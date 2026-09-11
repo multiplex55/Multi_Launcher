@@ -1,5 +1,5 @@
 use crate::multi_manager::activation::{
-    self, ActivationDeps, ActivationOperation, ActivationResult,
+    self, ActivationDeps, ActivationOperation, ActivationResult, WinDesktopOps,
 };
 use crate::multi_manager::model::{MmHotkey, MmRect, MmWorkspace};
 use crate::multi_manager::reconnect::ReconnectSummary;
@@ -128,20 +128,22 @@ impl MultiManagerRuntime {
             while !thread_control.shutdown.load(Ordering::Relaxed) {
                 thread::sleep(poll);
                 let now = Instant::now();
-                if let Ok(mut workspaces) = thread_workspaces.lock() {
-                    runtime_tick(
-                        &mut workspaces,
-                        &thread_control,
-                        &thread_last_hotkey_info,
-                        &thread_event_queue,
-                        &mut debounce,
-                        DEFAULT_DEBOUNCE,
-                        &win_ops,
-                        &hotkey_ops,
-                        &|hwnd| win::is_valid_window(hwnd),
-                        now,
-                    );
-                } else if let Ok(mut events) = thread_event_queue.lock() {
+                if run_shared_runtime_tick(
+                    &thread_workspaces,
+                    &thread_control,
+                    &thread_last_hotkey_info,
+                    &thread_event_queue,
+                    &mut debounce,
+                    DEFAULT_DEBOUNCE,
+                    &win_ops,
+                    &WinDesktopOps,
+                    &hotkey_ops,
+                    &|hwnd| win::is_valid_window(hwnd),
+                    now,
+                )
+                .is_err()
+                    && let Ok(mut events) = thread_event_queue.lock()
+                {
                     events.push_back(MultiManagerRuntimeEvent::RuntimeLockFailed {
                         context: "runtime tick workspace lock".to_string(),
                     });
@@ -166,6 +168,81 @@ impl MultiManagerRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_shared_runtime_tick(
+    workspaces: &Arc<Mutex<Vec<MmWorkspace>>>,
+    control: &RuntimeControl,
+    last_hotkey_info: &Arc<Mutex<Option<(String, Instant)>>>,
+    event_queue: &Arc<Mutex<VecDeque<MultiManagerRuntimeEvent>>>,
+    debounce: &mut HashMap<String, Instant>,
+    debounce_duration: Duration,
+    window_ops: &impl WindowOps,
+    desktop_ops: &dyn crate::multi_manager::activation::DesktopOps,
+    hotkey_ops: &impl HotkeyOps,
+    is_window: &dyn Fn(usize) -> bool,
+    now: Instant,
+) -> std::result::Result<usize, ()> {
+    if !control.enabled.load(Ordering::Relaxed) || control.capture_pending.load(Ordering::Relaxed) {
+        return Ok(0);
+    }
+    let selected = {
+        let workspaces = workspaces.lock().map_err(|_| ())?;
+        workspaces
+            .iter()
+            .filter(|workspace| !workspace.disabled && workspace.valid)
+            .filter_map(|workspace| {
+                let sequence = workspace.hotkey.as_ref().and_then(hotkey_sequence)?;
+                if !hotkey_ops.is_hotkey_pressed(&sequence)
+                    || debounce
+                        .get(&workspace.id)
+                        .is_some_and(|last| now.duration_since(*last) < debounce_duration)
+                {
+                    return None;
+                }
+                debounce.insert(workspace.id.clone(), now);
+                Some(workspace.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let activated_count = selected.len();
+    for mut activated in selected {
+        let workspace_id = activated.id.clone();
+        let before = activation::capture_activation_state(&activated);
+        let deps = ActivationDeps {
+            window_ops,
+            is_window,
+            desktop_ops,
+        };
+        let result = activation::activate_workspace_with_deps(
+            std::slice::from_mut(&mut activated),
+            &workspace_id,
+            ActivationOperation::Toggle,
+            &deps,
+        )
+        .unwrap_or_default();
+        if let Ok(mut current) = workspaces.lock()
+            && let Some(target) = current
+                .iter_mut()
+                .find(|workspace| workspace.id == workspace_id)
+        {
+            activation::merge_activation_state_if_unchanged(target, &before, &activated);
+        }
+        if result.bindings_changed {
+            control.bindings_dirty_signal.store(true, Ordering::Relaxed);
+        }
+        push_runtime_activation_events(
+            event_queue,
+            workspace_id.clone(),
+            ActivationOperation::Toggle,
+            result,
+        );
+        if let Ok(mut info) = last_hotkey_info.lock() {
+            *info = Some((workspace_id, now));
+        }
+    }
+    Ok(activated_count)
+}
+
 impl Drop for MultiManagerRuntime {
     fn drop(&mut self) {
         self.shutdown();
@@ -176,7 +253,8 @@ pub fn send_workspace_home(workspace: &MmWorkspace) {
     send_workspace_home_with(workspace, &WinWindowOps);
 }
 
-pub fn send_workspace_target(workspace: &MmWorkspace) {
+#[cfg(test)]
+pub(crate) fn send_workspace_target(workspace: &MmWorkspace) {
     send_workspace_target_with(workspace, &WinWindowOps);
 }
 
@@ -187,11 +265,13 @@ pub fn send_all_home(workspaces: &[MmWorkspace]) {
     }
 }
 
-pub fn toggle_workspace(workspace: &mut MmWorkspace) {
+#[cfg(test)]
+pub(crate) fn toggle_workspace(workspace: &mut MmWorkspace) {
     toggle_workspace_with(workspace, &WinWindowOps);
 }
 
-pub fn rotate_workspace(workspace: &mut MmWorkspace) {
+#[cfg(test)]
+pub(crate) fn rotate_workspace(workspace: &mut MmWorkspace) {
     rotate_workspace_with(workspace, &WinWindowOps);
 }
 
@@ -199,11 +279,13 @@ pub fn send_workspace_home_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
     move_workspace_windows(workspace, RectKind::Home, ops);
 }
 
-pub fn send_workspace_target_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
+#[cfg(test)]
+pub(crate) fn send_workspace_target_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
     move_workspace_windows(workspace, RectKind::Target, ops);
 }
 
-pub fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
+#[cfg(test)]
+pub(crate) fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
     if workspace.disabled || !workspace.valid {
         return;
     }
@@ -228,7 +310,8 @@ pub fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) 
     }
 }
 
-pub fn rotate_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
+#[cfg(test)]
+pub(crate) fn rotate_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
     if workspace.disabled || !workspace.valid {
         return;
     }
@@ -330,6 +413,35 @@ pub fn runtime_tick(
     is_window: &dyn Fn(usize) -> bool,
     now: Instant,
 ) {
+    runtime_tick_with_desktop_ops(
+        workspaces,
+        control,
+        last_hotkey_info,
+        event_queue,
+        debounce,
+        debounce_duration,
+        window_ops,
+        &WinDesktopOps,
+        hotkey_ops,
+        is_window,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn runtime_tick_with_desktop_ops(
+    workspaces: &mut [MmWorkspace],
+    control: &RuntimeControl,
+    last_hotkey_info: &Arc<Mutex<Option<(String, Instant)>>>,
+    event_queue: &Arc<Mutex<VecDeque<MultiManagerRuntimeEvent>>>,
+    debounce: &mut HashMap<String, Instant>,
+    debounce_duration: Duration,
+    window_ops: &impl WindowOps,
+    desktop_ops: &dyn crate::multi_manager::activation::DesktopOps,
+    hotkey_ops: &impl HotkeyOps,
+    is_window: &dyn Fn(usize) -> bool,
+    now: Instant,
+) {
     if !control.enabled.load(Ordering::Relaxed) || control.capture_pending.load(Ordering::Relaxed) {
         return;
     }
@@ -351,6 +463,7 @@ pub fn runtime_tick(
         let deps = ActivationDeps {
             window_ops,
             is_window,
+            desktop_ops,
         };
         let result = activation::activate_workspace_with_deps(
             std::slice::from_mut(workspace),
@@ -425,6 +538,35 @@ mod tests {
     impl HotkeyOps for FakeHotkeyOps {
         fn is_hotkey_pressed(&self, _sequence: &str) -> bool {
             self.0
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeDesktopOps {
+        moved: RefCell<Vec<usize>>,
+        switched: RefCell<Vec<crate::virtual_desktop::VirtualDesktopId>>,
+    }
+    impl crate::multi_manager::activation::DesktopOps for FakeDesktopOps {
+        fn resolve_binding(
+            &self,
+            binding: &crate::virtual_desktop::VirtualDesktopBinding,
+        ) -> std::result::Result<crate::virtual_desktop::VirtualDesktopId, String> {
+            Ok(binding.id.clone())
+        }
+        fn move_window(
+            &self,
+            hwnd: usize,
+            _: &crate::virtual_desktop::VirtualDesktopId,
+        ) -> std::result::Result<(), String> {
+            self.moved.borrow_mut().push(hwnd);
+            Ok(())
+        }
+        fn switch(
+            &self,
+            desktop: &crate::virtual_desktop::VirtualDesktopId,
+        ) -> std::result::Result<(), String> {
+            self.switched.borrow_mut().push(desktop.clone());
+            Ok(())
         }
     }
 
@@ -572,6 +714,34 @@ mod tests {
     }
 
     #[test]
+    fn shared_idle_tick_snapshots_no_workspace_for_activation() {
+        let workspaces = Arc::new(Mutex::new(vec![workspace()]));
+        let control = RuntimeControl::new(true);
+        let info = Arc::new(Mutex::new(None));
+        let events = event_queue();
+        let mut debounce = HashMap::new();
+        let ops = FakeWindowOps::default();
+        let desktop_ops = FakeDesktopOps::default();
+        let activated = run_shared_runtime_tick(
+            &workspaces,
+            &control,
+            &info,
+            &events,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &desktop_ops,
+            &FakeHotkeyOps(false),
+            &|_| true,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(activated, 0);
+        assert!(ops.moves.borrow().is_empty());
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn repeated_runtime_ticks_do_not_periodically_reconnect_unresolved_windows() {
         let mut workspaces = vec![workspace()];
         workspaces[0].windows = vec![window(0, false, rect(1), rect(11))];
@@ -638,6 +808,41 @@ mod tests {
             info.lock().unwrap().as_ref().map(|(id, _)| id.as_str()),
             Some("ws")
         );
+    }
+
+    #[test]
+    fn runtime_hotkey_uses_same_bound_desktop_activation_path() {
+        let mut workspaces = vec![workspace()];
+        let desktop_id =
+            crate::virtual_desktop::VirtualDesktopId::parse("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap();
+        workspaces[0].virtual_desktop = Some(crate::virtual_desktop::VirtualDesktopBinding {
+            id: desktop_id.clone(),
+            cached_name: Some("Work".into()),
+        });
+        let control = RuntimeControl::new(true);
+        let info = Arc::new(Mutex::new(None));
+        let events = event_queue();
+        let mut debounce = HashMap::new();
+        let mut ops = FakeWindowOps::default();
+        ops.at_home.insert(1, rect(1));
+        ops.at_home.insert(2, rect(2));
+        let desktop_ops = FakeDesktopOps::default();
+        runtime_tick_with_desktop_ops(
+            &mut workspaces,
+            &control,
+            &info,
+            &events,
+            &mut debounce,
+            DEFAULT_DEBOUNCE,
+            &ops,
+            &desktop_ops,
+            &FakeHotkeyOps(true),
+            &|_| true,
+            Instant::now(),
+        );
+        assert_eq!(*desktop_ops.moved.borrow(), vec![1, 2]);
+        assert_eq!(*desktop_ops.switched.borrow(), vec![desktop_id]);
     }
 
     #[test]

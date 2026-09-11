@@ -127,13 +127,30 @@ impl LauncherApp {
     }
 
     pub fn multi_manager_send_all_home(&mut self) {
-        let result = {
-            match self.multi_manager.workspaces.lock() {
-                Ok(mut workspaces) => Ok(activation::activate_all_home(&mut workspaces)),
-                Err(_) => Err(()),
+        let snapshot = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .ok()
+            .map(|guard| guard.clone());
+        let result = snapshot.map(|mut workspaces| {
+            let before = workspaces
+                .iter()
+                .map(activation::capture_activation_state)
+                .collect::<Vec<_>>();
+            let result = activation::activate_all_home(&mut workspaces);
+            if let Ok(mut current) = self.multi_manager.workspaces.lock() {
+                for (original, activated) in before.iter().zip(&workspaces) {
+                    if let Some(target) = current.iter_mut().find(|item| item.id == activated.id) {
+                        activation::merge_activation_state_if_unchanged(
+                            target, original, activated,
+                        );
+                    }
+                }
             }
-        };
-        let Ok(result) = result else {
+            result
+        });
+        let Some(result) = result else {
             self.report_error_message(
                 "multi_manager.send_all_home",
                 "Failed to lock MultiManager workspaces to send all windows home",
@@ -457,12 +474,29 @@ impl LauncherApp {
         success_message: &str,
         error_context: &'static str,
     ) {
-        let result = match self.multi_manager.workspaces.lock() {
-            Ok(mut workspaces) => {
-                activation::activate_workspace(&mut workspaces, workspace_id, operation)
+        let snapshot = self
+            .multi_manager
+            .workspaces
+            .lock()
+            .ok()
+            .and_then(|workspaces| {
+                workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == workspace_id)
+                    .cloned()
+            });
+        let result = snapshot.map(|workspace| {
+            let before = activation::capture_activation_state(&workspace);
+            let mut workspaces = vec![workspace];
+            let result = activation::activate_workspace(&mut workspaces, workspace_id, operation)
+                .expect("snapshot contains requested workspace");
+            if let Ok(mut current) = self.multi_manager.workspaces.lock()
+                && let Some(target) = current.iter_mut().find(|item| item.id == workspace_id)
+            {
+                activation::merge_activation_state_if_unchanged(target, &before, &workspaces[0]);
             }
-            Err(_) => None,
-        };
+            result
+        });
         let Some(result) = result else {
             self.report_error_message(
                 error_context,
@@ -1513,6 +1547,47 @@ mod tests {
 
     fn set_workspaces(app: &mut LauncherApp, workspaces: Vec<MmWorkspace>) {
         *app.multi_manager.workspaces.lock().expect("workspaces") = workspaces;
+    }
+
+    #[test]
+    fn virtual_desktop_binding_command_mutates_workspace_by_stable_id_not_name() {
+        let mut app = test_app();
+        set_workspaces(
+            &mut app,
+            vec![MmWorkspace {
+                id: "stable-workspace-id".into(),
+                name: "Coding".into(),
+                ..Default::default()
+            }],
+        );
+        let desktop_id =
+            crate::virtual_desktop::VirtualDesktopId::parse("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap();
+        crate::commands::HeadlessCommandHost::spawn_virtual_desktop_command(
+            &mut app,
+            crate::commands::CommandInvocation {
+                command: crate::commands::Command::VirtualDesktop(
+                    crate::commands::VirtualDesktopCommand::BindWorkspace {
+                        workspace_id: "stable-workspace-id".into(),
+                        target: desktop_id.to_string(),
+                        cached_name: Some("Work".into()),
+                    },
+                ),
+                original_action: crate::actions::Action {
+                    label: "Bind Coding".into(),
+                    desc: "Virtual Desktop".into(),
+                    action: "vd:bind-workspace".into(),
+                    args: None,
+                },
+                query_override: None,
+                source: crate::commands::ActivationSource::Enter,
+            },
+        );
+        let workspaces = app.multi_manager.workspaces.lock().unwrap();
+        assert_eq!(
+            workspaces[0].virtual_desktop.as_ref().unwrap().id,
+            desktop_id
+        );
     }
 
     fn begin_one_window_capture(app: &mut LauncherApp, ctx: &eframe::egui::Context) {

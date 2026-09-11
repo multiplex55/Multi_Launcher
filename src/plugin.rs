@@ -55,6 +55,7 @@ use crate::plugins::timer::TimerPlugin;
 use crate::plugins::timestamp::TimestampPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
+use crate::plugins::virtual_desktop::VirtualDesktopPlugin;
 use crate::plugins::volume::VolumePlugin;
 use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::wikipedia::WikipediaPlugin;
@@ -62,6 +63,7 @@ use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
+use crate::window_catalog::WindowCatalog;
 use eframe::egui;
 use libloading::Library;
 use serde_json::Value;
@@ -109,6 +111,9 @@ pub trait Plugin: Send + Sync {
 
     /// Update the plugin using the provided settings value.
     fn apply_settings(&mut self, _value: &serde_json::Value) {}
+
+    /// Notify lifecycle-owning plugins when their configured enablement changes.
+    fn set_enabled(&mut self, _enabled: bool) {}
 
     /// Draw the settings UI for this plugin.
     fn settings_ui(&mut self, _ui: &mut egui::Ui, _value: &mut serde_json::Value) {}
@@ -198,20 +203,41 @@ impl PluginSearchUpdates {
     }
 
     pub(crate) fn publish_ticket(&self, source: &'static str, ticket: u64) {
-        let committed = self.tickets.lock().ok().is_some_and(|mut book| {
-            let state = book.sources.entry(source).or_default();
-            if state.active != Some(ticket) {
-                return false;
-            }
-            state.active = None;
-            state.resolved_through = state.resolved_through.max(ticket);
-            state.published = Some(ticket);
-            true
-        });
+        let (committed, _) = self.publish_ticket_with_followup(source, ticket, false);
         if !committed {
             return;
         }
         self.notify(source);
+    }
+
+    /// Resolve a publication and, when requested, reserve its successor under the same ticket
+    /// lock. The caller can make its local worker state match the returned ticket before invoking
+    /// `notify`, so repaint callbacks never observe an idle/ticket handoff gap.
+    pub(crate) fn publish_ticket_with_followup(
+        &self,
+        source: &'static str,
+        ticket: u64,
+        followup: bool,
+    ) -> (bool, Option<RefreshTicket>) {
+        let Ok(mut book) = self.tickets.lock() else {
+            return (false, None);
+        };
+        {
+            let state = book.sources.entry(source).or_default();
+            if state.active != Some(ticket) {
+                return (false, None);
+            }
+            state.active = None;
+            state.resolved_through = state.resolved_through.max(ticket);
+            state.published = Some(ticket);
+        }
+        let next = followup.then(|| {
+            book.next = book.next.wrapping_add(1).max(1);
+            let id = book.next;
+            book.sources.entry(source).or_default().active = Some(id);
+            RefreshTicket { id, start: true }
+        });
+        (true, next)
     }
 
     pub(crate) fn cancel_ticket(&self, source: &'static str, ticket: u64) {
@@ -232,6 +258,7 @@ impl PluginSearchUpdates {
     fn canonical_source(source: &str) -> &str {
         match source {
             "processes" | "sysinfo" | "volume" => "system_data",
+            "virtual_desktop" => "windows",
             source => source,
         }
     }
@@ -274,6 +301,8 @@ impl PluginSearchUpdates {
 pub struct PluginInternalServices {
     pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
     pub mkmacro_store: Arc<crate::mkmacro::MkMacroStore>,
+    pub window_catalog: Arc<WindowCatalog>,
+    pub workspace_catalog: Arc<crate::multi_manager::workspace_catalog::WorkspaceCatalog>,
     search_updates: Arc<PluginSearchUpdates>,
     system_data_runtime: Option<SystemDataRuntime>,
 }
@@ -281,6 +310,7 @@ pub struct PluginInternalServices {
 pub struct PluginManager {
     plugins: Vec<Arc<PluginSlot>>,
     services: PluginInternalServices,
+    runtime_enablement: Option<Option<HashSet<String>>>,
     next_plugin_epoch: u64,
     deferred_dynamic_reloads: Vec<(PathBuf, Weak<PluginSlot>)>,
 }
@@ -336,12 +366,19 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store(Arc::clone(&store));
+        let search_updates = Arc::new(PluginSearchUpdates::default());
+        let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
+            runtime_enablement: None,
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
-                search_updates: Arc::new(PluginSearchUpdates::default()),
+                search_updates,
+                window_catalog,
+                workspace_catalog: Arc::new(
+                    crate::multi_manager::workspace_catalog::WorkspaceCatalog::default(),
+                ),
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -357,12 +394,19 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store_with_reserved(Arc::clone(&store), reserved);
+        let search_updates = Arc::new(PluginSearchUpdates::default());
+        let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
+            runtime_enablement: None,
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
-                search_updates: Arc::new(PluginSearchUpdates::default()),
+                search_updates,
+                window_catalog,
+                workspace_catalog: Arc::new(
+                    crate::multi_manager::workspace_catalog::WorkspaceCatalog::default(),
+                ),
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -443,12 +487,19 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store(Arc::clone(&store));
+        let search_updates = Arc::new(PluginSearchUpdates::default());
+        let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
+            runtime_enablement: None,
             services: PluginInternalServices {
                 clipboard_modifier_catalog: catalog,
                 mkmacro_store: store,
-                search_updates: Arc::new(PluginSearchUpdates::default()),
+                search_updates,
+                window_catalog,
+                workspace_catalog: Arc::new(
+                    crate::multi_manager::workspace_catalog::WorkspaceCatalog::default(),
+                ),
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -459,6 +510,13 @@ impl PluginManager {
     /// Remove all registered plugins, deferring reload of a dynamic library while an owned plugin
     /// handle still pins its originating slot.
     pub fn clear_plugins(&mut self) {
+        // Stop lifecycle-owned runtimes before slots can be pinned by an in-flight
+        // search or deferred dynamic-library handle.
+        for slot in &self.plugins {
+            if let Ok(mut plugin) = slot.plugin.write() {
+                plugin.set_enabled(false);
+            }
+        }
         for slot in &self.plugins {
             if Arc::strong_count(slot) > 1
                 && let Some(path) = slot.library_path.clone()
@@ -566,7 +624,15 @@ impl PluginManager {
         self.register_with_settings(BrightnessPlugin, plugin_settings);
         self.register_with_settings(TaskManagerPlugin, plugin_settings);
         self.register_with_settings(
-            WindowsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+            WindowsPlugin::new(Arc::clone(&self.services.window_catalog)),
+            plugin_settings,
+        );
+        self.register_with_settings(
+            VirtualDesktopPlugin::new(
+                Arc::clone(&self.services.workspace_catalog),
+                Arc::clone(&self.services.window_catalog),
+                actions.clone(),
+            ),
             plugin_settings,
         );
         self.register_with_settings(
@@ -587,6 +653,9 @@ impl PluginManager {
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir, plugin_settings);
+        }
+        if let Some(enabled_plugins) = self.runtime_enablement.clone() {
+            self.apply_runtime_enablement(enabled_plugins.as_ref());
         }
         tracing::debug!(loaded=?self.plugin_names());
     }
@@ -648,6 +717,22 @@ impl PluginManager {
                 )
             })
             .collect()
+    }
+
+    /// Keep opt-in plugin runtimes aligned with launcher enablement. Managers used
+    /// only for headless search do not call this and therefore never start them.
+    pub fn sync_enabled_plugins(&mut self, enabled_plugins: Option<&HashSet<String>>) {
+        self.runtime_enablement = Some(enabled_plugins.cloned());
+        self.apply_runtime_enablement(enabled_plugins);
+    }
+
+    fn apply_runtime_enablement(&mut self, enabled_plugins: Option<&HashSet<String>>) {
+        for mut plugin in self.iter_mut() {
+            let enabled = enabled_plugins
+                .map(|enabled| enabled.contains(plugin.name()))
+                .unwrap_or(true);
+            plugin.set_enabled(enabled);
+        }
     }
 
     /// Collect command shortcuts from plugins filtered by `enabled_plugins`.
@@ -824,6 +909,26 @@ mod tests {
 
     struct NamedPlugin(&'static str);
 
+    struct LifecyclePlugin(Arc<Mutex<Vec<bool>>>);
+
+    impl Plugin for LifecyclePlugin {
+        fn search(&self, _: &str) -> Vec<Action> {
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "lifecycle"
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+        fn set_enabled(&mut self, enabled: bool) {
+            self.0.lock().unwrap().push(enabled);
+        }
+    }
+
     impl Plugin for NamedPlugin {
         fn search(&self, _query: &str) -> Vec<Action> {
             Vec::new()
@@ -890,6 +995,19 @@ mod tests {
         assert_eq!(manager.search_generation(), before + 1);
         assert_eq!(manager.search_generation_for("test"), source_before + 1);
         assert_eq!(manager.search_generation_for("unrelated"), 0);
+    }
+
+    #[test]
+    fn auxiliary_managers_do_not_start_lifecycle_plugins_without_owner_enablement() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(LifecyclePlugin(Arc::clone(&events))));
+        assert!(events.lock().unwrap().is_empty());
+
+        manager.sync_enabled_plugins(None);
+        manager.sync_enabled_plugins(Some(&HashSet::new()));
+        manager.clear_plugins();
+        assert_eq!(*events.lock().unwrap(), [true, false, false]);
     }
 
     #[test]

@@ -41,6 +41,10 @@ impl CommandBus {
                 Ok(handle_clipboard_modify(host, command, invocation))
             }
             Command::Data(command) => handle_data(host, command),
+            Command::VirtualDesktop(super::VirtualDesktopCommand::Settings) => {
+                host.open_settings_dialog();
+                Ok(CommandOutcome::default())
+            }
             Command::Shell(_)
             | Command::Clipboard(_)
             | Command::Calculator(_)
@@ -51,6 +55,7 @@ impl CommandBus {
             | Command::Media(_)
             | Command::Layout(_)
             | Command::Macro(_)
+            | Command::VirtualDesktop(_)
             | Command::External(_) => handle_headless_gui(host, invocation),
             Command::Dialog(_) => unreachable!("dialog commands are handled before dispatch"),
         }

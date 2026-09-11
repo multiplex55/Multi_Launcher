@@ -277,16 +277,36 @@ fn close_handle(_: usize) -> ExecResult {
 }
 #[cfg(windows)]
 fn activate_handle(h: usize) -> ExecResult {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-    let hwnd = HWND(h as *mut _);
-    if !unsafe { SetForegroundWindow(hwnd) }.as_bool() || unsafe { GetForegroundWindow() } != hwnd {
-        return Err(ExecutionDiagnostic::new(
-            DiagnosticKind::Backend,
-            "Windows foreground-activation policy denied the request",
-        ));
-    }
-    Ok(())
+    activate_handle_with(h, crate::window_activation::activate_window)
+}
+
+fn activate_handle_with(
+    h: usize,
+    activate: impl FnOnce(
+        crate::window_activation::WindowActivationRequest,
+    ) -> Result<(), crate::window_activation::WindowActivationError>,
+) -> ExecResult {
+    let request = crate::window_activation::WindowActivationRequest::follow_window(h);
+    activate(request).map_err(|error| {
+        let kind = match error.kind {
+            crate::window_activation::WindowActivationErrorKind::InvalidWindow => {
+                DiagnosticKind::InvalidTarget
+            }
+            crate::window_activation::WindowActivationErrorKind::Desktop => {
+                DiagnosticKind::ComFailure
+            }
+            crate::window_activation::WindowActivationErrorKind::ForegroundDenied => {
+                DiagnosticKind::Backend
+            }
+        };
+        let mut diagnostic = ExecutionDiagnostic::new(kind, error.message)
+            .context("backend", "window activation")
+            .context("desktop_policy", "FollowWindow");
+        for (key, value) in error.context {
+            diagnostic = diagnostic.context(key, value);
+        }
+        diagnostic
+    })
 }
 #[cfg(windows)]
 fn close_handle(h: usize) -> ExecResult {
@@ -310,6 +330,30 @@ mod tests {
             process_path: format!("C:\\bin\\{e}"),
             class_name: "Class".into(),
         }
+    }
+
+    #[test]
+    fn production_activation_adapter_uses_follow_window_and_propagates_context() {
+        use crate::window_activation::{
+            WindowActivationError, WindowActivationErrorKind, WindowDesktopPolicy,
+        };
+        let error = activate_handle_with(77, |request| {
+            assert_eq!(request.hwnd, 77);
+            assert_eq!(request.desktop_policy, WindowDesktopPolicy::FollowWindow);
+            Err(WindowActivationError {
+                kind: WindowActivationErrorKind::Desktop,
+                message: "desktop switch failed".into(),
+                context: std::collections::BTreeMap::from([(
+                    "windows_build".into(),
+                    "26100".into(),
+                )]),
+            })
+        })
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::ComFailure);
+        assert_eq!(error.context["desktop_policy"], "FollowWindow");
+        assert_eq!(error.context["windows_build"], "26100");
+        assert_eq!(error.message, "desktop switch failed");
     }
     fn geometry(
         x: Option<i32>,

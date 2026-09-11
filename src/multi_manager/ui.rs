@@ -18,6 +18,7 @@ pub struct MultiManagerDialog {
     hotkey_editor: HotkeyEditorState,
     hotkey_editor_needs_focus: bool,
     confirm: DeleteConfirmState,
+    virtual_desktops: VirtualDesktopSnapshotState,
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +47,14 @@ struct DeleteConfirmState {
     workspace_id: Option<String>,
     window: Option<(String, usize)>,
     reload: bool,
+}
+
+#[derive(Debug, Default)]
+enum VirtualDesktopSnapshotState {
+    #[default]
+    Unverified,
+    Ready(Vec<crate::virtual_desktop::VirtualDesktopInfo>),
+    Failed(String),
 }
 
 impl MultiManagerDialog {
@@ -93,6 +102,9 @@ impl MultiManagerDialog {
                         }
                         if ui.button("Refresh Titles").clicked() {
                             app.multi_manager_refresh_titles();
+                        }
+                        if ui.button("Refresh Desktops").clicked() {
+                            self.refresh_virtual_desktops();
                         }
                         if ui.button("Send All Home").clicked() {
                             send_all(app, true);
@@ -241,6 +253,7 @@ impl MultiManagerDialog {
                         }
                     });
                     self.hotkey_ui(ui, app, id);
+                    self.virtual_desktop_ui(ui, app, id, &workspace);
                     if self.confirm.workspace_id.as_deref() == Some(id) {
                         ui.horizontal(|ui| {
                             ui.colored_label(egui::Color32::RED, "Confirm delete workspace?");
@@ -273,6 +286,95 @@ impl MultiManagerDialog {
                     }
                 });
             });
+    }
+
+    fn refresh_virtual_desktops(&mut self) {
+        match crate::virtual_desktop::VirtualDesktopService.snapshot() {
+            Ok(snapshot) => {
+                self.virtual_desktops = VirtualDesktopSnapshotState::Ready(snapshot.desktops);
+            }
+            Err(error) => {
+                self.virtual_desktops = VirtualDesktopSnapshotState::Failed(error.to_string())
+            }
+        }
+    }
+
+    fn virtual_desktop_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        app: &mut LauncherApp,
+        id: &str,
+        workspace: &MmWorkspace,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Virtual desktop:");
+            match &workspace.virtual_desktop {
+                Some(binding) => {
+                    let cached = binding
+                        .cached_name
+                        .clone()
+                        .unwrap_or_else(|| binding.id.to_string());
+                    match &self.virtual_desktops {
+                        VirtualDesktopSnapshotState::Unverified => {
+                            ui.label(format!("{cached} (not refreshed)"));
+                        }
+                        VirtualDesktopSnapshotState::Failed(_) => {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!("{cached} (refresh failed; status unknown)"),
+                            );
+                        }
+                        VirtualDesktopSnapshotState::Ready(desktops) => {
+                            if let Some(desktop) =
+                                desktops.iter().find(|desktop| desktop.id == binding.id)
+                            {
+                                ui.label(desktop.display_name());
+                            } else {
+                                ui.colored_label(
+                                    egui::Color32::YELLOW,
+                                    format!("{cached} (stale: {})", binding.id),
+                                );
+                            }
+                        }
+                    }
+                    if ui.button("Clear").clicked() {
+                        app.multi_manager.unbind_virtual_desktop(id);
+                    }
+                }
+                None => {
+                    ui.label("unbound");
+                }
+            }
+            egui::ComboBox::from_id_source(("mm_virtual_desktop", id))
+                .selected_text("Bind / rebind…")
+                .show_ui(ui, |ui| {
+                    let VirtualDesktopSnapshotState::Ready(desktops) = &self.virtual_desktops
+                    else {
+                        ui.label("Refresh desktops to load choices");
+                        return;
+                    };
+                    for desktop in desktops {
+                        if ui
+                            .selectable_label(
+                                false,
+                                format!("{} — Desktop {}", desktop.display_name(), desktop.index),
+                            )
+                            .clicked()
+                        {
+                            app.multi_manager.bind_virtual_desktop(
+                                id,
+                                crate::virtual_desktop::VirtualDesktopBinding {
+                                    id: desktop.id.clone(),
+                                    cached_name: desktop.name.clone(),
+                                },
+                            );
+                        }
+                    }
+                });
+        });
+        if let VirtualDesktopSnapshotState::Failed(error) = &self.virtual_desktops {
+            ui.colored_label(egui::Color32::YELLOW, error);
+        }
     }
 
     fn hotkey_ui(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, id: &str) {
@@ -1120,6 +1222,22 @@ mod tests {
             workspace_header_label(&workspace),
             "Workspace Name - Ctrl+Alt+F9"
         );
+    }
+
+    #[test]
+    fn desktop_snapshot_states_distinguish_unverified_empty_ready_and_failed() {
+        assert!(matches!(
+            VirtualDesktopSnapshotState::default(),
+            VirtualDesktopSnapshotState::Unverified
+        ));
+        assert!(matches!(
+            VirtualDesktopSnapshotState::Ready(Vec::new()),
+            VirtualDesktopSnapshotState::Ready(desktops) if desktops.is_empty()
+        ));
+        assert!(matches!(
+            VirtualDesktopSnapshotState::Failed("offline".into()),
+            VirtualDesktopSnapshotState::Failed(error) if error == "offline"
+        ));
     }
 
     #[test]

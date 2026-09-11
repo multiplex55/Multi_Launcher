@@ -248,6 +248,7 @@ mod tests {
             disabled: true,
             valid: false,
             rotate: true,
+            virtual_desktop: None,
             rotation_offset: 99,
         };
         save_workspaces(&path, std::slice::from_ref(&workspace)).unwrap();

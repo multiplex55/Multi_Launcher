@@ -268,6 +268,8 @@ impl LauncherApp {
         query: &str,
         source: ActivationSource,
     ) {
+        #[cfg(test)]
+        self.test_recorded_history_queries.push(query.to_owned());
         let _ = history::append_history(
             HistoryEntry {
                 query: query.to_string(),

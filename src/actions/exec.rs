@@ -1,6 +1,17 @@
 use std::path::Path;
 
 pub fn launch(path: &str, args: Option<&str>) -> anyhow::Result<()> {
+    launch_with_identity(path, args).map(|_| ())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchIdentity {
+    pub pid: Option<u32>,
+    pub target: String,
+}
+
+/// Launch an external target while retaining process identity when the platform launcher exposes it.
+pub fn launch_with_identity(path: &str, args: Option<&str>) -> anyhow::Result<LaunchIdentity> {
     let path = Path::new(path);
     let is_exe = path
         .extension()
@@ -21,8 +32,19 @@ pub fn launch(path: &str, args: Option<&str>) -> anyhow::Result<()> {
                 }
             }
         }
-        command.spawn().map(|_| ()).map_err(|e| e.into())
+        command
+            .spawn()
+            .map(|child| LaunchIdentity {
+                pid: Some(child.id()),
+                target: path.to_string_lossy().into_owned(),
+            })
+            .map_err(|e| e.into())
     } else {
-        open::that(path).map_err(|e| e.into())
+        open::that(path)
+            .map(|_| LaunchIdentity {
+                pid: None,
+                target: path.to_string_lossy().into_owned(),
+            })
+            .map_err(|e| e.into())
     }
 }

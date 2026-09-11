@@ -148,6 +148,9 @@ pub trait HeadlessCommandHost {
     ) -> anyhow::Result<()>;
 
     fn spawn_headless_command(&mut self, command: Command, original_action: Action);
+    fn spawn_virtual_desktop_command(&mut self, invocation: super::CommandInvocation) {
+        self.spawn_headless_command(invocation.command, invocation.original_action);
+    }
     fn clear_query_after_run(&self) -> bool;
     fn hide_after_run(&self) -> bool;
     fn preserve_command(&self) -> bool;

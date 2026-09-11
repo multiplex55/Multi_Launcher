@@ -300,6 +300,8 @@ pub struct MmWorkspace {
     pub valid: bool,
     #[serde(default)]
     pub rotate: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_desktop: Option<crate::virtual_desktop::VirtualDesktopBinding>,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub rotation_offset: usize,
 }
@@ -317,6 +319,7 @@ impl Default for MmWorkspace {
             disabled: false,
             valid: true,
             rotate: false,
+            virtual_desktop: None,
             rotation_offset: 0,
         }
     }
@@ -434,6 +437,33 @@ mod tests {
         assert!(json.get("live_title").is_none());
         assert!(json.get("binding_status").is_none());
         assert!(json.get("binding_verified").is_none());
+    }
+
+    #[test]
+    fn workspace_without_desktop_binding_keeps_legacy_json_shape() {
+        let workspace: MmWorkspace =
+            serde_json::from_str(r#"{"id":"legacy","name":"Old"}"#).unwrap();
+        assert!(workspace.virtual_desktop.is_none());
+        let json = serde_json::to_value(&workspace).unwrap();
+        assert!(json.get("virtual_desktop").is_none());
+    }
+
+    #[test]
+    fn workspace_desktop_binding_round_trips_stable_id_and_cached_name() {
+        let id =
+            crate::virtual_desktop::VirtualDesktopId::parse("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap();
+        let workspace = MmWorkspace {
+            id: "bound".into(),
+            virtual_desktop: Some(crate::virtual_desktop::VirtualDesktopBinding {
+                id: id.clone(),
+                cached_name: Some("Work".into()),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&workspace).unwrap();
+        let restored: MmWorkspace = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.virtual_desktop.unwrap().id, id);
     }
 
     #[test]

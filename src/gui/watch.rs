@@ -204,6 +204,32 @@ impl LauncherApp {
                 WatchEvent::ClipboardModify(ev) => {
                     self.handle_clipboard_modify_gui_event(ev);
                 }
+                WatchEvent::VirtualDesktop(mut completion) => {
+                    let interaction_is_current = self.virtual_desktop_interaction_token
+                        == completion.interaction_token
+                        && self.query == completion.expected_query
+                        && self.visible_flag.load(Ordering::SeqCst) == completion.expected_visible;
+                    match completion.result {
+                        Ok(()) => {
+                            if !interaction_is_current {
+                                completion.completion_outcome.toasts.clear();
+                            }
+                            self.apply_command_outcome_with_history_query(
+                                completion.completion_outcome,
+                                &completion.invocation,
+                                Some(&completion.history_query),
+                            );
+                        }
+                        Err(error) if interaction_is_current => {
+                            self.report_error_message("virtual_desktop", format!("Failed: {error}"))
+                        }
+                        Err(error) => tracing::error!(
+                            context = "virtual_desktop",
+                            error,
+                            "suppressed stale virtual desktop completion error"
+                        ),
+                    }
+                }
             }
         }
         self.maybe_rebuild_completion_index(Instant::now());
@@ -259,6 +285,86 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn virtual_desktop_completion_error_is_surfaced_on_gui_event_reduction() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::Create,
+            ),
+            original_action: Action {
+                label: "Create Virtual Desktop".into(),
+                desc: "Virtual Desktop".into(),
+                action: "vd:create".into(),
+                args: None,
+            },
+            query_override: None,
+            source: ActivationSource::Enter,
+        };
+        app.event_tx
+            .send(WatchEvent::VirtualDesktop(VirtualDesktopGuiCompletion {
+                invocation,
+                completion_outcome: crate::commands::CommandOutcome::default(),
+                history_query: "vd create".into(),
+                interaction_token: 0,
+                expected_query: String::new(),
+                expected_visible: false,
+                result: Err("injected desktop failure".into()),
+            }))
+            .unwrap();
+        app.process_watch_events();
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| { error.contains("Failed: injected desktop failure") })
+        );
+    }
+
+    #[test]
+    fn delayed_virtual_desktop_success_preserves_new_interaction_and_records_captured_query() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let action = Action {
+            label: "Create Virtual Desktop".into(),
+            desc: "Virtual Desktop".into(),
+            action: "vd:create".into(),
+            args: None,
+        };
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::Create,
+            ),
+            original_action: action.clone(),
+            query_override: None,
+            source: ActivationSource::Enter,
+        };
+        app.virtual_desktop_interaction_token = 1;
+        app.query = "new interaction".into();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.event_tx
+            .send(WatchEvent::VirtualDesktop(VirtualDesktopGuiCompletion {
+                invocation,
+                completion_outcome: crate::commands::CommandOutcome {
+                    history: crate::commands::HistoryPolicy::Record,
+                    toasts: vec![crate::commands::ToastPolicy::Launched(action.label.clone())],
+                    ..crate::commands::CommandOutcome::default()
+                },
+                history_query: "vd create".into(),
+                interaction_token: 1,
+                expected_query: String::new(),
+                expected_visible: false,
+                result: Ok(()),
+            }))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.query, "new interaction");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
+        assert_eq!(app.test_recorded_history_queries, ["vd create"]);
+        assert!(app.test_toast_messages.is_empty());
     }
 
     #[test]

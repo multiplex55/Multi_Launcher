@@ -73,6 +73,7 @@ pub enum Command {
     Macro(MacroCommand),
     Crop(CropCommand),
     Data(DataCommand),
+    VirtualDesktop(VirtualDesktopCommand),
     External(ExternalCommand),
 }
 
@@ -104,6 +105,7 @@ impl Command {
             Self::Macro(_) => "macro",
             Self::Crop(_) => "crop",
             Self::Data(_) => "data",
+            Self::VirtualDesktop(_) => "virtual_desktop",
             Self::External(_) => "external",
         }
     }
@@ -134,12 +136,122 @@ impl Command {
             Self::Macro(v) => v.kind_name(),
             Self::Crop(v) => v.kind_name(),
             Self::Data(v) => v.kind_name(),
+            Self::VirtualDesktop(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
         }
     }
 }
 
 macro_rules! kinds { ($t:ty, $($pat:pat => $name:literal),+ $(,)?) => { impl $t { pub fn kind_name(&self) -> &'static str { match self { $($pat => $name,)+ } } } }; }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VirtualDesktopCommand {
+    List,
+    Current,
+    Switch {
+        target: String,
+    },
+    SwitchNext,
+    SwitchPrevious,
+    Create,
+    CloseCurrent,
+    Rename {
+        target: String,
+        name: String,
+    },
+    ActivateWindow {
+        hwnd: usize,
+    },
+    MoveWindow {
+        hwnd: usize,
+        target: String,
+        follow: bool,
+    },
+    MoveActiveWindow {
+        target: String,
+        follow: bool,
+    },
+    Launch(VirtualDesktopLaunchPayload),
+    BindWorkspace {
+        workspace_id: String,
+        target: String,
+        cached_name: Option<String>,
+    },
+    UnbindWorkspace {
+        workspace_id: String,
+    },
+    Settings,
+    Invalid {
+        action: String,
+        error: String,
+    },
+}
+
+kinds!(VirtualDesktopCommand,
+    Self::List => "list", Self::Current => "current", Self::Switch { .. } => "switch",
+    Self::SwitchNext => "next", Self::SwitchPrevious => "previous", Self::Create => "create",
+    Self::CloseCurrent => "close_current", Self::Rename { .. } => "rename",
+    Self::ActivateWindow { .. } => "activate_window", Self::MoveWindow { .. } => "move_window",
+    Self::MoveActiveWindow { .. } => "move_active_window", Self::Launch(_) => "launch",
+    Self::BindWorkspace { .. } => "bind_workspace", Self::UnbindWorkspace { .. } => "unbind_workspace",
+    Self::Settings => "settings", Self::Invalid { .. } => "invalid"
+);
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopTargetPayload {
+    pub target: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopRenamePayload {
+    pub target: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopWindowPayload {
+    pub hwnd: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopMoveWindowPayload {
+    pub hwnd: usize,
+    pub target: String,
+    #[serde(default)]
+    pub follow: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopMoveActivePayload {
+    pub target: String,
+    #[serde(default)]
+    pub follow: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopLaunchPayload {
+    pub target: String,
+    pub application: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
+    #[serde(default)]
+    pub follow: bool,
+    #[serde(default = "default_virtual_desktop_launch_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopWorkspacePayload {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_name: Option<String>,
+}
+
+fn default_virtual_desktop_launch_timeout_ms() -> u64 {
+    10_000
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LauncherCommand {

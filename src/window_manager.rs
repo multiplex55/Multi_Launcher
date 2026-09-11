@@ -136,240 +136,27 @@ pub fn virtual_key_from_string(key: &str) -> Option<u32> {
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-#[cfg(windows)]
-use self::windows_virtual_desktop::{IVirtualDesktop, IVirtualDesktopManagerInternal};
-
-#[cfg(windows)]
-#[path = "windows_virtual_desktop.rs"]
-mod windows_virtual_desktop;
-
-#[path = "virtual_desktop_selection.rs"]
-pub(crate) mod virtual_desktop_selection;
-
-/// Switch to a virtual desktop by its one-based position in the Windows
-/// virtual-desktop list.
-#[cfg(windows)]
-pub use self::windows_virtual_desktop::switch_virtual_desktop_by_number;
-
-/// Compatibility wrapper for callers that used the original string-error API.
-#[cfg(windows)]
-pub fn switch_to_virtual_desktop(desktop_number: u32) -> Result<(), String> {
-    switch_virtual_desktop_by_number(desktop_number).map_err(|error| error.message)
-}
-
-/// Ensure the given window resides on the active virtual desktop.
-///
-/// This uses the `IVirtualDesktopManager` COM interface to check if `hwnd`
-/// already belongs to the current desktop. If not, it is moved to the desktop
-/// of the foreground window.
-pub fn move_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    };
-    use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
-    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        if let Ok(vdm) =
-            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
-            && let Ok(on_current) = vdm.IsWindowOnCurrentVirtualDesktop(hwnd)
-            && !on_current.as_bool()
-            && let Ok(desktop) = vdm.GetWindowDesktopId(GetForegroundWindow())
-        {
-            let _ = vdm.MoveWindowToDesktop(hwnd, &desktop);
-        }
-        CoUninitialize();
-    }
-}
-
-#[cfg(windows)]
-fn format_desktop_id(desktop_id: &windows::core::GUID) -> String {
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        desktop_id.data1,
-        desktop_id.data2,
-        desktop_id.data3,
-        desktop_id.data4[0],
-        desktop_id.data4[1],
-        desktop_id.data4[2],
-        desktop_id.data4[3],
-        desktop_id.data4[4],
-        desktop_id.data4[5],
-        desktop_id.data4[6],
-        desktop_id.data4[7]
-    )
-}
-
-#[cfg(windows)]
-fn parse_desktop_id(value: &str) -> Option<windows::core::GUID> {
-    let trimmed = value.trim();
-    if trimmed.len() != 36 {
-        return None;
-    }
-    let is_valid = trimmed.chars().enumerate().all(|(idx, ch)| match idx {
-        8 | 13 | 18 | 23 => ch == '-',
-        _ => ch.is_ascii_hexdigit(),
-    });
-    if !is_valid {
-        return None;
-    }
-    Some(windows::core::GUID::from(trimmed))
-}
-
-#[cfg(windows)]
-pub fn resolve_virtual_desktop_name(desktop_id: &windows::core::GUID) -> Option<String> {
-    use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    };
-
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let manager = CoCreateInstance::<_, IVirtualDesktopManagerInternal>(
-            &windows::core::GUID::from_u128(0xc5e0cdca_7b6e_41b2_9fc4_d93975cc467b),
-            None,
-            CLSCTX_ALL,
-        )
-        .ok();
-        let name = manager.and_then(|manager| {
-            let desktops = manager.get_desktops(0).ok()?;
-            let count = desktops.GetCount().ok()?;
-            for idx in 0..count {
-                let desktop: IVirtualDesktop = desktops.GetAt(idx).ok()?;
-                let id = desktop.get_id().ok()?;
-                if &id == desktop_id {
-                    if let Ok(name) = desktop.get_name() {
-                        let name = name.to_string_lossy();
-                        let trimmed = name.trim();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed.to_string());
-                        }
-                    }
-                    break;
-                }
-            }
-            None
-        });
-        CoUninitialize();
-        name
-    }
-}
-
-#[cfg(windows)]
-fn resolve_virtual_desktop_id_by_name(name: &str) -> Option<windows::core::GUID> {
-    use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    };
-
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let manager = CoCreateInstance::<_, IVirtualDesktopManagerInternal>(
-            &windows::core::GUID::from_u128(0xc5e0cdca_7b6e_41b2_9fc4_d93975cc467b),
-            None,
-            CLSCTX_ALL,
-        )
-        .ok();
-        let resolved = manager.and_then(|manager| {
-            let desktops = manager.get_desktops(0).ok()?;
-            let count = desktops.GetCount().ok()?;
-            for idx in 0..count {
-                let desktop: IVirtualDesktop = desktops.GetAt(idx).ok()?;
-                let id = desktop.get_id().ok()?;
-                if let Ok(name) = desktop.get_name() {
-                    let current = name.to_string_lossy();
-                    if current.trim().eq_ignore_ascii_case(trimmed) {
-                        return Some(id);
-                    }
-                }
-            }
-            None
-        });
-        CoUninitialize();
-        resolved
-    }
-}
-
-#[cfg(windows)]
-pub fn window_desktop_label(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
-    use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    };
-    use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
-
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let manager =
-            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
-                .ok();
-        let desktop_id = manager.and_then(|manager| manager.GetWindowDesktopId(hwnd).ok());
-        let label = desktop_id.map(|desktop_id| {
-            resolve_virtual_desktop_name(&desktop_id)
-                .unwrap_or_else(|| format_desktop_id(&desktop_id))
-        });
-        CoUninitialize();
-        label
-    }
-}
-
-#[cfg(windows)]
-pub fn move_window_to_desktop(hwnd: windows::Win32::Foundation::HWND, target: &str) -> bool {
-    use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-    };
-    use windows::Win32::UI::Shell::{IVirtualDesktopManager, VirtualDesktopManager};
-
-    let target_id = parse_desktop_id(target).or_else(|| resolve_virtual_desktop_id_by_name(target));
-    let Some(target_id) = target_id else {
-        return false;
-    };
-
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let manager =
-            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
-                .ok();
-        let moved = manager
-            .and_then(|manager| {
-                let current = manager.GetWindowDesktopId(hwnd).ok()?;
-                if current == target_id {
-                    return Some(true);
-                }
-                manager.MoveWindowToDesktop(hwnd, &target_id).ok()?;
-                Some(true)
-            })
-            .unwrap_or(false);
-        CoUninitialize();
-        moved
-    }
-}
-
-/// On Windows, restore the window and bring it to the foreground.
+/// Restore and activate an arbitrary window by following it to its existing desktop.
 pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, SW_RESTORE, SetForegroundWindow,
-        ShowWindowAsync,
-    };
-    unsafe {
-        move_to_current_desktop(hwnd);
-        let fg_hwnd = GetForegroundWindow();
-        let fg_thread = GetWindowThreadProcessId(fg_hwnd, None);
-        let current_thread = GetCurrentThreadId();
+    let request = crate::window_activation::WindowActivationRequest::follow_window(hwnd.0 as usize);
+    std::thread::spawn(move || {
+        if let Err(error) = crate::window_activation::activate_window(request) {
+            tracing::warn!(error = %error, "failed to activate window");
+        }
+    });
+}
 
-        tracing::debug!("Forcing window restore and foreground");
-        let _ = ShowWindowAsync(hwnd, SW_RESTORE);
-
-        let _ = AttachThreadInput(fg_thread, current_thread, true);
-        let fg_success = SetForegroundWindow(hwnd).as_bool();
-        let _ = AttachThreadInput(fg_thread, current_thread, false);
-
-        tracing::debug!("SetForegroundWindow success: {fg_success}");
-    }
+/// Restore the launcher while explicitly relocating it onto the current desktop.
+pub fn restore_launcher_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
+    let request =
+        crate::window_activation::WindowActivationRequest::move_to_current_desktop(hwnd.0 as usize);
+    // Desktop transitions and foreground verification use bounded backoff. Keep that work off
+    // egui's render path so a slow or policy-blocked target cannot stall a frame.
+    std::thread::spawn(move || {
+        if let Err(error) = crate::window_activation::activate_window(request) {
+            tracing::warn!(error = %error, "failed to restore launcher window");
+        }
+    });
 }
 
 /// Extract the HWND from an eframe [`Frame`].
@@ -413,11 +200,6 @@ pub fn activate_process(pid: u32) {
     unsafe {
         let _ = EnumWindows(Some(enum_cb), LPARAM(pid as isize));
     }
-}
-
-pub fn activate_window(hwnd: usize) {
-    use windows::Win32::Foundation::HWND;
-    crate::window_manager::force_restore_and_foreground(HWND(hwnd as *mut _));
 }
 
 pub fn close_window(hwnd: usize) {

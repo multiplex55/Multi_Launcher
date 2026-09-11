@@ -149,6 +149,9 @@ fn format_restore_summary(
                 entry.result
             )
             .ok();
+            if let Some(error) = &entry.desktop_error {
+                writeln!(&mut contents, "  desktop placement skipped: {error}").ok();
+            }
         } else {
             writeln!(
                 &mut contents,
