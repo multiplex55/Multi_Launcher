@@ -8,11 +8,11 @@ integration. A milestone is complete only after its acceptance criteria and veri
 
 ## M1 — Authoritative keyboard domain and persisted recorder settings
 
-Status: `in_progress`
+Status: `complete`
 
 Implementation checkpoint: production integration completed; `cargo check`,
 `cargo check --tests`, `cargo fmt --all --check`, and `git diff --check` passed.
-Behavioral completion remains gated on M7.
+Behavioral completion was verified in M7 and the final M8 gate.
 
 Objective: establish shared typed foundations for every later recorder pass.
 
@@ -35,12 +35,12 @@ Verification: compile-level checks during construction; detailed tests in M7.
 
 ## M2 — Ordered recorder processing and generalized controls
 
-Status: `in_progress`
+Status: `complete`
 
 Implementation checkpoint: production integration completed; `cargo check`,
 `cargo check --tests`, focused hook/hotkey/processor tests, formatting, and diff checks passed.
 Primary-only control filtering was removed after inspection; explicit fired occurrences are the
-sole suppression path. Behavioral completion remains gated on M7.
+sole suppression path. Behavioral completion was verified in M7 and the final M8 gate.
 
 Depends on: M1.
 
@@ -59,11 +59,12 @@ Verification: compile boundary plus processor/hook/lifecycle/control tests in M7
 
 ## M3 — Enriched event and pure semantic recording pipeline
 
-Status: `in_progress`
+Status: `complete`
 
 Implementation checkpoint: semantic IR/translation/passes are integrated; `cargo check`,
 `cargo check --tests`, nine focused semantic tests, formatting, and diff checks passed after
-remediating the initial read-only findings. Behavioral completion remains gated on M7.
+remediating the initial read-only findings. Behavioral completion was verified in M7 and the final
+M8 gate.
 
 Depends on: M1-M2.
 
@@ -82,7 +83,7 @@ Verification: construction `cargo check`; semantic synthetic-event tests in M7.
 
 ## M4 — Smart observations and reviewable suggestions
 
-Status: `in_progress`
+Status: `complete`
 
 Implementation checkpoint: production WinEvent, process/window identity, clipboard, UIA,
 marker/annotation, and suggestion infrastructure is integrated. Native callbacks are bounded,
@@ -90,7 +91,7 @@ auxiliary timestamps share the pause-adjusted recorder clock, UIA uses a persist
 worker with cached element/ancestor inspection, and launch/dialog correlation is conservative and
 SHOW-epoch aware. `cargo check`, `cargo check --tests`, focused observer/processor/suggestion/
 window/UIA suites, formatting, and diff checks passed after independent review. Behavioral
-completion remains gated on M7.
+completion was verified in M7 and the final M8 gate.
 
 Depends on: M2-M3.
 
@@ -110,7 +111,7 @@ Verification: fake observer/clipboard/UIA and pure suggestion tests in M7.
 
 ## M5 — Recording Review, anchored apply, and local editing
 
-Status: `in_progress`
+Status: `complete`
 
 Implementation checkpoint: the transient Review session, generated/editable modes, cached
 statistics, suggestion controls, selection/trim/delete, local history, typed Action Editor target,
@@ -118,7 +119,7 @@ queued result lifecycle, captured-anchor recovery, and one document insertion tr
 staleness-safe undo/redo are integrated. Toolbar, hotkey, and command-dispatch Stop paths publish
 to Review without mutating or saving the draft. `cargo check`, `cargo check --tests`, focused
 Review/anchor/queue/editor/authoring tests, formatting, and diff checks passed after independent
-review. Behavioral completion remains gated on M7.
+review. Behavioral completion was verified in M7 and the final M8 gate.
 
 Depends on: M3-M4.
 
@@ -138,13 +139,13 @@ Verification: review session and authoring integration tests in M7.
 
 ## M6 — Ephemeral preview and complete UI integration
 
-Status: `in_progress`
+Status: `complete`
 
 Implementation checkpoint: M6 production integration is implemented and passes formatting,
 all-target compilation, and focused preview/Review/controller/hotkey/recorder tests. Preview
 tickets retain exact terminal state across later runs, Stop finalizes asynchronously through one
-owned Review queue, and Record Options are draft-owned. M7 remains the owner of broad behavioral
-suite consolidation, so M6 stays `in_progress` until that downstream acceptance pass.
+owned Review queue, and Record Options are draft-owned. M7 consolidated the broad behavioral suite,
+and M8 verified it repository-wide.
 
 Depends on: M2-M5.
 
@@ -164,7 +165,7 @@ Verification: fake-runtime and toolbar/controller tests in M7.
 
 ## M7 — Consolidated behavioral test authoring and migration
 
-Status: `in_progress`
+Status: `complete`
 
 Implementation checkpoint: keyboard/input/action-editor and schema/settings coverage is migrated
 and green (29 focused Nextest cases). The batch also fixed round-before-threshold delay cleanup,
@@ -191,7 +192,7 @@ keyboard/mouse cleanup, real RecorderRuntime and stored-playback admission on th
 stale-ticket Stop isolation, byte-exact backing-file stability, exact diagnostic message/context,
 deterministic pre-publication Apply/Cancel/close cleanup through an injected non-global test runtime,
 and fast terminal retention. `cargo check --tests`, formatting, and diff checks pass. M7 coverage
-groups are implemented; broader consolidated verification remains in M8.
+groups are implemented; M8 completed the broader consolidated verification.
 
 Depends on: M1-M6 production integration.
 
@@ -207,7 +208,7 @@ Verification: precise discovered Nextest filters followed by broader MkMacro fil
 
 ## M8 — Full verification, commits, independent review, remediation
 
-Status: `pending`
+Status: `complete`
 
 Depends on: M7.
 
@@ -219,3 +220,16 @@ runtime behavior changes, and leave the branch clean.
 
 Acceptance: every applicable definition-of-done item is satisfied, no stale competing path remains,
 full Nextest passes, review findings are resolved, and final reporting records actual checks/commits.
+
+Final verification completed September 10, 2026:
+
+- `cargo fmt --all --check` passed.
+- `cargo check` passed.
+- `git diff --check` passed.
+- `cargo nextest run --no-fail-fast` passed: 3,622 tests passed, 7 tests skipped by
+  repository configuration, and no tests failed.
+- The final independent review approved the implementation after remediation. Review-driven fixes
+  preserve repeated-click trailing timing and metadata exactly, require a coherent three-click
+  minimum across the domain and UI, and retain raw scan/extended identity for physically distinct
+  keypad keys. The two stale fixtures exposed by the first post-review full run were corrected and
+  the complete gate was rerun successfully.
