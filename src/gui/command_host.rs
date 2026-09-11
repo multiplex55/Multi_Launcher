@@ -496,6 +496,52 @@ impl HeadlessCommandHost for LauncherApp {
         &mut self,
         mut invocation: crate::commands::CommandInvocation,
     ) {
+        match &invocation.command {
+            crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::BindWorkspace {
+                    workspace_id,
+                    target,
+                    cached_name,
+                },
+            ) => {
+                let result = (|| -> Result<(), String> {
+                    let binding = crate::virtual_desktop::VirtualDesktopBinding {
+                        id: crate::virtual_desktop::VirtualDesktopId::parse(target)
+                            .map_err(|_| "workspace binding action must contain a desktop GUID")?,
+                        cached_name: cached_name.clone(),
+                    };
+                    self.multi_manager
+                        .bind_virtual_desktop(workspace_id, binding)
+                        .then_some(())
+                        .ok_or_else(|| format!("MultiManager workspace not found: {workspace_id}"))
+                })();
+                match result {
+                    Ok(()) => {
+                        let outcome = crate::commands::handlers::success_outcome(self, &invocation);
+                        self.apply_command_outcome(outcome, &invocation);
+                        self.add_success_toast("Bound MultiManager workspace to desktop");
+                    }
+                    Err(error) => self.report_error_message("virtual_desktop", error),
+                }
+                return;
+            }
+            crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::UnbindWorkspace { workspace_id },
+            ) => {
+                if self.multi_manager.unbind_virtual_desktop(workspace_id) {
+                    let outcome = crate::commands::handlers::success_outcome(self, &invocation);
+                    self.apply_command_outcome(outcome, &invocation);
+                    self.add_success_toast("Cleared MultiManager desktop binding");
+                } else {
+                    self.report_error_message(
+                        "virtual_desktop",
+                        format!("MultiManager workspace not found: {workspace_id}"),
+                    );
+                }
+                return;
+            }
+            _ => {}
+        }
         let history_query = self.query.clone();
         if let crate::commands::Command::VirtualDesktop(
             crate::commands::VirtualDesktopCommand::MoveActiveWindow { target, follow },

@@ -138,6 +138,10 @@ fn execute_virtual_desktop_inner(
             })?;
             crate::virtual_desktop::launch::launch_on_desktop(&payload, catalog)
         }
+        VirtualDesktopCommand::BindWorkspace { .. }
+        | VirtualDesktopCommand::UnbindWorkspace { .. } => {
+            anyhow::bail!("workspace desktop bindings require the launcher interface")
+        }
         VirtualDesktopCommand::Settings => {
             anyhow::bail!("virtual desktop settings require the launcher interface")
         }

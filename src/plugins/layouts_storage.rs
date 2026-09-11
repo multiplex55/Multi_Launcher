@@ -410,4 +410,23 @@ mod tests {
             directory.path().join(LAYOUTS_FILE)
         );
     }
+
+    #[test]
+    fn legacy_layout_desktop_string_schema_is_unchanged() {
+        let json = r#"{
+            "version": 1,
+            "layouts": [{
+                "name": "legacy",
+                "windows": [{
+                    "matcher": {"process": "app.exe"},
+                    "placement": {"rect": [0.0, 0.0, 1.0, 1.0]},
+                    "desktop": "Work"
+                }]
+            }]
+        }"#;
+        let store: LayoutStore = serde_json::from_str(json).unwrap();
+        assert_eq!(store.layouts[0].windows[0].desktop.as_deref(), Some("Work"));
+        let serialized = serde_json::to_value(&store).unwrap();
+        assert_eq!(serialized["layouts"][0]["windows"][0]["desktop"], "Work");
+    }
 }

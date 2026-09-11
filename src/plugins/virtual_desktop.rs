@@ -2,7 +2,7 @@ use crate::actions::Action;
 use crate::commands::{
     Command, ExternalCommand, VirtualDesktopLaunchPayload, VirtualDesktopMoveActivePayload,
     VirtualDesktopMoveWindowPayload, VirtualDesktopRenamePayload, VirtualDesktopTargetPayload,
-    VirtualDesktopWindowPayload,
+    VirtualDesktopWindowPayload, VirtualDesktopWorkspacePayload,
 };
 use crate::plugin::Plugin;
 use crate::virtual_desktop::{VirtualDesktopService, VirtualDesktopSnapshot};
@@ -29,6 +29,20 @@ trait DesktopSource: Send + Sync {
     fn snapshot(&self) -> Result<VirtualDesktopSnapshot, String>;
 }
 
+trait WorkspaceSource: Send + Sync {
+    fn snapshot(&self) -> Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor>;
+}
+
+struct ProductionWorkspaceSource {
+    catalog: Arc<crate::multi_manager::workspace_catalog::WorkspaceCatalog>,
+}
+
+impl WorkspaceSource for ProductionWorkspaceSource {
+    fn snapshot(&self) -> Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor> {
+        self.catalog.snapshot()
+    }
+}
+
 struct ProductionDesktopSource;
 
 impl DesktopSource for ProductionDesktopSource {
@@ -41,15 +55,23 @@ impl DesktopSource for ProductionDesktopSource {
 
 pub struct VirtualDesktopPlugin {
     desktops: Arc<dyn DesktopSource>,
+    workspaces: Arc<dyn WorkspaceSource>,
     catalog: Arc<WindowCatalog>,
     actions: Arc<Vec<Action>>,
     settings: VirtualDesktopPluginSettings,
 }
 
 impl VirtualDesktopPlugin {
-    pub(crate) fn new(catalog: Arc<WindowCatalog>, actions: Arc<Vec<Action>>) -> Self {
+    pub(crate) fn new(
+        workspace_catalog: Arc<crate::multi_manager::workspace_catalog::WorkspaceCatalog>,
+        catalog: Arc<WindowCatalog>,
+        actions: Arc<Vec<Action>>,
+    ) -> Self {
         Self {
             desktops: Arc::new(ProductionDesktopSource),
+            workspaces: Arc::new(ProductionWorkspaceSource {
+                catalog: workspace_catalog,
+            }),
             catalog,
             actions,
             settings: VirtualDesktopPluginSettings::default(),
@@ -59,11 +81,13 @@ impl VirtualDesktopPlugin {
     #[cfg(test)]
     fn with_source(
         desktops: Arc<dyn DesktopSource>,
+        workspaces: Arc<dyn WorkspaceSource>,
         catalog: Arc<WindowCatalog>,
         actions: Arc<Vec<Action>>,
     ) -> Self {
         Self {
             desktops,
+            workspaces,
             catalog,
             actions,
             settings: VirtualDesktopPluginSettings::default(),
@@ -328,6 +352,95 @@ impl VirtualDesktopPlugin {
             .flatten()
             .collect()
     }
+
+    fn workspace_bind_actions(
+        &self,
+        snapshot: &VirtualDesktopSnapshot,
+        input: &str,
+    ) -> Vec<Action> {
+        let input = input.trim();
+        let workspaces = self.workspaces.snapshot();
+        let mut full_matches = workspaces
+            .iter()
+            .filter_map(|workspace| {
+                let label = workspace_label(workspace);
+                workspace_target_remainder(input, &label)
+                    .or_else(|| workspace_target_remainder(input, &workspace.id))
+                    .map(|target| (workspace, label, target))
+            })
+            .collect::<Vec<_>>();
+        if !full_matches.is_empty() {
+            let longest = full_matches
+                .iter()
+                .map(|(_, label, _)| label.len())
+                .max()
+                .unwrap_or(0);
+            full_matches.retain(|(_, label, _)| label.len() == longest);
+            if full_matches.len() != 1 {
+                return Vec::new();
+            }
+            let (workspace, label, target) = full_matches.remove(0);
+            let Ok(selector) = crate::virtual_desktop::VirtualDesktopSelector::parse(target) else {
+                return Vec::new();
+            };
+            let Ok(desktop) = snapshot.resolve(&selector) else {
+                return Vec::new();
+            };
+            return vec![json_action(
+                format!("Bind workspace {label} to {}", desktop.display_name()),
+                "MultiManager virtual desktop binding".into(),
+                "vd:bind-workspace",
+                &VirtualDesktopWorkspacePayload {
+                    workspace_id: workspace.id.clone(),
+                    target: Some(desktop.id.to_string()),
+                    cached_name: desktop.name.clone(),
+                },
+            )];
+        }
+
+        let filter = input.to_ascii_lowercase();
+        workspaces
+            .iter()
+            .filter_map(|workspace| {
+                let label = workspace_label(workspace);
+                (filter.is_empty()
+                    || label.to_ascii_lowercase().contains(&filter)
+                    || workspace.id.to_ascii_lowercase().contains(&filter))
+                .then(|| {
+                    query_action(
+                        format!("Bind workspace {label}"),
+                        format!("vd bind workspace {label} "),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn workspace_unbind_actions(&self, input: &str) -> Vec<Action> {
+        let filter = input.trim().to_ascii_lowercase();
+        self.workspaces
+            .snapshot()
+            .into_iter()
+            .filter_map(|workspace| {
+                let label = workspace_label(&workspace);
+                (filter.is_empty()
+                    || label.to_ascii_lowercase().contains(&filter)
+                    || workspace.id.to_ascii_lowercase().contains(&filter))
+                .then(|| {
+                    json_action(
+                        format!("Clear desktop binding for workspace {label}"),
+                        "MultiManager virtual desktop binding".into(),
+                        "vd:unbind-workspace",
+                        &VirtualDesktopWorkspacePayload {
+                            workspace_id: workspace.id,
+                            target: None,
+                            cached_name: None,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
 }
 
 impl Plugin for VirtualDesktopPlugin {
@@ -416,6 +529,12 @@ impl Plugin for VirtualDesktopPlugin {
         if let Some(input) = strip_command(rest, "launch") {
             return self.launch_actions(&snapshot, input);
         }
+        if let Some(input) = strip_command(rest, "bind workspace") {
+            return self.workspace_bind_actions(&snapshot, input);
+        }
+        if let Some(input) = strip_command(rest, "unbind workspace") {
+            return self.workspace_unbind_actions(input);
+        }
         if let Some(input) = strip_command(rest, "rename") {
             let Some((target, name)) = input.trim().split_once(char::is_whitespace) else {
                 return Vec::new();
@@ -462,6 +581,8 @@ impl Plugin for VirtualDesktopPlugin {
             "vd windows",
             "vd move active",
             "vd launch",
+            "vd bind workspace",
+            "vd unbind workspace",
             "vd settings",
         ]
         .into_iter()
@@ -497,6 +618,29 @@ fn strip_command<'a>(input: &'a str, command: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+fn workspace_label(
+    workspace: &crate::multi_manager::workspace_catalog::WorkspaceDescriptor,
+) -> String {
+    let name = workspace.name.trim();
+    if name.is_empty() {
+        workspace.id.clone()
+    } else {
+        name.to_string()
+    }
+}
+
+fn workspace_target_remainder<'a>(input: &'a str, workspace: &str) -> Option<&'a str> {
+    if input.len() <= workspace.len()
+        || !input
+            .get(..workspace.len())?
+            .eq_ignore_ascii_case(workspace)
+        || !input.as_bytes().get(workspace.len())?.is_ascii_whitespace()
+    {
+        return None;
+    }
+    Some(input[workspace.len()..].trim())
 }
 
 fn simple_action(label: impl Into<String>, desc: impl Into<String>, action: &str) -> Action {
@@ -546,6 +690,13 @@ mod tests {
         snapshots: AtomicUsize,
     }
 
+    struct FakeWorkspaces(Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor>);
+    impl WorkspaceSource for FakeWorkspaces {
+        fn snapshot(&self) -> Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor> {
+            self.0.clone()
+        }
+    }
+
     impl DesktopSource for FakeDesktops {
         fn snapshot(&self) -> Result<VirtualDesktopSnapshot, String> {
             self.snapshots.fetch_add(1, Ordering::Relaxed);
@@ -577,8 +728,32 @@ mod tests {
     }
 
     fn plugin(source: Arc<FakeDesktops>) -> VirtualDesktopPlugin {
+        plugin_with_workspaces(
+            source,
+            vec![
+                ("workspace-42", "Coding"),
+                ("workspace-gaming", "Gaming Space"),
+            ],
+        )
+    }
+
+    fn plugin_with_workspaces(
+        source: Arc<FakeDesktops>,
+        workspaces: Vec<(&str, &str)>,
+    ) -> VirtualDesktopPlugin {
         VirtualDesktopPlugin::with_source(
             source,
+            Arc::new(FakeWorkspaces(
+                workspaces
+                    .into_iter()
+                    .map(|(id, name)| {
+                        crate::multi_manager::workspace_catalog::WorkspaceDescriptor {
+                            id: id.into(),
+                            name: name.into(),
+                        }
+                    })
+                    .collect(),
+            )),
             WindowCatalog::from_enriched_snapshot(
                 vec![WindowDescriptor {
                     title: "Code: project | alpha".into(),
@@ -699,6 +874,8 @@ mod tests {
             "vd windows",
             "vd move active",
             "vd launch",
+            "vd bind workspace",
+            "vd unbind workspace",
             "vd settings",
         ] {
             assert!(
@@ -709,5 +886,92 @@ mod tests {
         let settings: VirtualDesktopPluginSettings =
             serde_json::from_value(plugin.default_settings().unwrap()).unwrap();
         assert_eq!(settings.launch_timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn workspace_binding_actions_use_stable_workspace_id_and_resolved_desktop_guid() {
+        let plugin = plugin(source());
+        let discovery = plugin.search("vd bind workspace cod");
+        assert_eq!(discovery.len(), 1);
+        assert_eq!(discovery[0].action, "query:vd bind workspace Coding ");
+        let bind = plugin.search("vd bind workspace Coding Coding");
+        assert_eq!(bind.len(), 1);
+        assert!(matches!(
+            crate::commands::parse_action(&bind[0]).unwrap(),
+            Command::VirtualDesktop(VirtualDesktopCommand::BindWorkspace { workspace_id, target, .. })
+                if workspace_id == "workspace-42" && target == id(2).to_string()
+        ));
+        let unbind = plugin.search("vd unbind workspace Coding");
+        assert_eq!(unbind.len(), 1);
+        assert!(matches!(
+            crate::commands::parse_action(&unbind[0]).unwrap(),
+            Command::VirtualDesktop(VirtualDesktopCommand::UnbindWorkspace { workspace_id })
+                if workspace_id == "workspace-42"
+        ));
+    }
+
+    #[test]
+    fn production_workspace_sources_keep_app_instances_isolated() {
+        fn workspace(
+            id: &str,
+        ) -> Arc<std::sync::Mutex<Vec<crate::multi_manager::model::MmWorkspace>>> {
+            Arc::new(std::sync::Mutex::new(vec![
+                crate::multi_manager::model::MmWorkspace {
+                    id: id.into(),
+                    name: "Coding".into(),
+                    ..crate::multi_manager::model::MmWorkspace::default()
+                },
+            ]))
+        }
+
+        fn plugin_for_catalog(
+            catalog: Arc<crate::multi_manager::workspace_catalog::WorkspaceCatalog>,
+        ) -> VirtualDesktopPlugin {
+            VirtualDesktopPlugin::with_source(
+                source(),
+                Arc::new(ProductionWorkspaceSource { catalog }),
+                WindowCatalog::from_enriched_snapshot(Vec::new(), Default::default()),
+                Arc::new(Vec::new()),
+            )
+        }
+
+        let first_workspaces = workspace("workspace-first");
+        let second_workspaces = workspace("workspace-second");
+        let first_catalog =
+            Arc::new(crate::multi_manager::workspace_catalog::WorkspaceCatalog::default());
+        let second_catalog =
+            Arc::new(crate::multi_manager::workspace_catalog::WorkspaceCatalog::default());
+        first_catalog.attach(&first_workspaces);
+        second_catalog.attach(&second_workspaces);
+        let first = plugin_for_catalog(first_catalog);
+        let second = plugin_for_catalog(second_catalog);
+
+        let first_bind = first.search("vd bind workspace Coding Coding");
+        let second_bind = second.search("vd bind workspace Coding Coding");
+        assert!(matches!(
+            crate::commands::parse_action(&first_bind[0]).unwrap(),
+            Command::VirtualDesktop(VirtualDesktopCommand::BindWorkspace { workspace_id, .. })
+                if workspace_id == "workspace-first"
+        ));
+        assert!(matches!(
+            crate::commands::parse_action(&second_bind[0]).unwrap(),
+            Command::VirtualDesktop(VirtualDesktopCommand::BindWorkspace { workspace_id, .. })
+                if workspace_id == "workspace-second"
+        ));
+    }
+
+    #[test]
+    fn duplicate_workspace_names_do_not_bind_ambiguously() {
+        let plugin = plugin_with_workspaces(
+            source(),
+            vec![("workspace-a", "Coding"), ("workspace-b", "Coding")],
+        );
+        assert!(plugin.search("vd bind workspace Coding Coding").is_empty());
+        let by_id = plugin.search("vd bind workspace workspace-a Coding");
+        assert!(matches!(
+            crate::commands::parse_action(&by_id[0]).unwrap(),
+            Command::VirtualDesktop(VirtualDesktopCommand::BindWorkspace { workspace_id, .. })
+                if workspace_id == "workspace-a"
+        ));
     }
 }

@@ -299,6 +299,7 @@ pub struct PluginInternalServices {
     pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
     pub mkmacro_store: Arc<crate::mkmacro::MkMacroStore>,
     pub window_catalog: Arc<WindowCatalog>,
+    pub workspace_catalog: Arc<crate::multi_manager::workspace_catalog::WorkspaceCatalog>,
     search_updates: Arc<PluginSearchUpdates>,
     system_data_runtime: Option<SystemDataRuntime>,
 }
@@ -370,6 +371,9 @@ impl PluginManager {
                 mkmacro_store: store,
                 search_updates,
                 window_catalog,
+                workspace_catalog: Arc::new(
+                    crate::multi_manager::workspace_catalog::WorkspaceCatalog::default(),
+                ),
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -394,6 +398,9 @@ impl PluginManager {
                 mkmacro_store: store,
                 search_updates,
                 window_catalog,
+                workspace_catalog: Arc::new(
+                    crate::multi_manager::workspace_catalog::WorkspaceCatalog::default(),
+                ),
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -483,6 +490,9 @@ impl PluginManager {
                 mkmacro_store: store,
                 search_updates,
                 window_catalog,
+                workspace_catalog: Arc::new(
+                    crate::multi_manager::workspace_catalog::WorkspaceCatalog::default(),
+                ),
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -604,7 +614,11 @@ impl PluginManager {
             plugin_settings,
         );
         self.register_with_settings(
-            VirtualDesktopPlugin::new(Arc::clone(&self.services.window_catalog), actions.clone()),
+            VirtualDesktopPlugin::new(
+                Arc::clone(&self.services.workspace_catalog),
+                Arc::clone(&self.services.window_catalog),
+                actions.clone(),
+            ),
             plugin_settings,
         );
         self.register_with_settings(

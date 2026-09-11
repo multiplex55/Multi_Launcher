@@ -1,4 +1,22 @@
 use crate::plugins::layouts_storage::{LayoutMatch, LayoutWindowState};
+use crate::virtual_desktop::{
+    VirtualDesktopError, VirtualDesktopId, VirtualDesktopSelector, VirtualDesktopSnapshot,
+};
+
+pub fn resolve_layout_desktop(
+    snapshot: &VirtualDesktopSnapshot,
+    stored: Option<&str>,
+) -> Result<Option<VirtualDesktopId>, VirtualDesktopError> {
+    let Some(stored) = stored.map(str::trim).filter(|stored| !stored.is_empty()) else {
+        return Ok(None);
+    };
+    let selector = VirtualDesktopId::parse(stored)
+        .map(VirtualDesktopSelector::Id)
+        .unwrap_or_else(|_| VirtualDesktopSelector::Name(stored.to_string()));
+    snapshot
+        .resolve(&selector)
+        .map(|desktop| Some(desktop.id.clone()))
+}
 
 pub fn is_rule_match(rule: &LayoutMatch, candidate: &LayoutMatch) -> bool {
     if rule.app_id.is_none()
@@ -129,5 +147,52 @@ mod tests {
             title: None,
         };
         assert!(!is_rule_match(&empty, &empty));
+    }
+
+    fn desktop_snapshot(names: &[&str]) -> VirtualDesktopSnapshot {
+        VirtualDesktopSnapshot {
+            desktops: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| crate::virtual_desktop::VirtualDesktopInfo {
+                    id: VirtualDesktopId::parse(&format!(
+                        "{:08x}-0000-0000-0000-000000000000",
+                        index + 1
+                    ))
+                    .unwrap(),
+                    index: index as u32 + 1,
+                    name: Some((*name).into()),
+                    is_current: index == 0,
+                })
+                .collect(),
+            capabilities: Default::default(),
+        }
+    }
+
+    #[test]
+    fn layout_desktop_resolves_guid_and_unique_legacy_name() {
+        let snapshot = desktop_snapshot(&["Home", "Work"]);
+        let id = snapshot.desktops[1].id.clone();
+        assert_eq!(
+            resolve_layout_desktop(&snapshot, Some(id.as_str())).unwrap(),
+            Some(id.clone())
+        );
+        assert_eq!(
+            resolve_layout_desktop(&snapshot, Some("work")).unwrap(),
+            Some(id)
+        );
+        assert_eq!(resolve_layout_desktop(&snapshot, None).unwrap(), None);
+    }
+
+    #[test]
+    fn layout_desktop_rejects_missing_and_ambiguous_names() {
+        let snapshot = desktop_snapshot(&["Work", "work"]);
+        assert!(resolve_layout_desktop(&snapshot, Some("Missing")).is_err());
+        assert_eq!(
+            resolve_layout_desktop(&snapshot, Some("WORK"))
+                .unwrap_err()
+                .kind,
+            crate::virtual_desktop::VirtualDesktopErrorKind::AmbiguousSelector
+        );
     }
 }

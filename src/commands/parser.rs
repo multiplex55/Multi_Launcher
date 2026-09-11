@@ -165,6 +165,20 @@ fn parse_virtual_desktop(action: &Action) -> VirtualDesktopCommand {
         "vd:launch" => {
             payload::<VirtualDesktopLaunchPayload>(action).map(VirtualDesktopCommand::Launch)
         }
+        "vd:bind-workspace" => payload::<VirtualDesktopWorkspacePayload>(action).and_then(|p| {
+            p.target
+                .map(|target| VirtualDesktopCommand::BindWorkspace {
+                    workspace_id: p.workspace_id,
+                    target,
+                    cached_name: p.cached_name,
+                })
+                .ok_or_else(|| "workspace binding requires a desktop target".into())
+        }),
+        "vd:unbind-workspace" => payload::<VirtualDesktopWorkspacePayload>(action).map(|p| {
+            VirtualDesktopCommand::UnbindWorkspace {
+                workspace_id: p.workspace_id,
+            }
+        }),
         other => Err(format!("unknown virtual desktop action: {other}")),
     };
     let result = result.and_then(|command| {
@@ -208,6 +222,18 @@ fn parse_virtual_desktop(action: &Action) -> VirtualDesktopCommand {
                     || payload.timeout_ms == 0 =>
             {
                 Err("launch target, application, and timeout must be valid".into())
+            }
+            VirtualDesktopCommand::BindWorkspace {
+                workspace_id,
+                target,
+                ..
+            } if workspace_id.trim().is_empty() || target.trim().is_empty() => {
+                Err("workspace id and desktop target cannot be empty".into())
+            }
+            VirtualDesktopCommand::UnbindWorkspace { workspace_id }
+                if workspace_id.trim().is_empty() =>
+            {
+                Err("workspace id cannot be empty".into())
             }
             _ => Ok(command),
         }
@@ -1618,6 +1644,16 @@ mod tests {
                     r#"{"target":"3","application":"C:\\Program Files\\App.exe","args":"--name a | b","follow":true,"timeout_ms":10000}"#,
                 ),
             ),
+            (
+                "vd:bind-workspace",
+                Some(
+                    r#"{"workspace_id":"stable-id","target":"550e8400-e29b-41d4-a716-446655440000","cached_name":"Work"}"#,
+                ),
+            ),
+            (
+                "vd:unbind-workspace",
+                Some(r#"{"workspace_id":"stable-id"}"#),
+            ),
         ];
         for (raw, args) in payloads {
             let mut action = action(raw);
@@ -1633,6 +1669,7 @@ mod tests {
             ("vd:launch", Some("not json")),
             ("vd:unknown", None),
             ("vd:list", Some("{}")),
+            ("vd:bind-workspace", Some(r#"{"workspace_id":"stable-id"}"#)),
             (
                 "vd:move-window",
                 Some(r#"{"hwnd":42,"target":"","follow":false}"#),

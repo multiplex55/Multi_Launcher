@@ -250,6 +250,14 @@ mod tests {
     }
 
     #[test]
+    fn persisted_desktop_ids_normalize_uppercase_and_reject_malformed_values() {
+        let id: VirtualDesktopId =
+            serde_json::from_str(r#""{550E8400-E29B-41D4-A716-446655440000}""#).unwrap();
+        assert_eq!(id.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+        assert!(serde_json::from_str::<VirtualDesktopId>(r#""not-a-guid""#).is_err());
+    }
+
+    #[test]
     fn selectors_resolve_number_name_and_guid() {
         let snapshot = snapshot(0, &[Some("Work"), None]);
         assert_eq!(

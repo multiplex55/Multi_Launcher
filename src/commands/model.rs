@@ -172,6 +172,14 @@ pub enum VirtualDesktopCommand {
         follow: bool,
     },
     Launch(VirtualDesktopLaunchPayload),
+    BindWorkspace {
+        workspace_id: String,
+        target: String,
+        cached_name: Option<String>,
+    },
+    UnbindWorkspace {
+        workspace_id: String,
+    },
     Settings,
     Invalid {
         action: String,
@@ -185,6 +193,7 @@ kinds!(VirtualDesktopCommand,
     Self::CloseCurrent => "close_current", Self::Rename { .. } => "rename",
     Self::ActivateWindow { .. } => "activate_window", Self::MoveWindow { .. } => "move_window",
     Self::MoveActiveWindow { .. } => "move_active_window", Self::Launch(_) => "launch",
+    Self::BindWorkspace { .. } => "bind_workspace", Self::UnbindWorkspace { .. } => "unbind_workspace",
     Self::Settings => "settings", Self::Invalid { .. } => "invalid"
 );
 
@@ -229,6 +238,15 @@ pub struct VirtualDesktopLaunchPayload {
     pub follow: bool,
     #[serde(default = "default_virtual_desktop_launch_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualDesktopWorkspacePayload {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_name: Option<String>,
 }
 
 fn default_virtual_desktop_launch_timeout_ms() -> u64 {

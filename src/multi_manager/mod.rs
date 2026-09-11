@@ -12,3 +12,4 @@ pub mod state;
 pub mod store;
 pub mod ui;
 pub mod win;
+pub mod workspace_catalog;

@@ -441,6 +441,22 @@ impl MultiManagerState {
         Some(result)
     }
 
+    pub fn bind_virtual_desktop(
+        &mut self,
+        workspace_id: &str,
+        binding: crate::virtual_desktop::VirtualDesktopBinding,
+    ) -> bool {
+        self.with_workspace_mut(workspace_id, |workspace| {
+            workspace.virtual_desktop = Some(binding)
+        })
+        .is_some()
+    }
+
+    pub fn unbind_virtual_desktop(&mut self, workspace_id: &str) -> bool {
+        self.with_workspace_mut(workspace_id, |workspace| workspace.virtual_desktop = None)
+            .is_some()
+    }
+
     #[cfg(test)]
     fn force_debounce_elapsed(&mut self) {
         self.dirty_since = Some(Instant::now() - self.save_debounce - Duration::from_millis(1));
@@ -683,6 +699,42 @@ mod tests {
             state.bindings_path,
             dir.path().join("missing-bindings.json")
         );
+    }
+
+    #[test]
+    fn desktop_binding_mutation_marks_workspace_dirty_and_autosaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(
+            dir.path().join("workspaces.json"),
+            r#"[{"id":"ws","name":"Loaded"}]"#,
+        )
+        .unwrap();
+        let mut state = MultiManagerState::load_or_default(
+            &MultiManagerSettings {
+                enabled: false,
+                auto_save: true,
+                workspaces_path: "workspaces.json".into(),
+                ..Default::default()
+            },
+            settings_path.to_str().unwrap(),
+        );
+        let id =
+            crate::virtual_desktop::VirtualDesktopId::parse("550e8400-e29b-41d4-a716-446655440000")
+                .unwrap();
+        assert!(state.bind_virtual_desktop(
+            "ws",
+            crate::virtual_desktop::VirtualDesktopBinding {
+                id: id.clone(),
+                cached_name: Some("Work".into()),
+            },
+        ));
+        assert!(state.dirty);
+        state.force_debounce_elapsed();
+        state.maybe_auto_save();
+        assert!(!state.dirty);
+        let saved = store::load_workspaces(&state.workspace_path).unwrap();
+        assert_eq!(saved[0].virtual_desktop.as_ref().unwrap().id, id);
     }
 
     #[test]

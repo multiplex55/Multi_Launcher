@@ -1522,6 +1522,10 @@ impl LauncherApp {
         let settings_editor = SettingsEditor::new_with_plugins(&settings);
         let multi_manager =
             MultiManagerState::load_or_default(&settings.multi_manager, &settings_path);
+        plugins
+            .internal_services()
+            .workspace_catalog
+            .attach(&multi_manager.workspaces);
         let plugin_editor = PluginEditor::new(&settings);
         let actions_by_id = actions
             .iter()
