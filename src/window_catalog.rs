@@ -478,14 +478,9 @@ fn terminate_worker(
 
 #[cfg(windows)]
 fn enumerate_windows() -> Vec<WindowDescriptor> {
-    use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    };
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GW_OWNER, GetClassNameW, GetWindow, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible,
+        EnumWindows, GW_OWNER, GetWindow, IsWindowVisible,
     };
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -498,48 +493,11 @@ fn enumerate_windows() -> Vec<WindowDescriptor> {
         {
             return BOOL(1);
         }
-        let len = unsafe { GetWindowTextLengthW(hwnd) };
-        if len <= 0 {
-            return BOOL(1);
+        if let Some(window) = describe_window(hwnd.0 as usize)
+            && !window.title.is_empty()
+        {
+            out.push(window);
         }
-        let mut title_buf = vec![0u16; len as usize + 1];
-        let read = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
-        let title = String::from_utf16_lossy(&title_buf[..read as usize]);
-        let mut pid = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        let mut class_buf = [0u16; 256];
-        let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) } as usize;
-        let class_name = (class_len > 0).then(|| String::from_utf16_lossy(&class_buf[..class_len]));
-        let process_path = unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok();
-            handle.and_then(|handle| {
-                let mut path = vec![0u16; 32768];
-                let mut size = path.len() as u32;
-                let result = QueryFullProcessImageNameW(
-                    handle,
-                    PROCESS_NAME_FORMAT(0),
-                    windows::core::PWSTR(path.as_mut_ptr()),
-                    &mut size,
-                );
-                let _ = CloseHandle(handle);
-                result
-                    .ok()
-                    .map(|_| String::from_utf16_lossy(&path[..size as usize]))
-            })
-        };
-        let executable = process_path.as_deref().and_then(|path| {
-            std::path::Path::new(path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        });
-        out.push(WindowDescriptor {
-            title,
-            hwnd: hwnd.0 as usize,
-            pid,
-            executable,
-            process_path,
-            class_name,
-        });
         BOOL(1)
     }
     let mut out = Vec::new();
@@ -548,6 +506,74 @@ fn enumerate_windows() -> Vec<WindowDescriptor> {
         let _ = EnumWindows(Some(enum_cb), LPARAM(out_ptr as isize));
     }
     out
+}
+
+/// Read metadata for one known HWND without starting another enumeration worker.
+///
+/// Foreground-event consumers use this after leaving the native callback. Empty
+/// titles are retained because process-only rules remain meaningful for such windows.
+#[cfg(windows)]
+pub(crate) fn describe_window(hwnd: usize) -> Option<WindowDescriptor> {
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
+    };
+
+    let hwnd = HWND(hwnd as *mut _);
+    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+        return None;
+    }
+    let len = unsafe { GetWindowTextLengthW(hwnd) }.max(0) as usize;
+    let mut title_buf = vec![0u16; len + 1];
+    let read = unsafe { GetWindowTextW(hwnd, &mut title_buf) }.max(0) as usize;
+    let title = String::from_utf16_lossy(&title_buf[..read]);
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
+    let mut class_buf = [0u16; 256];
+    let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) }.max(0) as usize;
+    let class_name = (class_len > 0).then(|| String::from_utf16_lossy(&class_buf[..class_len]));
+    let process_path = unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok();
+        handle.and_then(|handle| {
+            let mut path = vec![0u16; 32768];
+            let mut size = path.len() as u32;
+            let result = QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(path.as_mut_ptr()),
+                &mut size,
+            );
+            let _ = CloseHandle(handle);
+            result
+                .ok()
+                .map(|_| String::from_utf16_lossy(&path[..size as usize]))
+        })
+    };
+    let executable = process_path.as_deref().and_then(|path| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    });
+    Some(WindowDescriptor {
+        title,
+        hwnd: hwnd.0 as usize,
+        pid,
+        executable,
+        process_path,
+        class_name,
+    })
+}
+
+#[cfg(not(windows))]
+pub(crate) fn describe_window(_hwnd: usize) -> Option<WindowDescriptor> {
+    None
 }
 
 #[cfg(not(windows))]

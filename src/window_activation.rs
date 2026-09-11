@@ -33,6 +33,13 @@ impl WindowActivationRequest {
             desktop_policy: WindowDesktopPolicy::MoveToCurrentDesktop,
         }
     }
+
+    pub const fn current_desktop_only(hwnd: usize) -> Self {
+        Self {
+            hwnd,
+            desktop_policy: WindowDesktopPolicy::CurrentDesktopOnly,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

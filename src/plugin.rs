@@ -112,6 +112,9 @@ pub trait Plugin: Send + Sync {
     /// Update the plugin using the provided settings value.
     fn apply_settings(&mut self, _value: &serde_json::Value) {}
 
+    /// Notify lifecycle-owning plugins when their configured enablement changes.
+    fn set_enabled(&mut self, _enabled: bool) {}
+
     /// Draw the settings UI for this plugin.
     fn settings_ui(&mut self, _ui: &mut egui::Ui, _value: &mut serde_json::Value) {}
 }
@@ -307,6 +310,7 @@ pub struct PluginInternalServices {
 pub struct PluginManager {
     plugins: Vec<Arc<PluginSlot>>,
     services: PluginInternalServices,
+    runtime_enablement: Option<Option<HashSet<String>>>,
     next_plugin_epoch: u64,
     deferred_dynamic_reloads: Vec<(PathBuf, Weak<PluginSlot>)>,
 }
@@ -366,6 +370,7 @@ impl PluginManager {
         let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
+            runtime_enablement: None,
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
@@ -393,6 +398,7 @@ impl PluginManager {
         let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
+            runtime_enablement: None,
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
@@ -485,6 +491,7 @@ impl PluginManager {
         let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
+            runtime_enablement: None,
             services: PluginInternalServices {
                 clipboard_modifier_catalog: catalog,
                 mkmacro_store: store,
@@ -503,6 +510,13 @@ impl PluginManager {
     /// Remove all registered plugins, deferring reload of a dynamic library while an owned plugin
     /// handle still pins its originating slot.
     pub fn clear_plugins(&mut self) {
+        // Stop lifecycle-owned runtimes before slots can be pinned by an in-flight
+        // search or deferred dynamic-library handle.
+        for slot in &self.plugins {
+            if let Ok(mut plugin) = slot.plugin.write() {
+                plugin.set_enabled(false);
+            }
+        }
         for slot in &self.plugins {
             if Arc::strong_count(slot) > 1
                 && let Some(path) = slot.library_path.clone()
@@ -640,6 +654,9 @@ impl PluginManager {
             tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir, plugin_settings);
         }
+        if let Some(enabled_plugins) = self.runtime_enablement.clone() {
+            self.apply_runtime_enablement(enabled_plugins.as_ref());
+        }
         tracing::debug!(loaded=?self.plugin_names());
     }
 
@@ -700,6 +717,22 @@ impl PluginManager {
                 )
             })
             .collect()
+    }
+
+    /// Keep opt-in plugin runtimes aligned with launcher enablement. Managers used
+    /// only for headless search do not call this and therefore never start them.
+    pub fn sync_enabled_plugins(&mut self, enabled_plugins: Option<&HashSet<String>>) {
+        self.runtime_enablement = Some(enabled_plugins.cloned());
+        self.apply_runtime_enablement(enabled_plugins);
+    }
+
+    fn apply_runtime_enablement(&mut self, enabled_plugins: Option<&HashSet<String>>) {
+        for mut plugin in self.iter_mut() {
+            let enabled = enabled_plugins
+                .map(|enabled| enabled.contains(plugin.name()))
+                .unwrap_or(true);
+            plugin.set_enabled(enabled);
+        }
     }
 
     /// Collect command shortcuts from plugins filtered by `enabled_plugins`.
@@ -876,6 +909,26 @@ mod tests {
 
     struct NamedPlugin(&'static str);
 
+    struct LifecyclePlugin(Arc<Mutex<Vec<bool>>>);
+
+    impl Plugin for LifecyclePlugin {
+        fn search(&self, _: &str) -> Vec<Action> {
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "lifecycle"
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+        fn set_enabled(&mut self, enabled: bool) {
+            self.0.lock().unwrap().push(enabled);
+        }
+    }
+
     impl Plugin for NamedPlugin {
         fn search(&self, _query: &str) -> Vec<Action> {
             Vec::new()
@@ -942,6 +995,19 @@ mod tests {
         assert_eq!(manager.search_generation(), before + 1);
         assert_eq!(manager.search_generation_for("test"), source_before + 1);
         assert_eq!(manager.search_generation_for("unrelated"), 0);
+    }
+
+    #[test]
+    fn auxiliary_managers_do_not_start_lifecycle_plugins_without_owner_enablement() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(LifecyclePlugin(Arc::clone(&events))));
+        assert!(events.lock().unwrap().is_empty());
+
+        manager.sync_enabled_plugins(None);
+        manager.sync_enabled_plugins(Some(&HashSet::new()));
+        manager.clear_plugins();
+        assert_eq!(*events.lock().unwrap(), [true, false, false]);
     }
 
     #[test]

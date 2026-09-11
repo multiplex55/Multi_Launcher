@@ -1,5 +1,6 @@
 pub mod launch;
 mod model;
+pub mod rules;
 mod selection;
 #[cfg(windows)]
 mod windows;
@@ -207,11 +208,6 @@ impl VirtualDesktopService {
         desktop: &VirtualDesktopId,
     ) -> Result<(), VirtualDesktopError> {
         windows::move_window_to_desktop(hwnd, desktop)
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn id_from_native(&self, guid: &::windows::core::GUID) -> VirtualDesktopId {
-        windows::id_from_guid(*guid)
     }
 }
 

@@ -385,45 +385,75 @@ pub fn enumerate_top_level_windows() -> anyhow::Result<Vec<EnumeratedWindow>> {
     Ok(Vec::new())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeometryActivation {
+    Activated,
+    CrossDesktop,
+}
+
+trait GeometryActivationBackend {
+    fn is_on_current_desktop(&mut self, hwnd: usize) -> Result<bool, String>;
+    fn activate_on_current_desktop(&mut self, hwnd: usize) -> Result<(), String>;
+}
+
+fn prepare_geometry_activation(
+    backend: &mut impl GeometryActivationBackend,
+    hwnd: usize,
+) -> Result<GeometryActivation, String> {
+    if !backend.is_on_current_desktop(hwnd)? {
+        return Ok(GeometryActivation::CrossDesktop);
+    }
+    backend.activate_on_current_desktop(hwnd)?;
+    Ok(GeometryActivation::Activated)
+}
+
+#[cfg(windows)]
+struct SharedGeometryActivation;
+
+#[cfg(windows)]
+impl GeometryActivationBackend for SharedGeometryActivation {
+    fn is_on_current_desktop(&mut self, hwnd: usize) -> Result<bool, String> {
+        crate::virtual_desktop::VirtualDesktopService
+            .is_window_on_current_desktop(hwnd_from_usize(hwnd))
+            .map_err(|error| error.to_string())
+    }
+
+    fn activate_on_current_desktop(&mut self, hwnd: usize) -> Result<(), String> {
+        crate::window_activation::activate_window(
+            crate::window_activation::WindowActivationRequest::current_desktop_only(hwnd),
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(windows)]
 pub fn move_window_to_rect(hwnd: usize, rect: MmRect) -> Result<(), MmWindowError> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, SW_RESTORE, SWP_SHOWWINDOW,
-        SetForegroundWindow, SetWindowPos, ShowWindowAsync,
+        HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, SW_RESTORE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+        SetWindowPos, ShowWindowAsync,
     };
 
     if !is_valid_window(hwnd) {
         return Err(anyhow!("invalid window handle: {hwnd}"));
     }
 
+    let activation = prepare_geometry_activation(&mut SharedGeometryActivation, hwnd)
+        .map_err(|error| anyhow!("failed to prepare window for rectangle movement: {error}"))?;
     let hwnd = hwnd_from_usize(hwnd);
     unsafe {
-        if IsIconic(hwnd).as_bool() {
+        if activation == GeometryActivation::CrossDesktop && IsIconic(hwnd).as_bool() {
             let _ = ShowWindowAsync(hwnd, SW_RESTORE);
         }
-        let _ = BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
+        let flags = if activation == GeometryActivation::CrossDesktop {
+            SWP_SHOWWINDOW | SWP_NOACTIVATE
+        } else {
+            SWP_SHOWWINDOW
+        };
 
-        SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            SWP_SHOWWINDOW,
-        )
-        .map_err(|err| anyhow!("failed to move window to rect as temporary topmost: {err}"))?;
-        SetWindowPos(
-            hwnd,
-            HWND_NOTOPMOST,
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            SWP_SHOWWINDOW,
-        )
-        .map_err(|err| anyhow!("failed to remove temporary topmost after move: {err}"))
+        SetWindowPos(hwnd, HWND_TOPMOST, rect.x, rect.y, rect.w, rect.h, flags)
+            .map_err(|err| anyhow!("failed to move window to rect as temporary topmost: {err}"))?;
+        SetWindowPos(hwnd, HWND_NOTOPMOST, rect.x, rect.y, rect.w, rect.h, flags)
+            .map_err(|err| anyhow!("failed to remove temporary topmost after move: {err}"))
     }
 }
 
@@ -458,6 +488,24 @@ pub fn poll_capture_keys() -> Option<CaptureKeyAction> {
 mod tests {
     use super::*;
 
+    struct FakeGeometryActivation {
+        on_current: Result<bool, String>,
+        activation: Result<(), String>,
+        calls: Vec<&'static str>,
+    }
+
+    impl GeometryActivationBackend for FakeGeometryActivation {
+        fn is_on_current_desktop(&mut self, _: usize) -> Result<bool, String> {
+            self.calls.push("membership");
+            self.on_current.clone()
+        }
+
+        fn activate_on_current_desktop(&mut self, _: usize) -> Result<(), String> {
+            self.calls.push("activate");
+            self.activation.clone()
+        }
+    }
+
     fn down(vk: u32) -> bool {
         matches!(vk, 0x11 | 0x10 | 0x41 | 0x70)
     }
@@ -490,6 +538,55 @@ mod tests {
         assert_eq!(executable_from_process_path("app"), Some("app".to_string()));
         assert_eq!(executable_from_process_path(""), None);
         assert_eq!(executable_from_process_path(r"C:\Program Files\App\"), None);
+    }
+
+    #[test]
+    fn geometry_uses_shared_activation_only_for_current_desktop_windows() {
+        let mut current = FakeGeometryActivation {
+            on_current: Ok(true),
+            activation: Ok(()),
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            prepare_geometry_activation(&mut current, 42).unwrap(),
+            GeometryActivation::Activated
+        );
+        assert_eq!(current.calls, ["membership", "activate"]);
+
+        let mut remote = FakeGeometryActivation {
+            on_current: Ok(false),
+            activation: Err("must not run".into()),
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            prepare_geometry_activation(&mut remote, 42).unwrap(),
+            GeometryActivation::CrossDesktop
+        );
+        assert_eq!(remote.calls, ["membership"]);
+    }
+
+    #[test]
+    fn geometry_propagates_membership_and_shared_activation_failures() {
+        let mut membership_failure = FakeGeometryActivation {
+            on_current: Err("desktop lookup failed".into()),
+            activation: Ok(()),
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            prepare_geometry_activation(&mut membership_failure, 42).unwrap_err(),
+            "desktop lookup failed"
+        );
+
+        let mut activation_failure = FakeGeometryActivation {
+            on_current: Ok(true),
+            activation: Err("foreground denied".into()),
+            calls: Vec::new(),
+        };
+        assert_eq!(
+            prepare_geometry_activation(&mut activation_failure, 42).unwrap_err(),
+            "foreground denied"
+        );
+        assert_eq!(activation_failure.calls, ["membership", "activate"]);
     }
 
     #[cfg(windows)]

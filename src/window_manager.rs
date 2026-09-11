@@ -136,63 +136,6 @@ pub fn virtual_key_from_string(key: &str) -> Option<u32> {
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-/// Switch to a virtual desktop by its one-based position in the Windows
-/// virtual-desktop list.
-#[cfg(windows)]
-pub fn switch_virtual_desktop_by_number(number: u32) -> crate::mkmacro::ExecResult {
-    use crate::virtual_desktop::{VirtualDesktopSelector, VirtualDesktopService};
-    VirtualDesktopService
-        .switch(&VirtualDesktopSelector::Number(number))
-        .map_err(virtual_desktop_diagnostic)
-}
-
-/// Compatibility wrapper for callers that used the original string-error API.
-#[cfg(windows)]
-pub fn switch_to_virtual_desktop(desktop_number: u32) -> Result<(), String> {
-    switch_virtual_desktop_by_number(desktop_number).map_err(|error| error.message)
-}
-
-#[cfg(windows)]
-pub fn resolve_virtual_desktop_name(desktop_id: &windows::core::GUID) -> Option<String> {
-    let service = crate::virtual_desktop::VirtualDesktopService;
-    let id = service.id_from_native(desktop_id);
-    service
-        .snapshot()
-        .ok()?
-        .desktops
-        .into_iter()
-        .find(|desktop| desktop.id == id)
-        .and_then(|desktop| desktop.name)
-}
-
-#[cfg(windows)]
-pub fn window_desktop_label(hwnd: windows::Win32::Foundation::HWND) -> Option<String> {
-    let service = crate::virtual_desktop::VirtualDesktopService;
-    let id = service.desktop_for_window(hwnd).ok()?;
-    service
-        .snapshot()
-        .ok()?
-        .desktops
-        .into_iter()
-        .find(|desktop| desktop.id == id)
-        .map(|desktop| desktop.name.unwrap_or_else(|| desktop.id.to_string()))
-}
-
-#[cfg(windows)]
-pub fn move_window_to_desktop(hwnd: windows::Win32::Foundation::HWND, target: &str) -> bool {
-    let service = crate::virtual_desktop::VirtualDesktopService;
-    let Ok(selector) = crate::virtual_desktop::VirtualDesktopSelector::parse(target) else {
-        return false;
-    };
-    let Ok(snapshot) = service.snapshot() else {
-        return false;
-    };
-    let Ok(desktop) = snapshot.resolve(&selector) else {
-        return false;
-    };
-    service.move_window_to_desktop(hwnd, &desktop.id).is_ok()
-}
-
 /// Restore and activate an arbitrary window by following it to its existing desktop.
 pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
     let request = crate::window_activation::WindowActivationRequest::follow_window(hwnd.0 as usize);
@@ -214,40 +157,6 @@ pub fn restore_launcher_to_current_desktop(hwnd: windows::Win32::Foundation::HWN
             tracing::warn!(error = %error, "failed to restore launcher window");
         }
     });
-}
-
-#[cfg(windows)]
-fn virtual_desktop_diagnostic(
-    error: crate::virtual_desktop::VirtualDesktopError,
-) -> crate::mkmacro::ExecutionDiagnostic {
-    use crate::mkmacro::{DiagnosticKind, ExecutionDiagnostic};
-    let kind = match error.kind {
-        crate::virtual_desktop::VirtualDesktopErrorKind::InvalidSelector => {
-            DiagnosticKind::InvalidSelection
-        }
-        crate::virtual_desktop::VirtualDesktopErrorKind::NotFound
-        | crate::virtual_desktop::VirtualDesktopErrorKind::StaleBinding => {
-            DiagnosticKind::TargetNotFound
-        }
-        crate::virtual_desktop::VirtualDesktopErrorKind::AmbiguousSelector => {
-            DiagnosticKind::AmbiguousTarget
-        }
-        crate::virtual_desktop::VirtualDesktopErrorKind::UnsupportedCapability => {
-            DiagnosticKind::UnsupportedOperation
-        }
-        crate::virtual_desktop::VirtualDesktopErrorKind::InvalidWindow => {
-            DiagnosticKind::InvalidTarget
-        }
-        crate::virtual_desktop::VirtualDesktopErrorKind::Native => DiagnosticKind::ComFailure,
-    };
-    let mut diagnostic = ExecutionDiagnostic::new(kind, error.message)
-        .context("backend", "virtual desktop")
-        .context("backend_operation", "virtual desktop")
-        .context("operation", error.operation);
-    for (key, value) in error.context {
-        diagnostic = diagnostic.context(key, value);
-    }
-    diagnostic
 }
 
 /// Extract the HWND from an eframe [`Frame`].
@@ -291,11 +200,6 @@ pub fn activate_process(pid: u32) {
     unsafe {
         let _ = EnumWindows(Some(enum_cb), LPARAM(pid as isize));
     }
-}
-
-pub fn activate_window(hwnd: usize) {
-    use windows::Win32::Foundation::HWND;
-    crate::window_manager::force_restore_and_foreground(HWND(hwnd as *mut _));
 }
 
 pub fn close_window(hwnd: usize) {

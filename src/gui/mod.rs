@@ -1059,6 +1059,8 @@ impl LauncherApp {
 
         // Keep MG hook in lockstep with whether the plugin is enabled in the UI/settings.
         crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
+        self.plugins
+            .sync_enabled_plugins(self.enabled_plugins.as_ref());
         self.update_command_cache();
         self.enabled_capabilities = enabled_capabilities;
         if let Some((x, y)) = offscreen_pos {
@@ -1830,6 +1832,8 @@ impl LauncherApp {
         app.plugins
             .set_search_repaint_callback(Arc::new(move || repaint_context.request_repaint()));
         crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
+        app.plugins
+            .sync_enabled_plugins(app.enabled_plugins.as_ref());
         app.recompute_query_results_layout();
         app
     }

@@ -5,22 +5,25 @@ use crate::commands::{
     VirtualDesktopWindowPayload, VirtualDesktopWorkspacePayload,
 };
 use crate::plugin::Plugin;
+use crate::virtual_desktop::rules::{RuleRuntimeController, RuleRuntimeStatus, VirtualDesktopRule};
 use crate::virtual_desktop::{VirtualDesktopService, VirtualDesktopSnapshot};
 use crate::window_catalog::WindowCatalog;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VirtualDesktopPluginSettings {
     pub launch_timeout_ms: u64,
+    pub auto_switch_rules: Vec<VirtualDesktopRule>,
 }
 
 impl Default for VirtualDesktopPluginSettings {
     fn default() -> Self {
         Self {
             launch_timeout_ms: 10_000,
+            auto_switch_rules: Vec::new(),
         }
     }
 }
@@ -59,6 +62,9 @@ pub struct VirtualDesktopPlugin {
     catalog: Arc<WindowCatalog>,
     actions: Arc<Vec<Action>>,
     settings: VirtualDesktopPluginSettings,
+    rule_runtime: RuleRuntimeController,
+    runtime_enabled: bool,
+    settings_desktops: Option<Result<VirtualDesktopSnapshot, String>>,
 }
 
 impl VirtualDesktopPlugin {
@@ -75,6 +81,9 @@ impl VirtualDesktopPlugin {
             catalog,
             actions,
             settings: VirtualDesktopPluginSettings::default(),
+            rule_runtime: RuleRuntimeController::default(),
+            runtime_enabled: false,
+            settings_desktops: None,
         }
     }
 
@@ -91,6 +100,9 @@ impl VirtualDesktopPlugin {
             catalog,
             actions,
             settings: VirtualDesktopPluginSettings::default(),
+            rule_runtime: RuleRuntimeController::default(),
+            runtime_enabled: false,
+            settings_desktops: None,
         }
     }
 
@@ -140,6 +152,7 @@ impl VirtualDesktopPlugin {
             "Virtual Desktop",
             "vd:settings",
         ));
+        rows.push(query_action("Configure Auto-Switch Rules", "vd rules "));
         rows
     }
 
@@ -510,6 +523,13 @@ impl Plugin for VirtualDesktopPlugin {
                 "vd:settings",
             )];
         }
+        if rest.eq_ignore_ascii_case("rules") {
+            return vec![simple_action(
+                "Virtual Desktop Auto-Switch Rules",
+                "Open Virtual Desktop settings to configure application rules",
+                "vd:settings",
+            )];
+        }
         if let Some(filter) = strip_command(rest, "switch") {
             return self
                 .desktop_actions(&snapshot, filter, false)
@@ -583,6 +603,7 @@ impl Plugin for VirtualDesktopPlugin {
             "vd launch",
             "vd bind workspace",
             "vd unbind workspace",
+            "vd rules",
             "vd settings",
         ]
         .into_iter()
@@ -593,18 +614,173 @@ impl Plugin for VirtualDesktopPlugin {
         serde_json::to_value(VirtualDesktopPluginSettings::default()).ok()
     }
     fn apply_settings(&mut self, value: &serde_json::Value) {
-        if let Ok(settings) = serde_json::from_value(value.clone()) {
+        if let Ok(settings) = serde_json::from_value::<VirtualDesktopPluginSettings>(value.clone())
+        {
+            if self.runtime_enabled {
+                self.rule_runtime.reconcile(&settings.auto_switch_rules);
+            }
             self.settings = settings;
         }
+    }
+    fn set_enabled(&mut self, enabled: bool) {
+        self.runtime_enabled = enabled;
+        self.rule_runtime.reconcile(if enabled {
+            &self.settings.auto_switch_rules
+        } else {
+            &[]
+        });
     }
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut settings: VirtualDesktopPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
         ui.label("Launch window discovery timeout");
         ui.add(egui::Slider::new(&mut settings.launch_timeout_ms, 1_000..=30_000).suffix(" ms"));
+        ui.separator();
+        ui.heading("Application auto-switch rules");
+        ui.small("Rules are opt-in and react only when a matching application becomes foreground. Empty or fully disabled rules start no background runtime.");
+        if ui.button("Refresh desktops").clicked() || self.settings_desktops.is_none() {
+            self.settings_desktops = Some(self.desktops.snapshot());
+        }
+        let desktop_snapshot = self
+            .settings_desktops
+            .clone()
+            .unwrap_or_else(|| Err("Desktop list has not been loaded".into()));
+        if let Err(error) = &desktop_snapshot {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("Desktop list unavailable: {error}"),
+            );
+        }
+        let mut remove = None;
+        for (index, rule) in settings.auto_switch_rules.iter_mut().enumerate() {
+            ui.push_id((index, &rule.id), |ui| {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut rule.enabled, "Enabled");
+                        if ui.button("Remove").clicked() {
+                            remove = Some(index);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Application/process");
+                        ui.text_edit_singleline(&mut rule.executable);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Process path (optional)");
+                        ui.text_edit_singleline(&mut rule.process_path);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Window title contains (optional)");
+                        ui.text_edit_singleline(&mut rule.title);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Window class (optional)");
+                        ui.text_edit_singleline(&mut rule.class_name);
+                    });
+                    let selected = rule
+                        .target
+                        .as_ref()
+                        .map(|binding| {
+                            binding
+                                .cached_name
+                                .clone()
+                                .unwrap_or_else(|| binding.id.to_string())
+                        })
+                        .unwrap_or_else(|| "Select desktop".into());
+                    egui::ComboBox::from_label("Target desktop")
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            if let Ok(snapshot) = &desktop_snapshot {
+                                for desktop in &snapshot.desktops {
+                                    let selected = rule
+                                        .target
+                                        .as_ref()
+                                        .is_some_and(|binding| binding.id == desktop.id);
+                                    if ui
+                                        .selectable_label(
+                                            selected,
+                                            format!(
+                                                "Desktop {} — {}",
+                                                desktop.index,
+                                                desktop.display_name()
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        rule.target =
+                                            Some(crate::virtual_desktop::VirtualDesktopBinding {
+                                                id: desktop.id.clone(),
+                                                cached_name: desktop.name.clone(),
+                                            });
+                                    }
+                                }
+                            }
+                        });
+                    match (&rule.target, &desktop_snapshot) {
+                        (None, _) => {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                "No target desktop selected",
+                            );
+                        }
+                        (Some(binding), Ok(snapshot)) => {
+                            if let Err(error) = snapshot.resolve_binding(binding) {
+                                ui.colored_label(
+                                    ui.visuals().error_fg_color,
+                                    format!("Stale target: {error}"),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            });
+        }
+        if let Some(index) = remove {
+            settings.auto_switch_rules.remove(index);
+        }
+        if ui.button("Add rule").clicked() {
+            let id = next_rule_id(&settings.auto_switch_rules);
+            let target = desktop_snapshot
+                .as_ref()
+                .ok()
+                .and_then(|snapshot| snapshot.current().ok())
+                .map(|desktop| crate::virtual_desktop::VirtualDesktopBinding {
+                    id: desktop.id.clone(),
+                    cached_name: desktop.name.clone(),
+                });
+            settings.auto_switch_rules.push(VirtualDesktopRule {
+                id,
+                target,
+                ..VirtualDesktopRule::default()
+            });
+        }
+        match (self.runtime_enabled, self.rule_runtime.status()) {
+            (false, _) => {
+                ui.small("Auto-switch runtime: plugin disabled");
+            }
+            (true, RuleRuntimeStatus::Disabled) => {
+                ui.small("Auto-switch runtime: disabled (no enabled rules)");
+            }
+            (true, RuleRuntimeStatus::Running) => {
+                ui.small("Auto-switch runtime: listening for foreground changes");
+            }
+            (true, RuleRuntimeStatus::Unavailable) => {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    "Auto-switch runtime could not install the Windows foreground hook",
+                );
+            }
+        }
         *value = serde_json::to_value(&settings).unwrap_or_default();
-        self.settings = settings;
     }
+}
+
+fn next_rule_id(existing: &[VirtualDesktopRule]) -> String {
+    (1u64..)
+        .map(|number| format!("vd-rule-{number}"))
+        .find(|candidate| existing.iter().all(|rule| rule.id != *candidate))
+        .expect("virtual desktop rule id space exhausted")
 }
 
 fn strip_command<'a>(input: &'a str, command: &str) -> Option<&'a str> {
@@ -679,6 +855,7 @@ fn json_action<T: Serialize>(
 mod tests {
     use super::*;
     use crate::commands::VirtualDesktopCommand;
+    use crate::virtual_desktop::rules::{RuleRuntimeFactory, RuleRuntimeHandle};
     use crate::virtual_desktop::{
         VirtualDesktopCapabilities, VirtualDesktopId, VirtualDesktopInfo, VirtualDesktopSelector,
     };
@@ -691,6 +868,28 @@ mod tests {
     }
 
     struct FakeWorkspaces(Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor>);
+
+    #[derive(Default)]
+    struct RuleRuntimeCounts {
+        starts: AtomicUsize,
+        shutdowns: AtomicUsize,
+    }
+
+    struct FakeRuleRuntimeFactory(Arc<RuleRuntimeCounts>);
+    struct FakeRuleRuntime(Arc<RuleRuntimeCounts>);
+
+    impl RuleRuntimeFactory for FakeRuleRuntimeFactory {
+        fn start(&self, _: Arc<Vec<VirtualDesktopRule>>) -> Option<Box<dyn RuleRuntimeHandle>> {
+            self.0.starts.fetch_add(1, Ordering::SeqCst);
+            Some(Box::new(FakeRuleRuntime(Arc::clone(&self.0))))
+        }
+    }
+
+    impl RuleRuntimeHandle for FakeRuleRuntime {
+        fn shutdown(self: Box<Self>) {
+            self.0.shutdowns.fetch_add(1, Ordering::SeqCst);
+        }
+    }
     impl WorkspaceSource for FakeWorkspaces {
         fn snapshot(&self) -> Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor> {
             self.0.clone()
@@ -876,6 +1075,7 @@ mod tests {
             "vd launch",
             "vd bind workspace",
             "vd unbind workspace",
+            "vd rules",
             "vd settings",
         ] {
             assert!(
@@ -886,6 +1086,97 @@ mod tests {
         let settings: VirtualDesktopPluginSettings =
             serde_json::from_value(plugin.default_settings().unwrap()).unwrap();
         assert_eq!(settings.launch_timeout_ms, 10_000);
+        assert!(settings.auto_switch_rules.is_empty());
+        assert_eq!(plugin.search("vd rules")[0].action, "vd:settings");
+    }
+
+    #[test]
+    fn legacy_settings_default_to_no_rule_runtime_and_rules_round_trip_bindings() {
+        let legacy: VirtualDesktopPluginSettings =
+            serde_json::from_value(serde_json::json!({ "launch_timeout_ms": 5000 })).unwrap();
+        assert_eq!(legacy.launch_timeout_ms, 5000);
+        assert!(legacy.auto_switch_rules.is_empty());
+
+        let settings = VirtualDesktopPluginSettings {
+            auto_switch_rules: vec![VirtualDesktopRule {
+                id: "editor-work".into(),
+                enabled: true,
+                executable: "editor.exe".into(),
+                target: Some(crate::virtual_desktop::VirtualDesktopBinding {
+                    id: id(1),
+                    cached_name: Some("Personal".into()),
+                }),
+                ..VirtualDesktopRule::default()
+            }],
+            ..VirtualDesktopPluginSettings::default()
+        };
+        let round_trip: VirtualDesktopPluginSettings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(round_trip, settings);
+        assert!(round_trip.auto_switch_rules[0].enabled);
+    }
+
+    #[test]
+    fn rule_runtime_requires_plugin_enablement_and_stops_on_disable_and_drop() {
+        let counts = Arc::new(RuleRuntimeCounts::default());
+        {
+            let mut plugin = plugin(source());
+            plugin.rule_runtime =
+                RuleRuntimeController::new(Arc::new(FakeRuleRuntimeFactory(Arc::clone(&counts))));
+            let settings = VirtualDesktopPluginSettings {
+                auto_switch_rules: vec![VirtualDesktopRule {
+                    id: "editor".into(),
+                    enabled: true,
+                    executable: "editor.exe".into(),
+                    target: Some(crate::virtual_desktop::VirtualDesktopBinding {
+                        id: id(1),
+                        cached_name: Some("Personal".into()),
+                    }),
+                    ..VirtualDesktopRule::default()
+                }],
+                ..VirtualDesktopPluginSettings::default()
+            };
+            plugin.apply_settings(&serde_json::to_value(settings).unwrap());
+            assert_eq!(counts.starts.load(Ordering::SeqCst), 0);
+
+            plugin.set_enabled(true);
+            assert_eq!(counts.starts.load(Ordering::SeqCst), 1);
+            let committed = plugin.settings.clone();
+            let mut unsaved = committed.clone();
+            unsaved.auto_switch_rules[0].executable = "unsaved.exe".into();
+            let mut draft_value = serde_json::to_value(unsaved).unwrap();
+            let context = egui::Context::default();
+            let _ = context.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    plugin.settings_ui(ui, &mut draft_value);
+                });
+            });
+            assert_eq!(plugin.settings, committed);
+            assert_eq!(counts.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(counts.shutdowns.load(Ordering::SeqCst), 0);
+
+            plugin.set_enabled(false);
+            assert_eq!(counts.shutdowns.load(Ordering::SeqCst), 1);
+            plugin.set_enabled(true);
+            assert_eq!(counts.starts.load(Ordering::SeqCst), 2);
+        }
+        assert_eq!(counts.shutdowns.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn settings_desktop_dropdown_is_on_demand_not_polled_each_frame() {
+        let source = source();
+        let mut plugin = plugin(Arc::clone(&source));
+        let mut value = plugin.default_settings().unwrap();
+        let context = egui::Context::default();
+        for _ in 0..2 {
+            let _ = context.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    plugin.settings_ui(ui, &mut value);
+                });
+            });
+        }
+        assert_eq!(source.snapshots.load(Ordering::Relaxed), 1);
     }
 
     #[test]
