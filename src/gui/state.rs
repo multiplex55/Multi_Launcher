@@ -27,6 +27,18 @@ pub enum WatchEvent {
     Recycle(Result<(), String>),
     ExecuteAction(Action),
     ClipboardModify(ClipboardModifyGuiEvent),
+    VirtualDesktop(VirtualDesktopGuiCompletion),
+}
+
+#[derive(Clone, Debug)]
+pub struct VirtualDesktopGuiCompletion {
+    pub invocation: crate::commands::CommandInvocation,
+    pub completion_outcome: crate::commands::CommandOutcome,
+    pub history_query: String,
+    pub interaction_token: u64,
+    pub expected_query: String,
+    pub expected_visible: bool,
+    pub result: Result<(), String>,
 }
 
 #[cfg(test)]
@@ -101,6 +113,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Recycle(_) => unreachable!(),
             WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
             WatchEvent::ClipboardModify(event) => TestWatchEvent::ClipboardModify(event),
+            WatchEvent::VirtualDesktop(_) => TestWatchEvent::Actions,
         }
     }
 }

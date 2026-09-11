@@ -741,6 +741,23 @@ pub(super) fn desktop_for_window(hwnd: HWND) -> Result<VirtualDesktopId, Virtual
         .map(id_from_guid)
         .map_err(|e| native_error("get desktop for window", e))
 }
+pub(super) fn desktops_for_windows(
+    hwnds: &[usize],
+) -> Result<Vec<(usize, Option<VirtualDesktopId>)>, VirtualDesktopError> {
+    let session = PublicSession::open("get desktops for windows")?;
+    Ok(hwnds
+        .iter()
+        .copied()
+        .map(|raw| {
+            let hwnd = HWND(raw as *mut _);
+            let id = validate_window(hwnd, "get desktop for window")
+                .ok()
+                .and_then(|_| unsafe { session.manager.GetWindowDesktopId(hwnd) }.ok())
+                .map(id_from_guid);
+            (raw, id)
+        })
+        .collect())
+}
 pub(super) fn is_window_on_current_desktop(hwnd: HWND) -> Result<bool, VirtualDesktopError> {
     validate_window(hwnd, "check window desktop")?;
     let session = PublicSession::open("check window desktop")?;

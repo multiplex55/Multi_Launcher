@@ -25,6 +25,10 @@ pub fn parse_command(
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
 
+    if s.starts_with("vd:") {
+        return Ok(Command::VirtualDesktop(parse_virtual_desktop(action)));
+    }
+
     if s.starts_with("data:") {
         return Ok(Command::Data(parse_data(action)));
     }
@@ -117,6 +121,101 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         _ => return parse_prefixed(action),
     };
     Ok(command)
+}
+
+fn parse_virtual_desktop(action: &Action) -> VirtualDesktopCommand {
+    fn payload<T: serde::de::DeserializeOwned>(action: &Action) -> Result<T, String> {
+        let raw = action
+            .args
+            .as_deref()
+            .ok_or_else(|| "missing JSON action payload".to_string())?;
+        serde_json::from_str(raw).map_err(|error| format!("invalid JSON action payload: {error}"))
+    }
+    let result = match action.action.as_str() {
+        "vd:list" => Ok(VirtualDesktopCommand::List),
+        "vd:current" => Ok(VirtualDesktopCommand::Current),
+        "vd:next" => Ok(VirtualDesktopCommand::SwitchNext),
+        "vd:previous" => Ok(VirtualDesktopCommand::SwitchPrevious),
+        "vd:create" => Ok(VirtualDesktopCommand::Create),
+        "vd:close-current" => Ok(VirtualDesktopCommand::CloseCurrent),
+        "vd:settings" => Ok(VirtualDesktopCommand::Settings),
+        "vd:switch" => payload::<VirtualDesktopTargetPayload>(action)
+            .map(|p| VirtualDesktopCommand::Switch { target: p.target }),
+        "vd:rename" => {
+            payload::<VirtualDesktopRenamePayload>(action).map(|p| VirtualDesktopCommand::Rename {
+                target: p.target,
+                name: p.name,
+            })
+        }
+        "vd:activate-window" => payload::<VirtualDesktopWindowPayload>(action)
+            .map(|p| VirtualDesktopCommand::ActivateWindow { hwnd: p.hwnd }),
+        "vd:move-window" => payload::<VirtualDesktopMoveWindowPayload>(action).map(|p| {
+            VirtualDesktopCommand::MoveWindow {
+                hwnd: p.hwnd,
+                target: p.target,
+                follow: p.follow,
+            }
+        }),
+        "vd:move-active" => payload::<VirtualDesktopMoveActivePayload>(action).map(|p| {
+            VirtualDesktopCommand::MoveActiveWindow {
+                target: p.target,
+                follow: p.follow,
+            }
+        }),
+        "vd:launch" => {
+            payload::<VirtualDesktopLaunchPayload>(action).map(VirtualDesktopCommand::Launch)
+        }
+        other => Err(format!("unknown virtual desktop action: {other}")),
+    };
+    let result = result.and_then(|command| {
+        let static_action = matches!(
+            command,
+            VirtualDesktopCommand::List
+                | VirtualDesktopCommand::Current
+                | VirtualDesktopCommand::SwitchNext
+                | VirtualDesktopCommand::SwitchPrevious
+                | VirtualDesktopCommand::Create
+                | VirtualDesktopCommand::CloseCurrent
+                | VirtualDesktopCommand::Settings
+        );
+        if static_action && action.args.is_some() {
+            return Err("this action does not accept an argument payload".into());
+        }
+        match &command {
+            VirtualDesktopCommand::Switch { target }
+            | VirtualDesktopCommand::MoveActiveWindow { target, .. }
+                if target.trim().is_empty() =>
+            {
+                Err("desktop target cannot be empty".into())
+            }
+            VirtualDesktopCommand::MoveWindow { target, .. } if target.trim().is_empty() => {
+                Err("desktop target cannot be empty".into())
+            }
+            VirtualDesktopCommand::Rename { target, name }
+                if target.trim().is_empty() || name.trim().is_empty() =>
+            {
+                Err("desktop target and name cannot be empty".into())
+            }
+            VirtualDesktopCommand::ActivateWindow { hwnd }
+            | VirtualDesktopCommand::MoveWindow { hwnd, .. }
+                if *hwnd == 0 =>
+            {
+                Err("window handle cannot be zero".into())
+            }
+            VirtualDesktopCommand::Launch(payload)
+                if payload.target.trim().is_empty()
+                    || payload.application.trim().is_empty()
+                    || payload.timeout_ms == 0 =>
+            {
+                Err("launch target, application, and timeout must be valid".into())
+            }
+            _ => Ok(command),
+        }
+    });
+    result.unwrap_or_else(|error| VirtualDesktopCommand::Invalid {
+        action: action.action.clone(),
+        error,
+    })
 }
 
 fn parse_data(action: &Action) -> DataCommand {
@@ -1489,6 +1588,65 @@ mod tests {
                 invocation.command,
                 Command::FileSearch(_) | Command::Diff(_) | Command::ClipboardModify(_)
             ));
+        }
+    }
+
+    #[test]
+    fn every_virtual_desktop_protocol_is_typed_and_malformed_payloads_stay_internal() {
+        let payloads = [
+            ("vd:list", None),
+            ("vd:current", None),
+            ("vd:next", None),
+            ("vd:previous", None),
+            ("vd:create", None),
+            ("vd:close-current", None),
+            ("vd:settings", None),
+            ("vd:switch", Some(r#"{"target":"Work | Focus"}"#)),
+            ("vd:rename", Some(r#"{"target":"2","name":"Code: A | B"}"#)),
+            ("vd:activate-window", Some(r#"{"hwnd":42}"#)),
+            (
+                "vd:move-window",
+                Some(r#"{"hwnd":42,"target":"3","follow":true}"#),
+            ),
+            (
+                "vd:move-active",
+                Some(r#"{"target":"Gaming","follow":false}"#),
+            ),
+            (
+                "vd:launch",
+                Some(
+                    r#"{"target":"3","application":"C:\\Program Files\\App.exe","args":"--name a | b","follow":true,"timeout_ms":10000}"#,
+                ),
+            ),
+        ];
+        for (raw, args) in payloads {
+            let mut action = action(raw);
+            action.args = args.map(str::to_owned);
+            assert!(
+                matches!(parse_action(&action).unwrap(), Command::VirtualDesktop(command) if !matches!(command, VirtualDesktopCommand::Invalid { .. })),
+                "{raw}"
+            );
+        }
+
+        for (raw, args) in [
+            ("vd:switch", None),
+            ("vd:launch", Some("not json")),
+            ("vd:unknown", None),
+            ("vd:list", Some("{}")),
+            (
+                "vd:move-window",
+                Some(r#"{"hwnd":42,"target":"","follow":false}"#),
+            ),
+        ] {
+            let mut action = action(raw);
+            action.args = args.map(str::to_owned);
+            assert!(
+                matches!(
+                    parse_action(&action).unwrap(),
+                    Command::VirtualDesktop(VirtualDesktopCommand::Invalid { .. })
+                ),
+                "{raw}"
+            );
         }
     }
 }

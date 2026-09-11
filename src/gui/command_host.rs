@@ -492,6 +492,101 @@ impl HeadlessCommandHost for LauncherApp {
         });
     }
 
+    fn spawn_virtual_desktop_command(
+        &mut self,
+        mut invocation: crate::commands::CommandInvocation,
+    ) {
+        let history_query = self.query.clone();
+        if let crate::commands::Command::VirtualDesktop(
+            crate::commands::VirtualDesktopCommand::MoveActiveWindow { target, follow },
+        ) = &invocation.command
+        {
+            match crate::active_window::resolve_previous_active_window() {
+                Ok(hwnd) => {
+                    invocation.command = crate::commands::Command::VirtualDesktop(
+                        crate::commands::VirtualDesktopCommand::MoveWindow {
+                            hwnd,
+                            target: target.clone(),
+                            follow: *follow,
+                        },
+                    );
+                }
+                Err(error) => {
+                    let completion_outcome = crate::commands::CommandOutcome::default();
+                    let _ = self.event_tx.send(crate::gui::WatchEvent::VirtualDesktop(
+                        crate::gui::VirtualDesktopGuiCompletion {
+                            invocation,
+                            completion_outcome,
+                            history_query,
+                            interaction_token: self.virtual_desktop_interaction_token,
+                            expected_query: self.query.clone(),
+                            expected_visible: self.visible_flag.load(Ordering::SeqCst),
+                            result: Err(error),
+                        },
+                    ));
+                    self.egui_ctx.request_repaint();
+                    return;
+                }
+            }
+        }
+        let mut completion_outcome = crate::commands::handlers::success_outcome(self, &invocation);
+        let immediate_outcome = crate::commands::CommandOutcome {
+            query: std::mem::replace(
+                &mut completion_outcome.query,
+                crate::commands::QueryPolicy::Keep,
+            ),
+            pending_query: std::mem::replace(
+                &mut completion_outcome.pending_query,
+                crate::commands::PendingQueryPolicy::Keep,
+            ),
+            search: std::mem::take(&mut completion_outcome.search),
+            invalidate_results: std::mem::take(&mut completion_outcome.invalidate_results),
+            results: std::mem::replace(
+                &mut completion_outcome.results,
+                crate::commands::ResultsPolicy::Keep,
+            ),
+            visibility: std::mem::replace(
+                &mut completion_outcome.visibility,
+                crate::commands::VisibilityPolicy::Keep,
+            ),
+            restore: std::mem::take(&mut completion_outcome.restore),
+            focus: std::mem::take(&mut completion_outcome.focus),
+            move_cursor_end: std::mem::take(&mut completion_outcome.move_cursor_end),
+            activate_first_result: completion_outcome.activate_first_result.take(),
+            ..crate::commands::CommandOutcome::default()
+        };
+        self.apply_command_outcome(immediate_outcome, &invocation);
+        let interaction_token = self.virtual_desktop_interaction_token;
+        let expected_query = self.query.clone();
+        let expected_visible = self.visible_flag.load(Ordering::SeqCst);
+        let catalog = std::sync::Arc::clone(&self.plugins.internal_services().window_catalog);
+        let tx = self.event_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::commands::headless::execute_virtual_desktop_with_catalog(
+                match &invocation.command {
+                    crate::commands::Command::VirtualDesktop(command) => command.clone(),
+                    _ => unreachable!("virtual desktop host receives virtual desktop commands"),
+                },
+                &invocation.original_action,
+                catalog,
+            )
+            .map_err(|error| error.to_string());
+            let _ = tx.send(crate::gui::WatchEvent::VirtualDesktop(
+                crate::gui::VirtualDesktopGuiCompletion {
+                    invocation,
+                    completion_outcome,
+                    history_query,
+                    interaction_token,
+                    expected_query,
+                    expected_visible,
+                    result,
+                },
+            ));
+            ctx.request_repaint();
+        });
+    }
+
     fn clear_query_after_run(&self) -> bool {
         self.clear_query_after_run
     }
@@ -522,6 +617,10 @@ fn command_accepts_query_override(command: &Command) -> bool {
 
 impl LauncherApp {
     pub(crate) fn dispatch_command_invocation(&mut self, invocation: CommandInvocation) {
+        self.virtual_desktop_interaction_token = self
+            .virtual_desktop_interaction_token
+            .wrapping_add(1)
+            .max(1);
         if let Some(query_override) = invocation.query_override.as_ref()
             && command_accepts_query_override(&invocation.command)
         {
@@ -559,8 +658,23 @@ impl LauncherApp {
         }
     }
 
-    fn apply_command_outcome(&mut self, outcome: CommandOutcome, invocation: &CommandInvocation) {
-        let history_query = self.query.clone();
+    pub(crate) fn apply_command_outcome(
+        &mut self,
+        outcome: CommandOutcome,
+        invocation: &CommandInvocation,
+    ) {
+        self.apply_command_outcome_with_history_query(outcome, invocation, None);
+    }
+
+    pub(crate) fn apply_command_outcome_with_history_query(
+        &mut self,
+        outcome: CommandOutcome,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+    ) {
+        let history_query = captured_history_query
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.query.clone());
 
         if let QueryPolicy::Set(query) = outcome.query {
             self.last_timer_query =

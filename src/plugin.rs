@@ -55,6 +55,7 @@ use crate::plugins::timer::TimerPlugin;
 use crate::plugins::timestamp::TimestampPlugin;
 use crate::plugins::todo::TodoPlugin;
 use crate::plugins::unit_convert::UnitConvertPlugin;
+use crate::plugins::virtual_desktop::VirtualDesktopPlugin;
 use crate::plugins::volume::VolumePlugin;
 use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::wikipedia::WikipediaPlugin;
@@ -62,6 +63,7 @@ use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::settings::NetUnit;
+use crate::window_catalog::WindowCatalog;
 use eframe::egui;
 use libloading::Library;
 use serde_json::Value;
@@ -198,20 +200,41 @@ impl PluginSearchUpdates {
     }
 
     pub(crate) fn publish_ticket(&self, source: &'static str, ticket: u64) {
-        let committed = self.tickets.lock().ok().is_some_and(|mut book| {
-            let state = book.sources.entry(source).or_default();
-            if state.active != Some(ticket) {
-                return false;
-            }
-            state.active = None;
-            state.resolved_through = state.resolved_through.max(ticket);
-            state.published = Some(ticket);
-            true
-        });
+        let (committed, _) = self.publish_ticket_with_followup(source, ticket, false);
         if !committed {
             return;
         }
         self.notify(source);
+    }
+
+    /// Resolve a publication and, when requested, reserve its successor under the same ticket
+    /// lock. The caller can make its local worker state match the returned ticket before invoking
+    /// `notify`, so repaint callbacks never observe an idle/ticket handoff gap.
+    pub(crate) fn publish_ticket_with_followup(
+        &self,
+        source: &'static str,
+        ticket: u64,
+        followup: bool,
+    ) -> (bool, Option<RefreshTicket>) {
+        let Ok(mut book) = self.tickets.lock() else {
+            return (false, None);
+        };
+        {
+            let state = book.sources.entry(source).or_default();
+            if state.active != Some(ticket) {
+                return (false, None);
+            }
+            state.active = None;
+            state.resolved_through = state.resolved_through.max(ticket);
+            state.published = Some(ticket);
+        }
+        let next = followup.then(|| {
+            book.next = book.next.wrapping_add(1).max(1);
+            let id = book.next;
+            book.sources.entry(source).or_default().active = Some(id);
+            RefreshTicket { id, start: true }
+        });
+        (true, next)
     }
 
     pub(crate) fn cancel_ticket(&self, source: &'static str, ticket: u64) {
@@ -232,6 +255,7 @@ impl PluginSearchUpdates {
     fn canonical_source(source: &str) -> &str {
         match source {
             "processes" | "sysinfo" | "volume" => "system_data",
+            "virtual_desktop" => "windows",
             source => source,
         }
     }
@@ -274,6 +298,7 @@ impl PluginSearchUpdates {
 pub struct PluginInternalServices {
     pub clipboard_modifier_catalog: SharedClipboardModifierCatalog,
     pub mkmacro_store: Arc<crate::mkmacro::MkMacroStore>,
+    pub window_catalog: Arc<WindowCatalog>,
     search_updates: Arc<PluginSearchUpdates>,
     system_data_runtime: Option<SystemDataRuntime>,
 }
@@ -336,12 +361,15 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store(Arc::clone(&store));
+        let search_updates = Arc::new(PluginSearchUpdates::default());
+        let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
-                search_updates: Arc::new(PluginSearchUpdates::default()),
+                search_updates,
+                window_catalog,
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -357,12 +385,15 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store_with_reserved(Arc::clone(&store), reserved);
+        let search_updates = Arc::new(PluginSearchUpdates::default());
+        let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
             services: PluginInternalServices {
                 clipboard_modifier_catalog: shared_default_catalog(),
                 mkmacro_store: store,
-                search_updates: Arc::new(PluginSearchUpdates::default()),
+                search_updates,
+                window_catalog,
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -443,12 +474,15 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store(Arc::clone(&store));
+        let search_updates = Arc::new(PluginSearchUpdates::default());
+        let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
             plugins: Vec::new(),
             services: PluginInternalServices {
                 clipboard_modifier_catalog: catalog,
                 mkmacro_store: store,
-                search_updates: Arc::new(PluginSearchUpdates::default()),
+                search_updates,
+                window_catalog,
                 system_data_runtime: None,
             },
             next_plugin_epoch: 0,
@@ -566,7 +600,11 @@ impl PluginManager {
         self.register_with_settings(BrightnessPlugin, plugin_settings);
         self.register_with_settings(TaskManagerPlugin, plugin_settings);
         self.register_with_settings(
-            WindowsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+            WindowsPlugin::new(Arc::clone(&self.services.window_catalog)),
+            plugin_settings,
+        );
+        self.register_with_settings(
+            VirtualDesktopPlugin::new(Arc::clone(&self.services.window_catalog), actions.clone()),
             plugin_settings,
         );
         self.register_with_settings(

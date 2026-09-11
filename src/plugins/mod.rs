@@ -55,6 +55,7 @@ pub mod timer;
 pub mod timestamp;
 pub mod todo;
 pub mod unit_convert;
+pub mod virtual_desktop;
 pub mod volume;
 pub mod weather;
 pub mod wikipedia;

@@ -18,6 +18,7 @@
 
 pub mod actions;
 pub mod actions_editor;
+pub mod active_window;
 
 pub mod clipboard_modify;
 pub mod commands;
@@ -58,6 +59,7 @@ pub mod usage;
 pub mod virtual_desktop;
 pub mod visibility;
 pub mod window_activation;
+pub mod window_catalog;
 
 pub mod global_hotkey;
 pub mod graph;

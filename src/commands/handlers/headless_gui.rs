@@ -8,6 +8,11 @@ pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
     host: &mut H,
     invocation: &CommandInvocation,
 ) -> Result<CommandOutcome, CommandError> {
+    if let Command::VirtualDesktop(command) = &invocation.command {
+        let _ = command;
+        host.spawn_virtual_desktop_command(invocation.clone());
+        return Ok(CommandOutcome::default());
+    }
     if matches!(
         &invocation.command,
         Command::BrowserTab(BrowserTabCommand::Switch(_) | BrowserTabCommand::InvalidSwitch)
@@ -41,7 +46,7 @@ pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
     Ok(success_outcome(host, invocation))
 }
 
-fn success_outcome<H: HeadlessCommandHost + ?Sized>(
+pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
     host: &H,
     invocation: &CommandInvocation,
 ) -> CommandOutcome {
@@ -469,5 +474,30 @@ mod tests {
                 vec![ToastPolicy::Info("Switching to Example".into())]
             );
         }
+    }
+
+    #[test]
+    fn virtual_desktop_commands_are_dispatched_off_the_gui_thread() {
+        let mut host = host();
+        let invocation = invocation(
+            Command::VirtualDesktop(super::super::super::VirtualDesktopCommand::Launch(
+                super::super::super::VirtualDesktopLaunchPayload {
+                    target: "1".into(),
+                    application: "app.exe".into(),
+                    args: None,
+                    follow: false,
+                    timeout_ms: 10_000,
+                },
+            )),
+            "vd:launch",
+        );
+        let result = handle_headless_gui(&mut host, &invocation).unwrap();
+        assert_eq!(host.spawned, 1);
+        assert_eq!(host.executed, 0);
+        assert_eq!(result.history, HistoryPolicy::Skip);
+        assert!(result.toasts.is_empty());
+        let completed = success_outcome(&host, &invocation);
+        assert_eq!(completed.history, HistoryPolicy::Record);
+        assert_eq!(completed.toasts, [ToastPolicy::Launched("Example".into())]);
     }
 }

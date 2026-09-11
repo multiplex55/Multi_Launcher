@@ -25,9 +25,9 @@
 
 | ID | Milestone | Depends on | Status | Commit / verification |
 | --- | --- | --- | --- | --- |
-| M01 | Shared virtual-desktop domain/native service and window activation | baseline | complete | pending commit; `cargo check`, 26 desktop tests, and 13 activation tests passed; independent tranche review approved |
-| M02 | Shared window catalog, typed commands, and standalone `vd` plugin | M01 | in_progress | pending |
-| M03 | Multi Manager binding and Layout migration | M02 | pending | pending |
+| M01 | Shared virtual-desktop domain/native service and window activation | baseline | complete | `ad055c1a`; `cargo check`, 26 desktop tests, and 13 activation tests passed; independent tranche review approved |
+| M02 | Shared window catalog, typed commands, and standalone `vd` plugin | M01 | complete | pending commit; `cargo check`, formatting, diff validation, focused catalog/launch/plugin/protocol/GUI tests passed; independent tranche review approved |
+| M03 | Multi Manager binding and Layout migration | M02 | in_progress | pending |
 | M04 | Event-driven rules, MkMacro consolidation/extensions, and discovery polish | M03 | pending | pending |
 | M05 | Test completion, targeted validation, and full authoritative Nextest | M04 | pending | pending |
 | M06 | Independent review, remediation, final verification, and ledger completion | M05 | pending | pending |

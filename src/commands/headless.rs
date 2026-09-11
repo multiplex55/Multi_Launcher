@@ -48,6 +48,7 @@ fn execute_with_external(
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
+        Command::VirtualDesktop(command) => execute_virtual_desktop(command, original_action),
         Command::External(command) => external(&command.target, command.args.as_deref()),
 
         // These families require LauncherApp state. Before the typed parser
@@ -65,6 +66,105 @@ fn execute_with_external(
         | Command::Diff(_)
         | Command::Crop(_) => external(&original_action.action, original_action.args.as_deref()),
     }
+}
+
+fn execute_virtual_desktop(
+    command: VirtualDesktopCommand,
+    _original: &Action,
+) -> anyhow::Result<()> {
+    execute_virtual_desktop_inner(command, None)
+}
+
+pub(crate) fn execute_virtual_desktop_with_catalog(
+    command: VirtualDesktopCommand,
+    _original: &Action,
+    catalog: std::sync::Arc<crate::window_catalog::WindowCatalog>,
+) -> anyhow::Result<()> {
+    let result = execute_virtual_desktop_inner(command, Some(std::sync::Arc::clone(&catalog)));
+    if result.is_ok() {
+        catalog.invalidate_desktop_memberships();
+    }
+    result
+}
+
+fn execute_virtual_desktop_inner(
+    command: VirtualDesktopCommand,
+    catalog: Option<std::sync::Arc<crate::window_catalog::WindowCatalog>>,
+) -> anyhow::Result<()> {
+    use crate::virtual_desktop::{
+        AdjacentDirection, VirtualDesktopSelector, VirtualDesktopService,
+    };
+    use crate::window_activation::{WindowActivationRequest, activate_window};
+    let service = VirtualDesktopService;
+    let selector = |raw: &str| VirtualDesktopSelector::parse(raw);
+    match command {
+        VirtualDesktopCommand::List | VirtualDesktopCommand::Current => {
+            service.snapshot().map(|_| ()).map_err(Into::into)
+        }
+        VirtualDesktopCommand::Switch { target } => {
+            service.switch(&selector(&target)?).map_err(Into::into)
+        }
+        VirtualDesktopCommand::SwitchNext => service
+            .switch_adjacent(AdjacentDirection::Next)
+            .map(|_| ())
+            .map_err(Into::into),
+        VirtualDesktopCommand::SwitchPrevious => service
+            .switch_adjacent(AdjacentDirection::Previous)
+            .map(|_| ())
+            .map_err(Into::into),
+        VirtualDesktopCommand::Create => service.create().map(|_| ()).map_err(Into::into),
+        VirtualDesktopCommand::CloseCurrent => service.close_current().map_err(Into::into),
+        VirtualDesktopCommand::Rename { target, name } => service
+            .rename(&selector(&target)?, &name)
+            .map_err(Into::into),
+        VirtualDesktopCommand::ActivateWindow { hwnd } => {
+            activate_window(WindowActivationRequest::follow_window(hwnd)).map_err(Into::into)
+        }
+        VirtualDesktopCommand::MoveWindow {
+            hwnd,
+            target,
+            follow,
+        } => move_window(hwnd, &target, follow),
+        VirtualDesktopCommand::MoveActiveWindow { target, follow } => {
+            let hwnd = crate::active_window::resolve_previous_active_window()
+                .map_err(anyhow::Error::msg)?;
+            move_window(hwnd, &target, follow)
+        }
+        VirtualDesktopCommand::Launch(payload) => {
+            let catalog = catalog.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "virtual desktop launch discovery requires the launcher service host"
+                )
+            })?;
+            crate::virtual_desktop::launch::launch_on_desktop(&payload, catalog)
+        }
+        VirtualDesktopCommand::Settings => {
+            anyhow::bail!("virtual desktop settings require the launcher interface")
+        }
+        VirtualDesktopCommand::Invalid { action, error } => {
+            anyhow::bail!("invalid virtual desktop action {action}: {error}")
+        }
+    }
+}
+
+fn move_window(hwnd: usize, target: &str, follow: bool) -> anyhow::Result<()> {
+    use crate::virtual_desktop::{VirtualDesktopSelector, VirtualDesktopService};
+    let service = VirtualDesktopService;
+    let snapshot = service.snapshot()?;
+    let target = snapshot
+        .resolve(&VirtualDesktopSelector::parse(target)?)?
+        .clone();
+    #[cfg(windows)]
+    service.move_window_to_desktop(windows::Win32::Foundation::HWND(hwnd as *mut _), &target.id)?;
+    #[cfg(not(windows))]
+    anyhow::bail!("Window movement is available only on Windows");
+    if follow {
+        service.switch_to_id(&target.id)?;
+        crate::window_activation::activate_window(
+            crate::window_activation::WindowActivationRequest::follow_window(hwnd),
+        )?;
+    }
+    Ok(())
 }
 
 fn execute_shell(command: ShellCommand) -> anyhow::Result<()> {
@@ -520,6 +620,20 @@ mod tests {
             .unwrap();
             assert_eq!(calls, [(raw.into(), None)], "{raw}");
         }
+    }
+
+    #[test]
+    fn malformed_virtual_desktop_actions_never_fall_back_to_external_launch() {
+        let original = action("vd:switch");
+        let command = crate::commands::parse_action(&original).unwrap();
+        let mut calls = Vec::new();
+        let error = execute_with_external(command, &original, &mut |target, args| {
+            calls.push((target.to_owned(), args.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid virtual desktop action"));
+        assert!(calls.is_empty());
     }
     #[test]
     fn invalid_mkmacro_facade_error_keeps_legacy_wording() {

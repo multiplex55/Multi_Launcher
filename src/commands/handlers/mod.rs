@@ -16,7 +16,7 @@ pub(crate) use clipboard_modify::handle_clipboard_modify;
 pub(crate) use data::handle_data;
 pub(crate) use dialog_crop::{handle_crop, handle_simple_dialog};
 pub(crate) use file_search_diff::{handle_diff, handle_file_search};
-pub(crate) use headless_gui::handle_headless_gui;
+pub(crate) use headless_gui::{handle_headless_gui, success_outcome};
 pub(crate) use launcher_query::{handle_launcher, handle_query};
 pub(crate) use mouse_gesture::handle_mouse_gesture;
 pub(crate) use multi_manager::handle_multi_manager;

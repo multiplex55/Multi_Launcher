@@ -1,3 +1,4 @@
+pub mod launch;
 mod model;
 mod selection;
 #[cfg(windows)]
@@ -171,6 +172,24 @@ impl VirtualDesktopService {
         hwnd: ::windows::Win32::Foundation::HWND,
     ) -> Result<VirtualDesktopId, VirtualDesktopError> {
         windows::desktop_for_window(hwnd)
+    }
+
+    pub fn desktops_for_windows(
+        &self,
+        hwnds: &[usize],
+    ) -> Result<Vec<(usize, Option<VirtualDesktopId>)>, VirtualDesktopError> {
+        #[cfg(windows)]
+        {
+            windows::desktops_for_windows(hwnds)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = hwnds;
+            Err(VirtualDesktopError::unsupported(
+                "get desktops for windows",
+                VirtualDesktopCapability::WindowMembership,
+            ))
+        }
     }
 
     #[cfg(windows)]

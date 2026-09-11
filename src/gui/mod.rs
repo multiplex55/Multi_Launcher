@@ -164,7 +164,7 @@ use url::Url;
 use watch::watch_file;
 
 pub use crate::commands::ActivationSource;
-pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, WatchEvent};
+pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, VirtualDesktopGuiCompletion, WatchEvent};
 pub(crate) use state::{PendingConfirmCommand, ResultContextMenuKind, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
@@ -496,6 +496,9 @@ pub struct LauncherApp {
     pub dashboard_editor: DashboardEditorDialog,
     pub show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
+    event_tx: Sender<WatchEvent>,
+    egui_ctx: egui::Context,
+    virtual_desktop_interaction_token: u64,
     folder_aliases: HashMap<String, Option<String>>,
     folder_aliases_lc: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
@@ -516,6 +519,8 @@ pub struct LauncherApp {
     toasts: egui_toast::Toasts,
     #[cfg(test)]
     pub test_toast_messages: Vec<String>,
+    #[cfg(test)]
+    pub(crate) test_recorded_history_queries: Vec<String>,
     pub enable_toasts: bool,
     pub show_inline_errors: bool,
     pub show_error_toasts: bool,
@@ -1587,6 +1592,9 @@ impl LauncherApp {
             dashboard_editor: DashboardEditorDialog::default(),
             show_dashboard_editor: false,
             rx,
+            event_tx: tx,
+            egui_ctx: ctx.clone(),
+            virtual_desktop_interaction_token: 0,
             folder_aliases,
             folder_aliases_lc,
             bookmark_aliases,
@@ -1607,6 +1615,8 @@ impl LauncherApp {
             toasts,
             #[cfg(test)]
             test_toast_messages: Vec::new(),
+            #[cfg(test)]
+            test_recorded_history_queries: Vec::new(),
             enable_toasts,
             show_inline_errors,
             show_error_toasts,
@@ -3235,6 +3245,7 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             }
             WatchEvent::ClipboardModify(_) => return Some(ev.into()),
             WatchEvent::Recycle(_) => return Some(ev.into()),
+            WatchEvent::VirtualDesktop(_) => return Some(ev.into()),
         }
     }
     None
