@@ -154,18 +154,18 @@ fn activate_with(
     }
 
     prepare_desktop(backend, request)?;
-    let restore_result = backend.restore(request.hwnd);
-    if backend.is_minimized(request.hwnd)
-        && !wait_until(backend, &RESTORE_VERIFY_DELAYS, |backend| {
+    if backend.is_minimized(request.hwnd) {
+        let restore_result = backend.restore(request.hwnd);
+        if !wait_until(backend, &RESTORE_VERIFY_DELAYS, |backend| {
             !backend.is_minimized(request.hwnd)
-        })
-    {
-        return Err(WindowActivationError::new(
-            WindowActivationErrorKind::ForegroundDenied,
-            "Target window did not restore before activation",
-        )
-        .context("hwnd", request.hwnd.to_string())
-        .context("restore_request", restore_result.to_string()));
+        }) {
+            return Err(WindowActivationError::new(
+                WindowActivationErrorKind::ForegroundDenied,
+                "Target window did not restore before activation",
+            )
+            .context("hwnd", request.hwnd.to_string())
+            .context("restore_request", restore_result.to_string()));
+        }
     }
 
     let direct_result = backend.set_foreground(request.hwnd);
@@ -375,11 +375,6 @@ impl ActivationBackend for WindowsActivationBackend {
     }
 
     fn current_desktop(&mut self) -> Result<VirtualDesktopId, VirtualDesktopError> {
-        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-        let foreground = unsafe { GetForegroundWindow() };
-        if !foreground.0.is_null() {
-            return VirtualDesktopService.desktop_for_window(foreground);
-        }
         VirtualDesktopService.current().map(|desktop| desktop.id)
     }
 
@@ -481,6 +476,7 @@ mod tests {
         detach_fail_at: Option<(u32, u32)>,
         transition_delay_after_action: usize,
         transition_checks_remaining: usize,
+        minimized: bool,
     }
 
     impl FakeBackend {
@@ -498,6 +494,7 @@ mod tests {
                 detach_fail_at: None,
                 transition_delay_after_action: 0,
                 transition_checks_remaining: 0,
+                minimized: false,
             }
         }
     }
@@ -550,10 +547,12 @@ mod tests {
         }
         fn restore(&mut self, _: usize) -> bool {
             self.events.push("restore".into());
+            self.minimized = false;
             true
         }
         fn is_minimized(&mut self, _: usize) -> bool {
-            false
+            self.events.push("is_minimized".into());
+            self.minimized
         }
         fn foreground_window(&mut self) -> Option<usize> {
             self.events.push("foreground".into());
@@ -614,7 +613,7 @@ mod tests {
                 "target_desktop",
                 &format!("switch:{}", id(2)),
                 "is_current",
-                "restore"
+                "is_minimized"
             ]
         );
         assert!(
@@ -623,6 +622,38 @@ mod tests {
                 .iter()
                 .any(|event| event.starts_with("move:"))
         );
+    }
+
+    #[test]
+    fn non_minimized_window_is_never_restored_and_preserves_maximized_state() {
+        let mut backend = FakeBackend::new();
+        backend.on_current = true;
+        activate_with(&mut backend, WindowActivationRequest::follow_window(42)).unwrap();
+        assert!(!backend.events.iter().any(|event| event == "restore"));
+    }
+
+    #[test]
+    fn minimized_window_is_restored_before_foreground_activation() {
+        let mut backend = FakeBackend::new();
+        backend.on_current = true;
+        backend.minimized = true;
+        activate_with(&mut backend, WindowActivationRequest::follow_window(42)).unwrap();
+        let minimized = backend
+            .events
+            .iter()
+            .position(|event| event == "is_minimized")
+            .unwrap();
+        let restore = backend
+            .events
+            .iter()
+            .position(|event| event == "restore")
+            .unwrap();
+        let foreground = backend
+            .events
+            .iter()
+            .position(|event| event == "set:42")
+            .unwrap();
+        assert!(minimized < restore && restore < foreground);
     }
 
     #[test]
@@ -637,7 +668,13 @@ mod tests {
             backend
                 .events
                 .iter()
-                .any(|event| event.starts_with("move:"))
+                .any(|event| event == &format!("move:{}", id(1)))
+        );
+        assert!(
+            backend
+                .events
+                .iter()
+                .any(|event| event == "current_desktop")
         );
         assert!(
             !backend

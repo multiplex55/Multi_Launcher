@@ -108,15 +108,12 @@ impl VirtualDesktopService {
     }
 
     pub fn close_current(&self) -> Result<(), VirtualDesktopError> {
-        let snapshot = self.snapshot()?;
-        let (current, fallback) = close_current_plan(&snapshot)?;
         #[cfg(windows)]
         {
-            windows::close(&current.id, &fallback.id)
+            windows::close_current()
         }
         #[cfg(not(windows))]
         {
-            let _ = (current, fallback);
             Err(VirtualDesktopError::unsupported(
                 "close current desktop",
                 VirtualDesktopCapability::Closing,
@@ -208,6 +205,31 @@ impl VirtualDesktopService {
         desktop: &VirtualDesktopId,
     ) -> Result<(), VirtualDesktopError> {
         windows::move_window_to_desktop(hwnd, desktop)
+    }
+
+    pub fn move_windows_to_desktops(
+        &self,
+        requests: &[(usize, VirtualDesktopId)],
+    ) -> Vec<(usize, Result<(), VirtualDesktopError>)> {
+        #[cfg(windows)]
+        {
+            windows::move_windows_to_desktops(requests)
+        }
+        #[cfg(not(windows))]
+        {
+            requests
+                .iter()
+                .map(|(hwnd, _)| {
+                    (
+                        *hwnd,
+                        Err(VirtualDesktopError::unsupported(
+                            "move windows to virtual desktops",
+                            VirtualDesktopCapability::WindowMovement,
+                        )),
+                    )
+                })
+                .collect()
+        }
     }
 }
 

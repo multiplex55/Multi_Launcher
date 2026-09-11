@@ -254,16 +254,12 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
             class,
             process,
         };
-        let desktop = crate::virtual_desktop::VirtualDesktopService
-            .desktop_for_window(hwnd)
-            .ok()
-            .map(|id| id.to_string());
         ctx.windows.push(EnumeratedWindow {
             hwnd,
             matcher,
             placement,
             monitor: monitor_info,
-            desktop,
+            desktop: None,
         });
         BOOL(1)
     }
@@ -289,6 +285,24 @@ fn enumerate_windows(options: LayoutWindowOptions) -> anyhow::Result<Vec<Enumera
     unsafe {
         let ctx_ptr = &mut ctx as *mut Ctx;
         let _ = EnumWindows(Some(enum_cb), LPARAM(ctx_ptr as isize));
+    }
+    let hwnds = ctx
+        .windows
+        .iter()
+        .map(|window| window.hwnd.0 as usize)
+        .collect::<Vec<_>>();
+    if let Ok(memberships) =
+        crate::virtual_desktop::VirtualDesktopService.desktops_for_windows(&hwnds)
+    {
+        let memberships = memberships
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        for window in &mut ctx.windows {
+            window.desktop = memberships
+                .get(&(window.hwnd.0 as usize))
+                .and_then(|desktop| desktop.as_ref())
+                .map(ToString::to_string);
+        }
     }
     Ok(ctx.windows)
 }
@@ -664,21 +678,35 @@ pub fn apply_layout_restore_plan(plan: &LayoutRestorePlan) -> anyhow::Result<()>
                 .map(|error| format!("layout window {} desktop: {error}", index + 1))
         })
         .collect::<Vec<_>>();
+    let move_requests = plan
+        .actions
+        .iter()
+        .filter_map(|action| {
+            action
+                .target_desktop
+                .as_ref()
+                .map(|desktop| (action.hwnd.0 as usize, desktop.clone()))
+        })
+        .collect::<Vec<_>>();
+    let move_results = crate::virtual_desktop::VirtualDesktopService
+        .move_windows_to_desktops(&move_requests)
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
     apply_all_with_diagnostics(&plan.actions, desktop_errors, |action| {
         let mut placement = WINDOWPLACEMENT::default();
         placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
         let _ = unsafe { GetWindowPlacement(action.hwnd, &mut placement) };
-        let mut desktop_error = None;
-        if let Some(target_desktop) = &action.target_desktop {
-            if let Err(error) = crate::virtual_desktop::VirtualDesktopService
-                .move_window_to_desktop(action.hwnd, target_desktop)
-            {
-                desktop_error = Some(format!(
-                    "failed to move layout window {:?} to desktop {}: {}",
-                    action.hwnd, target_desktop, error
-                ));
-            }
-        }
+        let desktop_error = action.target_desktop.as_ref().and_then(|target_desktop| {
+            move_results
+                .get(&(action.hwnd.0 as usize))
+                .and_then(|result| result.as_ref().err())
+                .map(|error| {
+                    format!(
+                        "failed to move layout window {:?} to desktop {}: {}",
+                        action.hwnd, target_desktop, error
+                    )
+                })
+        });
         placement.rcNormalPosition = action.rect;
         placement.showCmd = SW_SHOWNORMAL.0 as u32;
         unsafe {
@@ -747,5 +775,28 @@ mod tests {
         .to_string();
         assert_eq!(applied, [1, 2]);
         assert!(error.contains("desktop missing"));
+    }
+
+    #[test]
+    fn capture_and_apply_use_batch_virtual_desktop_sessions() {
+        let source = include_str!("windows_layout.rs");
+        let enumerate = source
+            .split("fn enumerate_windows")
+            .nth(1)
+            .unwrap()
+            .split("fn placement_state")
+            .next()
+            .unwrap();
+        assert!(enumerate.contains("desktops_for_windows(&hwnds)"));
+        assert!(!enumerate.contains("desktop_for_window(hwnd)"));
+        let apply = source
+            .split("pub fn apply_layout_restore_plan")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(not(windows))]")
+            .next()
+            .unwrap();
+        assert!(apply.contains("move_windows_to_desktops(&move_requests)"));
+        assert!(!apply.contains("move_window_to_desktop(action.hwnd"));
     }
 }

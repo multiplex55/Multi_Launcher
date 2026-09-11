@@ -33,6 +33,15 @@ pub struct ActivationDeps<'a, O: WindowOps> {
 pub trait DesktopOps {
     fn resolve_binding(&self, binding: &VirtualDesktopBinding) -> Result<VirtualDesktopId, String>;
     fn move_window(&self, hwnd: usize, desktop: &VirtualDesktopId) -> Result<(), String>;
+    fn move_windows(
+        &self,
+        requests: &[(usize, VirtualDesktopId)],
+    ) -> Vec<(usize, Result<(), String>)> {
+        requests
+            .iter()
+            .map(|(hwnd, desktop)| (*hwnd, self.move_window(*hwnd, desktop)))
+            .collect()
+    }
     fn switch(&self, desktop: &VirtualDesktopId) -> Result<(), String>;
 }
 
@@ -62,6 +71,17 @@ impl DesktopOps for WinDesktopOps {
             let _ = (hwnd, desktop);
             Err("Virtual desktop window movement is available only on Windows".into())
         }
+    }
+
+    fn move_windows(
+        &self,
+        requests: &[(usize, VirtualDesktopId)],
+    ) -> Vec<(usize, Result<(), String>)> {
+        VirtualDesktopService
+            .move_windows_to_desktops(requests)
+            .into_iter()
+            .map(|(hwnd, result)| (hwnd, result.map_err(|error| error.to_string())))
+            .collect()
     }
 
     fn switch(&self, desktop: &VirtualDesktopId) -> Result<(), String> {
@@ -259,15 +279,17 @@ fn activate_one_workspace<O: WindowOps>(
         match deps.desktop_ops.resolve_binding(binding) {
             Ok(desktop_id) => {
                 let errors_before = result.movement_errors.len();
-                for window in workspace
+                let requests = workspace
                     .windows
                     .iter()
                     .filter(|window| window.can_activate())
-                {
-                    if let Err(error) = deps.desktop_ops.move_window(window.hwnd, &desktop_id) {
+                    .map(|window| (window.hwnd, desktop_id.clone()))
+                    .collect::<Vec<_>>();
+                for (hwnd, move_result) in deps.desktop_ops.move_windows(&requests) {
+                    if let Err(error) = move_result {
                         result
                             .movement_errors
-                            .push(format!("{} desktop: {error}", window.hwnd));
+                            .push(format!("{hwnd} desktop: {error}"));
                     }
                 }
                 if result.movement_errors.len() == errors_before {
@@ -450,6 +472,7 @@ mod tests {
     struct FakeDesktopOps {
         moves: RefCell<Vec<(usize, VirtualDesktopId)>>,
         switches: RefCell<Vec<VirtualDesktopId>>,
+        batch_calls: RefCell<usize>,
     }
     impl DesktopOps for FakeDesktopOps {
         fn resolve_binding(
@@ -461,6 +484,16 @@ mod tests {
         fn move_window(&self, hwnd: usize, desktop: &VirtualDesktopId) -> Result<(), String> {
             self.moves.borrow_mut().push((hwnd, desktop.clone()));
             Ok(())
+        }
+        fn move_windows(
+            &self,
+            requests: &[(usize, VirtualDesktopId)],
+        ) -> Vec<(usize, Result<(), String>)> {
+            *self.batch_calls.borrow_mut() += 1;
+            requests
+                .iter()
+                .map(|(hwnd, desktop)| (*hwnd, self.move_window(*hwnd, desktop)))
+                .collect()
         }
         fn switch(&self, desktop: &VirtualDesktopId) -> Result<(), String> {
             self.switches.borrow_mut().push(desktop.clone());
@@ -611,6 +644,7 @@ mod tests {
                 *desktop_ops.moves.borrow(),
                 vec![(1, desktop_id.clone()), (2, desktop_id.clone())]
             );
+            assert_eq!(*desktop_ops.batch_calls.borrow(), 1);
             assert_eq!(*desktop_ops.switches.borrow(), vec![desktop_id]);
         }
     }

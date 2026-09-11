@@ -493,7 +493,7 @@ fn enumerate_windows() -> Vec<WindowDescriptor> {
         {
             return BOOL(1);
         }
-        if let Some(window) = describe_window(hwnd.0 as usize)
+        if let Some(window) = describe_window_minimal(hwnd.0 as usize)
             && !window.title.is_empty()
         {
             out.push(window);
@@ -506,6 +506,31 @@ fn enumerate_windows() -> Vec<WindowDescriptor> {
         let _ = EnumWindows(Some(enum_cb), LPARAM(out_ptr as isize));
     }
     out
+}
+
+#[cfg(windows)]
+fn describe_window_minimal(hwnd: usize) -> Option<WindowDescriptor> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow,
+    };
+    let hwnd = HWND(hwnd as *mut _);
+    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+        return None;
+    }
+    let len = unsafe { GetWindowTextLengthW(hwnd) }.max(0) as usize;
+    let mut title_buf = vec![0u16; len + 1];
+    let read = unsafe { GetWindowTextW(hwnd, &mut title_buf) }.max(0) as usize;
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    (pid != 0).then(|| WindowDescriptor {
+        title: String::from_utf16_lossy(&title_buf[..read]),
+        hwnd: hwnd.0 as usize,
+        pid,
+        executable: None,
+        process_path: None,
+        class_name: None,
+    })
 }
 
 /// Read metadata for one known HWND without starting another enumeration worker.
@@ -623,6 +648,29 @@ mod tests {
             process_path: None,
             class_name: None,
         }
+    }
+
+    #[test]
+    fn production_enumeration_keeps_expensive_metadata_on_the_single_window_path() {
+        let source = include_str!("window_catalog.rs");
+        let callback = source
+            .split("unsafe extern \"system\" fn enum_cb")
+            .nth(1)
+            .unwrap()
+            .split("let mut out")
+            .next()
+            .unwrap();
+        assert!(callback.contains("describe_window_minimal"));
+        assert!(!callback.contains("describe_window(hwnd"));
+        let minimal = source
+            .split("fn describe_window_minimal")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn describe_window")
+            .next()
+            .unwrap();
+        assert!(!minimal.contains("OpenProcess"));
+        assert!(!minimal.contains("GetClassNameW"));
     }
 
     #[test]

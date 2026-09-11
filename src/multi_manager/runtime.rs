@@ -253,7 +253,8 @@ pub fn send_workspace_home(workspace: &MmWorkspace) {
     send_workspace_home_with(workspace, &WinWindowOps);
 }
 
-pub fn send_workspace_target(workspace: &MmWorkspace) {
+#[cfg(test)]
+pub(crate) fn send_workspace_target(workspace: &MmWorkspace) {
     send_workspace_target_with(workspace, &WinWindowOps);
 }
 
@@ -264,11 +265,13 @@ pub fn send_all_home(workspaces: &[MmWorkspace]) {
     }
 }
 
-pub fn toggle_workspace(workspace: &mut MmWorkspace) {
+#[cfg(test)]
+pub(crate) fn toggle_workspace(workspace: &mut MmWorkspace) {
     toggle_workspace_with(workspace, &WinWindowOps);
 }
 
-pub fn rotate_workspace(workspace: &mut MmWorkspace) {
+#[cfg(test)]
+pub(crate) fn rotate_workspace(workspace: &mut MmWorkspace) {
     rotate_workspace_with(workspace, &WinWindowOps);
 }
 
@@ -276,11 +279,13 @@ pub fn send_workspace_home_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
     move_workspace_windows(workspace, RectKind::Home, ops);
 }
 
-pub fn send_workspace_target_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
+#[cfg(test)]
+pub(crate) fn send_workspace_target_with(workspace: &MmWorkspace, ops: &impl WindowOps) {
     move_workspace_windows(workspace, RectKind::Target, ops);
 }
 
-pub fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
+#[cfg(test)]
+pub(crate) fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
     if workspace.disabled || !workspace.valid {
         return;
     }
@@ -305,7 +310,8 @@ pub fn toggle_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) 
     }
 }
 
-pub fn rotate_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
+#[cfg(test)]
+pub(crate) fn rotate_workspace_with(workspace: &mut MmWorkspace, ops: &impl WindowOps) {
     if workspace.disabled || !workspace.valid {
         return;
     }

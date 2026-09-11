@@ -12,6 +12,12 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[derive(Default)]
+struct WindowDetailCache {
+    generation: u64,
+    windows: std::collections::HashMap<usize, Option<crate::window_catalog::WindowDescriptor>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VirtualDesktopPluginSettings {
@@ -34,6 +40,17 @@ trait DesktopSource: Send + Sync {
 
 trait WorkspaceSource: Send + Sync {
     fn snapshot(&self) -> Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor>;
+}
+
+trait WindowDetailsSource: Send + Sync {
+    fn describe(&self, hwnd: usize) -> Option<crate::window_catalog::WindowDescriptor>;
+}
+
+struct ProductionWindowDetailsSource;
+impl WindowDetailsSource for ProductionWindowDetailsSource {
+    fn describe(&self, hwnd: usize) -> Option<crate::window_catalog::WindowDescriptor> {
+        crate::window_catalog::describe_window(hwnd)
+    }
 }
 
 struct ProductionWorkspaceSource {
@@ -60,6 +77,8 @@ pub struct VirtualDesktopPlugin {
     desktops: Arc<dyn DesktopSource>,
     workspaces: Arc<dyn WorkspaceSource>,
     catalog: Arc<WindowCatalog>,
+    window_details: Arc<dyn WindowDetailsSource>,
+    window_detail_cache: std::sync::Mutex<WindowDetailCache>,
     actions: Arc<Vec<Action>>,
     settings: VirtualDesktopPluginSettings,
     rule_runtime: RuleRuntimeController,
@@ -79,6 +98,8 @@ impl VirtualDesktopPlugin {
                 catalog: workspace_catalog,
             }),
             catalog,
+            window_details: Arc::new(ProductionWindowDetailsSource),
+            window_detail_cache: std::sync::Mutex::new(WindowDetailCache::default()),
             actions,
             settings: VirtualDesktopPluginSettings::default(),
             rule_runtime: RuleRuntimeController::default(),
@@ -98,6 +119,8 @@ impl VirtualDesktopPlugin {
             desktops,
             workspaces,
             catalog,
+            window_details: Arc::new(ProductionWindowDetailsSource),
+            window_detail_cache: std::sync::Mutex::new(WindowDetailCache::default()),
             actions,
             settings: VirtualDesktopPluginSettings::default(),
             rule_runtime: RuleRuntimeController::default(),
@@ -108,6 +131,7 @@ impl VirtualDesktopPlugin {
 
     fn overview(&self, snapshot: &VirtualDesktopSnapshot) -> Vec<Action> {
         let mut rows = Vec::new();
+        rows.extend(capability_diagnostics(snapshot));
         if let Ok(current) = snapshot.current() {
             rows.push(simple_action(
                 format!(
@@ -131,22 +155,28 @@ impl VirtualDesktopPlugin {
                 "vd:list",
             ));
         }
-        rows.push(simple_action(
-            "Create Virtual Desktop",
-            "Virtual Desktop",
-            "vd:create",
-        ));
-        rows.push(simple_action(
-            "Switch Previous",
-            "Virtual Desktop",
-            "vd:previous",
-        ));
-        rows.push(simple_action("Switch Next", "Virtual Desktop", "vd:next"));
+        if snapshot.capabilities.creation {
+            rows.push(simple_action(
+                "Create Virtual Desktop",
+                "Virtual Desktop",
+                "vd:create",
+            ));
+        }
+        if snapshot.capabilities.direct_switching {
+            rows.push(simple_action(
+                "Switch Previous",
+                "Virtual Desktop",
+                "vd:previous",
+            ));
+            rows.push(simple_action("Switch Next", "Virtual Desktop", "vd:next"));
+        }
         rows.extend(self.desktop_actions(snapshot, "", false));
-        rows.push(query_action(
-            "Search Windows Across Desktops",
-            "vd windows ",
-        ));
+        if snapshot.capabilities.window_membership {
+            rows.push(query_action(
+                "Search Windows Across Desktops",
+                "vd windows ",
+            ));
+        }
         rows.push(simple_action(
             "Virtual Desktop Settings",
             "Virtual Desktop",
@@ -170,7 +200,7 @@ impl VirtualDesktopPlugin {
                 || desktop.id.as_str().contains(&filter)
         }) {
             let target = desktop.id.to_string();
-            if !move_only {
+            if !move_only && snapshot.capabilities.direct_switching {
                 rows.push(json_action(
                     format!("Switch to {}", desktop.display_name()),
                     format!("Desktop {}", desktop.index),
@@ -180,27 +210,29 @@ impl VirtualDesktopPlugin {
                     },
                 ));
             }
-            rows.push(json_action(
-                format!("Move Active Window to {}", desktop.display_name()),
-                "Move without switching desktops".into(),
-                "vd:move-active",
-                &VirtualDesktopMoveActivePayload {
-                    target: target.clone(),
-                    follow: false,
-                },
-            ));
-            rows.push(json_action(
-                format!(
-                    "Move Active Window to {} and Follow",
-                    desktop.display_name()
-                ),
-                "Move, switch, and activate".into(),
-                "vd:move-active",
-                &VirtualDesktopMoveActivePayload {
-                    target,
-                    follow: true,
-                },
-            ));
+            if snapshot.capabilities.window_movement {
+                rows.push(json_action(
+                    format!("Move Active Window to {}", desktop.display_name()),
+                    "Move without switching desktops".into(),
+                    "vd:move-active",
+                    &VirtualDesktopMoveActivePayload {
+                        target: target.clone(),
+                        follow: false,
+                    },
+                ));
+                rows.push(json_action(
+                    format!(
+                        "Move Active Window to {} and Follow",
+                        desktop.display_name()
+                    ),
+                    "Move, switch, and activate".into(),
+                    "vd:move-active",
+                    &VirtualDesktopMoveActivePayload {
+                        target,
+                        follow: true,
+                    },
+                ));
+            }
         }
         rows
     }
@@ -241,6 +273,79 @@ impl VirtualDesktopPlugin {
             rows.push(json_action(
                 format!("Activate {}", window.title),
                 desktop_label.clone(),
+                "vd:activate-window",
+                &VirtualDesktopWindowPayload { hwnd: window.hwnd },
+            ));
+            rows.push(query_action(
+                format!("Move {} to…", window.title),
+                format!("vd windows move {} ", window.hwnd),
+            ));
+        }
+        if !filter.is_empty()
+            && windows.iter().any(|window| {
+                window.executable.is_none() && !window.title.to_lowercase().contains(&filter)
+            })
+        {
+            rows.push(query_action(
+                format!("Search executable names for {filter:?}"),
+                format!("vd windows details {filter}"),
+            ));
+        }
+        rows
+    }
+
+    fn window_detail_actions(
+        &self,
+        snapshot: &VirtualDesktopSnapshot,
+        filter: &str,
+    ) -> Vec<Action> {
+        let filter = filter.trim().to_lowercase();
+        if filter.is_empty() {
+            return Vec::new();
+        }
+        let catalog = self.catalog.snapshot_with_desktops_and_refresh();
+        let mut cache = match self.window_detail_cache.lock() {
+            Ok(cache) => cache,
+            Err(_) => return Vec::new(),
+        };
+        if cache.generation != catalog.generation {
+            cache.generation = catalog.generation;
+            cache.windows.clear();
+        }
+        let enriched = catalog
+            .windows
+            .iter()
+            .filter_map(|minimal| {
+                if let Some(window) = cache.windows.get(&minimal.hwnd) {
+                    return window.clone();
+                }
+                let window = self
+                    .window_details
+                    .describe(minimal.hwnd)
+                    .or_else(|| minimal.executable.is_some().then(|| minimal.clone()));
+                cache.windows.insert(minimal.hwnd, window.clone());
+                window
+            })
+            .filter(|window| {
+                window.title.to_lowercase().contains(&filter)
+                    || window
+                        .executable
+                        .as_deref()
+                        .is_some_and(|value| value.to_lowercase().contains(&filter))
+            })
+            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        for window in enriched {
+            let desktop_label = catalog
+                .desktop_ids
+                .get(&window.hwnd)
+                .and_then(|desktop| desktop.as_ref())
+                .and_then(|id| snapshot.desktops.iter().find(|entry| &entry.id == id))
+                .map(|entry| format!("{} • Desktop {}", entry.display_name(), entry.index))
+                .unwrap_or_else(|| "Desktop details unavailable".into());
+            rows.push(json_action(
+                format!("Activate {}", window.title),
+                desktop_label,
                 "vd:activate-window",
                 &VirtualDesktopWindowPayload { hwnd: window.hwnd },
             ));
@@ -330,6 +435,7 @@ impl VirtualDesktopPlugin {
                     return None;
                 };
                 if namespace.is_some()
+                    || !is_direct_executable_target(&application)
                     || (!filter.is_empty() && !action.label.to_lowercase().contains(&filter))
                 {
                     return None;
@@ -459,19 +565,21 @@ impl VirtualDesktopPlugin {
 impl Plugin for VirtualDesktopPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
-        if trimmed.len() < 2
-            || !trimmed[..2].eq_ignore_ascii_case("vd")
-            || trimmed
-                .as_bytes()
-                .get(2)
-                .is_some_and(|byte| !byte.is_ascii_whitespace())
-        {
-            return Vec::new();
-        }
-        let Ok(snapshot) = self.desktops.snapshot() else {
+        let Some(rest) = strip_command(trimmed, "vd") else {
             return Vec::new();
         };
-        let rest = trimmed[2..].trim();
+        let snapshot = match self.desktops.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return vec![diagnostic_action(
+                    "Virtual desktops are unavailable",
+                    format!("Could not enumerate Windows virtual desktops: {error}"),
+                )];
+            }
+        };
+        if let Some(row) = capability_diagnostic_for_query(rest, &snapshot) {
+            return vec![row];
+        }
         if rest.is_empty() || rest.eq_ignore_ascii_case("list") {
             return self.overview(&snapshot);
         }
@@ -539,6 +647,9 @@ impl Plugin for VirtualDesktopPlugin {
         }
         if let Some(filter) = strip_command(rest, "move active") {
             return self.desktop_actions(&snapshot, filter, true);
+        }
+        if let Some(filter) = strip_command(rest, "windows details") {
+            return self.window_detail_actions(&snapshot, filter);
         }
         if let Some(input) = strip_command(rest, "windows move") {
             return self.window_move_actions(&snapshot, input);
@@ -786,14 +897,91 @@ fn next_rule_id(existing: &[VirtualDesktopRule]) -> String {
 fn strip_command<'a>(input: &'a str, command: &str) -> Option<&'a str> {
     if input.eq_ignore_ascii_case(command) {
         Some("")
-    } else if input.len() > command.len()
-        && input[..command.len()].eq_ignore_ascii_case(command)
-        && input.as_bytes()[command.len()].is_ascii_whitespace()
+    } else if input
+        .get(..command.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(command))
+        && input
+            .get(command.len()..)
+            .and_then(|tail| tail.chars().next())
+            .is_some_and(char::is_whitespace)
     {
-        Some(input[command.len()..].trim())
+        Some(input.get(command.len()..)?.trim())
     } else {
         None
     }
+}
+
+fn diagnostic_action(label: impl Into<String>, detail: impl Into<String>) -> Action {
+    Action {
+        label: label.into(),
+        desc: detail.into(),
+        action: "query:vd ".into(),
+        args: None,
+    }
+}
+
+fn capability_diagnostics(snapshot: &VirtualDesktopSnapshot) -> Vec<Action> {
+    let capabilities = [
+        (snapshot.capabilities.direct_switching, "desktop switching"),
+        (snapshot.capabilities.creation, "desktop creation"),
+        (snapshot.capabilities.closing, "desktop closing"),
+        (snapshot.capabilities.renaming, "desktop renaming"),
+        (snapshot.capabilities.window_membership, "window membership"),
+        (
+            snapshot.capabilities.window_movement,
+            "external window movement",
+        ),
+    ];
+    capabilities
+        .into_iter()
+        .filter_map(|(available, name)| {
+            (!available).then(|| {
+                diagnostic_action(
+                    format!("Unavailable: {name}"),
+                    format!("This Windows build does not expose a verified ABI for {name}"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn capability_diagnostic_for_query(
+    query: &str,
+    snapshot: &VirtualDesktopSnapshot,
+) -> Option<Action> {
+    let query = query.trim();
+    let required = if query.eq_ignore_ascii_case("next")
+        || query.eq_ignore_ascii_case("previous")
+        || strip_command(query, "switch").is_some()
+    {
+        Some((snapshot.capabilities.direct_switching, "desktop switching"))
+    } else if query.eq_ignore_ascii_case("create") {
+        Some((snapshot.capabilities.creation, "desktop creation"))
+    } else if query.eq_ignore_ascii_case("close") || query.eq_ignore_ascii_case("close current") {
+        Some((snapshot.capabilities.closing, "desktop closing"))
+    } else if strip_command(query, "rename").is_some() {
+        Some((snapshot.capabilities.renaming, "desktop renaming"))
+    } else if strip_command(query, "move active").is_some()
+        || strip_command(query, "windows move").is_some()
+        || strip_command(query, "launch").is_some()
+    {
+        Some((
+            snapshot.capabilities.window_movement,
+            "external window movement",
+        ))
+    } else if strip_command(query, "windows").is_some() {
+        Some((snapshot.capabilities.window_membership, "window membership"))
+    } else {
+        None
+    };
+    required.and_then(|(available, capability)| {
+        (!available).then(|| {
+            diagnostic_action(
+                format!("Unavailable: {capability}"),
+                format!("This Windows build does not expose a verified ABI for {capability}"),
+            )
+        })
+    })
 }
 
 fn workspace_label(
@@ -805,6 +993,13 @@ fn workspace_label(
     } else {
         name.to_string()
     }
+}
+
+fn is_direct_executable_target(target: &str) -> bool {
+    std::path::Path::new(target.trim_matches('"'))
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
 }
 
 fn workspace_target_remainder<'a>(input: &'a str, workspace: &str) -> Option<&'a str> {
@@ -868,6 +1063,16 @@ mod tests {
     }
 
     struct FakeWorkspaces(Vec<crate::multi_manager::workspace_catalog::WorkspaceDescriptor>);
+    struct FakeWindowDetails {
+        windows: std::collections::HashMap<usize, WindowDescriptor>,
+        calls: AtomicUsize,
+    }
+    impl WindowDetailsSource for FakeWindowDetails {
+        fn describe(&self, hwnd: usize) -> Option<WindowDescriptor> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.windows.get(&hwnd).cloned()
+        }
+    }
 
     #[derive(Default)]
     struct RuleRuntimeCounts {
@@ -920,7 +1125,15 @@ mod tests {
                         is_current: index == 1,
                     })
                     .collect(),
-                capabilities: VirtualDesktopCapabilities::default(),
+                capabilities: VirtualDesktopCapabilities {
+                    enumeration: true,
+                    direct_switching: true,
+                    creation: true,
+                    closing: true,
+                    renaming: true,
+                    window_membership: true,
+                    window_movement: true,
+                },
             },
             snapshots: AtomicUsize::new(0),
         })
@@ -979,9 +1192,19 @@ mod tests {
         let plugin = plugin(Arc::clone(&source));
         assert!(plugin.search("files").is_empty());
         assert!(plugin.search("vds").is_empty());
+        assert!(plugin.search("🔥vd").is_empty());
+        assert!(plugin.search("é").is_empty());
         assert_eq!(source.snapshots.load(Ordering::Relaxed), 0);
         assert!(!plugin.search("VD").is_empty());
         assert_eq!(source.snapshots.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn strip_command_is_utf8_safe_and_token_bounded() {
+        assert_eq!(strip_command("VD 🔥", "vd"), Some("🔥"));
+        assert_eq!(strip_command("rename 工作", "rename"), Some("工作"));
+        assert_eq!(strip_command("🔥vd", "vd"), None);
+        assert_eq!(strip_command("vdesktop", "vd"), None);
     }
 
     #[test]
@@ -1045,6 +1268,49 @@ mod tests {
     }
 
     #[test]
+    fn executable_filter_is_explicitly_staged_cached_and_keeps_baseline_minimal() {
+        let mut plugin = plugin(source());
+        plugin.catalog = WindowCatalog::from_enriched_snapshot(
+            vec![WindowDescriptor {
+                title: "Unrelated title".into(),
+                hwnd: 77,
+                pid: 7,
+                executable: None,
+                process_path: None,
+                class_name: None,
+            }],
+            std::collections::HashMap::from([(77, Some(id(2)))]),
+        );
+        let details = Arc::new(FakeWindowDetails {
+            windows: std::collections::HashMap::from([(
+                77,
+                WindowDescriptor {
+                    title: "Unrelated title".into(),
+                    hwnd: 77,
+                    pid: 7,
+                    executable: Some("editor.exe".into()),
+                    process_path: Some("C:\\Tools\\editor.exe".into()),
+                    class_name: Some("EditorWindow".into()),
+                },
+            )]),
+            calls: AtomicUsize::new(0),
+        });
+        plugin.window_details = details.clone();
+
+        let baseline = plugin.search("vd windows editor");
+        assert_eq!(details.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].action, "query:vd windows details editor");
+
+        let detailed = plugin.search("vd windows details editor");
+        assert_eq!(detailed.len(), 2);
+        assert_eq!(details.calls.load(Ordering::Relaxed), 1);
+        let repeated = plugin.search("vd windows details editor");
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(details.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn rename_and_launch_preserve_arbitrary_text_in_json_payloads() {
         let plugin = plugin(source());
         let rename = plugin.search("vd rename 2 Work | Focus");
@@ -1059,6 +1325,82 @@ mod tests {
         assert!(launch.iter().any(|row|
             matches!(crate::commands::parse_action(row).unwrap(), Command::VirtualDesktop(VirtualDesktopCommand::Launch(payload)) if payload.follow)
         ));
+    }
+
+    #[test]
+    fn launch_discovery_excludes_shortcuts_documents_urls_and_namespaced_actions() {
+        let mut plugin = plugin(source());
+        plugin.actions = Arc::new(vec![
+            Action {
+                label: "Executable".into(),
+                desc: String::new(),
+                action: "C:\\Tools\\app.exe".into(),
+                args: None,
+            },
+            Action {
+                label: "Shortcut".into(),
+                desc: String::new(),
+                action: "C:\\Links\\app.lnk".into(),
+                args: None,
+            },
+            Action {
+                label: "Document".into(),
+                desc: String::new(),
+                action: "C:\\Docs\\notes.txt".into(),
+                args: None,
+            },
+            Action {
+                label: "URL".into(),
+                desc: String::new(),
+                action: "https://example.com".into(),
+                args: None,
+            },
+            Action {
+                label: "Namespaced".into(),
+                desc: String::new(),
+                action: "shell:C:\\Tools\\app.exe".into(),
+                args: None,
+            },
+        ]);
+        let rows = plugin.search("vd launch 2");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.label.contains("Executable")));
+    }
+
+    #[test]
+    fn snapshot_failures_surface_an_actionable_diagnostic_row() {
+        struct ErrorSource;
+        impl DesktopSource for ErrorSource {
+            fn snapshot(&self) -> Result<VirtualDesktopSnapshot, String> {
+                Err("unsupported Windows build 99999".into())
+            }
+        }
+        let plugin = VirtualDesktopPlugin::with_source(
+            Arc::new(ErrorSource),
+            Arc::new(FakeWorkspaces(Vec::new())),
+            WindowCatalog::from_snapshot(Vec::new()),
+            Arc::new(Vec::new()),
+        );
+        let rows = plugin.search("vd");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].label.contains("unavailable"));
+        assert!(rows[0].desc.contains("unsupported Windows build 99999"));
+        assert_eq!(rows[0].action, "query:vd ");
+    }
+
+    #[test]
+    fn unsupported_capability_surfaces_diagnostic_instead_of_dead_action() {
+        let source = source();
+        let mut unavailable = source.snapshot.clone();
+        unavailable.capabilities.window_movement = false;
+        let plugin = plugin(Arc::new(FakeDesktops {
+            snapshot: unavailable,
+            snapshots: AtomicUsize::new(0),
+        }));
+        let rows = plugin.search("vd move active 2");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].label.contains("Unavailable"));
+        assert!(rows[0].desc.contains("verified ABI"));
     }
 
     #[test]

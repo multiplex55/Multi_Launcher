@@ -150,6 +150,8 @@ trait RuleBackend {
     fn switch_desktop(&mut self, target: &VirtualDesktopId) -> Result<(), String>;
     fn activate(&mut self, hwnd: usize) -> Result<(), String>;
     fn now_ms(&mut self) -> u64;
+    fn begin_programmatic_foreground(&mut self, _hwnd: usize) {}
+    fn end_programmatic_foreground(&mut self, _hwnd: usize, _successful: bool) {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -223,21 +225,26 @@ fn process_foreground_event(
     if backend.current_foreground() != Some(hwnd) {
         return RuleEventOutcome::NoOp(RulePlan::NoMatch);
     }
+    backend.begin_programmatic_foreground(hwnd);
     if let Err(error) = backend.move_window(hwnd, &target) {
+        backend.end_programmatic_foreground(hwnd, false);
         return RuleEventOutcome::Diagnostic(format!(
             "Virtual desktop rule {rule_id:?} could not move its foreground window: {error}"
         ));
     }
     if let Err(error) = backend.switch_desktop(&target) {
+        backend.end_programmatic_foreground(hwnd, false);
         return RuleEventOutcome::Diagnostic(format!(
             "Virtual desktop rule {rule_id:?} moved the window but could not switch desktops: {error}"
         ));
     }
     if let Err(error) = backend.activate(hwnd) {
+        backend.end_programmatic_foreground(hwnd, false);
         return RuleEventOutcome::Diagnostic(format!(
             "Virtual desktop rule {rule_id:?} moved and switched but could not restore foreground activation: {error}"
         ));
     }
+    backend.end_programmatic_foreground(hwnd, true);
     *suppression = Some(RuleSuppression::arm(hwnd, target, backend.now_ms()));
     RuleEventOutcome::Applied { rule_id }
 }
@@ -245,6 +252,7 @@ fn process_foreground_event(
 #[cfg(windows)]
 struct ProductionRuleBackend {
     started: std::time::Instant,
+    signal: LatestForegroundSignal,
 }
 
 #[cfg(windows)]
@@ -290,10 +298,37 @@ impl RuleBackend for ProductionRuleBackend {
     fn now_ms(&mut self) -> u64 {
         self.started.elapsed().as_millis() as u64
     }
+
+    fn begin_programmatic_foreground(&mut self, hwnd: usize) {
+        self.signal.ignore(hwnd);
+    }
+
+    fn end_programmatic_foreground(&mut self, hwnd: usize, successful: bool) {
+        self.signal.finish_ignoring(hwnd, successful);
+    }
+}
+
+const PROGRAMMATIC_EVENT_GRACE_MS: u64 = 1_500;
+const FAILED_EVENT_GRACE_MS: u64 = 150;
+
+struct IgnoredForeground {
+    hwnd: std::sync::atomic::AtomicUsize,
+    expires_at_ms: std::sync::atomic::AtomicU64,
+}
+
+impl IgnoredForeground {
+    fn new() -> Self {
+        Self {
+            hwnd: std::sync::atomic::AtomicUsize::new(0),
+            expires_at_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
 }
 
 struct LatestForegroundSignal {
     latest: Arc<std::sync::atomic::AtomicUsize>,
+    ignored: Arc<[IgnoredForeground; 4]>,
+    started: Arc<std::time::Instant>,
     wake: mpsc::SyncSender<()>,
 }
 
@@ -301,6 +336,8 @@ impl Clone for LatestForegroundSignal {
     fn clone(&self) -> Self {
         Self {
             latest: Arc::clone(&self.latest),
+            ignored: Arc::clone(&self.ignored),
+            started: Arc::clone(&self.started),
             wake: self.wake.clone(),
         }
     }
@@ -311,6 +348,113 @@ impl LatestForegroundSignal {
         self.latest
             .store(hwnd, std::sync::atomic::Ordering::Release);
         let _ = self.wake.try_send(());
+    }
+
+    fn publish_native(&self, hwnd: usize) {
+        self.publish_native_at(hwnd, self.elapsed_ms());
+    }
+
+    fn publish_native_at(&self, hwnd: usize, now_ms: u64) {
+        for marker in self.ignored.iter() {
+            if marker.hwnd.load(std::sync::atomic::Ordering::Acquire) != hwnd {
+                continue;
+            }
+            let expires_at = marker
+                .expires_at_ms
+                .load(std::sync::atomic::Ordering::Acquire);
+            if now_ms <= expires_at
+                && marker
+                    .hwnd
+                    .compare_exchange(
+                        hwnd,
+                        0,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                return;
+            }
+            if now_ms > expires_at {
+                let _ = marker.hwnd.compare_exchange(
+                    hwnd,
+                    0,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                );
+            }
+        }
+        self.publish(hwnd);
+    }
+
+    fn ignore(&self, hwnd: usize) {
+        self.ignore_at(hwnd, self.elapsed_ms(), PROGRAMMATIC_EVENT_GRACE_MS);
+    }
+
+    fn ignore_at(&self, hwnd: usize, now_ms: u64, grace_ms: u64) {
+        let expires_at = now_ms.saturating_add(grace_ms);
+        for marker in self.ignored.iter() {
+            let current = marker.hwnd.load(std::sync::atomic::Ordering::Acquire);
+            if current == hwnd {
+                marker
+                    .expires_at_ms
+                    .store(expires_at, std::sync::atomic::Ordering::Release);
+                return;
+            }
+            if current == 0 {
+                marker
+                    .expires_at_ms
+                    .store(expires_at, std::sync::atomic::Ordering::Relaxed);
+            }
+            if current == 0
+                && marker
+                    .hwnd
+                    .compare_exchange(
+                        0,
+                        hwnd,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                return;
+            }
+        }
+        // Four unobserved programmatic transitions is already an abnormal shell backlog. Keep
+        // the newest marker rather than allowing it to overwrite a genuine foreground signal.
+        self.ignored[0]
+            .expires_at_ms
+            .store(expires_at, std::sync::atomic::Ordering::Relaxed);
+        self.ignored[0]
+            .hwnd
+            .store(hwnd, std::sync::atomic::Ordering::Release);
+    }
+
+    fn finish_ignoring(&self, hwnd: usize, successful: bool) {
+        self.finish_ignoring_at(hwnd, successful, self.elapsed_ms());
+    }
+
+    fn finish_ignoring_at(&self, hwnd: usize, successful: bool, now_ms: u64) {
+        let expires_at = now_ms.saturating_add(if successful {
+            PROGRAMMATIC_EVENT_GRACE_MS
+        } else {
+            FAILED_EVENT_GRACE_MS
+        });
+        // If the callback already consumed the marker during the operation, do not re-arm it:
+        // there is no outstanding synthetic event left to suppress.
+        if let Some(marker) = self
+            .ignored
+            .iter()
+            .find(|marker| marker.hwnd.load(std::sync::atomic::Ordering::Acquire) == hwnd)
+        {
+            marker
+                .expires_at_ms
+                .store(expires_at, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
     }
 
     fn take_latest(&self) -> Option<usize> {
@@ -456,7 +600,7 @@ impl NativeRuleRuntime {
                     if let Ok(signal) = slot.try_borrow()
                         && let Some(signal) = signal.as_ref()
                     {
-                        signal.publish(hwnd.0 as usize);
+                        signal.publish_native(hwnd.0 as usize);
                     }
                 });
             }
@@ -464,6 +608,8 @@ impl NativeRuleRuntime {
             let (wake_tx, wake_rx) = sync_channel(1);
             let signal = LatestForegroundSignal {
                 latest: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                ignored: Arc::new(std::array::from_fn(|_| IgnoredForeground::new())),
+                started: Arc::new(Instant::now()),
                 wake: wake_tx.clone(),
             };
             let (ready_tx, ready_rx) = sync_channel(0);
@@ -475,6 +621,7 @@ impl NativeRuleRuntime {
                 .spawn(move || {
                     let mut backend = ProductionRuleBackend {
                         started: Instant::now(),
+                        signal: worker_signal.clone(),
                     };
                     let mut suppression = None;
                     while wake_rx.recv().is_ok() {
@@ -868,6 +1015,8 @@ mod tests {
         let (wake, receiver) = mpsc::sync_channel(1);
         let signal = LatestForegroundSignal {
             latest: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ignored: Arc::new(std::array::from_fn(|_| IgnoredForeground::new())),
+            started: Arc::new(std::time::Instant::now()),
             wake,
         };
         signal.publish(41);
@@ -879,6 +1028,72 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn programmatic_foreground_event_cannot_overwrite_newer_genuine_event() {
+        let (wake, _receiver) = mpsc::sync_channel(1);
+        let signal = LatestForegroundSignal {
+            latest: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ignored: Arc::new(std::array::from_fn(|_| IgnoredForeground::new())),
+            started: Arc::new(std::time::Instant::now()),
+            wake,
+        };
+        signal.ignore_at(41, 100, PROGRAMMATIC_EVENT_GRACE_MS);
+        signal.publish_native_at(42, 101);
+        signal.finish_ignoring_at(41, true, 102);
+        // The worker may begin B before the delayed callback for A is delivered. Arming B must
+        // not discard A's outstanding source marker.
+        signal.ignore_at(42, 103, PROGRAMMATIC_EVENT_GRACE_MS);
+        signal.publish_native_at(41, 104);
+        signal.finish_ignoring_at(42, false, 105);
+        assert_eq!(signal.take_latest(), Some(42));
+    }
+
+    #[test]
+    fn failed_programmatic_action_does_not_hide_later_genuine_focus() {
+        let (wake, _receiver) = mpsc::sync_channel(1);
+        let signal = LatestForegroundSignal {
+            latest: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ignored: Arc::new(std::array::from_fn(|_| IgnoredForeground::new())),
+            started: Arc::new(std::time::Instant::now()),
+            wake,
+        };
+        signal.ignore_at(41, 100, PROGRAMMATIC_EVENT_GRACE_MS);
+        signal.finish_ignoring_at(41, false, 101);
+        signal.publish_native_at(41, 252);
+        assert_eq!(signal.take_latest(), Some(41));
+    }
+
+    #[test]
+    fn successful_action_without_callback_accepts_focus_after_deadline() {
+        let (wake, _receiver) = mpsc::sync_channel(1);
+        let signal = LatestForegroundSignal {
+            latest: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ignored: Arc::new(std::array::from_fn(|_| IgnoredForeground::new())),
+            started: Arc::new(std::time::Instant::now()),
+            wake,
+        };
+        signal.ignore_at(41, 100, PROGRAMMATIC_EVENT_GRACE_MS);
+        signal.finish_ignoring_at(41, true, 101);
+        signal.publish_native_at(41, 1_602);
+        assert_eq!(signal.take_latest(), Some(41));
+    }
+
+    #[test]
+    fn completed_callback_is_not_rearmed_at_operation_end() {
+        let (wake, _receiver) = mpsc::sync_channel(1);
+        let signal = LatestForegroundSignal {
+            latest: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            ignored: Arc::new(std::array::from_fn(|_| IgnoredForeground::new())),
+            started: Arc::new(std::time::Instant::now()),
+            wake,
+        };
+        signal.ignore_at(41, 100, PROGRAMMATIC_EVENT_GRACE_MS);
+        signal.publish_native_at(41, 101);
+        signal.finish_ignoring_at(41, true, 102);
+        signal.publish_native_at(41, 103);
+        assert_eq!(signal.take_latest(), Some(41));
     }
 
     #[derive(Default)]

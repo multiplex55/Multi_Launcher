@@ -19,6 +19,7 @@ trait LaunchWorkflowBackend {
     fn fresh_windows(&mut self, timeout: Duration) -> anyhow::Result<Arc<Vec<WindowDescriptor>>>;
     fn launch(&mut self, application: &str, args: Option<&str>) -> anyhow::Result<LaunchIdentity>;
     fn foreground_window(&mut self) -> Option<usize>;
+    fn describe_window(&mut self, hwnd: usize) -> Option<WindowDescriptor>;
     fn wait_for_input_idle(&mut self, pid: Option<u32>, timeout: Duration);
     fn pause(&mut self, duration: Duration);
     fn move_window(&mut self, hwnd: usize, desktop: &VirtualDesktopId) -> anyhow::Result<()>;
@@ -55,6 +56,9 @@ impl LaunchWorkflowBackend for ProductionLaunchBackend {
         }
         #[cfg(not(windows))]
         None
+    }
+    fn describe_window(&mut self, hwnd: usize) -> Option<WindowDescriptor> {
+        crate::window_catalog::describe_window(hwnd)
     }
     fn wait_for_input_idle(&mut self, pid: Option<u32>, timeout: Duration) {
         #[cfg(windows)]
@@ -162,6 +166,16 @@ fn launch_with_backend(
             found = Some(window.clone());
             break;
         }
+        // The shared catalog intentionally keeps process metadata lazy. If a direct executable
+        // reuses an existing single-instance window, enrich only the newly foreground HWND.
+        if let Some(hwnd) = foreground_after.filter(|after| Some(*after) != foreground_before)
+            && windows.iter().any(|window| window.hwnd == hwnd)
+            && let Some(window) = backend.describe_window(hwnd)
+            && launch_target_matches(&window, &launch)
+        {
+            found = Some(window);
+            break;
+        }
     }
     let found = found.ok_or_else(|| anyhow::anyhow!(
         "Application was launched, but no movable top-level window could be identified within {} seconds",
@@ -179,6 +193,19 @@ fn remaining_until(deadline: Duration, now: Duration) -> Duration {
     deadline.saturating_sub(now)
 }
 
+fn launch_target_matches(window: &WindowDescriptor, launch: &LaunchIdentity) -> bool {
+    let Some(target_name) = Path::new(&launch.target)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+    window
+        .executable
+        .as_deref()
+        .is_some_and(|exe| exe.eq_ignore_ascii_case(target_name))
+}
+
 pub(crate) fn select_launch_window<'a>(
     before: &HashSet<usize>,
     windows: &'a [WindowDescriptor],
@@ -191,15 +218,7 @@ pub(crate) fn select_launch_window<'a>(
     {
         return Some(window);
     }
-    let target_name = Path::new(&launch.target)
-        .file_name()
-        .and_then(|name| name.to_str())?;
-    let matches = |window: &&WindowDescriptor| {
-        window
-            .executable
-            .as_deref()
-            .is_some_and(|exe| exe.eq_ignore_ascii_case(target_name))
-    };
+    let matches = |window: &&WindowDescriptor| launch_target_matches(window, launch);
     windows
         .iter()
         .filter(matches)
@@ -250,6 +269,7 @@ mod tests {
         idle_delay: Duration,
         refresh_delays: VecDeque<Duration>,
         refresh_timeouts: Vec<Duration>,
+        descriptions: std::collections::HashMap<usize, WindowDescriptor>,
         log: Vec<String>,
     }
     impl FakeBackend {
@@ -268,6 +288,7 @@ mod tests {
                 idle_delay: Duration::ZERO,
                 refresh_delays: VecDeque::new(),
                 refresh_timeouts: Vec::new(),
+                descriptions: std::collections::HashMap::new(),
                 log: Vec::new(),
             }
         }
@@ -313,6 +334,16 @@ mod tests {
         }
         fn foreground_window(&mut self) -> Option<usize> {
             self.foreground.pop_front().flatten()
+        }
+        fn describe_window(&mut self, hwnd: usize) -> Option<WindowDescriptor> {
+            self.descriptions.get(&hwnd).cloned().or_else(|| {
+                self.windows
+                    .iter()
+                    .filter_map(|result| result.as_ref().ok())
+                    .flat_map(|windows| windows.iter())
+                    .find(|window| window.hwnd == hwnd)
+                    .cloned()
+            })
         }
         fn wait_for_input_idle(&mut self, _: Option<u32>, timeout: Duration) {
             self.log.push("idle".into());
@@ -368,6 +399,27 @@ mod tests {
             target: "app.exe".into(),
         }));
         backend.foreground = VecDeque::from([Some(1), Some(7)]);
+        launch_with_backend(&payload(false), &mut backend).unwrap();
+        assert!(backend.log.ends_with(&["refresh".into(), "move:7".into()]));
+    }
+
+    #[test]
+    fn single_instance_uses_only_foreground_hwnd_metadata_enrichment() {
+        let minimal = WindowDescriptor {
+            title: "App".into(),
+            hwnd: 7,
+            pid: 70,
+            executable: None,
+            process_path: None,
+            class_name: None,
+        };
+        let mut backend = FakeBackend::new(vec![Ok(vec![minimal.clone()]), Ok(vec![minimal])]);
+        backend.launch = Some(Ok(LaunchIdentity {
+            pid: None,
+            target: "app.exe".into(),
+        }));
+        backend.foreground = VecDeque::from([Some(1), Some(7)]);
+        backend.descriptions.insert(7, window(7, 70, "app.exe"));
         launch_with_backend(&payload(false), &mut backend).unwrap();
         assert!(backend.log.ends_with(&["refresh".into(), "move:7".into()]));
     }

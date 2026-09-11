@@ -89,6 +89,36 @@ interface!(
     ManagerWin11FlatVtable,
     0x53f5ca0b_158f_4124_900c_057158060b27
 );
+interface!(
+    DesktopWin10,
+    DesktopIdentityVtable,
+    0xff72ffdd_be7e_43fc_9c03_ad81681e88e4
+);
+interface!(
+    DesktopServer,
+    DesktopIdentityVtable,
+    0x62fdf88b_11ca_4afb_8bd8_2296dfae49e2
+);
+interface!(
+    DesktopWin11Legacy,
+    DesktopIdentityVtable,
+    0x536d3495_b208_4cc9_ae26_de8111275bf8
+);
+interface!(
+    DesktopWin11Current,
+    DesktopIdentityVtable,
+    0x3f07f4be_b107_441a_af0f_39d82529072c
+);
+interface!(
+    ApplicationView,
+    IUnknown_Vtbl,
+    0x372e1d3b_38d3_42e4_a15b_8ab2b178f513
+);
+interface!(
+    ApplicationViewCollection,
+    ApplicationViewCollectionVtable,
+    0x1841c6d7_4f9d_42c0_af41_8747538f10e5
+);
 
 #[repr(C)]
 #[allow(non_snake_case)]
@@ -222,12 +252,54 @@ struct DesktopIdentityVtable {
     GetID: unsafe extern "system" fn(*mut c_void, *mut GUID) -> HRESULT,
 }
 
-fn desktop_id(desktop: &IUnknown) -> windows::core::Result<GUID> {
-    let mut id = GUID::zeroed();
-    // GetID is the stable fourth method on desktop identities returned by these managers.
-    let vtable =
-        unsafe { &*(Interface::vtable(desktop) as *const _ as *const DesktopIdentityVtable) };
-    unsafe { (vtable.GetID)(Interface::as_raw(desktop), &mut id) }.map(|| id)
+#[repr(C)]
+#[allow(non_snake_case)]
+struct ApplicationViewCollectionVtable {
+    base__: IUnknown_Vtbl,
+    GetViews: UnknownSlot,
+    GetViewsByZOrder: UnknownSlot,
+    GetViewsByAppUserModelId: UnknownSlot,
+    GetViewForHwnd: unsafe extern "system" fn(*mut c_void, HWND, *mut *mut c_void) -> HRESULT,
+}
+
+#[derive(Clone)]
+enum Desktop {
+    Win10(DesktopWin10),
+    Server(DesktopServer),
+    Win11Legacy(DesktopWin11Legacy),
+    Win11Current(DesktopWin11Current),
+}
+
+impl Desktop {
+    fn raw(&self) -> *mut c_void {
+        match self {
+            Self::Win10(value) => Interface::as_raw(value),
+            Self::Server(value) => Interface::as_raw(value),
+            Self::Win11Legacy(value) => Interface::as_raw(value),
+            Self::Win11Current(value) => Interface::as_raw(value),
+        }
+    }
+
+    fn id(&self) -> windows::core::Result<GUID> {
+        let mut id = GUID::zeroed();
+        let hr = unsafe {
+            match self {
+                Self::Win10(value) => (Interface::vtable(value).GetID)(value.as_raw(), &mut id),
+                Self::Server(value) => (Interface::vtable(value).GetID)(value.as_raw(), &mut id),
+                Self::Win11Legacy(value) => {
+                    (Interface::vtable(value).GetID)(value.as_raw(), &mut id)
+                }
+                Self::Win11Current(value) => {
+                    (Interface::vtable(value).GetID)(value.as_raw(), &mut id)
+                }
+            }
+        };
+        hr.map(|| id)
+    }
+}
+
+fn desktop_id(desktop: &Desktop) -> windows::core::Result<GUID> {
+    desktop.id()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,7 +364,11 @@ impl ShellServiceProvider {
     }
 
     unsafe fn query<T: Interface>(&self) -> windows::core::Result<T> {
-        unsafe { self.0.QueryService(&MANAGER_SERVICE_ID) }
+        unsafe { self.query_service(&MANAGER_SERVICE_ID) }
+    }
+
+    unsafe fn query_service<T: Interface>(&self, service: &GUID) -> windows::core::Result<T> {
+        unsafe { self.0.QueryService(service) }
     }
 }
 
@@ -324,7 +400,21 @@ impl Manager {
             _ => true,
         }
     }
-    fn current(&self) -> windows::core::Result<IUnknown> {
+    unsafe fn desktop_from_abi(&self, value: *mut c_void) -> windows::core::Result<Desktop> {
+        unsafe {
+            match self {
+                Self::Win10(_) => Type::from_abi(value).map(Desktop::Win10),
+                Self::Server(_) => Type::from_abi(value).map(Desktop::Server),
+                Self::Win11Monitor(_) | Self::Win11Shifted(_) => {
+                    Type::from_abi(value).map(Desktop::Win11Legacy)
+                }
+                Self::Win11Flat(_) | Self::Win11CurrentLegacy(_) | Self::Win11Current(_) => {
+                    Type::from_abi(value).map(Desktop::Win11Current)
+                }
+            }
+        }
+    }
+    fn current(&self) -> windows::core::Result<Desktop> {
         let mut out = core::ptr::null_mut();
         let hr = unsafe {
             match self {
@@ -351,7 +441,7 @@ impl Manager {
                 }
             }
         };
-        hr.and_then(|| unsafe { Type::from_abi(out) })
+        hr.and_then(|| unsafe { self.desktop_from_abi(out) })
     }
     fn desktops(&self) -> windows::core::Result<IObjectArray> {
         let mut out = core::ptr::null_mut();
@@ -382,45 +472,35 @@ impl Manager {
         };
         hr.and_then(|| unsafe { Type::from_abi(out) })
     }
-    fn switch(&self, desktop: &IUnknown) -> windows::core::Result<()> {
+    fn switch(&self, desktop: &Desktop) -> windows::core::Result<()> {
         unsafe {
             match self {
-                Self::Win10(x) => (Interface::vtable(x).SwitchDesktop)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                ),
-                Self::Server(x) => (Interface::vtable(x).SwitchDesktop)(
-                    Interface::as_raw(x),
-                    0,
-                    Interface::as_raw(desktop),
-                ),
-                Self::Win11Monitor(x) => (Interface::vtable(x).SwitchDesktop)(
-                    Interface::as_raw(x),
-                    0,
-                    Interface::as_raw(desktop),
-                ),
-                Self::Win11Shifted(x) => (Interface::vtable(x).SwitchDesktop)(
-                    Interface::as_raw(x),
-                    0,
-                    Interface::as_raw(desktop),
-                ),
-                Self::Win11Flat(x) => (Interface::vtable(x).SwitchDesktop)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                ),
-                Self::Win11CurrentLegacy(x) => (Interface::vtable(x).SwitchDesktop)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                ),
-                Self::Win11Current(x) => (Interface::vtable(x).SwitchDesktop)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                ),
+                Self::Win10(x) => {
+                    (Interface::vtable(x).SwitchDesktop)(Interface::as_raw(x), desktop.raw())
+                }
+                Self::Server(x) => {
+                    (Interface::vtable(x).SwitchDesktop)(Interface::as_raw(x), 0, desktop.raw())
+                }
+                Self::Win11Monitor(x) => {
+                    (Interface::vtable(x).SwitchDesktop)(Interface::as_raw(x), 0, desktop.raw())
+                }
+                Self::Win11Shifted(x) => {
+                    (Interface::vtable(x).SwitchDesktop)(Interface::as_raw(x), 0, desktop.raw())
+                }
+                Self::Win11Flat(x) => {
+                    (Interface::vtable(x).SwitchDesktop)(Interface::as_raw(x), desktop.raw())
+                }
+                Self::Win11CurrentLegacy(x) => {
+                    (Interface::vtable(x).SwitchDesktop)(Interface::as_raw(x), desktop.raw())
+                }
+                Self::Win11Current(x) => {
+                    (Interface::vtable(x).SwitchDesktop)(Interface::as_raw(x), desktop.raw())
+                }
             }
         }
         .ok()
     }
-    fn create(&self) -> windows::core::Result<IUnknown> {
+    fn create(&self) -> windows::core::Result<Desktop> {
         let mut out = core::ptr::null_mut();
         let hr = unsafe {
             match self {
@@ -447,51 +527,51 @@ impl Manager {
                 }
             }
         };
-        hr.and_then(|| unsafe { Type::from_abi(out) })
+        hr.and_then(|| unsafe { self.desktop_from_abi(out) })
     }
-    fn remove(&self, desktop: &IUnknown, fallback: &IUnknown) -> windows::core::Result<()> {
+    fn remove(&self, desktop: &Desktop, fallback: &Desktop) -> windows::core::Result<()> {
         unsafe {
             match self {
                 Self::Win10(x) => (Interface::vtable(x).RemoveDesktop)(
                     Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    Interface::as_raw(fallback),
+                    desktop.raw(),
+                    fallback.raw(),
                 ),
                 Self::Server(x) => (Interface::vtable(x).RemoveDesktop)(
                     Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    Interface::as_raw(fallback),
+                    desktop.raw(),
+                    fallback.raw(),
                 ),
                 Self::Win11Monitor(x) => (Interface::vtable(x).RemoveDesktop)(
                     Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    Interface::as_raw(fallback),
+                    desktop.raw(),
+                    fallback.raw(),
                 ),
                 Self::Win11Shifted(x) => (Interface::vtable(x).RemoveDesktop)(
                     Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    Interface::as_raw(fallback),
+                    desktop.raw(),
+                    fallback.raw(),
                 ),
                 Self::Win11Flat(x) => (Interface::vtable(x).RemoveDesktop)(
                     Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    Interface::as_raw(fallback),
+                    desktop.raw(),
+                    fallback.raw(),
                 ),
                 Self::Win11CurrentLegacy(x) => (Interface::vtable(x).RemoveDesktop)(
                     Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    Interface::as_raw(fallback),
+                    desktop.raw(),
+                    fallback.raw(),
                 ),
                 Self::Win11Current(x) => (Interface::vtable(x).RemoveDesktop)(
                     Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    Interface::as_raw(fallback),
+                    desktop.raw(),
+                    fallback.raw(),
                 ),
             }
         }
         .ok()
     }
-    fn rename(&self, desktop: &IUnknown, name: &str) -> windows::core::Result<()> {
+    fn rename(&self, desktop: &Desktop, name: &str) -> windows::core::Result<()> {
         let name = HSTRING::from(name);
         unsafe {
             match self {
@@ -499,39 +579,70 @@ impl Manager {
                     let named: ManagerWin10Names = x.cast()?;
                     (Interface::vtable(&named).SetDesktopName)(
                         Interface::as_raw(&named),
-                        Interface::as_raw(desktop),
+                        desktop.raw(),
                         name,
                     )
                 }
-                Self::Server(x) => (Interface::vtable(x).SetDesktopName)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    name,
+                Self::Server(x) => {
+                    (Interface::vtable(x).SetDesktopName)(Interface::as_raw(x), desktop.raw(), name)
+                }
+                Self::Win11Monitor(x) => {
+                    (Interface::vtable(x).SetDesktopName)(Interface::as_raw(x), desktop.raw(), name)
+                }
+                Self::Win11Shifted(x) => {
+                    (Interface::vtable(x).SetDesktopName)(Interface::as_raw(x), desktop.raw(), name)
+                }
+                Self::Win11Flat(x) => {
+                    (Interface::vtable(x).SetDesktopName)(Interface::as_raw(x), desktop.raw(), name)
+                }
+                Self::Win11CurrentLegacy(x) => {
+                    (Interface::vtable(x).SetDesktopName)(Interface::as_raw(x), desktop.raw(), name)
+                }
+                Self::Win11Current(x) => {
+                    (Interface::vtable(x).SetDesktopName)(Interface::as_raw(x), desktop.raw(), name)
+                }
+            }
+        }
+        .ok()
+    }
+
+    fn move_view(&self, view: &ApplicationView, desktop: &Desktop) -> windows::core::Result<()> {
+        unsafe {
+            match self {
+                Self::Win10(x) => (Interface::vtable(x).MoveViewToDesktop)(
+                    x.as_raw(),
+                    view.as_raw(),
+                    desktop.raw(),
                 ),
-                Self::Win11Monitor(x) => (Interface::vtable(x).SetDesktopName)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    name,
+                Self::Server(x) => (Interface::vtable(x).MoveViewToDesktop)(
+                    x.as_raw(),
+                    view.as_raw(),
+                    desktop.raw(),
                 ),
-                Self::Win11Shifted(x) => (Interface::vtable(x).SetDesktopName)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    name,
+                Self::Win11Monitor(x) => (Interface::vtable(x).MoveViewToDesktop)(
+                    x.as_raw(),
+                    view.as_raw(),
+                    desktop.raw(),
                 ),
-                Self::Win11Flat(x) => (Interface::vtable(x).SetDesktopName)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    name,
+                Self::Win11Shifted(x) => (Interface::vtable(x).MoveViewToDesktop)(
+                    x.as_raw(),
+                    view.as_raw(),
+                    desktop.raw(),
                 ),
-                Self::Win11CurrentLegacy(x) => (Interface::vtable(x).SetDesktopName)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    name,
+                Self::Win11Flat(x) => (Interface::vtable(x).MoveViewToDesktop)(
+                    x.as_raw(),
+                    view.as_raw(),
+                    desktop.raw(),
                 ),
-                Self::Win11Current(x) => (Interface::vtable(x).SetDesktopName)(
-                    Interface::as_raw(x),
-                    Interface::as_raw(desktop),
-                    name,
+                Self::Win11CurrentLegacy(x) => (Interface::vtable(x).MoveViewToDesktop)(
+                    x.as_raw(),
+                    view.as_raw(),
+                    desktop.raw(),
+                ),
+                Self::Win11Current(x) => (Interface::vtable(x).MoveViewToDesktop)(
+                    x.as_raw(),
+                    view.as_raw(),
+                    desktop.raw(),
                 ),
             }
         }
@@ -555,6 +666,7 @@ impl Drop for ComApartment {
 struct InternalSession {
     manager: Manager,
     desktops: IObjectArray,
+    views: Option<ApplicationViewCollection>,
     version: WindowsVersion,
     _service_provider: ShellServiceProvider,
     _apartment: ComApartment,
@@ -574,20 +686,51 @@ impl InternalSession {
         let desktops = manager
             .desktops()
             .map_err(|e| native_error("enumerate virtual desktops", e))?;
+        // This established shell service identity is paired with the verified collection ABI.
+        // A missing collection means movement is unavailable; read-only desktop operations
+        // remain usable.
+        let views = unsafe {
+            service_provider
+                .query_service::<ApplicationViewCollection>(&ApplicationViewCollection::IID)
+        }
+        .ok();
         Ok(Self {
             manager,
             desktops,
+            views,
             version,
             _service_provider: service_provider,
             _apartment: apartment,
         })
     }
-    fn desktop(&self, index: u32) -> Result<IUnknown, VirtualDesktopError> {
-        unsafe { self.desktops.GetAt(index) }.map_err(|e| {
+    fn desktop(&self, index: u32) -> Result<Desktop, VirtualDesktopError> {
+        let result = unsafe {
+            match &self.manager {
+                Manager::Win10(_) => self
+                    .desktops
+                    .GetAt::<DesktopWin10>(index)
+                    .map(Desktop::Win10),
+                Manager::Server(_) => self
+                    .desktops
+                    .GetAt::<DesktopServer>(index)
+                    .map(Desktop::Server),
+                Manager::Win11Monitor(_) | Manager::Win11Shifted(_) => self
+                    .desktops
+                    .GetAt::<DesktopWin11Legacy>(index)
+                    .map(Desktop::Win11Legacy),
+                Manager::Win11Flat(_)
+                | Manager::Win11CurrentLegacy(_)
+                | Manager::Win11Current(_) => self
+                    .desktops
+                    .GetAt::<DesktopWin11Current>(index)
+                    .map(Desktop::Win11Current),
+            }
+        };
+        result.map_err(|e| {
             native_error("index virtual desktop", e).context("native_index", index.to_string())
         })
     }
-    fn find(&self, id: &VirtualDesktopId) -> Result<IUnknown, VirtualDesktopError> {
+    fn find(&self, id: &VirtualDesktopId) -> Result<Desktop, VirtualDesktopError> {
         let count = unsafe { self.desktops.GetCount() }
             .map_err(|e| native_error("read virtual desktop count", e))?;
         for index in 0..count {
@@ -606,6 +749,27 @@ impl InternalSession {
             format!("Virtual desktop {id} no longer exists"),
         )
         .context("desktop_id", id.to_string()))
+    }
+
+    fn view_for_window(&self, hwnd: HWND) -> Result<ApplicationView, VirtualDesktopError> {
+        let views = self.views.as_ref().ok_or_else(|| {
+            VirtualDesktopError::unsupported(
+                "open shell application view collection",
+                VirtualDesktopCapability::WindowMovement,
+            )
+        })?;
+        let mut out = core::ptr::null_mut();
+        unsafe { (Interface::vtable(views).GetViewForHwnd)(views.as_raw(), hwnd, &mut out) }
+            .and_then(|| unsafe { Type::from_abi(out) })
+            .map_err(|e| native_error("resolve shell application view for window", e))
+    }
+
+    fn move_window(&self, hwnd: HWND, target: &Desktop) -> Result<(), VirtualDesktopError> {
+        validate_window(hwnd, "move window to desktop")?;
+        let view = self.view_for_window(hwnd)?;
+        self.manager
+            .move_view(&view, target)
+            .map_err(|e| native_error("move shell application view to desktop", e))
     }
 }
 fn unsupported_layout(version: Option<WindowsVersion>) -> VirtualDesktopError {
@@ -660,7 +824,7 @@ pub(super) fn snapshot() -> Result<VirtualDesktopSnapshot, VirtualDesktopError> 
             closing: true,
             renaming: session.manager.supports_rename(session.version),
             window_membership: true,
-            window_movement: true,
+            window_movement: session.views.is_some(),
         },
     })
 }
@@ -690,17 +854,78 @@ pub(super) fn create() -> Result<VirtualDesktopInfo, VirtualDesktopError> {
         is_current: false,
     })
 }
-pub(super) fn close(
-    current: &VirtualDesktopId,
-    fallback: &VirtualDesktopId,
-) -> Result<(), VirtualDesktopError> {
+pub(super) fn close_current() -> Result<(), VirtualDesktopError> {
     let session = InternalSession::open()?;
-    let current = session.find(current)?;
-    let fallback = session.find(fallback)?;
+    let count = unsafe { session.desktops.GetCount() }
+        .map_err(|e| native_error("read virtual desktop count", e))?;
+    if count < 2 {
+        return Err(VirtualDesktopError::new(
+            VirtualDesktopErrorKind::Native,
+            "close current desktop",
+            "Cannot close the only virtual desktop",
+        ));
+    }
+    let current = session
+        .manager
+        .current()
+        .map_err(|e| native_error("query current virtual desktop", e))?;
+    let current_id = id_from_guid(
+        desktop_id(&current).map_err(|e| native_error("read current desktop identity", e))?,
+    );
+    let mut current_index = None;
+    for index in 0..count {
+        let desktop = session.desktop(index)?;
+        if id_from_guid(
+            desktop_id(&desktop).map_err(|e| native_error("read virtual desktop identity", e))?,
+        ) == current_id
+        {
+            current_index = Some(index);
+            break;
+        }
+    }
+    let current_index = current_index.ok_or_else(|| {
+        VirtualDesktopError::new(
+            VirtualDesktopErrorKind::Native,
+            "close current desktop",
+            "The current virtual desktop disappeared during enumeration",
+        )
+    })?;
+    let fallback = session.desktop(if current_index + 1 < count {
+        current_index + 1
+    } else {
+        current_index - 1
+    })?;
+    // Re-read immediately before the destructive call. Both reads and RemoveDesktop use the
+    // same manager/session, so a concurrent user switch cannot close a stale selection.
+    let confirmed = session
+        .manager
+        .current()
+        .map_err(|e| native_error("confirm current virtual desktop", e))?;
+    let confirmed_id = id_from_guid(
+        desktop_id(&confirmed).map_err(|e| native_error("confirm current desktop identity", e))?,
+    );
+    ensure_expected_current(&current_id, &confirmed_id)?;
     session
         .manager
-        .remove(&current, &fallback)
+        .remove(&confirmed, &fallback)
         .map_err(|e| native_error("close virtual desktop", e))
+}
+
+fn ensure_expected_current(
+    selected: &VirtualDesktopId,
+    actual: &VirtualDesktopId,
+) -> Result<(), VirtualDesktopError> {
+    if selected == actual {
+        Ok(())
+    } else {
+        Err(VirtualDesktopError::new(
+            VirtualDesktopErrorKind::Native,
+            "close current desktop",
+            "The current virtual desktop changed before it could be closed; retry the command",
+        )
+        .context("selected_desktop", selected.to_string())
+        .context("current_desktop", actual.to_string()))
+    }
 }
 pub(super) fn rename(target: &VirtualDesktopId, name: &str) -> Result<(), VirtualDesktopError> {
     let session = InternalSession::open()?;
@@ -744,6 +969,9 @@ pub(super) fn desktop_for_window(hwnd: HWND) -> Result<VirtualDesktopId, Virtual
 pub(super) fn desktops_for_windows(
     hwnds: &[usize],
 ) -> Result<Vec<(usize, Option<VirtualDesktopId>)>, VirtualDesktopError> {
+    if hwnds.is_empty() {
+        return Ok(Vec::new());
+    }
     let session = PublicSession::open("get desktops for windows")?;
     Ok(hwnds
         .iter()
@@ -769,18 +997,53 @@ pub(super) fn move_window_to_desktop(
     hwnd: HWND,
     desktop: &VirtualDesktopId,
 ) -> Result<(), VirtualDesktopError> {
-    validate_window(hwnd, "move window to desktop")?;
-    let session = PublicSession::open("move window to desktop")?;
-    let target = guid_from_id(desktop);
-    if unsafe { session.manager.GetWindowDesktopId(hwnd) }
-        .map_err(|e| native_error("get desktop for window", e))?
-        == target
-    {
-        return Ok(());
-    }
-    unsafe { session.manager.MoveWindowToDesktop(hwnd, &target) }.map_err(|e| {
-        native_error("move window to desktop", e).context("desktop_id", desktop.to_string())
+    let session = InternalSession::open()?;
+    let target = session.find(desktop)?;
+    session.move_window(hwnd, &target).map_err(|error| {
+        error
+            .context("desktop_id", desktop.to_string())
+            .context("hwnd", format!("{:?}", hwnd))
     })
+}
+
+pub(super) fn move_windows_to_desktops(
+    requests: &[(usize, VirtualDesktopId)],
+) -> Vec<(usize, Result<(), VirtualDesktopError>)> {
+    if requests.is_empty() {
+        return Vec::new();
+    }
+    let session = match InternalSession::open() {
+        Ok(session) => session,
+        Err(error) => {
+            return requests
+                .iter()
+                .map(|(hwnd, _)| (*hwnd, Err(error.clone())))
+                .collect();
+        }
+    };
+    let mut targets: Vec<(VirtualDesktopId, Result<Desktop, VirtualDesktopError>)> = Vec::new();
+    requests
+        .iter()
+        .map(|(raw, desktop)| {
+            let target = if let Some((_, target)) = targets.iter().find(|(id, _)| id == desktop) {
+                target.clone()
+            } else {
+                let target = session.find(desktop);
+                targets.push((desktop.clone(), target.clone()));
+                target
+            };
+            let result = target.and_then(|target| {
+                session
+                    .move_window(HWND(*raw as *mut _), &target)
+                    .map_err(|error| {
+                        error
+                            .context("desktop_id", desktop.to_string())
+                            .context("hwnd", raw.to_string())
+                    })
+            });
+            (*raw, result)
+        })
+        .collect()
 }
 fn validate_window(hwnd: HWND, operation: &'static str) -> Result<(), VirtualDesktopError> {
     if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
@@ -828,12 +1091,22 @@ fn desktop_name(id: &VirtualDesktopId) -> Option<String> {
 fn windows_version() -> Option<WindowsVersion> {
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
     let path = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
-    Some(WindowsVersion {
-        build: registry_string(HKEY_LOCAL_MACHINE, path, "CurrentBuildNumber")?
-            .parse()
-            .ok()?,
-        revision: registry_dword(HKEY_LOCAL_MACHINE, path, "UBR").unwrap_or(0),
-    })
+    let build = registry_string(HKEY_LOCAL_MACHINE, path, "CurrentBuildNumber")?
+        .parse()
+        .ok()?;
+    let revision = registry_dword(HKEY_LOCAL_MACHINE, path, "UBR");
+    windows_version_from_parts(build, revision)
+}
+
+fn windows_version_from_parts(build: u32, revision: Option<u32>) -> Option<WindowsVersion> {
+    // Build 26100 changes ABI at UBR 863. Missing revision data is therefore unsafe rather than
+    // equivalent to revision zero. Other verified families do not branch on UBR.
+    let revision = if build == 26_100 {
+        revision?
+    } else {
+        revision.unwrap_or(0)
+    };
+    Some(WindowsVersion { build, revision })
 }
 fn registry_string(
     root: windows::Win32::System::Registry::HKEY,
@@ -949,6 +1222,100 @@ mod tests {
         assert_eq!(shell_layout(v(26100, 863)), Some(ShellLayout::Win11Current));
         assert_eq!(shell_layout(v(26200, 0)), Some(ShellLayout::Win11Current));
         assert_eq!(shell_layout(v(26300, 0)), None);
+    }
+
+    #[test]
+    fn object_array_desktop_iid_matches_each_selected_abi_family() {
+        assert_eq!(
+            DesktopWin10::IID,
+            GUID::from_u128(0xff72ffdd_be7e_43fc_9c03_ad81681e88e4)
+        );
+        assert_eq!(
+            DesktopServer::IID,
+            GUID::from_u128(0x62fdf88b_11ca_4afb_8bd8_2296dfae49e2)
+        );
+        assert_eq!(
+            DesktopWin11Legacy::IID,
+            GUID::from_u128(0x536d3495_b208_4cc9_ae26_de8111275bf8)
+        );
+        assert_eq!(
+            DesktopWin11Current::IID,
+            GUID::from_u128(0x3f07f4be_b107_441a_af0f_39d82529072c)
+        );
+        let source = include_str!("windows.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(production.contains("GetAt::<DesktopWin10>"));
+        assert!(production.contains("GetAt::<DesktopServer>"));
+        assert!(production.contains("GetAt::<DesktopWin11Legacy>"));
+        assert!(production.contains("GetAt::<DesktopWin11Current>"));
+        assert!(!production.contains("GetAt::<IUnknown>"));
+    }
+
+    #[test]
+    fn application_view_move_uses_the_verified_manager_slot_for_every_family() {
+        assert_eq!(
+            ApplicationViewCollection::IID,
+            GUID::from_u128(0x1841c6d7_4f9d_42c0_af41_8747538f10e5)
+        );
+        assert_eq!(
+            ApplicationView::IID,
+            GUID::from_u128(0x372e1d3b_38d3_42e4_a15b_8ab2b178f513)
+        );
+        let source = include_str!("windows.rs");
+        let move_view = source
+            .split("fn move_view(")
+            .nth(1)
+            .unwrap()
+            .split("struct ComApartment")
+            .next()
+            .unwrap();
+        for family in [
+            "Win10",
+            "Server",
+            "Win11Monitor",
+            "Win11Shifted",
+            "Win11Flat",
+            "Win11CurrentLegacy",
+            "Win11Current",
+        ] {
+            assert!(move_view.contains(&format!("Self::{family}")), "{family}");
+        }
+        assert!(move_view.contains(".MoveViewToDesktop"));
+    }
+
+    #[test]
+    fn missing_revision_is_rejected_for_layout_sensitive_build() {
+        assert_eq!(windows_version_from_parts(26_100, None), None);
+        assert_eq!(
+            windows_version_from_parts(26_100, Some(862))
+                .unwrap()
+                .revision,
+            862
+        );
+        assert_eq!(
+            windows_version_from_parts(22_631, None).unwrap().revision,
+            0
+        );
+    }
+
+    #[test]
+    fn close_precondition_aborts_if_current_desktop_changed() {
+        let selected = VirtualDesktopId::parse("00000001-0000-0000-0000-000000000000").unwrap();
+        let actual = VirtualDesktopId::parse("00000002-0000-0000-0000-000000000000").unwrap();
+        let error = ensure_expected_current(&selected, &actual).unwrap_err();
+        assert!(error.message.contains("changed"));
+        assert_eq!(error.context["selected_desktop"], selected.to_string());
+        assert!(ensure_expected_current(&selected, &selected).is_ok());
+        let close = include_str!("windows.rs")
+            .split("pub(super) fn close_current")
+            .nth(1)
+            .unwrap()
+            .split("fn ensure_expected_current")
+            .next()
+            .unwrap();
+        assert_eq!(close.matches("InternalSession::open()").count(), 1);
+        assert_eq!(close.matches(".current()").count(), 2);
+        assert!(close.contains(".remove(&confirmed, &fallback)"));
     }
 
     #[test]
