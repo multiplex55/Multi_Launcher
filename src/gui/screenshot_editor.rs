@@ -1,3 +1,6 @@
+use crate::annotation::raster::{
+    self, Color as RasterColor, Point as RasterPoint, Rect as RasterRect,
+};
 use crate::gui::LauncherApp;
 use eframe::egui::{
     self, Color32, PointerButton, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Vec2,
@@ -100,116 +103,37 @@ impl MarkupHistory {
     }
 }
 
-fn blend_pixel(img: &mut RgbaImage, x: u32, y: u32, color: Color32) {
-    let [r, g, b, a] = color.to_array();
-    if a == 0 {
-        return;
-    }
-    let dst = img.get_pixel(x, y).0;
-    let src_a = a as f32 / 255.0;
-    let dst_a = dst[3] as f32 / 255.0;
-    let out_a = src_a + dst_a * (1.0 - src_a);
-    if out_a <= 0.0 {
-        return;
-    }
-    let blend = |src: u8, dst: u8| {
-        let src_f = src as f32 / 255.0;
-        let dst_f = dst as f32 / 255.0;
-        ((src_f * src_a + dst_f * dst_a * (1.0 - src_a)) / out_a * 255.0)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    img.put_pixel(
-        x,
-        y,
-        image::Rgba([
-            blend(r, dst[0]),
-            blend(g, dst[1]),
-            blend(b, dst[2]),
-            (out_a * 255.0) as u8,
-        ]),
-    );
-}
-
-fn draw_circle(img: &mut RgbaImage, center: Pos2, radius: f32, color: Color32) {
-    if radius <= 0.0 {
-        return;
-    }
-    let radius_sq = radius * radius;
-    let width = img.width() as i32;
-    let height = img.height() as i32;
-    let min_x = (center.x - radius).floor().max(0.0) as i32;
-    let max_x = (center.x + radius).ceil().min((width - 1) as f32) as i32;
-    let min_y = (center.y - radius).floor().max(0.0) as i32;
-    let max_y = (center.y + radius).ceil().min((height - 1) as f32) as i32;
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            let dx = x as f32 + 0.5 - center.x;
-            let dy = y as f32 + 0.5 - center.y;
-            if dx * dx + dy * dy <= radius_sq {
-                blend_pixel(img, x as u32, y as u32, color);
-            }
-        }
-    }
-}
-
 fn draw_line(img: &mut RgbaImage, start: Pos2, end: Pos2, color: Color32, thickness: f32) {
-    let dx = end.x - start.x;
-    let dy = end.y - start.y;
-    let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as i32;
-    let radius = (thickness / 2.0).max(0.5);
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let point = Pos2::new(start.x + dx * t, start.y + dy * t);
-        draw_circle(img, point, radius, color);
-    }
+    raster::draw_line(
+        img,
+        RasterPoint::new(start.x, start.y),
+        RasterPoint::new(end.x, end.y),
+        RasterColor(color.to_array()),
+        thickness,
+    );
 }
 
 fn draw_rect_outline(img: &mut RgbaImage, rect: Rect, color: Color32, thickness: f32) {
-    let min = rect.min;
-    let max = rect.max;
-    draw_line(
+    raster::draw_rect_outline(
         img,
-        Pos2::new(min.x, min.y),
-        Pos2::new(max.x, min.y),
-        color,
-        thickness,
-    );
-    draw_line(
-        img,
-        Pos2::new(max.x, min.y),
-        Pos2::new(max.x, max.y),
-        color,
-        thickness,
-    );
-    draw_line(
-        img,
-        Pos2::new(max.x, max.y),
-        Pos2::new(min.x, max.y),
-        color,
-        thickness,
-    );
-    draw_line(
-        img,
-        Pos2::new(min.x, max.y),
-        Pos2::new(min.x, min.y),
-        color,
+        RasterRect::from_corners(
+            RasterPoint::new(rect.min.x, rect.min.y),
+            RasterPoint::new(rect.max.x, rect.max.y),
+        ),
+        RasterColor(color.to_array()),
         thickness,
     );
 }
 
 fn draw_rect_fill(img: &mut RgbaImage, rect: Rect, color: Color32) {
-    let width = img.width() as i32;
-    let height = img.height() as i32;
-    let min_x = rect.min.x.floor().max(0.0) as i32;
-    let max_x = rect.max.x.ceil().min((width - 1) as f32) as i32;
-    let min_y = rect.min.y.floor().max(0.0) as i32;
-    let max_y = rect.max.y.ceil().min((height - 1) as f32) as i32;
-    for y in min_y..=max_y {
-        for x in min_x..=max_x {
-            blend_pixel(img, x as u32, y as u32, color);
-        }
-    }
+    raster::draw_rect_fill(
+        img,
+        RasterRect::from_corners(
+            RasterPoint::new(rect.min.x, rect.min.y),
+            RasterPoint::new(rect.max.x, rect.max.y),
+        ),
+        RasterColor(color.to_array()),
+    );
 }
 
 fn rotate_vec(vec: Vec2, angle: f32) -> Vec2 {
@@ -217,29 +141,8 @@ fn rotate_vec(vec: Vec2, angle: f32) -> Vec2 {
     Vec2::new(vec.x * cos - vec.y * sin, vec.x * sin + vec.y * cos)
 }
 
-fn default_font_data() -> Option<(egui::FontData, egui::FontTweak)> {
-    let definitions = egui::FontDefinitions::default();
-    let family = definitions.families.get(&egui::FontFamily::Proportional)?;
-    let font_name = family.first()?;
-    let data = definitions.font_data.get(font_name)?.clone();
-    Some((data.clone(), data.tweak))
-}
-
 fn default_font_arc() -> Option<(ab_glyph::FontArc, egui::FontTweak)> {
-    let (data, tweak) = default_font_data()?;
-    let font = match data.font {
-        std::borrow::Cow::Borrowed(bytes) => {
-            ab_glyph::FontRef::try_from_slice_and_index(bytes, data.index)
-                .map(ab_glyph::FontArc::from)
-                .ok()
-        }
-        std::borrow::Cow::Owned(bytes) => {
-            ab_glyph::FontVec::try_from_vec_and_index(bytes, data.index)
-                .map(ab_glyph::FontArc::from)
-                .ok()
-        }
-    }?;
-    Some((font, tweak))
+    raster::default_font_arc()
 }
 
 fn draw_text(
@@ -251,30 +154,15 @@ fn draw_text(
     color: Color32,
     size: f32,
 ) {
-    use ab_glyph::{Font, ScaleFont, point};
-    if text.is_empty() {
-        return;
-    }
-    let scaled = font.as_scaled(size * tweak.scale);
-    let mut caret = point(pos.x, pos.y + scaled.ascent() + tweak.y_offset * size);
-    for ch in text.chars() {
-        let mut glyph = scaled.scaled_glyph(ch);
-        glyph.position = caret;
-        caret.x += scaled.h_advance(glyph.id);
-        if let Some(outlined) = scaled.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            outlined.draw(|x, y, coverage| {
-                let px = x as i32 + bounds.min.x as i32;
-                let py = y as i32 + bounds.min.y as i32;
-                if px >= 0 && py >= 0 && px < img.width() as i32 && py < img.height() as i32 {
-                    let alpha = (color.a() as f32 * coverage).round().clamp(0.0, 255.0) as u8;
-                    let blended =
-                        Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
-                    blend_pixel(img, px as u32, py as u32, blended);
-                }
-            });
-        }
-    }
+    raster::draw_text(
+        img,
+        font,
+        tweak,
+        RasterPoint::new(pos.x, pos.y),
+        text,
+        RasterColor(color.to_array()),
+        size,
+    );
 }
 
 pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaImage {

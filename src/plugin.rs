@@ -40,6 +40,7 @@ use crate::plugins::random::RandomPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::reddit::RedditPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
+use crate::plugins::screen_draw::ScreenDrawPlugin;
 use crate::plugins::screenshot::ScreenshotPlugin;
 use crate::plugins::settings::SettingsPlugin;
 use crate::plugins::shell::ShellPlugin;
@@ -609,6 +610,7 @@ impl PluginManager {
         self.register_with_settings(EmojiPlugin::default(), plugin_settings);
         self.register_with_settings(TextCasePlugin, plugin_settings);
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
+        self.register_with_settings(ScreenDrawPlugin, plugin_settings);
         self.register_with_settings(CropPlugin, plugin_settings);
         self.register_with_settings(DataPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);

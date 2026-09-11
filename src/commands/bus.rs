@@ -2,8 +2,8 @@ use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcom
 use crate::commands::handlers::{
     handle_calendar, handle_clipboard_modify, handle_crop, handle_data, handle_diff,
     handle_file_search, handle_headless_gui, handle_launcher, handle_link, handle_mouse_gesture,
-    handle_multi_manager, handle_note, handle_query, handle_screenshot, handle_simple_dialog,
-    handle_todo,
+    handle_multi_manager, handle_note, handle_query, handle_screen_draw, handle_screenshot,
+    handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -37,6 +37,7 @@ impl CommandBus {
             Command::FileSearch(command) => Ok(handle_file_search(host, command)),
             Command::Diff(command) => handle_diff(host, command),
             Command::Screenshot(command) => handle_screenshot(host, command),
+            Command::ScreenDraw(command) => handle_screen_draw(host, command),
             Command::ClipboardModify(command) => {
                 Ok(handle_clipboard_modify(host, command, invocation))
             }
@@ -83,6 +84,7 @@ mod tests {
         file_search_calls: usize,
         diff_calls: usize,
         screenshot_calls: usize,
+        screen_draw_calls: Vec<crate::commands::ScreenDrawCommand>,
         clipboard_modify_calls: usize,
         data_calls: Vec<&'static str>,
     }
@@ -269,6 +271,15 @@ mod tests {
         }
         fn screenshot_launcher_should_refocus(&self) -> bool {
             false
+        }
+    }
+    impl crate::commands::ScreenDrawCommandHost for FakeHost {
+        fn execute_screen_draw_command(
+            &mut self,
+            command: crate::commands::ScreenDrawCommand,
+        ) -> Result<(), String> {
+            self.screen_draw_calls.push(command);
+            Ok(())
         }
     }
     impl crate::commands::ClipboardModifyCommandHost for FakeHost {
@@ -494,6 +505,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.screenshot_calls, 1);
+
+        let screen_draw = CommandBus
+            .dispatch(
+                &invocation(Command::ScreenDraw(
+                    crate::commands::ScreenDrawCommand::Start,
+                )),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            host.screen_draw_calls,
+            [crate::commands::ScreenDrawCommand::Start]
+        );
+        assert_eq!(screen_draw.visibility, VisibilityPolicy::Hide);
+        assert_eq!(screen_draw.history, crate::commands::HistoryPolicy::Record);
 
         CommandBus
             .dispatch(

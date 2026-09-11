@@ -200,6 +200,7 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
         "file_search",
         "omni_search",
         "data",
+        "screen_draw",
     ] {
         assert!(plugin_names.contains(name), "missing plugin {name}");
     }
@@ -227,6 +228,7 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
             "Open the application data folder",
             "data:folder",
         ),
+        ("Screen Draw", "Screen Draw", "screen_draw:start"),
     ] {
         assert!(
             commands.contains(&(expected.0.into(), expected.1.into(), expected.2.into())),

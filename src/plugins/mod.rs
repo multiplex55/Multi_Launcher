@@ -40,6 +40,7 @@ pub mod random;
 pub mod recycle;
 pub mod reddit;
 pub mod runescape;
+pub mod screen_draw;
 pub mod screenshot;
 pub mod settings;
 pub mod shell;

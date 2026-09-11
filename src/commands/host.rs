@@ -120,6 +120,13 @@ pub trait ScreenshotCommandHost {
     fn screenshot_launcher_should_refocus(&self) -> bool;
 }
 
+pub trait ScreenDrawCommandHost {
+    fn execute_screen_draw_command(
+        &mut self,
+        command: super::ScreenDrawCommand,
+    ) -> Result<(), String>;
+}
+
 pub trait ClipboardModifyCommandHost {
     fn open_clipboard_modify(&mut self, section: ClipboardModifySectionPayload);
     fn undo_clipboard_modify(&mut self) -> Result<(), String>;
@@ -170,6 +177,7 @@ pub trait CommandHost:
     + FileSearchCommandHost
     + DiffCommandHost
     + ScreenshotCommandHost
+    + ScreenDrawCommandHost
     + ClipboardModifyCommandHost
     + DataCommandHost
     + HeadlessCommandHost
@@ -188,6 +196,7 @@ impl<T> CommandHost for T where
         + FileSearchCommandHost
         + DiffCommandHost
         + ScreenshotCommandHost
+        + ScreenDrawCommandHost
         + ClipboardModifyCommandHost
         + DataCommandHost
         + HeadlessCommandHost

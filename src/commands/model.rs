@@ -61,6 +61,7 @@ pub enum Command {
     Diff(DiffCommand),
     ClipboardModify(ClipboardModifyCommand),
     Screenshot(ScreenshotCommand),
+    ScreenDraw(ScreenDrawCommand),
     Shell(ShellCommand),
     Clipboard(ClipboardCommand),
     Calculator(CalculatorCommand),
@@ -93,6 +94,7 @@ impl Command {
             Self::Diff(_) => "diff",
             Self::ClipboardModify(_) => "clipboard_modify",
             Self::Screenshot(_) => "screenshot",
+            Self::ScreenDraw(_) => "screen_draw",
             Self::Shell(_) => "shell",
             Self::Clipboard(_) => "clipboard",
             Self::Calculator(_) => "calculator",
@@ -124,6 +126,7 @@ impl Command {
             Self::Diff(v) => v.kind_name(),
             Self::ClipboardModify(v) => v.kind_name(),
             Self::Screenshot(v) => v.kind_name(),
+            Self::ScreenDraw(v) => v.kind_name(),
             Self::Shell(v) => v.kind_name(),
             Self::Clipboard(v) => v.kind_name(),
             Self::Calculator(v) => v.kind_name(),
@@ -143,6 +146,23 @@ impl Command {
 }
 
 macro_rules! kinds { ($t:ty, $($pat:pat => $name:literal),+ $(,)?) => { impl $t { pub fn kind_name(&self) -> &'static str { match self { $($pat => $name,)+ } } } }; }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenDrawCommand {
+    Start,
+    OpenToolbar,
+    NewCapture,
+    Ghost,
+    Done,
+    Clear,
+    Close,
+}
+
+kinds!(ScreenDrawCommand,
+    Self::Start => "start", Self::OpenToolbar => "toolbar",
+    Self::NewCapture => "new_capture", Self::Ghost => "ghost",
+    Self::Done => "done", Self::Clear => "clear", Self::Close => "close"
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VirtualDesktopCommand {

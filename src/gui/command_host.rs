@@ -6,9 +6,9 @@ use crate::commands::{
     CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
     FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
     LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenshotCommandHost, ScreenshotCommandResult,
-    ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost,
-    VisibilityPolicy,
+    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenDrawCommandHost, ScreenshotCommandHost,
+    ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy,
+    TodoCommandHost, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -16,6 +16,35 @@ use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
 impl LauncherCommandHost for LauncherApp {
     fn launcher_is_visible(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst)
+    }
+}
+
+impl ScreenDrawCommandHost for LauncherApp {
+    fn execute_screen_draw_command(
+        &mut self,
+        command: crate::commands::ScreenDrawCommand,
+    ) -> Result<(), String> {
+        use crate::commands::ScreenDrawCommand;
+
+        let result = match command {
+            ScreenDrawCommand::Start => self.screen_draw_controller.request_start().map(|_| ()),
+            ScreenDrawCommand::OpenToolbar => {
+                self.screen_draw_controller.open_toolbar();
+                Ok(())
+            }
+            ScreenDrawCommand::NewCapture => self
+                .screen_draw_controller
+                .request_new_capture()
+                .map(|_| ()),
+            ScreenDrawCommand::Ghost => self.screen_draw_controller.enter_ghost(),
+            ScreenDrawCommand::Done => self.screen_draw_controller.finish(),
+            ScreenDrawCommand::Clear => self.screen_draw_controller.request_clear(),
+            ScreenDrawCommand::Close => {
+                self.screen_draw_controller.close();
+                Ok(())
+            }
+        };
+        result.map_err(|error| error.to_string())
     }
 }
 
@@ -808,6 +837,58 @@ impl LauncherApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app() -> LauncherApp {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.keep();
+        LauncherApp::new(
+            &eframe::egui::Context::default(),
+            std::sync::Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            crate::settings::Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn launcher_host_routes_screen_draw_commands_only_through_the_controller() {
+        let mut app = test_app();
+        ScreenDrawCommandHost::execute_screen_draw_command(
+            &mut app,
+            crate::commands::ScreenDrawCommand::Start,
+        )
+        .unwrap();
+        assert!(matches!(
+            app.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::AwaitingLauncherHide { .. }
+        ));
+        assert!(!app.screen_draw_controller.toolbar_open());
+
+        ScreenDrawCommandHost::execute_screen_draw_command(
+            &mut app,
+            crate::commands::ScreenDrawCommand::Close,
+        )
+        .unwrap();
+        ScreenDrawCommandHost::execute_screen_draw_command(
+            &mut app,
+            crate::commands::ScreenDrawCommand::OpenToolbar,
+        )
+        .unwrap();
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::NoSession
+        );
+        assert!(app.screen_draw_controller.toolbar_open());
+    }
 
     #[test]
     fn clipboard_modify_commands_reject_query_override_reclassification() {

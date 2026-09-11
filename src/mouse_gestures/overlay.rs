@@ -674,11 +674,7 @@ impl DefaultOverlayBackend {
 #[cfg(windows)]
 impl OverlayBackend for DefaultOverlayBackend {
     fn draw_trail_segment(&mut self, from: (f32, f32), to: (f32, f32), color: [u8; 4], width: f32) {
-        use windows::Win32::Foundation::COLORREF;
         use windows::Win32::Graphics::Gdi::InvalidateRect;
-        use windows::Win32::Graphics::Gdi::{
-            CreatePen, DeleteObject, LineTo, MoveToEx, PS_SOLID, SelectObject,
-        };
 
         let needs_raise = self.trail_needs_raise;
 
@@ -711,22 +707,15 @@ impl OverlayBackend for DefaultOverlayBackend {
             return;
         };
 
-        let colorref =
-            COLORREF((color[0] as u32) | ((color[1] as u32) << 8) | ((color[2] as u32) << 16));
-        let pen = unsafe { CreatePen(PS_SOLID, width.max(1.0) as i32, colorref) };
-        let old_pen = unsafe { SelectObject(surface.mem_dc, pen) };
-
-        let fx = from.0 as i32 - surface.origin_x;
-        let fy = from.1 as i32 - surface.origin_y;
-        let tx = to.0 as i32 - surface.origin_x;
-        let ty = to.1 as i32 - surface.origin_y;
-
-        let _ = unsafe { MoveToEx(surface.mem_dc, fx, fy, None) };
-        let _ = unsafe { LineTo(surface.mem_dc, tx, ty) };
-
         unsafe {
-            SelectObject(surface.mem_dc, old_pen);
-            let _ = DeleteObject(pen);
+            crate::platform::gdi_stroke::draw_solid_segment(
+                surface.mem_dc,
+                from,
+                to,
+                (surface.origin_x, surface.origin_y),
+                [color[0], color[1], color[2]],
+                width,
+            );
             let _ = InvalidateRect(surface.hwnd, None, false);
         }
     }

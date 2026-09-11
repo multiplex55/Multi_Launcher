@@ -1001,6 +1001,7 @@ impl eframe::App for LauncherApp {
         if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
+        self.poll_screen_draw_capture(ctx);
         self.multi_manager_drain_runtime_events();
         self.poll_clipboard_modify_runtime(ctx);
         let _ = self.multi_manager.start_pending_automatic_reconnect();
@@ -1881,6 +1882,33 @@ impl eframe::App for LauncherApp {
 }
 
 impl LauncherApp {
+    fn poll_screen_draw_capture(&mut self, ctx: &egui::Context) {
+        let repaint_ctx = ctx.clone();
+        let poll = self.screen_draw_controller.poll_capture(
+            self.launcher_hwnd,
+            Arc::new(move || repaint_ctx.request_repaint()),
+        );
+        self.apply_screen_draw_capture_poll(ctx, poll);
+    }
+
+    fn apply_screen_draw_capture_poll(
+        &mut self,
+        ctx: &egui::Context,
+        poll: crate::screen_draw::ScreenDrawCapturePoll,
+    ) {
+        if poll.hide_launcher {
+            crate::visibility::hide_root_for_screen_draw_capture(ctx);
+        }
+        if poll.restore_launcher {
+            self.visible_flag.store(true, Ordering::SeqCst);
+            self.restore_flag.store(true, Ordering::SeqCst);
+        }
+        if let Some(diagnostic) = poll.diagnostic {
+            tracing::error!(error = %diagnostic, "Screen Draw capture failed");
+            self.report_error_message("screen_draw.capture", diagnostic);
+        }
+    }
+
     fn multi_manager_save_on_exit(&self) -> bool {
         self.multi_manager_settings.save_on_exit
     }
@@ -1928,6 +1956,29 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn screen_draw_capture_failure_restores_launcher_and_reports_diagnostic() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.show_inline_errors = true;
+
+        app.apply_screen_draw_capture_poll(
+            &ctx,
+            crate::screen_draw::ScreenDrawCapturePoll {
+                restore_launcher: true,
+                diagnostic: Some("fixture capture failure".into()),
+                ..Default::default()
+            },
+        );
+
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(app.error.as_deref(), Some("fixture capture failure"));
+        assert!(!app.screen_draw_controller.toolbar_open());
     }
 
     fn two_results() -> Vec<Action> {

@@ -450,6 +450,9 @@ pub struct LauncherApp {
     pub error: Option<String>,
     error_time: Option<Instant>,
     pub plugins: PluginManager,
+    /// Main-thread orchestration for Screen Draw. Native session resources are
+    /// intentionally owned outside `LauncherApp` by the later worker layer.
+    pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
     pub selected: Option<usize>,
     /// Test seam for verifying that command dispatch used normal activation,
     /// including the activation source, without launching an external process.
@@ -1561,6 +1564,7 @@ impl LauncherApp {
             error: None,
             error_time: None,
             plugins,
+            screen_draw_controller: crate::screen_draw::ScreenDrawController::default(),
             selected: None,
             #[cfg(test)]
             test_last_activation: None,
