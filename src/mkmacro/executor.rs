@@ -579,9 +579,7 @@ pub fn production_backends() -> Backends {
         Backends {
             notification: Arc::new(super::notifications::WindowsNotificationBackend::new()),
             sound: Arc::new(ProductionSoundBackend),
-            virtual_desktop: Arc::new(super::virtual_desktops::WindowsVirtualDesktopBackend(
-                input.clone(),
-            )),
+            virtual_desktop: Arc::new(super::virtual_desktops::WindowsVirtualDesktopBackend::new()),
             input,
             window: Arc::new(super::windows::Win32WindowBackend),
             screen: Arc::new(super::screen::WindowsScreenBackend::system()),

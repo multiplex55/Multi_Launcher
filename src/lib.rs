@@ -55,7 +55,9 @@ pub mod startup;
 pub mod text_transform;
 pub mod toast_log;
 pub mod usage;
+pub mod virtual_desktop;
 pub mod visibility;
+pub mod window_activation;
 
 pub mod global_hotkey;
 pub mod graph;

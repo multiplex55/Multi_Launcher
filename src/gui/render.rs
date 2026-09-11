@@ -1109,7 +1109,7 @@ impl eframe::App for LauncherApp {
                 (self.window_size.0 as f32, self.window_size.1 as f32),
             );
             if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
-                crate::window_manager::force_restore_and_foreground(hwnd);
+                crate::window_manager::restore_launcher_to_current_desktop(hwnd);
             }
         }
 

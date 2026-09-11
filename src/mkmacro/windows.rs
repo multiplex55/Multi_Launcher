@@ -277,15 +277,27 @@ fn close_handle(_: usize) -> ExecResult {
 }
 #[cfg(windows)]
 fn activate_handle(h: usize) -> ExecResult {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-    let hwnd = HWND(h as *mut _);
-    if !unsafe { SetForegroundWindow(hwnd) }.as_bool() || unsafe { GetForegroundWindow() } != hwnd {
-        return Err(ExecutionDiagnostic::new(
-            DiagnosticKind::Backend,
-            "Windows foreground-activation policy denied the request",
-        ));
-    }
+    let request = crate::window_activation::WindowActivationRequest::follow_window(h);
+    crate::window_activation::activate_window(request).map_err(|error| {
+        let kind = match error.kind {
+            crate::window_activation::WindowActivationErrorKind::InvalidWindow => {
+                DiagnosticKind::InvalidTarget
+            }
+            crate::window_activation::WindowActivationErrorKind::Desktop => {
+                DiagnosticKind::ComFailure
+            }
+            crate::window_activation::WindowActivationErrorKind::ForegroundDenied => {
+                DiagnosticKind::Backend
+            }
+        };
+        let mut diagnostic = ExecutionDiagnostic::new(kind, error.message)
+            .context("backend", "window activation")
+            .context("desktop_policy", "FollowWindow");
+        for (key, value) in error.context {
+            diagnostic = diagnostic.context(key, value);
+        }
+        diagnostic
+    })?;
     Ok(())
 }
 #[cfg(windows)]
