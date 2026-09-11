@@ -880,7 +880,7 @@ mod tests {
                 down,
                 vk,
                 scan_code: 0,
-                extended: false,
+                extended: matches!(vk, 0xA3 | 0xA5),
                 flags: 0,
                 extra_info: 0,
             },

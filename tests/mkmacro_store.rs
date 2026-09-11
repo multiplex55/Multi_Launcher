@@ -923,7 +923,7 @@ fn recorder_settings_round_trip_and_clamp_at_public_store_boundary() {
     assert_eq!(actual.delay_rounding_ms, 1);
     assert_eq!(actual.key_tap_max_ms, 1);
     assert_eq!(actual.text_run_gap_ms, 60_000);
-    assert_eq!(actual.repeated_click_minimum, 2);
+    assert_eq!(actual.repeated_click_minimum, REPEATED_CLICK_MINIMUM_MIN);
     assert_eq!(actual.repeated_click_interval_tolerance_ms, 10_000);
     assert_eq!(
         actual.pause_resume_hotkey.as_ref().unwrap().key,
