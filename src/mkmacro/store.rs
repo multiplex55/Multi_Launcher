@@ -173,6 +173,7 @@ impl MkMacroStore {
         let _transaction = self.inner.transaction.lock().unwrap();
         let before = self.snapshot().macros.len();
         doc.schema_version = SCHEMA_VERSION;
+        doc.settings.recorder.clamp();
         repair_ids(doc);
         persist(&self.inner.path, doc)?;
         before_publication();
@@ -667,10 +668,16 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if value.get("schema_version").and_then(|v| v.as_u64()) == Some(12) {
         migrate_v12_to_v13(&mut value);
     }
+    if value.get("schema_version").and_then(|v| v.as_u64()) == Some(13) {
+        migrate_v13_to_v14(&mut value)?;
+    }
     let mut doc: MkMacroDocument =
         serde_json::from_value(value).context("mkmacros.json does not match the macro schema")?;
     let mut changed = input_version != SCHEMA_VERSION;
     doc.schema_version = SCHEMA_VERSION;
+    let recorder_before = doc.settings.recorder.clone();
+    doc.settings.recorder.clamp();
+    changed |= doc.settings.recorder != recorder_before;
     changed |= repair_ids(&mut doc);
     Ok(Some((doc, changed)))
 }
@@ -691,6 +698,9 @@ pub(crate) fn probe_document(bytes: &[u8]) -> Result<DocumentProbe> {
         .unwrap_or(0) as u32;
     if input_version > SCHEMA_VERSION {
         return Ok(DocumentProbe::Unsupported(input_version));
+    }
+    if input_version == 13 {
+        migrate_v13_to_v14(&mut value)?;
     }
     if input_version >= 11 {
         serde_json::from_value::<MkMacroDocument>(value)?;
@@ -737,6 +747,46 @@ fn migrate_v11_to_v12(value: &mut serde_json::Value) {
 /// OCR persistence is additive, so schema-12 documents retain all content.
 fn migrate_v12_to_v13(value: &mut serde_json::Value) {
     value["schema_version"] = serde_json::json!(13);
+}
+
+/// Recorder persistence is additive. Install the complete default object while
+/// preserving every existing macro, folder, hotkey, and authoring field.
+fn migrate_v13_to_v14(value: &mut serde_json::Value) -> Result<()> {
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("schema 13 macro document must be an object"))?;
+    let settings = root
+        .entry("settings")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("schema 13 settings must be an object"))?;
+    let defaults = serde_json::to_value(MkMacroSettings::default())?;
+    let defaults = defaults
+        .as_object()
+        .expect("MkMacroSettings serializes as an object");
+    settings
+        .entry("record_toggle_hotkey")
+        .or_insert_with(|| defaults["record_toggle_hotkey"].clone());
+    let recorder_default = defaults["recorder"].clone();
+    match settings.entry("recorder") {
+        serde_json::map::Entry::Vacant(entry) => {
+            entry.insert(recorder_default);
+        }
+        serde_json::map::Entry::Occupied(mut entry) => {
+            if let (Some(existing), Some(defaults)) = (
+                entry.get_mut().as_object_mut(),
+                recorder_default.as_object(),
+            ) {
+                for (field, default) in defaults {
+                    existing
+                        .entry(field.clone())
+                        .or_insert_with(|| default.clone());
+                }
+            }
+        }
+    }
+    root.insert("schema_version".into(), serde_json::json!(14));
+    Ok(())
 }
 
 /// Filesystem-aware schema-10 migration. The JSON value is rewritten only after
@@ -1626,6 +1676,161 @@ mod tests {
         assert_eq!(canonical["schema_version"], SCHEMA_VERSION);
     }
 
+    #[test]
+    fn schema_thirteen_without_settings_installs_complete_defaults() {
+        let original = serde_json::json!({
+            "schema_version": 13,
+            "folders": [],
+            "macros": []
+        });
+        assert_eq!(
+            probe_document(&serde_json::to_vec(&original).unwrap()).unwrap(),
+            DocumentProbe::Supported
+        );
+        let mut value = original;
+
+        migrate_v13_to_v14(&mut value).unwrap();
+
+        assert_eq!(value["schema_version"], 14);
+        assert_eq!(
+            serde_json::from_value::<MkMacroSettings>(value["settings"].clone()).unwrap(),
+            MkMacroSettings::default()
+        );
+    }
+
+    #[test]
+    fn schema_thirteen_partial_settings_fill_missing_fields_without_overwriting_values() {
+        let mut value = serde_json::json!({
+            "schema_version": 13,
+            "settings": {
+                "recorder": {"record_keyboard": false}
+            },
+            "macros": []
+        });
+
+        migrate_v13_to_v14(&mut value).unwrap();
+
+        assert_eq!(
+            value["settings"]["record_toggle_hotkey"],
+            serde_json::to_value(MkMacroSettings::default().record_toggle_hotkey).unwrap()
+        );
+        let recorder: MkRecorderSettings =
+            serde_json::from_value(value["settings"]["recorder"].clone()).unwrap();
+        assert!(!recorder.record_keyboard);
+        assert_eq!(
+            recorder.movement_distance_px,
+            MkRecorderSettings::default().movement_distance_px
+        );
+    }
+
+    #[test]
+    fn schema_thirteen_preserves_custom_toggle_and_complete_recorder() {
+        let mut settings = MkMacroSettings::default();
+        settings.record_toggle_hotkey = MkHotkey {
+            key: MkKey::Function(7),
+            modifiers: vec![MkKey::Control, MkKey::Shift],
+        };
+        settings.recorder.record_keyboard = false;
+        settings.recorder.movement_distance_px = 41;
+        settings.recorder.pause_resume_hotkey = Some(MkHotkey {
+            key: MkKey::Function(6),
+            modifiers: vec![MkKey::Alt],
+        });
+        let settings_value = serde_json::to_value(&settings).unwrap();
+        let mut value = serde_json::json!({
+            "schema_version": 13,
+            "settings": settings_value,
+            "folders": [{"id": 9, "name": "Preserved"}],
+            "macros": []
+        });
+        let settings_before = value["settings"].clone();
+        let folders_before = value["folders"].clone();
+
+        migrate_v13_to_v14(&mut value).unwrap();
+
+        assert_eq!(value["settings"], settings_before);
+        assert_eq!(value["folders"], folders_before);
+        assert_eq!(
+            serde_json::from_value::<MkMacroSettings>(value["settings"].clone()).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn schema_thirteen_load_persists_once_then_reloads_canonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        let mut expected = representative_schema_twelve_document();
+        expected.settings.record_toggle_hotkey = MkHotkey {
+            key: MkKey::Function(9),
+            modifiers: vec![MkKey::Control, MkKey::Alt],
+        };
+        let mut schema_thirteen = serde_json::to_value(&expected).unwrap();
+        schema_thirteen["schema_version"] = serde_json::json!(13);
+        schema_thirteen["settings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("recorder");
+        fs::write(&path, serde_json::to_vec(&schema_thirteen).unwrap()).unwrap();
+
+        let (loaded, changed) = read_document(&path).unwrap().unwrap();
+        assert!(changed);
+        assert_eq!(loaded.macros, expected.macros);
+        assert_eq!(loaded.folders, expected.folders);
+        assert_eq!(
+            loaded.settings.record_toggle_hotkey,
+            expected.settings.record_toggle_hotkey
+        );
+        assert_eq!(loaded, expected);
+        persist(&path, &loaded).unwrap();
+        let canonical = fs::read(&path).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<MkMacroDocument>(&canonical).unwrap(),
+            expected
+        );
+
+        let (reloaded, changed_again) = read_document(&path).unwrap().unwrap();
+        assert!(!changed_again);
+        assert_eq!(reloaded, loaded);
+        persist(&path, &reloaded).unwrap();
+        assert_eq!(fs::read(path).unwrap(), canonical);
+    }
+
+    #[test]
+    fn malformed_schema_thirteen_settings_are_recoverable_without_rewriting_source() {
+        let default_hotkey =
+            serde_json::to_value(MkMacroSettings::default().record_toggle_hotkey).unwrap();
+        for settings in [
+            serde_json::json!([]),
+            serde_json::json!({"record_toggle_hotkey": 7}),
+            serde_json::json!({
+                "record_toggle_hotkey": default_hotkey,
+                "recorder": "invalid"
+            }),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(MKMACROS_FILE);
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "schema_version": 13,
+                "settings": settings,
+                "folders": [],
+                "macros": []
+            }))
+            .unwrap();
+
+            assert!(probe_document(&bytes).is_err());
+            fs::write(&path, &bytes).unwrap();
+            assert!(read_document(&path).is_err());
+            let (store, disposition) = MkMacroStore::open(dir.path()).unwrap();
+            assert!(matches!(
+                disposition,
+                LoadDisposition::NeedsUserRecovery { .. }
+            ));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            drop(store);
+        }
+    }
+
     fn png_bytes(color: [u8; 4]) -> Vec<u8> {
         let mut output = std::io::Cursor::new(Vec::new());
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba(color)))
@@ -2351,7 +2556,7 @@ mod tests {
         );
     }
     #[test]
-    fn schema_twelve_migrates_additively_to_thirteen_without_assets() {
+    fn schema_twelve_migrates_additively_to_current_without_assets() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join(MKMACROS_FILE);
         let mut value = serde_json::to_value(document()).unwrap();
@@ -2359,10 +2564,10 @@ mod tests {
         fs::write(&p, serde_json::to_vec(&value).unwrap()).unwrap();
         let (store, disposition) = MkMacroStore::open(d.path()).unwrap();
         assert!(matches!(disposition, LoadDisposition::Loaded));
-        assert_eq!(store.snapshot().schema_version, 13);
+        assert_eq!(store.snapshot().schema_version, SCHEMA_VERSION);
         assert!(store.image_refs().unwrap().is_empty());
         let persisted: MkMacroDocument = serde_json::from_slice(&fs::read(p).unwrap()).unwrap();
-        assert_eq!(persisted.schema_version, 13);
+        assert_eq!(persisted.schema_version, SCHEMA_VERSION);
     }
     #[test]
     fn version_one_mouse_move_migrates_once_to_payload() {

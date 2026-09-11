@@ -2,7 +2,8 @@
 use super::validation::{MatcherValidationError, validate_window_matcher};
 use super::{
     ExecutionDiagnostic, MkHotkey, MkHotkeyScope, MkKey, MkMacroDocument, MkMacroStore,
-    MkWindowMatcher, WindowCandidate, candidate_matches,
+    MkWindowMatcher, WindowCandidate, candidate_matches, display_name, is_modifier,
+    key_validation_error, virtual_key, windows_key_metadata,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,7 +52,7 @@ impl KeyStateBackend for SystemKeyStateBackend {
             MkKey::RightAlt => down(0xA5),
             MkKey::LeftMeta => down(0x5B),
             MkKey::RightMeta => down(0x5C),
-            _ => vk_from_primary(key).is_some_and(down),
+            _ => virtual_key(key).is_some_and(|vk| down(i32::from(vk))),
         }
     }
 }
@@ -72,35 +73,6 @@ impl ActiveWindowBackend for SystemActiveWindowBackend {
     }
 }
 
-#[cfg(windows)]
-fn vk_from_primary(key: &MkKey) -> Option<i32> {
-    Some(match key {
-        MkKey::Character(s) if s.len() == 1 && s.is_ascii() => {
-            let c = s.as_bytes()[0].to_ascii_uppercase();
-            if !c.is_ascii_alphanumeric() {
-                return None;
-            }
-            c as i32
-        }
-        MkKey::Enter => 0x0D,
-        MkKey::Tab => 0x09,
-        MkKey::Escape => 0x1B,
-        MkKey::Space => 0x20,
-        MkKey::Backspace => 0x08,
-        MkKey::Delete => 0x2E,
-        MkKey::Up => 0x26,
-        MkKey::Down => 0x28,
-        MkKey::Left => 0x25,
-        MkKey::Right => 0x27,
-        MkKey::Home => 0x24,
-        MkKey::End => 0x23,
-        MkKey::PageUp => 0x21,
-        MkKey::PageDown => 0x22,
-        MkKey::Function(n @ 1..=12) => 0x6F + *n as i32,
-        _ => return None,
-    })
-}
-
 /// Whether a hotkey configuration is invalid or merely risks contextual overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyDiagnosticSeverity {
@@ -116,6 +88,9 @@ pub struct HotkeyDiagnostic {
 }
 
 fn modifier(key: &MkKey) -> Option<MkKey> {
+    if !is_modifier(key) {
+        return None;
+    }
     match key {
         MkKey::Control | MkKey::LeftControl | MkKey::RightControl => Some(MkKey::Control),
         MkKey::Alt | MkKey::LeftAlt | MkKey::RightAlt => Some(MkKey::Alt),
@@ -132,7 +107,7 @@ fn key_name(k: &MkKey) -> String {
         Some(MkKey::Meta) => "META".into(),
         _ => match k {
             MkKey::Character(s) => s.to_ascii_uppercase(),
-            x => format!("{x:?}").to_ascii_uppercase(),
+            x => display_name(x).to_ascii_uppercase(),
         },
     }
 }
@@ -169,13 +144,9 @@ fn normalize_primary(key: &MkKey) -> Option<MkKey> {
     }
 }
 fn usable_primary(key: &MkKey) -> bool {
-    match key {
-        MkKey::Character(s) => {
-            s.chars().count() == 1 && s.is_ascii() && s.as_bytes()[0].is_ascii_alphanumeric()
-        }
-        MkKey::Function(n) => (1..=12).contains(n),
-        _ => modifier(key).is_none(),
-    }
+    modifier(key).is_none()
+        && key_validation_error(key).is_none()
+        && windows_key_metadata(key).is_some_and(|metadata| metadata.virtual_key != 0)
 }
 
 fn compiled_canonical_hotkey(h: &MkHotkey) -> Option<String> {
@@ -257,6 +228,23 @@ fn normalize_reserved_chords(
         normalized
             .by_chord
             .insert(chord, "the recording toggle".into());
+    }
+    for (hotkey, name) in [
+        (
+            doc.settings.recorder.pause_resume_hotkey.as_ref(),
+            "the recorder pause/resume control",
+        ),
+        (
+            doc.settings.recorder.marker_hotkey.as_ref(),
+            "the recorder marker control",
+        ),
+    ] {
+        if let Some(chord) = hotkey.and_then(compiled_canonical_hotkey) {
+            normalized
+                .by_chord
+                .entry(chord)
+                .or_insert_with(|| name.into());
+        }
     }
 
     for (name, chord) in reserved {
@@ -580,27 +568,7 @@ fn candidate_summaries<'a>(
 
 /// Windows virtual-key representation used for recorder-control suppression.
 pub(crate) fn primary_virtual_key(key: &MkKey) -> Option<u32> {
-    Some(match key {
-        MkKey::Character(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_alphanumeric() => {
-            s.as_bytes()[0].to_ascii_uppercase() as u32
-        }
-        MkKey::Enter => 0x0D,
-        MkKey::Tab => 0x09,
-        MkKey::Escape => 0x1B,
-        MkKey::Space => 0x20,
-        MkKey::Backspace => 0x08,
-        MkKey::Delete => 0x2E,
-        MkKey::Up => 0x26,
-        MkKey::Down => 0x28,
-        MkKey::Left => 0x25,
-        MkKey::Right => 0x27,
-        MkKey::Home => 0x24,
-        MkKey::End => 0x23,
-        MkKey::PageUp => 0x21,
-        MkKey::PageDown => 0x22,
-        MkKey::Function(n @ 1..=12) => 0x6F + *n as u32,
-        _ => return None,
-    })
+    virtual_key(key).map(u32::from)
 }
 
 struct PollState {
@@ -1624,6 +1592,24 @@ mod tests {
         );
         assert_eq!(primary_virtual_key(&MkKey::Character("é".into())), None);
         assert_eq!(primary_virtual_key(&MkKey::Character("AB".into())), None);
+    }
+    #[test]
+    fn f24_is_a_valid_macro_primary_and_recorder_control() {
+        let f24 = MkHotkey {
+            key: MkKey::Function(24),
+            modifiers: vec![MkKey::Control],
+        };
+        assert!(compile_hotkey(&f24).is_some());
+        assert_eq!(primary_virtual_key(&f24.key), Some(0x87));
+
+        let mut owner = mac(15, true);
+        owner.hotkey = Some(f24.clone());
+        let mut document = MkMacroDocument::default();
+        document.settings.recorder.pause_resume_hotkey = Some(f24);
+        document.macros = vec![owner];
+        let diagnostics = validate_hotkeys(&document, &[]);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("pause/resume"));
     }
     #[derive(Default)]
     struct FakeKeyStateBackend(RwLock<Vec<MkKey>>);

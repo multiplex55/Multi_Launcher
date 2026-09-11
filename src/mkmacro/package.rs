@@ -257,7 +257,7 @@ pub fn parse_package(bytes: &[u8]) -> Result<MkMacroPackage> {
         .and_then(|version| u32::try_from(version).ok())
         .context("package manifest has no valid schema version")?;
     ensure!(
-        matches!(source_schema, 12 | SCHEMA_VERSION),
+        matches!(source_schema, 12 | 13 | SCHEMA_VERSION),
         "unsupported macro schema version {source_schema}"
     );
     let mut package: MkMacroPackage =
@@ -506,7 +506,7 @@ fn validate_package(package: &MkMacroPackage) -> Result<()> {
         manifest.format_version
     );
     ensure!(
-        matches!(manifest.schema_version, 12 | SCHEMA_VERSION),
+        matches!(manifest.schema_version, 12 | 13 | SCHEMA_VERSION),
         "unsupported macro schema version {}",
         manifest.schema_version
     );

@@ -25,6 +25,7 @@ mod outline;
 mod package_ui;
 pub(crate) mod parameter_prompt;
 pub mod recorder_controller;
+pub mod recording_review;
 pub(crate) mod runtime_inspector;
 mod search;
 mod signature_editor;
@@ -41,9 +42,9 @@ pub mod window_picker;
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use crate::mkmacro::{
     DiagnosticSeverity, MkHotkeyScope, MkMacro, MkMacroDocument, MkMacroFolder, MkMacroStore,
-    MkWindowMatcher, NormalizationConfig, RecordedStep, repair_ids, validate_document,
+    MkWindowMatcher, NormalizationConfig, repair_ids, validate_document,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 pub use step_table::Selection;
 use visual_capture_workflow::SharedVisualOverlayController;
@@ -52,6 +53,95 @@ use visual_capture_workflow::SharedVisualOverlayController;
 pub enum DirtyDecision {
     KeepEditing,
     Discard,
+}
+
+#[cfg(test)]
+mod recording_preview_document_tests {
+    use super::*;
+    use crate::mkmacro::{
+        MkMacroOutput, MkMacroParameter, MkMacroSignature, MkSignatureId, MkValueType,
+        RecordingPlan, RecordingTarget,
+    };
+
+    #[test]
+    fn preview_clone_clears_only_the_ephemeral_root_contract() {
+        let signature = MkMacroSignature {
+            parameters: vec![MkMacroParameter {
+                id: MkSignatureId(1),
+                name: "required".into(),
+                value_type: MkValueType::String,
+                description: String::new(),
+                default_value: None,
+            }],
+            outputs: vec![MkMacroOutput {
+                id: MkSignatureId(2),
+                name: "result".into(),
+                value_type: MkValueType::String,
+                description: String::new(),
+            }],
+        };
+        let root = MkMacro {
+            signature: signature.clone(),
+            id: 7,
+            name: "Root".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: crate::mkmacro::MkPlayback {
+                speed_percent: 125,
+                ..Default::default()
+            },
+            steps: vec![],
+        };
+        let callee = MkMacro {
+            id: 8,
+            name: "Callee".into(),
+            ..root.clone()
+        };
+        let draft = MkMacroDocument {
+            macros: vec![root, callee.clone()],
+            ..Default::default()
+        };
+        let preview = build_recording_preview_document(
+            &draft,
+            RecordingTarget {
+                macro_id: 7,
+                insertion_anchor_step_id: None,
+                insertion_anchor_generation: None,
+            },
+            &RecordingPlan { steps: vec![] },
+        )
+        .unwrap();
+
+        assert_eq!(draft.macros[0].signature, signature);
+        assert_eq!(preview.macros[0].signature, MkMacroSignature::default());
+        assert_eq!(preview.macros[0].playback.speed_percent, 125);
+        assert_eq!(preview.macros[1], callee);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingReviewOpenDisposition {
+    Opened,
+    Queued,
+}
+
+fn annotation_pause_ownership(state: crate::mkmacro::RecorderRuntimeState) -> anyhow::Result<bool> {
+    match state {
+        crate::mkmacro::RecorderRuntimeState::Recording => Ok(true),
+        crate::mkmacro::RecorderRuntimeState::Paused => Ok(false),
+        crate::mkmacro::RecorderRuntimeState::Stopping
+        | crate::mkmacro::RecorderRuntimeState::Idle => anyhow::bail!("Recorder is not active"),
+    }
+}
+
+fn should_resume_annotation_owned(
+    pause_owned: bool,
+    state: Option<crate::mkmacro::RecorderRuntimeState>,
+) -> bool {
+    pause_owned && state == Some(crate::mkmacro::RecorderRuntimeState::Paused)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +203,8 @@ pub struct MkMacroDialog {
     pub pending_unwrap_selection: Option<Selection>,
     pub hotkey_capture: bool,
     pub record_hotkey_capture: bool,
+    pub pause_record_hotkey_capture: bool,
+    pub marker_record_hotkey_capture: bool,
     pub action_catalog_visible: bool,
     pub action_search: String,
     pub structural_insertion: Option<action_catalog::StructuralInsertion>,
@@ -124,10 +216,23 @@ pub struct MkMacroDialog {
     pub launcher_action_picker: launcher_action_picker::LauncherActionPickerState,
     pub command_error: Option<String>,
     ui_notices: VecDeque<String>,
-    /// Editable options are copied into the runtime at Start and never mutate an active session.
-    pub recorder_options: NormalizationConfig,
-    /// Kept when the target was deleted so the user can restore it without losing captured data.
-    pub pending_recording: Option<(u64, Vec<RecordedStep>)>,
+    /// Transient annotation editor. `annotation_pause_owned` is true only when
+    /// opening it paused an actively recording session.
+    pub recording_annotation_open: bool,
+    pub recording_annotation_text: String,
+    pub annotation_pause_owned: bool,
+    /// Process-local capture review. It never participates in draft dirty tracking or persistence.
+    pub recording_review: Option<recording_review::RecordingReviewSession>,
+    #[cfg(test)]
+    recording_preview_test_facade: Option<RecordingPreviewTestFacade>,
+    #[cfg(test)]
+    next_recording_preview_test_ticket: u64,
+    queued_recording_reviews: VecDeque<recording_review::RecordingReviewSession>,
+    recording_insert_undo: Vec<RecordingInsertTransaction>,
+    recording_insert_redo: Vec<RecordingInsertTransaction>,
+    recording_target_cache: std::cell::RefCell<Option<RecordingTargetCache>>,
+    step_instance_generations: HashMap<(u64, u64), u64>,
+    next_step_instance_generation: u64,
     /// Process-local read-only runtime presentation state. None of these fields
     /// participate in draft dirty tracking, persistence, or save conflicts.
     pub runtime_inspector_open: bool,
@@ -138,6 +243,27 @@ pub struct MkMacroDialog {
     runtime_inspector_observed_run: Option<(crate::mkmacro::RuntimeRunMode, u64)>,
     runtime_inspector_active_breakpoint: Option<crate::mkmacro::BreakpointOccurrence>,
     package_ui: package_ui::PackageUiState,
+}
+
+#[cfg(test)]
+struct RecordingPreviewTestFacade {
+    runtime: Arc<crate::mkmacro::MacroRuntime>,
+    recorder_state: crate::mkmacro::RecorderRuntimeState,
+}
+
+#[derive(Debug, Clone)]
+struct RecordingInsertTransaction {
+    macro_id: u64,
+    before: Vec<crate::mkmacro::MkStep>,
+    after: Vec<crate::mkmacro::MkStep>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecordingTargetCache {
+    macro_id: u64,
+    anchor_id: Option<u64>,
+    draft_revision: u64,
+    target: crate::mkmacro::RecordingTarget,
 }
 
 #[cfg(test)]
@@ -155,6 +281,29 @@ mod tests {
         fs, thread,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn annotation_pause_ownership_preserves_manual_pause() {
+        use crate::mkmacro::RecorderRuntimeState;
+
+        assert!(annotation_pause_ownership(RecorderRuntimeState::Recording).unwrap());
+        assert!(!annotation_pause_ownership(RecorderRuntimeState::Paused).unwrap());
+        assert!(annotation_pause_ownership(RecorderRuntimeState::Idle).is_err());
+        assert!(annotation_pause_ownership(RecorderRuntimeState::Stopping).is_err());
+        assert!(should_resume_annotation_owned(
+            true,
+            Some(RecorderRuntimeState::Paused)
+        ));
+        assert!(!should_resume_annotation_owned(
+            false,
+            Some(RecorderRuntimeState::Paused)
+        ));
+        assert!(!should_resume_annotation_owned(
+            true,
+            Some(RecorderRuntimeState::Idle)
+        ));
+        assert!(!should_resume_annotation_owned(true, None));
+    }
 
     fn five_macros() -> MkMacroDocument {
         MkMacroDocument {
@@ -3854,7 +4003,714 @@ mod tests {
         dialog.observe_runtime_snapshot(Some(Arc::new(reentered)));
         assert!(dialog.runtime_inspector_open);
     }
+
+    fn review_result(
+        target: crate::mkmacro::RecordingTarget,
+        actions: Vec<MkAction>,
+    ) -> crate::mkmacro::RecordingResult {
+        let steps = actions
+            .into_iter()
+            .enumerate()
+            .map(|(index, action)| crate::mkmacro::PlannedStep {
+                review_id: crate::mkmacro::ReviewStepId(index as u64 + 1),
+                source: crate::mkmacro::RecordingSourceSpan {
+                    first: index,
+                    last: index,
+                },
+                association_source: index,
+                provenance: crate::mkmacro::RecordingProvenance::Literal,
+                action,
+                enabled: true,
+                breakpoint: false,
+                delay_after_ms: 0,
+                repeat: 1,
+                on_error: crate::mkmacro::MkErrorPolicy::Stop,
+                metadata: Default::default(),
+            })
+            .collect();
+        crate::mkmacro::RecordingResult {
+            target,
+            literal_steps: Vec::new(),
+            plan: crate::mkmacro::RecordingPlan { steps },
+            suggestions: Vec::new(),
+            clipboard_observations: Vec::new(),
+            click_inspections: Vec::new(),
+            window_observations: Vec::new(),
+            notes: Vec::new(),
+            capture_duration: Duration::from_secs(1),
+            raw_event_count: 2,
+            dropped_event_count: 0,
+        }
+    }
+
+    fn freeze_review_result(
+        target: crate::mkmacro::RecordingTarget,
+        secret: &str,
+    ) -> crate::mkmacro::RecordingResult {
+        let mut result = review_result(
+            target,
+            vec![MkAction::Hotkey(vec![
+                MkKey::LeftControl,
+                MkKey::Character("V".into()),
+            ])],
+        );
+        result.clipboard_observations = vec![crate::mkmacro::ClipboardObservation {
+            timestamp_us: 10,
+            text: crate::mkmacro::SensitiveClipboardText::new(secret.into()),
+        }];
+        result.suggestions = crate::mkmacro::discover_suggestions(
+            &result.plan,
+            &crate::mkmacro::MkRecorderSettings::default(),
+            &crate::mkmacro::ObservationBaseline::default(),
+            &[],
+            &result.clipboard_observations,
+            &[(0, 10)],
+        );
+        result
+    }
+
+    fn delay_step(id: u64, fixed_ms: u64) -> MkStep {
+        MkStep {
+            id,
+            action: MkAction::Delay(MkDelayPayload {
+                fixed_ms,
+                ..Default::default()
+            }),
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn recording_review_applies_at_start_anchor_and_undo_redo_is_one_transaction() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps =
+            vec![delay_step(1, 1), delay_step(2, 2), delay_step(3, 3)];
+        dialog.mark_dirty();
+        let anchor = dialog.selected_macro().unwrap().steps[1].clone();
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: Some(anchor.id),
+            insertion_anchor_generation: dialog
+                .step_instance_generations
+                .get(&(macro_id, anchor.id))
+                .copied(),
+        };
+        dialog.create_macro();
+        let other_macro_id = dialog.selected_macro_id.unwrap();
+        dialog.set_selected_macro(Some(macro_id));
+        dialog
+            .open_recording_review(review_result(
+                target,
+                vec![
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 10,
+                        ..Default::default()
+                    }),
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 20,
+                        ..Default::default()
+                    }),
+                ],
+            ))
+            .unwrap();
+        dialog.selection.replace([3]);
+        dialog.set_selected_macro(Some(other_macro_id));
+        let ids = dialog.apply_recording_review().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(dialog.selected_macro_id, Some(other_macro_id));
+        assert!(dialog.selected_macro().unwrap().steps.is_empty());
+        let values: Vec<_> = dialog
+            .draft
+            .macros
+            .iter()
+            .find(|item| item.id == macro_id)
+            .unwrap()
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                MkAction::Delay(payload) => Some(payload.fixed_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, vec![1, 2, 10, 20, 3]);
+        dialog.undo_last_recording_insert().unwrap();
+        assert_eq!(
+            dialog
+                .draft
+                .macros
+                .iter()
+                .find(|item| item.id == macro_id)
+                .unwrap()
+                .steps
+                .len(),
+            3
+        );
+        dialog.redo_last_recording_insert().unwrap();
+        assert_eq!(
+            dialog
+                .draft
+                .macros
+                .iter()
+                .find(|item| item.id == macro_id)
+                .unwrap()
+                .steps
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn completed_recording_and_cancel_are_a_total_draft_and_store_no_op() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1)];
+        dialog.mark_dirty();
+        dialog.save().unwrap();
+        let draft_before = dialog.draft.clone();
+        let stored_before = dialog.store.snapshot();
+        let revision_before = dialog.draft_revision();
+
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 99,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(dialog.store.snapshot(), stored_before);
+        assert!(!dialog.dirty);
+        assert_eq!(dialog.draft_revision(), revision_before);
+        dialog.cancel_recording_review();
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(dialog.store.snapshot(), stored_before);
+        assert!(!dialog.dirty);
+        assert_eq!(dialog.draft_revision(), revision_before);
+    }
+
+    #[test]
+    fn disabled_freeze_paste_never_materializes_or_persists_clipboard_text() {
+        const SECRET: &str = "recording-only clipboard sentinel";
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.save().unwrap();
+        let stored_before = dialog.store.snapshot();
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+
+        dialog
+            .open_recording_review(freeze_review_result(target, SECRET))
+            .unwrap();
+        assert!(
+            dialog
+                .recording_review
+                .as_ref()
+                .unwrap()
+                .enabled_suggestions
+                .is_empty()
+        );
+        dialog.cancel_recording_review();
+        assert!(
+            !serde_json::to_string(&dialog.draft)
+                .unwrap()
+                .contains(SECRET)
+        );
+        assert_eq!(dialog.store.snapshot(), stored_before);
+
+        dialog
+            .open_recording_review(freeze_review_result(target, SECRET))
+            .unwrap();
+        dialog.discard_all_recording_reviews();
+        assert!(dialog.recording_review.is_none());
+        assert!(
+            !serde_json::to_string(&dialog.draft)
+                .unwrap()
+                .contains(SECRET)
+        );
+        assert_eq!(dialog.store.snapshot(), stored_before);
+
+        dialog
+            .open_recording_review(freeze_review_result(target, SECRET))
+            .unwrap();
+        let inserted = dialog.apply_recording_review().unwrap();
+        assert_eq!(inserted.len(), 1);
+        assert!(matches!(
+            &dialog.selected_macro().unwrap().steps[0].action,
+            MkAction::Hotkey(keys)
+                if keys == &vec![MkKey::LeftControl, MkKey::Character("V".into())]
+        ));
+        assert!(
+            !serde_json::to_string(&dialog.draft)
+                .unwrap()
+                .contains(SECRET)
+        );
+        assert_eq!(dialog.store.snapshot(), stored_before);
+    }
+
+    #[test]
+    fn no_anchor_appends_with_fresh_ids() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1), delay_step(2, 2)];
+        dialog.mark_dirty();
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 10,
+                        ..Default::default()
+                    }),
+                    MkAction::Delay(MkDelayPayload {
+                        fixed_ms: 20,
+                        ..Default::default()
+                    }),
+                ],
+            ))
+            .unwrap();
+
+        let inserted = dialog.apply_recording_review().unwrap();
+        assert_eq!(inserted.len(), 2);
+        assert!(inserted.iter().all(|id| ![1, 2].contains(id)));
+        let all_ids: HashSet<_> = dialog
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .map(|step| step.id)
+            .collect();
+        assert_eq!(all_ids.len(), 4);
+        let values: Vec<_> = dialog
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                MkAction::Delay(payload) => Some(payload.fixed_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, vec![1, 2, 10, 20]);
+    }
+
+    #[test]
+    fn deleted_anchor_blocks_apply_until_explicit_append_recovery() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1), delay_step(2, 2)];
+        dialog.mark_dirty();
+        let generation = dialog
+            .step_instance_generations
+            .get(&(macro_id, 1))
+            .copied();
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: Some(1),
+                    insertion_anchor_generation: generation,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 9,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+
+        dialog.selected_macro_mut().unwrap().steps.remove(0);
+        dialog.mark_dirty();
+        assert!(dialog.apply_recording_review().is_err());
+        assert!(dialog.recording_review.is_some());
+        dialog
+            .recording_review
+            .as_mut()
+            .unwrap()
+            .recover_append_to_original_macro();
+        dialog.apply_recording_review().unwrap();
+        let values: Vec<_> = dialog
+            .selected_macro()
+            .unwrap()
+            .steps
+            .iter()
+            .filter_map(|step| match &step.action {
+                MkAction::Delay(payload) => Some(payload.fixed_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, vec![2, 9]);
+    }
+
+    #[test]
+    fn deleted_target_macro_preserves_review_until_explicit_retarget() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let target_id = dialog.selected_macro_id.unwrap();
+        dialog.create_macro();
+        let recovery_id = dialog.selected_macro_id.unwrap();
+        dialog.set_selected_macro(Some(target_id));
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id: target_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 9,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+
+        dialog.delete_selected_macro();
+        assert!(dialog.apply_recording_review().is_err());
+        assert!(dialog.recording_review.is_some());
+        dialog
+            .recording_review
+            .as_mut()
+            .unwrap()
+            .retarget_append(recovery_id);
+        dialog.apply_recording_review().unwrap();
+        let recovery = dialog
+            .draft
+            .macros
+            .iter()
+            .find(|item| item.id == recovery_id)
+            .unwrap();
+        assert_eq!(recovery.steps.len(), 1);
+    }
+
+    #[test]
+    fn recording_insert_history_blocks_stale_undo_and_redo() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1)];
+        dialog.mark_dirty();
+        dialog
+            .open_recording_review(review_result(
+                crate::mkmacro::RecordingTarget {
+                    macro_id,
+                    insertion_anchor_step_id: None,
+                    insertion_anchor_generation: None,
+                },
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 2,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+        dialog.apply_recording_review().unwrap();
+        let inserted_state = dialog.selected_macro().unwrap().steps.clone();
+
+        dialog.selected_macro_mut().unwrap().steps[0]
+            .metadata
+            .comment = "changed".into();
+        dialog.mark_dirty();
+        assert!(!dialog.can_undo_recording_insert());
+        assert!(dialog.undo_last_recording_insert().is_err());
+        dialog.selected_macro_mut().unwrap().steps = inserted_state;
+        dialog.mark_dirty();
+        dialog.undo_last_recording_insert().unwrap();
+        assert_eq!(dialog.selected_macro().unwrap().steps.len(), 1);
+
+        dialog.selected_macro_mut().unwrap().steps[0]
+            .metadata
+            .comment = "changed again".into();
+        dialog.mark_dirty();
+        assert!(!dialog.can_redo_recording_insert());
+        assert!(dialog.redo_last_recording_insert().is_err());
+        assert_eq!(dialog.selected_macro().unwrap().steps.len(), 1);
+    }
+
+    #[test]
+    fn preview_is_transient_and_review_terminal_actions_stop_the_owned_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let store = Arc::new(store);
+        let mut dialog = MkMacroDialog::new(store.clone());
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.selected_macro_mut().unwrap().steps = vec![delay_step(1, 1)];
+        dialog.mark_dirty();
+        dialog.save().unwrap();
+        let fake = Arc::new(crate::mkmacro::executor::fake::FakeBackend::default());
+        let runtime = Arc::new(MacroRuntime::new(store.clone(), fake.clone().backends()));
+        dialog.set_recording_preview_runtime_for_test(runtime.clone());
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+        let long_preview = || {
+            review_result(
+                target,
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 60_000,
+                    ..Default::default()
+                })],
+            )
+        };
+        let wait_for_state = |wanted, previous_run_id| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let snapshot = runtime.snapshot();
+                if snapshot.run_id > previous_run_id && snapshot.state == wanted {
+                    break snapshot;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "preview did not reach {wanted:?}: {snapshot:?}"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+        };
+        let draft_before = dialog.draft.clone();
+        let stored_before = store.snapshot();
+
+        dialog.open_recording_review(long_preview()).unwrap();
+        let previous = runtime.snapshot().run_id;
+        let barrier = runtime.install_test_worker_barrier();
+        let cancel_ticket = dialog.preview_recording_review(false).unwrap();
+        barrier.wait_until_blocked();
+        assert_eq!(dialog.draft, draft_before);
+        assert_eq!(store.snapshot(), stored_before);
+        dialog.cancel_recording_review();
+        barrier.release();
+        let cancelled = wait_for_state(RuntimeState::Stopped, previous);
+        assert_eq!(
+            cancelled.origin,
+            crate::mkmacro::RuntimeOrigin::RecordingPreview {
+                ticket: cancel_ticket
+            }
+        );
+        assert!(fake.events().is_empty());
+
+        dialog.open_recording_review(long_preview()).unwrap();
+        let previous = cancelled.run_id;
+        let barrier = runtime.install_test_worker_barrier();
+        let apply_ticket = dialog.preview_recording_review(false).unwrap();
+        barrier.wait_until_blocked();
+        dialog.apply_recording_review().unwrap();
+        barrier.release();
+        let applied = wait_for_state(RuntimeState::Stopped, previous);
+        assert_eq!(
+            applied.origin,
+            crate::mkmacro::RuntimeOrigin::RecordingPreview {
+                ticket: apply_ticket
+            }
+        );
+        assert!(fake.events().is_empty());
+
+        dialog.open_recording_review(long_preview()).unwrap();
+        let previous = applied.run_id;
+        let barrier = runtime.install_test_worker_barrier();
+        let close_ticket = dialog.preview_recording_review(false).unwrap();
+        barrier.wait_until_blocked();
+        assert!(dialog.close_with_decision(DirtyDecision::Discard));
+        barrier.release();
+        let closed = wait_for_state(RuntimeState::Stopped, previous);
+        assert_eq!(
+            closed.origin,
+            crate::mkmacro::RuntimeOrigin::RecordingPreview {
+                ticket: close_ticket
+            }
+        );
+        assert!(fake.events().is_empty());
+
+        assert_eq!(
+            runtime.command(RuntimeCommand::Run(macro_id)),
+            crate::mkmacro::CommandResult::Accepted
+        );
+        let later = wait_for_state(RuntimeState::Completed, closed.run_id);
+        assert_eq!(later.origin, crate::mkmacro::RuntimeOrigin::Stored);
+    }
+
+    #[test]
+    fn reused_anchor_id_blocks_apply_and_explicit_append_preserves_review() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        let original = delay_step(8, 8);
+        dialog.selected_macro_mut().unwrap().steps = vec![original.clone()];
+        dialog.mark_dirty();
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: Some(8),
+            insertion_anchor_generation: dialog
+                .step_instance_generations
+                .get(&(macro_id, 8))
+                .copied(),
+        };
+        dialog
+            .open_recording_review(review_result(
+                target,
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 9,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+        dialog.selected_macro_mut().unwrap().steps.clear();
+        dialog.mark_dirty();
+        dialog.selected_macro_mut().unwrap().steps.push(original);
+        dialog.mark_dirty();
+        assert!(
+            dialog
+                .recording_review_apply_blocker()
+                .is_some_and(|message| message.contains("original insertion step"))
+        );
+        assert!(dialog.apply_recording_review().is_err());
+        assert!(dialog.recording_review.is_some());
+        dialog
+            .recording_review
+            .as_mut()
+            .unwrap()
+            .recover_append_to_original_macro();
+        dialog.apply_recording_review().unwrap();
+        assert_eq!(dialog.selected_macro().unwrap().steps.len(), 2);
+    }
+
+    #[test]
+    fn completed_recordings_queue_without_overwriting_active_review() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let first_id = dialog.selected_macro_id.unwrap();
+        dialog.create_macro();
+        let second_id = dialog.selected_macro_id.unwrap();
+        let target = |macro_id| crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+        dialog
+            .open_recording_review(review_result(target(first_id), Vec::new()))
+            .unwrap();
+        assert_eq!(
+            dialog
+                .open_recording_review(review_result(target(second_id), Vec::new()))
+                .unwrap(),
+            RecordingReviewOpenDisposition::Queued
+        );
+        assert_eq!(
+            dialog.recording_review.as_ref().unwrap().target.macro_id,
+            first_id
+        );
+        dialog.cancel_recording_review();
+        assert_eq!(
+            dialog.recording_review.as_ref().unwrap().target.macro_id,
+            second_id
+        );
+        dialog
+            .open_recording_review(review_result(target(first_id), Vec::new()))
+            .unwrap();
+        assert!(dialog.close_with_decision(DirtyDecision::Discard));
+        assert!(dialog.recording_review.is_none());
+        assert!(dialog.queued_recording_reviews.is_empty());
+    }
+
+    #[test]
+    fn review_action_editor_returns_clone_without_dirtying_document() {
+        let (_dir, mut dialog) = dialog();
+        dialog.create_macro();
+        let macro_id = dialog.selected_macro_id.unwrap();
+        dialog.save().unwrap();
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        };
+        dialog
+            .open_recording_review(review_result(
+                target,
+                vec![MkAction::Delay(MkDelayPayload {
+                    fixed_ms: 1,
+                    ..Default::default()
+                })],
+            ))
+            .unwrap();
+        let review_id = dialog.recording_review.as_ref().unwrap().proposed_steps()[0].review_id;
+        let step = dialog
+            .recording_review
+            .as_ref()
+            .unwrap()
+            .step_for_editor(review_id)
+            .unwrap();
+        let document_before = dialog.draft.clone();
+        dialog
+            .action_editor
+            .begin_review_edit(macro_id, review_id, &step);
+        let draft = dialog.action_editor.draft.as_mut().unwrap();
+        draft.action = MkAction::Delay(MkDelayPayload {
+            fixed_ms: 99,
+            ..Default::default()
+        });
+        draft.on_error = crate::mkmacro::MkErrorPolicy::Continue;
+        let (edited_id, edited) = dialog.action_editor.take_review_edited_step().unwrap();
+        dialog
+            .recording_review
+            .as_mut()
+            .unwrap()
+            .replace_step(edited_id, &edited)
+            .unwrap();
+        assert_eq!(dialog.draft, document_before);
+        assert!(!dialog.dirty);
+        let reviewed = &dialog.recording_review.as_ref().unwrap().proposed_steps()[0];
+        assert!(matches!(
+            reviewed.action,
+            MkAction::Delay(MkDelayPayload { fixed_ms: 99, .. })
+        ));
+        assert_eq!(reviewed.on_error, crate::mkmacro::MkErrorPolicy::Continue);
+    }
 }
+fn build_recording_preview_document(
+    draft: &MkMacroDocument,
+    target: crate::mkmacro::RecordingTarget,
+    plan: &crate::mkmacro::RecordingPlan,
+) -> anyhow::Result<MkMacroDocument> {
+    let mut document = draft.clone();
+    let preview = document
+        .macros
+        .iter_mut()
+        .find(|macro_item| macro_item.id == target.macro_id)
+        .ok_or_else(|| anyhow::anyhow!("The recording target macro no longer exists"))?;
+    preview.name = format!("{} — Recording Preview", preview.name);
+    preview.enabled = true;
+    preview.hotkey = None;
+    // A recording proposal is an argument/output-free fragment. Keep the
+    // target ID, playback settings and document dependency closure, while
+    // preventing unrelated required parameters/Return contracts from
+    // blocking it. The authored draft remains untouched.
+    preview.signature = Default::default();
+    preview.steps = crate::mkmacro::materialize_plan(plan, 0);
+    Ok(document)
+}
+
 impl MkMacroDialog {
     /// Returns an operation client for constructing dialog-scoped visual tools.
     pub fn visual_overlay_controller(&self) -> SharedVisualOverlayController {
@@ -3894,6 +4750,15 @@ impl MkMacroDialog {
         // The dialog is the sole production ownership boundary for the native
         // visual-overlay worker; every authoring surface receives a clone.
         let visual_overlay = SharedVisualOverlayController::new_dialog_owner();
+        let mut next_step_instance_generation = 1;
+        let mut step_instance_generations = HashMap::new();
+        for macro_item in &baseline.macros {
+            for step in &macro_item.steps {
+                step_instance_generations
+                    .insert((macro_item.id, step.id), next_step_instance_generation);
+                next_step_instance_generation += 1;
+            }
+        }
         Self {
             open: false,
             draft: (*baseline).clone(),
@@ -3927,6 +4792,8 @@ impl MkMacroDialog {
             pending_unwrap_selection: None,
             hotkey_capture: false,
             record_hotkey_capture: false,
+            pause_record_hotkey_capture: false,
+            marker_record_hotkey_capture: false,
             action_catalog_visible: false,
             action_search: String::new(),
             structural_insertion: None,
@@ -3935,8 +4802,20 @@ impl MkMacroDialog {
             launcher_action_picker: Default::default(),
             command_error: None,
             ui_notices: VecDeque::new(),
-            recorder_options: Default::default(),
-            pending_recording: None,
+            recording_annotation_open: false,
+            recording_annotation_text: String::new(),
+            annotation_pause_owned: false,
+            recording_review: None,
+            #[cfg(test)]
+            recording_preview_test_facade: None,
+            #[cfg(test)]
+            next_recording_preview_test_ticket: 1,
+            queued_recording_reviews: VecDeque::new(),
+            recording_insert_undo: Vec::new(),
+            recording_insert_redo: Vec::new(),
+            recording_target_cache: Default::default(),
+            step_instance_generations,
+            next_step_instance_generation,
             runtime_inspector_open: false,
             runtime_inspector_show_internal: false,
             runtime_inspector_builtins_open: false,
@@ -3951,8 +4830,7 @@ impl MkMacroDialog {
         self.sync_external();
         self.refresh_environment();
         self.open = true;
-        crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
-        crate::mkmacro::runtime::set_recording_options(self.recorder_options.clone());
+        self.publish_recording_target();
     }
 
     pub fn take_ui_notice(&mut self) -> Option<String> {
@@ -3977,6 +4855,8 @@ impl MkMacroDialog {
                 self.conflict = true;
             } else {
                 self.draft = (*current).clone();
+                self.recording_insert_undo.clear();
+                self.recording_insert_redo.clear();
                 self.record_draft_revision();
                 self.baseline = current;
                 self.cancel_folder_operations();
@@ -4005,6 +4885,29 @@ impl MkMacroDialog {
     fn record_draft_revision(&mut self) -> bool {
         if self.revision_document == self.draft {
             return false;
+        }
+        let current_steps: HashSet<_> = self
+            .draft
+            .macros
+            .iter()
+            .flat_map(|macro_item| {
+                macro_item
+                    .steps
+                    .iter()
+                    .map(move |step| (macro_item.id, step.id))
+            })
+            .collect();
+        self.step_instance_generations
+            .retain(|identity, _| current_steps.contains(identity));
+        for identity in current_steps {
+            self.step_instance_generations
+                .entry(identity)
+                .or_insert_with(|| {
+                    let generation = self.next_step_instance_generation;
+                    self.next_step_instance_generation =
+                        self.next_step_instance_generation.wrapping_add(1).max(1);
+                    generation
+                });
         }
         self.draft_revision = self.draft_revision.wrapping_add(1);
         self.revision_document = self.draft.clone();
@@ -4302,6 +5205,8 @@ impl MkMacroDialog {
         if self.dirty {
             let current = self.store.snapshot();
             self.draft = (*current).clone();
+            self.recording_insert_undo.clear();
+            self.recording_insert_redo.clear();
             self.record_draft_revision();
             self.baseline = current;
             self.dirty = false;
@@ -4311,6 +5216,7 @@ impl MkMacroDialog {
         self.prune_folder_ui_state();
         self.action_editor.cancel();
         self.image_crop_editor.cancel();
+        self.discard_all_recording_reviews();
         self.open = false;
         self.set_selected_macro(None);
         true
@@ -4321,6 +5227,8 @@ impl MkMacroDialog {
         }
         let current = self.store.snapshot();
         self.draft = (*current).clone();
+        self.recording_insert_undo.clear();
+        self.recording_insert_redo.clear();
         self.record_draft_revision();
         self.baseline = current;
         self.dirty = false;
@@ -4329,28 +5237,395 @@ impl MkMacroDialog {
         self.prune_folder_ui_state();
         true
     }
-    /// Applies normalized recorder output atomically. A missing target leaves the draft untouched.
-    pub fn apply_recording(
+    pub fn open_recording_review(
         &mut self,
+        result: crate::mkmacro::RecordingResult,
+    ) -> Result<RecordingReviewOpenDisposition, String> {
+        let review = recording_review::RecordingReviewSession::new(result);
+        if self.recording_review.is_some() {
+            self.queued_recording_reviews.push_back(review);
+            self.queue_ui_notice(
+                "Another completed recording is queued behind the current Recording Review",
+            );
+            return Ok(RecordingReviewOpenDisposition::Queued);
+        }
+        self.recording_review = Some(review);
+        self.publish_recording_target();
+        Ok(RecordingReviewOpenDisposition::Opened)
+    }
+
+    pub fn drain_pending_recording_reviews(&mut self) {
+        for result in crate::mkmacro::runtime::take_pending_recordings() {
+            if let Err(error) = self.open_recording_review(result) {
+                self.command_error = Some(error);
+            }
+        }
+    }
+
+    pub fn stop_recording_for_review(&mut self) -> anyhow::Result<()> {
+        crate::mkmacro::runtime::request_record_stop_for_review()?;
+        Ok(())
+    }
+
+    pub fn begin_recording_annotation(&mut self) -> anyhow::Result<()> {
+        let state = crate::mkmacro::runtime::recorder_snapshot()
+            .map(|snapshot| snapshot.state)
+            .unwrap_or(crate::mkmacro::RecorderRuntimeState::Idle);
+        let pause_owned = annotation_pause_ownership(state)?;
+        crate::mkmacro::runtime::set_recording_annotation_active(true);
+        self.annotation_pause_owned = match pause_owned {
+            true => {
+                if let Err(error) = crate::mkmacro::runtime::record_pause() {
+                    crate::mkmacro::runtime::set_recording_annotation_active(false);
+                    return Err(error);
+                }
+                true
+            }
+            false => false,
+        };
+        self.recording_annotation_text.clear();
+        self.recording_annotation_open = true;
+        Ok(())
+    }
+
+    pub fn finish_recording_annotation(&mut self, commit: bool) -> anyhow::Result<()> {
+        let text = self.recording_annotation_text.trim().to_owned();
+        let annotation_result = if commit {
+            if text.is_empty() {
+                anyhow::bail!("Annotation cannot be empty");
+            }
+            crate::mkmacro::runtime::record_annotation(text)
+        } else {
+            Ok(())
+        };
+        self.recording_annotation_open = false;
+        self.recording_annotation_text.clear();
+        crate::mkmacro::runtime::set_recording_annotation_active(false);
+        let resume = std::mem::take(&mut self.annotation_pause_owned);
+        let resume_result = if should_resume_annotation_owned(
+            resume,
+            crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| snapshot.state),
+        ) {
+            crate::mkmacro::runtime::record_resume()
+        } else {
+            Ok(())
+        };
+        if let Err(error) = annotation_result {
+            return Err(error);
+        }
+        resume_result
+    }
+
+    pub fn preview_recording_review(&mut self, selected_range: bool) -> anyhow::Result<u64> {
+        if self.action_editor.draft.is_some() || self.recording_annotation_open {
+            anyhow::bail!("Close the active editor before previewing this recording");
+        }
+        if self
+            .recording_preview_recorder_state()
+            .is_some_and(|state| state != crate::mkmacro::RecorderRuntimeState::Idle)
+        {
+            anyhow::bail!("Stop recording before previewing");
+        }
+        if self
+            .recording_preview_runtime_snapshot()
+            .is_some_and(|snapshot| {
+                matches!(
+                    snapshot.state,
+                    crate::mkmacro::RuntimeState::Running
+                        | crate::mkmacro::RuntimeState::Paused
+                        | crate::mkmacro::RuntimeState::Stopping
+                )
+            })
+        {
+            anyhow::bail!("Another playback operation is active");
+        }
+        let (target, plan) = {
+            let review = self
+                .recording_review
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No recording is awaiting review"))?;
+            (
+                review.effective_target(),
+                review.preview_plan(selected_range)?,
+            )
+        };
+        {
+            let review = self.recording_review.as_mut().unwrap();
+            review.preview_ticket = None;
+            review.preview_state = None;
+            review.preview_diagnostic = None;
+            review.message = None;
+        }
+        let document = build_recording_preview_document(&self.draft, target, &plan)?;
+        let ticket = self.submit_recording_preview(&document, target.macro_id)?;
+        let review = self.recording_review.as_mut().unwrap();
+        review.preview_ticket = Some(ticket);
+        review.preview_state = Some(crate::mkmacro::RuntimeState::Running);
+        review.preview_diagnostic = None;
+        Ok(ticket)
+    }
+
+    pub(crate) fn stop_owned_recording_preview(&mut self) {
+        if let Some(ticket) = self
+            .recording_review
+            .as_ref()
+            .and_then(|review| review.preview_ticket)
+        {
+            self.stop_recording_preview(ticket);
+        }
+    }
+
+    fn submit_recording_preview(
+        &mut self,
+        document: &MkMacroDocument,
         macro_id: u64,
-        recorded: &[RecordedStep],
-    ) -> Result<Vec<u64>, String> {
-        let m = self
+    ) -> anyhow::Result<u64> {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            let ticket = self.next_recording_preview_test_ticket;
+            self.next_recording_preview_test_ticket = ticket.wrapping_add(1).max(1);
+            facade.runtime.preview(document, macro_id, ticket)?;
+            return Ok(ticket);
+        }
+        crate::mkmacro::runtime::preview_document(document, macro_id)
+    }
+
+    fn stop_recording_preview(&self, ticket: u64) -> bool {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return facade.runtime.stop_recording_preview(ticket);
+        }
+        crate::mkmacro::runtime::stop_recording_preview(ticket)
+    }
+
+    fn recording_preview_recorder_state(&self) -> Option<crate::mkmacro::RecorderRuntimeState> {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return Some(facade.recorder_state);
+        }
+        crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| snapshot.state)
+    }
+
+    fn recording_preview_runtime_snapshot(&self) -> Option<Arc<crate::mkmacro::RuntimeSnapshot>> {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return Some(facade.runtime.snapshot());
+        }
+        crate::mkmacro::runtime::snapshot()
+    }
+
+    fn recording_preview_status(
+        &self,
+        ticket: u64,
+    ) -> (bool, Option<Arc<crate::mkmacro::RuntimeSnapshot>>) {
+        #[cfg(test)]
+        if let Some(facade) = &self.recording_preview_test_facade {
+            return facade.runtime.recording_preview_status(ticket);
+        }
+        crate::mkmacro::runtime::recording_preview_status(ticket)
+    }
+
+    #[cfg(test)]
+    fn set_recording_preview_runtime_for_test(
+        &mut self,
+        runtime: Arc<crate::mkmacro::MacroRuntime>,
+    ) {
+        self.recording_preview_test_facade = Some(RecordingPreviewTestFacade {
+            runtime,
+            recorder_state: crate::mkmacro::RecorderRuntimeState::Idle,
+        });
+    }
+
+    /// Applies the complete reviewed proposal as one atomic document mutation.
+    /// The captured target, not current macro/row selection, owns placement.
+    pub fn recording_review_apply_blocker(&self) -> Option<String> {
+        let review = self.recording_review.as_ref()?;
+        let target = review.effective_target();
+        let Some(macro_item) = self
             .draft
             .macros
-            .iter_mut()
-            .find(|m| m.id == macro_id)
-            .ok_or("recording target no longer exists")?;
-        // Recorder output gets temporary local IDs; the canonical allocator
-        // assigns checked destination IDs, including after u64::MAX.
-        let recorded_steps = crate::mkmacro::to_macro_steps(recorded, 0, true);
-        let inserted = crate::mkmacro::editor_mutation::clone_fragment(&recorded_steps, &m.steps)
-            .map_err(|error| error.to_string())?;
+            .iter()
+            .find(|item| item.id == target.macro_id)
+        else {
+            return Some(
+                "The recording target macro no longer exists. Choose a target macro or cancel."
+                    .to_owned(),
+            );
+        };
+        if let Some(anchor) = target.insertion_anchor_step_id
+            && !macro_item.steps.iter().any(|step| {
+                step.id == anchor
+                    && target.insertion_anchor_generation.is_none_or(|generation| {
+                        self.step_instance_generations
+                            .get(&(target.macro_id, step.id))
+                            .copied()
+                            == Some(generation)
+                    })
+            })
+        {
+            return Some(
+                "The original insertion step no longer exists. Choose Append to end or cancel."
+                    .to_owned(),
+            );
+        }
+        None
+    }
+
+    pub fn apply_recording_review(&mut self) -> Result<Vec<u64>, String> {
+        if let Some(blocker) = self.recording_review_apply_blocker() {
+            return Err(blocker);
+        }
+        self.stop_owned_recording_preview();
+        let review = self
+            .recording_review
+            .as_ref()
+            .ok_or("No recording is awaiting review")?;
+        let target = review.effective_target();
+        let plan = review.proposal_plan();
+        let macro_index = self
+            .draft
+            .macros
+            .iter()
+            .position(|item| item.id == target.macro_id)
+            .ok_or(
+                "The recording target macro no longer exists. Choose a target macro or cancel.",
+            )?;
+        let fragment = crate::mkmacro::materialize_plan(&plan, 0);
+        let before = self.draft.macros[macro_index].steps.clone();
+        let anchor = target.insertion_anchor_step_id.map_or(
+            crate::mkmacro::editor_mutation::InsertionAnchor::End,
+            crate::mkmacro::editor_mutation::InsertionAnchor::After,
+        );
+        let inserted = crate::mkmacro::editor_mutation::insert_fragment(
+            &mut self.draft.macros[macro_index].steps,
+            &fragment,
+            anchor,
+        )
+        .map_err(|error| error.to_string())?;
         let ids = inserted.inserted_ids;
-        m.steps.extend(inserted.steps);
-        self.selection.replace(ids.iter().copied());
+        let after = self.draft.macros[macro_index].steps.clone();
+        if self.selected_macro_id == Some(target.macro_id) {
+            self.selection.replace(ids.iter().copied());
+        }
         self.mark_dirty();
+        self.recording_insert_undo.push(RecordingInsertTransaction {
+            macro_id: target.macro_id,
+            before,
+            after,
+        });
+        self.recording_insert_redo.clear();
+        if self.action_editor.review_editing_id().is_some() {
+            self.action_editor.cancel();
+        }
+        if let Some(mut review) = self.recording_review.take() {
+            review.clear_sensitive();
+        }
+        self.recording_review = self.queued_recording_reviews.pop_front();
+        self.publish_recording_target();
         Ok(ids)
+    }
+
+    pub fn cancel_recording_review(&mut self) {
+        self.stop_owned_recording_preview();
+        if self.action_editor.review_editing_id().is_some() {
+            self.action_editor.cancel();
+        }
+        if let Some(mut review) = self.recording_review.take() {
+            review.clear_sensitive();
+        }
+        self.recording_review = self.queued_recording_reviews.pop_front();
+        self.publish_recording_target();
+    }
+
+    fn discard_all_recording_reviews(&mut self) {
+        self.stop_owned_recording_preview();
+        if self.action_editor.review_editing_id().is_some() {
+            self.action_editor.cancel();
+        }
+        if let Some(mut review) = self.recording_review.take() {
+            review.clear_sensitive();
+        }
+        for mut review in self.queued_recording_reviews.drain(..) {
+            review.clear_sensitive();
+        }
+        self.publish_recording_target();
+    }
+
+    pub fn can_undo_recording_insert(&self) -> bool {
+        self.recording_insert_undo
+            .last()
+            .is_some_and(|transaction| {
+                self.draft
+                    .macros
+                    .iter()
+                    .any(|item| item.id == transaction.macro_id && item.steps == transaction.after)
+            })
+    }
+
+    pub fn can_redo_recording_insert(&self) -> bool {
+        self.recording_insert_redo
+            .last()
+            .is_some_and(|transaction| {
+                self.draft
+                    .macros
+                    .iter()
+                    .any(|item| item.id == transaction.macro_id && item.steps == transaction.before)
+            })
+    }
+
+    pub fn undo_last_recording_insert(&mut self) -> Result<(), String> {
+        let transaction = self
+            .recording_insert_undo
+            .pop()
+            .ok_or("No recording insertion is available to undo")?;
+        let Some(target) = self
+            .draft
+            .macros
+            .iter()
+            .position(|item| item.id == transaction.macro_id)
+        else {
+            self.recording_insert_undo.push(transaction);
+            return Err("The recording target macro no longer exists".into());
+        };
+        if self.draft.macros[target].steps != transaction.after {
+            self.recording_insert_undo.push(transaction);
+            return Err(
+                "The inserted recording changed and cannot be undone as one transaction".into(),
+            );
+        }
+        self.draft.macros[target].steps = transaction.before.clone();
+        self.selection.clear();
+        self.mark_dirty();
+        self.recording_insert_redo.push(transaction);
+        Ok(())
+    }
+
+    pub fn redo_last_recording_insert(&mut self) -> Result<(), String> {
+        let transaction = self
+            .recording_insert_redo
+            .pop()
+            .ok_or("No recording insertion is available to redo")?;
+        let Some(target) = self
+            .draft
+            .macros
+            .iter()
+            .position(|item| item.id == transaction.macro_id)
+        else {
+            self.recording_insert_redo.push(transaction);
+            return Err("The recording target macro no longer exists".into());
+        };
+        if self.draft.macros[target].steps != transaction.before {
+            self.recording_insert_redo.push(transaction);
+            return Err(
+                "The macro changed after undo; the recording transaction cannot be redone safely"
+                    .into(),
+            );
+        }
+        self.draft.macros[target].steps = transaction.after.clone();
+        self.selection.clear();
+        self.mark_dirty();
+        self.recording_insert_undo.push(transaction);
+        Ok(())
     }
     pub fn selected_macro(&self) -> Option<&MkMacro> {
         let id = self.selected_macro_id?;
@@ -4364,7 +5639,46 @@ impl MkMacroDialog {
             self.navigation.focus_table = false;
         }
         self.selected_macro_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
-        crate::mkmacro::runtime::set_recording_target(self.selected_macro_id);
+        self.publish_recording_target();
+    }
+    pub(crate) fn recording_target(&self) -> Option<crate::mkmacro::RecordingTarget> {
+        if self.recording_review.is_some() {
+            return None;
+        }
+        let macro_id = self.selected_macro_id?;
+        let insertion_anchor_step_id = self.selection.primary.filter(|step_id| {
+            self.selected_macro()
+                .is_some_and(|m| m.steps.iter().any(|step| step.id == *step_id))
+        });
+        if let Some(cached) = *self.recording_target_cache.borrow()
+            && cached.macro_id == macro_id
+            && cached.anchor_id == insertion_anchor_step_id
+            && cached.draft_revision == self.draft_revision
+        {
+            return Some(cached.target);
+        }
+        let target = crate::mkmacro::RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id,
+            insertion_anchor_generation: insertion_anchor_step_id.and_then(|step_id| {
+                self.step_instance_generations
+                    .get(&(macro_id, step_id))
+                    .copied()
+            }),
+        };
+        *self.recording_target_cache.borrow_mut() = Some(RecordingTargetCache {
+            macro_id,
+            anchor_id: insertion_anchor_step_id,
+            draft_revision: self.draft_revision,
+            target,
+        });
+        Some(target)
+    }
+    fn publish_recording_target(&self) {
+        crate::mkmacro::runtime::arm_recording(
+            self.recording_target(),
+            NormalizationConfig::from(&self.draft.settings.recorder),
+        );
     }
     pub fn selected_macro_mut(&mut self) -> Option<&mut MkMacro> {
         let id = self.selected_macro_id?;
@@ -4461,6 +5775,15 @@ impl MkMacroDialog {
         };
         if !m.enabled {
             return Some("The selected macro is disabled".into());
+        }
+        if self.recording_review.is_some() {
+            return Some("Close Recording Review before running a saved macro".into());
+        }
+        if crate::mkmacro::runtime::recorder_snapshot()
+            .is_some_and(|snapshot| snapshot.state != crate::mkmacro::RecorderRuntimeState::Idle)
+            || crate::mkmacro::runtime::record_stop_pending()
+        {
+            return Some("Recording is active".into());
         }
         if crate::mkmacro::runtime::snapshot().is_some_and(|s| {
             matches!(
@@ -4654,9 +5977,13 @@ impl MkMacroDialog {
         }
     }
     fn close_children(&mut self) {
+        if self.recording_annotation_open {
+            let _ = self.finish_recording_annotation(false);
+        }
         search::close(self);
         self.cancel_folder_operations();
         self.action_catalog_visible = false;
+        self.discard_all_recording_reviews();
         self.action_editor.cancel();
         self.image_crop_editor.cancel();
         self.structural_insertion = None;
@@ -4664,22 +5991,17 @@ impl MkMacroDialog {
             .cancel("Window picker closed because the macro dialog closed");
         self.launcher_action_picker.cancel();
         self.package_ui.close();
+        let stored = self.store.snapshot();
+        crate::mkmacro::runtime::arm_recording(
+            None,
+            NormalizationConfig::from(&stored.settings.recorder),
+        );
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
         search::shortcuts(ui.ctx(), self);
+        self.publish_recording_target();
         self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
-        for result in crate::mkmacro::runtime::take_pending_recordings() {
-            if self
-                .apply_recording(result.macro_id, &result.generated_steps)
-                .is_err()
-            {
-                self.pending_recording = Some((result.macro_id, result.generated_steps));
-                self.command_error = Some(
-                    "Recording target was deleted; captured actions were preserved for recovery"
-                        .into(),
-                );
-            }
-        }
+        self.drain_pending_recording_reviews();
         toolbar::show(ui, self);
         if self.draft.macros.is_empty() && self.draft.folders.is_empty() {
             let body_size = ui.available_size();
@@ -4711,6 +6033,7 @@ impl MkMacroDialog {
         }
         action_catalog::show_modal(ui.ctx(), self);
         search::show(ui.ctx(), self);
+        recording_review::show(ui.ctx(), self);
         action_editor::show(ui.ctx(), self);
         image_crop_editor::show(ui.ctx(), self);
         launcher_action_picker::show(ui.ctx(), self);

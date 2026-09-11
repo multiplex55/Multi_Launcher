@@ -1,5 +1,8 @@
 use super::MkMacroDialog;
-use crate::mkmacro::{MovementMode, RecorderRuntimeState, RuntimeState};
+use crate::mkmacro::{
+    MovementMode, REPEATED_CLICK_MINIMUM_MAX, REPEATED_CLICK_MINIMUM_MIN, RecorderRuntimeState,
+    RuntimeState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolbarState {
@@ -28,6 +31,10 @@ pub enum ToolbarCommand {
     DebugRun,
     DebugFrom,
     DebugSelected,
+}
+
+fn repeated_click_minimum_range() -> std::ops::RangeInclusive<u32> {
+    REPEATED_CLICK_MINIMUM_MIN..=REPEATED_CLICK_MINIMUM_MAX
 }
 
 impl ToolbarState {
@@ -111,10 +118,18 @@ fn report(dialog: &mut MkMacroDialog, result: anyhow::Result<()>) {
     }
 }
 pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
-    crate::mkmacro::runtime::set_recording_options(dialog.recorder_options.clone());
+    process_recorder_hotkey_capture(ui.ctx(), dialog);
+    if dialog.recording_annotation_open {
+        show_recording_annotation(ui.ctx(), dialog);
+        return;
+    }
     let state = state(dialog);
     ui.horizontal(|ui| {
-        if ui.button("Refresh checks").on_hover_text("Check external image files and connected monitors").clicked() {
+        if ui
+            .button("Refresh checks")
+            .on_hover_text("Check external image files and connected monitors")
+            .clicked()
+        {
             dialog.refresh_environment();
         }
         if ui.button("Save").clicked() {
@@ -122,40 +137,57 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             report(dialog, result);
         }
         ui.add_enabled_ui(
-            dialog.action_editor.draft.is_none()
-                && !super::step_table::table_modal_open(dialog),
+            dialog.action_editor.draft.is_none() && !super::step_table::table_modal_open(dialog),
             |ui| super::package_ui::show_toolbar_menu(ui, dialog),
         );
-        ui.add_enabled_ui(dialog.action_editor.draft.is_none() && !super::step_table::table_modal_open(dialog), |ui| {
-            ui.menu_button("Edit steps", |ui| {
-                use super::editor_operations::{self, ClipboardCommand};
-                let selected = dialog.selected_macro().is_some() && !dialog.selection.ids.is_empty();
-                for (label, command, enabled) in [
-                    ("Copy  Ctrl+C", ClipboardCommand::Copy, selected),
-                    ("Cut  Ctrl+X", ClipboardCommand::Cut, selected),
-                    ("Paste  Ctrl+V", ClipboardCommand::Paste, dialog.selected_macro().is_some() && !dialog.editor_state.clipboard.is_empty()),
-                    ("Duplicate  Ctrl+D", ClipboardCommand::Duplicate, selected),
-                ] {
-                    if ui.add_enabled(enabled, eframe::egui::Button::new(label)).clicked() {
-                        let result = editor_operations::clipboard(dialog, command);
-                        report(dialog, result);
-                        ui.close_menu();
+        ui.add_enabled_ui(
+            dialog.action_editor.draft.is_none() && !super::step_table::table_modal_open(dialog),
+            |ui| {
+                ui.menu_button("Edit steps", |ui| {
+                    use super::editor_operations::{self, ClipboardCommand};
+                    let selected =
+                        dialog.selected_macro().is_some() && !dialog.selection.ids.is_empty();
+                    for (label, command, enabled) in [
+                        ("Copy  Ctrl+C", ClipboardCommand::Copy, selected),
+                        ("Cut  Ctrl+X", ClipboardCommand::Cut, selected),
+                        (
+                            "Paste  Ctrl+V",
+                            ClipboardCommand::Paste,
+                            dialog.selected_macro().is_some()
+                                && !dialog.editor_state.clipboard.is_empty(),
+                        ),
+                        ("Duplicate  Ctrl+D", ClipboardCommand::Duplicate, selected),
+                    ] {
+                        if ui
+                            .add_enabled(enabled, eframe::egui::Button::new(label))
+                            .clicked()
+                        {
+                            let result = editor_operations::clipboard(dialog, command);
+                            report(dialog, result);
+                            ui.close_menu();
+                        }
                     }
-                }
-                ui.separator();
-                for (label, mode) in [
-                    ("Find  Ctrl+F", super::search::SearchMode::Find),
-                    ("Replace  Ctrl+H", super::search::SearchMode::Replace),
-                    ("Jump to Step  Ctrl+G", super::search::SearchMode::Jump),
-                ] {
-                    if ui.add_enabled(dialog.selected_macro().is_some(), eframe::egui::Button::new(label)).clicked() {
-                        super::search::open(dialog, mode);
-                        ui.close_menu();
+                    ui.separator();
+                    for (label, mode) in [
+                        ("Find  Ctrl+F", super::search::SearchMode::Find),
+                        ("Replace  Ctrl+H", super::search::SearchMode::Replace),
+                        ("Jump to Step  Ctrl+G", super::search::SearchMode::Jump),
+                    ] {
+                        if ui
+                            .add_enabled(
+                                dialog.selected_macro().is_some(),
+                                eframe::egui::Button::new(label),
+                            )
+                            .clicked()
+                        {
+                            super::search::open(dialog, mode);
+                            ui.close_menu();
+                        }
                     }
-                }
-                ui.checkbox(&mut dialog.navigation.outline.open, "Show Outline");
-            });
-        });
+                    ui.checkbox(&mut dialog.navigation.outline.open, "Show Outline");
+                });
+            },
+        );
         if ui
             .add_enabled(
                 dialog.selected_macro().is_some(),
@@ -178,7 +210,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             report(dialog, result);
         }
         ui.menu_button("Debug", |ui| {
-            let [debug_run_command, debug_from_command, debug_selected_command] = DEBUG_COMMANDS;
+            let [
+                debug_run_command,
+                debug_from_command,
+                debug_selected_command,
+            ] = DEBUG_COMMANDS;
             let response = ui.add_enabled(
                 state.command_enabled(debug_run_command),
                 eframe::egui::Button::new("Debug Run"),
@@ -283,6 +319,26 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         if dialog.dirty {
             ui.label("Unsaved changes");
         }
+        if ui
+            .add_enabled(
+                dialog.can_undo_recording_insert(),
+                eframe::egui::Button::new("Undo Recording Insert"),
+            )
+            .clicked()
+            && let Err(error) = dialog.undo_last_recording_insert()
+        {
+            dialog.command_error = Some(error);
+        }
+        if ui
+            .add_enabled(
+                dialog.can_redo_recording_insert(),
+                eframe::egui::Button::new("Redo Recording Insert"),
+            )
+            .clicked()
+            && let Err(error) = dialog.redo_last_recording_insert()
+        {
+            dialog.command_error = Some(error);
+        }
         if dialog.conflict {
             ui.colored_label(
                 eframe::egui::Color32::YELLOW,
@@ -292,104 +348,125 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         let recorder = crate::mkmacro::runtime::recorder_snapshot();
         let recorder_active = recorder
             .as_ref()
-            .is_some_and(|s| s.state != RecorderRuntimeState::Idle);
+            .is_some_and(|s| s.state != RecorderRuntimeState::Idle)
+            || crate::mkmacro::runtime::record_stop_pending();
+        let authoring_modal =
+            dialog.action_editor.draft.is_some() || super::step_table::table_modal_open(dialog);
+        let recording_controls = super::recorder_controller::decide_recording_controls(
+            crate::mkmacro::runtime::snapshot()
+                .as_deref()
+                .map_or(RuntimeState::Idle, |snapshot| snapshot.state),
+            if crate::mkmacro::runtime::record_stop_pending() {
+                RecorderRuntimeState::Stopping
+            } else {
+                recorder
+                    .as_deref()
+                    .map_or(RecorderRuntimeState::Idle, |snapshot| snapshot.state)
+            },
+            dialog.selected_macro().is_some(),
+            dialog.recording_review.is_some(),
+            authoring_modal,
+        );
         if ui
             .add_enabled(
-                !recorder_active && dialog.selected_macro().is_some(),
+                recording_controls.record,
                 eframe::egui::Button::new("Record"),
             )
             .clicked()
         {
-            if let Some(id) = dialog.selected_macro_id {
+            if let Some(target) = dialog.recording_target() {
                 report(
                     dialog,
-                    crate::mkmacro::runtime::record(id, dialog.recorder_options.clone()),
+                    crate::mkmacro::runtime::record_target(
+                        target,
+                        crate::mkmacro::NormalizationConfig::from(&dialog.draft.settings.recorder),
+                    ),
                 );
             }
         }
         ui.menu_button("Record Options", |ui| {
-            ui.set_enabled(!recorder_active);
-            ui.checkbox(&mut dialog.recorder_options.record_keyboard, "Keyboard");
-            ui.checkbox(
-                &mut dialog.recorder_options.record_mouse_buttons,
-                "Mouse buttons",
-            );
-            ui.checkbox(
-                &mut dialog.recorder_options.record_mouse_wheel,
-                "Mouse wheel",
-            );
-            ui.label("Input");
-            ui.checkbox(
-                &mut dialog.recorder_options.record_injected_input,
-                "Record injected input",
-            );
-            ui.separator();
-            ui.label("Mouse movement");
-            for (mode, label) in [
-                (MovementMode::Off, "Off"),
-                (MovementMode::ClicksOnly, "Clicks Only"),
-                (MovementMode::SampledMovement, "Sampled Movement"),
-                (MovementMode::DetailedMovement, "Detailed Movement"),
-            ] {
-                let help = match mode {
-                    MovementMode::SampledMovement => {
-                        "Editable default: samples and simplifies the mouse path."
-                    }
-                    MovementMode::DetailedMovement => {
-                        "High-fidelity option: retains every distinct mouse position."
-                    }
-                    _ => "Does not record standalone mouse movement.",
-                };
-                ui.radio_value(&mut dialog.recorder_options.movement_mode, mode, label)
-                    .on_hover_text(help);
-            }
-            ui.separator();
-            ui.label("Window context");
-            ui.checkbox(&mut dialog.recorder_options.record_window_context, "Record active/target windows")
-                .on_hover_text("Captures active and target windows and generates Activate Window actions.");
-            ui.small("Uses client-relative coordinates when reliable metadata is available; otherwise falls back to Screen.");
-            let sampled = dialog.recorder_options.movement_mode == MovementMode::SampledMovement;
-            ui.add_enabled(
-                sampled,
-                eframe::egui::Slider::new(
-                    &mut dialog.recorder_options.movement_distance_px,
-                    1..=500,
-                )
-                .text("Sample distance (px)"),
-            );
-            ui.add_enabled(
-                sampled,
-                eframe::egui::Slider::new(
-                    &mut dialog.recorder_options.movement_interval_ms,
-                    1..=5000,
-                )
-                .text("Sample interval (ms)"),
-            );
+            show_record_options(ui, dialog, recorder_active)
         });
     });
-    if let Some(rec) = crate::mkmacro::runtime::recorder_snapshot()
-        .filter(|s| s.state != RecorderRuntimeState::Idle)
-    {
+    if let Some(rec) = crate::mkmacro::runtime::recorder_snapshot().filter(|s| {
+        s.state != RecorderRuntimeState::Idle || crate::mkmacro::runtime::record_stop_pending()
+    }) {
+        let recorder_state = if crate::mkmacro::runtime::record_stop_pending() {
+            RecorderRuntimeState::Stopping
+        } else {
+            rec.state
+        };
+        let controls = super::recorder_controller::decide_recording_controls(
+            crate::mkmacro::runtime::snapshot()
+                .as_deref()
+                .map_or(RuntimeState::Idle, |snapshot| snapshot.state),
+            recorder_state,
+            dialog.selected_macro().is_some(),
+            dialog.recording_review.is_some(),
+            dialog.action_editor.draft.is_some() || super::step_table::table_modal_open(dialog),
+        );
         ui.horizontal(|ui| {
-            let secs=rec.elapsed.as_secs(); ui.label(format!("● Recording {:02}:{:02} — {} raw events — ~{} actions",secs/60,secs%60,rec.raw_event_count,rec.estimated_action_count));
-            if rec.dropped_event_count>0 { ui.colored_label(eframe::egui::Color32::YELLOW,format!("{} events dropped",rec.dropped_event_count)); }
-            match rec.state {
-                RecorderRuntimeState::Recording => if ui.button("Pause Recording").clicked(){report(dialog,crate::mkmacro::runtime::record_pause())},
-                RecorderRuntimeState::Paused => if ui.button("Resume Recording").clicked(){report(dialog,crate::mkmacro::runtime::record_resume())},
-                _ => {}
+            let secs = rec.elapsed.as_secs();
+            let state_label = match recorder_state {
+                RecorderRuntimeState::Recording => "Recording",
+                RecorderRuntimeState::Paused => "Paused",
+                RecorderRuntimeState::Stopping => "Stopping",
+                RecorderRuntimeState::Idle => "Idle",
+            };
+            ui.label(format!(
+                "● {state_label} {:02}:{:02} — {} raw events — ~{} actions",
+                secs / 60,
+                secs % 60,
+                rec.raw_event_count,
+                rec.estimated_action_count
+            ));
+            if rec.dropped_event_count > 0 {
+                ui.colored_label(
+                    eframe::egui::Color32::YELLOW,
+                    format!("{} events dropped", rec.dropped_event_count),
+                );
             }
-            if rec.state!=RecorderRuntimeState::Stopping && ui.button("Stop Recording").clicked() {
-                match crate::mkmacro::runtime::record_stop() {
-                    Err(e)=>dialog.command_error=Some(e.to_string()),
-                    Ok(result)=> {
-                        if dialog.apply_recording(result.macro_id, &result.generated_steps).is_ok() {
-                            if result.dropped_event_count>0 { dialog.command_error=Some(format!("Recording completed with {} dropped events",result.dropped_event_count)); }
-                        } else {
-                            dialog.pending_recording=Some((result.macro_id,result.generated_steps));
-                            dialog.command_error=Some("Recording target was deleted; captured actions were preserved for recovery".into());
-                        }
+            match recorder_state {
+                RecorderRuntimeState::Recording => {
+                    if ui
+                        .add_enabled(controls.pause, eframe::egui::Button::new("Pause Recording"))
+                        .clicked()
+                    {
+                        report(dialog, crate::mkmacro::runtime::record_pause())
                     }
                 }
+                RecorderRuntimeState::Paused => {
+                    if ui
+                        .add_enabled(
+                            controls.resume,
+                            eframe::egui::Button::new("Resume Recording"),
+                        )
+                        .clicked()
+                    {
+                        report(dialog, crate::mkmacro::runtime::record_resume())
+                    }
+                }
+                _ => {}
+            }
+            if ui
+                .add_enabled(controls.marker, eframe::egui::Button::new("Marker"))
+                .clicked()
+            {
+                report(dialog, crate::mkmacro::runtime::record_marker());
+            }
+            if ui
+                .add_enabled(controls.annotate, eframe::egui::Button::new("Annotate"))
+                .clicked()
+            {
+                let result = dialog.begin_recording_annotation();
+                report(dialog, result);
+            }
+            if ui
+                .add_enabled(controls.stop, eframe::egui::Button::new("Stop Recording"))
+                .clicked()
+            {
+                let result = dialog.stop_recording_for_review();
+                report(dialog, result);
             }
         });
     }
@@ -418,11 +495,318 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             run.total_steps
         ));
     }
+    show_recording_annotation(ui.ctx(), dialog);
+}
+
+fn show_recording_annotation(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
+    if !dialog.recording_annotation_open {
+        return;
+    }
+    if crate::mkmacro::runtime::recorder_snapshot().is_none_or(|snapshot| {
+        matches!(
+            snapshot.state,
+            RecorderRuntimeState::Idle | RecorderRuntimeState::Stopping
+        )
+    }) {
+        let _ = dialog.finish_recording_annotation(false);
+        return;
+    }
+    let mut open = true;
+    let mut save = false;
+    let mut cancel = false;
+    eframe::egui::Window::new("Recording annotation")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("Add a note at the current recording position.");
+            ui.text_edit_singleline(&mut dialog.recording_annotation_text)
+                .request_focus();
+            ui.horizontal(|ui| {
+                save = ui
+                    .add_enabled(
+                        !dialog.recording_annotation_text.trim().is_empty(),
+                        eframe::egui::Button::new("Add note"),
+                    )
+                    .clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+    if save || cancel || !open {
+        let result = dialog.finish_recording_annotation(save);
+        report(dialog, result);
+    }
+}
+
+fn process_recorder_hotkey_capture(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
+    let pause = if dialog.pause_record_hotkey_capture {
+        true
+    } else if dialog.marker_record_hotkey_capture {
+        false
+    } else {
+        return;
+    };
+    let Some(chord) = ctx.input(super::key_capture::captured_chord) else {
+        return;
+    };
+    // The capture owns this physical press for the frame; table/search
+    // shortcuts must not also act on it after the capture flag is cleared.
+    ctx.input_mut(|input| {
+        input
+            .events
+            .retain(|event| !matches!(event, eframe::egui::Event::Key { pressed: true, .. }));
+    });
+    dialog.pause_record_hotkey_capture = false;
+    dialog.marker_record_hotkey_capture = false;
+    let Some(hotkey) = super::key_capture::chord_hotkey(chord) else {
+        return;
+    };
+    let slot = if pause {
+        &mut dialog.draft.settings.recorder.pause_resume_hotkey
+    } else {
+        &mut dialog.draft.settings.recorder.marker_hotkey
+    };
+    if slot.as_ref() != Some(&hotkey) {
+        *slot = Some(hotkey);
+        dialog.mark_dirty();
+    }
+}
+
+fn recorder_control_conflict(dialog: &MkMacroDialog) -> Option<String> {
+    let controls = [
+        (
+            "Record Toggle",
+            Some(&dialog.draft.settings.record_toggle_hotkey),
+        ),
+        (
+            "Pause/Resume",
+            dialog.draft.settings.recorder.pause_resume_hotkey.as_ref(),
+        ),
+        (
+            "Marker",
+            dialog.draft.settings.recorder.marker_hotkey.as_ref(),
+        ),
+    ];
+    for (index, (left_name, left)) in controls.iter().enumerate() {
+        let Some(left) = left else { continue };
+        let left = crate::mkmacro::hotkeys::canonical_hotkey(left);
+        for (right_name, right) in &controls[index + 1..] {
+            if right.is_some_and(|right| crate::mkmacro::hotkeys::canonical_hotkey(right) == left) {
+                return Some(format!("{left_name} conflicts with {right_name}"));
+            }
+        }
+    }
+    None
+}
+
+fn show_record_options(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog, active: bool) {
+    ui.set_enabled(!active);
+    let before = dialog.draft.settings.recorder.clone();
+    let pause_capturing = dialog.pause_record_hotkey_capture;
+    let marker_capturing = dialog.marker_record_hotkey_capture;
+    let toggle_capturing = dialog.record_hotkey_capture;
+    let toggle_label = super::key_capture::hotkey_name(&dialog.draft.settings.record_toggle_hotkey);
+    let mut capture_pause = false;
+    let mut capture_marker = false;
+    let mut capture_toggle = false;
+    {
+        let options = &mut dialog.draft.settings.recorder;
+        ui.collapsing("Keyboard", |ui| {
+            ui.checkbox(&mut options.record_keyboard, "Keyboard");
+        });
+        ui.collapsing("Input", |ui| {
+            ui.checkbox(&mut options.record_mouse_buttons, "Mouse buttons");
+            ui.checkbox(&mut options.record_mouse_wheel, "Mouse wheel");
+            ui.checkbox(&mut options.record_injected_input, "Injected input");
+        });
+        ui.collapsing("Mouse Movement", |ui| {
+            for (mode, label) in [
+                (MovementMode::Off, "Off"),
+                (MovementMode::ClicksOnly, "Clicks Only"),
+                (MovementMode::SampledMovement, "Sampled Movement"),
+                (MovementMode::DetailedMovement, "Detailed Movement"),
+            ] {
+                ui.radio_value(&mut options.movement_mode, mode, label);
+            }
+            let sampled = options.movement_mode == MovementMode::SampledMovement;
+            ui.add_enabled(
+                sampled,
+                eframe::egui::Slider::new(&mut options.movement_distance_px, 1..=500)
+                    .text("Distance (px)"),
+            );
+            ui.add_enabled(
+                sampled,
+                eframe::egui::Slider::new(&mut options.movement_interval_ms, 1..=5_000)
+                    .text("Interval (ms)"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(&mut options.click_max_ms, 1..=10_000)
+                    .text("Click max (ms)"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(&mut options.click_distance_px, 0..=100)
+                    .text("Click distance (px)"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(&mut options.multi_click_ms, 1..=5_000)
+                    .text("Multi-click (ms)"),
+            );
+        });
+        ui.collapsing("Timing", |ui| {
+            ui.add(
+                eframe::egui::Slider::new(&mut options.minimum_idle_delay_ms, 0..=60_000)
+                    .text("Minimum idle delay (ms)"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(&mut options.delay_rounding_ms, 1..=10_000)
+                    .text("Delay rounding (ms)"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(&mut options.key_tap_max_ms, 1..=10_000)
+                    .text("Key tap max (ms)"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(&mut options.text_run_gap_ms, 1..=60_000)
+                    .text("Text run gap (ms)"),
+            );
+        });
+        ui.collapsing("Window Context", |ui| {
+            ui.checkbox(
+                &mut options.record_window_context,
+                "Record active and target windows",
+            );
+            ui.checkbox(
+                &mut options.detect_application_launches,
+                "Detect application launches",
+            );
+            ui.checkbox(
+                &mut options.inspect_clicked_controls,
+                "Inspect clicked controls",
+            );
+        });
+        ui.collapsing("Smart Cleanup", |ui| {
+            ui.checkbox(&mut options.smart_keyboard_cleanup, "Keyboard cleanup");
+            ui.checkbox(&mut options.smart_mouse_cleanup, "Mouse cleanup");
+            ui.checkbox(&mut options.smart_window_cleanup, "Window cleanup");
+            ui.checkbox(
+                &mut options.smart_repeated_click_cleanup,
+                "Repeated-click cleanup",
+            );
+            ui.add(
+                eframe::egui::Slider::new(
+                    &mut options.repeated_click_minimum,
+                    repeated_click_minimum_range(),
+                )
+                .text("Repeat minimum"),
+            );
+            ui.add(
+                eframe::egui::Slider::new(
+                    &mut options.repeated_click_interval_tolerance_ms,
+                    0..=10_000,
+                )
+                .text("Interval tolerance (ms)"),
+            );
+        });
+        ui.collapsing("Recorder Hotkeys", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Record Toggle:");
+                capture_toggle = ui
+                    .button(if toggle_capturing {
+                        "Press a key…"
+                    } else {
+                        &toggle_label
+                    })
+                    .clicked();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Pause/Resume:");
+                let label = options
+                    .pause_resume_hotkey
+                    .as_ref()
+                    .map(super::key_capture::hotkey_name)
+                    .unwrap_or_else(|| "Not set".into());
+                capture_pause = ui
+                    .button(if pause_capturing {
+                        "Press a key…"
+                    } else {
+                        &label
+                    })
+                    .clicked();
+                if ui
+                    .add_enabled(
+                        options.pause_resume_hotkey.is_some(),
+                        eframe::egui::Button::new("Clear"),
+                    )
+                    .clicked()
+                {
+                    options.pause_resume_hotkey = None;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Marker:");
+                let label = options
+                    .marker_hotkey
+                    .as_ref()
+                    .map(super::key_capture::hotkey_name)
+                    .unwrap_or_else(|| "Not set".into());
+                capture_marker = ui
+                    .button(if marker_capturing {
+                        "Press a key…"
+                    } else {
+                        &label
+                    })
+                    .clicked();
+                if ui
+                    .add_enabled(
+                        options.marker_hotkey.is_some(),
+                        eframe::egui::Button::new("Clear"),
+                    )
+                    .clicked()
+                {
+                    options.marker_hotkey = None;
+                }
+            });
+        });
+        ui.collapsing("Advanced", |ui| {
+            ui.checkbox(
+                &mut options.capture_text_paste_for_freeze_suggestion,
+                "Capture paste for freeze suggestion",
+            );
+            ui.small("Clipboard observations are transient and clear when Review closes.");
+        });
+        options.clamp();
+    }
+    if capture_toggle {
+        dialog.record_hotkey_capture = true;
+        dialog.pause_record_hotkey_capture = false;
+        dialog.marker_record_hotkey_capture = false;
+    } else if capture_pause {
+        dialog.pause_record_hotkey_capture = true;
+        dialog.marker_record_hotkey_capture = false;
+    } else if capture_marker {
+        dialog.marker_record_hotkey_capture = true;
+        dialog.pause_record_hotkey_capture = false;
+    }
+    if dialog.draft.settings.recorder != before {
+        dialog.mark_dirty();
+    }
+    if let Some(conflict) = recorder_control_conflict(dialog) {
+        ui.colored_label(eframe::egui::Color32::RED, conflict);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_click_slider_uses_the_domain_range() {
+        let range = repeated_click_minimum_range();
+        assert_eq!(*range.start(), REPEATED_CLICK_MINIMUM_MIN);
+        assert_eq!(*range.end(), REPEATED_CLICK_MINIMUM_MAX);
+        assert_eq!(*range.start(), 3);
+    }
+
     #[test]
     fn idle_controls_follow_eligibility_and_selection() {
         let s = decide(RuntimeState::Idle, None, 1);

@@ -369,6 +369,30 @@ fn analyze_document_with_context(
     let asset_root = context.asset_root;
     let graph = super::call_graph::CallGraph::build(doc);
     let mut out = graph.identity_diagnostics().to_vec();
+    let controls = [
+        ("Record Toggle", Some(&doc.settings.record_toggle_hotkey)),
+        (
+            "Pause/Resume",
+            doc.settings.recorder.pause_resume_hotkey.as_ref(),
+        ),
+        ("Marker", doc.settings.recorder.marker_hotkey.as_ref()),
+    ];
+    for (index, (left_name, left)) in controls.iter().enumerate() {
+        let Some(left) = left else { continue };
+        let left = super::hotkeys::canonical_hotkey(left);
+        for (right_name, right) in &controls[index + 1..] {
+            if right.is_some_and(|right| super::hotkeys::canonical_hotkey(right) == left) {
+                let mut diagnostic = MkDiagnostic::fatal(
+                    0,
+                    None,
+                    "duplicate_recorder_control_hotkey",
+                    format!("{left_name} hotkey conflicts with {right_name}"),
+                );
+                diagnostic.scope = DiagnosticScope::Document;
+                out.push(diagnostic);
+            }
+        }
+    }
     out.extend(graph.cycle_diagnostics(super::call_graph::DependencyPolicy::EnabledCalls));
     let mut invalid_signatures = HashSet::new();
     for m in &doc.macros {
@@ -1068,13 +1092,30 @@ fn analyze_document_with_context(
                         );
                     }
                 }
+                MkAction::KeyDown(key) | MkAction::KeyUp(key) | MkAction::KeyPress(key) => {
+                    if let Some(error) = super::key_validation_error(key) {
+                        push(&mut out, m.id, sid, "invalid_keyboard_key", error);
+                    }
+                }
+                MkAction::Hotkey(keys) => {
+                    if keys.is_empty() {
+                        push(
+                            &mut out,
+                            m.id,
+                            sid,
+                            "empty_keyboard_chord",
+                            "Hotkey chord must contain at least one key",
+                        );
+                    }
+                    for key in keys {
+                        if let Some(error) = super::key_validation_error(key) {
+                            push(&mut out, m.id, sid, "invalid_keyboard_key", error);
+                        }
+                    }
+                }
                 // These actions have no additional payload constraints. Keep
                 // this exhaustive so new actions require a validation decision.
-                MkAction::KeyDown(_)
-                | MkAction::KeyUp(_)
-                | MkAction::KeyPress(_)
-                | MkAction::Hotkey(_)
-                | MkAction::Text(_)
+                MkAction::Text(_)
                 | MkAction::MouseDown(_)
                 | MkAction::MouseUp(_)
                 | MkAction::MouseScroll { .. }
@@ -1161,6 +1202,37 @@ mod reusable_tests {
     }
     fn diagnostics(doc: &MkMacroDocument) -> Vec<MkDiagnostic> {
         analyze_document(doc).diagnostics
+    }
+    #[test]
+    fn keyboard_validation_reports_empty_chords_and_invalid_physical_keys() {
+        let document = document(vec![owner(
+            1,
+            vec![
+                MkAction::Hotkey(Vec::new()),
+                MkAction::KeyPress(MkKey::Function(25)),
+                MkAction::Hotkey(vec![MkKey::RawVirtualKey {
+                    vk: 0,
+                    scan_code: 0,
+                    extended: false,
+                }]),
+            ],
+        )]);
+        let diagnostics = diagnostics(&document);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "empty_keyboard_chord" && d.step_id == Some(1))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "invalid_keyboard_key" && d.step_id == Some(2))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "invalid_keyboard_key" && d.step_id == Some(3))
+        );
     }
     fn parameter(
         id: u64,

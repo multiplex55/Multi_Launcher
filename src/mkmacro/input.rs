@@ -1,7 +1,7 @@
 //! Production input synthesis. This is intentionally independent of legacy `actions::keys`.
 use super::{
     DiagnosticKind, ExecResult, ExecutionDiagnostic, InputBackend, MkKey, MkMouseButton,
-    MkMouseScrollAxis, MkPoint, MkTextMode, MkTextPayload,
+    MkMouseScrollAxis, MkPoint, MkTextMode, MkTextPayload, windows_key_metadata,
 };
 use std::time::{Duration, Instant};
 
@@ -97,7 +97,13 @@ impl<S: InputSink> Win32InputBackend<S> {
         }
     }
     fn key_event(&self, key: &MkKey, up: bool) -> ExecResult {
-        let (vk, scan, extended) = key_metadata(key)?;
+        let metadata = windows_key_metadata(key).ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "key has no Windows virtual-key representation",
+            )
+        })?;
+        let (vk, scan, extended) = (metadata.virtual_key, metadata.scan_code, metadata.extended);
         let mut flags = if up { KEYEVENTF_KEYUP_ } else { 0 };
         if scan != 0 {
             flags |= KEYEVENTF_SCANCODE_
@@ -128,7 +134,38 @@ impl<S: InputSink> Win32InputBackend<S> {
                 extra: MKMACRO_EXTRA_INFO,
             });
         }
-        self.emit(&e)
+        let sent = self
+            .sink
+            .send(&e)
+            .map_err(|error| rejected(e.len(), 0, error))?;
+        if sent != e.len() {
+            // UTF-16 events are emitted as down/up pairs. If SendInput accepts
+            // an odd prefix, the last accepted unit is owned by us and must be
+            // released best-effort before returning the primary rejection.
+            if sent < e.len()
+                && sent % 2 == 1
+                && let RawInputEvent::Keyboard {
+                    vk,
+                    scan,
+                    flags,
+                    extra,
+                } = e[sent - 1]
+            {
+                let _ = self.sink.send(&[RawInputEvent::Keyboard {
+                    vk,
+                    scan,
+                    flags: flags | KEYEVENTF_KEYUP_,
+                    extra,
+                }]);
+            }
+            Err(rejected(
+                e.len(),
+                sent,
+                "the operating system rejected Unicode input",
+            ))
+        } else {
+            Ok(())
+        }
     }
     pub fn key_press(&self, key: &MkKey) -> ExecResult {
         self.key_event(key, false)?;
@@ -167,61 +204,6 @@ impl<S: InputSink> Win32InputBackend<S> {
             extra: MKMACRO_EXTRA_INFO,
         }])
     }
-}
-fn key_metadata(k: &MkKey) -> ExecResult<(u16, u16, bool)> {
-    let v = match k {
-        MkKey::Character(s) if s.len() == 1 => s.as_bytes()[0].to_ascii_uppercase() as u16,
-        MkKey::Enter => 0x0D,
-        MkKey::Tab => 9,
-        MkKey::Escape => 0x1B,
-        MkKey::Space => 0x20,
-        MkKey::Backspace => 8,
-        MkKey::Delete => 0x2E,
-        MkKey::Up => 0x26,
-        MkKey::Down => 0x28,
-        MkKey::Left => 0x25,
-        MkKey::Right => 0x27,
-        MkKey::Home => 0x24,
-        MkKey::End => 0x23,
-        MkKey::PageUp => 0x21,
-        MkKey::PageDown => 0x22,
-        MkKey::Control => 0x11,
-        MkKey::LeftControl => 0xA2,
-        MkKey::RightControl => 0xA3,
-        MkKey::Alt => 0x12,
-        MkKey::LeftAlt => 0xA4,
-        MkKey::RightAlt => 0xA5,
-        MkKey::Shift => 0x10,
-        MkKey::LeftShift => 0xA0,
-        MkKey::RightShift => 0xA1,
-        MkKey::Meta | MkKey::LeftMeta => 0x5B,
-        MkKey::RightMeta => 0x5C,
-        MkKey::Function(n @ 1..=24) => 0x6F + *n as u16,
-        _ => {
-            return Err(ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidTarget,
-                "key has no virtual-key representation",
-            ));
-        }
-    };
-    let ext = matches!(
-        k,
-        MkKey::Delete
-            | MkKey::Up
-            | MkKey::Down
-            | MkKey::Left
-            | MkKey::Right
-            | MkKey::Home
-            | MkKey::End
-            | MkKey::PageUp
-            | MkKey::PageDown
-            | MkKey::Meta
-            | MkKey::LeftMeta
-            | MkKey::RightMeta
-            | MkKey::RightControl
-            | MkKey::RightAlt
-    );
-    Ok((v, 0, ext))
 }
 impl<S: InputSink> InputBackend for Win32InputBackend<S> {
     fn escape_pressed(&self) -> bool {
@@ -458,6 +440,34 @@ mod tests {
             Ok(e.len())
         }
     }
+    struct FailingSink {
+        events: Mutex<Vec<RawInputEvent>>,
+        fail_call: usize,
+        calls: Mutex<usize>,
+    }
+    #[derive(Default)]
+    struct PartialUnicodeSink {
+        calls: Mutex<Vec<Vec<RawInputEvent>>>,
+    }
+    impl InputSink for &PartialUnicodeSink {
+        fn send(&self, events: &[RawInputEvent]) -> Result<usize, String> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(events.to_vec());
+            Ok(if calls.len() == 1 { 1 } else { events.len() })
+        }
+    }
+    impl InputSink for &FailingSink {
+        fn send(&self, events: &[RawInputEvent]) -> Result<usize, String> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            self.events.lock().unwrap().extend_from_slice(events);
+            if *calls == self.fail_call {
+                Err("synthetic rejection".into())
+            } else {
+                Ok(events.len())
+            }
+        }
+    }
     #[test]
     fn unicode_surrogates_have_down_up() {
         let s = Sink::default();
@@ -468,6 +478,35 @@ mod tests {
             RawInputEvent::Keyboard { extra, .. } => *extra == MKMACRO_EXTRA_INFO,
             _ => false,
         }));
+    }
+    #[test]
+    fn odd_unicode_partial_acceptance_releases_the_owned_packet() {
+        let sink = PartialUnicodeSink::default();
+        let error = Win32InputBackend::with_sink(&sink)
+            .unicode_text("A")
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InputRejected);
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].len(), 2);
+        assert!(matches!(
+            calls[0][0],
+            RawInputEvent::Keyboard {
+                vk: 0,
+                scan: 0x41,
+                flags: KEYEVENTF_UNICODE_,
+                extra: MKMACRO_EXTRA_INFO,
+            }
+        ));
+        assert_eq!(
+            calls[1],
+            vec![RawInputEvent::Keyboard {
+                vk: 0,
+                scan: 0x41,
+                flags: KEYEVENTF_UNICODE_ | KEYEVENTF_KEYUP_,
+                extra: MKMACRO_EXTRA_INFO,
+            }]
+        );
     }
     #[test]
     fn x2_data_and_flags() {
@@ -501,5 +540,110 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ordered_chord_presses_in_order_and_releases_in_reverse() {
+        let sink = Sink::default();
+        Win32InputBackend::with_sink(&sink)
+            .chord(&[MkKey::Control, MkKey::Shift, MkKey::Character("S".into())])
+            .unwrap();
+        let events = sink.0.lock().unwrap();
+        let compact = events
+            .iter()
+            .map(|event| match event {
+                RawInputEvent::Keyboard { vk, flags, .. } => (*vk, flags & KEYEVENTF_KEYUP_ != 0),
+                _ => panic!("unexpected mouse event"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compact,
+            vec![
+                (0x11, false),
+                (0x10, false),
+                (u16::from(b'S'), false),
+                (u16::from(b'S'), true),
+                (0x10, true),
+                (0x11, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_chord_failure_attempts_reverse_cleanup_of_owned_keys() {
+        let sink = FailingSink {
+            events: Mutex::new(Vec::new()),
+            fail_call: 3,
+            calls: Mutex::new(0),
+        };
+        let error = Win32InputBackend::with_sink(&sink)
+            .chord(&[MkKey::Control, MkKey::Shift, MkKey::Character("S".into())])
+            .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::InputRejected);
+        let events = sink.events.lock().unwrap();
+        let compact = events
+            .iter()
+            .map(|event| match event {
+                RawInputEvent::Keyboard { vk, flags, .. } => (*vk, flags & KEYEVENTF_KEYUP_ != 0),
+                _ => panic!("unexpected mouse event"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compact,
+            vec![
+                (0x11, false),
+                (0x10, false),
+                (u16::from(b'S'), false),
+                (0x10, true),
+                (0x11, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn modifier_only_press_emits_a_balanced_fake_input_pair() {
+        let sink = Sink::default();
+        Win32InputBackend::with_sink(&sink)
+            .key_press(&MkKey::RightControl)
+            .unwrap();
+        let events = sink.0.lock().unwrap();
+        assert!(matches!(events.as_slice(), [
+            RawInputEvent::Keyboard { vk: 0xA3, flags, .. },
+            RawInputEvent::Keyboard { vk: 0xA3, flags: up_flags, .. },
+        ] if flags & KEYEVENTF_EXTENDEDKEY_ != 0
+            && flags & KEYEVENTF_KEYUP_ == 0
+            && up_flags & KEYEVENTF_EXTENDEDKEY_ != 0
+            && up_flags & KEYEVENTF_KEYUP_ != 0));
+    }
+
+    #[test]
+    fn raw_virtual_key_preserves_scan_extended_and_marker_through_fake_sink() {
+        let sink = Sink::default();
+        let backend = Win32InputBackend::with_sink(&sink);
+        let key = MkKey::RawVirtualKey {
+            vk: 0xE8,
+            scan_code: 0x56,
+            extended: true,
+        };
+        backend.key_down(&key).unwrap();
+        backend.key_up(&key).unwrap();
+        let events = sink.0.lock().unwrap();
+        assert_eq!(
+            events.as_slice(),
+            [
+                RawInputEvent::Keyboard {
+                    vk: 0xE8,
+                    scan: 0x56,
+                    flags: KEYEVENTF_SCANCODE_ | KEYEVENTF_EXTENDEDKEY_,
+                    extra: MKMACRO_EXTRA_INFO,
+                },
+                RawInputEvent::Keyboard {
+                    vk: 0xE8,
+                    scan: 0x56,
+                    flags: KEYEVENTF_SCANCODE_ | KEYEVENTF_EXTENDEDKEY_ | KEYEVENTF_KEYUP_,
+                    extra: MKMACRO_EXTRA_INFO,
+                },
+            ]
+        );
     }
 }

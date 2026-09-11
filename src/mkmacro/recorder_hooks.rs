@@ -8,11 +8,52 @@ use std::{
         mpsc::{self, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
+    time::Instant,
 };
+
+static RECORDER_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Shared monotonic timestamp domain for hook events and recorder boundaries.
+pub fn recorder_now_us() -> u64 {
+    RECORDER_EPOCH
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros() as u64
+}
 
 pub const LLKHF_EXTENDED: u32 = 0x01;
 pub const LLKHF_INJECTED: u32 = 0x10;
 pub const LLMHF_INJECTED: u32 = 0x01;
+
+#[cfg(any(windows, test))]
+fn clear_hook_pair<T>(
+    keyboard_hook: &mut Option<T>,
+    mouse_hook: &mut Option<T>,
+    uninstall: &mut impl FnMut(T),
+) {
+    if let Some(handle) = keyboard_hook.take() {
+        uninstall(handle);
+    }
+    if let Some(handle) = mouse_hook.take() {
+        uninstall(handle);
+    }
+}
+
+/// Retain hook handles only when the install transaction produced a complete pair.
+/// A partial pair cannot capture a session correctly and must not survive into a retry.
+#[cfg(any(windows, test))]
+fn retain_complete_hook_pair<T>(
+    keyboard_hook: &mut Option<T>,
+    mouse_hook: &mut Option<T>,
+    uninstall: &mut impl FnMut(T),
+) -> bool {
+    if keyboard_hook.is_some() && mouse_hook.is_some() {
+        true
+    } else {
+        clear_hook_pair(keyboard_hook, mouse_hook, uninstall);
+        false
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyTransition {
@@ -27,7 +68,7 @@ pub enum MouseMessage {
     Wheel(i32),
     HorizontalWheel(i32),
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,
@@ -78,17 +119,40 @@ pub enum HookCommand {
     Start,
     Pause,
     Resume,
+    Fence,
     Stop,
     Shutdown,
 }
+fn requires_pre_boundary_drain(command: HookCommand) -> bool {
+    matches!(
+        command,
+        HookCommand::Pause | HookCommand::Fence | HookCommand::Stop | HookCommand::Shutdown
+    )
+}
+pub struct HookCommandRequest {
+    pub command: HookCommand,
+    acknowledgement: mpsc::SyncSender<bool>,
+}
+impl HookCommandRequest {
+    pub fn acknowledge(self, succeeded: bool) {
+        let _ = self.acknowledgement.send(succeeded);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequencedHookEvent {
+    pub sequence: u64,
+    pub event: HookEvent,
+}
 pub trait HookLoopAdapter: Send + 'static {
     /// Runs on the hook thread. Implementations install/uninstall hooks and own their message loop.
-    fn run(self, commands: mpsc::Receiver<HookCommand>, callback: CallbackSender);
+    fn run(self, commands: mpsc::Receiver<HookCommandRequest>, callback: CallbackSender);
 }
 
 #[derive(Clone)]
 pub struct CallbackSender {
-    tx: SyncSender<HookEvent>,
+    tx: SyncSender<SequencedHookEvent>,
+    next_sequence: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     record_injected: Arc<AtomicBool>,
 }
@@ -100,7 +164,9 @@ impl CallbackSender {
         if !should_record(&event, self.record_injected.load(Ordering::Relaxed)) {
             return;
         }
-        if let Err(TrySendError::Full(_)) = self.tx.try_send(event) {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        if let Err(TrySendError::Full(_)) = self.tx.try_send(SequencedHookEvent { sequence, event })
+        {
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -108,8 +174,9 @@ impl CallbackSender {
 }
 
 pub struct HookService {
-    commands: mpsc::Sender<HookCommand>,
-    events: Mutex<mpsc::Receiver<HookEvent>>,
+    commands: mpsc::Sender<HookCommandRequest>,
+    events: Mutex<Option<mpsc::Receiver<SequencedHookEvent>>>,
+    next_sequence: Arc<AtomicU64>,
     dropped: Arc<std::sync::atomic::AtomicU64>,
     record_injected: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -119,9 +186,11 @@ impl HookService {
         let (commands, rx) = mpsc::channel();
         let (tx, events) = mpsc::sync_channel(capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
+        let next_sequence = Arc::new(AtomicU64::new(0));
         let record_injected = Arc::new(AtomicBool::new(false));
         let callback = CallbackSender {
             tx,
+            next_sequence: next_sequence.clone(),
             dropped: dropped.clone(),
             record_injected: record_injected.clone(),
         };
@@ -131,14 +200,22 @@ impl HookService {
             .expect("spawn hook loop");
         Self {
             commands,
-            events: Mutex::new(events),
+            events: Mutex::new(Some(events)),
+            next_sequence,
             dropped,
             record_injected,
             thread: Mutex::new(Some(thread)),
         }
     }
     pub fn command(&self, command: HookCommand) -> bool {
-        self.commands.send(command).is_ok()
+        let (acknowledgement, acknowledged) = mpsc::sync_channel(0);
+        self.commands
+            .send(HookCommandRequest {
+                command,
+                acknowledgement,
+            })
+            .is_ok()
+            && acknowledged.recv().unwrap_or(false)
     }
     pub fn start(&self) -> bool {
         self.command(HookCommand::Start)
@@ -156,14 +233,21 @@ impl HookService {
     pub fn stop(&self) -> bool {
         self.command(HookCommand::Stop)
     }
-    pub fn try_event(&self) -> Option<HookEvent> {
-        self.events.lock().unwrap().try_recv().ok()
+    pub fn synchronize(&self) -> Option<u64> {
+        self.command(HookCommand::Fence).then(|| self.fence())
+    }
+    pub fn take_events(&self) -> Option<mpsc::Receiver<SequencedHookEvent>> {
+        self.events.lock().unwrap().take()
+    }
+    /// The first sequence that cannot have been submitted before the acknowledged transition.
+    pub fn fence(&self) -> u64 {
+        self.next_sequence.load(Ordering::Acquire)
     }
     pub fn dropped_events(&self) -> u64 {
         self.dropped.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn shutdown(&self) {
-        let _ = self.commands.send(HookCommand::Shutdown);
+        let _ = self.command(HookCommand::Shutdown);
         if let Some(t) = self.thread.lock().unwrap().take() {
             let _ = t.join();
         }
@@ -182,9 +266,11 @@ pub fn should_record(event: &HookEvent, record_injected_input: bool) -> bool {
 /// Portable no-op adapter; the Windows implementation is selected by the application on Windows.
 pub struct NoopHookLoop;
 impl HookLoopAdapter for NoopHookLoop {
-    fn run(self, commands: mpsc::Receiver<HookCommand>, _: CallbackSender) {
-        while let Ok(c) = commands.recv() {
-            if c == HookCommand::Shutdown {
+    fn run(self, commands: mpsc::Receiver<HookCommandRequest>, _: CallbackSender) {
+        while let Ok(request) = commands.recv() {
+            let shutdown = request.command == HookCommand::Shutdown;
+            request.acknowledge(true);
+            if shutdown {
                 break;
             }
         }
@@ -206,19 +292,15 @@ pub fn production_hook_service(capacity: usize) -> HookService {
 #[cfg(windows)]
 mod win32 {
     use super::*;
-    use std::{
-        sync::OnceLock,
-        time::{Duration, Instant},
-    };
+    use std::{sync::OnceLock, time::Duration};
     use windows::Win32::{
         Foundation::{LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::*,
     };
     static CALLBACK: OnceLock<Mutex<Option<CallbackSender>>> = OnceLock::new();
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
     fn now() -> u64 {
-        EPOCH.get_or_init(Instant::now).elapsed().as_micros() as u64
+        super::recorder_now_us()
     }
     unsafe extern "system" fn keyboard(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code >= 0 {
@@ -300,8 +382,15 @@ mod win32 {
     /// Dedicated low-level-hook thread. Commands are polled beside its Windows message queue;
     /// shutdown always unhooks both handles before returning and allowing the owner to join.
     pub struct WindowsHookLoop;
+    unsafe fn drain_pending_messages() {
+        let mut msg = MSG::default();
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            let _ = unsafe { TranslateMessage(&msg) };
+            unsafe { DispatchMessageW(&msg) };
+        }
+    }
     impl HookLoopAdapter for WindowsHookLoop {
-        fn run(self, commands: mpsc::Receiver<HookCommand>, callback: CallbackSender) {
+        fn run(self, commands: mpsc::Receiver<HookCommandRequest>, callback: CallbackSender) {
             unsafe {
                 *CALLBACK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(callback.clone());
                 // HMODULE implements the windows crate's HINSTANCE parameter conversion.
@@ -312,10 +401,26 @@ mod win32 {
                 let mut mouse_hook = None;
                 let mut enabled = false;
                 'outer: loop {
-                    while let Ok(c) = commands.try_recv() {
-                        match c {
+                    while let Ok(request) = commands.try_recv() {
+                        // Low-level hook notifications already in this thread's
+                        // queue precede the acknowledged lifecycle boundary.
+                        // Dispatch them while CALLBACK is still installed so
+                        // the returned fence includes the complete pre-boundary tail.
+                        if enabled && requires_pre_boundary_drain(request.command) {
+                            drain_pending_messages();
+                        }
+                        let mut succeeded = true;
+                        match request.command {
                             HookCommand::Start => {
-                                if keyboard_hook.is_none() {
+                                if keyboard_hook.is_none() || mouse_hook.is_none() {
+                                    let mut unhook = |handle| {
+                                        let _ = UnhookWindowsHookEx(handle);
+                                    };
+                                    clear_hook_pair(
+                                        &mut keyboard_hook,
+                                        &mut mouse_hook,
+                                        &mut unhook,
+                                    );
                                     keyboard_hook = SetWindowsHookExW(
                                         WH_KEYBOARD_LL,
                                         Some(keyboard),
@@ -326,33 +431,52 @@ mod win32 {
                                     mouse_hook =
                                         SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0).ok();
                                 }
-                                enabled = true
+                                succeeded = retain_complete_hook_pair(
+                                    &mut keyboard_hook,
+                                    &mut mouse_hook,
+                                    &mut |handle| {
+                                        let _ = UnhookWindowsHookEx(handle);
+                                    },
+                                );
+                                enabled = succeeded;
+                                *CALLBACK.get().unwrap().lock().unwrap() =
+                                    succeeded.then(|| callback.clone());
                             }
-                            HookCommand::Pause | HookCommand::Stop => enabled = false,
-                            HookCommand::Resume => enabled = true,
-                            HookCommand::Shutdown => break 'outer,
+                            HookCommand::Pause | HookCommand::Stop => {
+                                enabled = false;
+                                *CALLBACK.get().unwrap().lock().unwrap() = None;
+                            }
+                            HookCommand::Resume => {
+                                succeeded = keyboard_hook.is_some() && mouse_hook.is_some();
+                                enabled = succeeded;
+                                *CALLBACK.get().unwrap().lock().unwrap() =
+                                    succeeded.then(|| callback.clone());
+                            }
+                            HookCommand::Fence => {}
+                            HookCommand::Shutdown => {
+                                enabled = false;
+                                *CALLBACK.get().unwrap().lock().unwrap() = None;
+                            }
+                        }
+                        let shutdown = request.command == HookCommand::Shutdown;
+                        request.acknowledge(succeeded);
+                        if shutdown {
+                            break 'outer;
                         }
                     }
                     if !enabled {
                         *CALLBACK.get().unwrap().lock().unwrap() = None;
                     } // paused callbacks still chain, but do not enqueue
-                    let mut msg = MSG::default();
-                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                        let _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                    }
+                    drain_pending_messages();
                     std::thread::sleep(Duration::from_millis(2));
                     if enabled && CALLBACK.get().unwrap().lock().unwrap().is_none() {
                         *CALLBACK.get().unwrap().lock().unwrap() = Some(callback.clone());
                     }
                 }
                 *CALLBACK.get().unwrap().lock().unwrap() = None;
-                if let Some(h) = keyboard_hook {
-                    let _ = UnhookWindowsHookEx(h);
-                }
-                if let Some(h) = mouse_hook {
-                    let _ = UnhookWindowsHookEx(h);
-                }
+                clear_hook_pair(&mut keyboard_hook, &mut mouse_hook, &mut |handle| {
+                    let _ = UnhookWindowsHookEx(handle);
+                });
             }
         }
     }
@@ -363,16 +487,50 @@ pub use win32::WindowsHookLoop;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn partial_hook_install_is_rolled_back_before_clean_retry_and_teardown() {
+        for (keyboard, mouse, expected_uninstalled) in
+            [(Some(11), None, vec![11]), (None, Some(12), vec![12])]
+        {
+            let mut keyboard = keyboard;
+            let mut mouse = mouse;
+            let mut uninstalled = Vec::new();
+            assert!(!retain_complete_hook_pair(
+                &mut keyboard,
+                &mut mouse,
+                &mut |handle| uninstalled.push(handle),
+            ));
+            assert_eq!(uninstalled, expected_uninstalled);
+            assert!(keyboard.is_none() && mouse.is_none());
+
+            keyboard = Some(21);
+            mouse = Some(22);
+            assert!(retain_complete_hook_pair(
+                &mut keyboard,
+                &mut mouse,
+                &mut |handle| uninstalled.push(handle),
+            ));
+            clear_hook_pair(&mut keyboard, &mut mouse, &mut |handle| {
+                uninstalled.push(handle)
+            });
+            assert_eq!(&uninstalled[uninstalled.len() - 2..], &[21, 22]);
+            assert!(keyboard.is_none() && mouse.is_none());
+        }
+    }
+
     struct Fake {
         unhooked: Arc<AtomicUsize>,
         event: HookEvent,
     }
     impl HookLoopAdapter for Fake {
-        fn run(self, rx: mpsc::Receiver<HookCommand>, cb: CallbackSender) {
+        fn run(self, rx: mpsc::Receiver<HookCommandRequest>, cb: CallbackSender) {
             let mut active = false;
-            while let Ok(c) = rx.recv() {
-                match c {
+            while let Ok(request) = rx.recv() {
+                let shutdown = request.command == HookCommand::Shutdown;
+                match request.command {
                     HookCommand::Start => {
                         active = true;
                         cb.submit(self.event);
@@ -384,9 +542,13 @@ mod tests {
                             active = false;
                         }
                         self.unhooked.fetch_add(1, Ordering::SeqCst);
-                        break;
                     }
+                    HookCommand::Fence => {}
                     _ => {}
+                }
+                request.acknowledge(true);
+                if shutdown {
+                    break;
                 }
             }
             let _ = active;
@@ -437,5 +599,63 @@ mod tests {
         s.shutdown();
         s.shutdown();
         assert_eq!(u.load(Ordering::SeqCst), 1);
+    }
+
+    struct QueuedTail {
+        queued: Arc<Mutex<VecDeque<HookEvent>>>,
+    }
+    impl HookLoopAdapter for QueuedTail {
+        fn run(self, commands: mpsc::Receiver<HookCommandRequest>, callback: CallbackSender) {
+            let mut active = false;
+            while let Ok(request) = commands.recv() {
+                if active && requires_pre_boundary_drain(request.command) {
+                    for event in self.queued.lock().unwrap().drain(..) {
+                        callback.submit(event);
+                    }
+                }
+                let shutdown = request.command == HookCommand::Shutdown;
+                match request.command {
+                    HookCommand::Start | HookCommand::Resume => active = true,
+                    HookCommand::Pause | HookCommand::Stop | HookCommand::Shutdown => {
+                        active = false
+                    }
+                    HookCommand::Fence => {}
+                }
+                request.acknowledge(true);
+                if shutdown {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn acknowledged_stop_drains_pre_boundary_tail_and_excludes_later_input() {
+        let queued = Arc::new(Mutex::new(VecDeque::new()));
+        let service = HookService::with_adapter(
+            QueuedTail {
+                queued: queued.clone(),
+            },
+            8,
+        );
+        let events = service.take_events().unwrap();
+        assert!(service.start());
+        queued.lock().unwrap().push_back(key(0, 0));
+        assert!(service.stop());
+        let fence = service.fence();
+        queued.lock().unwrap().push_back(HookEvent::Key {
+            timestamp_us: 2,
+            transition: KeyTransition::Up,
+            vk: 65,
+            scan_code: 30,
+            flags: 0,
+            extra_info: 0,
+        });
+        assert!(service.synchronize().is_some());
+        let retained = events.try_iter().collect::<Vec<_>>();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].sequence, 0);
+        assert!(retained[0].sequence < fence);
+        service.shutdown();
     }
 }

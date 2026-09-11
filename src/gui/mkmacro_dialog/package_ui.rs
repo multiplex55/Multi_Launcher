@@ -373,6 +373,11 @@ fn import_policy(ui: &mut egui::Ui, plan: &PackageImportPlan, template: bool) {
 }
 
 fn help(ui: &mut egui::Ui) {
+    ui.heading("Recording");
+    ui.label("Record captures into a transient Review instead of changing or saving the macro. Pause/Resume, Marker, and Annotate preserve the capture timeline; Stop finalizes on a worker and opens Review. Play All and Play Selected Range run the proposal ephemerally through the normal runtime, and Apply is the only operation that inserts reviewed actions.");
+    ui.label("Cleanup can fold physical key transitions into taps, holds, chords, and layout-aware text; simplify mouse movement/clicks; retain useful delays; and propose window, launch, repeat, clipboard-freeze, and clicked-control transformations. Suggestions stay reviewable and can be disabled.");
+    ui.label("Use physical Key actions for shortcuts, navigation, sided modifiers, and scan-code-sensitive input. Use Unicode Text for characters/content. Clipboard and UI inspection observations are transient and clear when Review closes.");
+    ui.label("Send Keys exposes Key Press, Key Down, Key Up, Hotkey, and Text. Use Hotkey for Ctrl+V, Ctrl+Shift+S, or Shift+F1; use Key Down Shift and a later Key Up Shift for an explicit hold; use Text for Unicode content.");
     ui.heading("Editing");
     ui.label("Ctrl+C / Ctrl+X / Ctrl+V copy, cut, and paste complete structured steps. Ctrl+D duplicates with fresh step IDs. Drag the primary selected row to reorder; all selected rows move together.");
     ui.label("Ctrl+F finds fields, Ctrl+H performs schema-aware replacement, and Ctrl+G jumps to a step. Fold block rows, add labels/comments/accent colors, bookmark steps, and use the Outline to navigate structure.");

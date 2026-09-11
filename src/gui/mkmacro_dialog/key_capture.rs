@@ -61,6 +61,7 @@ pub(crate) fn mk_key_from_egui(key: egui::Key) -> Option<MkKey> {
         Space => MkKey::Space,
         Backspace => MkKey::Backspace,
         Delete => MkKey::Delete,
+        Insert => MkKey::Insert,
         ArrowUp => MkKey::Up,
         ArrowDown => MkKey::Down,
         ArrowLeft => MkKey::Left,
@@ -93,17 +94,6 @@ pub(crate) fn mk_key_from_egui(key: egui::Key) -> Option<MkKey> {
         F22 => MkKey::Function(22),
         F23 => MkKey::Function(23),
         F24 => MkKey::Function(24),
-        F25 => MkKey::Function(25),
-        F26 => MkKey::Function(26),
-        F27 => MkKey::Function(27),
-        F28 => MkKey::Function(28),
-        F29 => MkKey::Function(29),
-        F30 => MkKey::Function(30),
-        F31 => MkKey::Function(31),
-        F32 => MkKey::Function(32),
-        F33 => MkKey::Function(33),
-        F34 => MkKey::Function(34),
-        F35 => MkKey::Function(35),
         _ => return None,
     })
 }
@@ -167,17 +157,7 @@ pub(crate) fn apply_captured_hotkey(current: &mut Option<MkHotkey>, chord: Captu
 }
 
 pub(crate) fn key_name(key: &MkKey) -> String {
-    match key {
-        MkKey::Character(v) => v.to_uppercase(),
-        MkKey::Function(n) => format!("F{n}"),
-        MkKey::PageUp => "Page Up".into(),
-        MkKey::PageDown => "Page Down".into(),
-        MkKey::LeftControl | MkKey::RightControl | MkKey::Control => "Ctrl".into(),
-        MkKey::LeftAlt | MkKey::RightAlt | MkKey::Alt => "Alt".into(),
-        MkKey::LeftShift | MkKey::RightShift | MkKey::Shift => "Shift".into(),
-        MkKey::LeftMeta | MkKey::RightMeta | MkKey::Meta => "Meta".into(),
-        other => format!("{other:?}"),
-    }
+    crate::mkmacro::display_name(key)
 }
 
 pub(crate) fn hotkey_name(h: &MkHotkey) -> String {
@@ -232,7 +212,7 @@ mod tests {
         }
         let functions = [
             F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, F13, F14, F15, F16, F17, F18, F19,
-            F20, F21, F22, F23, F24, F25, F26, F27, F28, F29, F30, F31, F32, F33, F34, F35,
+            F20, F21, F22, F23, F24,
         ];
         for (number, key) in functions.into_iter().enumerate() {
             assert_eq!(
@@ -240,7 +220,10 @@ mod tests {
                 Some(MkKey::Function(number as u8 + 1))
             );
         }
-        assert_eq!(mk_key_from_egui(Insert), None);
+        for unsupported in [F25, F26, F27, F28, F29, F30, F31, F32, F33, F34, F35] {
+            assert_eq!(mk_key_from_egui(unsupported), None);
+        }
+        assert_eq!(mk_key_from_egui(Insert), Some(MkKey::Insert));
     }
 
     fn capture(key: egui::Key, modifiers: egui::Modifiers) -> CapturedChord {

@@ -1,15 +1,18 @@
 use multi_launcher::{
     actions::Action,
     gui::mkmacro_dialog::{
-        MkMacroAuthoringContext, MkMacroDialog, action_catalog,
-        action_editor::ActionEditorState,
-        launcher_action_picker::PickerPurpose,
-        recorder_controller::{
-            RecorderController, RecorderControllerView, RecorderState, RecorderStatusSnapshot,
-        },
+        MkMacroAuthoringContext, MkMacroDialog, action_catalog, action_editor::ActionEditorState,
+        launcher_action_picker::PickerPurpose, recorder_controller::decide_recording_controls,
     },
     mkmacro::{executor::fake::FakeBackend, *},
 };
+
+struct NoTextTranslator;
+impl KeyboardTranslator for NoTextTranslator {
+    fn translate(&mut self, _: &KeyboardTranslationRequest) -> KeyTranslation {
+        KeyTranslation::None
+    }
+}
 
 #[test]
 fn virtual_desktop_catalog_entries_are_searchable_typed_and_stable() {
@@ -513,19 +516,6 @@ fn wait_for_successful_step(runtime: &MacroRuntime) -> RuntimeSnapshot {
     }
 }
 
-#[derive(Default)]
-struct FakeRecorderView;
-impl RecorderControllerView for FakeRecorderView {
-    fn set_visible(&mut self, _: bool) {}
-    fn show(
-        &mut self,
-        _: &RecorderStatusSnapshot,
-        _: Option<&RuntimeSnapshot>,
-    ) -> Option<multi_launcher::gui::mkmacro_dialog::recorder_controller::ControllerAction> {
-        None
-    }
-}
-
 fn insert(dialog: &mut MkMacroDialog, action: MkAction) -> u64 {
     let mut editor = ActionEditorState::new(dialog.visual_overlay_controller());
     editor.begin_new(action);
@@ -655,9 +645,14 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
     let stopped = wait_for(&runtime, RuntimeState::Stopped);
     assert!(stopped.steps.values().any(|s| *s == StepState::Success));
 
-    let mut recorder = RecorderController::new(FakeRecorderView);
-    recorder.hook_command(HookCommand::Start);
-    assert_eq!(recorder.status.state, RecorderState::Recording);
+    let recording_controls = decide_recording_controls(
+        RuntimeState::Idle,
+        RecorderRuntimeState::Recording,
+        true,
+        false,
+        false,
+    );
+    assert!(recording_controls.pause && recording_controls.stop);
     let recorded = normalize(
         &[
             RecordingBoundary::Event(
@@ -711,12 +706,61 @@ fn complete_authoring_recording_and_playback_workflow_uses_typed_intents() {
         },
         None,
     );
-    recorder.hook_command(HookCommand::Stop);
-    assert_eq!(recorder.status.state, RecorderState::Stopped);
+    assert!(
+        decide_recording_controls(
+            RuntimeState::Idle,
+            RecorderRuntimeState::Idle,
+            true,
+            false,
+            false,
+        )
+        .record
+    );
     let before = dialog.draft.clone();
-    assert!(dialog.apply_recording(u64::MAX, &recorded).is_err());
+    let recording_result = |macro_id| RecordingResult {
+        target: RecordingTarget {
+            macro_id,
+            insertion_anchor_step_id: None,
+            insertion_anchor_generation: None,
+        },
+        literal_steps: recorded.clone(),
+        plan: build_recording_plan(
+            &enrich_keyboard(&recorded, &mut NoTextTranslator),
+            &MkRecorderSettings {
+                record_window_context: false,
+                smart_mouse_cleanup: false,
+                minimum_idle_delay_ms: 0,
+                delay_rounding_ms: 1,
+                ..Default::default()
+            },
+        ),
+        suggestions: vec![],
+        clipboard_observations: vec![],
+        click_inspections: vec![],
+        window_observations: vec![],
+        notes: vec![],
+        capture_duration: Duration::from_micros(3),
+        raw_event_count: 4,
+        dropped_event_count: 0,
+    };
+    dialog
+        .open_recording_review(recording_result(u64::MAX))
+        .unwrap();
+    assert!(dialog.apply_recording_review().is_err());
     assert_eq!(dialog.draft, before, "recorder failure is atomic");
-    let ids = dialog.apply_recording(id, &recorded).unwrap();
+    assert!(
+        dialog.recording_review.is_some(),
+        "failed Apply preserves Review"
+    );
+    dialog.cancel_recording_review();
+    dialog.open_recording_review(recording_result(id)).unwrap();
+    let ids = dialog.apply_recording_review().unwrap();
+    assert!(dialog.selected_macro().unwrap().steps.iter().any(|step| {
+        matches!(
+            step.action,
+            MkAction::KeyPress(MkKey::Character(ref value)) if value == "A"
+        )
+    }));
     let click = *ids.last().unwrap();
     let original = dialog
         .selected_macro()

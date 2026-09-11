@@ -618,6 +618,19 @@ templates, and the complete in-app MkMacro help.
   fresh macro/folder/step/signature identities and independent dependencies/assets;
   all copied hotkeys are cleared. Sources, templates, and instances never maintain
   live links.
+- **Record** captures keyboard, mouse, timing, and optional window context into a
+  transient Recording Review; it never inserts or saves behind your back. Pause,
+  markers, and annotations preserve the timeline, cleanup suggestions remain
+  optional, and **Play All/Selected Range** use the normal runtime without
+  publishing the draft. **Apply** performs the single anchored insertion.
+- Choose physical **Key** actions for shortcuts, navigation, sided modifiers, and
+  scan-code-sensitive input. Choose Unicode **Text** for typed characters and
+  content. Clipboard/UI-control observations used for suggestions are transient
+  and are cleared when Review closes.
+- Send Keys exposes **Key Press**, **Key Down**, **Key Up**, **Hotkey**, and
+  **Text**. Use Hotkey for `Ctrl+V`, `Ctrl+Shift+S`, or `Shift+F1`; use
+  **Key Down Shift** and a later **Key Up Shift** for an explicit hold; use
+  **Text** for Unicode content.
 
 ## Configuration
 
