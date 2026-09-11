@@ -29,8 +29,8 @@
 | M02 | Shared window catalog, typed commands, and standalone `vd` plugin | M01 | complete | `5a42d723`; `cargo check`, formatting, diff validation, focused catalog/launch/plugin/protocol/GUI tests passed; independent tranche review approved |
 | M03 | Multi Manager binding and Layout migration | M02 | complete | `c845c599`; `cargo check`, formatting, diff validation, focused MM/Layout/protocol tests passed; independent tranche review approved after remediation |
 | M04 | Event-driven rules, MkMacro consolidation/extensions, and discovery polish | M03 | complete | `88a48810`; formatting/check/diff/audit and focused rules/plugin/catalog/MM/activation/MkMacro tests passed; independent tranche review approved after remediation |
-| M05 | Test completion, targeted validation, and full authoritative Nextest | M04 | complete | `cargo fmt --all --check` and `cargo check` passed; `cargo nextest run --no-fail-fast`: 3696 passed, 0 failed, 7 skipped |
-| M06 | Independent review, remediation, final verification, and ledger completion | M05 | in_progress | pending |
+| M05 | Test completion, targeted validation, and full authoritative Nextest | M04 | complete | `b0348014`; `cargo fmt --all --check` and `cargo check` passed; pre-review `cargo nextest run --no-fail-fast`: 3696 passed, 0 failed, 7 skipped |
+| M06 | Independent review, remediation, final verification, and ledger completion | M05 | complete | `839dac7a`; final independent review approved after remediation; post-remediation `cargo nextest run --no-fail-fast`: 3715 passed, 0 failed, 7 skipped |
 
 ## M01 — Shared Windows foundations
 
