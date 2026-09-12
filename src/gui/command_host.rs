@@ -901,6 +901,60 @@ mod tests {
     }
 
     #[test]
+    fn repeated_screen_draw_start_preserves_active_session_in_drawing_ghost_and_finish() {
+        for safe_mode in [None, Some(false), Some(true)] {
+            let mut app = test_app();
+            let generation = app.screen_draw_controller.request_start().unwrap();
+            app.screen_draw_controller
+                .launcher_parked(generation)
+                .unwrap();
+            app.screen_draw_controller
+                .capture_succeeded(generation)
+                .unwrap();
+            app.screen_draw_controller.install_test_session_snapshot(
+                generation,
+                crate::mkmacro::screen::CapturedRegion {
+                    image: image::RgbaImage::from_pixel(3, 2, image::Rgba([7, 8, 9, 255])),
+                    origin: (-3, 4),
+                },
+            );
+            let (commands, _) = app.screen_draw_controller.install_test_native_worker();
+            match safe_mode {
+                None => {}
+                Some(false) => app.screen_draw_controller.enter_ghost().unwrap(),
+                Some(true) => app.screen_draw_controller.finish().unwrap(),
+            }
+            let _ = commands.try_iter().collect::<Vec<_>>();
+            let snapshot = std::sync::Arc::clone(
+                app.screen_draw_controller
+                    .session_snapshot()
+                    .unwrap()
+                    .capture(),
+            );
+
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                &mut app,
+                crate::commands::ScreenDrawCommand::Start,
+            )
+            .unwrap();
+
+            assert_eq!(
+                app.screen_draw_controller.state().generation(),
+                Some(generation)
+            );
+            assert!(app.screen_draw_controller.toolbar_open());
+            assert!(std::sync::Arc::ptr_eq(
+                &snapshot,
+                app.screen_draw_controller
+                    .session_snapshot()
+                    .unwrap()
+                    .capture()
+            ));
+            assert!(commands.try_recv().is_err());
+        }
+    }
+
+    #[test]
     fn screen_draw_new_restores_before_waiting_for_native_teardown_then_restarts() {
         let mut app = test_app();
         let first = app.screen_draw_controller.request_start().unwrap();

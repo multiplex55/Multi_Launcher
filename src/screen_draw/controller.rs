@@ -291,6 +291,15 @@ impl ScreenDrawController {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_dependencies(
+        capture_backend: Arc<dyn DesktopCaptureBackend>,
+        visibility_probe: Arc<dyn LauncherVisibilityProbe>,
+        native_factory: Arc<dyn NativeSessionFactory>,
+    ) -> Self {
+        Self::with_runtime_dependencies(capture_backend, visibility_probe, native_factory)
+    }
+
     fn with_runtime_dependencies_and_clock(
         capture_backend: Arc<dyn DesktopCaptureBackend>,
         visibility_probe: Arc<dyn LauncherVisibilityProbe>,

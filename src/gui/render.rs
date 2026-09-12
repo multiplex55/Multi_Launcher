@@ -2172,6 +2172,160 @@ mod tests {
         )
     }
 
+    struct StartupCaptureBackend {
+        capture_calls: AtomicUsize,
+        completed: std::sync::mpsc::Sender<()>,
+    }
+
+    impl crate::screen_draw::capture::DesktopCaptureBackend for StartupCaptureBackend {
+        fn virtual_desktop(&self) -> Result<crate::mkmacro::screen::ScreenRect, String> {
+            Ok(crate::mkmacro::screen::ScreenRect::new(
+                -1920, -1080, 5760, 3240,
+            ))
+        }
+
+        fn capture_desktop(
+            &self,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<crate::mkmacro::screen::CapturedRegion, String> {
+            assert!(!cancelled());
+            self.capture_calls.fetch_add(1, Ordering::SeqCst);
+            let _ = self.completed.send(());
+            Ok(crate::mkmacro::screen::CapturedRegion {
+                image: image::RgbaImage::from_pixel(4, 3, image::Rgba([1, 2, 3, 255])),
+                origin: (-1920, -1080),
+            })
+        }
+    }
+
+    struct ParkedLauncherProbe;
+
+    impl crate::screen_draw::capture::LauncherVisibilityProbe for ParkedLauncherProbe {
+        fn launcher_is_capture_parked(
+            &self,
+            launcher_hwnd: Option<usize>,
+            virtual_desktop: crate::mkmacro::screen::ScreenRect,
+        ) -> Result<bool, String> {
+            assert_eq!(launcher_hwnd, Some(42));
+            assert_eq!(
+                virtual_desktop,
+                crate::mkmacro::screen::ScreenRect::new(-1920, -1080, 5760, 3240)
+            );
+            Ok(true)
+        }
+    }
+
+    struct StartupNativeFactory {
+        spawns: AtomicUsize,
+        command_receivers:
+            Mutex<Vec<std::sync::mpsc::Receiver<crate::screen_draw::NativeSessionCommand>>>,
+    }
+
+    impl crate::screen_draw::native_runtime::NativeSessionFactory for StartupNativeFactory {
+        fn spawn(
+            &self,
+            config: crate::screen_draw::native_runtime::NativeSessionConfig,
+        ) -> Result<crate::screen_draw::NativeSessionHandle, String> {
+            assert_eq!(config.snapshot.capture().origin, (-1920, -1080));
+            self.spawns.fetch_add(1, Ordering::SeqCst);
+            let (handle, commands, _) =
+                crate::screen_draw::NativeSessionHandle::test_stub_with_events();
+            self.command_receivers.lock().unwrap().push(commands);
+            Ok(handle)
+        }
+    }
+
+    #[test]
+    fn screen_draw_start_keeps_root_alive_across_parking_capture_native_and_toolbar() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let (capture_completed, capture_completed_rx) = std::sync::mpsc::channel();
+        let capture = Arc::new(StartupCaptureBackend {
+            capture_calls: AtomicUsize::new(0),
+            completed: capture_completed,
+        });
+        let native = Arc::new(StartupNativeFactory {
+            spawns: AtomicUsize::new(0),
+            command_receivers: Mutex::new(Vec::new()),
+        });
+        app.screen_draw_controller =
+            crate::screen_draw::ScreenDrawController::with_test_dependencies(
+                capture.clone(),
+                Arc::new(ParkedLauncherProbe),
+                native.clone(),
+            );
+        app.screen_draw_controller
+            .set_recovery_bridge(Arc::clone(&app.screen_draw_recovery_bridge));
+        app.launcher_hwnd = Some(42);
+        app.static_location_enabled = true;
+        app.follow_mouse = true;
+
+        assert!(app.start_or_focus_screen_draw().unwrap());
+        let generation = app.screen_draw_controller.state().generation().unwrap();
+        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            left: 1371,
+            top: 611,
+            right: 1834,
+            bottom: 898,
+        };
+        let desktop = crate::mkmacro::screen::ScreenRect::new(-1920, -1080, 5760, 3240);
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                generation, original, desktop,
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.poll_screen_draw_capture(&ctx);
+        assert!(matches!(
+            app.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
+        ));
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+
+        app.poll_screen_draw_capture(&ctx);
+        assert!(matches!(
+            app.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::Capturing { .. }
+        ));
+        assert!(!app.screen_draw_controller.toolbar_open());
+        capture_completed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("capture worker completes without blocking the GUI thread");
+
+        for _ in 0..100_000 {
+            app.poll_screen_draw_capture(&ctx);
+            if matches!(
+                app.screen_draw_controller.state(),
+                crate::screen_draw::ScreenDrawState::Drawing { .. }
+            ) {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::Drawing { generation }
+        );
+        assert!(app.screen_draw_controller.toolbar_open());
+        assert_eq!(capture.capture_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(native.spawns.load(Ordering::SeqCst), 1);
+        app.show_screen_draw_toolbar(&ctx);
+        let output = ctx.end_frame();
+
+        assert!(app.screen_draw_toolbar.was_open);
+        assert!(observer.restored_rects().is_empty());
+        let root_commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport remains in the frame")
+            .commands;
+        assert!(!root_commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
+        )));
+    }
+
     #[test]
     fn screen_draw_capture_failure_restores_launcher_and_reports_diagnostic() {
         let ctx = egui::Context::default();
@@ -2179,6 +2333,19 @@ mod tests {
         app.visible_flag.store(false, Ordering::SeqCst);
         app.restore_flag.store(false, Ordering::SeqCst);
         app.show_inline_errors = true;
+        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            left: 1200,
+            top: 700,
+            right: 1663,
+            bottom: 987,
+        };
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(1),
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
 
         app.apply_screen_draw_capture_poll(
             &ctx,
@@ -2191,6 +2358,7 @@ mod tests {
 
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.last_visible);
+        assert_eq!(observer.restored_rects(), [original]);
         assert!(!app.restore_flag.load(Ordering::SeqCst));
         assert_eq!(app.error.as_deref(), Some("fixture capture failure"));
         assert!(!app.screen_draw_controller.toolbar_open());
@@ -2203,6 +2371,19 @@ mod tests {
         app.visible_flag.store(false, Ordering::SeqCst);
         app.restore_flag.store(false, Ordering::SeqCst);
         let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([4, 5, 6, 255]));
+        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            left: -800,
+            top: 250,
+            right: -337,
+            bottom: 537,
+        };
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(1),
+                original,
+                crate::mkmacro::screen::ScreenRect::new(-1920, 0, 3840, 1080),
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
 
         app.apply_screen_draw_capture_poll(
             &ctx,
@@ -2222,6 +2403,7 @@ mod tests {
         ));
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.last_visible);
+        assert_eq!(observer.restored_rects(), [original]);
         assert!(!app.restore_flag.load(Ordering::SeqCst));
         assert_eq!(app.screenshot_editors.len(), 1);
     }
@@ -2339,29 +2521,34 @@ mod tests {
 
     #[test]
     fn screen_draw_recovery_cancels_both_capture_startup_states_and_restores_exactly() {
-        for advance_to_capturing in [false, true] {
-            let ctx = egui::Context::default();
-            let mut app = new_app(&ctx);
-            let generation = app.screen_draw_controller.request_start().unwrap();
-            if advance_to_capturing {
-                app.screen_draw_controller
-                    .launcher_parked(generation)
-                    .unwrap();
+        for recovery in [
+            super::ScreenDrawRecoveryRequest::LauncherToggle,
+            super::ScreenDrawRecoveryRequest::Emergency,
+        ] {
+            for advance_to_capturing in [false, true] {
+                let ctx = egui::Context::default();
+                let mut app = new_app(&ctx);
+                let generation = app.screen_draw_controller.request_start().unwrap();
+                if advance_to_capturing {
+                    app.screen_draw_controller
+                        .launcher_parked(generation)
+                        .unwrap();
+                }
+                let (observer, original) = install_recovery_parking(&mut app, generation);
+
+                ctx.begin_frame(egui::RawInput::default());
+                app.recover_screen_draw(recovery);
+                let _ = ctx.end_frame();
+
+                assert_eq!(
+                    app.screen_draw_controller.state(),
+                    &crate::screen_draw::ScreenDrawState::NoSession
+                );
+                assert!(!app.screen_draw_recovery_bridge.is_active());
+                assert_eq!(observer.restored_rects(), [original]);
+                assert!(app.screen_draw_launcher_parking.is_none());
+                assert!(app.visible_flag.load(Ordering::SeqCst));
             }
-            let (observer, original) = install_recovery_parking(&mut app, generation);
-
-            ctx.begin_frame(egui::RawInput::default());
-            app.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
-            let _ = ctx.end_frame();
-
-            assert_eq!(
-                app.screen_draw_controller.state(),
-                &crate::screen_draw::ScreenDrawState::NoSession
-            );
-            assert!(!app.screen_draw_recovery_bridge.is_active());
-            assert_eq!(observer.restored_rects(), [original]);
-            assert!(app.screen_draw_launcher_parking.is_none());
-            assert!(app.visible_flag.load(Ordering::SeqCst));
         }
     }
 
@@ -2693,43 +2880,45 @@ mod tests {
 
     #[test]
     fn root_escape_cancels_pre_capture_and_restores_without_generic_placement() {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        ctx.begin_frame(egui::RawInput::default());
-        let _ = ctx.end_frame();
-        let generation = app.screen_draw_controller.request_start().unwrap();
-        assert!(matches!(
-            app.screen_draw_controller.state(),
-            crate::screen_draw::ScreenDrawState::AwaitingLauncherParking {
-                generation: current
-            } if *current == generation
-        ));
-        app.visible_flag.store(false, Ordering::SeqCst);
-        app.last_visible = false;
+        for capturing in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            ctx.begin_frame(egui::RawInput::default());
+            let _ = ctx.end_frame();
+            let generation = app.screen_draw_controller.request_start().unwrap();
+            if capturing {
+                app.screen_draw_controller
+                    .launcher_parked(generation)
+                    .unwrap();
+            }
+            let (observer, original) = install_recovery_parking(&mut app, generation);
 
-        ctx.begin_frame(egui::RawInput {
-            events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
-            ..Default::default()
-        });
-        app.cancel_screen_draw_startup_on_escape(&ctx);
-        let output = ctx.end_frame();
+            ctx.begin_frame(egui::RawInput {
+                events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+                ..Default::default()
+            });
+            app.cancel_screen_draw_startup_on_escape(&ctx);
+            let output = ctx.end_frame();
 
-        assert_eq!(
-            app.screen_draw_controller.state(),
-            &crate::screen_draw::ScreenDrawState::NoSession
-        );
-        assert!(app.visible_flag.load(Ordering::SeqCst));
-        assert!(app.last_visible);
-        assert!(!app.restore_flag.load(Ordering::SeqCst));
-        let commands = &output
-            .viewport_output
-            .get(&egui::ViewportId::ROOT)
-            .unwrap()
-            .commands;
-        assert!(!commands.iter().any(|command| matches!(
-            command,
-            egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
-        )));
+            assert_eq!(
+                app.screen_draw_controller.state(),
+                &crate::screen_draw::ScreenDrawState::NoSession
+            );
+            assert_eq!(observer.restored_rects(), [original]);
+            assert!(app.screen_draw_launcher_parking.is_none());
+            assert!(app.visible_flag.load(Ordering::SeqCst));
+            assert!(app.last_visible);
+            assert!(!app.restore_flag.load(Ordering::SeqCst));
+            let commands = &output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .unwrap()
+                .commands;
+            assert!(!commands.iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
+            )));
+        }
     }
 
     #[test]
