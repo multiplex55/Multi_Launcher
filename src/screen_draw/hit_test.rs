@@ -28,9 +28,8 @@ pub fn stroke_hit_test(stroke: &Stroke, point: DesktopPoint, tolerance: f32) -> 
     match stroke.points.as_slice() {
         [] => false,
         [only] => point_distance_squared(only.position, point) <= radius * radius,
-        points => points.windows(2).any(|pair| {
-            point_segment_distance_squared(point, pair[0].position, pair[1].position)
-                <= radius * radius
+        _ => stroke.segments().any(|segment| {
+            point_segment_distance_squared(point, segment.from, segment.to) <= radius * radius
         }),
     }
 }
@@ -275,5 +274,20 @@ mod tests {
             DesktopPoint::new(50, 10),
             0.0
         ));
+    }
+
+    #[test]
+    fn stroke_break_is_not_hit_but_following_subpath_is() {
+        let stroke = Stroke {
+            points: vec![
+                StrokePoint::mouse(DesktopPoint::new(0, 10)),
+                StrokePoint::mouse_break(DesktopPoint::new(100, 10)),
+                StrokePoint::mouse(DesktopPoint::new(120, 10)),
+            ],
+            color: RgbaColor::RED,
+            thickness: 2.0,
+        };
+        assert!(!stroke_hit_test(&stroke, DesktopPoint::new(50, 10), 0.0));
+        assert!(stroke_hit_test(&stroke, DesktopPoint::new(110, 10), 0.0));
     }
 }

@@ -7,6 +7,30 @@ pub struct DesktopPoint {
     pub y: i32,
 }
 
+/// A subpixel point used while clipping physical pointer movement. Keeping
+/// intersections in floating point prevents premature unsigned conversion or
+/// rounding on desktops whose origin is negative.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct DesktopPointF64 {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+}
+
+impl From<DesktopPoint> for DesktopPointF64 {
+    fn from(point: DesktopPoint) -> Self {
+        Self {
+            x: f64::from(point.x),
+            y: f64::from(point.y),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct VisibleSegment {
+    pub(crate) from: DesktopPointF64,
+    pub(crate) to: DesktopPointF64,
+}
+
 impl DesktopPoint {
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
@@ -162,6 +186,80 @@ pub fn plan_crop(source: DesktopRect, requested: DesktopRect) -> Option<CropPlan
     })
 }
 
+/// Subtracts an axis-aligned exclusion rectangle from one pointer segment.
+/// Returned fragments retain input order. Rectangle edges are treated as
+/// excluded; an exact corner tangent, which has no positive-length overlap,
+/// leaves the segment intact.
+pub(crate) fn visible_segment_fragments(
+    from: DesktopPoint,
+    to: DesktopPoint,
+    exclusion: DesktopRect,
+) -> Vec<VisibleSegment> {
+    let from = DesktopPointF64::from(from);
+    let to = DesktopPointF64::from(to);
+    let full = VisibleSegment { from, to };
+    if exclusion.is_empty() {
+        return vec![full];
+    }
+
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let left = f64::from(exclusion.x);
+    let top = f64::from(exclusion.y);
+    let right = exclusion.right() as f64;
+    let bottom = exclusion.bottom() as f64;
+
+    let mut enter = 0.0_f64;
+    let mut exit = 1.0_f64;
+    for (p, q) in [
+        (-dx, from.x - left),
+        (dx, right - from.x),
+        (-dy, from.y - top),
+        (dy, bottom - from.y),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return vec![full];
+            }
+            continue;
+        }
+        let ratio = q / p;
+        if p < 0.0 {
+            enter = enter.max(ratio);
+        } else {
+            exit = exit.min(ratio);
+        }
+        if enter > exit {
+            return vec![full];
+        }
+    }
+
+    // A corner tangent removes only a mathematical point. Treating it as a
+    // crossing would create an unnecessary persisted subpath discontinuity.
+    if exit - enter <= f64::EPSILON * 16.0 {
+        return vec![full];
+    }
+
+    let point_at = |t: f64| DesktopPointF64 {
+        x: from.x + dx * t,
+        y: from.y + dy * t,
+    };
+    let mut visible = Vec::with_capacity(2);
+    if enter > 0.0 {
+        visible.push(VisibleSegment {
+            from,
+            to: point_at(enter),
+        });
+    }
+    if exit < 1.0 {
+        visible.push(VisibleSegment {
+            from: point_at(exit),
+            to,
+        });
+    }
+    visible
+}
+
 /// Recovers a toolbar onto the nearest visible monitor and keeps it fully
 /// inside that monitor whenever the monitor is large enough.
 pub fn clamp_toolbar_position(
@@ -266,5 +364,78 @@ mod tests {
             ),
             Some(DesktopPoint::new(-100, -50))
         );
+    }
+
+    fn assert_point(actual: DesktopPointF64, expected: (f64, f64)) {
+        assert!((actual.x - expected.0).abs() < 1e-9, "{actual:?}");
+        assert!((actual.y - expected.1).abs() < 1e-9, "{actual:?}");
+    }
+
+    #[test]
+    fn segment_crossing_exclusion_returns_two_ordered_visible_fragments() {
+        let fragments = visible_segment_fragments(
+            DesktopPoint::new(50, 200),
+            DesktopPoint::new(400, 200),
+            DesktopRect::new(100, 100, 250, 700),
+        );
+        assert_eq!(fragments.len(), 2);
+        assert_point(fragments[0].from, (50.0, 200.0));
+        assert_point(fragments[0].to, (100.0, 200.0));
+        assert_point(fragments[1].from, (350.0, 200.0));
+        assert_point(fragments[1].to, (400.0, 200.0));
+    }
+
+    #[test]
+    fn segment_exclusion_handles_inside_entry_exit_and_negative_coordinates() {
+        let rect = DesktopRect::new(-300, -200, 100, 100);
+        assert!(
+            visible_segment_fragments(
+                DesktopPoint::new(-250, -150),
+                DesktopPoint::new(-220, -120),
+                rect
+            )
+            .is_empty()
+        );
+
+        let entering = visible_segment_fragments(
+            DesktopPoint::new(-400, -150),
+            DesktopPoint::new(-250, -150),
+            rect,
+        );
+        assert_eq!(entering.len(), 1);
+        assert_point(entering[0].from, (-400.0, -150.0));
+        assert_point(entering[0].to, (-300.0, -150.0));
+
+        let leaving = visible_segment_fragments(
+            DesktopPoint::new(-250, -150),
+            DesktopPoint::new(-100, -150),
+            rect,
+        );
+        assert_eq!(leaving.len(), 1);
+        assert_point(leaving[0].from, (-200.0, -150.0));
+        assert_point(leaving[0].to, (-100.0, -150.0));
+    }
+
+    #[test]
+    fn segment_exclusion_has_deterministic_boundary_and_tangent_behavior() {
+        let rect = DesktopRect::new(10, 10, 10, 10);
+        let tangent =
+            visible_segment_fragments(DesktopPoint::new(0, 0), DesktopPoint::new(10, 10), rect);
+        assert_eq!(tangent.len(), 1);
+        assert_point(tangent[0].from, (0.0, 0.0));
+        assert_point(tangent[0].to, (10.0, 10.0));
+
+        let along_edge =
+            visible_segment_fragments(DesktopPoint::new(0, 10), DesktopPoint::new(30, 10), rect);
+        assert_eq!(along_edge.len(), 2);
+        assert_point(along_edge[0].to, (10.0, 10.0));
+        assert_point(along_edge[1].from, (20.0, 10.0));
+
+        let outside = visible_segment_fragments(
+            DesktopPoint::new(i32::MIN, -1),
+            DesktopPoint::new(i32::MAX, -1),
+            rect,
+        );
+        assert_eq!(outside.len(), 1);
     }
 }

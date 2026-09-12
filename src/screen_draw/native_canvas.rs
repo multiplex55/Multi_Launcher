@@ -425,13 +425,12 @@ fn union_rect(a: DesktopRect, b: DesktopRect) -> DesktopRect {
 fn stroke_bounds(canvas: DesktopRect, stroke: &Stroke) -> Option<DesktopRect> {
     let first = stroke.points.first()?.position;
     let mut bounds = dirty_segment(canvas, first, first, stroke.thickness)?;
-    for segment in stroke.points.windows(2) {
-        if let Some(dirty) = dirty_segment(
-            canvas,
-            segment[0].position,
-            segment[1].position,
-            stroke.thickness,
-        ) {
+    // Bounds deliberately remain conservative across subpath breaks. Including
+    // every sample preserves the pre-break invalidation behavior without
+    // causing any renderer or hit tester to connect the gap.
+    for point in stroke.points.iter().skip(1) {
+        if let Some(dirty) = dirty_segment(canvas, point.position, point.position, stroke.thickness)
+        {
             bounds = union_rect(bounds, dirty);
         }
     }

@@ -46,6 +46,9 @@ pub struct StrokePoint {
     pub pressure: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_millis: Option<u64>,
+    /// Suppresses the segment from the preceding sample to this sample.
+    #[serde(default)]
+    pub break_before: bool,
 }
 
 impl StrokePoint {
@@ -54,8 +57,24 @@ impl StrokePoint {
             position,
             pressure: None,
             timestamp_millis: None,
+            break_before: false,
         }
     }
+
+    pub const fn mouse_break(position: DesktopPoint) -> Self {
+        Self {
+            position,
+            pressure: None,
+            timestamp_millis: None,
+            break_before: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StrokeSegment {
+    pub(crate) from: DesktopPoint,
+    pub(crate) to: DesktopPoint,
 }
 
 /// An in-progress or committed freehand stroke.
@@ -77,6 +96,17 @@ impl Stroke {
 
     pub fn push_mouse_point(&mut self, position: DesktopPoint) {
         self.points.push(StrokePoint::mouse(position));
+    }
+
+    /// Iterates the drawable subpaths in this stroke. A break marker belongs
+    /// to the current point and suppresses only its incoming segment.
+    pub(crate) fn segments(&self) -> impl Iterator<Item = StrokeSegment> + '_ {
+        self.points.windows(2).filter_map(|pair| {
+            (!pair[1].break_before).then_some(StrokeSegment {
+                from: pair[0].position,
+                to: pair[1].position,
+            })
+        })
     }
 }
 
@@ -283,5 +313,40 @@ mod tests {
         assert_eq!(CanvasBackground::default(), CanvasBackground::FrozenDesktop);
         assert_eq!(ToolbarOrientation::default(), ToolbarOrientation::Vertical);
         assert_eq!(ScreenDrawMode::default(), ScreenDrawMode::NoSession);
+    }
+
+    #[test]
+    fn legacy_stroke_points_default_to_an_unbroken_subpath() {
+        let point: StrokePoint = serde_json::from_value(serde_json::json!({
+            "position": { "x": -42, "y": 17 }
+        }))
+        .unwrap();
+        assert_eq!(point, StrokePoint::mouse(DesktopPoint::new(-42, 17)));
+        assert!(!point.break_before);
+    }
+
+    #[test]
+    fn stroke_point_breaks_round_trip_and_suppress_only_the_incoming_segment() {
+        let points = vec![
+            StrokePoint::mouse(DesktopPoint::new(0, 0)),
+            StrokePoint::mouse_break(DesktopPoint::new(10, 0)),
+            StrokePoint::mouse(DesktopPoint::new(20, 0)),
+        ];
+        let restored: Vec<StrokePoint> =
+            serde_json::from_str(&serde_json::to_string(&points).unwrap()).unwrap();
+        assert_eq!(restored, points);
+
+        let stroke = Stroke {
+            points: restored,
+            color: RgbaColor::RED,
+            thickness: 2.0,
+        };
+        assert_eq!(
+            stroke.segments().collect::<Vec<_>>(),
+            vec![StrokeSegment {
+                from: DesktopPoint::new(10, 0),
+                to: DesktopPoint::new(20, 0),
+            }]
+        );
     }
 }

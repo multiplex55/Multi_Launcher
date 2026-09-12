@@ -255,11 +255,11 @@ fn render_software_stroke(
     stroke: &Stroke,
     stroke_color: RgbaColor,
 ) {
-    for segment in stroke.points.windows(2) {
+    for segment in stroke.segments() {
         software::draw_line(
             output,
-            local_point(segment[0].position, origin),
-            local_point(segment[1].position, origin),
+            local_point(segment.from, origin),
+            local_point(segment.to, origin),
             color(stroke_color),
             stroke.thickness,
         );
@@ -287,9 +287,9 @@ pub(crate) fn stroke_mask_tiles(output: DesktopRect, stroke: &Stroke) -> Vec<Des
     }
     let margin = (stroke.thickness.max(1.0) * 0.5).ceil() as i64 + 2;
     let mut occupied = BTreeSet::new();
-    for segment in stroke.points.windows(2) {
-        let from = segment[0].position;
-        let to = segment[1].position;
+    for segment in stroke.segments() {
+        let from = segment.from;
+        let to = segment.to;
         let dx = i64::from(to.x) - i64::from(from.x);
         let dy = i64::from(to.y) - i64::from(from.y);
         let sample_step = i64::from(PEN_MASK_TILE_SIZE / 2);
@@ -405,11 +405,11 @@ fn render_pen_stroke_in_tiles(
             };
             let old_bitmap = SelectObject(dc, dib);
             ptr::write_bytes(bits as *mut u8, 0, byte_len);
-            for segment in stroke.points.windows(2) {
+            for segment in stroke.segments() {
                 crate::platform::gdi_stroke::draw_solid_segment(
                     dc,
-                    (segment[0].position.x as f32, segment[0].position.y as f32),
-                    (segment[1].position.x as f32, segment[1].position.y as f32),
+                    (segment.from.x as f32, segment.from.y as f32),
+                    (segment.to.x as f32, segment.to.y as f32),
                     (tile.x, tile.y),
                     [255, 255, 255],
                     stroke.thickness,
@@ -734,5 +734,62 @@ mod tests {
         assert!(output.pixels().all(|pixel| pixel.0 == [0, 0, 0, 0]));
         assert_eq!(document.objects().len(), 1);
         assert!(document.can_undo());
+    }
+
+    #[test]
+    fn software_stroke_raster_does_not_bridge_a_subpath_break() {
+        let stroke = Stroke {
+            points: vec![
+                StrokePoint::mouse(DesktopPoint::new(5, 10)),
+                StrokePoint::mouse(DesktopPoint::new(20, 10)),
+                StrokePoint::mouse_break(DesktopPoint::new(80, 10)),
+                StrokePoint::mouse(DesktopPoint::new(95, 10)),
+            ],
+            color: RgbaColor::RED,
+            thickness: 2.0,
+        };
+        let mut output = RgbaImage::new(100, 20);
+        render_software_stroke(&mut output, DesktopPoint::new(0, 0), &stroke, stroke.color);
+        assert_ne!(output.get_pixel(10, 10).0[3], 0);
+        assert_eq!(output.get_pixel(50, 10).0[3], 0);
+        assert_ne!(output.get_pixel(90, 10).0[3], 0);
+    }
+
+    #[test]
+    fn pen_tile_planning_does_not_visit_tiles_across_a_subpath_break() {
+        let stroke = Stroke {
+            points: vec![
+                StrokePoint::mouse(DesktopPoint::new(20, 20)),
+                StrokePoint::mouse(DesktopPoint::new(80, 20)),
+                StrokePoint::mouse_break(DesktopPoint::new(1000, 20)),
+                StrokePoint::mouse(DesktopPoint::new(1060, 20)),
+            ],
+            color: RgbaColor::RED,
+            thickness: 2.0,
+        };
+        let tiles = stroke_mask_tiles(DesktopRect::new(0, 0, 1280, 256), &stroke);
+        assert!(tiles.iter().any(|tile| tile.x == 0));
+        assert!(tiles.iter().any(|tile| tile.x == 768));
+        assert!(tiles.iter().all(|tile| tile.x != 256 && tile.x != 512));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gdi_pen_raster_does_not_bridge_a_subpath_break() {
+        let stroke = Stroke {
+            points: vec![
+                StrokePoint::mouse(DesktopPoint::new(5, 10)),
+                StrokePoint::mouse(DesktopPoint::new(20, 10)),
+                StrokePoint::mouse_break(DesktopPoint::new(80, 10)),
+                StrokePoint::mouse(DesktopPoint::new(95, 10)),
+            ],
+            color: RgbaColor::RED,
+            thickness: 2.0,
+        };
+        let mut output = RgbaImage::new(100, 20);
+        render_pen_stroke(&mut output, DesktopPoint::new(0, 0), &stroke).unwrap();
+        assert_ne!(output.get_pixel(10, 10).0[3], 0);
+        assert_eq!(output.get_pixel(50, 10).0[3], 0);
+        assert_ne!(output.get_pixel(90, 10).0[3], 0);
     }
 }
