@@ -552,7 +552,7 @@ mod windows_canvas {
     use crate::screen_draw::hotkeys::{LocalShortcutAction, local_shortcut};
     use crate::screen_draw::native_overlay::NativeOverlaySurface;
     use crate::screen_draw::window_layers::{
-        NativeWindowHandle, ToolbarZOrderCeiling, interactive_canvas_extended_style,
+        ToolbarWindowInfo, ToolbarZOrderCeiling, interactive_canvas_extended_style,
         interactive_canvas_style, raise_interactive_canvas,
     };
     use crate::screen_draw::{ScreenDrawSettings, render_document_into, selected_background};
@@ -665,6 +665,7 @@ mod windows_canvas {
         passive: Option<NativeOverlaySurface>,
         passive_transient: Vec<(DesktopRect, NativeOverlaySurface)>,
         toolbar_ceiling: ToolbarZOrderCeiling,
+        toolbar_bounds: Option<DesktopRect>,
         passive_mode: bool,
         destroying_surfaces: bool,
         background: CanvasBackground,
@@ -1345,6 +1346,7 @@ mod windows_canvas {
                 )?),
                 passive_transient: Vec::new(),
                 toolbar_ceiling: ToolbarZOrderCeiling::default(),
+                toolbar_bounds: None,
                 passive_mode: false,
                 destroying_surfaces: false,
                 background: initial_background,
@@ -1472,8 +1474,11 @@ mod windows_canvas {
                 raise_interactive_canvas(self.state.hwnd);
             }
         }
-        pub(crate) fn set_toolbar_z_order_ceiling(&mut self, toolbar: Option<NativeWindowHandle>) {
-            self.state.toolbar_ceiling.set(toolbar);
+        pub(crate) fn set_toolbar_window(&mut self, info: Option<ToolbarWindowInfo>) {
+            self.state.toolbar_bounds = info.map(|info| info.bounds);
+            self.state
+                .toolbar_ceiling
+                .set(info.and_then(|info| info.handle));
             let ceiling = self.state.toolbar_ceiling;
             if let Some(passive) = self.state.passive.as_mut() {
                 passive.set_toolbar_z_order_ceiling(ceiling);
@@ -1481,6 +1486,10 @@ mod windows_canvas {
             for (_, passive) in &mut self.state.passive_transient {
                 passive.set_toolbar_z_order_ceiling(ceiling);
             }
+        }
+
+        pub(crate) fn toolbar_bounds(&self) -> Option<DesktopRect> {
+            self.state.toolbar_bounds
         }
         pub(crate) fn cancel_active(&mut self) -> bool {
             let changed = self.state.canvas.cancel_active();

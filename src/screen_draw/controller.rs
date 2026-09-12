@@ -20,7 +20,7 @@ use super::native_runtime::{
 };
 use super::{
     CanvasBackground, ExportBackground, ExportDestination, RgbaColor, ScreenDrawSettings,
-    ScreenDrawTool,
+    ScreenDrawTool, ToolbarWindowInfo,
 };
 use super::{ExportOutcome, ExportRequest, ExportScope};
 use crate::mkmacro::screen::{CapturedRegion, ScreenRect};
@@ -688,6 +688,15 @@ impl ScreenDrawController {
         self.send_native(NativeSessionCommand::Resume)?;
         self.set_state(ScreenDrawState::Drawing { generation });
         Ok(())
+    }
+
+    /// Forwards the toolbar's ephemeral native identity and physical bounds to
+    /// the current worker without adding it to user-visible runtime state.
+    pub(crate) fn set_toolbar_window(
+        &self,
+        info: Option<ToolbarWindowInfo>,
+    ) -> Result<(), ScreenDrawTransitionError> {
+        self.send_native(NativeSessionCommand::SetToolbarWindow(info))
     }
 
     pub fn finish(&mut self) -> Result<(), ScreenDrawTransitionError> {
@@ -1914,6 +1923,38 @@ mod tests {
             commands[0].try_recv(),
             Ok(NativeSessionCommand::Shutdown)
         ));
+    }
+
+    #[test]
+    fn toolbar_window_forwarding_precedes_resume_when_ui_synchronizes_lifecycle() {
+        use crate::screen_draw::{DesktopRect, NativeWindowHandle, ToolbarWindowInfo};
+
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let (_, repaint) = repaint_counter();
+        controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+
+        controller.enter_ghost().unwrap();
+        let info = ToolbarWindowInfo {
+            handle: NativeWindowHandle::from_raw(77),
+            bounds: DesktopRect::new(-1200, -80, 420, 820),
+        };
+        controller.set_toolbar_window(Some(info)).unwrap();
+        controller.resume_drawing().unwrap();
+
+        let commands: Vec<_> = native.commands.lock().unwrap()[0].try_iter().collect();
+        assert_eq!(
+            commands,
+            vec![
+                NativeSessionCommand::Ghost,
+                NativeSessionCommand::SetToolbarWindow(Some(info)),
+                NativeSessionCommand::Resume,
+            ]
+        );
     }
 
     #[test]

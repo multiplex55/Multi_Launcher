@@ -48,3 +48,4 @@ pub use native_runtime::{
 pub use raster::{RasterBackground, RasterError, render_document_into, selected_background};
 pub use recovery::ScreenDrawRecoveryBridge;
 pub use settings::{HotkeyChord, PALETTE_SLOT_COUNT, ScreenDrawSettings, SettingsValidationError};
+pub use window_layers::{NativeWindowHandle, ToolbarWindowInfo};

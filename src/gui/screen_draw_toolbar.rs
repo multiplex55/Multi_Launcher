@@ -2,6 +2,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::screen_draw::window_layers::{
+    ScreenDrawToolbarNativeBridge, SystemToolbarWindowBackend, TOOLBAR_WINDOW_TITLE,
+    desktop_rect_from_logical_edges,
+};
 use crate::screen_draw::{
     CanvasBackground, DesktopPoint, DesktopRect, DesktopSize, ExportBackground, ExportDestination,
     ExportRequest, ExportScope, RgbaColor, ScreenDrawController, ScreenDrawSettings,
@@ -97,6 +101,8 @@ pub(crate) struct ScreenDrawToolbarUi {
     initial_position_points: Option<egui::Pos2>,
     known_monitors: Vec<DesktopRect>,
     last_physical_position: Option<DesktopPoint>,
+    last_physical_bounds: Option<DesktopRect>,
+    native_bridge: ScreenDrawToolbarNativeBridge,
     settings_dirty_since: Option<Instant>,
     export_background: ExportBackground,
     #[cfg(test)]
@@ -105,6 +111,8 @@ pub(crate) struct ScreenDrawToolbarUi {
 
 impl ScreenDrawToolbarUi {
     fn begin_open(&mut self, settings: &ScreenDrawSettings, pixels_per_point: f32) {
+        self.native_bridge.begin_viewport();
+        self.last_physical_bounds = None;
         self.known_monitors = current_monitor_rects();
         let requested = settings
             .toolbar_position
@@ -186,6 +194,7 @@ impl super::LauncherApp {
 
     pub(super) fn request_new_screen_draw_capture(&mut self) -> Result<(), String> {
         self.cancel_screen_draw_region_picker();
+        self.clear_screen_draw_toolbar_native_bridge();
         self.screen_draw_controller
             .request_new_capture()
             .map_err(|error| error.to_string())?;
@@ -265,6 +274,18 @@ impl super::LauncherApp {
         self.last_visible = false;
         self.restore_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        let toolbar = self
+            .screen_draw_toolbar
+            .native_bridge
+            .synchronize_for_resume(
+                generation.get(),
+                self.screen_draw_toolbar.last_physical_bounds,
+                &SystemToolbarWindowBackend,
+            );
+        if let Err(error) = self.screen_draw_controller.set_toolbar_window(toolbar) {
+            let _ = self.restore_screen_draw_launcher_exact();
+            return Err(error.to_string());
+        }
         if let Err(error) = self.screen_draw_controller.resume_drawing() {
             let _ = self.restore_screen_draw_launcher_exact();
             return Err(error.to_string());
@@ -278,6 +299,7 @@ impl super::LauncherApp {
 
     pub(super) fn close_screen_draw_session(&mut self) -> Result<(), String> {
         self.cancel_screen_draw_region_picker();
+        self.clear_screen_draw_toolbar_native_bridge();
         // Controller close disarms native input before launcher restoration.
         self.screen_draw_controller.close();
         self.restore_screen_draw_launcher_exact()?;
@@ -312,6 +334,9 @@ impl super::LauncherApp {
     pub(super) fn show_screen_draw_toolbar(&mut self, ctx: &egui::Context) {
         let open = self.screen_draw_controller.toolbar_open();
         if !open {
+            if self.screen_draw_toolbar.was_open {
+                self.clear_screen_draw_toolbar_native_bridge();
+            }
             self.screen_draw_toolbar.was_open = false;
             return;
         }
@@ -336,12 +361,13 @@ impl super::LauncherApp {
         let mut actions = Vec::new();
         let mut close_requested = false;
         let mut observed_position = None;
-        let mut observed_scale = None;
+        let mut observed_outer_rect = None;
+        let mut observed_pixels_per_point = None;
         let mut escape_pressed = false;
 
         let toolbar_size = toolbar_size_points(settings.toolbar_orientation);
         let mut builder = egui::ViewportBuilder::default()
-            .with_title("Screen Draw")
+            .with_title(TOOLBAR_WINDOW_TITLE)
             .with_inner_size(toolbar_size)
             .with_min_inner_size(toolbar_size)
             .with_max_inner_size(toolbar_size)
@@ -368,20 +394,47 @@ impl super::LauncherApp {
             child.input(|input| {
                 let viewport = input.viewport();
                 observed_position = viewport.outer_rect.map(|rect| rect.min);
-                observed_scale = viewport.native_pixels_per_point;
+                observed_outer_rect = viewport.outer_rect;
                 close_requested = viewport.close_requested();
             });
+            observed_pixels_per_point = Some(child.pixels_per_point());
             escape_pressed = consume_drawing_escape(child, &state);
         });
         self.screen_draw_toolbar.export_background = export_background;
 
-        if let (Some(position), Some(scale)) = (observed_position, observed_scale) {
+        if let (Some(position), Some(scale)) = (observed_position, observed_pixels_per_point) {
             let physical = logical_to_physical(position, scale);
             let settings = self.screen_draw_controller.settings().clone();
             let mut updated = settings;
             self.screen_draw_toolbar
                 .note_position(physical, &mut updated);
             self.screen_draw_controller.update_settings(updated);
+        }
+        let physical_bounds =
+            observed_outer_rect
+                .zip(observed_pixels_per_point)
+                .and_then(|(rect, scale)| {
+                    desktop_rect_from_logical_edges(
+                        rect.min.x, rect.min.y, rect.max.x, rect.max.y, scale,
+                    )
+                });
+        if let Some(bounds) = physical_bounds {
+            self.screen_draw_toolbar.last_physical_bounds = Some(bounds);
+        }
+        let bridge_fallback = physical_bounds.or(self.screen_draw_toolbar.last_physical_bounds);
+        if let Some(toolbar) = self.screen_draw_toolbar.native_bridge.synchronize(
+            state.generation().map(|generation| generation.get()),
+            bridge_fallback,
+            &SystemToolbarWindowBackend,
+        ) {
+            if let Err(error) = self.screen_draw_controller.set_toolbar_window(toolbar) {
+                self.report_error_message("screen_draw.toolbar", error.to_string());
+            }
+        }
+        if self.screen_draw_toolbar.native_bridge.resolution_pending() {
+            // Bounded child-viewport creation retries; this stops as soon as
+            // the handle resolves or the fixed attempt budget is exhausted.
+            ctx.request_repaint();
         }
         if close_requested {
             actions.push(ToolbarAction::Lifecycle(LifecycleAction::Close));
@@ -411,6 +464,7 @@ impl super::LauncherApp {
         if should_close_viewport || !self.screen_draw_controller.toolbar_open() {
             // Lifecycle actions perform their launcher work before requesting
             // this viewport-only close.
+            self.clear_screen_draw_toolbar_native_bridge();
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
             self.screen_draw_toolbar.was_open = false;
         }
@@ -442,10 +496,20 @@ impl super::LauncherApp {
         // Native teardown is synchronous to initiate: the worker receives its
         // shutdown request before UI state is discarded or settings are saved.
         self.cancel_screen_draw_region_picker();
+        self.clear_screen_draw_toolbar_native_bridge();
         self.screen_draw_controller.close();
         if self.screen_draw_toolbar.is_dirty() {
             self.persist_screen_draw_settings();
         }
+    }
+
+    fn clear_screen_draw_toolbar_native_bridge(&mut self) {
+        if self.screen_draw_toolbar.native_bridge.close_viewport() {
+            if let Err(error) = self.screen_draw_controller.set_toolbar_window(None) {
+                tracing::warn!(%error, "failed to clear Screen Draw toolbar native bridge");
+            }
+        }
+        self.screen_draw_toolbar.last_physical_bounds = None;
     }
 }
 

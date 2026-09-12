@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use super::{
     CanvasBackground, ExportBackground, ExportOutcome, ExportRequest, ExportSource, RgbaColor,
     ScreenDrawGeneration, ScreenDrawMode, ScreenDrawSessionSnapshot, ScreenDrawSettings,
-    ScreenDrawTool,
+    ScreenDrawTool, ToolbarWindowInfo,
 };
 
 #[cfg(windows)]
@@ -26,6 +26,7 @@ pub enum NativeSessionCommand {
     Clear,
     SetAnnotationsVisible(bool),
     SetBackground(CanvasBackground),
+    SetToolbarWindow(Option<ToolbarWindowInfo>),
     Ghost,
     Resume,
     Finish,
@@ -379,6 +380,7 @@ trait InteractiveSurface: Send {
     }
     fn destroy_surfaces(&mut self);
     fn resume_interactive(&mut self);
+    fn set_toolbar_window(&mut self, _info: Option<ToolbarWindowInfo>) {}
     fn annotations_visible(&self) -> bool {
         true
     }
@@ -420,6 +422,7 @@ impl InteractiveSurface for PendingCanvasSurface {
     fn hide_passive_annotations(&mut self) {}
     fn destroy_surfaces(&mut self) {}
     fn resume_interactive(&mut self) {}
+    fn set_toolbar_window(&mut self, _info: Option<ToolbarWindowInfo>) {}
 }
 
 #[cfg(windows)]
@@ -444,6 +447,9 @@ impl InteractiveSurface for super::native_canvas::NativeCanvasSurface {
     }
     fn resume_interactive(&mut self) {
         self.resume();
+    }
+    fn set_toolbar_window(&mut self, info: Option<ToolbarWindowInfo>) {
+        self.set_toolbar_window(info);
     }
     fn annotations_visible(&self) -> bool {
         self.annotations_visible()
@@ -633,6 +639,9 @@ impl WorkerCore {
                 self.surface.set_background(background);
                 self.events
                     .send(NativeSessionEvent::BackgroundChanged(background));
+            }
+            NativeSessionCommand::SetToolbarWindow(info) => {
+                self.surface.set_toolbar_window(info);
             }
             NativeSessionCommand::Ghost => {
                 if self.state.mode == ScreenDrawMode::Drawing {
@@ -986,6 +995,7 @@ mod tests {
         annotations_visible: bool,
         retained_document_objects: usize,
         export_previews: Vec<(u32, u32)>,
+        toolbar_windows: Vec<Option<ToolbarWindowInfo>>,
     }
 
     struct CountingSurface(Arc<Mutex<SurfaceCounts>>);
@@ -1022,6 +1032,9 @@ mod tests {
         }
         fn resume_interactive(&mut self) {
             self.0.lock().unwrap().resume += 1;
+        }
+        fn set_toolbar_window(&mut self, info: Option<ToolbarWindowInfo>) {
+            self.0.lock().unwrap().toolbar_windows.push(info);
         }
         fn annotations_visible(&self) -> bool {
             self.0.lock().unwrap().annotations_visible
@@ -1252,6 +1265,28 @@ mod tests {
             CanvasBackground::Black,
         );
         assert_eq!(state.background, CanvasBackground::Black);
+    }
+
+    #[test]
+    fn toolbar_window_is_forwarded_without_mutating_runtime_state_or_emitting_an_event() {
+        use crate::screen_draw::{DesktopRect, NativeWindowHandle};
+
+        let (mut core, events, surface, _) = test_core();
+        let before = core.state;
+        let info = ToolbarWindowInfo {
+            handle: NativeWindowHandle::from_raw(41),
+            bounds: DesktopRect::new(-900, -120, 420, 860),
+        };
+
+        core.handle(NativeSessionCommand::SetToolbarWindow(Some(info)));
+        core.handle(NativeSessionCommand::SetToolbarWindow(None));
+
+        assert_eq!(core.state, before);
+        assert_eq!(
+            surface.lock().unwrap().toolbar_windows,
+            vec![Some(info), None]
+        );
+        assert!(matches!(events.try_recv(), Err(mpsc::TryRecvError::Empty)));
     }
 
     #[test]
