@@ -10,8 +10,8 @@ use image::{Rgba, RgbaImage};
 use crate::annotation::raster::{self as software, Color, Point, Rect};
 
 use super::{
-    AnnotationDocument, AnnotationKind, CanvasBackground, DesktopPoint, DesktopRect, RgbaColor,
-    Stroke,
+    AnnotationDocument, AnnotationKind, AnnotationObject, CanvasBackground, DesktopPoint,
+    DesktopRect, RgbaColor, Stroke,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -62,15 +62,33 @@ pub fn render_document_into(
     document: &AnnotationDocument,
     transient_strokes: &[Stroke],
 ) -> Result<(), RasterError> {
+    render_annotations_into(
+        output,
+        origin,
+        background,
+        document.objects(),
+        document.annotations_visible(),
+        transient_strokes,
+    )
+}
+
+pub(crate) fn render_annotations_into(
+    output: &mut RgbaImage,
+    origin: DesktopPoint,
+    background: RasterBackground<'_>,
+    objects: &[AnnotationObject],
+    annotations_visible: bool,
+    transient_strokes: &[Stroke],
+) -> Result<(), RasterError> {
     paint_background(output, origin, background)?;
     let font = software::default_font_arc();
-    if document.annotations_visible() {
-        for object in document.objects() {
+    if annotations_visible {
+        for object in objects {
             render_kind(output, origin, &object.kind, font.as_ref())?;
         }
-    }
-    for stroke in transient_strokes {
-        render_software_stroke(output, origin, stroke, stroke.color);
+        for stroke in transient_strokes {
+            render_software_stroke(output, origin, stroke, stroke.color);
+        }
     }
     Ok(())
 }
@@ -184,6 +202,51 @@ fn render_kind(
         }
     }
     Ok(())
+}
+
+/// Renders one ephemeral authoring preview without inserting it into document
+/// history. Callers normally use a small dirty-region image.
+pub(crate) fn render_preview_into(
+    output: &mut RgbaImage,
+    origin: DesktopPoint,
+    preview: &AnnotationKind,
+) -> Result<(), RasterError> {
+    let font = software::default_font_arc();
+    render_kind(output, origin, preview, font.as_ref())
+}
+
+/// Measures text with the same bundled proportional font and scale used by
+/// [`render_document_into`]. The fallback remains deterministic if the bundled
+/// font cannot be loaded.
+pub(crate) fn measure_text(text: &str, size: f32) -> (u32, u32) {
+    use ab_glyph::{Font, ScaleFont};
+
+    let size = size.max(1.0);
+    let lines: Vec<&str> = text.split('\n').collect();
+    if let Some((font, tweak)) = software::default_font_arc() {
+        let scaled = font.as_scaled(size * tweak.scale);
+        let width = lines
+            .iter()
+            .map(|line| {
+                line.chars()
+                    .map(|character| scaled.h_advance(scaled.glyph_id(character)))
+                    .sum::<f32>()
+            })
+            .fold(0.0_f32, f32::max)
+            .ceil() as u32;
+        let height = (lines.len().max(1) as f32 * scaled.height()).ceil() as u32;
+        return (width.max(1), height.max(1));
+    }
+    let columns = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    (
+        (columns as f32 * size * 0.65).ceil().max(1.0) as u32,
+        (lines.len().max(1) as f32 * size * 1.25).ceil().max(1.0) as u32,
+    )
 }
 
 fn render_software_stroke(
@@ -483,5 +546,46 @@ mod tests {
             ),
             Err(RasterError::FrozenImageSizeMismatch)
         );
+    }
+
+    #[test]
+    fn text_measurement_is_deterministic_and_multiline_height_grows() {
+        let first = measure_text("Wide text", 24.0);
+        let second = measure_text("Wide text", 24.0);
+        let multiline = measure_text("Wide\ntext", 24.0);
+        assert_eq!(first, second);
+        assert!(first.0 > 1 && first.1 > 1);
+        assert!(multiline.1 > first.1);
+    }
+
+    #[test]
+    fn visibility_hides_permanent_and_transient_annotations_without_deleting_them() {
+        let mut document = AnnotationDocument::default();
+        document
+            .commit(AnnotationKind::Line(crate::screen_draw::LineAnnotation {
+                from: DesktopPoint::new(0, 0),
+                to: DesktopPoint::new(3, 3),
+                style: crate::screen_draw::ShapeStyle {
+                    color: RgbaColor::RED,
+                    thickness: 2.0,
+                },
+            }))
+            .unwrap();
+        document.set_annotations_visible(false);
+        let mut transient = Stroke::new(RgbaColor::WHITE, 2.0);
+        transient.push_mouse_point(DesktopPoint::new(0, 3));
+        transient.push_mouse_point(DesktopPoint::new(3, 0));
+        let mut output = RgbaImage::new(4, 4);
+        render_document_into(
+            &mut output,
+            DesktopPoint::new(0, 0),
+            RasterBackground::Transparent,
+            &document,
+            &[transient],
+        )
+        .unwrap();
+        assert!(output.pixels().all(|pixel| pixel.0 == [0, 0, 0, 0]));
+        assert_eq!(document.objects().len(), 1);
+        assert!(document.can_undo());
     }
 }

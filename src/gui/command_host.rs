@@ -32,14 +32,17 @@ impl ScreenDrawCommandHost for LauncherApp {
                 self.screen_draw_controller.open_toolbar();
                 Ok(())
             }
-            ScreenDrawCommand::NewCapture => self
-                .screen_draw_controller
-                .request_new_capture()
-                .map(|_| ()),
+            ScreenDrawCommand::NewCapture => {
+                self.cancel_screen_draw_region_picker();
+                self.screen_draw_controller
+                    .request_new_capture()
+                    .map(|_| ())
+            }
             ScreenDrawCommand::Ghost => self.screen_draw_controller.enter_ghost(),
             ScreenDrawCommand::Done => self.screen_draw_controller.finish(),
             ScreenDrawCommand::Clear => self.screen_draw_controller.request_clear(),
             ScreenDrawCommand::Close => {
+                self.cancel_screen_draw_region_picker();
                 self.screen_draw_controller.close();
                 Ok(())
             }

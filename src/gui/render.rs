@@ -992,6 +992,7 @@ impl eframe::App for LauncherApp {
         }
 
         self.poll_crop_screenshot(ctx);
+        self.poll_screen_draw_region_picker(ctx);
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
         self.poll_macro_prompt(ctx);
@@ -1002,6 +1003,7 @@ impl eframe::App for LauncherApp {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.poll_screen_draw_capture(ctx);
+        self.show_screen_draw_toolbar(ctx);
         self.multi_manager_drain_runtime_events();
         self.poll_clipboard_modify_runtime(ctx);
         let _ = self.multi_manager.start_pending_automatic_reconnect();
@@ -1828,6 +1830,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.close_screen_draw_for_exit();
         self.macro_parameter_prompt.shutdown();
         self.data_recovery_dialog.shutdown();
         self.clipboard_modify_dialog.cleanup_after_close();
@@ -1902,10 +1905,21 @@ impl LauncherApp {
         if poll.restore_launcher {
             self.visible_flag.store(true, Ordering::SeqCst);
             self.restore_flag.store(true, Ordering::SeqCst);
+            ctx.request_repaint();
+        }
+        if let Some(ready) = poll.region_picker_ready {
+            self.begin_screen_draw_region_picker(ready);
+        }
+        if let Some(handoff) = poll.editor_handoff {
+            debug_assert!(matches!(
+                self.screen_draw_controller.state(),
+                crate::screen_draw::ScreenDrawState::NoSession
+            ));
+            self.open_screenshot_editor(handoff.image, false, crate::gui::MarkupTool::Pen);
         }
         if let Some(diagnostic) = poll.diagnostic {
-            tracing::error!(error = %diagnostic, "Screen Draw capture failed");
-            self.report_error_message("screen_draw.capture", diagnostic);
+            tracing::error!(error = %diagnostic, "Screen Draw operation failed");
+            self.report_error_message("screen_draw", diagnostic);
         }
     }
 
@@ -1979,6 +1993,35 @@ mod tests {
         assert!(app.restore_flag.load(Ordering::SeqCst));
         assert_eq!(app.error.as_deref(), Some("fixture capture failure"));
         assert!(!app.screen_draw_controller.toolbar_open());
+    }
+
+    #[test]
+    fn screen_draw_editor_handoff_restores_launcher_after_session_teardown() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([4, 5, 6, 255]));
+
+        app.apply_screen_draw_capture_poll(
+            &ctx,
+            crate::screen_draw::ScreenDrawCapturePoll {
+                restore_launcher: true,
+                editor_handoff: Some(crate::screen_draw::ScreenDrawEditorHandoff {
+                    generation: crate::screen_draw::ScreenDrawGeneration::from_raw(1),
+                    image,
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            app.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::NoSession
+        ));
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(app.screenshot_editors.len(), 1);
     }
 
     fn two_results() -> Vec<Action> {

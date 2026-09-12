@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::geometry::{DesktopPoint, DesktopRect};
+use crate::mkmacro::screen::ScreenRect;
 
 /// An unpremultiplied sRGBA color suitable for persistence and native drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -167,6 +168,54 @@ pub enum CanvasBackground {
     White,
     Black,
     Solid(RgbaColor),
+}
+
+/// The pixels selected for an export, independently of how they are painted
+/// and where they are delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportScope {
+    FullDesktop,
+    Region(ScreenRect),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportBackground {
+    FrozenDesktop,
+    Transparent,
+    White,
+    Black,
+    Solid(RgbaColor),
+}
+
+impl Default for ExportBackground {
+    fn default() -> Self {
+        Self::FrozenDesktop
+    }
+}
+
+impl From<CanvasBackground> for ExportBackground {
+    fn from(value: CanvasBackground) -> Self {
+        match value {
+            CanvasBackground::FrozenDesktop => Self::FrozenDesktop,
+            CanvasBackground::White => Self::White,
+            CanvasBackground::Black => Self::Black,
+            CanvasBackground::Solid(color) => Self::Solid(color),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportDestination {
+    Clipboard,
+    File,
+    ScreenshotEditor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportRequest {
+    pub scope: ExportScope,
+    pub background: ExportBackground,
+    pub destination: ExportDestination,
 }
 
 impl Default for CanvasBackground {

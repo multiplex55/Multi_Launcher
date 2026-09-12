@@ -275,6 +275,14 @@ impl TransientInk {
         &self.strokes
     }
 
+    pub(crate) fn snapshot(&self) -> Vec<TransientStroke> {
+        self.strokes.clone()
+    }
+
+    pub fn render_strokes_at(&self, now: Duration) -> Vec<Stroke> {
+        fading_strokes_at(&self.strokes, now)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.strokes.is_empty()
     }
@@ -310,6 +318,12 @@ impl TransientInk {
         before - self.strokes.len()
     }
 
+    pub fn clear(&mut self) -> usize {
+        let removed = self.strokes.len();
+        self.strokes.clear();
+        removed
+    }
+
     pub fn visible_at(&self, now: Duration) -> impl Iterator<Item = &TransientStroke> {
         self.strokes
             .iter()
@@ -325,6 +339,33 @@ impl TransientInk {
             .retain(|entry| !stroke_hit_test(&entry.stroke, point, tolerance));
         before - self.strokes.len()
     }
+}
+
+/// Produces the transient render layer at an injected monotonic time without
+/// pruning or otherwise mutating authoring state.
+pub(crate) fn fading_strokes_at(strokes: &[TransientStroke], now: Duration) -> Vec<Stroke> {
+    strokes
+        .iter()
+        .filter(|entry| entry.expires_at > now)
+        .map(|entry| {
+            let mut stroke = entry.stroke.clone();
+            let lifetime = entry.expires_at.saturating_sub(entry.created_at);
+            let remaining = entry.expires_at.saturating_sub(now);
+            let opacity = if lifetime.is_zero() {
+                0.0
+            } else {
+                remaining.as_secs_f32() / lifetime.as_secs_f32()
+            };
+            let [r, g, b, alpha] = stroke.color.channels();
+            stroke.color = super::RgbaColor::rgba(
+                r,
+                g,
+                b,
+                (f32::from(alpha) * opacity.clamp(0.0, 1.0)).round() as u8,
+            );
+            stroke
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -35,6 +35,7 @@ mod notes_dialog;
 mod numpad_navigation;
 mod query_history;
 mod render;
+mod screen_draw_toolbar;
 mod screenshot_editor;
 mod search;
 mod shell_cmd_dialog;
@@ -101,6 +102,12 @@ pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::{TodoViewDialog, todo_view_layout_sizes, todo_view_window_constraints};
 pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScreenDrawRegionOperation {
+    generation: crate::screen_draw::ScreenDrawGeneration,
+    operation_id: mkmacro_dialog::visual_overlay::OperationId,
+}
 
 use crate::actions::folders;
 use crate::actions::{Action, load_actions_typed};
@@ -453,6 +460,7 @@ pub struct LauncherApp {
     /// Main-thread orchestration for Screen Draw. Native session resources are
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
+    screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
     pub selected: Option<usize>,
     /// Test seam for verifying that command dispatch used normal activation,
     /// including the activation source, without launching an external process.
@@ -569,6 +577,7 @@ pub struct LauncherApp {
     pub(crate) crop_dialog: crop_dialog::CropDialogState,
     crop_screenshot_operation: Option<mkmacro_dialog::visual_overlay::OperationId>,
     crop_screenshot_capture: Option<Arc<dyn crate::mkmacro::ScreenCaptureBackend>>,
+    screen_draw_region_operation: Option<ScreenDrawRegionOperation>,
     todo_dialog: TodoDialog,
     todo_view_dialog: TodoViewDialog,
     clipboard_dialog: ClipboardDialog,
@@ -1564,7 +1573,19 @@ impl LauncherApp {
             error: None,
             error_time: None,
             plugins,
-            screen_draw_controller: crate::screen_draw::ScreenDrawController::default(),
+            screen_draw_controller: {
+                let mut controller = crate::screen_draw::ScreenDrawController::default();
+                let mut screen_draw_settings: crate::screen_draw::ScreenDrawSettings = settings
+                    .plugin_settings
+                    .get("screen_draw")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or_default();
+                screen_draw_settings.normalize();
+                controller.update_settings(screen_draw_settings);
+                controller
+            },
+            screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi::default(),
             selected: None,
             #[cfg(test)]
             test_last_activation: None,
@@ -1681,6 +1702,7 @@ impl LauncherApp {
             crop_dialog: crop_dialog::CropDialogState::default(),
             crop_screenshot_operation: None,
             crop_screenshot_capture: None,
+            screen_draw_region_operation: None,
             todo_dialog: TodoDialog::default(),
             todo_view_dialog: TodoViewDialog::default(),
             clipboard_dialog: ClipboardDialog::default(),

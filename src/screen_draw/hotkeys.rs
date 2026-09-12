@@ -1,6 +1,6 @@
 use crate::hotkey::{Key, parse_hotkey};
 
-use super::HotkeyChord;
+use super::{HotkeyChord, RgbaColor, ScreenDrawSettings, ScreenDrawTool};
 
 /// Platform-neutral representation passed to the session-scoped native
 /// hotkey registration boundary.
@@ -122,6 +122,84 @@ fn key_to_virtual_key(key: Key) -> Option<u32> {
     Some(value)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum LocalShortcutAction {
+    Tool(ScreenDrawTool),
+    Undo,
+    Redo,
+    IncreaseThickness,
+    DecreaseThickness,
+    Color(RgbaColor),
+}
+
+/// Resolves canvas-local shortcuts. This is deliberately called only by the
+/// focused Drawing canvas; Ghost has no input surface and therefore cannot
+/// consume these keys.
+pub(crate) fn local_shortcut(
+    settings: &ScreenDrawSettings,
+    virtual_key: u32,
+    modifiers: u32,
+    text_editing: bool,
+) -> Option<LocalShortcutAction> {
+    if text_editing {
+        return None;
+    }
+    let ctrl = modifiers & MOD_CONTROL_VALUE != 0;
+    let shift = modifiers & MOD_SHIFT_VALUE != 0;
+    if ctrl && virtual_key == b'Z' as u32 {
+        return Some(if shift {
+            LocalShortcutAction::Redo
+        } else {
+            LocalShortcutAction::Undo
+        });
+    }
+    if ctrl && virtual_key == b'Y' as u32 {
+        return Some(LocalShortcutAction::Redo);
+    }
+    for (tool, chord) in &settings.tool_hotkeys {
+        if chord_matches(chord, virtual_key, modifiers) {
+            return Some(LocalShortcutAction::Tool(*tool));
+        }
+    }
+    if settings
+        .increase_thickness_hotkey
+        .as_ref()
+        .is_some_and(|chord| chord_matches(chord, virtual_key, modifiers))
+    {
+        return Some(LocalShortcutAction::IncreaseThickness);
+    }
+    if settings
+        .decrease_thickness_hotkey
+        .as_ref()
+        .is_some_and(|chord| chord_matches(chord, virtual_key, modifiers))
+    {
+        return Some(LocalShortcutAction::DecreaseThickness);
+    }
+    for (index, chord) in settings.quick_color_hotkeys.iter().enumerate() {
+        if chord
+            .as_ref()
+            .is_some_and(|chord| chord_matches(chord, virtual_key, modifiers))
+        {
+            return Some(LocalShortcutAction::Color(settings.palette[index]));
+        }
+    }
+    None
+}
+
+fn chord_matches(chord: &HotkeyChord, virtual_key: u32, modifiers: u32) -> bool {
+    let text = chord.as_str().trim();
+    if text == "[" || text == "]" {
+        return modifiers & (MOD_CONTROL_VALUE | MOD_ALT_VALUE | MOD_WIN_VALUE) == 0
+            && virtual_key == if text == "[" { 0xDB } else { 0xDD };
+    }
+    let Ok(native) = to_native_hotkey(chord) else {
+        return false;
+    };
+    let expected = native.modifiers & !MOD_NOREPEAT_VALUE;
+    modifiers & (MOD_ALT_VALUE | MOD_CONTROL_VALUE | MOD_SHIFT_VALUE | MOD_WIN_VALUE) == expected
+        && virtual_key == native.virtual_key
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +214,40 @@ mod tests {
     #[test]
     fn malformed_or_unsupported_chords_are_rejected_before_registration() {
         assert!(to_native_hotkey(&HotkeyChord::from_unchecked("Ctrl+Nope")).is_err());
+    }
+
+    #[test]
+    fn local_defaults_cover_tools_history_brackets_and_quick_colors() {
+        let settings = ScreenDrawSettings::default();
+        assert_eq!(
+            local_shortcut(&settings, b'G' as u32, 0, false),
+            Some(LocalShortcutAction::Tool(ScreenDrawTool::FadingInk))
+        );
+        assert_eq!(
+            local_shortcut(&settings, b'V' as u32, 0, false),
+            Some(LocalShortcutAction::Tool(ScreenDrawTool::Eyedropper))
+        );
+        assert_eq!(
+            local_shortcut(&settings, 0xDB, 0, false),
+            Some(LocalShortcutAction::DecreaseThickness)
+        );
+        assert_eq!(
+            local_shortcut(&settings, b'Z' as u32, MOD_CONTROL_VALUE, false),
+            Some(LocalShortcutAction::Undo)
+        );
+        assert_eq!(
+            local_shortcut(&settings, b'1' as u32, 0, false),
+            Some(LocalShortcutAction::Color(settings.palette[0]))
+        );
+    }
+
+    #[test]
+    fn text_editing_disables_all_local_shortcuts() {
+        let settings = ScreenDrawSettings::default();
+        assert_eq!(local_shortcut(&settings, b'P' as u32, 0, true), None);
+        assert_eq!(
+            local_shortcut(&settings, b'Z' as u32, MOD_CONTROL_VALUE, true),
+            None
+        );
     }
 }

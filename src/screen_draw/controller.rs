@@ -13,11 +13,15 @@ use super::capture::{
 #[cfg(not(test))]
 use super::native_runtime::SystemNativeSessionFactory;
 use super::native_runtime::{
-    NativeRuntimeState, NativeSessionCommand, NativeSessionConfig, NativeSessionEvent,
-    NativeSessionFactory, NativeSessionHandle,
+    ExportRenderRequest, NativeRuntimeState, NativeSessionCommand, NativeSessionConfig,
+    NativeSessionEvent, NativeSessionFactory, NativeSessionHandle,
 };
-use super::{CanvasBackground, RgbaColor, ScreenDrawSettings, ScreenDrawTool};
-use crate::mkmacro::screen::CapturedRegion;
+use super::{
+    CanvasBackground, ExportBackground, ExportDestination, RgbaColor, ScreenDrawSettings,
+    ScreenDrawTool,
+};
+use super::{ExportOutcome, ExportRequest, ExportScope};
+use crate::mkmacro::screen::{CapturedRegion, ScreenRect};
 
 const MAX_LAUNCHER_HIDE_FRAMES: u8 = 8;
 
@@ -118,7 +122,20 @@ pub struct ScreenDrawController {
     runtime_state: Option<NativeRuntimeState>,
     latest_runtime_warning: Option<String>,
     latest_runtime_error: Option<String>,
+    latest_export_outcome: Option<ExportOutcome>,
+    export_in_flight: bool,
+    pending_region: Option<PendingRegionSelection>,
+    region_suppression: Option<crate::mouse_gestures::service::GestureSuppressionGuard>,
+    pending_editor_handoff: Option<ScreenDrawEditorHandoff>,
     settings: ScreenDrawSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingRegionSelection {
+    generation: ScreenDrawGeneration,
+    background: ExportBackground,
+    destination: ExportDestination,
+    preview_dispatched: bool,
 }
 
 struct PendingCapture {
@@ -141,6 +158,20 @@ pub struct ScreenDrawCapturePoll {
     pub capture_started: bool,
     pub capture_completed: bool,
     pub diagnostic: Option<String>,
+    pub region_picker_ready: Option<ScreenDrawRegionPickerReady>,
+    pub editor_handoff: Option<ScreenDrawEditorHandoff>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenDrawRegionPickerReady {
+    pub generation: ScreenDrawGeneration,
+    pub bounds: ScreenRect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenDrawEditorHandoff {
+    pub generation: ScreenDrawGeneration,
+    pub image: image::RgbaImage,
 }
 
 impl fmt::Debug for ScreenDrawController {
@@ -155,6 +186,11 @@ impl fmt::Debug for ScreenDrawController {
             .field("session_snapshot", &self.session_snapshot)
             .field("native_worker", &self.native_worker.is_some())
             .field("runtime_state", &self.runtime_state)
+            .field("export_in_flight", &self.export_in_flight)
+            .field(
+                "pending_editor_handoff",
+                &self.pending_editor_handoff.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -218,6 +254,11 @@ impl ScreenDrawController {
             runtime_state: None,
             latest_runtime_warning: None,
             latest_runtime_error: None,
+            latest_export_outcome: None,
+            export_in_flight: false,
+            pending_region: None,
+            region_suppression: None,
+            pending_editor_handoff: None,
             settings: ScreenDrawSettings::default(),
         }
     }
@@ -247,6 +288,14 @@ impl ScreenDrawController {
 
     pub fn latest_runtime_error(&self) -> Option<&str> {
         self.latest_runtime_error.as_deref()
+    }
+
+    pub fn latest_export_outcome(&self) -> Option<&ExportOutcome> {
+        self.latest_export_outcome.as_ref()
+    }
+
+    pub const fn export_in_flight(&self) -> bool {
+        self.export_in_flight
     }
 
     pub fn settings(&self) -> &ScreenDrawSettings {
@@ -341,6 +390,9 @@ impl ScreenDrawController {
         if let Some(poll) = self.poll_capture_completion(Arc::clone(&request_repaint)) {
             return poll;
         }
+        if let Some(poll) = self.dispatch_pending_region_preview() {
+            return poll;
+        }
 
         let Some(pending) = self.pending_capture.as_mut() else {
             return ScreenDrawCapturePoll::default();
@@ -421,44 +473,131 @@ impl ScreenDrawController {
         Ok(())
     }
 
-    pub fn begin_region_selection(&mut self) -> Result<(), ScreenDrawTransitionError> {
+    pub fn request_export(
+        &mut self,
+        request: ExportRequest,
+    ) -> Result<(), ScreenDrawTransitionError> {
+        let generation = self.require_generation("export", |state| {
+            matches!(
+                state,
+                ScreenDrawState::Finish { .. } | ScreenDrawState::DisplayChanged { .. }
+            )
+        })?;
+        if self.export_in_flight {
+            return Err(self.invalid("start another export while one is already running"));
+        }
+        self.latest_runtime_error = None;
+        self.send_native(NativeSessionCommand::RenderExport(ExportRenderRequest {
+            generation,
+            request,
+        }))?;
+        self.export_in_flight = true;
+        Ok(())
+    }
+
+    pub fn begin_region_selection(
+        &mut self,
+        background: ExportBackground,
+        destination: ExportDestination,
+    ) -> Result<(), ScreenDrawTransitionError> {
         let generation = self.require_generation("select an export region", |state| {
             matches!(state, ScreenDrawState::Finish { .. })
         })?;
+        if self.export_in_flight {
+            return Err(self.invalid("select an export region while an export is running"));
+        }
+        let suppression = crate::mouse_gestures::service::acquire_gesture_suppression();
+        self.pending_region = Some(PendingRegionSelection {
+            generation,
+            background,
+            destination,
+            preview_dispatched: false,
+        });
+        self.region_suppression = Some(suppression);
+        self.latest_runtime_error = None;
+        self.export_in_flight = true;
+        self.toolbar_open = false;
         self.state = ScreenDrawState::SelectingRegion { generation };
         Ok(())
     }
 
-    pub fn finish_region_selection(
+    pub fn complete_region_selection(
         &mut self,
         generation: ScreenDrawGeneration,
+        rect: ScreenRect,
     ) -> Result<(), ScreenDrawTransitionError> {
-        self.transition_generation(
-            generation,
-            "finish region selection",
-            |state| matches!(state, ScreenDrawState::SelectingRegion { .. }),
-            ScreenDrawState::Finish { generation },
-        )
+        if self.state.generation() != Some(generation)
+            || !matches!(self.state, ScreenDrawState::SelectingRegion { .. })
+        {
+            return Err(self.invalid("finish region selection"));
+        }
+        let Some(pending) = self
+            .pending_region
+            .filter(|pending| pending.generation == generation)
+        else {
+            return Err(self.invalid("finish region selection without a pending request"));
+        };
+        let request = ExportRequest {
+            scope: ExportScope::Region(rect),
+            background: pending.background,
+            destination: pending.destination,
+        };
+        self.send_native(NativeSessionCommand::EndRegionSelection)?;
+        if let Err(error) =
+            self.send_native(NativeSessionCommand::RenderExport(ExportRenderRequest {
+                generation,
+                request,
+            }))
+        {
+            self.restore_region_finish(generation, Some(error.to_string()));
+            return Err(error);
+        }
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
+        self.toolbar_open = true;
+        self.state = ScreenDrawState::Finish { generation };
+        Ok(())
+    }
+
+    pub fn cancel_region_selection(
+        &mut self,
+        generation: ScreenDrawGeneration,
+        diagnostic: Option<String>,
+    ) -> Result<(), ScreenDrawTransitionError> {
+        if self.state.generation() != Some(generation)
+            || !matches!(self.state, ScreenDrawState::SelectingRegion { .. })
+        {
+            return Err(self.invalid("cancel region selection"));
+        }
+        let _ = self.send_native(NativeSessionCommand::EndRegionSelection);
+        self.restore_region_finish(generation, diagnostic);
+        Ok(())
     }
 
     pub fn note_display_changed(
         &mut self,
         generation: ScreenDrawGeneration,
     ) -> Result<(), ScreenDrawTransitionError> {
-        self.transition_generation(
-            generation,
-            "handle a display change",
-            |state| {
-                matches!(
-                    state,
-                    ScreenDrawState::Drawing { .. }
-                        | ScreenDrawState::Ghost { .. }
-                        | ScreenDrawState::Finish { .. }
-                        | ScreenDrawState::SelectingRegion { .. }
-                )
-            },
-            ScreenDrawState::DisplayChanged { generation },
-        )
+        if self.state.generation() != Some(generation)
+            || !matches!(
+                self.state,
+                ScreenDrawState::Drawing { .. }
+                    | ScreenDrawState::Ghost { .. }
+                    | ScreenDrawState::Finish { .. }
+                    | ScreenDrawState::SelectingRegion { .. }
+            )
+        {
+            return Err(self.invalid("handle a display change"));
+        }
+        self.send_native(NativeSessionCommand::DisplayChanged)?;
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
+        self.export_in_flight = false;
+        self.toolbar_open = true;
+        self.state = ScreenDrawState::DisplayChanged { generation };
+        Ok(())
     }
 
     pub fn request_clear(&mut self) -> Result<(), ScreenDrawTransitionError> {
@@ -523,6 +662,10 @@ impl ScreenDrawController {
         self.state = ScreenDrawState::NoSession;
         self.toolbar_open = false;
         self.runtime_state = None;
+        self.export_in_flight = false;
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
     }
 
     pub fn complete_session(
@@ -530,7 +673,10 @@ impl ScreenDrawController {
         generation: ScreenDrawGeneration,
     ) -> Result<(), ScreenDrawTransitionError> {
         if self.state.generation() != Some(generation)
-            || !matches!(self.state, ScreenDrawState::Finish { .. })
+            || !matches!(
+                self.state,
+                ScreenDrawState::Finish { .. } | ScreenDrawState::DisplayChanged { .. }
+            )
         {
             return Err(self.invalid("complete session"));
         }
@@ -538,6 +684,10 @@ impl ScreenDrawController {
         self.teardown_native_worker();
         self.session_snapshot = None;
         self.runtime_state = None;
+        self.export_in_flight = false;
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
         Ok(())
     }
 
@@ -551,6 +701,11 @@ impl ScreenDrawController {
         self.runtime_state = None;
         self.latest_runtime_warning = None;
         self.latest_runtime_error = None;
+        self.latest_export_outcome = None;
+        self.export_in_flight = false;
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
         self.pending_capture = Some(PendingCapture {
             generation,
             cancellation: Arc::new(AtomicBool::new(false)),
@@ -674,10 +829,11 @@ impl ScreenDrawController {
         let settings = self.settings.clone();
         let worker = self.native_factory.spawn(NativeSessionConfig {
             snapshot,
-            emergency_hotkey: settings.emergency_hotkey,
+            emergency_hotkey: settings.emergency_hotkey.clone(),
             tool: settings.default_tool,
             color: settings.default_color,
             thickness: settings.default_thickness,
+            settings: settings.clone(),
             request_repaint,
         })?;
         self.native_worker = Some(worker);
@@ -686,6 +842,11 @@ impl ScreenDrawController {
 
     fn poll_native_worker(&mut self) -> Option<ScreenDrawCapturePoll> {
         let mut terminal_error = None;
+        let mut export_completed = None;
+        let mut export_failure = None;
+        let mut region_picker_ready = None;
+        let mut region_failure = None;
+        let mut editor_teardown_complete = false;
         if let Some(worker) = self.native_worker.as_mut() {
             while let Some(event) = worker.try_recv() {
                 match event {
@@ -693,6 +854,20 @@ impl ScreenDrawController {
                     NativeSessionEvent::ModeChanged(mode) => {
                         if let Some(state) = self.runtime_state.as_mut() {
                             state.mode = mode;
+                        }
+                        if let Some(generation) = self.state.generation() {
+                            self.state = match mode {
+                                super::ScreenDrawMode::Drawing => {
+                                    ScreenDrawState::Drawing { generation }
+                                }
+                                super::ScreenDrawMode::Ghost => {
+                                    ScreenDrawState::Ghost { generation }
+                                }
+                                super::ScreenDrawMode::Finish => {
+                                    ScreenDrawState::Finish { generation }
+                                }
+                                _ => self.state.clone(),
+                            };
                         }
                     }
                     NativeSessionEvent::ToolChanged(tool) => {
@@ -727,20 +902,143 @@ impl ScreenDrawController {
                     NativeSessionEvent::Error(message) => terminal_error = Some(message),
                     NativeSessionEvent::EmergencyPaused => {
                         if let Some(generation) = self.state.generation() {
+                            if matches!(self.state, ScreenDrawState::SelectingRegion { .. }) {
+                                self.pending_region = None;
+                                self.region_suppression = None;
+                                self.export_in_flight = false;
+                                self.toolbar_open = true;
+                            }
                             self.state = ScreenDrawState::Ghost { generation };
                         }
                     }
+                    NativeSessionEvent::DisplayChanged => {
+                        self.pending_region = None;
+                        self.region_suppression = None;
+                        self.export_in_flight = false;
+                        self.toolbar_open = true;
+                        if let Some(generation) = self.state.generation() {
+                            self.state = ScreenDrawState::DisplayChanged { generation };
+                        }
+                        if let Some(state) = self.runtime_state.as_mut() {
+                            state.mode = super::ScreenDrawMode::DisplayChanged;
+                        }
+                    }
                     NativeSessionEvent::SessionClosed => {
-                        if terminal_error.is_none() {
+                        if self.pending_editor_handoff.is_some() {
+                            editor_teardown_complete = true;
+                        } else if terminal_error.is_none() {
                             terminal_error =
                                 Some("Screen Draw native worker closed unexpectedly".to_string());
                         }
                     }
-                    NativeSessionEvent::DocumentChanged
-                    | NativeSessionEvent::ExportRenderDeferred(_) => {}
+                    NativeSessionEvent::ExportCompleted {
+                        generation,
+                        outcome,
+                    } => {
+                        if self.state.generation() == Some(generation)
+                            && matches!(
+                                self.state,
+                                ScreenDrawState::Finish { .. }
+                                    | ScreenDrawState::DisplayChanged { .. }
+                            )
+                        {
+                            export_completed = Some((generation, outcome));
+                        }
+                    }
+                    NativeSessionEvent::ExportFailed {
+                        generation,
+                        message,
+                    } => {
+                        if self.state.generation() == Some(generation)
+                            && matches!(
+                                self.state,
+                                ScreenDrawState::Finish { .. }
+                                    | ScreenDrawState::DisplayChanged { .. }
+                            )
+                        {
+                            export_failure = Some(message);
+                        }
+                    }
+                    NativeSessionEvent::RegionPreviewReady { generation, bounds } => {
+                        if self.state.generation() == Some(generation)
+                            && matches!(self.state, ScreenDrawState::SelectingRegion { .. })
+                            && self
+                                .pending_region
+                                .is_some_and(|pending| pending.generation == generation)
+                        {
+                            region_picker_ready =
+                                Some(ScreenDrawRegionPickerReady { generation, bounds });
+                        }
+                    }
+                    NativeSessionEvent::RegionPreviewFailed {
+                        generation,
+                        message,
+                    } => {
+                        if self.state.generation() == Some(generation)
+                            && matches!(self.state, ScreenDrawState::SelectingRegion { .. })
+                        {
+                            region_failure = Some((generation, message));
+                        }
+                    }
+                    NativeSessionEvent::EditorImageReady { generation, image } => {
+                        if self.state.generation() == Some(generation)
+                            && matches!(
+                                self.state,
+                                ScreenDrawState::Finish { .. }
+                                    | ScreenDrawState::DisplayChanged { .. }
+                            )
+                        {
+                            if self.pending_editor_handoff.is_none() {
+                                self.pending_editor_handoff =
+                                    Some(ScreenDrawEditorHandoff { generation, image });
+                                worker.request_shutdown();
+                            }
+                        }
+                    }
+                    NativeSessionEvent::DocumentChanged => {}
                 }
             }
             let _ = worker.poll_finished();
+        }
+        if editor_teardown_complete {
+            let handoff = self
+                .pending_editor_handoff
+                .take()
+                .expect("teardown completion requires a pending editor handoff");
+            self.finalize_editor_handoff();
+            return Some(ScreenDrawCapturePoll {
+                restore_launcher: true,
+                editor_handoff: Some(handoff),
+                ..ScreenDrawCapturePoll::default()
+            });
+        }
+        if let Some((generation, message)) = region_failure {
+            self.restore_region_finish(generation, Some(message.clone()));
+            return Some(ScreenDrawCapturePoll {
+                diagnostic: Some(message),
+                ..ScreenDrawCapturePoll::default()
+            });
+        }
+        if let Some(ready) = region_picker_ready {
+            return Some(ScreenDrawCapturePoll {
+                region_picker_ready: Some(ready),
+                ..ScreenDrawCapturePoll::default()
+            });
+        }
+        if let Some((generation, outcome)) = export_completed {
+            self.latest_export_outcome = Some(outcome);
+            let _ = self.complete_session(generation);
+            return Some(ScreenDrawCapturePoll::default());
+        }
+        if let Some(message) = export_failure {
+            self.export_in_flight = false;
+            self.toolbar_open = true;
+            tracing::error!(error = %message, "Screen Draw export failed");
+            self.latest_runtime_error = Some(message.clone());
+            return Some(ScreenDrawCapturePoll {
+                diagnostic: Some(message),
+                ..ScreenDrawCapturePoll::default()
+            });
         }
         terminal_error.map(|message| {
             let generation = self
@@ -751,6 +1049,10 @@ impl ScreenDrawController {
             self.teardown_native_worker();
             self.session_snapshot = None;
             self.runtime_state = None;
+            self.export_in_flight = false;
+            self.pending_region = None;
+            self.region_suppression = None;
+            self.pending_editor_handoff = None;
             self.toolbar_open = false;
             self.state = ScreenDrawState::Failed {
                 generation,
@@ -764,10 +1066,65 @@ impl ScreenDrawController {
         })
     }
 
+    fn dispatch_pending_region_preview(&mut self) -> Option<ScreenDrawCapturePoll> {
+        let pending = self.pending_region.as_ref().copied()?;
+        if pending.preview_dispatched
+            || self.state.generation() != Some(pending.generation)
+            || !matches!(self.state, ScreenDrawState::SelectingRegion { .. })
+        {
+            return None;
+        }
+        if let Err(error) = self.send_native(NativeSessionCommand::PrepareRegionSelection {
+            generation: pending.generation,
+            background: pending.background,
+        }) {
+            let message = error.to_string();
+            self.restore_region_finish(pending.generation, Some(message.clone()));
+            return Some(ScreenDrawCapturePoll {
+                diagnostic: Some(message),
+                ..ScreenDrawCapturePoll::default()
+            });
+        }
+        if let Some(pending) = self.pending_region.as_mut() {
+            pending.preview_dispatched = true;
+        }
+        Some(ScreenDrawCapturePoll::default())
+    }
+
     fn teardown_native_worker(&mut self) {
         if let Some(worker) = self.native_worker.take() {
             worker.request_shutdown();
         }
+    }
+
+    fn restore_region_finish(
+        &mut self,
+        generation: ScreenDrawGeneration,
+        diagnostic: Option<String>,
+    ) {
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.export_in_flight = false;
+        self.toolbar_open = true;
+        if let Some(message) = diagnostic {
+            self.latest_runtime_error = Some(message);
+        }
+        if self.state.generation() == Some(generation) {
+            self.state = ScreenDrawState::Finish { generation };
+        }
+    }
+
+    fn finalize_editor_handoff(&mut self) {
+        self.cancel_pending_capture();
+        self.native_worker.take();
+        self.session_snapshot = None;
+        self.runtime_state = None;
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
+        self.export_in_flight = false;
+        self.toolbar_open = false;
+        self.state = ScreenDrawState::NoSession;
     }
 
     fn send_native(&self, command: NativeSessionCommand) -> Result<(), ScreenDrawTransitionError> {
@@ -1024,12 +1381,16 @@ mod tests {
         assert_eq!(controller.state(), &ScreenDrawState::Ghost { generation });
         controller.resume_drawing().unwrap();
         controller.finish().unwrap();
-        controller.begin_region_selection().unwrap();
+        controller
+            .begin_region_selection(ExportBackground::Transparent, ExportDestination::Clipboard)
+            .unwrap();
         assert_eq!(
             controller.state(),
             &ScreenDrawState::SelectingRegion { generation }
         );
-        controller.finish_region_selection(generation).unwrap();
+        controller
+            .cancel_region_selection(generation, None)
+            .unwrap();
         assert_eq!(controller.state(), &ScreenDrawState::Finish { generation });
         controller.complete_session(generation).unwrap();
         assert_eq!(controller.state(), &ScreenDrawState::NoSession);
@@ -1191,6 +1552,495 @@ mod tests {
         );
         assert!(matches!(controller.state(), ScreenDrawState::Failed { .. }));
         assert!(controller.session_snapshot().is_none());
+    }
+
+    #[test]
+    fn native_safe_pause_and_display_change_update_controller_without_losing_session() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let native = Arc::new(CountingNativeFactory::default());
+        let native_dependency: Arc<dyn NativeSessionFactory> = native.clone();
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native_dependency);
+        let (_, repaint) = repaint_counter();
+        let generation = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+
+        let event = native.events.lock().unwrap()[0].clone();
+        event
+            .send(NativeSessionEvent::ModeChanged(
+                super::super::ScreenDrawMode::Ghost,
+            ))
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(controller.state(), &ScreenDrawState::Ghost { generation });
+
+        event.send(NativeSessionEvent::DisplayChanged).unwrap();
+        event
+            .send(NativeSessionEvent::Warning(
+                "display changed fixture".into(),
+            ))
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(
+            controller.state(),
+            &ScreenDrawState::DisplayChanged { generation }
+        );
+        assert!(controller.session_snapshot().is_some());
+        assert!(controller.toolbar_open());
+        assert_eq!(
+            controller.latest_runtime_warning(),
+            Some("display changed fixture")
+        );
+        assert!(controller.resume_drawing().is_err());
+    }
+
+    #[test]
+    fn export_failure_preserves_finish_retry_and_stale_completion_is_ignored() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let observed_backend = Arc::clone(&backend);
+        let native = Arc::new(CountingNativeFactory::default());
+        let native_dependency: Arc<dyn NativeSessionFactory> = native.clone();
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native_dependency);
+        let (_, repaint) = repaint_counter();
+        let generation = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        controller.finish().unwrap();
+        let request = ExportRequest {
+            scope: super::super::ExportScope::FullDesktop,
+            background: super::super::ExportBackground::Transparent,
+            destination: super::super::ExportDestination::Clipboard,
+        };
+        controller.request_export(request).unwrap();
+        assert!(controller.export_in_flight());
+        assert!(controller.request_export(request).is_err());
+        let queued: Vec<_> = native.commands.lock().unwrap()[0].try_iter().collect();
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|command| matches!(command, NativeSessionCommand::RenderExport(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            queued.last(),
+            Some(NativeSessionCommand::RenderExport(ExportRenderRequest { generation: sent, request: actual }))
+                if *sent == generation && *actual == request
+        ));
+
+        let event = native.events.lock().unwrap()[0].clone();
+        event
+            .send(NativeSessionEvent::ExportCompleted {
+                generation: ScreenDrawGeneration::from_raw(generation.get() + 1),
+                outcome: ExportOutcome::Clipboard,
+            })
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(controller.state(), &ScreenDrawState::Finish { generation });
+        assert!(controller.export_in_flight());
+
+        event
+            .send(NativeSessionEvent::ExportFailed {
+                generation,
+                message: "fixture clipboard failure".into(),
+            })
+            .unwrap();
+        let failure = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(
+            failure.diagnostic.as_deref(),
+            Some("fixture clipboard failure")
+        );
+        assert_eq!(controller.state(), &ScreenDrawState::Finish { generation });
+        assert!(controller.session_snapshot().is_some());
+        assert!(controller.toolbar_open());
+        assert!(!controller.export_in_flight());
+
+        controller.request_export(request).unwrap();
+        assert!(controller.export_in_flight());
+        event
+            .send(NativeSessionEvent::ExportCompleted {
+                generation,
+                outcome: ExportOutcome::Clipboard,
+            })
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(controller.state(), &ScreenDrawState::NoSession);
+        assert!(controller.session_snapshot().is_none());
+        assert!(controller.runtime_state().is_none());
+        assert!(controller.toolbar_open());
+        assert!(!controller.export_in_flight());
+        assert_eq!(
+            controller.latest_export_outcome(),
+            Some(&ExportOutcome::Clipboard)
+        );
+        assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            native.commands.lock().unwrap()[0].try_iter().last(),
+            Some(NativeSessionCommand::Shutdown)
+        ));
+    }
+
+    #[test]
+    fn region_selection_orders_suppression_toolbar_preview_and_picker_readiness() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let (_, repaint) = repaint_counter();
+        let generation = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        controller.finish().unwrap();
+        let _ = native.commands.lock().unwrap()[0]
+            .try_iter()
+            .collect::<Vec<_>>();
+
+        controller
+            .begin_region_selection(ExportBackground::Black, ExportDestination::File)
+            .unwrap();
+        assert!(controller.region_suppression.is_some());
+        assert!(!controller.toolbar_open());
+        assert!(controller.export_in_flight());
+        assert!(native.commands.lock().unwrap()[0].try_recv().is_err());
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(matches!(
+            native.commands.lock().unwrap()[0].try_recv().unwrap(),
+            NativeSessionCommand::PrepareRegionSelection {
+                generation: sent,
+                background: ExportBackground::Black,
+            } if sent == generation
+        ));
+
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::RegionPreviewReady {
+                generation,
+                bounds: ScreenRect::new(-1920, -200, 3840, 1200),
+            })
+            .unwrap();
+        let poll = controller.poll_capture(Some(1), repaint);
+        assert_eq!(
+            poll.region_picker_ready,
+            Some(ScreenDrawRegionPickerReady {
+                generation,
+                bounds: ScreenRect::new(-1920, -200, 3840, 1200),
+            })
+        );
+        controller
+            .cancel_region_selection(generation, None)
+            .unwrap();
+        assert!(controller.region_suppression.is_none());
+        assert!(controller.toolbar_open());
+        assert!(!controller.export_in_flight());
+        assert_eq!(controller.state(), &ScreenDrawState::Finish { generation });
+        assert!(controller.session_snapshot().is_some());
+        assert!(matches!(
+            native.commands.lock().unwrap()[0].try_recv().unwrap(),
+            NativeSessionCommand::EndRegionSelection
+        ));
+    }
+
+    #[test]
+    fn region_confirmation_queues_preview_teardown_before_signed_export_and_failure_retries() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let (_, repaint) = repaint_counter();
+        let generation = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        controller.finish().unwrap();
+        controller
+            .begin_region_selection(
+                ExportBackground::FrozenDesktop,
+                ExportDestination::Clipboard,
+            )
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        let _ = native.commands.lock().unwrap()[0]
+            .try_iter()
+            .collect::<Vec<_>>();
+        let rect = ScreenRect::new(-2, -1, 3, 2);
+        controller
+            .complete_region_selection(generation, rect)
+            .unwrap();
+        let queued = native.commands.lock().unwrap()[0]
+            .try_iter()
+            .collect::<Vec<_>>();
+        assert!(matches!(queued.as_slice(), [
+            NativeSessionCommand::EndRegionSelection,
+            NativeSessionCommand::RenderExport(ExportRenderRequest { generation: sent, request })
+        ] if *sent == generation && request.scope == ExportScope::Region(rect)));
+        assert!(controller.region_suppression.is_none());
+        assert!(controller.toolbar_open());
+
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::ExportFailed {
+                generation,
+                message: "fixture region crop failure".into(),
+            })
+            .unwrap();
+        let failure = controller.poll_capture(Some(1), repaint);
+        assert_eq!(
+            failure.diagnostic.as_deref(),
+            Some("fixture region crop failure")
+        );
+        assert_eq!(controller.state(), &ScreenDrawState::Finish { generation });
+        assert!(controller.toolbar_open());
+        assert!(controller.session_snapshot().is_some());
+    }
+
+    #[test]
+    fn successful_region_copy_and_save_complete_with_idle_toolbar_open() {
+        for (destination, outcome) in [
+            (ExportDestination::Clipboard, ExportOutcome::Clipboard),
+            (
+                ExportDestination::File,
+                ExportOutcome::File(std::path::PathBuf::from("fixture-region.png")),
+            ),
+        ] {
+            let backend = Arc::new(FakeCaptureBackend::successful());
+            let native = Arc::new(CountingNativeFactory::default());
+            let mut controller =
+                capture_controller_with_native(backend, [Ok(true)], native.clone());
+            let (_, repaint) = repaint_counter();
+            let generation = controller.request_start().unwrap();
+            controller.poll_capture(Some(1), Arc::clone(&repaint));
+            controller.poll_capture(Some(1), Arc::clone(&repaint));
+            poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+            controller.finish().unwrap();
+            controller
+                .begin_region_selection(ExportBackground::White, destination)
+                .unwrap();
+            controller.poll_capture(Some(1), Arc::clone(&repaint));
+            controller
+                .complete_region_selection(generation, ScreenRect::new(-2, -1, 2, 2))
+                .unwrap();
+            assert_eq!(controller.state(), &ScreenDrawState::Finish { generation });
+            assert!(controller.export_in_flight());
+            assert!(controller.toolbar_open());
+
+            native.events.lock().unwrap()[0]
+                .send(NativeSessionEvent::ExportCompleted {
+                    generation,
+                    outcome: outcome.clone(),
+                })
+                .unwrap();
+            controller.poll_capture(Some(1), Arc::clone(&repaint));
+            assert_eq!(controller.state(), &ScreenDrawState::NoSession);
+            assert!(!controller.export_in_flight());
+            assert!(controller.toolbar_open());
+            assert_eq!(controller.latest_export_outcome(), Some(&outcome));
+        }
+    }
+
+    #[test]
+    fn replacing_a_region_selection_releases_its_guard_and_ignores_late_ready_events() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let (_, repaint) = repaint_counter();
+        let first = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        controller.finish().unwrap();
+        controller
+            .begin_region_selection(ExportBackground::White, ExportDestination::File)
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(controller.region_suppression.is_some());
+
+        let second = controller.request_new_capture().unwrap();
+        assert_ne!(first, second);
+        assert!(controller.region_suppression.is_none());
+        assert!(controller.pending_region.is_none());
+        assert!(!controller.export_in_flight());
+        assert_eq!(
+            controller.state(),
+            &ScreenDrawState::AwaitingLauncherHide { generation: second }
+        );
+        assert!(
+            native.events.lock().unwrap()[0]
+                .send(NativeSessionEvent::RegionPreviewReady {
+                    generation: first,
+                    bounds: ScreenRect::new(-2, -1, 4, 3),
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn emergency_during_region_selection_aborts_to_ghost_and_quarantines_picker_cancel() {
+        use crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController;
+        use crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose;
+
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let (_, repaint) = repaint_counter();
+        let generation = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        controller.finish().unwrap();
+        controller
+            .begin_region_selection(ExportBackground::White, ExportDestination::Clipboard)
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let operation_id = fixture.controller.begin_rectangle_pick(
+            RectanglePurpose::ScreenDrawExport,
+            ScreenRect::new(-2, -1, 4, 3),
+        );
+        fixture.observer.wait_for_commands(1);
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::EmergencyPaused)
+            .unwrap();
+        controller.poll_capture(Some(1), repaint);
+
+        assert_eq!(controller.state(), &ScreenDrawState::Ghost { generation });
+        assert!(controller.pending_region.is_none());
+        assert!(controller.region_suppression.is_none());
+        assert!(!controller.export_in_flight());
+        assert!(controller.toolbar_open());
+        assert!(controller.session_snapshot().is_some());
+        assert!(controller.native_worker.is_some());
+
+        fixture
+            .controller
+            .cancel_screen_draw_operation(operation_id);
+        fixture.observer.wait_for_commands(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while fixture
+            .controller
+            .screen_draw_discard_pending_for_test(operation_id)
+        {
+            assert!(
+                fixture.controller.poll().is_empty(),
+                "picker cancellation must not leak into macro-editor events"
+            );
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(fixture.controller.poll().is_empty());
+        assert!(
+            fixture
+                .controller
+                .poll_rectangle_event(operation_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn editor_payload_tears_down_session_and_restores_launcher_without_recapture() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let observed_backend = backend.clone();
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let (_, repaint) = repaint_counter();
+        let generation = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        controller.finish().unwrap();
+        controller
+            .request_export(ExportRequest {
+                scope: ExportScope::FullDesktop,
+                background: ExportBackground::White,
+                destination: ExportDestination::ScreenshotEditor,
+            })
+            .unwrap();
+        let image = RgbaImage::from_pixel(3, 2, Rgba([7, 8, 9, 255]));
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::EditorImageReady {
+                generation,
+                image: image.clone(),
+            })
+            .unwrap();
+        let rendered = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(!rendered.restore_launcher);
+        assert!(rendered.editor_handoff.is_none());
+        assert_eq!(controller.state(), &ScreenDrawState::Finish { generation });
+        assert!(controller.session_snapshot().is_some());
+        assert!(controller.native_worker.is_some());
+        assert!(controller.pending_editor_handoff.is_some());
+        assert!(controller.toolbar_open());
+        assert!(matches!(
+            native.commands.lock().unwrap()[0].try_iter().last(),
+            Some(NativeSessionCommand::Shutdown)
+        ));
+
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::SessionClosed)
+            .unwrap();
+        let poll = controller.poll_capture(Some(1), repaint);
+        assert!(poll.restore_launcher);
+        assert_eq!(poll.editor_handoff.unwrap().image, image);
+        assert_eq!(controller.state(), &ScreenDrawState::NoSession);
+        assert!(controller.session_snapshot().is_none());
+        assert!(controller.native_worker.is_none());
+        assert!(!controller.toolbar_open());
+        assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn display_changed_session_exports_retained_original_and_never_resumes() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let observed_backend = Arc::clone(&backend);
+        let native = Arc::new(CountingNativeFactory::default());
+        let native_dependency: Arc<dyn NativeSessionFactory> = native.clone();
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native_dependency);
+        let (_, repaint) = repaint_counter();
+        let generation = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        let event = native.events.lock().unwrap()[0].clone();
+        event.send(NativeSessionEvent::DisplayChanged).unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(controller.resume_drawing().is_err());
+
+        let request = ExportRequest {
+            scope: super::super::ExportScope::FullDesktop,
+            background: super::super::ExportBackground::FrozenDesktop,
+            destination: super::super::ExportDestination::File,
+        };
+        controller.request_export(request).unwrap();
+        assert!(controller.export_in_flight());
+        assert!(matches!(
+            native.commands.lock().unwrap()[0].try_iter().last(),
+            Some(NativeSessionCommand::RenderExport(ExportRenderRequest { generation: sent, request: actual }))
+                if sent == generation && actual == request
+        ));
+        event
+            .send(NativeSessionEvent::ExportFailed {
+                generation,
+                message: "fixture save failure".into(),
+            })
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(
+            controller.state(),
+            &ScreenDrawState::DisplayChanged { generation }
+        );
+        assert!(controller.session_snapshot().is_some());
+        assert!(!controller.export_in_flight());
+
+        controller.request_export(request).unwrap();
+        event
+            .send(NativeSessionEvent::ExportCompleted {
+                generation,
+                outcome: ExportOutcome::File(std::path::PathBuf::from("fixture.png")),
+            })
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(controller.state(), &ScreenDrawState::NoSession);
+        assert!(controller.toolbar_open());
+        assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

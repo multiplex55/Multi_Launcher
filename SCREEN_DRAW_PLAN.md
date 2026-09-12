@@ -13,12 +13,12 @@ This ledger tracks the approved Screen Draw initiative. A milestone is only
 | M06 | complete | Typed commands, built-in plugin, controller state machine | Parser/bus/host/plugin/state tests |
 | M07 | complete | Hide-before-capture coordinator | Ordering, cancellation, stale-generation, and failure-restoration tests |
 | M08 | complete | Native worker protocol and fail-safe lifecycle | Protocol, teardown, hotkey-conflict, worker-failure tests |
-| M09 | in_progress | Active canvas, exact Pen, and backgrounds | Input, signed mapping, dirty-region, cancellation, suppression tests |
-| M10 | pending | Remaining tools, text, eraser, fading ink, local shortcuts | Tool/text/shortcut/eyedropper/fade tests |
-| M11 | pending | Ghost overlay, visibility, and display-change safety | Overlay alpha/style, transitions, display-change tests |
-| M12 | pending | Floating toolbar and preference persistence | Control mapping, teardown order, persistence/clamping tests |
-| M13 | pending | Unified full export workflows | Synthetic compositor/destination/failure tests |
-| M14 | pending | Region export and Screenshot Editor handoff | Signed crop, picker cancel/error, handoff-order tests |
+| M09 | complete | Active canvas, exact Pen, and backgrounds | Input, signed mapping, dirty-region, cancellation, suppression tests |
+| M10 | complete | Remaining tools, text, eraser, fading ink, local shortcuts | Tool/text/shortcut/eyedropper/fade tests |
+| M11 | complete | Ghost overlay, visibility, and display-change safety | Overlay alpha/style, transitions, display-change tests |
+| M12 | complete | Floating toolbar and preference persistence | Control mapping, teardown order, persistence/clamping tests |
+| M13 | complete | Unified full export workflows | Synthetic compositor/destination/failure tests |
+| M14 | complete | Region export and Screenshot Editor handoff | Signed crop, picker cancel/error, handoff-order tests |
 | M15 | pending | Lifecycle hardening, documentation, full verification, independent review | Formatting, check, targeted Nextest, full Nextest, review/remediation |
 
 ## Architectural invariants

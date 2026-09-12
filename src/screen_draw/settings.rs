@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::geometry::DesktopPoint;
-use super::model::{RgbaColor, ScreenDrawTool, ToolbarOrientation};
+use super::model::{CanvasBackground, RgbaColor, ScreenDrawTool, ToolbarOrientation};
 
 pub const PALETTE_SLOT_COUNT: usize = 24;
 pub const DEFAULT_FADE_DURATION_SECONDS: u8 = 3;
@@ -42,7 +42,8 @@ impl HotkeyChord {
     }
 
     pub fn is_valid(&self) -> bool {
-        crate::hotkey::parse_hotkey(self.as_str()).is_some()
+        matches!(self.as_str().trim(), "[" | "]")
+            || crate::hotkey::parse_hotkey(self.as_str()).is_some()
     }
 }
 
@@ -79,6 +80,8 @@ pub struct ScreenDrawSettings {
     pub default_tool: ScreenDrawTool,
     pub default_color: RgbaColor,
     pub default_thickness: f32,
+    pub default_background: CanvasBackground,
+    pub custom_background: RgbaColor,
     pub text_size: f32,
     pub highlighter_alpha: u8,
     pub fade_duration_seconds: u8,
@@ -99,6 +102,8 @@ impl Default for ScreenDrawSettings {
             default_tool: ScreenDrawTool::Pen,
             default_color: RgbaColor::RED,
             default_thickness: 3.0,
+            default_background: CanvasBackground::FrozenDesktop,
+            custom_background: RgbaColor::rgba(32, 32, 32, 255),
             text_size: 24.0,
             highlighter_alpha: 96,
             fade_duration_seconds: DEFAULT_FADE_DURATION_SECONDS,
@@ -108,8 +113,8 @@ impl Default for ScreenDrawSettings {
             launch_hotkey: None,
             emergency_hotkey: HotkeyChord::from_unchecked("Ctrl+Shift+F12"),
             tool_hotkeys: default_tool_hotkeys(),
-            increase_thickness_hotkey: None,
-            decrease_thickness_hotkey: None,
+            increase_thickness_hotkey: Some(HotkeyChord::from_unchecked("]")),
+            decrease_thickness_hotkey: Some(HotkeyChord::from_unchecked("[")),
             quick_color_hotkeys: default_quick_color_hotkeys(),
         }
     }
@@ -193,10 +198,8 @@ fn default_tool_hotkeys() -> BTreeMap<ScreenDrawTool, HotkeyChord> {
         (Ellipse, "O"),
         (Text, "T"),
         (Eraser, "E"),
-        // The shared parser currently reserves the `F` prefix for function
-        // keys, so use a distinct ordinary-letter default for fading ink.
-        (FadingInk, "D"),
-        (Eyedropper, "I"),
+        (FadingInk, "G"),
+        (Eyedropper, "V"),
     ]
     .into_iter()
     .map(|(tool, chord)| (tool, HotkeyChord::from_unchecked(chord)))
@@ -252,6 +255,30 @@ mod tests {
         assert_eq!(settings.fade_duration_seconds, 3);
         assert_eq!(settings.palette.len(), 24);
         assert_eq!(settings.quick_color_hotkeys.len(), 24);
+        assert_eq!(
+            settings.tool_hotkeys[&ScreenDrawTool::FadingInk].as_str(),
+            "G"
+        );
+        assert_eq!(
+            settings.tool_hotkeys[&ScreenDrawTool::Eyedropper].as_str(),
+            "V"
+        );
+        assert_eq!(
+            settings
+                .decrease_thickness_hotkey
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "["
+        );
+        assert_eq!(
+            settings
+                .increase_thickness_hotkey
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "]"
+        );
         assert!(settings.validate_hotkeys().is_empty());
     }
 

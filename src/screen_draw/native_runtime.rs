@@ -8,7 +8,8 @@ use std::sync::{
 use std::thread::JoinHandle;
 
 use super::{
-    CanvasBackground, HotkeyChord, RgbaColor, ScreenDrawMode, ScreenDrawSessionSnapshot,
+    CanvasBackground, ExportBackground, ExportOutcome, ExportRequest, ExportSource, HotkeyChord,
+    RgbaColor, ScreenDrawGeneration, ScreenDrawMode, ScreenDrawSessionSnapshot, ScreenDrawSettings,
     ScreenDrawTool,
 };
 
@@ -29,16 +30,20 @@ pub enum NativeSessionCommand {
     Ghost,
     Resume,
     Finish,
+    PrepareRegionSelection {
+        generation: ScreenDrawGeneration,
+        background: ExportBackground,
+    },
+    EndRegionSelection,
+    DisplayChanged,
     RenderExport(ExportRenderRequest),
     Shutdown,
 }
 
-/// Placeholder carried by the M08 protocol. M13 will attach the concrete
-/// compositor result/destination to this request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExportRenderRequest {
-    pub include_annotations: bool,
-    pub background: CanvasBackground,
+    pub generation: ScreenDrawGeneration,
+    pub request: ExportRequest,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,8 +56,28 @@ pub enum NativeSessionEvent {
     ThicknessChanged(f32),
     AnnotationsVisibilityChanged(bool),
     BackgroundChanged(CanvasBackground),
-    ExportRenderDeferred(ExportRenderRequest),
+    ExportCompleted {
+        generation: ScreenDrawGeneration,
+        outcome: ExportOutcome,
+    },
+    ExportFailed {
+        generation: ScreenDrawGeneration,
+        message: String,
+    },
+    RegionPreviewReady {
+        generation: ScreenDrawGeneration,
+        bounds: crate::mkmacro::screen::ScreenRect,
+    },
+    RegionPreviewFailed {
+        generation: ScreenDrawGeneration,
+        message: String,
+    },
+    EditorImageReady {
+        generation: ScreenDrawGeneration,
+        image: image::RgbaImage,
+    },
     EmergencyPaused,
+    DisplayChanged,
     Warning(String),
     Error(String),
     SessionClosed,
@@ -69,14 +94,19 @@ pub struct NativeRuntimeState {
 }
 
 impl NativeRuntimeState {
-    fn initial(tool: ScreenDrawTool, color: RgbaColor, thickness: f32) -> Self {
+    fn initial(
+        tool: ScreenDrawTool,
+        color: RgbaColor,
+        thickness: f32,
+        background: CanvasBackground,
+    ) -> Self {
         Self {
             mode: ScreenDrawMode::Drawing,
             tool,
             color,
             thickness,
             annotations_visible: true,
-            background: CanvasBackground::FrozenDesktop,
+            background,
         }
     }
 }
@@ -87,6 +117,7 @@ pub(crate) struct NativeSessionConfig {
     pub tool: ScreenDrawTool,
     pub color: RgbaColor,
     pub thickness: f32,
+    pub settings: ScreenDrawSettings,
     pub request_repaint: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -291,8 +322,16 @@ impl SuppressionLease for crate::mouse_gestures::service::GestureSuppressionGuar
 trait InteractiveSurface: Send {
     fn release_pointer_capture(&mut self);
     fn hide_interactive(&mut self);
-    fn show_passive_annotations(&mut self);
+    fn show_passive_annotations(&mut self, visible: bool);
+    fn hide_passive_annotations(&mut self);
+    fn show_export_preview(&mut self, _image: &image::RgbaImage) -> Result<(), String> {
+        Err("Screen Draw export preview surface is not ready".into())
+    }
+    fn destroy_surfaces(&mut self);
     fn resume_interactive(&mut self);
+    fn annotations_visible(&self) -> bool {
+        true
+    }
     fn cancel_active(&mut self) -> bool {
         false
     }
@@ -310,6 +349,9 @@ trait InteractiveSurface: Send {
     }
     fn set_annotations_visible(&mut self, _visible: bool) {}
     fn set_background(&mut self, _background: CanvasBackground) {}
+    fn export_source(&self) -> Result<ExportSource, String> {
+        Err("Screen Draw export surface is not ready".into())
+    }
 }
 
 #[derive(Default)]
@@ -324,7 +366,9 @@ impl InteractiveSurface for PendingCanvasSurface {
     }
 
     fn hide_interactive(&mut self) {}
-    fn show_passive_annotations(&mut self) {}
+    fn show_passive_annotations(&mut self, _visible: bool) {}
+    fn hide_passive_annotations(&mut self) {}
+    fn destroy_surfaces(&mut self) {}
     fn resume_interactive(&mut self) {}
 }
 
@@ -336,9 +380,23 @@ impl InteractiveSurface for super::native_canvas::NativeCanvasSurface {
     fn hide_interactive(&mut self) {
         self.hide();
     }
-    fn show_passive_annotations(&mut self) {}
+    fn show_passive_annotations(&mut self, visible: bool) {
+        self.show_passive(visible);
+    }
+    fn hide_passive_annotations(&mut self) {
+        self.hide_passive();
+    }
+    fn show_export_preview(&mut self, image: &image::RgbaImage) -> Result<(), String> {
+        self.show_export_preview(image)
+    }
+    fn destroy_surfaces(&mut self) {
+        self.destroy_surfaces();
+    }
     fn resume_interactive(&mut self) {
         self.resume();
+    }
+    fn annotations_visible(&self) -> bool {
+        self.annotations_visible()
     }
     fn cancel_active(&mut self) -> bool {
         self.cancel_active()
@@ -367,6 +425,9 @@ impl InteractiveSurface for super::native_canvas::NativeCanvasSurface {
     fn set_background(&mut self, background: CanvasBackground) {
         self.set_background(background);
     }
+    fn export_source(&self) -> Result<ExportSource, String> {
+        Ok(self.export_source())
+    }
 }
 
 struct WorkerCore {
@@ -377,11 +438,12 @@ struct WorkerCore {
     suppression: Option<Box<dyn SuppressionLease>>,
     suppression_factory: Arc<dyn Fn() -> Box<dyn SuppressionLease> + Send + Sync>,
     running: bool,
+    export_destination: Arc<dyn super::export::ExportDestinationBackend>,
 }
 
 impl Drop for WorkerCore {
     fn drop(&mut self) {
-        self.disarm_interactive();
+        self.shutdown_surfaces();
     }
 }
 
@@ -403,10 +465,22 @@ impl WorkerCore {
                 config.color,
                 config.thickness,
                 config.tool,
+                config.settings.clone(),
                 Box::new(move |event| match event {
                     CanvasEvent::DocumentChanged => {
                         canvas_events.send(NativeSessionEvent::DocumentChanged)
                     }
+                    CanvasEvent::ToolChanged(tool) => {
+                        canvas_events.send(NativeSessionEvent::ToolChanged(tool))
+                    }
+                    CanvasEvent::ColorChanged(color) => {
+                        canvas_events.send(NativeSessionEvent::ColorChanged(color))
+                    }
+                    CanvasEvent::ThicknessChanged(thickness) => {
+                        canvas_events.send(NativeSessionEvent::ThicknessChanged(thickness))
+                    }
+                    CanvasEvent::AnnotationsVisibilityChanged(visible) => canvas_events
+                        .send(NativeSessionEvent::AnnotationsVisibilityChanged(visible)),
                     CanvasEvent::Escape => {
                         let _ = unsafe {
                             PostThreadMessageW(
@@ -443,13 +517,19 @@ impl WorkerCore {
         #[cfg(not(windows))]
         let surface: Box<dyn InteractiveSurface> = Box::new(PendingCanvasSurface);
         Ok(Self {
-            state: NativeRuntimeState::initial(config.tool, config.color, config.thickness),
+            state: NativeRuntimeState::initial(
+                config.tool,
+                config.color,
+                config.thickness,
+                config.settings.default_background,
+            ),
             _snapshot: config.snapshot.clone(),
             events,
             surface,
             suppression,
             suppression_factory,
             running: true,
+            export_destination: Arc::new(super::export::SystemExportDestination),
         })
     }
 
@@ -504,8 +584,21 @@ impl WorkerCore {
                 self.events
                     .send(NativeSessionEvent::BackgroundChanged(background));
             }
-            NativeSessionCommand::Ghost => self.safe_pause(false),
+            NativeSessionCommand::Ghost => {
+                if self.state.mode == ScreenDrawMode::Drawing {
+                    self.safe_pause(false);
+                }
+            }
             NativeSessionCommand::Resume => {
+                if !matches!(
+                    self.state.mode,
+                    ScreenDrawMode::Ghost | ScreenDrawMode::Finish
+                ) {
+                    self.events.send(NativeSessionEvent::Warning(
+                        "ignored resume because Screen Draw surfaces are not resumable".into(),
+                    ));
+                    return;
+                }
                 if self.suppression.is_none() {
                     self.suppression = Some((self.suppression_factory)());
                 }
@@ -515,23 +608,171 @@ impl WorkerCore {
                     .send(NativeSessionEvent::ModeChanged(ScreenDrawMode::Drawing));
             }
             NativeSessionCommand::Finish => {
-                self.disarm_interactive();
+                if !matches!(
+                    self.state.mode,
+                    ScreenDrawMode::Drawing | ScreenDrawMode::Ghost
+                ) {
+                    return;
+                }
+                self.pause_to_passive();
                 self.state.mode = ScreenDrawMode::Finish;
                 self.events
                     .send(NativeSessionEvent::ModeChanged(ScreenDrawMode::Finish));
             }
-            NativeSessionCommand::RenderExport(request) => self
-                .events
-                .send(NativeSessionEvent::ExportRenderDeferred(request)),
+            NativeSessionCommand::PrepareRegionSelection {
+                generation,
+                background,
+            } => self.prepare_region_selection(generation, background),
+            NativeSessionCommand::EndRegionSelection => self.end_region_selection(),
+            NativeSessionCommand::DisplayChanged => self.display_changed(),
+            NativeSessionCommand::RenderExport(request) => self.start_export(request),
             NativeSessionCommand::Shutdown => {
-                self.disarm_interactive();
+                self.shutdown_surfaces();
                 self.running = false;
             }
         }
     }
 
+    fn start_export(&mut self, request: ExportRenderRequest) {
+        if !matches!(
+            self.state.mode,
+            ScreenDrawMode::Finish | ScreenDrawMode::DisplayChanged
+        ) || request.generation != self._snapshot.generation()
+        {
+            self.events.send(NativeSessionEvent::ExportFailed {
+                generation: request.generation,
+                message: "ignored stale or invalid Screen Draw export request".into(),
+            });
+            return;
+        }
+        let source = match self.surface.export_source() {
+            Ok(source) => source,
+            Err(message) => {
+                self.events.send(NativeSessionEvent::ExportFailed {
+                    generation: request.generation,
+                    message,
+                });
+                return;
+            }
+        };
+        let events = self.events.clone();
+        let destination = Arc::clone(&self.export_destination);
+        let generation = request.generation;
+        let spawn = std::thread::Builder::new()
+            .name(format!("screen-draw-export-{}", generation.get()))
+            .spawn(move || {
+                if request.request.destination == super::ExportDestination::ScreenshotEditor {
+                    match super::export::compose_export(request.request, &source) {
+                        Ok(image) => {
+                            events.send(NativeSessionEvent::EditorImageReady { generation, image })
+                        }
+                        Err(message) => events.send(NativeSessionEvent::ExportFailed {
+                            generation,
+                            message,
+                        }),
+                    }
+                    return;
+                }
+                match super::export::execute_export(request.request, source, destination) {
+                    Ok(outcome) => events.send(NativeSessionEvent::ExportCompleted {
+                        generation,
+                        outcome,
+                    }),
+                    Err(message) => events.send(NativeSessionEvent::ExportFailed {
+                        generation,
+                        message,
+                    }),
+                }
+            });
+        if let Err(error) = spawn {
+            self.events.send(NativeSessionEvent::ExportFailed {
+                generation,
+                message: format!("failed to start Screen Draw export worker: {error}"),
+            });
+        }
+    }
+
+    fn prepare_region_selection(
+        &mut self,
+        generation: ScreenDrawGeneration,
+        background: ExportBackground,
+    ) {
+        if self.state.mode != ScreenDrawMode::Finish || generation != self._snapshot.generation() {
+            self.events.send(NativeSessionEvent::RegionPreviewFailed {
+                generation,
+                message: "ignored stale or invalid Screen Draw region request".into(),
+            });
+            return;
+        }
+        let source = match self.surface.export_source() {
+            Ok(source) => source,
+            Err(message) => {
+                self.events.send(NativeSessionEvent::RegionPreviewFailed {
+                    generation,
+                    message,
+                });
+                return;
+            }
+        };
+        let capture = source.snapshot.capture();
+        let bounds = crate::mkmacro::screen::ScreenRect::new(
+            capture.origin.0,
+            capture.origin.1,
+            capture.image.width(),
+            capture.image.height(),
+        );
+        let request = ExportRequest {
+            scope: super::ExportScope::FullDesktop,
+            background,
+            destination: super::ExportDestination::ScreenshotEditor,
+        };
+        let image = match super::export::compose_export(request, &source) {
+            Ok(image) => image,
+            Err(message) => {
+                self.events.send(NativeSessionEvent::RegionPreviewFailed {
+                    generation,
+                    message,
+                });
+                return;
+            }
+        };
+        self.surface.hide_passive_annotations();
+        match self.surface.show_export_preview(&image) {
+            Ok(()) => {
+                self.state.mode = ScreenDrawMode::SelectingRegion;
+                self.events
+                    .send(NativeSessionEvent::RegionPreviewReady { generation, bounds });
+            }
+            Err(message) => {
+                self.surface
+                    .show_passive_annotations(self.state.annotations_visible);
+                self.events.send(NativeSessionEvent::RegionPreviewFailed {
+                    generation,
+                    message,
+                });
+            }
+        }
+    }
+
+    fn end_region_selection(&mut self) {
+        if self.state.mode != ScreenDrawMode::SelectingRegion {
+            return;
+        }
+        self.surface.hide_passive_annotations();
+        self.surface
+            .show_passive_annotations(self.state.annotations_visible);
+        self.state.mode = ScreenDrawMode::Finish;
+    }
+
     fn safe_pause(&mut self, emergency: bool) {
-        self.disarm_interactive();
+        if self.state.mode == ScreenDrawMode::DisplayChanged {
+            self.shutdown_surfaces();
+            if emergency {
+                self.events.send(NativeSessionEvent::EmergencyPaused);
+            }
+            return;
+        }
+        self.pause_to_passive();
         self.state.mode = ScreenDrawMode::Ghost;
         if emergency {
             self.events.send(NativeSessionEvent::EmergencyPaused);
@@ -540,15 +781,36 @@ impl WorkerCore {
             .send(NativeSessionEvent::ModeChanged(ScreenDrawMode::Ghost));
     }
 
-    /// One idempotent safety path for Escape/emergency, mode changes, errors,
-    /// panic cleanup, and shutdown. The pending surface implements the same
-    /// contract before M09 creates concrete HWNDs.
-    fn disarm_interactive(&mut self) {
+    fn release_interactive(&mut self) {
         self.surface.cancel_active();
         self.surface.release_pointer_capture();
         self.surface.hide_interactive();
-        self.surface.show_passive_annotations();
         self.suppression.take();
+    }
+
+    fn pause_to_passive(&mut self) {
+        self.release_interactive();
+        self.state.annotations_visible = self.surface.annotations_visible();
+        self.surface
+            .show_passive_annotations(self.state.annotations_visible);
+    }
+
+    fn shutdown_surfaces(&mut self) {
+        self.release_interactive();
+        self.surface.hide_passive_annotations();
+    }
+
+    fn display_changed(&mut self) {
+        if self.state.mode == ScreenDrawMode::DisplayChanged {
+            return;
+        }
+        self.release_interactive();
+        self.surface.destroy_surfaces();
+        self.state.mode = ScreenDrawMode::DisplayChanged;
+        self.events.send(NativeSessionEvent::DisplayChanged);
+        self.events.send(NativeSessionEvent::Warning(
+            "display configuration changed; Screen Draw surfaces were safely destroyed".into(),
+        ));
     }
 }
 
@@ -562,7 +824,7 @@ fn drain_commands(core: &mut WorkerCore, command_rx: &mpsc::Receiver<NativeSessi
 }
 
 fn finish_worker(core: &mut WorkerCore, result: std::thread::Result<Result<(), String>>) {
-    core.disarm_interactive();
+    core.shutdown_surfaces();
     match result {
         Ok(Ok(())) => {}
         Ok(Err(message)) => core.events.send(NativeSessionEvent::Error(message)),
@@ -677,12 +939,9 @@ fn run_platform_loop(
         } else if message.message == super::native_canvas::WM_CANVAS_ESCAPE {
             core.safe_pause(false);
         } else if message.message == super::native_canvas::WM_CANVAS_DISPLAY_CHANGED {
-            core.safe_pause(false);
-            core.events.send(NativeSessionEvent::Warning(
-                "display configuration changed; Screen Draw was safely paused".into(),
-            ));
+            core.display_changed();
         } else if message.message == super::native_canvas::WM_CANVAS_CLOSED {
-            core.disarm_interactive();
+            core.shutdown_surfaces();
             core.running = false;
         } else if message.message == WM_HOTKEY
             && message.wParam == WPARAM(EMERGENCY_HOTKEY_ID as usize)
@@ -694,7 +953,7 @@ fn run_platform_loop(
         }
     }
 
-    core.disarm_interactive();
+    core.shutdown_surfaces();
     drop(registration);
     wake.thread_id.store(0, Ordering::Release);
     Ok(())
@@ -725,7 +984,13 @@ mod tests {
         release: usize,
         hide: usize,
         passive: usize,
+        passive_hide: usize,
+        destroy: usize,
         resume: usize,
+        last_passive_visible: Option<bool>,
+        annotations_visible: bool,
+        retained_document_objects: usize,
+        export_previews: Vec<(u32, u32)>,
     }
 
     struct CountingSurface(Arc<Mutex<SurfaceCounts>>);
@@ -741,11 +1006,59 @@ mod tests {
         fn hide_interactive(&mut self) {
             self.0.lock().unwrap().hide += 1;
         }
-        fn show_passive_annotations(&mut self) {
-            self.0.lock().unwrap().passive += 1;
+        fn show_passive_annotations(&mut self, visible: bool) {
+            let mut counts = self.0.lock().unwrap();
+            counts.passive += 1;
+            counts.last_passive_visible = Some(visible);
+        }
+        fn hide_passive_annotations(&mut self) {
+            self.0.lock().unwrap().passive_hide += 1;
+        }
+        fn show_export_preview(&mut self, image: &RgbaImage) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .export_previews
+                .push(image.dimensions());
+            Ok(())
+        }
+        fn destroy_surfaces(&mut self) {
+            self.0.lock().unwrap().destroy += 1;
         }
         fn resume_interactive(&mut self) {
             self.0.lock().unwrap().resume += 1;
+        }
+        fn annotations_visible(&self) -> bool {
+            self.0.lock().unwrap().annotations_visible
+        }
+        fn set_annotations_visible(&mut self, visible: bool) {
+            self.0.lock().unwrap().annotations_visible = visible;
+        }
+        fn export_source(&self) -> Result<ExportSource, String> {
+            Ok(ExportSource {
+                snapshot: ScreenDrawSessionSnapshot::new(
+                    ScreenDrawGeneration::from_raw(1),
+                    CapturedRegion {
+                        image: RgbaImage::new(1, 1),
+                        origin: (0, 0),
+                    },
+                ),
+                objects: Vec::new(),
+                transient: Vec::new(),
+                now: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    struct FixtureDestination(Result<ExportOutcome, String>);
+
+    impl super::super::export::ExportDestinationBackend for FixtureDestination {
+        fn deliver(
+            &self,
+            _destination: super::super::ExportDestination,
+            _image: RgbaImage,
+        ) -> Result<ExportOutcome, String> {
+            self.0.clone()
         }
     }
 
@@ -757,6 +1070,8 @@ mod tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel();
         let surface = Arc::new(Mutex::new(SurfaceCounts::default()));
+        surface.lock().unwrap().annotations_visible = true;
+        surface.lock().unwrap().retained_document_objects = 2;
         let releases = Arc::new(AtomicUsize::new(0));
         let lease_factory_releases = Arc::clone(&releases);
         let suppression_factory: Arc<dyn Fn() -> Box<dyn SuppressionLease> + Send + Sync> =
@@ -769,13 +1084,19 @@ mod tests {
             },
         );
         let core = WorkerCore {
-            state: NativeRuntimeState::initial(ScreenDrawTool::Pen, RgbaColor::RED, 3.0),
+            state: NativeRuntimeState::initial(
+                ScreenDrawTool::Pen,
+                RgbaColor::RED,
+                3.0,
+                CanvasBackground::FrozenDesktop,
+            ),
             _snapshot: snapshot,
             events: EventSink::new(event_tx, Arc::new(|| {})),
             surface: Box::new(CountingSurface(Arc::clone(&surface))),
             suppression: Some(suppression_factory()),
             suppression_factory,
             running: true,
+            export_destination: Arc::new(super::super::export::SystemExportDestination),
         };
         (core, event_rx, surface, releases)
     }
@@ -800,11 +1121,12 @@ mod tests {
     fn central_disarm_is_idempotent_and_resume_reacquires_suppression() {
         let (mut core, _, surface, releases) = test_core();
         core.safe_pause(true);
-        core.disarm_interactive();
+        core.pause_to_passive();
         assert_eq!(releases.load(Ordering::SeqCst), 1);
         let counts = surface.lock().unwrap();
         assert_eq!(counts.cancel, 2);
         assert_eq!((counts.release, counts.hide, counts.passive), (2, 2, 2));
+        assert_eq!(counts.last_passive_visible, Some(true));
         drop(counts);
 
         core.handle(NativeSessionCommand::Resume);
@@ -812,6 +1134,90 @@ mod tests {
         assert_eq!(surface.lock().unwrap().resume, 1);
         core.handle(NativeSessionCommand::Finish);
         assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn hidden_annotations_keep_ghost_surface_hidden_without_changing_history() {
+        let (mut core, _, surface, _) = test_core();
+        core.handle(NativeSessionCommand::SetAnnotationsVisible(false));
+        core.safe_pause(false);
+        let counts = surface.lock().unwrap();
+        assert_eq!(counts.last_passive_visible, Some(false));
+        assert_eq!(core.state.mode, ScreenDrawMode::Ghost);
+        assert!(!core.state.annotations_visible);
+    }
+
+    #[test]
+    fn safe_pause_uses_document_visibility_after_native_drawing_auto_reveals() {
+        let (mut core, _, surface, _) = test_core();
+        core.state.annotations_visible = false;
+        surface.lock().unwrap().annotations_visible = true;
+        core.safe_pause(false);
+        assert!(core.state.annotations_visible);
+        assert_eq!(surface.lock().unwrap().last_passive_visible, Some(true));
+    }
+
+    #[test]
+    fn display_change_releases_input_hides_both_surfaces_and_preserves_worker() {
+        let (mut core, events, surface, releases) = test_core();
+        core.display_changed();
+        assert!(core.running);
+        assert!(core.suppression.is_none());
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        assert_eq!(core.state.mode, ScreenDrawMode::DisplayChanged);
+        assert_eq!(core.state.tool, ScreenDrawTool::Pen);
+        assert_eq!(core._snapshot.capture().image.dimensions(), (1, 1));
+        assert_eq!(surface.lock().unwrap().destroy, 1);
+        assert_eq!(surface.lock().unwrap().retained_document_objects, 2);
+        assert_eq!(events.recv().unwrap(), NativeSessionEvent::DisplayChanged);
+        assert!(matches!(
+            events.recv().unwrap(),
+            NativeSessionEvent::Warning(_)
+        ));
+
+        core.display_changed();
+        assert_eq!(surface.lock().unwrap().destroy, 1);
+
+        let export_request = super::super::ExportRequest {
+            scope: super::super::ExportScope::FullDesktop,
+            background: super::super::ExportBackground::FrozenDesktop,
+            destination: super::super::ExportDestination::Clipboard,
+        };
+        core.export_destination = Arc::new(FixtureDestination(Err("display export failed".into())));
+        core.handle(NativeSessionCommand::RenderExport(ExportRenderRequest {
+            generation: ScreenDrawGeneration::from_raw(1),
+            request: export_request,
+        }));
+        assert!(matches!(
+            events.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
+            NativeSessionEvent::ExportFailed { message, .. } if message == "display export failed"
+        ));
+        assert_eq!(surface.lock().unwrap().destroy, 1);
+        assert_eq!(core.state.mode, ScreenDrawMode::DisplayChanged);
+
+        core.export_destination = Arc::new(FixtureDestination(Ok(ExportOutcome::Clipboard)));
+        core.handle(NativeSessionCommand::RenderExport(ExportRenderRequest {
+            generation: ScreenDrawGeneration::from_raw(1),
+            request: export_request,
+        }));
+        assert!(matches!(
+            events
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            NativeSessionEvent::ExportCompleted {
+                outcome: ExportOutcome::Clipboard,
+                ..
+            }
+        ));
+        assert_eq!(surface.lock().unwrap().destroy, 1);
+
+        core.handle(NativeSessionCommand::Resume);
+        assert_eq!(core.state.mode, ScreenDrawMode::DisplayChanged);
+        assert_eq!(surface.lock().unwrap().resume, 0);
+        assert!(matches!(
+            events.recv().unwrap(),
+            NativeSessionEvent::Warning(message) if message.contains("not resumable")
+        ));
     }
 
     #[test]
@@ -826,6 +1232,113 @@ mod tests {
         assert!(!core.running);
         assert_eq!(releases.load(Ordering::SeqCst), 1);
         assert_eq!(surface.lock().unwrap().release, 1);
+    }
+
+    #[test]
+    fn initial_runtime_state_uses_the_persisted_background() {
+        let state = NativeRuntimeState::initial(
+            ScreenDrawTool::Pen,
+            RgbaColor::RED,
+            3.0,
+            CanvasBackground::Black,
+        );
+        assert_eq!(state.background, CanvasBackground::Black);
+    }
+
+    #[test]
+    fn export_worker_is_generation_and_safe_mode_gated_and_reports_destination_results() {
+        let (mut core, events, _, _) = test_core();
+        let request = super::super::ExportRequest {
+            scope: super::super::ExportScope::FullDesktop,
+            background: super::super::ExportBackground::Transparent,
+            destination: super::super::ExportDestination::Clipboard,
+        };
+        core.handle(NativeSessionCommand::RenderExport(ExportRenderRequest {
+            generation: ScreenDrawGeneration::from_raw(2),
+            request,
+        }));
+        assert!(matches!(
+            events.recv().unwrap(),
+            NativeSessionEvent::ExportFailed { message, .. } if message.contains("stale or invalid")
+        ));
+
+        core.state.mode = ScreenDrawMode::Finish;
+        core.export_destination =
+            Arc::new(FixtureDestination(Err("fixture export failure".into())));
+        core.handle(NativeSessionCommand::RenderExport(ExportRenderRequest {
+            generation: ScreenDrawGeneration::from_raw(1),
+            request,
+        }));
+        assert!(matches!(
+            events.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
+            NativeSessionEvent::ExportFailed { message, .. } if message == "fixture export failure"
+        ));
+        assert!(core.running);
+        assert_eq!(core.state.mode, ScreenDrawMode::Finish);
+
+        core.export_destination = Arc::new(FixtureDestination(Ok(ExportOutcome::Clipboard)));
+        core.handle(NativeSessionCommand::RenderExport(ExportRenderRequest {
+            generation: ScreenDrawGeneration::from_raw(1),
+            request,
+        }));
+        assert_eq!(
+            events
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            NativeSessionEvent::ExportCompleted {
+                generation: ScreenDrawGeneration::from_raw(1),
+                outcome: ExportOutcome::Clipboard,
+            }
+        );
+    }
+
+    #[test]
+    fn region_preview_is_composed_before_ready_and_editor_payload_bypasses_destinations() {
+        let (mut core, events, surface, releases) = test_core();
+        core.handle(NativeSessionCommand::Finish);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            events.recv().unwrap(),
+            NativeSessionEvent::ModeChanged(ScreenDrawMode::Finish)
+        );
+
+        core.handle(NativeSessionCommand::PrepareRegionSelection {
+            generation: ScreenDrawGeneration::from_raw(1),
+            background: super::super::ExportBackground::White,
+        });
+        assert_eq!(core.state.mode, ScreenDrawMode::SelectingRegion);
+        assert_eq!(surface.lock().unwrap().export_previews, [(1, 1)]);
+        assert_eq!(
+            events.recv().unwrap(),
+            NativeSessionEvent::RegionPreviewReady {
+                generation: ScreenDrawGeneration::from_raw(1),
+                bounds: crate::mkmacro::screen::ScreenRect::new(0, 0, 1, 1),
+            }
+        );
+
+        core.handle(NativeSessionCommand::EndRegionSelection);
+        assert_eq!(core.state.mode, ScreenDrawMode::Finish);
+        let request = super::super::ExportRequest {
+            scope: super::super::ExportScope::Region(crate::mkmacro::screen::ScreenRect::new(
+                0, 0, 1, 1,
+            )),
+            background: super::super::ExportBackground::White,
+            destination: super::super::ExportDestination::ScreenshotEditor,
+        };
+        core.export_destination = Arc::new(FixtureDestination(Err(
+            "editor must not use the system destination".into(),
+        )));
+        core.handle(NativeSessionCommand::RenderExport(ExportRenderRequest {
+            generation: ScreenDrawGeneration::from_raw(1),
+            request,
+        }));
+        assert!(matches!(
+            events.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
+            NativeSessionEvent::EditorImageReady { generation, image }
+                if generation == ScreenDrawGeneration::from_raw(1)
+                    && image.dimensions() == (1, 1)
+                    && image.get_pixel(0, 0).0 == [255, 255, 255, 255]
+        ));
     }
 
     #[test]

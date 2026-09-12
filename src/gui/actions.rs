@@ -420,6 +420,104 @@ impl LauncherApp {
             _ => {}
         }
     }
+
+    pub(crate) fn begin_screen_draw_region_picker(
+        &mut self,
+        ready: crate::screen_draw::ScreenDrawRegionPickerReady,
+    ) {
+        if self.screen_draw_controller.state().generation() != Some(ready.generation)
+            || !matches!(
+                self.screen_draw_controller.state(),
+                crate::screen_draw::ScreenDrawState::SelectingRegion { .. }
+            )
+        {
+            return;
+        }
+        self.cancel_screen_draw_region_picker();
+        let operation_id = self
+            .mkmacro_dialog
+            .visual_overlay_controller()
+            .begin_rectangle_pick(
+                crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose::ScreenDrawExport,
+                ready.bounds,
+            );
+        self.screen_draw_region_operation = Some(super::ScreenDrawRegionOperation {
+            generation: ready.generation,
+            operation_id,
+        });
+    }
+
+    pub(crate) fn poll_screen_draw_region_picker(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.screen_draw_region_operation else {
+            return;
+        };
+        if self.screen_draw_controller.state().generation() != Some(pending.generation)
+            || !matches!(
+                self.screen_draw_controller.state(),
+                crate::screen_draw::ScreenDrawState::SelectingRegion { .. }
+            )
+        {
+            self.cancel_screen_draw_region_picker();
+            return;
+        }
+        let overlay = self.mkmacro_dialog.visual_overlay_controller();
+        let Some(event) = overlay.poll_rectangle_event(pending.operation_id) else {
+            ctx.request_repaint();
+            return;
+        };
+        self.screen_draw_region_operation = None;
+        match event {
+            crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose:
+                    crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose::ScreenDrawExport,
+                rect,
+            } if operation_id == pending.operation_id => {
+                if let Err(error) = self
+                    .screen_draw_controller
+                    .complete_region_selection(pending.generation, rect)
+                {
+                    self.report_error_message("screen_draw.region", error.to_string());
+                }
+            }
+            crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::Cancelled {
+                operation_id,
+            }
+            | crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::Expired {
+                operation_id,
+            } if operation_id == pending.operation_id => {
+                let _ = self
+                    .screen_draw_controller
+                    .cancel_region_selection(pending.generation, None);
+            }
+            crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::Error {
+                operation_id,
+                error,
+            } if operation_id == pending.operation_id => {
+                let message = error.to_string();
+                let _ = self
+                    .screen_draw_controller
+                    .cancel_region_selection(pending.generation, Some(message.clone()));
+                self.report_error_message("screen_draw.region", message);
+            }
+            _ => {
+                let message = "Screen Draw received an unexpected rectangle picker result";
+                let _ = self.screen_draw_controller.cancel_region_selection(
+                    pending.generation,
+                    Some(message.into()),
+                );
+                self.report_error_message("screen_draw.region", message);
+            }
+        }
+    }
+
+    pub(crate) fn cancel_screen_draw_region_picker(&mut self) {
+        if let Some(pending) = self.screen_draw_region_operation.take() {
+            self.mkmacro_dialog
+                .visual_overlay_controller()
+                .cancel_screen_draw_operation(pending.operation_id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -456,6 +554,49 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn screen_draw_picker_cancel_restores_finish_toolbar_and_retry_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let fixture =
+            crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        let generation = app.screen_draw_controller.request_start().unwrap();
+        app.screen_draw_controller
+            .launcher_hidden(generation)
+            .unwrap();
+        app.screen_draw_controller
+            .capture_succeeded(generation)
+            .unwrap();
+        app.screen_draw_controller.finish().unwrap();
+        app.screen_draw_controller
+            .begin_region_selection(
+                crate::screen_draw::ExportBackground::Transparent,
+                crate::screen_draw::ExportDestination::Clipboard,
+            )
+            .unwrap();
+        app.begin_screen_draw_region_picker(crate::screen_draw::ScreenDrawRegionPickerReady {
+            generation,
+            bounds: crate::mkmacro::screen::ScreenRect::new(-1920, -200, 3840, 1200),
+        });
+        let operation_id = app.screen_draw_region_operation.unwrap().operation_id;
+        fixture.observer.wait_for_commands(1);
+        fixture.observer.cancel_rectangle(operation_id);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while app.screen_draw_region_operation.is_some() {
+            app.poll_screen_draw_region_picker(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::Finish { generation }
+        );
+        assert!(app.screen_draw_controller.toolbar_open());
+        assert!(!app.screen_draw_controller.export_in_flight());
     }
 
     #[test]
