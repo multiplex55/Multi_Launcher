@@ -544,13 +544,17 @@ mod windows_canvas {
         LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SetCursor, SetTimer, SetWindowLongPtrW,
         ShowWindow, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_KEYDOWN,
         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN,
-        WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW,
     };
     use windows::core::{PCWSTR, w};
 
     use super::*;
     use crate::screen_draw::hotkeys::{LocalShortcutAction, local_shortcut};
     use crate::screen_draw::native_overlay::NativeOverlaySurface;
+    use crate::screen_draw::window_layers::{
+        NativeWindowHandle, ToolbarZOrderCeiling, interactive_canvas_extended_style,
+        interactive_canvas_style, raise_interactive_canvas,
+    };
     use crate::screen_draw::{ScreenDrawSettings, render_document_into, selected_background};
 
     const FADE_TIMER_ID: usize = 0x5344_4641;
@@ -660,6 +664,7 @@ mod windows_canvas {
         backing: Option<BackingDib>,
         passive: Option<NativeOverlaySurface>,
         passive_transient: Vec<(DesktopRect, NativeOverlaySurface)>,
+        toolbar_ceiling: ToolbarZOrderCeiling,
         passive_mode: bool,
         destroying_surfaces: bool,
         background: CanvasBackground,
@@ -758,8 +763,10 @@ mod windows_canvas {
             {
                 self.passive_transient.clear();
                 for bounds in &bounds {
-                    self.passive_transient
-                        .push((*bounds, NativeOverlaySurface::create(*bounds)?));
+                    self.passive_transient.push((
+                        *bounds,
+                        NativeOverlaySurface::create(*bounds, self.toolbar_ceiling)?,
+                    ));
                 }
             }
             for (bounds, surface) in &mut self.passive_transient {
@@ -1332,8 +1339,12 @@ mod windows_canvas {
                 snapshot,
                 canvas: CanvasDocument::new(bounds),
                 backing: Some(unsafe { BackingDib::new(bounds.width, bounds.height)? }),
-                passive: Some(NativeOverlaySurface::create(bounds)?),
+                passive: Some(NativeOverlaySurface::create(
+                    bounds,
+                    ToolbarZOrderCeiling::default(),
+                )?),
                 passive_transient: Vec::new(),
+                toolbar_ceiling: ToolbarZOrderCeiling::default(),
                 passive_mode: false,
                 destroying_surfaces: false,
                 background: initial_background,
@@ -1364,10 +1375,10 @@ mod windows_canvas {
             }
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                    interactive_canvas_extended_style(),
                     class_name,
                     PCWSTR::null(),
-                    WS_POPUP,
+                    interactive_canvas_style(),
                     bounds.x,
                     bounds.y,
                     i32::try_from(bounds.width).map_err(|_| "canvas width is too large")?,
@@ -1387,6 +1398,7 @@ mod windows_canvas {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOW);
             }
+            raise_interactive_canvas(hwnd);
             Ok(Self { state })
         }
 
@@ -1457,6 +1469,17 @@ mod windows_canvas {
                 unsafe {
                     let _ = ShowWindow(self.state.hwnd, SW_SHOW);
                 }
+                raise_interactive_canvas(self.state.hwnd);
+            }
+        }
+        pub(crate) fn set_toolbar_z_order_ceiling(&mut self, toolbar: Option<NativeWindowHandle>) {
+            self.state.toolbar_ceiling.set(toolbar);
+            let ceiling = self.state.toolbar_ceiling;
+            if let Some(passive) = self.state.passive.as_mut() {
+                passive.set_toolbar_z_order_ceiling(ceiling);
+            }
+            for (_, passive) in &mut self.state.passive_transient {
+                passive.set_toolbar_z_order_ceiling(ceiling);
             }
         }
         pub(crate) fn cancel_active(&mut self) -> bool {

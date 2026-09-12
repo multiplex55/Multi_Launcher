@@ -45,17 +45,15 @@ mod windows_overlay {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, HTTRANSPARENT, RegisterClassW, SW_HIDE,
         SW_SHOWNOACTIVATE, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_NCHITTEST, WNDCLASSW,
-        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
         WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
     use super::premultiplied_bgra;
     use crate::screen_draw::DesktopRect;
-
-    fn passive_extended_style() -> windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE {
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE
-    }
+    use crate::screen_draw::window_layers::{
+        NativeWindowHandle, ToolbarZOrderCeiling, passive_overlay_extended_style,
+    };
 
     unsafe extern "system" fn overlay_proc(
         hwnd: HWND,
@@ -136,13 +134,17 @@ mod windows_overlay {
         bounds: DesktopRect,
         backing: LayeredDib,
         visible: bool,
+        toolbar_ceiling: ToolbarZOrderCeiling,
     }
 
     // Created, updated, and destroyed on the owning native worker thread.
     unsafe impl Send for NativeOverlaySurface {}
 
     impl NativeOverlaySurface {
-        pub(crate) fn create(bounds: DesktopRect) -> Result<Self, String> {
+        pub(crate) fn create(
+            bounds: DesktopRect,
+            toolbar_ceiling: ToolbarZOrderCeiling,
+        ) -> Result<Self, String> {
             let instance = HINSTANCE(
                 unsafe { GetModuleHandleW(None) }
                     .map_err(|error| error.to_string())?
@@ -162,7 +164,7 @@ mod windows_overlay {
             let height = i32::try_from(bounds.height).map_err(|_| "overlay height is too large")?;
             let hwnd = unsafe {
                 CreateWindowExW(
-                    passive_extended_style(),
+                    passive_overlay_extended_style(),
                     class_name,
                     PCWSTR::null(),
                     WS_POPUP,
@@ -186,12 +188,33 @@ mod windows_overlay {
                     return Err(error);
                 }
             };
-            Ok(Self {
+            let mut surface = Self {
                 hwnd,
                 bounds,
                 backing,
                 visible: false,
-            })
+                toolbar_ceiling: ToolbarZOrderCeiling::default(),
+            };
+            surface.set_toolbar_z_order_ceiling(toolbar_ceiling);
+            Ok(surface)
+        }
+
+        fn native_handle(&self) -> NativeWindowHandle {
+            NativeWindowHandle::from_raw(self.hwnd.0 as isize)
+                .expect("created passive overlay has a non-null HWND")
+        }
+
+        fn enforce_toolbar_ceiling(&mut self) {
+            let handle = self.native_handle();
+            self.toolbar_ceiling.place_passive_below(handle);
+        }
+
+        pub(crate) fn set_toolbar_z_order_ceiling(
+            &mut self,
+            toolbar_ceiling: ToolbarZOrderCeiling,
+        ) {
+            self.toolbar_ceiling = toolbar_ceiling;
+            self.enforce_toolbar_ceiling();
         }
 
         pub(crate) fn update(&mut self, image: &RgbaImage) -> Result<(), String> {
@@ -229,17 +252,19 @@ mod windows_overlay {
                     ULW_ALPHA,
                 )
             }
-            .map_err(|error| format!("UpdateLayeredWindow failed: {error}"))
+            .map_err(|error| format!("UpdateLayeredWindow failed: {error}"))?;
+            self.enforce_toolbar_ceiling();
+            Ok(())
         }
 
         pub(crate) fn show(&mut self) {
-            if self.visible {
-                return;
+            if !self.visible {
+                unsafe {
+                    let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+                }
+                self.visible = true;
             }
-            unsafe {
-                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            }
-            self.visible = true;
+            self.enforce_toolbar_ceiling();
         }
 
         pub(crate) fn hide(&mut self) {
@@ -258,25 +283,6 @@ mod windows_overlay {
             self.hide();
             unsafe {
                 let _ = DestroyWindow(self.hwnd);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn passive_style_is_layered_topmost_noactivate_and_click_through() {
-            let style = passive_extended_style();
-            for required in [
-                WS_EX_LAYERED,
-                WS_EX_TRANSPARENT,
-                WS_EX_TOOLWINDOW,
-                WS_EX_TOPMOST,
-                WS_EX_NOACTIVATE,
-            ] {
-                assert_eq!(style & required, required);
             }
         }
     }

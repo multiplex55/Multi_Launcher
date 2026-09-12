@@ -19,6 +19,7 @@ pub mod native_runtime;
 pub mod raster;
 mod recovery;
 pub mod settings;
+pub(crate) mod window_layers;
 
 pub use capture::{ScreenDrawCaptureBackend, ScreenDrawSessionSnapshot};
 pub use controller::{
