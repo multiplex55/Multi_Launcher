@@ -1878,6 +1878,70 @@ impl eframe::App for LauncherApp {
 }
 
 impl LauncherApp {
+    pub(super) fn recover_screen_draw(&mut self, request: super::ScreenDrawRecoveryRequest) {
+        use crate::screen_draw::ScreenDrawState;
+
+        let state = self.screen_draw_controller.state().clone();
+        let mut transition_error = None;
+        match state {
+            ScreenDrawState::AwaitingLauncherParking { generation }
+            | ScreenDrawState::Capturing { generation } => {
+                if let Err(error) = self
+                    .screen_draw_controller
+                    .cancel_capture_startup(generation)
+                {
+                    transition_error = Some(error.to_string());
+                }
+            }
+            ScreenDrawState::AwaitingNativeTeardown { .. } => {
+                // Dropping PendingNewCapture before discarding the worker
+                // receiver quarantines a late SessionClosed completion.
+                self.cancel_screen_draw_region_picker();
+                self.screen_draw_controller.close();
+            }
+            ScreenDrawState::Drawing { .. } => match request {
+                super::ScreenDrawRecoveryRequest::LauncherToggle => {
+                    if let Err(error) = self.screen_draw_controller.enter_ghost() {
+                        transition_error = Some(error.to_string());
+                        // A lost native channel cannot prove input was disarmed.
+                        self.screen_draw_controller.close();
+                    }
+                }
+                super::ScreenDrawRecoveryRequest::Emergency => {
+                    self.screen_draw_controller.reconcile_emergency_pause();
+                }
+            },
+            ScreenDrawState::SelectingRegion { generation } => {
+                self.cancel_screen_draw_region_picker();
+                if let Err(error) = self
+                    .screen_draw_controller
+                    .cancel_region_selection(generation, None)
+                {
+                    transition_error = Some(error.to_string());
+                }
+                if request == super::ScreenDrawRecoveryRequest::Emergency {
+                    self.screen_draw_controller.reconcile_emergency_pause();
+                }
+            }
+            ScreenDrawState::Ghost { .. }
+            | ScreenDrawState::Finish { .. }
+            | ScreenDrawState::DisplayChanged { .. } => {
+                if request == super::ScreenDrawRecoveryRequest::Emergency {
+                    self.screen_draw_controller.reconcile_emergency_pause();
+                }
+            }
+            ScreenDrawState::NoSession | ScreenDrawState::Failed { .. } => {}
+        }
+
+        if let Some(error) = transition_error {
+            self.report_error_message("screen_draw.recovery", error);
+        }
+        if let Err(error) = self.restore_screen_draw_launcher_exact() {
+            tracing::error!(error = %error, "failed to restore Screen Draw launcher during recovery");
+            self.report_error_message("screen_draw.restore", error);
+        }
+    }
+
     fn cancel_screen_draw_startup_on_escape(&mut self, ctx: &egui::Context) {
         let Some(generation) = self
             .screen_draw_controller
@@ -2194,6 +2258,236 @@ mod tests {
             command,
             egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
         )));
+    }
+
+    fn install_recovery_parking(
+        app: &mut LauncherApp,
+        generation: crate::screen_draw::ScreenDrawGeneration,
+    ) -> (
+        crate::screen_draw::launcher_parking::LauncherParkingTestObserver,
+        crate::screen_draw::launcher_parking::LauncherWindowRect,
+    ) {
+        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            left: 31,
+            top: 47,
+            right: 431,
+            bottom: 267,
+        };
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                generation,
+                original,
+                crate::mkmacro::screen::ScreenRect::new(-1920, 0, 3840, 1080),
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        (observer, original)
+    }
+
+    #[test]
+    fn screen_draw_recovery_cancels_both_capture_startup_states_and_restores_exactly() {
+        for advance_to_capturing in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            let generation = app.screen_draw_controller.request_start().unwrap();
+            if advance_to_capturing {
+                app.screen_draw_controller
+                    .launcher_parked(generation)
+                    .unwrap();
+            }
+            let (observer, original) = install_recovery_parking(&mut app, generation);
+
+            ctx.begin_frame(egui::RawInput::default());
+            app.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+            let _ = ctx.end_frame();
+
+            assert_eq!(
+                app.screen_draw_controller.state(),
+                &crate::screen_draw::ScreenDrawState::NoSession
+            );
+            assert!(!app.screen_draw_recovery_bridge.is_active());
+            assert_eq!(observer.restored_rects(), [original]);
+            assert!(app.screen_draw_launcher_parking.is_none());
+            assert!(app.visible_flag.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn screen_draw_recovery_pauses_drawing_but_preserves_safe_session_states() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let generation = app.screen_draw_controller.request_start().unwrap();
+        app.screen_draw_controller
+            .launcher_parked(generation)
+            .unwrap();
+        app.screen_draw_controller
+            .capture_succeeded(generation)
+            .unwrap();
+        let (observer, original) = install_recovery_parking(&mut app, generation);
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+        let _ = ctx.end_frame();
+
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::Ghost { generation }
+        );
+        assert!(app.screen_draw_controller.toolbar_open());
+        assert!(app.screen_draw_recovery_bridge.is_active());
+        assert_eq!(observer.restored_rects(), [original]);
+
+        for expected in [
+            crate::screen_draw::ScreenDrawState::Ghost { generation },
+            crate::screen_draw::ScreenDrawState::Finish { generation },
+            crate::screen_draw::ScreenDrawState::DisplayChanged { generation },
+        ] {
+            match expected {
+                crate::screen_draw::ScreenDrawState::Ghost { .. } => {}
+                crate::screen_draw::ScreenDrawState::Finish { .. } => {
+                    app.screen_draw_controller.finish().unwrap();
+                }
+                crate::screen_draw::ScreenDrawState::DisplayChanged { .. } => {
+                    app.screen_draw_controller
+                        .note_display_changed(generation)
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            app.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+            assert_eq!(app.screen_draw_controller.state(), &expected);
+            assert!(app.screen_draw_recovery_bridge.is_active());
+        }
+    }
+
+    #[test]
+    fn screen_draw_recovery_cancels_picker_and_quarantines_its_operation() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let fixture = crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        let generation = app.screen_draw_controller.request_start().unwrap();
+        app.screen_draw_controller
+            .launcher_parked(generation)
+            .unwrap();
+        app.screen_draw_controller
+            .capture_succeeded(generation)
+            .unwrap();
+        app.screen_draw_controller.finish().unwrap();
+        app.screen_draw_controller
+            .begin_region_selection(
+                crate::screen_draw::ExportBackground::Transparent,
+                crate::screen_draw::ExportDestination::Clipboard,
+            )
+            .unwrap();
+        app.begin_screen_draw_region_picker(crate::screen_draw::ScreenDrawRegionPickerReady {
+            generation,
+            bounds: crate::mkmacro::screen::ScreenRect::new(-50, 10, 200, 100),
+        });
+        let operation_id = app.screen_draw_region_operation.unwrap().operation_id;
+        fixture.observer.wait_for_commands(1);
+
+        app.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+
+        assert!(app.screen_draw_region_operation.is_none());
+        assert!(
+            fixture
+                .controller
+                .screen_draw_discard_pending_for_test(operation_id)
+        );
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::Finish { generation }
+        );
+        assert!(app.screen_draw_controller.toolbar_open());
+        assert!(!app.screen_draw_controller.export_in_flight());
+        fixture.observer.wait_for_commands(2);
+        fixture.observer.confirm_rectangle(
+            operation_id,
+            crate::mkmacro::variables::MkPoint { x: -20, y: 20 },
+            crate::mkmacro::variables::MkPoint { x: 20, y: 50 },
+        );
+        std::thread::yield_now();
+        assert!(fixture.controller.poll().is_empty());
+        assert!(
+            fixture
+                .controller
+                .poll_rectangle_event(operation_id)
+                .is_none()
+        );
+        app.poll_screen_draw_region_picker(&ctx);
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::Finish { generation }
+        );
+    }
+
+    #[test]
+    fn screen_draw_recovery_cancels_native_teardown_and_restores_exactly() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let first = app.screen_draw_controller.request_start().unwrap();
+        app.screen_draw_controller.launcher_parked(first).unwrap();
+        app.screen_draw_controller.capture_succeeded(first).unwrap();
+        let (commands, late_events) = app.screen_draw_controller.install_test_native_worker();
+        let replacement = app.screen_draw_controller.request_new_capture().unwrap();
+        let (observer, original) = install_recovery_parking(&mut app, replacement);
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+        let _ = ctx.end_frame();
+
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::NoSession
+        );
+        assert!(!app.screen_draw_recovery_bridge.is_active());
+        assert_eq!(observer.restored_rects(), [original]);
+        let commands = commands.try_iter().collect::<Vec<_>>();
+        assert!(!commands.is_empty());
+        assert!(
+            commands.iter().all(|command| matches!(
+                command,
+                crate::screen_draw::NativeSessionCommand::Shutdown
+            ))
+        );
+        let _ = late_events.send(crate::screen_draw::NativeSessionEvent::SessionClosed);
+        app.poll_screen_draw_capture(&ctx);
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::NoSession
+        );
+    }
+
+    #[test]
+    fn repeated_emergency_recovery_is_idempotent_and_shutdown_clears_activity() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let generation = app.screen_draw_controller.request_start().unwrap();
+        app.screen_draw_controller
+            .launcher_parked(generation)
+            .unwrap();
+        app.screen_draw_controller
+            .capture_succeeded(generation)
+            .unwrap();
+
+        app.event_tx.send(WatchEvent::ScreenDrawEmergency).unwrap();
+        app.event_tx.send(WatchEvent::ScreenDrawEmergency).unwrap();
+        app.process_watch_events();
+
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::Ghost { generation }
+        );
+        assert!(app.screen_draw_controller.toolbar_open());
+        assert!(app.screen_draw_recovery_bridge.is_active());
+        app.close_screen_draw_for_exit();
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::NoSession
+        );
+        assert!(!app.screen_draw_recovery_bridge.is_active());
     }
 
     #[test]

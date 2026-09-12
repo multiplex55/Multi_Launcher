@@ -208,6 +208,12 @@ impl LauncherApp {
                         tracing::debug!(%error, "ignored Screen Draw launch hotkey");
                     }
                 }
+                WatchEvent::ScreenDrawRecover => {
+                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+                }
+                WatchEvent::ScreenDrawEmergency => {
+                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::Emergency);
+                }
                 WatchEvent::ClipboardModify(ev) => {
                     self.handle_clipboard_modify_gui_event(ev);
                 }
@@ -559,6 +565,14 @@ mod tests {
                 crate::dashboard::DashboardEvent::Reloaded
             )),
             TestWatchEvent::Actions
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::ScreenDrawRecover),
+            TestWatchEvent::ScreenDrawRecover
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::ScreenDrawEmergency),
+            TestWatchEvent::ScreenDrawEmergency
         );
 
         let (tx, rx) = channel();

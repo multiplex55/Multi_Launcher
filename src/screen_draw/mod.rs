@@ -17,6 +17,7 @@ mod native_canvas;
 mod native_overlay;
 pub mod native_runtime;
 pub mod raster;
+mod recovery;
 pub mod settings;
 
 pub use capture::{ScreenDrawCaptureBackend, ScreenDrawSessionSnapshot};
@@ -40,8 +41,9 @@ pub use model::{
     TextAnnotation, ToolbarOrientation,
 };
 pub use native_runtime::{
-    ExportRenderRequest, NativeRuntimeState, NativeSessionCommand, NativeSessionEvent,
-    NativeSessionHandle,
+    ExportRenderRequest, NativeEmergencyHandle, NativeRuntimeState, NativeSessionCommand,
+    NativeSessionEvent, NativeSessionHandle,
 };
 pub use raster::{RasterBackground, RasterError, render_document_into, selected_background};
+pub use recovery::ScreenDrawRecoveryBridge;
 pub use settings::{HotkeyChord, PALETTE_SLOT_COUNT, ScreenDrawSettings, SettingsValidationError};

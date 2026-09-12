@@ -8,12 +8,11 @@ use std::sync::{
 use std::thread::JoinHandle;
 
 use super::{
-    CanvasBackground, ExportBackground, ExportOutcome, ExportRequest, ExportSource, HotkeyChord,
-    RgbaColor, ScreenDrawGeneration, ScreenDrawMode, ScreenDrawSessionSnapshot, ScreenDrawSettings,
+    CanvasBackground, ExportBackground, ExportOutcome, ExportRequest, ExportSource, RgbaColor,
+    ScreenDrawGeneration, ScreenDrawMode, ScreenDrawSessionSnapshot, ScreenDrawSettings,
     ScreenDrawTool,
 };
 
-const EMERGENCY_HOTKEY_ID: i32 = 0x5344;
 #[cfg(windows)]
 const WM_SCREEN_DRAW_COMMAND: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 0x34;
 
@@ -36,6 +35,7 @@ pub enum NativeSessionCommand {
     },
     EndRegionSelection,
     DisplayChanged,
+    EmergencyPause,
     RenderExport(ExportRenderRequest),
     Shutdown,
 }
@@ -113,7 +113,6 @@ impl NativeRuntimeState {
 
 pub(crate) struct NativeSessionConfig {
     pub snapshot: ScreenDrawSessionSnapshot,
-    pub emergency_hotkey: HotkeyChord,
     pub tool: ScreenDrawTool,
     pub color: RgbaColor,
     pub thickness: f32,
@@ -199,6 +198,29 @@ pub struct NativeSessionHandle {
     join: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+pub struct NativeEmergencyHandle {
+    command_tx: mpsc::Sender<NativeSessionCommand>,
+    wake: Arc<CommandWake>,
+}
+
+impl fmt::Debug for NativeEmergencyHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeEmergencyHandle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeEmergencyHandle {
+    pub fn emergency_pause(&self) -> Result<(), String> {
+        self.command_tx
+            .send(NativeSessionCommand::EmergencyPause)
+            .map_err(|_| "Screen Draw native worker is closed".to_string())?;
+        fail_closed_on_wake_error(self.wake.signal(), || self.wake.force_quit())
+    }
+}
+
 impl fmt::Debug for NativeSessionHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -230,12 +252,7 @@ impl NativeSessionHandle {
                             return;
                         }
                     };
-                    let result = run_platform_loop(
-                        &mut core,
-                        command_rx,
-                        &worker_wake,
-                        &config.emergency_hotkey,
-                    );
+                    let result = run_platform_loop(&mut core, command_rx, &worker_wake);
                     finish_worker(&mut core, Ok(result));
                 }));
                 if result.is_err() {
@@ -261,6 +278,13 @@ impl NativeSessionHandle {
             .send(command)
             .map_err(|_| "Screen Draw native worker is closed".to_string())?;
         fail_closed_on_wake_error(self.wake.signal(), || self.wake.force_quit())
+    }
+
+    pub fn emergency_handle(&self) -> NativeEmergencyHandle {
+        NativeEmergencyHandle {
+            command_tx: self.command_tx.clone(),
+            wake: Arc::clone(&self.wake),
+        }
     }
 
     pub fn try_recv(&self) -> Option<NativeSessionEvent> {
@@ -651,6 +675,7 @@ impl WorkerCore {
             } => self.prepare_region_selection(generation, background),
             NativeSessionCommand::EndRegionSelection => self.end_region_selection(),
             NativeSessionCommand::DisplayChanged => self.display_changed(),
+            NativeSessionCommand::EmergencyPause => self.safe_pause(true),
             NativeSessionCommand::RenderExport(request) => self.start_export(request),
             NativeSessionCommand::Shutdown => {
                 self.shutdown_surfaces();
@@ -861,29 +886,11 @@ fn finish_worker(core: &mut WorkerCore, result: std::thread::Result<Result<(), S
     core.events.send(NativeSessionEvent::SessionClosed);
 }
 
-fn report_hotkey_registration(
-    events: &EventSink,
-    emergency_hotkey: &HotkeyChord,
-    result: Result<(), String>,
-) -> bool {
-    match result {
-        Ok(()) => true,
-        Err(error) => {
-            events.send(NativeSessionEvent::Warning(format!(
-                "emergency hotkey '{}' is unavailable: {error}",
-                emergency_hotkey.as_str()
-            )));
-            false
-        }
-    }
-}
-
 #[cfg(not(windows))]
 fn run_platform_loop(
     core: &mut WorkerCore,
     command_rx: mpsc::Receiver<NativeSessionCommand>,
     _wake: &CommandWake,
-    _emergency_hotkey: &HotkeyChord,
 ) -> Result<(), String> {
     core.events
         .send(NativeSessionEvent::SessionStarted(core.state));
@@ -901,13 +908,11 @@ fn run_platform_loop(
     core: &mut WorkerCore,
     command_rx: mpsc::Receiver<NativeSessionCommand>,
     wake: &CommandWake,
-    emergency_hotkey: &HotkeyChord,
 ) -> Result<(), String> {
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::Foundation::LPARAM;
     use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, RegisterHotKey};
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, TranslateMessage, WM_HOTKEY,
+        DispatchMessageW, GetMessageW, MSG, PM_NOREMOVE, PeekMessageW, TranslateMessage,
     };
 
     // Creating the queue before publishing the thread id prevents the classic
@@ -916,37 +921,6 @@ fn run_platform_loop(
     let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE) };
     wake.thread_id
         .store(unsafe { GetCurrentThreadId() }, Ordering::Release);
-
-    struct RegisteredEmergencyHotkey(bool);
-    impl Drop for RegisteredEmergencyHotkey {
-        fn drop(&mut self) {
-            if self.0 {
-                let _ = unsafe {
-                    windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(
-                        windows::Win32::Foundation::HWND::default(),
-                        EMERGENCY_HOTKEY_ID,
-                    )
-                };
-            }
-        }
-    }
-
-    let mut registration = RegisteredEmergencyHotkey(false);
-    match super::hotkeys::to_native_hotkey(emergency_hotkey) {
-        Ok(hotkey) => {
-            let result = unsafe {
-                RegisterHotKey(
-                    HWND::default(),
-                    EMERGENCY_HOTKEY_ID,
-                    HOT_KEY_MODIFIERS(hotkey.modifiers),
-                    hotkey.virtual_key,
-                )
-            }
-            .map_err(|error| error.to_string());
-            registration.0 = report_hotkey_registration(&core.events, emergency_hotkey, result);
-        }
-        Err(error) => core.events.send(NativeSessionEvent::Warning(error)),
-    }
 
     core.events
         .send(NativeSessionEvent::SessionStarted(core.state));
@@ -969,10 +943,6 @@ fn run_platform_loop(
         } else if message.message == super::native_canvas::WM_CANVAS_CLOSED {
             core.shutdown_surfaces();
             core.running = false;
-        } else if message.message == WM_HOTKEY
-            && message.wParam == WPARAM(EMERGENCY_HOTKEY_ID as usize)
-        {
-            core.safe_pause(true);
         } else {
             let _ = unsafe { TranslateMessage(&message) };
             unsafe { DispatchMessageW(&message) };
@@ -980,7 +950,6 @@ fn run_platform_loop(
     }
 
     core.shutdown_surfaces();
-    drop(registration);
     wake.thread_id.store(0, Ordering::Release);
     Ok(())
 }
@@ -1146,13 +1115,14 @@ mod tests {
     #[test]
     fn central_disarm_is_idempotent_and_resume_reacquires_suppression() {
         let (mut core, _, surface, releases) = test_core();
-        core.safe_pause(true);
+        core.handle(NativeSessionCommand::EmergencyPause);
         core.pause_to_passive();
         assert_eq!(releases.load(Ordering::SeqCst), 1);
         let counts = surface.lock().unwrap();
         assert_eq!(counts.cancel, 2);
         assert_eq!((counts.release, counts.hide, counts.passive), (2, 2, 2));
         assert_eq!(counts.last_passive_visible, Some(true));
+        assert_eq!(counts.retained_document_objects, 2);
         drop(counts);
 
         core.handle(NativeSessionCommand::Resume);
@@ -1160,6 +1130,19 @@ mod tests {
         assert_eq!(surface.lock().unwrap().resume, 1);
         core.handle(NativeSessionCommand::Finish);
         assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ghost_command_cancels_transient_input_and_preserves_document() {
+        let (mut core, _, surface, releases) = test_core();
+        core.handle(NativeSessionCommand::Ghost);
+
+        assert_eq!(core.state.mode, ScreenDrawMode::Ghost);
+        assert!(core.suppression.is_none());
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        let counts = surface.lock().unwrap();
+        assert_eq!((counts.cancel, counts.release), (1, 1));
+        assert_eq!(counts.retained_document_objects, 2);
     }
 
     #[test]
@@ -1391,22 +1374,6 @@ mod tests {
             .is_ok()
         );
         assert!(!forced.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn emergency_hotkey_conflict_is_a_warning_and_does_not_stop_worker() {
-        let (core, events, _, _) = test_core();
-        let registered = report_hotkey_registration(
-            &core.events,
-            &HotkeyChord::from_unchecked("Ctrl+Shift+F12"),
-            Err("already registered".into()),
-        );
-        assert!(!registered);
-        assert!(core.running);
-        assert!(matches!(
-            events.recv().unwrap(),
-            NativeSessionEvent::Warning(message) if message.contains("already registered")
-        ));
     }
 
     #[test]

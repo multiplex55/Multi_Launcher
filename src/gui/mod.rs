@@ -109,6 +109,12 @@ struct ScreenDrawRegionOperation {
     operation_id: mkmacro_dialog::visual_overlay::OperationId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenDrawRecoveryRequest {
+    LauncherToggle,
+    Emergency,
+}
+
 use crate::actions::folders;
 use crate::actions::{Action, load_actions_typed};
 use crate::actions_editor::ActionsEditor;
@@ -460,6 +466,7 @@ pub struct LauncherApp {
     /// Main-thread orchestration for Screen Draw. Native session resources are
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
+    screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
     screen_draw_launcher_parking:
         Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
@@ -1565,6 +1572,8 @@ impl LauncherApp {
         );
         install_visual_capture(&mut mkmacro_dialog, visual_capture_dependencies);
         mkmacro_timer.finish("startup.mkmacro");
+        let screen_draw_recovery_bridge =
+            Arc::new(crate::screen_draw::ScreenDrawRecoveryBridge::default());
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
@@ -1585,8 +1594,10 @@ impl LauncherApp {
                     .unwrap_or_default();
                 screen_draw_settings.normalize();
                 controller.update_settings(screen_draw_settings);
+                controller.set_recovery_bridge(Arc::clone(&screen_draw_recovery_bridge));
                 controller
             },
+            screen_draw_recovery_bridge,
             screen_draw_launcher_parking: None,
             screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi::default(),
             selected: None,
@@ -2958,6 +2969,15 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
+    pub fn install_screen_draw_recovery_bridge(
+        &mut self,
+        bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
+    ) {
+        self.screen_draw_controller
+            .set_recovery_bridge(Arc::clone(&bridge));
+        self.screen_draw_recovery_bridge = bridge;
+    }
+
     pub fn watch_receiver(&self) -> &Receiver<WatchEvent> {
         &self.rx
     }
@@ -3281,6 +3301,9 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::ScreenDrawStart => {
                 continue;
             }
+            WatchEvent::ScreenDrawRecover | WatchEvent::ScreenDrawEmergency => {
+                return Some(ev.into());
+            }
             WatchEvent::ClipboardModify(_) => return Some(ev.into()),
             WatchEvent::Recycle(_) => return Some(ev.into()),
             WatchEvent::VirtualDesktop(_) => return Some(ev.into()),
@@ -3298,7 +3321,11 @@ pub fn recv_test_event_timeout(
         let remaining = deadline.saturating_duration_since(Instant::now());
         let event = rx.recv_timeout(remaining).ok()?;
         match event {
-            WatchEvent::Actions | WatchEvent::Folders | WatchEvent::Bookmarks => {
+            WatchEvent::Actions
+            | WatchEvent::Folders
+            | WatchEvent::Bookmarks
+            | WatchEvent::ScreenDrawRecover
+            | WatchEvent::ScreenDrawEmergency => {
                 return Some(event.into());
             }
             _ if Instant::now() < deadline => {}

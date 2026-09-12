@@ -7,6 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use super::ScreenDrawRecoveryBridge;
 use super::capture::{
     DesktopCaptureBackend, LauncherVisibilityProbe, ScreenDrawCaptureBackend,
     ScreenDrawSessionSnapshot, SystemLauncherVisibilityProbe,
@@ -138,6 +139,7 @@ pub struct ScreenDrawController {
     pending_new_capture: Option<PendingNewCapture>,
     settings: ScreenDrawSettings,
     clock: Arc<dyn MonotonicClock>,
+    recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,7 +321,32 @@ impl ScreenDrawController {
             pending_new_capture: None,
             settings: ScreenDrawSettings::default(),
             clock,
+            recovery_bridge: Arc::new(ScreenDrawRecoveryBridge::default()),
         }
+    }
+
+    pub(crate) fn set_recovery_bridge(&mut self, bridge: Arc<ScreenDrawRecoveryBridge>) {
+        self.recovery_bridge.set_active(false);
+        self.recovery_bridge = bridge;
+        self.recovery_bridge
+            .set_active(Self::state_is_active(&self.state));
+        if let Some(worker) = self.native_worker.as_ref() {
+            self.recovery_bridge
+                .install_emergency_handle(worker.emergency_handle());
+        }
+    }
+
+    fn state_is_active(state: &ScreenDrawState) -> bool {
+        !matches!(
+            state,
+            ScreenDrawState::NoSession | ScreenDrawState::Failed { .. }
+        )
+    }
+
+    fn set_state(&mut self, state: ScreenDrawState) {
+        self.recovery_bridge
+            .set_active(Self::state_is_active(&state));
+        self.state = state;
     }
     pub fn state(&self) -> &ScreenDrawState {
         &self.state
@@ -366,6 +393,20 @@ impl ScreenDrawController {
         self.settings = settings;
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_test_native_worker(
+        &mut self,
+    ) -> (
+        mpsc::Receiver<NativeSessionCommand>,
+        mpsc::Sender<NativeSessionEvent>,
+    ) {
+        let (worker, commands, events) = NativeSessionHandle::test_stub_with_events();
+        self.recovery_bridge
+            .install_emergency_handle(worker.emergency_handle());
+        self.native_worker = Some(worker);
+        (commands, events)
+    }
+
     pub fn request_start(&mut self) -> Result<ScreenDrawGeneration, ScreenDrawTransitionError> {
         if !matches!(
             self.state,
@@ -394,7 +435,7 @@ impl ScreenDrawController {
             deadline: self.clock.now() + NATIVE_TEARDOWN_TIMEOUT,
             timed_out: false,
         });
-        self.state = ScreenDrawState::AwaitingNativeTeardown { generation };
+        self.set_state(ScreenDrawState::AwaitingNativeTeardown { generation });
         if let Err(error) = self.send_native(NativeSessionCommand::Shutdown) {
             // A closed command channel is not proof that native cleanup has
             // completed. Keep waiting for SessionClosed (or the deadline)
@@ -578,8 +619,37 @@ impl ScreenDrawController {
             matches!(state, ScreenDrawState::Drawing { .. })
         })?;
         self.send_native(NativeSessionCommand::Ghost)?;
-        self.state = ScreenDrawState::Ghost { generation };
+        self.set_state(ScreenDrawState::Ghost { generation });
         Ok(())
+    }
+
+    /// Reconciles the GUI model after the process-wide emergency bridge has
+    /// already delivered a native pause. Repeated native/UI notifications are
+    /// intentionally harmless.
+    pub(crate) fn reconcile_emergency_pause(&mut self) {
+        let Some(generation) = self.state.generation() else {
+            return;
+        };
+        match self.state {
+            ScreenDrawState::Drawing { .. }
+            | ScreenDrawState::Ghost { .. }
+            | ScreenDrawState::Finish { .. }
+            | ScreenDrawState::SelectingRegion { .. } => {
+                self.pending_region = None;
+                self.region_suppression = None;
+                self.export_in_flight = false;
+                self.toolbar_open = true;
+                self.set_state(ScreenDrawState::Ghost { generation });
+            }
+            // Native safe-pause deliberately preserves DisplayChanged so a
+            // stale desktop can never be resumed.
+            ScreenDrawState::DisplayChanged { .. }
+            | ScreenDrawState::AwaitingLauncherParking { .. }
+            | ScreenDrawState::Capturing { .. }
+            | ScreenDrawState::AwaitingNativeTeardown { .. }
+            | ScreenDrawState::Failed { .. }
+            | ScreenDrawState::NoSession => {}
+        }
     }
 
     pub fn resume_drawing(&mut self) -> Result<(), ScreenDrawTransitionError> {
@@ -590,7 +660,7 @@ impl ScreenDrawController {
             )
         })?;
         self.send_native(NativeSessionCommand::Resume)?;
-        self.state = ScreenDrawState::Drawing { generation };
+        self.set_state(ScreenDrawState::Drawing { generation });
         Ok(())
     }
 
@@ -602,7 +672,7 @@ impl ScreenDrawController {
             )
         })?;
         self.send_native(NativeSessionCommand::Finish)?;
-        self.state = ScreenDrawState::Finish { generation };
+        self.set_state(ScreenDrawState::Finish { generation });
         Ok(())
     }
 
@@ -650,7 +720,7 @@ impl ScreenDrawController {
         self.latest_runtime_error = None;
         self.export_in_flight = true;
         self.toolbar_open = false;
-        self.state = ScreenDrawState::SelectingRegion { generation };
+        self.set_state(ScreenDrawState::SelectingRegion { generation });
         Ok(())
     }
 
@@ -689,7 +759,7 @@ impl ScreenDrawController {
         self.region_suppression = None;
         self.pending_editor_handoff = None;
         self.toolbar_open = true;
-        self.state = ScreenDrawState::Finish { generation };
+        self.set_state(ScreenDrawState::Finish { generation });
         Ok(())
     }
 
@@ -730,7 +800,7 @@ impl ScreenDrawController {
         self.pending_new_capture = None;
         self.export_in_flight = false;
         self.toolbar_open = true;
-        self.state = ScreenDrawState::DisplayChanged { generation };
+        self.set_state(ScreenDrawState::DisplayChanged { generation });
         Ok(())
     }
 
@@ -793,7 +863,7 @@ impl ScreenDrawController {
         self.cancel_pending_capture();
         self.teardown_native_worker();
         self.session_snapshot = None;
-        self.state = ScreenDrawState::NoSession;
+        self.set_state(ScreenDrawState::NoSession);
         self.toolbar_open = false;
         self.runtime_state = None;
         self.export_in_flight = false;
@@ -815,7 +885,7 @@ impl ScreenDrawController {
         {
             return Err(self.invalid("complete session"));
         }
-        self.state = ScreenDrawState::NoSession;
+        self.set_state(ScreenDrawState::NoSession);
         self.teardown_native_worker();
         self.session_snapshot = None;
         self.runtime_state = None;
@@ -861,7 +931,7 @@ impl ScreenDrawController {
             parking_deadline: None,
             capture_deadline: None,
         });
-        self.state = ScreenDrawState::AwaitingLauncherParking { generation };
+        self.set_state(ScreenDrawState::AwaitingLauncherParking { generation });
     }
 
     fn start_capture_worker(
@@ -877,7 +947,7 @@ impl ScreenDrawController {
         let cancellation = Arc::clone(&pending.cancellation);
         let capture_backend = Arc::clone(&self.capture_backend);
         let capture_tx = self.capture_tx.clone();
-        self.state = ScreenDrawState::Capturing { generation };
+        self.set_state(ScreenDrawState::Capturing { generation });
         let spawn = std::thread::Builder::new()
             .name(format!("screen-draw-capture-{}", generation.get()))
             .spawn(move || {
@@ -978,15 +1048,15 @@ impl ScreenDrawController {
         self.pending_new_capture = None;
         let diagnostic = match exit {
             CaptureStartupExit::Cancelled => {
-                self.state = ScreenDrawState::NoSession;
+                self.set_state(ScreenDrawState::NoSession);
                 None
             }
             CaptureStartupExit::Failed(message) => {
                 self.latest_runtime_error = Some(message.clone());
-                self.state = ScreenDrawState::Failed {
+                self.set_state(ScreenDrawState::Failed {
                     generation,
                     message: message.clone(),
-                };
+                });
                 Some(message)
             }
         };
@@ -1019,13 +1089,14 @@ impl ScreenDrawController {
         let settings = self.settings.clone();
         let worker = self.native_factory.spawn(NativeSessionConfig {
             snapshot,
-            emergency_hotkey: settings.emergency_hotkey.clone(),
             tool: settings.default_tool,
             color: settings.default_color,
             thickness: settings.default_thickness,
             settings: settings.clone(),
             request_repaint,
         })?;
+        self.recovery_bridge
+            .install_emergency_handle(worker.emergency_handle());
         self.native_worker = Some(worker);
         Ok(())
     }
@@ -1041,6 +1112,7 @@ impl ScreenDrawController {
         let mut region_failure = None;
         let mut editor_teardown_complete = false;
         let mut new_capture_teardown_complete = false;
+        let mut emergency_paused = false;
         if let Some(worker) = self.native_worker.as_mut() {
             while let Some(event) = worker.try_recv() {
                 match event {
@@ -1050,7 +1122,7 @@ impl ScreenDrawController {
                             state.mode = mode;
                         }
                         if let Some(generation) = self.state.generation() {
-                            self.state = match mode {
+                            let next = match mode {
                                 super::ScreenDrawMode::Drawing => {
                                     ScreenDrawState::Drawing { generation }
                                 }
@@ -1062,6 +1134,8 @@ impl ScreenDrawController {
                                 }
                                 _ => self.state.clone(),
                             };
+                            // Every native mode remains an active bridge state.
+                            self.state = next;
                         }
                     }
                     NativeSessionEvent::ToolChanged(tool) => {
@@ -1094,23 +1168,14 @@ impl ScreenDrawController {
                         self.latest_runtime_warning = Some(message)
                     }
                     NativeSessionEvent::Error(message) => terminal_error = Some(message),
-                    NativeSessionEvent::EmergencyPaused => {
-                        if let Some(generation) = self.state.generation() {
-                            if matches!(self.state, ScreenDrawState::SelectingRegion { .. }) {
-                                self.pending_region = None;
-                                self.region_suppression = None;
-                                self.export_in_flight = false;
-                                self.toolbar_open = true;
-                            }
-                            self.state = ScreenDrawState::Ghost { generation };
-                        }
-                    }
+                    NativeSessionEvent::EmergencyPaused => emergency_paused = true,
                     NativeSessionEvent::DisplayChanged => {
                         self.pending_region = None;
                         self.region_suppression = None;
                         self.export_in_flight = false;
                         self.toolbar_open = true;
                         if let Some(generation) = self.state.generation() {
+                            // Display recovery remains inside the active session.
                             self.state = ScreenDrawState::DisplayChanged { generation };
                         }
                         if let Some(state) = self.runtime_state.as_mut() {
@@ -1196,21 +1261,25 @@ impl ScreenDrawController {
             }
             let _ = worker.poll_finished();
         }
+        if emergency_paused {
+            self.reconcile_emergency_pause();
+        }
         if new_capture_teardown_complete && terminal_error.is_none() {
             let pending = self
                 .pending_new_capture
                 .take()
                 .expect("teardown completion requires a pending new capture");
             self.native_worker.take();
+            self.recovery_bridge.clear_emergency_handle();
             self.session_snapshot = None;
             self.runtime_state = None;
             if pending.timed_out {
                 self.toolbar_open = true;
-                self.state = ScreenDrawState::Failed {
+                self.set_state(ScreenDrawState::Failed {
                     generation: pending.generation,
                     message: "Screen Draw native session closed after the new capture timeout"
                         .to_string(),
-                };
+                });
             } else {
                 self.activate_capture(pending.generation);
             }
@@ -1297,10 +1366,10 @@ impl ScreenDrawController {
             self.pending_editor_handoff = None;
             self.pending_new_capture = None;
             self.toolbar_open = false;
-            self.state = ScreenDrawState::Failed {
+            self.set_state(ScreenDrawState::Failed {
                 generation,
                 message: message.clone(),
-            };
+            });
             ScreenDrawCapturePoll {
                 restore_launcher: true,
                 diagnostic: Some(message),
@@ -1336,6 +1405,7 @@ impl ScreenDrawController {
 
     fn teardown_native_worker(&mut self) {
         if let Some(worker) = self.native_worker.take() {
+            self.recovery_bridge.clear_emergency_handle();
             worker.request_shutdown();
         }
     }
@@ -1353,13 +1423,14 @@ impl ScreenDrawController {
             self.latest_runtime_error = Some(message);
         }
         if self.state.generation() == Some(generation) {
-            self.state = ScreenDrawState::Finish { generation };
+            self.set_state(ScreenDrawState::Finish { generation });
         }
     }
 
     fn finalize_editor_handoff(&mut self) {
         self.cancel_pending_capture();
         self.native_worker.take();
+        self.recovery_bridge.clear_emergency_handle();
         self.session_snapshot = None;
         self.runtime_state = None;
         self.pending_region = None;
@@ -1368,7 +1439,7 @@ impl ScreenDrawController {
         self.pending_new_capture = None;
         self.export_in_flight = false;
         self.toolbar_open = false;
-        self.state = ScreenDrawState::NoSession;
+        self.set_state(ScreenDrawState::NoSession);
     }
 
     fn send_native(&self, command: NativeSessionCommand) -> Result<(), ScreenDrawTransitionError> {
@@ -1404,7 +1475,7 @@ impl ScreenDrawController {
         if self.state.generation() != Some(generation) || !valid_state(&self.state) {
             return Err(self.invalid(operation));
         }
-        self.state = next;
+        self.set_state(next);
         Ok(())
     }
 
@@ -1484,17 +1555,12 @@ mod tests {
         spawns: AtomicUsize,
         commands: Mutex<Vec<mpsc::Receiver<NativeSessionCommand>>>,
         events: Mutex<Vec<mpsc::Sender<NativeSessionEvent>>>,
-        emergency_hotkeys: Mutex<Vec<String>>,
     }
 
     impl NativeSessionFactory for CountingNativeFactory {
         fn spawn(&self, config: NativeSessionConfig) -> Result<NativeSessionHandle, String> {
             assert_eq!(config.snapshot.capture().origin, (-2, -1));
             self.spawns.fetch_add(1, Ordering::SeqCst);
-            self.emergency_hotkeys
-                .lock()
-                .unwrap()
-                .push(config.emergency_hotkey.as_str().to_string());
             let (handle, commands, events) = NativeSessionHandle::test_stub_with_events();
             self.commands.lock().unwrap().push(commands);
             self.events.lock().unwrap().push(events);
@@ -1791,11 +1857,12 @@ mod tests {
         let native = Arc::new(CountingNativeFactory::default());
         let native_dependency: Arc<dyn NativeSessionFactory> = native.clone();
         let mut controller = capture_controller_with_native(backend, [Ok(true)], native_dependency);
-        let mut settings = controller.settings().clone();
-        settings.emergency_hotkey = super::super::HotkeyChord::from_unchecked("Ctrl+Shift+F11");
-        controller.update_settings(settings);
+        let recovery = Arc::new(ScreenDrawRecoveryBridge::default());
+        controller.set_recovery_bridge(Arc::clone(&recovery));
         let (_, repaint) = repaint_counter();
         controller.request_start().unwrap();
+        assert!(recovery.is_active());
+        assert!(!recovery.has_emergency_handle());
         assert_eq!(native.spawns.load(Ordering::SeqCst), 0);
         let parking = controller.poll_capture(Some(1), Arc::clone(&repaint));
         assert!(parking.park_launcher.is_some());
@@ -1808,12 +1875,11 @@ mod tests {
         let completed = poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
         assert!(completed.capture_completed);
         assert_eq!(native.spawns.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            native.emergency_hotkeys.lock().unwrap().as_slice(),
-            ["Ctrl+Shift+F11"]
-        );
+        assert!(recovery.has_emergency_handle());
 
         controller.close();
+        assert!(!recovery.is_active());
+        assert!(!recovery.has_emergency_handle());
         let commands = native.commands.lock().unwrap();
         assert!(matches!(
             commands[0].try_recv(),
@@ -2230,6 +2296,38 @@ mod tests {
     }
 
     #[test]
+    fn recovery_during_native_teardown_quarantines_late_session_closed() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let observed_backend = Arc::clone(&backend);
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let recovery = Arc::new(ScreenDrawRecoveryBridge::default());
+        controller.set_recovery_bridge(Arc::clone(&recovery));
+        let (_, repaint) = repaint_counter();
+        controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        let late_events = native.events.lock().unwrap()[0].clone();
+
+        let replacement = controller.request_new_capture().unwrap();
+        assert_eq!(
+            controller.state(),
+            &ScreenDrawState::AwaitingNativeTeardown {
+                generation: replacement
+            }
+        );
+        controller.close();
+        assert!(!recovery.is_active());
+        assert!(!recovery.has_emergency_handle());
+
+        let _ = late_events.send(NativeSessionEvent::SessionClosed);
+        controller.poll_capture(Some(1), repaint);
+        assert_eq!(controller.state(), &ScreenDrawState::NoSession);
+        assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn emergency_during_region_selection_aborts_to_ghost_and_quarantines_picker_cancel() {
         use crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController;
         use crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose;
@@ -2254,6 +2352,9 @@ mod tests {
             ScreenRect::new(-2, -1, 4, 3),
         );
         fixture.observer.wait_for_commands(1);
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::EmergencyPaused)
+            .unwrap();
         native.events.lock().unwrap()[0]
             .send(NativeSessionEvent::EmergencyPaused)
             .unwrap();
@@ -2516,8 +2617,11 @@ mod tests {
             [Ok(true), Ok(true)],
             Arc::new(FailingNativeFactory),
         );
+        let recovery = Arc::new(ScreenDrawRecoveryBridge::default());
+        controller.set_recovery_bridge(Arc::clone(&recovery));
         let (_, repaint) = repaint_counter();
         let first = controller.request_start().unwrap();
+        assert!(recovery.is_active());
         controller.poll_capture(Some(1), Arc::clone(&repaint));
         controller.poll_capture(Some(1), Arc::clone(&repaint));
         let failure = poll_until(&mut controller, &repaint, |poll| poll.restore_launcher);
@@ -2527,8 +2631,11 @@ mod tests {
         );
         assert!(controller.session_snapshot().is_none());
         assert!(controller.native_worker.is_none());
+        assert!(!recovery.is_active());
+        assert!(!recovery.has_emergency_handle());
 
         let second = controller.request_start().unwrap();
+        assert!(recovery.is_active());
         assert_ne!(first, second);
         assert!(
             controller
