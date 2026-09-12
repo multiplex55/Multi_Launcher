@@ -358,6 +358,13 @@ impl ScreenDrawController {
             .set_active(Self::state_is_active(&state));
         self.state = state;
     }
+
+    /// Re-publishes controller-owned lifecycle state after an external trigger
+    /// has staged recovery optimistically before its GUI event is reduced.
+    pub(crate) fn reconcile_recovery_publication(&self) {
+        self.recovery_bridge
+            .set_active(Self::state_is_active(&self.state));
+    }
     pub fn state(&self) -> &ScreenDrawState {
         &self.state
     }

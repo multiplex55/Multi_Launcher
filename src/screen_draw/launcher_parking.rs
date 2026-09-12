@@ -261,6 +261,24 @@ impl LauncherParkingTestObserver {
         self.fail_next_park
             .store(true, std::sync::atomic::Ordering::Release);
     }
+
+    pub(crate) fn begin_transaction(
+        &self,
+        generation: ScreenDrawGeneration,
+        virtual_desktop: ScreenRect,
+    ) -> LauncherParkingTransaction {
+        LauncherParkingTransaction::begin_with_api(
+            generation,
+            42,
+            virtual_desktop,
+            Arc::new(GuiTestLauncherWindowApi {
+                current: Arc::clone(&self.current),
+                restores: Arc::clone(&self.restores),
+                fail_next_park: Arc::clone(&self.fail_next_park),
+            }),
+        )
+        .expect("GUI parking fixture has valid geometry")
+    }
 }
 
 #[cfg(test)]

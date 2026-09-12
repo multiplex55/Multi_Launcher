@@ -1383,6 +1383,17 @@ pub fn set_shared_store_with_reserved(store: Arc<MkMacroStore>, reserved: &[(&st
         reserved,
     )
 }
+
+/// Replaces only launcher-owned hotkey reservations without rebuilding the
+/// macro runtime, recorder, or store during a settings reload.
+pub fn refresh_shared_hotkey_reservations(reserved: &[(&str, &str)]) -> Result<(), String> {
+    let service = HOTKEYS
+        .read()
+        .map_err(|_| "shared macro hotkey service lock is poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| "shared macro hotkey service is not initialized".to_string())?;
+    service.replace_reserved(reserved)
+}
 /// Installs a shared runtime with injected effects (intended for tests).
 pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {
     set_shared_store_with_backends_and_reserved(store, backends, &[])

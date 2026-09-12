@@ -881,7 +881,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.screen_draw_controller.state().generation(), generation);
-        assert!(app.screen_draw_controller.toolbar_open());
+        assert!(!app.screen_draw_controller.toolbar_open());
 
         ScreenDrawCommandHost::execute_screen_draw_command(
             &mut app,

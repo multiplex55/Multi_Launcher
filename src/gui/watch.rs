@@ -205,6 +205,7 @@ impl LauncherApp {
                     if let Err(error) = self.start_or_focus_screen_draw() {
                         self.report_error_message("screen_draw.start", error);
                     }
+                    self.screen_draw_controller.reconcile_recovery_publication();
                 }
                 WatchEvent::ScreenDrawRecover => {
                     self.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
@@ -299,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_screen_draw_launch_event_focuses_one_toolbar_without_restarting() {
+    fn repeated_pre_capture_screen_draw_launch_event_is_idempotent_without_toolbar() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
@@ -319,14 +320,14 @@ mod tests {
             app.screen_draw_controller.state().generation(),
             Some(generation)
         );
-        assert!(app.screen_draw_controller.toolbar_open());
+        assert!(!app.screen_draw_controller.toolbar_open());
 
         ctx.begin_frame(egui::RawInput::default());
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
         app.process_watch_events();
         let _ = ctx.end_frame();
-        assert!(app.screen_draw_toolbar.was_open);
-        assert_eq!(app.screen_draw_toolbar.focus_request_count, 2);
+        assert!(!app.screen_draw_toolbar.was_open);
+        assert_eq!(app.screen_draw_toolbar.focus_request_count, 0);
     }
 
     #[test]

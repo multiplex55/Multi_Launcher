@@ -151,19 +151,26 @@ impl ScreenDrawToolbarUi {
 
 impl super::LauncherApp {
     pub(super) fn start_or_focus_screen_draw(&mut self) -> Result<bool, String> {
-        if matches!(
-            self.screen_draw_controller.state(),
-            ScreenDrawState::NoSession | ScreenDrawState::Failed { .. }
-        ) {
-            self.screen_draw_controller
-                .request_start()
-                .map_err(|error| error.to_string())?;
-            self.egui_ctx.request_repaint();
-            return Ok(true);
+        match self.screen_draw_controller.state() {
+            ScreenDrawState::NoSession | ScreenDrawState::Failed { .. } => {
+                self.screen_draw_controller
+                    .request_start()
+                    .map_err(|error| error.to_string())?;
+                self.egui_ctx.request_repaint();
+                Ok(true)
+            }
+            ScreenDrawState::Drawing { .. }
+            | ScreenDrawState::Ghost { .. }
+            | ScreenDrawState::Finish { .. }
+            | ScreenDrawState::DisplayChanged { .. } => {
+                self.focus_screen_draw_toolbar();
+                Ok(false)
+            }
+            ScreenDrawState::AwaitingLauncherParking { .. }
+            | ScreenDrawState::Capturing { .. }
+            | ScreenDrawState::SelectingRegion { .. }
+            | ScreenDrawState::AwaitingNativeTeardown { .. } => Ok(false),
         }
-
-        self.focus_screen_draw_toolbar();
-        Ok(false)
     }
 
     pub(super) fn focus_screen_draw_toolbar(&mut self) {

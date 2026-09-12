@@ -21,6 +21,12 @@ impl ScreenDrawRecoveryBridge {
         self.active.load(Ordering::Acquire)
     }
 
+    /// Optimistically publishes a process trigger before its GUI start event
+    /// is reduced. The controller subsequently reconciles authoritative state.
+    pub fn stage_start(&self) {
+        self.active.store(true, Ordering::Release);
+    }
+
     pub(crate) fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Release);
         if !active {
