@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use image::RgbaImage;
 
+use super::geometry::{DesktopPointF64, VisibleSegment, visible_segment_fragments};
+
 use super::{
     AnnotationDocument, AnnotationKind, ArrowAnnotation, CanvasBackground, DesktopPoint,
     DesktopRect, EraserDrag, LineAnnotation, RgbaColor, ScreenDrawSessionSnapshot, ScreenDrawTool,
@@ -31,11 +33,19 @@ fn passive_fade_refresh_region(
 pub(crate) struct CanvasDocument {
     bounds: DesktopRect,
     document: AnnotationDocument,
-    active_stroke: Option<(ScreenDrawTool, Stroke)>,
+    active_stroke: Option<ActiveStroke>,
     active_shape: Option<(ScreenDrawTool, DesktopPoint, DesktopPoint, ShapeStyle)>,
     pending_text: Option<PendingText>,
     eraser_drag: Option<EraserDrag>,
     transient: TransientInk,
+}
+
+#[derive(Debug)]
+struct ActiveStroke {
+    tool: ScreenDrawTool,
+    stroke: Stroke,
+    /// Last raw desktop sample, even when that sample was hidden by the input island.
+    raw_point: DesktopPoint,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,12 +79,26 @@ impl CanvasDocument {
 
     pub(crate) fn begin_pen(
         &mut self,
-        _button: PointerButton,
+        button: PointerButton,
         point: DesktopPoint,
         color: RgbaColor,
         thickness: f32,
     ) -> Option<DesktopRect> {
-        if !self.bounds.contains_point(point) || self.has_active_operation() {
+        self.begin_pen_excluding(button, point, color, thickness, None)
+    }
+
+    fn begin_pen_excluding(
+        &mut self,
+        _button: PointerButton,
+        point: DesktopPoint,
+        color: RgbaColor,
+        thickness: f32,
+        input_exclusion: Option<DesktopRect>,
+    ) -> Option<DesktopRect> {
+        if !self.bounds.contains_point(point)
+            || point_is_excluded(point, input_exclusion)
+            || self.has_active_operation()
+        {
             return None;
         }
         self.document.begin_drawing();
@@ -83,25 +107,25 @@ impl CanvasDocument {
         // ink starts on button-down and survives a later backing-store rebuild.
         stroke.push_mouse_point(point);
         stroke.push_mouse_point(point);
-        self.active_stroke = Some((ScreenDrawTool::Pen, stroke));
+        self.active_stroke = Some(ActiveStroke {
+            tool: ScreenDrawTool::Pen,
+            stroke,
+            raw_point: point,
+        });
         dirty_segment(self.bounds, point, point, thickness)
     }
 
     pub(crate) fn extend_pen(&mut self, point: DesktopPoint) -> Option<PenSegment> {
-        let (_, stroke) = self.active_stroke.as_mut()?;
-        let from = stroke.points.last()?.position;
-        stroke.push_mouse_point(point);
-        Some(PenSegment {
-            from,
-            to: point,
-            color: stroke.color,
-            thickness: stroke.thickness,
-            dirty: dirty_segment(self.bounds, from, point, stroke.thickness)?,
-        })
+        self.extend_active_stroke(point, None)?.first()
     }
 
     pub(crate) fn finish_pen(&mut self) -> bool {
-        let Some((ScreenDrawTool::Pen, stroke)) = self.active_stroke.take() else {
+        let Some(ActiveStroke {
+            tool: ScreenDrawTool::Pen,
+            stroke,
+            ..
+        }) = self.active_stroke.take()
+        else {
             return false;
         };
         self.document.commit(AnnotationKind::Pen(stroke)).is_ok()
@@ -125,11 +149,26 @@ impl CanvasDocument {
         text_size: f32,
         now: Duration,
     ) -> Option<DesktopRect> {
+        self.begin_tool_excluding(tool, button, point, color, thickness, text_size, now, None)
+    }
+
+    fn begin_tool_excluding(
+        &mut self,
+        tool: ScreenDrawTool,
+        button: PointerButton,
+        point: DesktopPoint,
+        color: RgbaColor,
+        thickness: f32,
+        text_size: f32,
+        now: Duration,
+        input_exclusion: Option<DesktopRect>,
+    ) -> Option<DesktopRect> {
         if tool == ScreenDrawTool::Pen {
-            return self.begin_pen(button, point, color, thickness);
+            return self.begin_pen_excluding(button, point, color, thickness, input_exclusion);
         }
         if button != PointerButton::Left
             || !self.bounds.contains_point(point)
+            || point_is_excluded(point, input_exclusion)
             || self.has_active_operation()
         {
             return None;
@@ -140,7 +179,11 @@ impl CanvasDocument {
                 let mut stroke = Stroke::new(color, thickness);
                 stroke.push_mouse_point(point);
                 stroke.push_mouse_point(point);
-                self.active_stroke = Some((tool, stroke));
+                self.active_stroke = Some(ActiveStroke {
+                    tool,
+                    stroke,
+                    raw_point: point,
+                });
                 dirty_segment(self.bounds, point, point, thickness)
             }
             ScreenDrawTool::StraightLine
@@ -174,16 +217,21 @@ impl CanvasDocument {
         eraser_tolerance: f32,
         now: Duration,
     ) -> Option<CanvasUpdate> {
-        if let Some((_, stroke)) = self.active_stroke.as_mut() {
-            let from = stroke.points.last()?.position;
-            stroke.push_mouse_point(point);
-            return Some(CanvasUpdate::Segment(PenSegment {
-                from,
-                to: point,
-                color: stroke.color,
-                thickness: stroke.thickness,
-                dirty: dirty_segment(self.bounds, from, point, stroke.thickness)?,
-            }));
+        self.extend_tool_excluding(point, eraser_tolerance, now, None)
+    }
+
+    fn extend_tool_excluding(
+        &mut self,
+        point: DesktopPoint,
+        eraser_tolerance: f32,
+        now: Duration,
+        input_exclusion: Option<DesktopRect>,
+    ) -> Option<CanvasUpdate> {
+        if self.active_stroke.is_some() {
+            return self
+                .extend_active_stroke(point, input_exclusion)
+                .filter(|segments| !segments.is_empty())
+                .map(CanvasUpdate::Segments);
         }
         if let Some((tool, from, to, style)) = self.active_shape.as_mut() {
             let old = primitive_bounds(self.bounds, *tool, *from, *to, style.thickness)?;
@@ -192,10 +240,55 @@ impl CanvasDocument {
             return Some(CanvasUpdate::Preview(union_rect(old, new)));
         }
         if self.eraser_drag.is_some() {
+            if point_is_excluded(point, input_exclusion) {
+                return None;
+            }
             let (removed, dirty) = self.erase_at(point, eraser_tolerance, now);
             return (removed > 0).then(|| CanvasUpdate::Rebuild(dirty.unwrap_or(self.bounds)));
         }
         None
+    }
+
+    fn extend_active_stroke(
+        &mut self,
+        point: DesktopPoint,
+        input_exclusion: Option<DesktopRect>,
+    ) -> Option<PenSegments> {
+        let active = self.active_stroke.as_mut()?;
+        let raw_from = active.raw_point;
+        // Raw continuity advances even when the whole segment is hidden. The
+        // retained endpoint deliberately does not, preventing a later exit
+        // sample from reconnecting ink across the toolbar.
+        active.raw_point = point;
+        let visible = match input_exclusion {
+            Some(exclusion) => visible_segment_fragments(raw_from, point, exclusion),
+            None => vec![VisibleSegment {
+                from: raw_from.into(),
+                to: point.into(),
+            }],
+        };
+        let mut updates = PenSegments::default();
+        for fragment in visible {
+            let (from, to) = visible_fragment_to_physical(fragment, input_exclusion);
+            if from == to && raw_from != point {
+                continue;
+            }
+            let retained = active.stroke.points.last()?.position;
+            if retained != from {
+                active.stroke.push_mouse_break(from);
+            }
+            active.stroke.push_mouse_point(to);
+            if let Some(dirty) = dirty_segment(self.bounds, from, to, active.stroke.thickness) {
+                updates.push(PenSegment {
+                    from,
+                    to,
+                    color: active.stroke.color,
+                    thickness: active.stroke.thickness,
+                    dirty,
+                });
+            }
+        }
+        Some(updates)
     }
 
     fn erase_at(
@@ -234,7 +327,7 @@ impl CanvasDocument {
     }
 
     pub(crate) fn finish_tool(&mut self, now: Duration, fade_lifetime: Duration) -> bool {
-        if let Some((tool, stroke)) = self.active_stroke.take() {
+        if let Some(ActiveStroke { tool, stroke, .. }) = self.active_stroke.take() {
             return match tool {
                 ScreenDrawTool::Pen => self.document.commit(AnnotationKind::Pen(stroke)).is_ok(),
                 ScreenDrawTool::Highlighter => self
@@ -268,7 +361,7 @@ impl CanvasDocument {
     }
 
     pub(crate) fn preview(&self) -> Option<AnnotationKind> {
-        if let Some((tool, stroke)) = &self.active_stroke {
+        if let Some(ActiveStroke { tool, stroke, .. }) = &self.active_stroke {
             return match tool {
                 ScreenDrawTool::Pen => Some(AnnotationKind::Pen(stroke.clone())),
                 ScreenDrawTool::Highlighter | ScreenDrawTool::FadingInk => {
@@ -399,9 +492,111 @@ impl CanvasDocument {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum CanvasUpdate {
-    Segment(PenSegment),
+    Segments(PenSegments),
     Preview(DesktopRect),
     Rebuild(DesktopRect),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct PenSegments {
+    segments: [Option<PenSegment>; 2],
+}
+
+impl PenSegments {
+    fn push(&mut self, segment: PenSegment) {
+        if let Some(slot) = self.segments.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(segment);
+        }
+    }
+
+    fn first(self) -> Option<PenSegment> {
+        self.segments[0]
+    }
+
+    fn is_empty(self) -> bool {
+        self.segments[0].is_none()
+    }
+
+    fn iter(self) -> impl Iterator<Item = PenSegment> {
+        self.segments.into_iter().flatten()
+    }
+
+    fn dirty(self) -> Option<DesktopRect> {
+        self.iter().map(|segment| segment.dirty).reduce(union_rect)
+    }
+}
+
+fn point_is_excluded(point: DesktopPoint, exclusion: Option<DesktopRect>) -> bool {
+    exclusion.is_some_and(|rect| rect.contains_point(point))
+}
+
+fn visible_fragment_to_physical(
+    fragment: VisibleSegment,
+    exclusion: Option<DesktopRect>,
+) -> (DesktopPoint, DesktopPoint) {
+    (
+        visible_point_to_physical(fragment.from, fragment.to, exclusion),
+        visible_point_to_physical(fragment.to, fragment.from, exclusion),
+    )
+}
+
+/// Converts a clipped subpixel intersection to a physical sample. Rounding is
+/// directed into the visible fragment. If that still lands on the toolbar's
+/// closed boundary, the sample advances one physical pixel farther outward;
+/// this may enlarge the gap but can never persist a sample inside the island.
+fn visible_point_to_physical(
+    point: DesktopPointF64,
+    visible_toward: DesktopPointF64,
+    exclusion: Option<DesktopRect>,
+) -> DesktopPoint {
+    fn directed(value: f64, toward: f64) -> i32 {
+        let rounded = if toward < value {
+            value.floor()
+        } else if toward > value {
+            value.ceil()
+        } else {
+            value.round()
+        };
+        rounded.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+    }
+
+    let mut physical = DesktopPoint::new(
+        directed(point.x, visible_toward.x),
+        directed(point.y, visible_toward.y),
+    );
+    if let Some(rect) = exclusion {
+        let on_or_inside_closed = |point: DesktopPoint| {
+            i64::from(point.x) >= i64::from(rect.x)
+                && i64::from(point.x) <= rect.right()
+                && i64::from(point.y) >= i64::from(rect.y)
+                && i64::from(point.y) <= rect.bottom()
+        };
+        if on_or_inside_closed(physical) {
+            physical.x =
+                physical
+                    .x
+                    .saturating_add((visible_toward.x - point.x).partial_cmp(&0.0).map_or(
+                        0,
+                        |ordering| match ordering {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        },
+                    ));
+            physical.y =
+                physical
+                    .y
+                    .saturating_add((visible_toward.y - point.y).partial_cmp(&0.0).map_or(
+                        0,
+                        |ordering| match ordering {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        },
+                    ));
+        }
+    }
+    physical
 }
 
 pub(crate) fn text_layout_bounds(origin: DesktopPoint, text: &str, font_size: f32) -> DesktopRect {
@@ -485,6 +680,17 @@ pub(crate) fn sample_frozen_pixel(
     let local = bounds.desktop_to_local(point)?;
     let pixel = frozen.get_pixel(local.x, local.y).0;
     Some(RgbaColor::rgba(pixel[0], pixel[1], pixel[2], pixel[3]))
+}
+
+fn sample_frozen_pixel_outside_exclusion(
+    frozen: &RgbaImage,
+    bounds: DesktopRect,
+    point: DesktopPoint,
+    input_exclusion: Option<DesktopRect>,
+) -> Option<RgbaColor> {
+    (!point_is_excluded(point, input_exclusion))
+        .then(|| sample_frozen_pixel(frozen, bounds, point))
+        .flatten()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -874,10 +1080,20 @@ mod windows_canvas {
             let Some(point) = self.cursor_point() else {
                 return;
             };
+            // Z-order normally routes toolbar clicks away from this HWND, but
+            // captured or reordered native input must remain harmless too.
+            if point_is_excluded(point, self.toolbar_bounds) {
+                return;
+            }
             if self.tool == ScreenDrawTool::Eyedropper {
                 if button == PointerButton::Left {
                     let capture = self.snapshot.capture();
-                    if let Some(sampled) = sample_frozen_pixel(&capture.image, self.bounds, point) {
+                    if let Some(sampled) = sample_frozen_pixel_outside_exclusion(
+                        &capture.image,
+                        self.bounds,
+                        point,
+                        self.toolbar_bounds,
+                    ) {
                         self.color = sampled;
                         (self.event)(CanvasEvent::ColorChanged(self.color));
                     }
@@ -891,7 +1107,7 @@ mod windows_canvas {
                 self.color
             };
             let annotations_were_visible = self.canvas.document().annotations_visible();
-            if let Some(dirty) = self.canvas.begin_tool(
+            if let Some(dirty) = self.canvas.begin_tool_excluding(
                 self.tool,
                 button,
                 point,
@@ -899,6 +1115,7 @@ mod windows_canvas {
                 self.thickness,
                 self.settings.text_size,
                 self.elapsed(),
+                self.toolbar_bounds,
             ) {
                 if !annotations_were_visible && self.canvas.document().annotations_visible() {
                     (self.event)(CanvasEvent::AnnotationsVisibilityChanged(true));
@@ -929,16 +1146,22 @@ mod windows_canvas {
                 return;
             }
             if let Some(point) = self.cursor_point() {
-                if let Some(update) =
-                    self.canvas
-                        .extend_tool(point, self.thickness.max(8.0) * 0.5, self.elapsed())
-                {
+                if let Some(update) = self.canvas.extend_tool_excluding(
+                    point,
+                    self.thickness.max(8.0) * 0.5,
+                    self.elapsed(),
+                    self.toolbar_bounds,
+                ) {
                     match update {
-                        CanvasUpdate::Segment(segment) if self.tool == ScreenDrawTool::Pen => {
-                            self.draw_segment(segment)
+                        CanvasUpdate::Segments(segments) if self.tool == ScreenDrawTool::Pen => {
+                            for segment in segments.iter() {
+                                self.draw_segment(segment);
+                            }
                         }
-                        CanvasUpdate::Segment(segment) => {
-                            let _ = self.rebuild_region(segment.dirty, true);
+                        CanvasUpdate::Segments(segments) => {
+                            if let Some(dirty) = segments.dirty() {
+                                let _ = self.rebuild_region(dirty, true);
+                            }
                         }
                         CanvasUpdate::Preview(dirty) => {
                             let _ = self.rebuild_region(dirty, true);
@@ -1590,8 +1813,48 @@ pub(crate) use windows_canvas::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen_draw::{render_document_into, selected_background};
+    use crate::screen_draw::{RasterBackground, render_document_into, selected_background};
     use image::RgbaImage;
+
+    const TOOLBAR: DesktopRect = DesktopRect::new(100, 100, 250, 700);
+
+    fn canvas_with_toolbar() -> CanvasDocument {
+        CanvasDocument::new(DesktopRect::new(0, 0, 500, 900))
+    }
+
+    fn begin_excluding_toolbar(
+        canvas: &mut CanvasDocument,
+        tool: ScreenDrawTool,
+        point: DesktopPoint,
+    ) -> Option<DesktopRect> {
+        canvas.begin_tool_excluding(
+            tool,
+            PointerButton::Left,
+            point,
+            RgbaColor::RED,
+            4.0,
+            24.0,
+            Duration::ZERO,
+            Some(TOOLBAR),
+        )
+    }
+
+    fn committed_stroke(canvas: &CanvasDocument) -> &Stroke {
+        match &canvas.document().objects()[0].kind {
+            AnnotationKind::Pen(stroke) | AnnotationKind::Highlighter(stroke) => stroke,
+            other => panic!("expected committed stroke, got {other:?}"),
+        }
+    }
+
+    fn segment_pairs(update: Option<CanvasUpdate>) -> Vec<(DesktopPoint, DesktopPoint)> {
+        let Some(CanvasUpdate::Segments(segments)) = update else {
+            return Vec::new();
+        };
+        segments
+            .iter()
+            .map(|segment| (segment.from, segment.to))
+            .collect()
+    }
 
     #[test]
     fn passive_fade_refresh_is_bounded_and_idle_without_transient_ink() {
@@ -1606,6 +1869,361 @@ mod tests {
     }
 
     #[test]
+    fn every_tool_rejects_an_initial_press_inside_toolbar_before_an_operation_starts() {
+        for tool in [
+            ScreenDrawTool::Pen,
+            ScreenDrawTool::Highlighter,
+            ScreenDrawTool::FadingInk,
+            ScreenDrawTool::Eraser,
+            ScreenDrawTool::StraightLine,
+            ScreenDrawTool::Arrow,
+            ScreenDrawTool::Rectangle,
+            ScreenDrawTool::Ellipse,
+            ScreenDrawTool::Text,
+            ScreenDrawTool::Eyedropper,
+        ] {
+            let mut canvas = canvas_with_toolbar();
+            assert!(
+                begin_excluding_toolbar(&mut canvas, tool, DesktopPoint::new(150, 200)).is_none(),
+                "{tool:?}"
+            );
+            assert!(!canvas.has_active_operation(), "{tool:?}");
+            assert!(canvas.document().objects().is_empty(), "{tool:?}");
+        }
+
+        // `down` uses this same guard before eyedropper sampling and before the
+        // only branch that can call SetCapture.
+        assert!(point_is_excluded(
+            DesktopPoint::new(150, 200),
+            Some(TOOLBAR)
+        ));
+        let frozen = RgbaImage::from_pixel(500, 900, image::Rgba([1, 2, 3, 255]));
+        assert_eq!(
+            sample_frozen_pixel_outside_exclusion(
+                &frozen,
+                DesktopRect::new(0, 0, 500, 900),
+                DesktopPoint::new(150, 200),
+                Some(TOOLBAR),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn full_pen_crossing_emits_two_live_fragments_and_one_break_aware_undo_item() {
+        let mut canvas = canvas_with_toolbar();
+        assert!(
+            begin_excluding_toolbar(&mut canvas, ScreenDrawTool::Pen, DesktopPoint::new(50, 200))
+                .is_some()
+        );
+        assert_eq!(
+            segment_pairs(canvas.extend_tool_excluding(
+                DesktopPoint::new(400, 200),
+                4.0,
+                Duration::ZERO,
+                Some(TOOLBAR),
+            )),
+            vec![
+                (DesktopPoint::new(50, 200), DesktopPoint::new(99, 200)),
+                (DesktopPoint::new(351, 200), DesktopPoint::new(400, 200)),
+            ]
+        );
+        assert!(canvas.finish_tool(Duration::ZERO, Duration::from_secs(3)));
+
+        let stroke = committed_stroke(&canvas);
+        assert_eq!(
+            stroke
+                .points
+                .iter()
+                .map(|point| (point.position, point.break_before))
+                .collect::<Vec<_>>(),
+            vec![
+                (DesktopPoint::new(50, 200), false),
+                (DesktopPoint::new(50, 200), false),
+                (DesktopPoint::new(99, 200), false),
+                (DesktopPoint::new(351, 200), true),
+                (DesktopPoint::new(400, 200), false),
+            ]
+        );
+        assert_eq!(
+            stroke
+                .segments()
+                .map(|segment| (segment.from, segment.to))
+                .collect::<Vec<_>>(),
+            vec![
+                (DesktopPoint::new(50, 200), DesktopPoint::new(50, 200)),
+                (DesktopPoint::new(50, 200), DesktopPoint::new(99, 200)),
+                (DesktopPoint::new(351, 200), DesktopPoint::new(400, 200)),
+            ]
+        );
+        let mut rendered = RgbaImage::new(500, 900);
+        render_document_into(
+            &mut rendered,
+            DesktopPoint::new(0, 0),
+            RasterBackground::Transparent,
+            canvas.document(),
+            &[],
+        )
+        .unwrap();
+        assert_ne!(rendered.get_pixel(50, 200).0[3], 0);
+        assert_eq!(rendered.get_pixel(200, 200).0[3], 0);
+        assert_ne!(rendered.get_pixel(400, 200).0[3], 0);
+        assert!(canvas.document().can_undo());
+        assert!(canvas.document_mut().undo());
+        assert!(canvas.document().objects().is_empty());
+        assert!(!canvas.document_mut().undo());
+    }
+
+    #[test]
+    fn pen_enter_stay_leave_uses_raw_continuity_and_reverse_crossing_is_symmetric() {
+        let mut canvas = canvas_with_toolbar();
+        begin_excluding_toolbar(&mut canvas, ScreenDrawTool::Pen, DesktopPoint::new(50, 200));
+        assert_eq!(
+            segment_pairs(canvas.extend_tool_excluding(
+                DesktopPoint::new(150, 200),
+                4.0,
+                Duration::ZERO,
+                Some(TOOLBAR),
+            )),
+            vec![(DesktopPoint::new(50, 200), DesktopPoint::new(99, 200))]
+        );
+        assert!(
+            canvas
+                .extend_tool_excluding(
+                    DesktopPoint::new(250, 200),
+                    4.0,
+                    Duration::ZERO,
+                    Some(TOOLBAR),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            segment_pairs(canvas.extend_tool_excluding(
+                DesktopPoint::new(400, 200),
+                4.0,
+                Duration::ZERO,
+                Some(TOOLBAR),
+            )),
+            vec![(DesktopPoint::new(351, 200), DesktopPoint::new(400, 200))]
+        );
+
+        let mut reverse = canvas_with_toolbar();
+        begin_excluding_toolbar(
+            &mut reverse,
+            ScreenDrawTool::Pen,
+            DesktopPoint::new(400, 200),
+        );
+        assert_eq!(
+            segment_pairs(reverse.extend_tool_excluding(
+                DesktopPoint::new(50, 200),
+                4.0,
+                Duration::ZERO,
+                Some(TOOLBAR),
+            )),
+            vec![
+                (DesktopPoint::new(400, 200), DesktopPoint::new(351, 200)),
+                (DesktopPoint::new(99, 200), DesktopPoint::new(50, 200)),
+            ]
+        );
+    }
+
+    #[test]
+    fn moving_toolbar_mid_drag_uses_current_bounds_without_reconnecting_old_hidden_samples() {
+        let mut canvas = canvas_with_toolbar();
+        begin_excluding_toolbar(&mut canvas, ScreenDrawTool::Pen, DesktopPoint::new(50, 200));
+        canvas.extend_tool_excluding(
+            DesktopPoint::new(150, 200),
+            4.0,
+            Duration::ZERO,
+            Some(TOOLBAR),
+        );
+        let moved = DesktopRect::new(200, 100, 250, 700);
+        assert_eq!(
+            segment_pairs(canvas.extend_tool_excluding(
+                DesktopPoint::new(180, 200),
+                4.0,
+                Duration::ZERO,
+                Some(moved),
+            )),
+            vec![(DesktopPoint::new(150, 200), DesktopPoint::new(180, 200))]
+        );
+        let active = &canvas.active_stroke.as_ref().unwrap().stroke;
+        assert!(
+            active.points.iter().any(|point| {
+                point.position == DesktopPoint::new(150, 200) && point.break_before
+            })
+        );
+    }
+
+    #[test]
+    fn native_fragment_rounding_is_conservative_on_negative_desktop_coordinates() {
+        let bounds = DesktopRect::new(-500, -300, 500, 500);
+        let toolbar = DesktopRect::new(-300, -200, 100, 100);
+        let mut canvas = CanvasDocument::new(bounds);
+        assert!(
+            canvas
+                .begin_pen_excluding(
+                    PointerButton::Left,
+                    DesktopPoint::new(-400, -150),
+                    RgbaColor::RED,
+                    4.0,
+                    Some(toolbar),
+                )
+                .is_some()
+        );
+        assert_eq!(
+            segment_pairs(canvas.extend_tool_excluding(
+                DesktopPoint::new(-100, -150),
+                4.0,
+                Duration::ZERO,
+                Some(toolbar),
+            )),
+            vec![
+                (DesktopPoint::new(-400, -150), DesktopPoint::new(-301, -150)),
+                (DesktopPoint::new(-199, -150), DesktopPoint::new(-100, -150)),
+            ]
+        );
+    }
+
+    #[test]
+    fn highlighter_and_fading_ink_preserve_the_same_toolbar_gap() {
+        for tool in [ScreenDrawTool::Highlighter, ScreenDrawTool::FadingInk] {
+            let mut canvas = canvas_with_toolbar();
+            begin_excluding_toolbar(&mut canvas, tool, DesktopPoint::new(50, 200));
+            assert_eq!(
+                segment_pairs(canvas.extend_tool_excluding(
+                    DesktopPoint::new(400, 200),
+                    4.0,
+                    Duration::ZERO,
+                    Some(TOOLBAR),
+                ))
+                .len(),
+                2
+            );
+            assert!(canvas.preview().is_some());
+            assert!(canvas.finish_tool(Duration::ZERO, Duration::from_secs(3)));
+            let stroke = if tool == ScreenDrawTool::Highlighter {
+                committed_stroke(&canvas).clone()
+            } else {
+                canvas.transient_strokes(Duration::ZERO)[0].clone()
+            };
+            assert_eq!(
+                stroke
+                    .points
+                    .iter()
+                    .filter(|point| point.break_before)
+                    .count(),
+                1
+            );
+
+            let mut rendered = RgbaImage::new(500, 900);
+            render_document_into(
+                &mut rendered,
+                DesktopPoint::new(0, 0),
+                RasterBackground::Transparent,
+                canvas.document(),
+                &canvas.transient_strokes(Duration::ZERO),
+            )
+            .unwrap();
+            assert_ne!(rendered.get_pixel(50, 200).0[3], 0, "{tool:?}");
+            assert_eq!(rendered.get_pixel(200, 200).0[3], 0, "{tool:?}");
+            assert_ne!(rendered.get_pixel(400, 200).0[3], 0, "{tool:?}");
+        }
+    }
+
+    #[test]
+    fn eraser_skips_toolbar_samples_resumes_outside_and_keeps_one_transaction() {
+        let mut canvas = canvas_with_toolbar();
+        for point in [DesktopPoint::new(150, 200), DesktopPoint::new(400, 200)] {
+            canvas.begin_pen(PointerButton::Left, point, RgbaColor::RED, 8.0);
+            canvas.finish_pen();
+        }
+        assert_eq!(canvas.document().objects().len(), 2);
+
+        begin_excluding_toolbar(
+            &mut canvas,
+            ScreenDrawTool::Eraser,
+            DesktopPoint::new(50, 50),
+        );
+        assert!(
+            canvas
+                .extend_tool_excluding(
+                    DesktopPoint::new(150, 200),
+                    12.0,
+                    Duration::ZERO,
+                    Some(TOOLBAR),
+                )
+                .is_none()
+        );
+        assert_eq!(canvas.document().objects().len(), 2);
+        assert!(matches!(
+            canvas.extend_tool_excluding(
+                DesktopPoint::new(400, 200),
+                12.0,
+                Duration::ZERO,
+                Some(TOOLBAR),
+            ),
+            Some(CanvasUpdate::Rebuild(_))
+        ));
+        assert!(canvas.finish_tool(Duration::ZERO, Duration::from_secs(3)));
+        assert_eq!(canvas.document().objects().len(), 1);
+        assert_eq!(
+            committed_stroke(&canvas).points[0].position,
+            DesktopPoint::new(150, 200)
+        );
+        assert!(canvas.document_mut().undo());
+        assert_eq!(canvas.document().objects().len(), 2);
+    }
+
+    #[test]
+    fn shapes_started_outside_remain_complete_across_toolbar() {
+        for tool in [
+            ScreenDrawTool::StraightLine,
+            ScreenDrawTool::Arrow,
+            ScreenDrawTool::Rectangle,
+            ScreenDrawTool::Ellipse,
+        ] {
+            let mut canvas = canvas_with_toolbar();
+            assert!(
+                begin_excluding_toolbar(&mut canvas, tool, DesktopPoint::new(50, 200)).is_some()
+            );
+            assert!(matches!(
+                canvas.extend_tool_excluding(
+                    DesktopPoint::new(400, 200),
+                    4.0,
+                    Duration::ZERO,
+                    Some(TOOLBAR),
+                ),
+                Some(CanvasUpdate::Preview(_))
+            ));
+            let preview = canvas.preview().unwrap();
+            match preview {
+                AnnotationKind::Line(line) => {
+                    assert_eq!(
+                        (line.from, line.to),
+                        (DesktopPoint::new(50, 200), DesktopPoint::new(400, 200))
+                    );
+                }
+                AnnotationKind::Arrow(arrow) => {
+                    assert_eq!(
+                        (arrow.from, arrow.to),
+                        (DesktopPoint::new(50, 200), DesktopPoint::new(400, 200))
+                    );
+                }
+                AnnotationKind::Rectangle(shape) | AnnotationKind::Ellipse(shape) => {
+                    assert_eq!(
+                        (shape.from, shape.to),
+                        (DesktopPoint::new(50, 200), DesktopPoint::new(400, 200))
+                    );
+                }
+                other => panic!("unexpected shape preview: {other:?}"),
+            }
+            assert!(canvas.finish_tool(Duration::ZERO, Duration::from_secs(3)));
+            assert_eq!(canvas.document().objects().len(), 1);
+        }
+    }
+
+    #[test]
     fn both_buttons_start_pen_immediately_without_deadzone() {
         for button in [PointerButton::Left, PointerButton::Right] {
             let mut canvas = CanvasDocument::new(DesktopRect::new(-100, -50, 200, 100));
@@ -1614,9 +2232,12 @@ mod tests {
                     .begin_pen(button, DesktopPoint::new(-20, 5), RgbaColor::RED, 3.0)
                     .is_some()
             );
-            assert_eq!(canvas.active_stroke.as_ref().unwrap().1.points.len(), 2);
             assert_eq!(
-                canvas.active_stroke.as_ref().unwrap().1.points[0].position,
+                canvas.active_stroke.as_ref().unwrap().stroke.points.len(),
+                2
+            );
+            assert_eq!(
+                canvas.active_stroke.as_ref().unwrap().stroke.points[0].position,
                 DesktopPoint::new(-20, 5)
             );
             assert!(canvas.finish_pen());

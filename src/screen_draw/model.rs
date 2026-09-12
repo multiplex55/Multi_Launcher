@@ -98,6 +98,10 @@ impl Stroke {
         self.points.push(StrokePoint::mouse(position));
     }
 
+    pub(crate) fn push_mouse_break(&mut self, position: DesktopPoint) {
+        self.points.push(StrokePoint::mouse_break(position));
+    }
+
     /// Iterates the drawable subpaths in this stroke. A break marker belongs
     /// to the current point and suppresses only its incoming segment.
     pub(crate) fn segments(&self) -> impl Iterator<Item = StrokeSegment> + '_ {
