@@ -241,7 +241,7 @@ impl Default for ToolbarOrientation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenDrawMode {
     NoSession,
-    AwaitingLauncherHide,
+    AwaitingLauncherParking,
     Capturing,
     Drawing,
     Ghost,

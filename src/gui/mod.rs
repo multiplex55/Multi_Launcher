@@ -460,6 +460,8 @@ pub struct LauncherApp {
     /// Main-thread orchestration for Screen Draw. Native session resources are
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
+    screen_draw_launcher_parking:
+        Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
     pub selected: Option<usize>,
     /// Test seam for verifying that command dispatch used normal activation,
@@ -1585,6 +1587,7 @@ impl LauncherApp {
                 controller.update_settings(screen_draw_settings);
                 controller
             },
+            screen_draw_launcher_parking: None,
             screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi::default(),
             selected: None,
             #[cfg(test)]

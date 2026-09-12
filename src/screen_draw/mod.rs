@@ -22,7 +22,8 @@ pub mod settings;
 pub use capture::{ScreenDrawCaptureBackend, ScreenDrawSessionSnapshot};
 pub use controller::{
     ScreenDrawCapturePoll, ScreenDrawController, ScreenDrawEditorHandoff, ScreenDrawGeneration,
-    ScreenDrawRegionPickerReady, ScreenDrawState, ScreenDrawTransitionError,
+    ScreenDrawParkingRequest, ScreenDrawRegionPickerReady, ScreenDrawState,
+    ScreenDrawTransitionError,
 };
 pub use document::{
     AnnotationDocument, DocumentError, EraserDrag, TransientInk, TransientStroke, TransientStrokeId,

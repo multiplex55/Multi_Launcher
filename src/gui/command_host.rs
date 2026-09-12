@@ -44,6 +44,7 @@ impl ScreenDrawCommandHost for LauncherApp {
             ScreenDrawCommand::Close => {
                 self.cancel_screen_draw_region_picker();
                 self.screen_draw_controller.close();
+                self.restore_screen_draw_launcher_exact()?;
                 Ok(())
             }
         };
@@ -872,7 +873,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             app.screen_draw_controller.state(),
-            crate::screen_draw::ScreenDrawState::AwaitingLauncherHide { .. }
+            crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
         ));
         assert!(!app.screen_draw_controller.toolbar_open());
 

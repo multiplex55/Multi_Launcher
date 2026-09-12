@@ -79,7 +79,7 @@ fn controls_for_state(state: &ScreenDrawState) -> &'static [ToolbarControl] {
         ],
         ScreenDrawState::Finish { .. } => &[Resume, Eye, Export, Clear, SessionControls],
         ScreenDrawState::DisplayChanged { .. } => &[Export, SessionControls],
-        ScreenDrawState::AwaitingLauncherHide { .. }
+        ScreenDrawState::AwaitingLauncherParking { .. }
         | ScreenDrawState::AwaitingNativeTeardown { .. }
         | ScreenDrawState::Capturing { .. }
         | ScreenDrawState::SelectingRegion { .. } => &[SessionControls],
@@ -237,6 +237,9 @@ impl super::LauncherApp {
         }
         if preferences_changed {
             self.screen_draw_toolbar.mark_dirty();
+        }
+        if should_close_viewport && let Err(error) = self.restore_screen_draw_launcher_exact() {
+            self.report_error_message("screen_draw.restore", error);
         }
         if should_close_viewport || !self.screen_draw_controller.toolbar_open() {
             // `ToolbarAction::Close` tears down the native session first.
@@ -559,7 +562,7 @@ fn render_toolbar_contents(
             );
             session_controls(ui, actions);
         }
-        ScreenDrawState::AwaitingLauncherHide { .. } => {
+        ScreenDrawState::AwaitingLauncherParking { .. } => {
             ui.spinner();
             ui.label("Hiding launcher…");
             session_controls(ui, actions);
@@ -897,7 +900,7 @@ fn session_controls(ui: &mut egui::Ui, actions: &mut Vec<ToolbarAction>) {
 fn state_label(state: &ScreenDrawState) -> &'static str {
     match state {
         ScreenDrawState::NoSession => "Idle",
-        ScreenDrawState::AwaitingLauncherHide { .. } => "Preparing capture",
+        ScreenDrawState::AwaitingLauncherParking { .. } => "Preparing capture",
         ScreenDrawState::AwaitingNativeTeardown { .. } => "Closing previous capture",
         ScreenDrawState::Capturing { .. } => "Capturing",
         ScreenDrawState::Drawing { .. } => "Drawing",
@@ -1187,7 +1190,7 @@ mod tests {
         let mut controller = ScreenDrawController::default();
         let generation = controller.request_start().unwrap();
         assert!(!controller.toolbar_open());
-        controller.launcher_hidden(generation).unwrap();
+        controller.launcher_parked(generation).unwrap();
         assert!(!controller.toolbar_open());
         controller.capture_succeeded(generation).unwrap();
         assert!(controller.toolbar_open());

@@ -1002,6 +1002,7 @@ impl eframe::App for LauncherApp {
         if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
+        self.cancel_screen_draw_startup_on_escape(ctx);
         self.poll_screen_draw_capture(ctx);
         self.show_screen_draw_toolbar(ctx);
         self.multi_manager_drain_runtime_events();
@@ -1877,6 +1878,34 @@ impl eframe::App for LauncherApp {
 }
 
 impl LauncherApp {
+    fn cancel_screen_draw_startup_on_escape(&mut self, ctx: &egui::Context) {
+        let Some(generation) = self
+            .screen_draw_controller
+            .state()
+            .generation()
+            .filter(|_| {
+                matches!(
+                    self.screen_draw_controller.state(),
+                    crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
+                        | crate::screen_draw::ScreenDrawState::Capturing { .. }
+                )
+            })
+        else {
+            return;
+        };
+        let escape = ctx.input_mut(|input| {
+            let modifiers = input.modifiers;
+            input.consume_key(modifiers, egui::Key::Escape)
+        });
+        if escape
+            && let Ok(poll) = self
+                .screen_draw_controller
+                .cancel_capture_startup(generation)
+        {
+            self.apply_screen_draw_capture_poll(ctx, poll);
+        }
+    }
+
     fn poll_screen_draw_capture(&mut self, ctx: &egui::Context) {
         let repaint_ctx = ctx.clone();
         let poll = self.screen_draw_controller.poll_capture(
@@ -1891,13 +1920,28 @@ impl LauncherApp {
         ctx: &egui::Context,
         poll: crate::screen_draw::ScreenDrawCapturePoll,
     ) {
-        if poll.hide_launcher {
-            crate::visibility::hide_root_for_screen_draw_capture(ctx);
+        if let Some(request) = poll.park_launcher
+            && let Err(error) = self.apply_screen_draw_parking_request(request)
+        {
+            let recovery = self
+                .screen_draw_controller
+                .fail_capture_startup(request.generation, error.clone());
+            match recovery {
+                Ok(recovery) => self.apply_screen_draw_capture_poll(ctx, recovery),
+                Err(_) => self.report_error_message("screen_draw", error),
+            }
+            return;
         }
         if poll.restore_launcher {
-            self.visible_flag.store(true, Ordering::SeqCst);
-            self.restore_flag.store(true, Ordering::SeqCst);
-            ctx.request_repaint();
+            if let Err(error) = self.restore_screen_draw_launcher_exact() {
+                tracing::error!(error = %error, "failed to restore Screen Draw launcher geometry");
+                self.report_error_message("screen_draw.restore", error);
+            }
+        }
+        if poll.capture_completed
+            && let Some(transaction) = self.screen_draw_launcher_parking.as_mut()
+        {
+            transaction.commit_hidden();
         }
         if let Some(delay) = poll.repoll_after {
             ctx.request_repaint_after(delay);
@@ -1916,6 +1960,87 @@ impl LauncherApp {
             tracing::error!(error = %diagnostic, "Screen Draw operation failed");
             self.report_error_message("screen_draw", diagnostic);
         }
+    }
+
+    fn apply_screen_draw_parking_request(
+        &mut self,
+        request: crate::screen_draw::ScreenDrawParkingRequest,
+    ) -> Result<(), String> {
+        if self.screen_draw_controller.state().generation() != Some(request.generation)
+            || !matches!(
+                self.screen_draw_controller.state(),
+                crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
+            )
+        {
+            return Ok(());
+        }
+
+        if let Some(transaction) = self.screen_draw_launcher_parking.as_ref() {
+            match transaction.verify() {
+                Ok(true) => {
+                    self.visible_flag.store(false, Ordering::SeqCst);
+                    self.last_visible = false;
+                    self.restore_flag.store(false, Ordering::SeqCst);
+                    self.egui_ctx.request_repaint();
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "failed to verify existing Screen Draw launcher parking: {error}"
+                    ));
+                }
+            }
+        }
+        if self.screen_draw_launcher_parking.is_some() {
+            self.restore_screen_draw_launcher_exact()?;
+        }
+
+        let hwnd = self
+            .launcher_hwnd
+            .ok_or_else(|| "launcher HWND is unavailable for Screen Draw parking".to_string())?;
+        let transaction = crate::screen_draw::launcher_parking::LauncherParkingTransaction::begin(
+            request.generation,
+            hwnd,
+            request.virtual_desktop,
+        )?;
+        self.screen_draw_launcher_parking = Some(transaction);
+        // Synchronize both logical visibility values so the ordinary visibility
+        // path cannot apply configured off-screen placement after native parking.
+        self.visible_flag.store(false, Ordering::SeqCst);
+        self.last_visible = false;
+        self.restore_flag.store(false, Ordering::SeqCst);
+        // Verification occurs on the next event-loop turn, after SetWindowPos.
+        self.egui_ctx.request_repaint();
+        Ok(())
+    }
+
+    pub(super) fn restore_screen_draw_launcher_exact(&mut self) -> Result<(), String> {
+        if let Some(transaction) = self.screen_draw_launcher_parking.as_mut() {
+            transaction.restore()?;
+        }
+        self.screen_draw_launcher_parking = None;
+        self.visible_flag.store(true, Ordering::SeqCst);
+        self.last_visible = true;
+        self.restore_flag.store(false, Ordering::SeqCst);
+        crate::visibility::apply_visibility(
+            true,
+            crate::visibility::VisiblePlacementPolicy::PreserveCurrentGeometry,
+            &self.egui_ctx,
+            self.offscreen_pos,
+            self.follow_mouse,
+            self.static_location_enabled,
+            self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+            self.static_size.map(|(w, h)| (w as f32, h as f32)),
+            (self.window_size.0 as f32, self.window_size.1 as f32),
+        );
+        #[cfg(windows)]
+        if let Some(hwnd) = self.launcher_hwnd {
+            crate::window_manager::force_restore_and_foreground(windows::Win32::Foundation::HWND(
+                hwnd as *mut core::ffi::c_void,
+            ));
+        }
+        Ok(())
     }
 
     fn multi_manager_save_on_exit(&self) -> bool {
@@ -1985,7 +2110,8 @@ mod tests {
         );
 
         assert!(app.visible_flag.load(Ordering::SeqCst));
-        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
         assert_eq!(app.error.as_deref(), Some("fixture capture failure"));
         assert!(!app.screen_draw_controller.toolbar_open());
     }
@@ -2015,8 +2141,179 @@ mod tests {
             crate::screen_draw::ScreenDrawState::NoSession
         ));
         assert!(app.visible_flag.load(Ordering::SeqCst));
-        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
         assert_eq!(app.screenshot_editors.len(), 1);
+    }
+
+    #[test]
+    fn screen_draw_exact_restore_ignores_configured_position_and_size() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        ctx.begin_frame(egui::RawInput::default());
+        let _ = ctx.end_frame();
+        app.static_location_enabled = true;
+        app.static_pos = Some((900, 700));
+        app.static_size = Some((800, 600));
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.restore_flag.store(true, Ordering::SeqCst);
+        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            left: 21,
+            top: 34,
+            right: 421,
+            bottom: 234,
+        };
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(11),
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.restore_screen_draw_launcher_exact().unwrap();
+        let output = ctx.end_frame();
+
+        assert_eq!(observer.restored_rects(), [original]);
+        assert!(app.screen_draw_launcher_parking.is_none());
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .unwrap()
+            .commands;
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+        )));
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
+        )));
+    }
+
+    #[test]
+    fn root_escape_cancels_pre_capture_and_restores_without_generic_placement() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        ctx.begin_frame(egui::RawInput::default());
+        let _ = ctx.end_frame();
+        let generation = app.screen_draw_controller.request_start().unwrap();
+        assert!(matches!(
+            app.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::AwaitingLauncherParking {
+                generation: current
+            } if *current == generation
+        ));
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+            ..Default::default()
+        });
+        app.cancel_screen_draw_startup_on_escape(&ctx);
+        let output = ctx.end_frame();
+
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::NoSession
+        );
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .unwrap()
+            .commands;
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
+        )));
+    }
+
+    #[test]
+    fn typed_parking_effect_synchronizes_visibility_without_configured_hide() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        ctx.begin_frame(egui::RawInput::default());
+        let _ = ctx.end_frame();
+        let generation = app.screen_draw_controller.request_start().unwrap();
+        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            left: 25,
+            top: 40,
+            right: 425,
+            bottom: 240,
+        };
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                generation,
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.restore_flag.store(true, Ordering::SeqCst);
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.apply_screen_draw_capture_poll(
+            &ctx,
+            crate::screen_draw::ScreenDrawCapturePoll {
+                park_launcher: Some(crate::screen_draw::ScreenDrawParkingRequest {
+                    generation,
+                    virtual_desktop: crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+                }),
+                ..Default::default()
+            },
+        );
+        let output = ctx.end_frame();
+
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.screen_draw_launcher_parking.is_some());
+        assert!(observer.restored_rects().is_empty());
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .unwrap()
+            .commands;
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
+        )));
+    }
+
+    #[test]
+    fn stale_parking_effect_cannot_mutate_replacement_generation() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let first = app.screen_draw_controller.request_start().unwrap();
+        let second = app.screen_draw_controller.request_new_capture().unwrap();
+        assert_ne!(first, second);
+
+        app.apply_screen_draw_capture_poll(
+            &ctx,
+            crate::screen_draw::ScreenDrawCapturePoll {
+                park_launcher: Some(crate::screen_draw::ScreenDrawParkingRequest {
+                    generation: first,
+                    virtual_desktop: crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { generation: second }
+        );
+        assert!(app.screen_draw_launcher_parking.is_none());
     }
 
     fn two_results() -> Vec<Action> {

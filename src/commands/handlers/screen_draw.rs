@@ -14,14 +14,7 @@ where
         .map_err(|error| CommandError::new("screen_draw", error).with_refocus_policy())?;
 
     Ok(CommandOutcome {
-        visibility: if matches!(
-            command,
-            ScreenDrawCommand::Start | ScreenDrawCommand::NewCapture
-        ) {
-            VisibilityPolicy::Hide
-        } else {
-            VisibilityPolicy::Keep
-        },
+        visibility: VisibilityPolicy::Keep,
         history: if matches!(
             command,
             ScreenDrawCommand::Start | ScreenDrawCommand::NewCapture
@@ -55,20 +48,20 @@ mod tests {
     }
 
     #[test]
-    fn start_stages_the_controller_then_hides_and_records() {
+    fn start_stages_the_controller_without_generic_visibility_and_records() {
         let mut host = Host::default();
         let outcome = handle_screen_draw(&mut host, &ScreenDrawCommand::Start).unwrap();
         assert_eq!(host.commands, [ScreenDrawCommand::Start]);
-        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Record);
     }
 
     #[test]
-    fn new_capture_also_hides_and_records() {
+    fn new_capture_keeps_generic_visibility_and_records() {
         let mut host = Host::default();
         let outcome = handle_screen_draw(&mut host, &ScreenDrawCommand::NewCapture).unwrap();
         assert_eq!(host.commands, [ScreenDrawCommand::NewCapture]);
-        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Record);
     }
 

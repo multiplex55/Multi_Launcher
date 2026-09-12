@@ -80,7 +80,7 @@ impl ScreenDrawSessionSnapshot {
 pub(crate) trait LauncherVisibilityProbe: Send + Sync {
     /// Returns true only when the launcher is known not to contribute pixels to
     /// the requested virtual-desktop capture.
-    fn launcher_is_clear(
+    fn launcher_is_capture_parked(
         &self,
         launcher_hwnd: Option<usize>,
         virtual_desktop: ScreenRect,
@@ -91,7 +91,7 @@ pub(crate) trait LauncherVisibilityProbe: Send + Sync {
 pub(crate) struct SystemLauncherVisibilityProbe;
 
 impl LauncherVisibilityProbe for SystemLauncherVisibilityProbe {
-    fn launcher_is_clear(
+    fn launcher_is_capture_parked(
         &self,
         launcher_hwnd: Option<usize>,
         virtual_desktop: ScreenRect,

@@ -518,7 +518,7 @@ mod tests {
             host.screen_draw_calls,
             [crate::commands::ScreenDrawCommand::Start]
         );
-        assert_eq!(screen_draw.visibility, VisibilityPolicy::Hide);
+        assert_eq!(screen_draw.visibility, VisibilityPolicy::Keep);
         assert_eq!(screen_draw.history, crate::commands::HistoryPolicy::Record);
 
         CommandBus

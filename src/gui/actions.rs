@@ -565,7 +565,7 @@ mod tests {
         app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
         let generation = app.screen_draw_controller.request_start().unwrap();
         app.screen_draw_controller
-            .launcher_hidden(generation)
+            .launcher_parked(generation)
             .unwrap();
         app.screen_draw_controller
             .capture_succeeded(generation)
@@ -610,7 +610,7 @@ mod tests {
             );
         let generation = app.screen_draw_controller.request_start().unwrap();
         app.screen_draw_controller
-            .launcher_hidden(generation)
+            .launcher_parked(generation)
             .unwrap();
         app.screen_draw_controller
             .capture_succeeded(generation)

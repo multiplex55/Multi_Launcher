@@ -24,7 +24,9 @@ use super::{
 use super::{ExportOutcome, ExportRequest, ExportScope};
 use crate::mkmacro::screen::{CapturedRegion, ScreenRect};
 
-const MAX_LAUNCHER_HIDE_FRAMES: u8 = 8;
+const LAUNCHER_PARKING_TIMEOUT: Duration = Duration::from_secs(1);
+const LAUNCHER_PARKING_REPOLL_INTERVAL: Duration = Duration::from_millis(16);
+const DESKTOP_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Identifies one capture/session attempt so late worker events cannot mutate a
@@ -45,7 +47,7 @@ impl ScreenDrawGeneration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScreenDrawState {
     NoSession,
-    AwaitingLauncherHide {
+    AwaitingLauncherParking {
         generation: ScreenDrawGeneration,
     },
     Capturing {
@@ -79,7 +81,7 @@ impl ScreenDrawState {
     pub const fn generation(&self) -> Option<ScreenDrawGeneration> {
         match self {
             Self::NoSession => None,
-            Self::AwaitingLauncherHide { generation }
+            Self::AwaitingLauncherParking { generation }
             | Self::Capturing { generation }
             | Self::AwaitingNativeTeardown { generation }
             | Self::Drawing { generation }
@@ -135,6 +137,7 @@ pub struct ScreenDrawController {
     pending_editor_handoff: Option<ScreenDrawEditorHandoff>,
     pending_new_capture: Option<PendingNewCapture>,
     settings: ScreenDrawSettings,
+    clock: Arc<dyn MonotonicClock>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +151,10 @@ struct PendingRegionSelection {
 struct PendingCapture {
     generation: ScreenDrawGeneration,
     cancellation: Arc<AtomicBool>,
-    hide_dispatched: bool,
-    hide_wait_frames: u8,
+    virtual_desktop: Option<ScreenRect>,
+    parking_requested: bool,
+    parking_deadline: Option<Instant>,
+    capture_deadline: Option<Instant>,
 }
 
 struct PendingNewCapture {
@@ -163,10 +168,34 @@ struct CaptureCompletion {
     result: Result<CapturedRegion, String>,
 }
 
+enum CaptureStartupExit {
+    Cancelled,
+    Failed(String),
+}
+
+trait MonotonicClock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+#[derive(Debug, Default)]
+struct SystemMonotonicClock;
+
+impl MonotonicClock for SystemMonotonicClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenDrawParkingRequest {
+    pub generation: ScreenDrawGeneration,
+    pub virtual_desktop: ScreenRect,
+}
+
 /// Feature-scoped effects produced by one non-blocking coordinator poll.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ScreenDrawCapturePoll {
-    pub hide_launcher: bool,
+    pub park_launcher: Option<ScreenDrawParkingRequest>,
     pub restore_launcher: bool,
     pub capture_started: bool,
     pub capture_completed: bool,
@@ -251,6 +280,20 @@ impl ScreenDrawController {
         visibility_probe: Arc<dyn LauncherVisibilityProbe>,
         native_factory: Arc<dyn NativeSessionFactory>,
     ) -> Self {
+        Self::with_runtime_dependencies_and_clock(
+            capture_backend,
+            visibility_probe,
+            native_factory,
+            Arc::new(SystemMonotonicClock),
+        )
+    }
+
+    fn with_runtime_dependencies_and_clock(
+        capture_backend: Arc<dyn DesktopCaptureBackend>,
+        visibility_probe: Arc<dyn LauncherVisibilityProbe>,
+        native_factory: Arc<dyn NativeSessionFactory>,
+        clock: Arc<dyn MonotonicClock>,
+    ) -> Self {
         let (capture_tx, capture_rx) = mpsc::channel();
         Self {
             state: ScreenDrawState::NoSession,
@@ -275,6 +318,7 @@ impl ScreenDrawController {
             pending_editor_handoff: None,
             pending_new_capture: None,
             settings: ScreenDrawSettings::default(),
+            clock,
         }
     }
     pub fn state(&self) -> &ScreenDrawState {
@@ -347,7 +391,7 @@ impl ScreenDrawController {
         self.pending_editor_handoff = None;
         self.pending_new_capture = Some(PendingNewCapture {
             generation,
-            deadline: Instant::now() + NATIVE_TEARDOWN_TIMEOUT,
+            deadline: self.clock.now() + NATIVE_TEARDOWN_TIMEOUT,
             timed_out: false,
         });
         self.state = ScreenDrawState::AwaitingNativeTeardown { generation };
@@ -364,14 +408,14 @@ impl ScreenDrawController {
         self.toolbar_open = true;
     }
 
-    pub fn launcher_hidden(
+    pub fn launcher_parked(
         &mut self,
         generation: ScreenDrawGeneration,
     ) -> Result<(), ScreenDrawTransitionError> {
         self.transition_generation(
             generation,
             "begin capture",
-            |state| matches!(state, ScreenDrawState::AwaitingLauncherHide { .. }),
+            |state| matches!(state, ScreenDrawState::AwaitingLauncherParking { .. }),
             ScreenDrawState::Capturing { generation },
         )
     }
@@ -396,24 +440,47 @@ impl ScreenDrawController {
         generation: ScreenDrawGeneration,
         message: impl Into<String>,
     ) -> Result<(), ScreenDrawTransitionError> {
-        self.transition_generation(
-            generation,
-            "fail capture",
-            |state| matches!(state, ScreenDrawState::Capturing { .. }),
-            ScreenDrawState::Failed {
-                generation,
-                message: message.into(),
-            },
-        )?;
-        self.cancel_pending_capture();
-        self.teardown_native_worker();
-        self.session_snapshot = None;
-        self.runtime_state = None;
-        self.toolbar_open = false;
+        if self.state.generation() != Some(generation)
+            || !matches!(self.state, ScreenDrawState::Capturing { .. })
+        {
+            return Err(self.invalid("fail capture"));
+        }
+        self.finish_capture_startup(generation, CaptureStartupExit::Failed(message.into()));
         Ok(())
     }
 
-    /// Advances hide verification and consumes capture completions without
+    pub fn cancel_capture_startup(
+        &mut self,
+        generation: ScreenDrawGeneration,
+    ) -> Result<ScreenDrawCapturePoll, ScreenDrawTransitionError> {
+        if self.state.generation() != Some(generation)
+            || !matches!(
+                self.state,
+                ScreenDrawState::AwaitingLauncherParking { .. } | ScreenDrawState::Capturing { .. }
+            )
+        {
+            return Err(self.invalid("cancel capture startup"));
+        }
+        Ok(self.finish_capture_startup(generation, CaptureStartupExit::Cancelled))
+    }
+
+    pub(crate) fn fail_capture_startup(
+        &mut self,
+        generation: ScreenDrawGeneration,
+        message: impl Into<String>,
+    ) -> Result<ScreenDrawCapturePoll, ScreenDrawTransitionError> {
+        if self.state.generation() != Some(generation)
+            || !matches!(
+                self.state,
+                ScreenDrawState::AwaitingLauncherParking { .. } | ScreenDrawState::Capturing { .. }
+            )
+        {
+            return Err(self.invalid("fail capture startup"));
+        }
+        Ok(self.finish_capture_startup(generation, CaptureStartupExit::Failed(message.into())))
+    }
+
+    /// Advances parking verification and consumes capture completions without
     /// blocking the GUI thread. The callback is invoked by the short-lived
     /// worker so egui wakes promptly when capture finishes.
     pub fn poll_capture(
@@ -422,6 +489,9 @@ impl ScreenDrawController {
         request_repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> ScreenDrawCapturePoll {
         if let Some(poll) = self.poll_native_worker(Arc::clone(&request_repaint)) {
+            return poll;
+        }
+        if let Some(poll) = self.poll_capture_timeout() {
             return poll;
         }
         if let Some(poll) = self.poll_capture_completion(Arc::clone(&request_repaint)) {
@@ -439,38 +509,64 @@ impl ScreenDrawController {
             self.pending_capture = None;
             return ScreenDrawCapturePoll::default();
         }
-        if !matches!(self.state, ScreenDrawState::AwaitingLauncherHide { .. }) {
+        if matches!(self.state, ScreenDrawState::Capturing { .. }) {
+            let repoll_after = pending
+                .capture_deadline
+                .map(|deadline| deadline.saturating_duration_since(self.clock.now()));
+            return ScreenDrawCapturePoll {
+                repoll_after,
+                ..ScreenDrawCapturePoll::default()
+            };
+        }
+        if !matches!(self.state, ScreenDrawState::AwaitingLauncherParking { .. }) {
             return ScreenDrawCapturePoll::default();
         }
-        if !pending.hide_dispatched {
-            pending.hide_dispatched = true;
+
+        let now = self.clock.now();
+        if pending.virtual_desktop.is_none() {
+            let generation = pending.generation;
+            let virtual_desktop = match self.capture_backend.virtual_desktop() {
+                Ok(desktop) => desktop,
+                Err(error) => return self.fail_pending_capture(generation, error),
+            };
+            pending.virtual_desktop = Some(virtual_desktop);
+            pending.parking_deadline = Some(now + LAUNCHER_PARKING_TIMEOUT);
+        }
+        let virtual_desktop = pending
+            .virtual_desktop
+            .expect("capture preparation stores virtual desktop before parking");
+        if !pending.parking_requested {
+            pending.parking_requested = true;
             request_repaint();
             return ScreenDrawCapturePoll {
-                hide_launcher: true,
+                park_launcher: Some(ScreenDrawParkingRequest {
+                    generation: pending.generation,
+                    virtual_desktop,
+                }),
                 ..ScreenDrawCapturePoll::default()
             };
         }
 
         let generation = pending.generation;
-        let virtual_desktop = match self.capture_backend.virtual_desktop() {
-            Ok(desktop) => desktop,
-            Err(error) => return self.fail_pending_capture(generation, error),
-        };
+        let deadline = pending
+            .parking_deadline
+            .expect("parking request always has an elapsed-time deadline");
+        if now >= deadline {
+            return self.fail_pending_capture(
+                generation,
+                "launcher did not leave the virtual desktop before the parking timeout".into(),
+            );
+        }
         match self
             .visibility_probe
-            .launcher_is_clear(launcher_hwnd, virtual_desktop)
+            .launcher_is_capture_parked(launcher_hwnd, virtual_desktop)
         {
-            Ok(true) => self.start_capture_worker(generation, request_repaint),
+            Ok(true) => self.start_capture_worker(generation, request_repaint, now),
             Ok(false) => {
-                pending.hide_wait_frames = pending.hide_wait_frames.saturating_add(1);
-                if pending.hide_wait_frames >= MAX_LAUNCHER_HIDE_FRAMES {
-                    self.fail_pending_capture(
-                        generation,
-                        "launcher did not leave the virtual desktop before capture".into(),
-                    )
-                } else {
-                    request_repaint();
-                    ScreenDrawCapturePoll::default()
+                let remaining = deadline.saturating_duration_since(now);
+                ScreenDrawCapturePoll {
+                    repoll_after: Some(remaining.min(LAUNCHER_PARKING_REPOLL_INTERVAL)),
+                    ..ScreenDrawCapturePoll::default()
                 }
             }
             Err(error) => self.fail_pending_capture(generation, error),
@@ -760,20 +856,24 @@ impl ScreenDrawController {
         self.pending_capture = Some(PendingCapture {
             generation,
             cancellation: Arc::new(AtomicBool::new(false)),
-            hide_dispatched: false,
-            hide_wait_frames: 0,
+            virtual_desktop: None,
+            parking_requested: false,
+            parking_deadline: None,
+            capture_deadline: None,
         });
-        self.state = ScreenDrawState::AwaitingLauncherHide { generation };
+        self.state = ScreenDrawState::AwaitingLauncherParking { generation };
     }
 
     fn start_capture_worker(
         &mut self,
         generation: ScreenDrawGeneration,
         request_repaint: Arc<dyn Fn() + Send + Sync>,
+        now: Instant,
     ) -> ScreenDrawCapturePoll {
-        let Some(pending) = self.pending_capture.as_ref() else {
+        let Some(pending) = self.pending_capture.as_mut() else {
             return ScreenDrawCapturePoll::default();
         };
+        pending.capture_deadline = Some(now + DESKTOP_CAPTURE_TIMEOUT);
         let cancellation = Arc::clone(&pending.cancellation);
         let capture_backend = Arc::clone(&self.capture_backend);
         let capture_tx = self.capture_tx.clone();
@@ -796,8 +896,25 @@ impl ScreenDrawController {
         }
         ScreenDrawCapturePoll {
             capture_started: true,
+            repoll_after: Some(DESKTOP_CAPTURE_TIMEOUT),
             ..ScreenDrawCapturePoll::default()
         }
+    }
+
+    fn poll_capture_timeout(&mut self) -> Option<ScreenDrawCapturePoll> {
+        if !matches!(self.state, ScreenDrawState::Capturing { .. }) {
+            return None;
+        }
+        let pending = self.pending_capture.as_ref()?;
+        let deadline = pending.capture_deadline?;
+        let now = self.clock.now();
+        if now >= deadline {
+            return Some(self.fail_pending_capture(
+                pending.generation,
+                "Screen Draw desktop capture did not complete before the capture timeout".into(),
+            ));
+        }
+        None
     }
 
     fn poll_capture_completion(
@@ -841,18 +958,41 @@ impl ScreenDrawController {
         generation: ScreenDrawGeneration,
         message: String,
     ) -> ScreenDrawCapturePoll {
+        self.finish_capture_startup(generation, CaptureStartupExit::Failed(message))
+    }
+
+    fn finish_capture_startup(
+        &mut self,
+        generation: ScreenDrawGeneration,
+        exit: CaptureStartupExit,
+    ) -> ScreenDrawCapturePoll {
         self.cancel_pending_capture();
         self.teardown_native_worker();
         self.session_snapshot = None;
         self.runtime_state = None;
         self.toolbar_open = false;
-        self.state = ScreenDrawState::Failed {
-            generation,
-            message: message.clone(),
+        self.export_in_flight = false;
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
+        self.pending_new_capture = None;
+        let diagnostic = match exit {
+            CaptureStartupExit::Cancelled => {
+                self.state = ScreenDrawState::NoSession;
+                None
+            }
+            CaptureStartupExit::Failed(message) => {
+                self.latest_runtime_error = Some(message.clone());
+                self.state = ScreenDrawState::Failed {
+                    generation,
+                    message: message.clone(),
+                };
+                Some(message)
+            }
         };
         ScreenDrawCapturePoll {
             restore_launcher: true,
-            diagnostic: Some(message),
+            diagnostic,
             ..ScreenDrawCapturePoll::default()
         }
     }
@@ -1123,7 +1263,7 @@ impl ScreenDrawController {
             if pending.timed_out {
                 return Some(ScreenDrawCapturePoll::default());
             }
-            let remaining = pending.deadline.saturating_duration_since(Instant::now());
+            let remaining = pending.deadline.saturating_duration_since(self.clock.now());
             if remaining.is_zero() {
                 let message =
                     "Screen Draw native session did not close before the new capture timeout"
@@ -1316,6 +1456,29 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
+    struct FakeClock {
+        now: Mutex<Instant>,
+    }
+
+    impl FakeClock {
+        fn new(now: Instant) -> Self {
+            Self {
+                now: Mutex::new(now),
+            }
+        }
+
+        fn advance(&self, duration: Duration) {
+            let mut now = self.now.lock().unwrap();
+            *now += duration;
+        }
+    }
+
+    impl MonotonicClock for FakeClock {
+        fn now(&self) -> Instant {
+            *self.now.lock().unwrap()
+        }
+    }
+
     #[derive(Default)]
     struct CountingNativeFactory {
         spawns: AtomicUsize,
@@ -1339,7 +1502,16 @@ mod tests {
         }
     }
 
+    struct FailingNativeFactory;
+
+    impl NativeSessionFactory for FailingNativeFactory {
+        fn spawn(&self, _config: NativeSessionConfig) -> Result<NativeSessionHandle, String> {
+            Err("fixture native startup failed".into())
+        }
+    }
+
     struct FakeCaptureBackend {
+        desktop_calls: AtomicUsize,
         calls: AtomicUsize,
         fail: bool,
         block_first_until_cancelled: bool,
@@ -1348,6 +1520,7 @@ mod tests {
     impl FakeCaptureBackend {
         fn successful() -> Self {
             Self {
+                desktop_calls: AtomicUsize::new(0),
                 calls: AtomicUsize::new(0),
                 fail: false,
                 block_first_until_cancelled: false,
@@ -1357,6 +1530,7 @@ mod tests {
 
     impl DesktopCaptureBackend for FakeCaptureBackend {
         fn virtual_desktop(&self) -> Result<ScreenRect, String> {
+            self.desktop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(ScreenRect::new(-2, -1, 4, 3))
         }
 
@@ -1392,7 +1566,7 @@ mod tests {
     }
 
     impl LauncherVisibilityProbe for FakeVisibilityProbe {
-        fn launcher_is_clear(
+        fn launcher_is_capture_parked(
             &self,
             _launcher_hwnd: Option<usize>,
             _virtual_desktop: ScreenRect,
@@ -1427,6 +1601,20 @@ mod tests {
         )
     }
 
+    fn capture_controller_with_clock(
+        backend: Arc<FakeCaptureBackend>,
+        visibility: impl IntoIterator<Item = Result<bool, String>>,
+        native_factory: Arc<dyn NativeSessionFactory>,
+        clock: Arc<dyn MonotonicClock>,
+    ) -> ScreenDrawController {
+        ScreenDrawController::with_runtime_dependencies_and_clock(
+            backend,
+            Arc::new(FakeVisibilityProbe::new(visibility)),
+            native_factory,
+            clock,
+        )
+    }
+
     fn repaint_counter() -> (Arc<AtomicUsize>, Arc<dyn Fn() + Send + Sync>) {
         let count = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&count);
@@ -1454,7 +1642,7 @@ mod tests {
     fn drawing_controller() -> (ScreenDrawController, ScreenDrawGeneration) {
         let mut controller = ScreenDrawController::default();
         let generation = controller.request_start().unwrap();
-        controller.launcher_hidden(generation).unwrap();
+        controller.launcher_parked(generation).unwrap();
         controller.capture_succeeded(generation).unwrap();
         (controller, generation)
     }
@@ -1465,10 +1653,10 @@ mod tests {
         let generation = controller.request_start().unwrap();
         assert_eq!(
             controller.state(),
-            &ScreenDrawState::AwaitingLauncherHide { generation }
+            &ScreenDrawState::AwaitingLauncherParking { generation }
         );
         assert!(!controller.toolbar_open());
-        controller.launcher_hidden(generation).unwrap();
+        controller.launcher_parked(generation).unwrap();
         assert_eq!(
             controller.state(),
             &ScreenDrawState::Capturing { generation }
@@ -1519,7 +1707,7 @@ mod tests {
     fn capture_failure_is_recoverable_and_new_start_gets_new_generation() {
         let mut controller = ScreenDrawController::default();
         let first = controller.request_start().unwrap();
-        controller.launcher_hidden(first).unwrap();
+        controller.launcher_parked(first).unwrap();
         controller.capture_failed(first, "capture failed").unwrap();
         assert!(
             matches!(controller.state(), ScreenDrawState::Failed { message, .. } if message == "capture failed")
@@ -1561,20 +1749,27 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_hides_then_verifies_before_starting_capture() {
+    fn coordinator_requests_typed_parking_then_verifies_before_capture() {
         let backend = Arc::new(FakeCaptureBackend::successful());
         let mut controller = capture_controller(Arc::clone(&backend), [Ok(false), Ok(true)]);
         let generation = controller.request_start().unwrap();
         let (repaints, repaint) = repaint_counter();
 
-        let hide = controller.poll_capture(Some(1), Arc::clone(&repaint));
-        assert!(hide.hide_launcher);
+        let parking = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(
+            parking.park_launcher,
+            Some(ScreenDrawParkingRequest {
+                generation,
+                virtual_desktop: ScreenRect::new(-2, -1, 4, 3),
+            })
+        );
         assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
         let waiting = controller.poll_capture(Some(1), Arc::clone(&repaint));
-        assert_eq!(waiting, ScreenDrawCapturePoll::default());
+        assert_eq!(waiting.repoll_after, Some(LAUNCHER_PARKING_REPOLL_INTERVAL));
         assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
         let started = controller.poll_capture(Some(1), Arc::clone(&repaint));
         assert!(started.capture_started);
+        assert_eq!(backend.desktop_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             controller.state(),
             &ScreenDrawState::Capturing { generation }
@@ -1602,11 +1797,8 @@ mod tests {
         let (_, repaint) = repaint_counter();
         controller.request_start().unwrap();
         assert_eq!(native.spawns.load(Ordering::SeqCst), 0);
-        assert!(
-            controller
-                .poll_capture(Some(1), Arc::clone(&repaint))
-                .hide_launcher
-        );
+        let parking = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(parking.park_launcher.is_some());
         assert!(
             controller
                 .poll_capture(Some(1), Arc::clone(&repaint))
@@ -1978,7 +2170,7 @@ mod tests {
         controller.poll_capture(Some(1), Arc::clone(&repaint));
         assert_eq!(
             controller.state(),
-            &ScreenDrawState::AwaitingLauncherHide { generation: second }
+            &ScreenDrawState::AwaitingLauncherParking { generation: second }
         );
         assert!(
             native.events.lock().unwrap()[0]
@@ -1995,7 +2187,9 @@ mod tests {
         let backend = Arc::new(FakeCaptureBackend::successful());
         let observed_backend = Arc::clone(&backend);
         let native = Arc::new(CountingNativeFactory::default());
-        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let clock = Arc::new(FakeClock::new(Instant::now()));
+        let mut controller =
+            capture_controller_with_clock(backend, [Ok(true)], native.clone(), clock.clone());
         let (_, repaint) = repaint_counter();
         controller.request_start().unwrap();
         controller.poll_capture(Some(1), Arc::clone(&repaint));
@@ -2006,7 +2200,7 @@ mod tests {
         let waiting = controller.poll_capture(Some(1), Arc::clone(&repaint));
         assert!(waiting.repoll_after.is_some_and(|delay| !delay.is_zero()));
         assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
-        controller.pending_new_capture.as_mut().unwrap().deadline = Instant::now();
+        clock.advance(NATIVE_TEARDOWN_TIMEOUT);
         let terminal = controller.poll_capture(Some(1), Arc::clone(&repaint));
 
         assert!(terminal.restore_launcher);
@@ -2207,26 +2401,31 @@ mod tests {
     }
 
     #[test]
-    fn launcher_hide_retry_is_bounded_and_restores_on_failure() {
+    fn launcher_parking_timeout_uses_elapsed_time_and_restores_on_failure() {
         let backend = Arc::new(FakeCaptureBackend::successful());
-        let mut controller = capture_controller(
+        let clock = Arc::new(FakeClock::new(Instant::now()));
+        let mut controller = capture_controller_with_clock(
             Arc::clone(&backend),
-            (0..MAX_LAUNCHER_HIDE_FRAMES).map(|_| Ok(false)),
+            [Ok(false), Ok(false)],
+            Arc::new(TestNativeSessionFactory),
+            clock.clone(),
         );
         let generation = controller.request_start().unwrap();
         let (_, repaint) = repaint_counter();
         assert!(
             controller
                 .poll_capture(Some(1), Arc::clone(&repaint))
-                .hide_launcher
+                .park_launcher
+                .is_some()
         );
-        let mut failure = ScreenDrawCapturePoll::default();
-        for _ in 0..MAX_LAUNCHER_HIDE_FRAMES {
-            failure = controller.poll_capture(Some(1), Arc::clone(&repaint));
-        }
+        let waiting = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(waiting.repoll_after, Some(LAUNCHER_PARKING_REPOLL_INTERVAL));
+        clock.advance(LAUNCHER_PARKING_TIMEOUT);
+        let failure = controller.poll_capture(Some(1), Arc::clone(&repaint));
         assert!(failure.restore_launcher);
-        assert!(failure.diagnostic.unwrap().contains("did not leave"));
+        assert!(failure.diagnostic.unwrap().contains("parking timeout"));
         assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.desktop_calls.load(Ordering::SeqCst), 1);
         assert!(matches!(
             controller.state(),
             ScreenDrawState::Failed { generation: failed, .. } if *failed == generation
@@ -2236,8 +2435,113 @@ mod tests {
     }
 
     #[test]
+    fn capture_timeout_cancels_without_joining_and_allows_retry() {
+        let backend = Arc::new(FakeCaptureBackend {
+            desktop_calls: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            fail: false,
+            block_first_until_cancelled: true,
+        });
+        let clock = Arc::new(FakeClock::new(Instant::now()));
+        let mut controller = capture_controller_with_clock(
+            Arc::clone(&backend),
+            [Ok(true), Ok(true)],
+            Arc::new(TestNativeSessionFactory),
+            clock.clone(),
+        );
+        let (_, repaint) = repaint_counter();
+        let first = controller.request_start().unwrap();
+        assert!(
+            controller
+                .poll_capture(Some(1), Arc::clone(&repaint))
+                .park_launcher
+                .is_some()
+        );
+        assert!(
+            controller
+                .poll_capture(Some(1), Arc::clone(&repaint))
+                .capture_started
+        );
+        while backend.calls.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+
+        clock.advance(DESKTOP_CAPTURE_TIMEOUT);
+        let timeout = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(timeout.restore_launcher);
+        assert!(timeout.diagnostic.unwrap().contains("capture timeout"));
+        assert!(matches!(
+            controller.state(),
+            ScreenDrawState::Failed { generation, .. } if *generation == first
+        ));
+
+        let second = controller.request_start().unwrap();
+        assert_ne!(first, second);
+        assert!(
+            controller
+                .poll_capture(Some(1), Arc::clone(&repaint))
+                .park_launcher
+                .is_some()
+        );
+        let completed = poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+        assert!(completed.capture_completed);
+        assert_eq!(
+            controller.state(),
+            &ScreenDrawState::Drawing { generation: second }
+        );
+    }
+
+    #[test]
+    fn cancelling_capture_preparation_uses_shared_cleanup_and_invalidates_generation() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let mut controller = capture_controller(backend, [Ok(false)]);
+        let generation = controller.request_start().unwrap();
+        let (_, repaint) = repaint_counter();
+        let request = controller.poll_capture(Some(1), repaint);
+        assert_eq!(request.park_launcher.unwrap().generation, generation);
+
+        let cancelled = controller.cancel_capture_startup(generation).unwrap();
+        assert!(cancelled.restore_launcher);
+        assert!(cancelled.diagnostic.is_none());
+        assert_eq!(controller.state(), &ScreenDrawState::NoSession);
+        assert!(controller.pending_capture.is_none());
+        assert!(controller.session_snapshot().is_none());
+    }
+
+    #[test]
+    fn native_start_failure_restores_and_a_new_generation_can_retry() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let mut controller = capture_controller_with_native(
+            backend,
+            [Ok(true), Ok(true)],
+            Arc::new(FailingNativeFactory),
+        );
+        let (_, repaint) = repaint_counter();
+        let first = controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        let failure = poll_until(&mut controller, &repaint, |poll| poll.restore_launcher);
+        assert_eq!(
+            failure.diagnostic.as_deref(),
+            Some("fixture native startup failed")
+        );
+        assert!(controller.session_snapshot().is_none());
+        assert!(controller.native_worker.is_none());
+
+        let second = controller.request_start().unwrap();
+        assert_ne!(first, second);
+        assert!(
+            controller
+                .poll_capture(Some(1), repaint)
+                .park_launcher
+                .is_some()
+        );
+    }
+
+    #[test]
     fn new_capture_cancels_worker_and_ignores_stale_completion() {
         let backend = Arc::new(FakeCaptureBackend {
+            desktop_calls: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             fail: false,
             block_first_until_cancelled: true,
@@ -2248,7 +2552,8 @@ mod tests {
         assert!(
             controller
                 .poll_capture(Some(1), Arc::clone(&repaint))
-                .hide_launcher
+                .park_launcher
+                .is_some()
         );
         assert!(
             controller
@@ -2264,7 +2569,8 @@ mod tests {
         assert!(
             controller
                 .poll_capture(Some(1), Arc::clone(&repaint))
-                .hide_launcher
+                .park_launcher
+                .is_some()
         );
         let started = poll_until(&mut controller, &repaint, |poll| poll.capture_started);
         assert!(started.capture_started);
@@ -2289,6 +2595,7 @@ mod tests {
     #[test]
     fn capture_failure_clears_pending_state_and_requests_launcher_restore() {
         let backend = Arc::new(FakeCaptureBackend {
+            desktop_calls: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
             fail: true,
             block_first_until_cancelled: false,
@@ -2299,7 +2606,8 @@ mod tests {
         assert!(
             controller
                 .poll_capture(Some(1), Arc::clone(&repaint))
-                .hide_launcher
+                .park_launcher
+                .is_some()
         );
         assert!(
             controller

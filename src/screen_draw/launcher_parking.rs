@@ -226,6 +226,67 @@ impl Drop for LauncherParkingTransaction {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct LauncherParkingTestObserver {
+    restores: Arc<std::sync::Mutex<Vec<LauncherWindowSnapshot>>>,
+}
+
+#[cfg(test)]
+impl LauncherParkingTestObserver {
+    pub(crate) fn restored_rects(&self) -> Vec<LauncherWindowRect> {
+        self.restores
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|snapshot| snapshot.rect)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+struct GuiTestLauncherWindowApi {
+    snapshot: LauncherWindowSnapshot,
+    restores: Arc<std::sync::Mutex<Vec<LauncherWindowSnapshot>>>,
+}
+
+#[cfg(test)]
+impl LauncherWindowApi for GuiTestLauncherWindowApi {
+    fn snapshot(&self, _hwnd: usize) -> Result<LauncherWindowSnapshot, String> {
+        Ok(self.snapshot)
+    }
+
+    fn park(&self, _hwnd: usize, _position: (i32, i32)) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn restore(&self, snapshot: LauncherWindowSnapshot) -> Result<(), String> {
+        self.restores.lock().unwrap().push(snapshot);
+        Ok(())
+    }
+
+    fn is_capture_safe(&self, _hwnd: usize, _desktop: ScreenRect) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn launcher_parking_test_fixture(
+    generation: ScreenDrawGeneration,
+    rect: LauncherWindowRect,
+    virtual_desktop: ScreenRect,
+) -> (LauncherParkingTransaction, LauncherParkingTestObserver) {
+    let restores = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = Arc::new(GuiTestLauncherWindowApi {
+        snapshot: LauncherWindowSnapshot { hwnd: 42, rect },
+        restores: Arc::clone(&restores),
+    });
+    let transaction =
+        LauncherParkingTransaction::begin_with_api(generation, 42, virtual_desktop, api)
+            .expect("GUI parking fixture has valid geometry");
+    (transaction, LauncherParkingTestObserver { restores })
+}
+
 /// Chooses the first representable capture-safe location in the order right,
 /// left, below, above. All arithmetic is widened so extreme signed desktop
 /// coordinates cannot wrap.

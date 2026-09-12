@@ -303,7 +303,7 @@ mod tests {
         let generation = app.screen_draw_controller.state().generation().unwrap();
         assert!(matches!(
             app.screen_draw_controller.state(),
-            crate::screen_draw::ScreenDrawState::AwaitingLauncherHide { .. }
+            crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
         ));
 
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
