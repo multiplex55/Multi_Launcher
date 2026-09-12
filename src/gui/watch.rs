@@ -202,10 +202,8 @@ impl LauncherApp {
                     self.activate_action(action, None, ActivationSource::Gesture);
                 }
                 WatchEvent::ScreenDrawStart => {
-                    if let Err(error) = self.screen_draw_controller.request_start() {
-                        // A repeated global chord is intentionally a no-op while a
-                        // session (including capture/export handshakes) is active.
-                        tracing::debug!(%error, "ignored Screen Draw launch hotkey");
+                    if let Err(error) = self.start_or_focus_screen_draw() {
+                        self.report_error_message("screen_draw.start", error);
                     }
                 }
                 WatchEvent::ScreenDrawRecover => {
@@ -301,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_draw_launch_event_stages_capture_once() {
+    fn repeated_screen_draw_launch_event_focuses_one_toolbar_without_restarting() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
@@ -312,12 +310,23 @@ mod tests {
             crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
         ));
 
+        ctx.begin_frame(egui::RawInput::default());
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
         app.process_watch_events();
+        app.show_screen_draw_toolbar(&ctx);
+        let _ = ctx.end_frame();
         assert_eq!(
             app.screen_draw_controller.state().generation(),
             Some(generation)
         );
+        assert!(app.screen_draw_controller.toolbar_open());
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
+        app.process_watch_events();
+        let _ = ctx.end_frame();
+        assert!(app.screen_draw_toolbar.was_open);
+        assert_eq!(app.screen_draw_toolbar.focus_request_count, 2);
     }
 
     #[test]

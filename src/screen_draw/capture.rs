@@ -75,6 +75,10 @@ impl ScreenDrawSessionSnapshot {
     pub fn capture(&self) -> &Arc<CapturedRegion> {
         &self.capture
     }
+
+    pub fn virtual_desktop(&self) -> ScreenRect {
+        self.capture.rect()
+    }
 }
 
 pub(crate) trait LauncherVisibilityProbe: Send + Sync {

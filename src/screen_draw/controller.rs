@@ -201,6 +201,7 @@ pub struct ScreenDrawCapturePoll {
     pub restore_launcher: bool,
     pub capture_started: bool,
     pub capture_completed: bool,
+    pub session_completed: bool,
     pub diagnostic: Option<String>,
     pub region_picker_ready: Option<ScreenDrawRegionPickerReady>,
     pub editor_handoff: Option<ScreenDrawEditorHandoff>,
@@ -405,6 +406,15 @@ impl ScreenDrawController {
             .install_emergency_handle(worker.emergency_handle());
         self.native_worker = Some(worker);
         (commands, events)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_test_session_snapshot(
+        &mut self,
+        generation: ScreenDrawGeneration,
+        capture: CapturedRegion,
+    ) {
+        self.session_snapshot = Some(ScreenDrawSessionSnapshot::new(generation, capture));
     }
 
     pub fn request_start(&mut self) -> Result<ScreenDrawGeneration, ScreenDrawTransitionError> {
@@ -1314,7 +1324,10 @@ impl ScreenDrawController {
         if let Some((generation, outcome)) = export_completed {
             self.latest_export_outcome = Some(outcome);
             let _ = self.complete_session(generation);
-            return Some(ScreenDrawCapturePoll::default());
+            return Some(ScreenDrawCapturePoll {
+                session_completed: true,
+                ..ScreenDrawCapturePoll::default()
+            });
         }
         if let Some(message) = export_failure {
             self.export_in_flight = false;
@@ -2027,7 +2040,8 @@ mod tests {
                 outcome: ExportOutcome::Clipboard,
             })
             .unwrap();
-        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        let completion = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(completion.session_completed);
         assert_eq!(controller.state(), &ScreenDrawState::NoSession);
         assert!(controller.session_snapshot().is_none());
         assert!(controller.runtime_state().is_none());
@@ -2190,7 +2204,8 @@ mod tests {
                     outcome: outcome.clone(),
                 })
                 .unwrap();
-            controller.poll_capture(Some(1), Arc::clone(&repaint));
+            let completion = controller.poll_capture(Some(1), Arc::clone(&repaint));
+            assert!(completion.session_completed);
             assert_eq!(controller.state(), &ScreenDrawState::NoSession);
             assert!(!controller.export_in_flight());
             assert!(controller.toolbar_open());

@@ -19,8 +19,7 @@ pub(crate) fn viewport_id() -> egui::ViewportId {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ToolbarAction {
-    Start,
-    NewCapture,
+    Lifecycle(LifecycleAction),
     SetTool(ScreenDrawTool),
     SetColor(RgbaColor),
     SetPaletteColor(usize, RgbaColor),
@@ -32,10 +31,16 @@ enum ToolbarAction {
     ToggleOrientation,
     Clear,
     Ghost,
-    Resume,
     Finish,
     Export(ExportDestination, ExportBackground),
     RegionExport(ExportDestination, ExportBackground),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleAction {
+    Start,
+    NewCapture,
+    Resume,
     Close,
 }
 
@@ -88,12 +93,14 @@ fn controls_for_state(state: &ScreenDrawState) -> &'static [ToolbarControl] {
 
 #[derive(Default)]
 pub(crate) struct ScreenDrawToolbarUi {
-    was_open: bool,
+    pub(super) was_open: bool,
     initial_position_points: Option<egui::Pos2>,
     known_monitors: Vec<DesktopRect>,
     last_physical_position: Option<DesktopPoint>,
     settings_dirty_since: Option<Instant>,
     export_background: ExportBackground,
+    #[cfg(test)]
+    pub(super) focus_request_count: usize,
 }
 
 impl ScreenDrawToolbarUi {
@@ -143,6 +150,158 @@ impl ScreenDrawToolbarUi {
 }
 
 impl super::LauncherApp {
+    pub(super) fn start_or_focus_screen_draw(&mut self) -> Result<bool, String> {
+        if matches!(
+            self.screen_draw_controller.state(),
+            ScreenDrawState::NoSession | ScreenDrawState::Failed { .. }
+        ) {
+            self.screen_draw_controller
+                .request_start()
+                .map_err(|error| error.to_string())?;
+            self.egui_ctx.request_repaint();
+            return Ok(true);
+        }
+
+        self.focus_screen_draw_toolbar();
+        Ok(false)
+    }
+
+    pub(super) fn focus_screen_draw_toolbar(&mut self) {
+        self.screen_draw_controller.open_toolbar();
+        #[cfg(test)]
+        {
+            self.screen_draw_toolbar.focus_request_count += 1;
+        }
+        self.egui_ctx
+            .send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+        self.egui_ctx.request_repaint();
+    }
+
+    pub(super) fn request_new_screen_draw_capture(&mut self) -> Result<(), String> {
+        self.cancel_screen_draw_region_picker();
+        self.screen_draw_controller
+            .request_new_capture()
+            .map_err(|error| error.to_string())?;
+        // Native teardown is requested before the launcher is restored. The
+        // replacement generation cannot capture until SessionClosed arrives.
+        self.restore_screen_draw_launcher_exact()?;
+        self.egui_ctx
+            .send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
+        self.screen_draw_toolbar.was_open = false;
+        Ok(())
+    }
+
+    pub(super) fn resume_screen_draw(&mut self) -> Result<(), String> {
+        let generation = match self.screen_draw_controller.state() {
+            ScreenDrawState::Ghost { generation } | ScreenDrawState::Finish { generation } => {
+                *generation
+            }
+            state => return Err(format!("cannot resume Screen Draw while in {state:?}")),
+        };
+        let virtual_desktop = self
+            .screen_draw_controller
+            .session_snapshot()
+            .map(|snapshot| snapshot.virtual_desktop())
+            .ok_or_else(|| "Screen Draw resume has no retained desktop snapshot".to_string())?;
+
+        if self
+            .screen_draw_launcher_parking
+            .as_ref()
+            .is_some_and(|transaction| transaction.generation() != generation)
+        {
+            if let Some(transaction) = self.screen_draw_launcher_parking.as_mut() {
+                transaction.restore()?;
+            }
+            self.screen_draw_launcher_parking = None;
+        }
+
+        let parking_result = if let Some(transaction) = self.screen_draw_launcher_parking.as_mut() {
+            match transaction.verify() {
+                Ok(true) => Ok(()),
+                Ok(false) => transaction.update_snapshot_before_repark(virtual_desktop),
+                Err(error) => Err(error),
+            }
+        } else {
+            let hwnd = self
+                .launcher_hwnd
+                .ok_or_else(|| "launcher HWND is unavailable for Screen Draw resume".to_string())?;
+            crate::screen_draw::launcher_parking::LauncherParkingTransaction::begin(
+                generation,
+                hwnd,
+                virtual_desktop,
+            )
+            .map(|transaction| self.screen_draw_launcher_parking = Some(transaction))
+        };
+        if let Err(error) = parking_result {
+            let _ = self.restore_screen_draw_launcher_exact();
+            return Err(error);
+        }
+        match self
+            .screen_draw_launcher_parking
+            .as_ref()
+            .expect("resume parking creates or updates one transaction")
+            .verify()
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = self.restore_screen_draw_launcher_exact();
+                return Err("launcher did not reach a capture-safe position for resume".into());
+            }
+            Err(error) => {
+                let _ = self.restore_screen_draw_launcher_exact();
+                return Err(error);
+            }
+        }
+
+        self.visible_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.last_visible = false;
+        self.restore_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Err(error) = self.screen_draw_controller.resume_drawing() {
+            let _ = self.restore_screen_draw_launcher_exact();
+            return Err(error.to_string());
+        }
+        self.screen_draw_launcher_parking
+            .as_mut()
+            .expect("verified resume parking remains owned")
+            .commit_hidden();
+        Ok(())
+    }
+
+    pub(super) fn close_screen_draw_session(&mut self) -> Result<(), String> {
+        self.cancel_screen_draw_region_picker();
+        // Controller close disarms native input before launcher restoration.
+        self.screen_draw_controller.close();
+        self.restore_screen_draw_launcher_exact()?;
+        self.egui_ctx
+            .send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
+        self.screen_draw_toolbar.was_open = false;
+        Ok(())
+    }
+
+    fn apply_screen_draw_lifecycle(
+        &mut self,
+        action: LifecycleAction,
+    ) -> Result<ActionEffect, String> {
+        let mut effect = ActionEffect::default();
+        match action {
+            LifecycleAction::Start => {
+                effect.close_viewport = self.start_or_focus_screen_draw()?;
+            }
+            LifecycleAction::NewCapture => {
+                self.request_new_screen_draw_capture()?;
+                effect.close_viewport = true;
+            }
+            LifecycleAction::Resume => self.resume_screen_draw()?,
+            LifecycleAction::Close => {
+                self.close_screen_draw_session()?;
+                effect.close_viewport = true;
+            }
+        }
+        Ok(effect)
+    }
+
     pub(super) fn show_screen_draw_toolbar(&mut self, ctx: &egui::Context) {
         let open = self.screen_draw_controller.toolbar_open();
         if !open {
@@ -218,7 +377,7 @@ impl super::LauncherApp {
             self.screen_draw_controller.update_settings(updated);
         }
         if close_requested {
-            actions.push(ToolbarAction::Close);
+            actions.push(ToolbarAction::Lifecycle(LifecycleAction::Close));
         }
         if escape_pressed {
             actions.insert(0, ToolbarAction::Ghost);
@@ -227,7 +386,11 @@ impl super::LauncherApp {
         let mut preferences_changed = false;
         let mut should_close_viewport = false;
         for action in actions {
-            match apply_toolbar_action(&mut self.screen_draw_controller, action) {
+            let result = match action {
+                ToolbarAction::Lifecycle(action) => self.apply_screen_draw_lifecycle(action),
+                action => apply_controller_toolbar_action(&mut self.screen_draw_controller, action),
+            };
+            match result {
                 Ok(effect) => {
                     preferences_changed |= effect.preferences_changed;
                     should_close_viewport |= effect.close_viewport;
@@ -238,11 +401,9 @@ impl super::LauncherApp {
         if preferences_changed {
             self.screen_draw_toolbar.mark_dirty();
         }
-        if should_close_viewport && let Err(error) = self.restore_screen_draw_launcher_exact() {
-            self.report_error_message("screen_draw.restore", error);
-        }
         if should_close_viewport || !self.screen_draw_controller.toolbar_open() {
-            // `ToolbarAction::Close` tears down the native session first.
+            // Lifecycle actions perform their launcher work before requesting
+            // this viewport-only close.
             ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
             self.screen_draw_toolbar.was_open = false;
         }
@@ -295,24 +456,13 @@ struct ActionEffect {
     close_viewport: bool,
 }
 
-fn apply_toolbar_action(
+fn apply_controller_toolbar_action(
     controller: &mut ScreenDrawController,
     action: ToolbarAction,
 ) -> Result<ActionEffect, String> {
     let mut effect = ActionEffect::default();
     match action {
-        ToolbarAction::Start => {
-            controller
-                .request_start()
-                .map_err(|error| error.to_string())?;
-            effect.close_viewport = true;
-        }
-        ToolbarAction::NewCapture => {
-            controller
-                .request_new_capture()
-                .map_err(|error| error.to_string())?;
-            effect.close_viewport = true;
-        }
+        ToolbarAction::Lifecycle(_) => unreachable!("lifecycle actions are owned by LauncherApp"),
         ToolbarAction::SetTool(tool) => {
             if active_session(controller.state()) {
                 controller
@@ -395,9 +545,6 @@ fn apply_toolbar_action(
         ToolbarAction::Ghost => controller
             .enter_ghost()
             .map_err(|error| error.to_string())?,
-        ToolbarAction::Resume => controller
-            .resume_drawing()
-            .map_err(|error| error.to_string())?,
         ToolbarAction::Finish => controller.finish().map_err(|error| error.to_string())?,
         ToolbarAction::Export(destination, background) => controller
             .request_export(ExportRequest {
@@ -410,10 +557,6 @@ fn apply_toolbar_action(
             controller
                 .begin_region_selection(background, destination)
                 .map_err(|error| error.to_string())?;
-            effect.close_viewport = true;
-        }
-        ToolbarAction::Close => {
-            controller.close();
             effect.close_viewport = true;
         }
     }
@@ -493,7 +636,7 @@ fn render_toolbar_contents(
     match state {
         ScreenDrawState::NoSession | ScreenDrawState::Failed { .. } => {
             if ui.button("Start / New Capture").clicked() {
-                actions.push(ToolbarAction::Start);
+                actions.push(ToolbarAction::Lifecycle(LifecycleAction::Start));
             }
             if let ScreenDrawState::Failed { message, .. } = state {
                 ui.colored_label(egui::Color32::LIGHT_RED, message);
@@ -501,7 +644,7 @@ fn render_toolbar_contents(
             idle_preferences(ui, settings, actions);
             ui.separator();
             if ui.button("Close Toolbar").clicked() {
-                actions.push(ToolbarAction::Close);
+                actions.push(ToolbarAction::Lifecycle(LifecycleAction::Close));
             }
         }
         ScreenDrawState::Drawing { .. } => {
@@ -516,7 +659,7 @@ fn render_toolbar_contents(
         }
         ScreenDrawState::Ghost { .. } => {
             if ui.button("Resume Drawing").clicked() {
-                actions.push(ToolbarAction::Resume);
+                actions.push(ToolbarAction::Lifecycle(LifecycleAction::Resume));
             }
             history_controls(ui, actions);
             visibility_controls(ui, runtime, actions);
@@ -531,7 +674,7 @@ fn render_toolbar_contents(
         }
         ScreenDrawState::Finish { .. } => {
             if ui.button("Resume Drawing").clicked() {
-                actions.push(ToolbarAction::Resume);
+                actions.push(ToolbarAction::Lifecycle(LifecycleAction::Resume));
             }
             visibility_controls(ui, runtime, actions);
             export_controls(
@@ -890,10 +1033,10 @@ fn visibility_controls(
 fn session_controls(ui: &mut egui::Ui, actions: &mut Vec<ToolbarAction>) {
     ui.separator();
     if ui.button("Discard / New Capture").clicked() {
-        actions.push(ToolbarAction::NewCapture);
+        actions.push(ToolbarAction::Lifecycle(LifecycleAction::NewCapture));
     }
     if ui.button("Close Screen Draw").clicked() {
-        actions.push(ToolbarAction::Close);
+        actions.push(ToolbarAction::Lifecycle(LifecycleAction::Close));
     }
 }
 
@@ -1112,7 +1255,8 @@ mod tests {
         );
         let mut controller = ScreenDrawController::default();
         let effect =
-            apply_toolbar_action(&mut controller, ToolbarAction::ToggleOrientation).unwrap();
+            apply_controller_toolbar_action(&mut controller, ToolbarAction::ToggleOrientation)
+                .unwrap();
         assert!(effect.preferences_changed);
         assert_eq!(
             controller.settings().toolbar_orientation,
@@ -1197,16 +1341,6 @@ mod tests {
     }
 
     #[test]
-    fn close_action_finishes_teardown_before_requesting_viewport_close() {
-        let mut controller = ScreenDrawController::default();
-        controller.open_toolbar();
-        let effect = apply_toolbar_action(&mut controller, ToolbarAction::Close).unwrap();
-        assert_eq!(controller.state(), &ScreenDrawState::NoSession);
-        assert!(!controller.toolbar_open());
-        assert!(effect.close_viewport);
-    }
-
-    #[test]
     fn idle_preference_actions_update_defaults_without_starting_a_session() {
         let mut controller = ScreenDrawController::default();
         for action in [
@@ -1217,7 +1351,7 @@ mod tests {
             ToolbarAction::SetBackground(CanvasBackground::Black),
         ] {
             assert!(
-                apply_toolbar_action(&mut controller, action)
+                apply_controller_toolbar_action(&mut controller, action)
                     .unwrap()
                     .preferences_changed
             );

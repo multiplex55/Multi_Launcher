@@ -202,6 +202,12 @@ impl LauncherParkingTransaction {
     ) -> Result<(), String> {
         let snapshot = self.window_api.snapshot(self.original_snapshot.hwnd)?;
         let (width, height) = snapshot.rect.dimensions()?;
+        // Publish the fresh restore point before any fallible parking work so
+        // recovery can never fall back to geometry captured before the user
+        // moved or resized the restored launcher.
+        self.original_snapshot = snapshot;
+        self.virtual_desktop = virtual_desktop;
+        self.state = LauncherParkingState::Restored;
         let position = compute_capture_safe_parking_position(
             virtual_desktop,
             width,
@@ -210,9 +216,7 @@ impl LauncherParkingTransaction {
         )?;
         self.window_api.park(snapshot.hwnd, position)?;
 
-        self.original_snapshot = snapshot;
         self.parked_rect = rect_at(position, width, height)?;
-        self.virtual_desktop = virtual_desktop;
         self.state = LauncherParkingState::Active;
         Ok(())
     }
@@ -230,6 +234,8 @@ impl Drop for LauncherParkingTransaction {
 #[derive(Clone)]
 pub(crate) struct LauncherParkingTestObserver {
     restores: Arc<std::sync::Mutex<Vec<LauncherWindowSnapshot>>>,
+    current: Arc<std::sync::Mutex<LauncherWindowSnapshot>>,
+    fail_next_park: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(test)]
@@ -242,26 +248,50 @@ impl LauncherParkingTestObserver {
             .map(|snapshot| snapshot.rect)
             .collect()
     }
+
+    pub(crate) fn set_current_rect(&self, rect: LauncherWindowRect) {
+        self.current.lock().unwrap().rect = rect;
+    }
+
+    pub(crate) fn current_rect(&self) -> LauncherWindowRect {
+        self.current.lock().unwrap().rect
+    }
+
+    pub(crate) fn fail_next_park(&self) {
+        self.fail_next_park
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(test)]
 struct GuiTestLauncherWindowApi {
-    snapshot: LauncherWindowSnapshot,
+    current: Arc<std::sync::Mutex<LauncherWindowSnapshot>>,
     restores: Arc<std::sync::Mutex<Vec<LauncherWindowSnapshot>>>,
+    fail_next_park: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(test)]
 impl LauncherWindowApi for GuiTestLauncherWindowApi {
     fn snapshot(&self, _hwnd: usize) -> Result<LauncherWindowSnapshot, String> {
-        Ok(self.snapshot)
+        Ok(*self.current.lock().unwrap())
     }
 
-    fn park(&self, _hwnd: usize, _position: (i32, i32)) -> Result<(), String> {
+    fn park(&self, _hwnd: usize, position: (i32, i32)) -> Result<(), String> {
+        if self
+            .fail_next_park
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err("fixture launcher park failed".into());
+        }
+        let mut current = self.current.lock().unwrap();
+        let (width, height) = current.rect.dimensions()?;
+        current.rect = rect_at(position, width, height)?;
         Ok(())
     }
 
     fn restore(&self, snapshot: LauncherWindowSnapshot) -> Result<(), String> {
         self.restores.lock().unwrap().push(snapshot);
+        *self.current.lock().unwrap() = snapshot;
         Ok(())
     }
 
@@ -277,14 +307,27 @@ pub(crate) fn launcher_parking_test_fixture(
     virtual_desktop: ScreenRect,
 ) -> (LauncherParkingTransaction, LauncherParkingTestObserver) {
     let restores = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let current = Arc::new(std::sync::Mutex::new(LauncherWindowSnapshot {
+        hwnd: 42,
+        rect,
+    }));
+    let fail_next_park = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let api = Arc::new(GuiTestLauncherWindowApi {
-        snapshot: LauncherWindowSnapshot { hwnd: 42, rect },
+        current: Arc::clone(&current),
         restores: Arc::clone(&restores),
+        fail_next_park: Arc::clone(&fail_next_park),
     });
     let transaction =
         LauncherParkingTransaction::begin_with_api(generation, 42, virtual_desktop, api)
             .expect("GUI parking fixture has valid geometry");
-    (transaction, LauncherParkingTestObserver { restores })
+    (
+        transaction,
+        LauncherParkingTestObserver {
+            restores,
+            current,
+            fail_next_park,
+        },
+    )
 }
 
 /// Chooses the first representable capture-safe location in the order right,
