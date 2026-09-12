@@ -2,6 +2,11 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::hotkey::Key as HotkeyKey;
+use crate::screen_draw::hotkeys::{
+    LocalShortcutAction, LocalShortcutInput, LocalShortcutKey, LocalShortcutModifiers,
+    resolve_local_shortcut,
+};
 use crate::screen_draw::window_layers::{
     ScreenDrawToolbarNativeBridge, SystemToolbarWindowBackend, TOOLBAR_WINDOW_TITLE,
     desktop_rect_from_logical_edges,
@@ -391,6 +396,12 @@ impl super::LauncherApp {
                 &mut export_background,
                 &mut actions,
             );
+            let shortcut_actions = consume_toolbar_local_shortcuts(child, &state, &settings);
+            let thickness = runtime.map_or(settings.default_thickness, |state| state.thickness);
+            actions.extend(toolbar_actions_for_local_shortcuts(
+                shortcut_actions,
+                thickness,
+            ));
             child.input(|input| {
                 let viewport = input.viewport();
                 observed_position = viewport.outer_rect.map(|rect| rect.min);
@@ -519,6 +530,213 @@ fn consume_drawing_escape(ctx: &egui::Context, state: &ScreenDrawState) -> bool 
             let modifiers = input.modifiers;
             input.consume_key(modifiers, egui::Key::Escape)
         })
+}
+
+fn consume_toolbar_local_shortcuts(
+    ctx: &egui::Context,
+    state: &ScreenDrawState,
+    settings: &ScreenDrawSettings,
+) -> Vec<LocalShortcutAction> {
+    consume_toolbar_local_shortcuts_with_win_modifier(
+        ctx,
+        state,
+        settings,
+        current_egui_win_modifier,
+    )
+}
+
+fn consume_toolbar_local_shortcuts_with_win_modifier(
+    ctx: &egui::Context,
+    state: &ScreenDrawState,
+    settings: &ScreenDrawSettings,
+    mut read_win_modifier: impl FnMut() -> bool,
+) -> Vec<LocalShortcutAction> {
+    if !matches!(state, ScreenDrawState::Drawing { .. })
+        || !ctx.input(|input| input.focused)
+        || toolbar_text_editing_owns_keyboard(ctx)
+    {
+        return Vec::new();
+    }
+
+    ctx.input_mut(|input| {
+        let mut actions = Vec::new();
+        let mut win = None;
+        input.events.retain(|event| {
+            let egui::Event::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+                ..
+            } = event
+            else {
+                return true;
+            };
+            let Some(key) = egui_key_to_local_shortcut(*key) else {
+                return true;
+            };
+            let win = *win.get_or_insert_with(&mut read_win_modifier);
+            let shortcut_input = egui_local_shortcut_input(key, *modifiers, win, false);
+            let Some(action) = resolve_local_shortcut(settings, shortcut_input) else {
+                return true;
+            };
+            actions.push(action);
+            false
+        });
+        actions
+    })
+}
+
+fn egui_local_shortcut_input(
+    key: LocalShortcutKey,
+    modifiers: egui::Modifiers,
+    win: bool,
+    text_editing: bool,
+) -> LocalShortcutInput {
+    LocalShortcutInput {
+        key,
+        modifiers: LocalShortcutModifiers {
+            alt: modifiers.alt,
+            ctrl: modifiers.ctrl,
+            shift: modifiers.shift,
+            win,
+        },
+        text_editing,
+    }
+}
+
+fn toolbar_text_editing_owns_keyboard(ctx: &egui::Context) -> bool {
+    if !ctx.wants_keyboard_input() {
+        return false;
+    }
+    let focused = ctx.memory(|memory| memory.focused());
+    focused.is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+}
+
+fn toolbar_action_for_local_shortcut(action: LocalShortcutAction, thickness: f32) -> ToolbarAction {
+    match action {
+        LocalShortcutAction::Tool(tool) => ToolbarAction::SetTool(tool),
+        LocalShortcutAction::Undo => ToolbarAction::Undo,
+        LocalShortcutAction::Redo => ToolbarAction::Redo,
+        LocalShortcutAction::IncreaseThickness => {
+            ToolbarAction::SetThickness((thickness + 1.0).clamp(0.5, 64.0))
+        }
+        LocalShortcutAction::DecreaseThickness => {
+            ToolbarAction::SetThickness((thickness - 1.0).clamp(0.5, 64.0))
+        }
+        LocalShortcutAction::Color(color) => ToolbarAction::SetColor(color),
+    }
+}
+
+fn toolbar_actions_for_local_shortcuts(
+    actions: Vec<LocalShortcutAction>,
+    initial_thickness: f32,
+) -> Vec<ToolbarAction> {
+    let mut thickness = initial_thickness;
+    actions
+        .into_iter()
+        .map(|action| {
+            let action = toolbar_action_for_local_shortcut(action, thickness);
+            if let ToolbarAction::SetThickness(next) = action {
+                thickness = next;
+            }
+            action
+        })
+        .collect()
+}
+
+fn egui_key_to_local_shortcut(key: egui::Key) -> Option<LocalShortcutKey> {
+    let key = match key {
+        egui::Key::OpenBracket => return Some(LocalShortcutKey::OpenBracket),
+        egui::Key::CloseBracket => return Some(LocalShortcutKey::CloseBracket),
+        egui::Key::Space => HotkeyKey::Space,
+        egui::Key::Tab => HotkeyKey::Tab,
+        egui::Key::Enter => HotkeyKey::Return,
+        egui::Key::Delete => HotkeyKey::Delete,
+        egui::Key::Backspace => HotkeyKey::Backspace,
+        egui::Key::Home => HotkeyKey::Home,
+        egui::Key::End => HotkeyKey::End,
+        egui::Key::PageUp => HotkeyKey::PageUp,
+        egui::Key::PageDown => HotkeyKey::PageDown,
+        egui::Key::ArrowLeft => HotkeyKey::LeftArrow,
+        egui::Key::ArrowUp => HotkeyKey::UpArrow,
+        egui::Key::ArrowRight => HotkeyKey::RightArrow,
+        egui::Key::ArrowDown => HotkeyKey::DownArrow,
+        egui::Key::Num0 => HotkeyKey::Num0,
+        egui::Key::Num1 => HotkeyKey::Num1,
+        egui::Key::Num2 => HotkeyKey::Num2,
+        egui::Key::Num3 => HotkeyKey::Num3,
+        egui::Key::Num4 => HotkeyKey::Num4,
+        egui::Key::Num5 => HotkeyKey::Num5,
+        egui::Key::Num6 => HotkeyKey::Num6,
+        egui::Key::Num7 => HotkeyKey::Num7,
+        egui::Key::Num8 => HotkeyKey::Num8,
+        egui::Key::Num9 => HotkeyKey::Num9,
+        egui::Key::A => HotkeyKey::KeyA,
+        egui::Key::B => HotkeyKey::KeyB,
+        egui::Key::C => HotkeyKey::KeyC,
+        egui::Key::D => HotkeyKey::KeyD,
+        egui::Key::E => HotkeyKey::KeyE,
+        egui::Key::F => HotkeyKey::KeyF,
+        egui::Key::G => HotkeyKey::KeyG,
+        egui::Key::H => HotkeyKey::KeyH,
+        egui::Key::I => HotkeyKey::KeyI,
+        egui::Key::J => HotkeyKey::KeyJ,
+        egui::Key::K => HotkeyKey::KeyK,
+        egui::Key::L => HotkeyKey::KeyL,
+        egui::Key::M => HotkeyKey::KeyM,
+        egui::Key::N => HotkeyKey::KeyN,
+        egui::Key::O => HotkeyKey::KeyO,
+        egui::Key::P => HotkeyKey::KeyP,
+        egui::Key::Q => HotkeyKey::KeyQ,
+        egui::Key::R => HotkeyKey::KeyR,
+        egui::Key::S => HotkeyKey::KeyS,
+        egui::Key::T => HotkeyKey::KeyT,
+        egui::Key::U => HotkeyKey::KeyU,
+        egui::Key::V => HotkeyKey::KeyV,
+        egui::Key::W => HotkeyKey::KeyW,
+        egui::Key::X => HotkeyKey::KeyX,
+        egui::Key::Y => HotkeyKey::KeyY,
+        egui::Key::Z => HotkeyKey::KeyZ,
+        egui::Key::F1 => HotkeyKey::F1,
+        egui::Key::F2 => HotkeyKey::F2,
+        egui::Key::F3 => HotkeyKey::F3,
+        egui::Key::F4 => HotkeyKey::F4,
+        egui::Key::F5 => HotkeyKey::F5,
+        egui::Key::F6 => HotkeyKey::F6,
+        egui::Key::F7 => HotkeyKey::F7,
+        egui::Key::F8 => HotkeyKey::F8,
+        egui::Key::F9 => HotkeyKey::F9,
+        egui::Key::F10 => HotkeyKey::F10,
+        egui::Key::F11 => HotkeyKey::F11,
+        egui::Key::F12 => HotkeyKey::F12,
+        egui::Key::F13 => HotkeyKey::F13,
+        egui::Key::F14 => HotkeyKey::F14,
+        egui::Key::F15 => HotkeyKey::F15,
+        egui::Key::F16 => HotkeyKey::F16,
+        egui::Key::F17 => HotkeyKey::F17,
+        egui::Key::F18 => HotkeyKey::F18,
+        egui::Key::F19 => HotkeyKey::F19,
+        egui::Key::F20 => HotkeyKey::F20,
+        egui::Key::F21 => HotkeyKey::F21,
+        egui::Key::F22 => HotkeyKey::F22,
+        egui::Key::F23 => HotkeyKey::F23,
+        egui::Key::F24 => HotkeyKey::F24,
+        _ => return None,
+    };
+    Some(LocalShortcutKey::Standard(key))
+}
+
+#[cfg(target_os = "windows")]
+fn current_egui_win_modifier() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+
+    unsafe { GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_egui_win_modifier() -> bool {
+    false
 }
 
 #[derive(Default)]
@@ -1247,6 +1465,51 @@ mod tests {
     use super::*;
     use crate::screen_draw::ScreenDrawGeneration;
 
+    fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn key_release(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn ctrl() -> egui::Modifiers {
+        egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        }
+    }
+
+    fn ctrl_shift() -> egui::Modifiers {
+        egui::Modifiers {
+            ctrl: true,
+            shift: true,
+            command: true,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn focused_toolbar_escape_is_consumed_and_requests_safe_pause_only_while_drawing() {
         let generation = ScreenDrawGeneration::from_raw(1);
@@ -1274,6 +1537,300 @@ mod tests {
             }
             let _ = ctx.end_frame();
         }
+    }
+
+    #[test]
+    fn toolbar_drawing_shortcuts_route_every_local_action_once() {
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(1),
+        };
+        let settings = ScreenDrawSettings::default();
+        let ctx = egui::Context::default();
+        ctx.begin_frame(raw_input(vec![
+            key_press(egui::Key::P, egui::Modifiers::NONE),
+            key_press(egui::Key::Z, ctrl()),
+            key_release(egui::Key::Z, ctrl()),
+            key_press(egui::Key::Y, ctrl()),
+            key_press(egui::Key::Z, ctrl_shift()),
+            key_press(egui::Key::OpenBracket, egui::Modifiers::NONE),
+            key_press(egui::Key::CloseBracket, egui::Modifiers::NONE),
+            key_press(egui::Key::Num1, egui::Modifiers::NONE),
+        ]));
+
+        let resolved = consume_toolbar_local_shortcuts(&ctx, &state, &settings);
+        assert_eq!(
+            resolved,
+            vec![
+                LocalShortcutAction::Tool(ScreenDrawTool::Pen),
+                LocalShortcutAction::Undo,
+                LocalShortcutAction::Redo,
+                LocalShortcutAction::Redo,
+                LocalShortcutAction::DecreaseThickness,
+                LocalShortcutAction::IncreaseThickness,
+                LocalShortcutAction::Color(settings.palette[0]),
+            ]
+        );
+        assert_eq!(
+            toolbar_actions_for_local_shortcuts(resolved, 3.0),
+            vec![
+                ToolbarAction::SetTool(ScreenDrawTool::Pen),
+                ToolbarAction::Undo,
+                ToolbarAction::Redo,
+                ToolbarAction::Redo,
+                ToolbarAction::SetThickness(2.0),
+                ToolbarAction::SetThickness(3.0),
+                ToolbarAction::SetColor(settings.palette[0]),
+            ]
+        );
+        assert_eq!(ctx.input(|input| input.events.len()), 1);
+        assert!(
+            ctx.input(|input| matches!(input.events[0], egui::Event::Key { pressed: false, .. }))
+        );
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn configured_toolbar_shortcut_and_native_adapter_have_resolver_parity() {
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(1),
+        };
+        let mut settings = ScreenDrawSettings::default();
+        settings.tool_hotkeys.insert(
+            ScreenDrawTool::Rectangle,
+            crate::screen_draw::HotkeyChord::from_unchecked("Ctrl+F12"),
+        );
+        let egui_input = egui_local_shortcut_input(
+            egui_key_to_local_shortcut(egui::Key::F12).unwrap(),
+            ctrl(),
+            false,
+            false,
+        );
+        let native_input = LocalShortcutInput::from_native(0x7B, 0x0002, false).unwrap();
+        assert_eq!(
+            resolve_local_shortcut(&settings, egui_input),
+            resolve_local_shortcut(&settings, native_input)
+        );
+
+        let ctx = egui::Context::default();
+        ctx.begin_frame(raw_input(vec![key_press(egui::Key::F12, ctrl())]));
+        assert_eq!(
+            consume_toolbar_local_shortcuts(&ctx, &state, &settings),
+            vec![LocalShortcutAction::Tool(ScreenDrawTool::Rectangle)]
+        );
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn toolbar_shortcuts_leave_unrelated_and_repeated_events_unconsumed() {
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(1),
+        };
+        let settings = ScreenDrawSettings::default();
+        let ctx = egui::Context::default();
+        ctx.begin_frame(raw_input(vec![key_press(
+            egui::Key::P,
+            egui::Modifiers::NONE,
+        )]));
+        assert_eq!(
+            consume_toolbar_local_shortcuts(&ctx, &state, &settings),
+            vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
+        );
+        let _ = ctx.end_frame();
+
+        let mut repeated = key_press(egui::Key::P, egui::Modifiers::NONE);
+        if let egui::Event::Key { repeat, .. } = &mut repeated {
+            *repeat = true;
+        }
+        ctx.begin_frame(raw_input(vec![
+            repeated,
+            key_press(egui::Key::F24, egui::Modifiers::NONE),
+        ]));
+        assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
+        assert_eq!(ctx.input(|input| input.events.len()), 2);
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn idle_unsupported_and_repeat_only_input_do_not_query_win_modifier_state() {
+        use std::cell::Cell;
+
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(1),
+        };
+        let settings = ScreenDrawSettings::default();
+        let reads = Cell::new(0);
+        let mut read_win = || {
+            reads.set(reads.get() + 1);
+            false
+        };
+
+        let empty = egui::Context::default();
+        empty.begin_frame(raw_input(Vec::new()));
+        assert!(
+            consume_toolbar_local_shortcuts_with_win_modifier(
+                &empty,
+                &state,
+                &settings,
+                &mut read_win,
+            )
+            .is_empty()
+        );
+        assert_eq!(reads.get(), 0);
+        let _ = empty.end_frame();
+
+        let unsupported = egui::Context::default();
+        unsupported.begin_frame(raw_input(vec![key_press(
+            egui::Key::Comma,
+            egui::Modifiers::NONE,
+        )]));
+        assert!(
+            consume_toolbar_local_shortcuts_with_win_modifier(
+                &unsupported,
+                &state,
+                &settings,
+                &mut read_win,
+            )
+            .is_empty()
+        );
+        assert_eq!(reads.get(), 0);
+        let _ = unsupported.end_frame();
+
+        let repeated = egui::Context::default();
+        repeated.begin_frame(raw_input(vec![key_press(
+            egui::Key::P,
+            egui::Modifiers::NONE,
+        )]));
+        assert_eq!(
+            consume_toolbar_local_shortcuts(&repeated, &state, &settings),
+            vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
+        );
+        let _ = repeated.end_frame();
+        let mut repeated_press = key_press(egui::Key::P, egui::Modifiers::NONE);
+        if let egui::Event::Key { repeat, .. } = &mut repeated_press {
+            *repeat = true;
+        }
+        repeated.begin_frame(raw_input(vec![repeated_press]));
+        assert!(
+            consume_toolbar_local_shortcuts_with_win_modifier(
+                &repeated,
+                &state,
+                &settings,
+                &mut read_win,
+            )
+            .is_empty()
+        );
+        assert_eq!(reads.get(), 0);
+        let _ = repeated.end_frame();
+    }
+
+    #[test]
+    fn batched_thickness_shortcuts_evolve_from_each_previous_action() {
+        assert_eq!(
+            toolbar_actions_for_local_shortcuts(
+                vec![
+                    LocalShortcutAction::DecreaseThickness,
+                    LocalShortcutAction::IncreaseThickness,
+                ],
+                3.0,
+            ),
+            vec![
+                ToolbarAction::SetThickness(2.0),
+                ToolbarAction::SetThickness(3.0),
+            ]
+        );
+        assert_eq!(
+            toolbar_actions_for_local_shortcuts(
+                vec![
+                    LocalShortcutAction::IncreaseThickness,
+                    LocalShortcutAction::IncreaseThickness,
+                ],
+                3.0,
+            ),
+            vec![
+                ToolbarAction::SetThickness(4.0),
+                ToolbarAction::SetThickness(5.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn toolbar_shortcuts_are_ignored_outside_drawing_or_without_viewport_focus() {
+        let generation = ScreenDrawGeneration::from_raw(1);
+        let settings = ScreenDrawSettings::default();
+        for (state, focused) in [
+            (ScreenDrawState::Ghost { generation }, true),
+            (ScreenDrawState::Finish { generation }, true),
+            (ScreenDrawState::Drawing { generation }, false),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.begin_frame(egui::RawInput {
+                focused,
+                events: vec![key_press(egui::Key::P, egui::Modifiers::NONE)],
+                ..Default::default()
+            });
+            assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
+            assert_eq!(ctx.input(|input| input.events.len()), 1);
+            let _ = ctx.end_frame();
+        }
+    }
+
+    #[test]
+    fn real_text_edit_focus_suppresses_toolbar_shortcuts_but_button_focus_does_not() {
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(1),
+        };
+        let settings = ScreenDrawSettings::default();
+
+        let text_ctx = egui::Context::default();
+        text_ctx.begin_frame(raw_input(Vec::new()));
+        let mut text = String::new();
+        egui::CentralPanel::default().show(&text_ctx, |ui| {
+            ui.text_edit_singleline(&mut text).request_focus();
+        });
+        let _ = text_ctx.end_frame();
+        text_ctx.begin_frame(raw_input(vec![key_press(
+            egui::Key::P,
+            egui::Modifiers::NONE,
+        )]));
+        assert!(toolbar_text_editing_owns_keyboard(&text_ctx));
+        assert!(consume_toolbar_local_shortcuts(&text_ctx, &state, &settings).is_empty());
+        assert_eq!(text_ctx.input(|input| input.events.len()), 1);
+        let _ = text_ctx.end_frame();
+
+        let button_ctx = egui::Context::default();
+        button_ctx.begin_frame(raw_input(Vec::new()));
+        egui::CentralPanel::default().show(&button_ctx, |ui| {
+            ui.button("Focused button").request_focus();
+        });
+        let _ = button_ctx.end_frame();
+        button_ctx.begin_frame(raw_input(vec![key_press(
+            egui::Key::P,
+            egui::Modifiers::NONE,
+        )]));
+        assert!(button_ctx.wants_keyboard_input());
+        assert!(!toolbar_text_editing_owns_keyboard(&button_ctx));
+        assert_eq!(
+            consume_toolbar_local_shortcuts(&button_ctx, &state, &settings),
+            vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
+        );
+        let _ = button_ctx.end_frame();
+    }
+
+    #[test]
+    fn escape_remains_owned_by_the_drawing_lifecycle_path() {
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(1),
+        };
+        let settings = ScreenDrawSettings::default();
+        let ctx = egui::Context::default();
+        ctx.begin_frame(raw_input(vec![key_press(
+            egui::Key::Escape,
+            egui::Modifiers::NONE,
+        )]));
+        assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
+        assert!(consume_drawing_escape(&ctx, &state));
+        assert!(ctx.input(|input| input.events.is_empty()));
+        let _ = ctx.end_frame();
     }
 
     #[test]

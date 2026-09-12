@@ -754,7 +754,9 @@ mod windows_canvas {
     use windows::core::{PCWSTR, w};
 
     use super::*;
-    use crate::screen_draw::hotkeys::{LocalShortcutAction, local_shortcut};
+    use crate::screen_draw::hotkeys::{
+        LocalShortcutAction, LocalShortcutInput, resolve_local_shortcut,
+    };
     use crate::screen_draw::native_overlay::NativeOverlaySurface;
     use crate::screen_draw::window_layers::{
         ToolbarWindowInfo, ToolbarZOrderCeiling, interactive_canvas_extended_style,
@@ -1203,7 +1205,7 @@ mod windows_canvas {
             }
         }
 
-        fn handle_key(&mut self, virtual_key: u32) -> bool {
+        fn handle_key(&mut self, virtual_key: u32, repeat: bool) -> bool {
             if virtual_key == 0x1B {
                 return false;
             }
@@ -1237,13 +1239,16 @@ mod windows_canvas {
                     _ => {}
                 }
             }
+            if repeat {
+                return false;
+            }
             let modifiers = current_modifiers();
-            let Some(action) = local_shortcut(
-                &self.settings,
-                virtual_key,
-                modifiers,
-                self.canvas.text_editing(),
-            ) else {
+            let Some(input) =
+                LocalShortcutInput::from_native(virtual_key, modifiers, self.canvas.text_editing())
+            else {
+                return false;
+            };
+            let Some(action) = resolve_local_shortcut(&self.settings, input) else {
                 return false;
             };
             match action {
@@ -1430,11 +1435,12 @@ mod windows_canvas {
                 LRESULT(0)
             }
             WM_KEYDOWN => {
-                if wparam.0 == 0x1b {
+                let repeat = lparam.0 & (1 << 30) != 0;
+                if wparam.0 == 0x1b && !repeat {
                     state.canvas.cancel_active();
                     (state.event)(CanvasEvent::Escape);
                 } else {
-                    state.handle_key(wparam.0 as u32);
+                    state.handle_key(wparam.0 as u32, repeat);
                 }
                 LRESULT(0)
             }

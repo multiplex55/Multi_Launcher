@@ -10,7 +10,7 @@ pub mod document;
 pub mod export;
 pub mod geometry;
 pub mod hit_test;
-mod hotkeys;
+pub(crate) mod hotkeys;
 pub(crate) mod launcher_parking;
 pub mod model;
 mod native_canvas;

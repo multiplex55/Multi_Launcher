@@ -132,53 +132,90 @@ pub(crate) enum LocalShortcutAction {
     Color(RgbaColor),
 }
 
-/// Resolves canvas-local shortcuts. This is deliberately called only by the
-/// focused Drawing canvas; Ghost has no input surface and therefore cannot
-/// consume these keys.
-pub(crate) fn local_shortcut(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalShortcutKey {
+    Standard(Key),
+    OpenBracket,
+    CloseBracket,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LocalShortcutModifiers {
+    pub alt: bool,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub win: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalShortcutInput {
+    pub key: LocalShortcutKey,
+    pub modifiers: LocalShortcutModifiers,
+    pub text_editing: bool,
+}
+
+impl LocalShortcutInput {
+    pub(crate) fn from_native(
+        virtual_key: u32,
+        modifiers: u32,
+        text_editing: bool,
+    ) -> Option<Self> {
+        Some(Self {
+            key: native_virtual_key_to_local_key(virtual_key)?,
+            modifiers: LocalShortcutModifiers {
+                alt: modifiers & MOD_ALT_VALUE != 0,
+                ctrl: modifiers & MOD_CONTROL_VALUE != 0,
+                shift: modifiers & MOD_SHIFT_VALUE != 0,
+                win: modifiers & MOD_WIN_VALUE != 0,
+            },
+            text_editing,
+        })
+    }
+}
+
+/// Resolves all focused Screen Draw shortcuts through one platform-neutral
+/// boundary. Native canvas and egui toolbar events are adapted before they
+/// reach this table.
+pub(crate) fn resolve_local_shortcut(
     settings: &ScreenDrawSettings,
-    virtual_key: u32,
-    modifiers: u32,
-    text_editing: bool,
+    input: LocalShortcutInput,
 ) -> Option<LocalShortcutAction> {
-    if text_editing {
+    if input.text_editing {
         return None;
     }
-    let ctrl = modifiers & MOD_CONTROL_VALUE != 0;
-    let shift = modifiers & MOD_SHIFT_VALUE != 0;
-    if ctrl && virtual_key == b'Z' as u32 {
-        return Some(if shift {
+    if input.modifiers.ctrl && input.key == LocalShortcutKey::Standard(Key::KeyZ) {
+        return Some(if input.modifiers.shift {
             LocalShortcutAction::Redo
         } else {
             LocalShortcutAction::Undo
         });
     }
-    if ctrl && virtual_key == b'Y' as u32 {
+    if input.modifiers.ctrl && input.key == LocalShortcutKey::Standard(Key::KeyY) {
         return Some(LocalShortcutAction::Redo);
     }
     for (tool, chord) in &settings.tool_hotkeys {
-        if chord_matches(chord, virtual_key, modifiers) {
+        if chord_matches(chord, input.key, input.modifiers) {
             return Some(LocalShortcutAction::Tool(*tool));
         }
     }
     if settings
         .increase_thickness_hotkey
         .as_ref()
-        .is_some_and(|chord| chord_matches(chord, virtual_key, modifiers))
+        .is_some_and(|chord| chord_matches(chord, input.key, input.modifiers))
     {
         return Some(LocalShortcutAction::IncreaseThickness);
     }
     if settings
         .decrease_thickness_hotkey
         .as_ref()
-        .is_some_and(|chord| chord_matches(chord, virtual_key, modifiers))
+        .is_some_and(|chord| chord_matches(chord, input.key, input.modifiers))
     {
         return Some(LocalShortcutAction::DecreaseThickness);
     }
     for (index, chord) in settings.quick_color_hotkeys.iter().enumerate() {
         if chord
             .as_ref()
-            .is_some_and(|chord| chord_matches(chord, virtual_key, modifiers))
+            .is_some_and(|chord| chord_matches(chord, input.key, input.modifiers))
         {
             return Some(LocalShortcutAction::Color(settings.palette[index]));
         }
@@ -186,18 +223,142 @@ pub(crate) fn local_shortcut(
     None
 }
 
-fn chord_matches(chord: &HotkeyChord, virtual_key: u32, modifiers: u32) -> bool {
+fn chord_matches(
+    chord: &HotkeyChord,
+    key: LocalShortcutKey,
+    modifiers: LocalShortcutModifiers,
+) -> bool {
     let text = chord.as_str().trim();
     if text == "[" || text == "]" {
-        return modifiers & (MOD_CONTROL_VALUE | MOD_ALT_VALUE | MOD_WIN_VALUE) == 0
-            && virtual_key == if text == "[" { 0xDB } else { 0xDD };
+        return !modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.win
+            && key
+                == if text == "[" {
+                    LocalShortcutKey::OpenBracket
+                } else {
+                    LocalShortcutKey::CloseBracket
+                };
     }
-    let Ok(native) = to_native_hotkey(chord) else {
+    let Some(parsed) = parse_hotkey(chord.as_str()) else {
         return false;
     };
-    let expected = native.modifiers & !MOD_NOREPEAT_VALUE;
-    modifiers & (MOD_ALT_VALUE | MOD_CONTROL_VALUE | MOD_SHIFT_VALUE | MOD_WIN_VALUE) == expected
-        && virtual_key == native.virtual_key
+    key == LocalShortcutKey::Standard(parsed.key)
+        && modifiers
+            == (LocalShortcutModifiers {
+                alt: parsed.alt,
+                ctrl: parsed.ctrl,
+                shift: parsed.shift,
+                win: parsed.win,
+            })
+}
+
+fn native_virtual_key_to_local_key(virtual_key: u32) -> Option<LocalShortcutKey> {
+    if virtual_key == 0xDB {
+        return Some(LocalShortcutKey::OpenBracket);
+    }
+    if virtual_key == 0xDD {
+        return Some(LocalShortcutKey::CloseBracket);
+    }
+    let key = match virtual_key {
+        0x20 => Key::Space,
+        0x09 => Key::Tab,
+        0x0D => Key::Return,
+        0x2E => Key::Delete,
+        0x08 => Key::Backspace,
+        0x14 => Key::CapsLock,
+        0x24 => Key::Home,
+        0x23 => Key::End,
+        0x21 => Key::PageUp,
+        0x22 => Key::PageDown,
+        0x25 => Key::LeftArrow,
+        0x26 => Key::UpArrow,
+        0x27 => Key::RightArrow,
+        0x28 => Key::DownArrow,
+        value @ 0x30..=0x39 => digit_key((value - 0x30) as u8)?,
+        value @ 0x41..=0x5A => letter_key((value - 0x41) as u8)?,
+        value @ 0x70..=0x87 => function_key((value - 0x70 + 1) as u8)?,
+        _ => return None,
+    };
+    Some(LocalShortcutKey::Standard(key))
+}
+
+fn digit_key(index: u8) -> Option<Key> {
+    Some(match index {
+        0 => Key::Num0,
+        1 => Key::Num1,
+        2 => Key::Num2,
+        3 => Key::Num3,
+        4 => Key::Num4,
+        5 => Key::Num5,
+        6 => Key::Num6,
+        7 => Key::Num7,
+        8 => Key::Num8,
+        9 => Key::Num9,
+        _ => return None,
+    })
+}
+
+fn letter_key(index: u8) -> Option<Key> {
+    Some(match index {
+        0 => Key::KeyA,
+        1 => Key::KeyB,
+        2 => Key::KeyC,
+        3 => Key::KeyD,
+        4 => Key::KeyE,
+        5 => Key::KeyF,
+        6 => Key::KeyG,
+        7 => Key::KeyH,
+        8 => Key::KeyI,
+        9 => Key::KeyJ,
+        10 => Key::KeyK,
+        11 => Key::KeyL,
+        12 => Key::KeyM,
+        13 => Key::KeyN,
+        14 => Key::KeyO,
+        15 => Key::KeyP,
+        16 => Key::KeyQ,
+        17 => Key::KeyR,
+        18 => Key::KeyS,
+        19 => Key::KeyT,
+        20 => Key::KeyU,
+        21 => Key::KeyV,
+        22 => Key::KeyW,
+        23 => Key::KeyX,
+        24 => Key::KeyY,
+        25 => Key::KeyZ,
+        _ => return None,
+    })
+}
+
+fn function_key(index: u8) -> Option<Key> {
+    Some(match index {
+        1 => Key::F1,
+        2 => Key::F2,
+        3 => Key::F3,
+        4 => Key::F4,
+        5 => Key::F5,
+        6 => Key::F6,
+        7 => Key::F7,
+        8 => Key::F8,
+        9 => Key::F9,
+        10 => Key::F10,
+        11 => Key::F11,
+        12 => Key::F12,
+        13 => Key::F13,
+        14 => Key::F14,
+        15 => Key::F15,
+        16 => Key::F16,
+        17 => Key::F17,
+        18 => Key::F18,
+        19 => Key::F19,
+        20 => Key::F20,
+        21 => Key::F21,
+        22 => Key::F22,
+        23 => Key::F23,
+        24 => Key::F24,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -219,35 +380,74 @@ mod tests {
     #[test]
     fn local_defaults_cover_tools_history_brackets_and_quick_colors() {
         let settings = ScreenDrawSettings::default();
+        let input = |virtual_key, modifiers| {
+            LocalShortcutInput::from_native(virtual_key, modifiers, false).unwrap()
+        };
         assert_eq!(
-            local_shortcut(&settings, b'G' as u32, 0, false),
+            resolve_local_shortcut(&settings, input(b'G' as u32, 0)),
             Some(LocalShortcutAction::Tool(ScreenDrawTool::FadingInk))
         );
         assert_eq!(
-            local_shortcut(&settings, b'V' as u32, 0, false),
+            resolve_local_shortcut(&settings, input(b'V' as u32, 0)),
             Some(LocalShortcutAction::Tool(ScreenDrawTool::Eyedropper))
         );
         assert_eq!(
-            local_shortcut(&settings, 0xDB, 0, false),
+            resolve_local_shortcut(&settings, input(0xDB, 0)),
             Some(LocalShortcutAction::DecreaseThickness)
         );
         assert_eq!(
-            local_shortcut(&settings, b'Z' as u32, MOD_CONTROL_VALUE, false),
+            resolve_local_shortcut(&settings, input(b'Z' as u32, MOD_CONTROL_VALUE)),
             Some(LocalShortcutAction::Undo)
         );
         assert_eq!(
-            local_shortcut(&settings, b'1' as u32, 0, false),
+            resolve_local_shortcut(&settings, input(b'1' as u32, 0)),
             Some(LocalShortcutAction::Color(settings.palette[0]))
         );
+        for index in 0..9 {
+            assert_eq!(
+                resolve_local_shortcut(&settings, input(b'1' as u32 + index as u32, 0)),
+                Some(LocalShortcutAction::Color(settings.palette[index]))
+            );
+        }
     }
 
     #[test]
     fn text_editing_disables_all_local_shortcuts() {
         let settings = ScreenDrawSettings::default();
-        assert_eq!(local_shortcut(&settings, b'P' as u32, 0, true), None);
+        let input = |virtual_key, modifiers| {
+            LocalShortcutInput::from_native(virtual_key, modifiers, true).unwrap()
+        };
         assert_eq!(
-            local_shortcut(&settings, b'Z' as u32, MOD_CONTROL_VALUE, true),
+            resolve_local_shortcut(&settings, input(b'P' as u32, 0)),
             None
         );
+        assert_eq!(
+            resolve_local_shortcut(&settings, input(b'Z' as u32, MOD_CONTROL_VALUE)),
+            None
+        );
+    }
+
+    #[test]
+    fn history_variants_and_modifier_matching_are_exact() {
+        let settings = ScreenDrawSettings::default();
+        let resolve = |virtual_key, modifiers| {
+            resolve_local_shortcut(
+                &settings,
+                LocalShortcutInput::from_native(virtual_key, modifiers, false).unwrap(),
+            )
+        };
+        assert_eq!(
+            resolve(b'Z' as u32, MOD_CONTROL_VALUE),
+            Some(LocalShortcutAction::Undo)
+        );
+        assert_eq!(
+            resolve(b'Y' as u32, MOD_CONTROL_VALUE),
+            Some(LocalShortcutAction::Redo)
+        );
+        assert_eq!(
+            resolve(b'Z' as u32, MOD_CONTROL_VALUE | MOD_SHIFT_VALUE),
+            Some(LocalShortcutAction::Redo)
+        );
+        assert_eq!(resolve(b'P' as u32, MOD_SHIFT_VALUE), None);
     }
 }
