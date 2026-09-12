@@ -3055,6 +3055,7 @@ mod tests {
             commands.as_slice(),
             [
                 crate::screen_draw::NativeSessionCommand::Ghost,
+                crate::screen_draw::NativeSessionCommand::SetToolbarWindow(None),
                 crate::screen_draw::NativeSessionCommand::Resume,
                 crate::screen_draw::NativeSessionCommand::Ghost
             ]
@@ -3114,6 +3115,7 @@ mod tests {
             commands.try_iter().collect::<Vec<_>>().as_slice(),
             [
                 crate::screen_draw::NativeSessionCommand::Ghost,
+                crate::screen_draw::NativeSessionCommand::SetToolbarWindow(None),
                 crate::screen_draw::NativeSessionCommand::Resume
             ]
         ));
