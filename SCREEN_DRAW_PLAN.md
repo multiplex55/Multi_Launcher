@@ -19,7 +19,7 @@ This ledger tracks the approved Screen Draw initiative. A milestone is only
 | M12 | complete | Floating toolbar and preference persistence | Control mapping, teardown order, persistence/clamping tests |
 | M13 | complete | Unified full export workflows | Synthetic compositor/destination/failure tests |
 | M14 | complete | Region export and Screenshot Editor handoff | Signed crop, picker cancel/error, handoff-order tests |
-| M15 | pending | Lifecycle hardening, documentation, full verification, independent review | Formatting, check, targeted Nextest, full Nextest, review/remediation |
+| M15 | complete | Lifecycle hardening, documentation, full verification, independent review | Formatting, check, targeted Nextest, full Nextest, review/remediation |
 
 ## Architectural invariants
 

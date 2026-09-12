@@ -145,7 +145,7 @@ impl CommandWake {
         }
     }
 
-    fn signal(&self) {
+    fn signal(&self) -> Result<(), String> {
         #[cfg(windows)]
         {
             use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -153,12 +153,39 @@ impl CommandWake {
 
             let thread_id = self.thread_id.load(Ordering::Acquire);
             if thread_id != 0 {
-                let _ = unsafe {
+                unsafe {
                     PostThreadMessageW(thread_id, WM_SCREEN_DRAW_COMMAND, WPARAM(0), LPARAM(0))
-                };
+                }
+                .map_err(|error| format!("failed to wake Screen Draw native worker: {error}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn force_quit(&self) {
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::{LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+
+            let thread_id = self.thread_id.load(Ordering::Acquire);
+            if thread_id != 0 {
+                // Last-resort wake for Drop/shutdown. WM_QUIT still unwinds the
+                // worker normally, so its surface and suppression guards run.
+                let _ = unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
             }
         }
     }
+}
+
+fn fail_closed_on_wake_error(
+    wake_result: Result<(), String>,
+    force_quit: impl FnOnce(),
+) -> Result<(), String> {
+    if wake_result.is_err() {
+        force_quit();
+    }
+    wake_result
 }
 
 /// Nonblocking owner of one native session thread. Command delivery signals a
@@ -233,8 +260,7 @@ impl NativeSessionHandle {
         self.command_tx
             .send(command)
             .map_err(|_| "Screen Draw native worker is closed".to_string())?;
-        self.wake.signal();
-        Ok(())
+        fail_closed_on_wake_error(self.wake.signal(), || self.wake.force_quit())
     }
 
     pub fn try_recv(&self) -> Option<NativeSessionEvent> {
@@ -1346,6 +1372,25 @@ mod tests {
         let (handle, commands) = NativeSessionHandle::test_stub();
         handle.request_shutdown();
         assert_eq!(commands.recv().unwrap(), NativeSessionCommand::Shutdown);
+    }
+
+    #[test]
+    fn every_command_wake_failure_forces_worker_quit_and_surfaces_error() {
+        let forced = AtomicBool::new(false);
+        let result = fail_closed_on_wake_error(Err("injected wake failure".into()), || {
+            forced.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(result.unwrap_err(), "injected wake failure");
+        assert!(forced.load(Ordering::SeqCst));
+
+        forced.store(false, Ordering::SeqCst);
+        assert!(
+            fail_closed_on_wake_error(Ok(()), || {
+                forced.store(true, Ordering::SeqCst);
+            })
+            .is_ok()
+        );
+        assert!(!forced.load(Ordering::SeqCst));
     }
 
     #[test]

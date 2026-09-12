@@ -600,6 +600,54 @@ mod tests {
     }
 
     #[test]
+    fn synchronous_screen_draw_picker_failure_releases_all_region_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.show_inline_errors = true;
+        app.mkmacro_dialog.visual_overlay =
+            crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController::new_with_controller_factory(
+                || Err(std::io::Error::other("fixture picker startup failure")),
+            );
+        let generation = app.screen_draw_controller.request_start().unwrap();
+        app.screen_draw_controller
+            .launcher_hidden(generation)
+            .unwrap();
+        app.screen_draw_controller
+            .capture_succeeded(generation)
+            .unwrap();
+        app.screen_draw_controller.finish().unwrap();
+        app.screen_draw_controller
+            .begin_region_selection(
+                crate::screen_draw::ExportBackground::Transparent,
+                crate::screen_draw::ExportDestination::Clipboard,
+            )
+            .unwrap();
+        app.begin_screen_draw_region_picker(crate::screen_draw::ScreenDrawRegionPickerReady {
+            generation,
+            bounds: crate::mkmacro::screen::ScreenRect::new(-1920, -200, 3840, 1200),
+        });
+
+        app.poll_screen_draw_region_picker(&ctx);
+
+        assert!(app.screen_draw_region_operation.is_none());
+        assert_eq!(
+            app.screen_draw_controller.state(),
+            &crate::screen_draw::ScreenDrawState::Finish { generation }
+        );
+        assert!(app.screen_draw_controller.toolbar_open());
+        assert!(!app.screen_draw_controller.export_in_flight());
+        assert_eq!(
+            app.screen_draw_controller.latest_runtime_error(),
+            Some("Could not start visual overlay worker: fixture picker startup failure")
+        );
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| { message.contains("fixture picker startup failure") })
+        );
+    }
+
+    #[test]
     fn cancelled_crop_picker_result_keeps_dialog_closed() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();

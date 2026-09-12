@@ -188,6 +188,49 @@ These checks are intentionally manual and destructive. They require a real inter
 
 - [ ] From a normal, non-elevated Multi Launcher, target an elevated disposable application (for example, an administrator-launched Notepad) where policy permits. **Expected:** UIPI-blocked activation/input/UIA fails visibly as a rejected operation; it never reports success, every owned key/button is released, later rows do not run under Stop policy, and normal input still works. Do not weaken UAC/UIPI policy merely to make this pass.
 
+## Screen Draw Windows acceptance checklist
+
+Record the Windows build, Multi Launcher commit, monitor geometry/DPI, tester, and date.
+Use a disposable desktop with no sensitive content because the frozen desktop is exportable.
+
+- [ ] Configure an optional `plugin_settings.screen_draw.launch_hotkey`, restart hotkeys from
+  Settings, and press it while the launcher is visible and hidden. **Expected:** one capture is
+  staged through the normal launcher-hide coordinator; repeated presses during a session do not
+  replace its capture or document. An invalid persisted chord produces a diagnostic and does not
+  prevent startup.
+- [ ] Start with `sd`, `sa`, and every documented subcommand. Confirm the launcher and Screen Draw
+  toolbar are absent from the frozen capture. **Expected:** capture begins only after native
+  launcher hiding is confirmed; failures restore the launcher.
+- [ ] On left, primary, above-primary, and mixed-DPI monitors, draw with both Pen buttons and test
+  every tool, color, thickness, undo/redo, clear/undo-clear, visibility, and each background.
+  **Expected:** signed coordinates and pointer alignment remain exact across monitor seams; only Pen
+  accepts both left and right buttons.
+- [ ] Start each primitive and a multiline Text edit, then press Escape. Press Escape again and also
+  exercise Ghost, Finish, Resume, Eye, and the emergency chord in Drawing/Ghost/Finish/region modes.
+  **Expected:** Escape first cancels incomplete work and then safely enters Ghost; passive ink is
+  per-pixel-alpha and click-through; emergency input always releases pointer capture, fade timer,
+  Mouse Gesture suppression, and interactive windows while leaving recovery controls available.
+- [ ] While Screen Draw is active, verify configured Mouse Gestures do not execute. Close Screen Draw
+  normally and through toolbar close, root-window close, quit hotkey, and Task Manager only as a final
+  recovery check. **Expected:** normal exits restore Mouse Gestures and unregister the session hotkey;
+  no overlay HWND, timer, capture, or toolbar remains.
+- [ ] In Finish, export whole desktop and a cross-monitor region to clipboard, PNG, and Screenshot
+  Editor with frozen, transparent, white, black, and custom backgrounds. Cancel region selection and
+  retry. **Expected:** the shared picker is not captured, cancellation returns to Finish, transparent
+  pixels have correct alpha, and editor handoff starts only after Screen Draw native teardown.
+- [ ] Add annotations, then connect/disconnect or reconfigure a display. **Expected:** Screen Draw
+  enters Display Changed, destroys stale native surfaces, preserves the original capture/document for
+  export, and requires New Capture before drawing against the new topology.
+- [ ] Leave Drawing, Ghost, and Finish idle for several minutes while observing Task Manager and a
+  window/message diagnostic tool. **Expected:** no continuous recapture, monitor enumeration, input
+  hook, idle fade timer, or repaint loop; fading ink alone temporarily arms the refresh timer.
+- [ ] Restart and confirm toolbar position/orientation, palette and drawing defaults persisted. Load a
+  pre-Screen-Draw settings file with no `screen_draw` entry. **Expected:** saved preferences return,
+  while absent fields receive defaults without rewriting unrelated plugin settings.
+
+Pressure-sensitive stylus behavior and simultaneous multi-touch drawing are explicitly deferred and
+are not release acceptance checks for this version.
+
 ### Native visual overlay renderer
 
 This checklist requires a **real, interactive Windows desktop**. The native layered-window renderer cannot be visually validated in headless CI, so these checks must not be automated there. For every item, record pass/fail evidence (screenshots or video where useful) plus:

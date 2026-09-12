@@ -26,6 +26,8 @@ pub enum WatchEvent {
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
     ExecuteAction(Action),
+    /// Event-driven request from the process-wide launcher hotkey listener.
+    ScreenDrawStart,
     ClipboardModify(ClipboardModifyGuiEvent),
     VirtualDesktop(VirtualDesktopGuiCompletion),
 }
@@ -112,6 +114,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
             WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
+            WatchEvent::ScreenDrawStart => TestWatchEvent::Actions,
             WatchEvent::ClipboardModify(event) => TestWatchEvent::ClipboardModify(event),
             WatchEvent::VirtualDesktop(_) => TestWatchEvent::Actions,
         }

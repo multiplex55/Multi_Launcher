@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
+use std::time::{Duration, Instant};
 
 use super::capture::{
     DesktopCaptureBackend, LauncherVisibilityProbe, ScreenDrawCaptureBackend,
@@ -24,6 +25,7 @@ use super::{ExportOutcome, ExportRequest, ExportScope};
 use crate::mkmacro::screen::{CapturedRegion, ScreenRect};
 
 const MAX_LAUNCHER_HIDE_FRAMES: u8 = 8;
+const NATIVE_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Identifies one capture/session attempt so late worker events cannot mutate a
 /// replacement session.
@@ -47,6 +49,9 @@ pub enum ScreenDrawState {
         generation: ScreenDrawGeneration,
     },
     Capturing {
+        generation: ScreenDrawGeneration,
+    },
+    AwaitingNativeTeardown {
         generation: ScreenDrawGeneration,
     },
     Drawing {
@@ -76,6 +81,7 @@ impl ScreenDrawState {
             Self::NoSession => None,
             Self::AwaitingLauncherHide { generation }
             | Self::Capturing { generation }
+            | Self::AwaitingNativeTeardown { generation }
             | Self::Drawing { generation }
             | Self::Ghost { generation }
             | Self::Finish { generation }
@@ -127,6 +133,7 @@ pub struct ScreenDrawController {
     pending_region: Option<PendingRegionSelection>,
     region_suppression: Option<crate::mouse_gestures::service::GestureSuppressionGuard>,
     pending_editor_handoff: Option<ScreenDrawEditorHandoff>,
+    pending_new_capture: Option<PendingNewCapture>,
     settings: ScreenDrawSettings,
 }
 
@@ -145,6 +152,12 @@ struct PendingCapture {
     hide_wait_frames: u8,
 }
 
+struct PendingNewCapture {
+    generation: ScreenDrawGeneration,
+    deadline: Instant,
+    timed_out: bool,
+}
+
 struct CaptureCompletion {
     generation: ScreenDrawGeneration,
     result: Result<CapturedRegion, String>,
@@ -160,6 +173,7 @@ pub struct ScreenDrawCapturePoll {
     pub diagnostic: Option<String>,
     pub region_picker_ready: Option<ScreenDrawRegionPickerReady>,
     pub editor_handoff: Option<ScreenDrawEditorHandoff>,
+    pub repoll_after: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +273,7 @@ impl ScreenDrawController {
             pending_region: None,
             region_suppression: None,
             pending_editor_handoff: None,
+            pending_new_capture: None,
             settings: ScreenDrawSettings::default(),
         }
     }
@@ -320,7 +335,29 @@ impl ScreenDrawController {
     pub fn request_new_capture(
         &mut self,
     ) -> Result<ScreenDrawGeneration, ScreenDrawTransitionError> {
-        Ok(self.stage_capture())
+        if self.native_worker.is_none() {
+            return Ok(self.stage_capture());
+        }
+        self.cancel_pending_capture();
+        let generation = self.allocate_generation();
+        self.toolbar_open = false;
+        self.export_in_flight = false;
+        self.pending_region = None;
+        self.region_suppression = None;
+        self.pending_editor_handoff = None;
+        self.pending_new_capture = Some(PendingNewCapture {
+            generation,
+            deadline: Instant::now() + NATIVE_TEARDOWN_TIMEOUT,
+            timed_out: false,
+        });
+        self.state = ScreenDrawState::AwaitingNativeTeardown { generation };
+        if let Err(error) = self.send_native(NativeSessionCommand::Shutdown) {
+            // A closed command channel is not proof that native cleanup has
+            // completed. Keep waiting for SessionClosed (or the deadline)
+            // instead of starting capture beneath a potentially live HWND.
+            self.latest_runtime_warning = Some(error.to_string());
+        }
+        Ok(generation)
     }
 
     pub fn open_toolbar(&mut self) {
@@ -384,7 +421,7 @@ impl ScreenDrawController {
         launcher_hwnd: Option<usize>,
         request_repaint: Arc<dyn Fn() + Send + Sync>,
     ) -> ScreenDrawCapturePoll {
-        if let Some(poll) = self.poll_native_worker() {
+        if let Some(poll) = self.poll_native_worker(Arc::clone(&request_repaint)) {
             return poll;
         }
         if let Some(poll) = self.poll_capture_completion(Arc::clone(&request_repaint)) {
@@ -594,6 +631,7 @@ impl ScreenDrawController {
         self.pending_region = None;
         self.region_suppression = None;
         self.pending_editor_handoff = None;
+        self.pending_new_capture = None;
         self.export_in_flight = false;
         self.toolbar_open = true;
         self.state = ScreenDrawState::DisplayChanged { generation };
@@ -666,6 +704,7 @@ impl ScreenDrawController {
         self.pending_region = None;
         self.region_suppression = None;
         self.pending_editor_handoff = None;
+        self.pending_new_capture = None;
     }
 
     pub fn complete_session(
@@ -688,14 +727,25 @@ impl ScreenDrawController {
         self.pending_region = None;
         self.region_suppression = None;
         self.pending_editor_handoff = None;
+        self.pending_new_capture = None;
         Ok(())
     }
 
     fn stage_capture(&mut self) -> ScreenDrawGeneration {
         self.cancel_pending_capture();
         self.teardown_native_worker();
+        let generation = self.allocate_generation();
+        self.activate_capture(generation);
+        generation
+    }
+
+    fn allocate_generation(&mut self) -> ScreenDrawGeneration {
         let generation = ScreenDrawGeneration(self.next_generation);
         self.next_generation = self.next_generation.saturating_add(1);
+        generation
+    }
+
+    fn activate_capture(&mut self, generation: ScreenDrawGeneration) {
         self.toolbar_open = false;
         self.session_snapshot = None;
         self.runtime_state = None;
@@ -706,6 +756,7 @@ impl ScreenDrawController {
         self.pending_region = None;
         self.region_suppression = None;
         self.pending_editor_handoff = None;
+        self.pending_new_capture = None;
         self.pending_capture = Some(PendingCapture {
             generation,
             cancellation: Arc::new(AtomicBool::new(false)),
@@ -713,7 +764,6 @@ impl ScreenDrawController {
             hide_wait_frames: 0,
         });
         self.state = ScreenDrawState::AwaitingLauncherHide { generation };
-        generation
     }
 
     fn start_capture_worker(
@@ -840,13 +890,17 @@ impl ScreenDrawController {
         Ok(())
     }
 
-    fn poll_native_worker(&mut self) -> Option<ScreenDrawCapturePoll> {
+    fn poll_native_worker(
+        &mut self,
+        request_repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> Option<ScreenDrawCapturePoll> {
         let mut terminal_error = None;
         let mut export_completed = None;
         let mut export_failure = None;
         let mut region_picker_ready = None;
         let mut region_failure = None;
         let mut editor_teardown_complete = false;
+        let mut new_capture_teardown_complete = false;
         if let Some(worker) = self.native_worker.as_mut() {
             while let Some(event) = worker.try_recv() {
                 match event {
@@ -926,6 +980,8 @@ impl ScreenDrawController {
                     NativeSessionEvent::SessionClosed => {
                         if self.pending_editor_handoff.is_some() {
                             editor_teardown_complete = true;
+                        } else if self.pending_new_capture.is_some() {
+                            new_capture_teardown_complete = true;
                         } else if terminal_error.is_none() {
                             terminal_error =
                                 Some("Screen Draw native worker closed unexpectedly".to_string());
@@ -1000,6 +1056,27 @@ impl ScreenDrawController {
             }
             let _ = worker.poll_finished();
         }
+        if new_capture_teardown_complete && terminal_error.is_none() {
+            let pending = self
+                .pending_new_capture
+                .take()
+                .expect("teardown completion requires a pending new capture");
+            self.native_worker.take();
+            self.session_snapshot = None;
+            self.runtime_state = None;
+            if pending.timed_out {
+                self.toolbar_open = true;
+                self.state = ScreenDrawState::Failed {
+                    generation: pending.generation,
+                    message: "Screen Draw native session closed after the new capture timeout"
+                        .to_string(),
+                };
+            } else {
+                self.activate_capture(pending.generation);
+            }
+            request_repaint();
+            return Some(ScreenDrawCapturePoll::default());
+        }
         if editor_teardown_complete {
             let handoff = self
                 .pending_editor_handoff
@@ -1040,6 +1117,31 @@ impl ScreenDrawController {
                 ..ScreenDrawCapturePoll::default()
             });
         }
+        if terminal_error.is_none()
+            && let Some(pending) = self.pending_new_capture.as_mut()
+        {
+            if pending.timed_out {
+                return Some(ScreenDrawCapturePoll::default());
+            }
+            let remaining = pending.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let message =
+                    "Screen Draw native session did not close before the new capture timeout"
+                        .to_string();
+                pending.timed_out = true;
+                self.latest_runtime_error = Some(message.clone());
+                self.toolbar_open = true;
+                return Some(ScreenDrawCapturePoll {
+                    restore_launcher: true,
+                    diagnostic: Some(message),
+                    ..ScreenDrawCapturePoll::default()
+                });
+            }
+            return Some(ScreenDrawCapturePoll {
+                repoll_after: Some(remaining),
+                ..ScreenDrawCapturePoll::default()
+            });
+        }
         terminal_error.map(|message| {
             let generation = self
                 .state
@@ -1053,6 +1155,7 @@ impl ScreenDrawController {
             self.pending_region = None;
             self.region_suppression = None;
             self.pending_editor_handoff = None;
+            self.pending_new_capture = None;
             self.toolbar_open = false;
             self.state = ScreenDrawState::Failed {
                 generation,
@@ -1122,6 +1225,7 @@ impl ScreenDrawController {
         self.pending_region = None;
         self.region_suppression = None;
         self.pending_editor_handoff = None;
+        self.pending_new_capture = None;
         self.export_in_flight = false;
         self.toolbar_open = false;
         self.state = ScreenDrawState::NoSession;
@@ -1839,6 +1943,7 @@ mod tests {
     #[test]
     fn replacing_a_region_selection_releases_its_guard_and_ignores_late_ready_events() {
         let backend = Arc::new(FakeCaptureBackend::successful());
+        let observed_backend = Arc::clone(&backend);
         let native = Arc::new(CountingNativeFactory::default());
         let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
         let (_, repaint) = repaint_counter();
@@ -1860,6 +1965,19 @@ mod tests {
         assert!(!controller.export_in_flight());
         assert_eq!(
             controller.state(),
+            &ScreenDrawState::AwaitingNativeTeardown { generation: second }
+        );
+        assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            native.commands.lock().unwrap()[0].try_iter().last(),
+            Some(NativeSessionCommand::Shutdown)
+        ));
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::SessionClosed)
+            .unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert_eq!(
+            controller.state(),
             &ScreenDrawState::AwaitingLauncherHide { generation: second }
         );
         assert!(
@@ -1870,6 +1988,51 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn new_capture_timeout_fails_safe_without_capturing_under_the_old_surface() {
+        let backend = Arc::new(FakeCaptureBackend::successful());
+        let observed_backend = Arc::clone(&backend);
+        let native = Arc::new(CountingNativeFactory::default());
+        let mut controller = capture_controller_with_native(backend, [Ok(true)], native.clone());
+        let (_, repaint) = repaint_counter();
+        controller.request_start().unwrap();
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        controller.poll_capture(Some(1), Arc::clone(&repaint));
+        poll_until(&mut controller, &repaint, |poll| poll.capture_completed);
+
+        let generation = controller.request_new_capture().unwrap();
+        let waiting = controller.poll_capture(Some(1), Arc::clone(&repaint));
+        assert!(waiting.repoll_after.is_some_and(|delay| !delay.is_zero()));
+        assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
+        controller.pending_new_capture.as_mut().unwrap().deadline = Instant::now();
+        let terminal = controller.poll_capture(Some(1), Arc::clone(&repaint));
+
+        assert!(terminal.restore_launcher);
+        assert!(
+            terminal
+                .diagnostic
+                .as_deref()
+                .is_some_and(|message| message.contains("did not close"))
+        );
+        assert_eq!(
+            controller.state(),
+            &ScreenDrawState::AwaitingNativeTeardown { generation }
+        );
+        assert_eq!(observed_backend.calls.load(Ordering::SeqCst), 1);
+        assert!(controller.session_snapshot().is_some());
+        assert!(controller.native_worker.is_some());
+        assert!(controller.toolbar_open());
+        native.events.lock().unwrap()[0]
+            .send(NativeSessionEvent::SessionClosed)
+            .unwrap();
+        controller.poll_capture(Some(1), repaint);
+        assert!(matches!(
+            controller.state(),
+            ScreenDrawState::Failed { generation: failed, .. } if *failed == generation
+        ));
+        assert!(controller.native_worker.is_none());
     }
 
     #[test]

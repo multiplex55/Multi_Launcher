@@ -277,11 +277,90 @@ fn color(color: RgbaColor) -> Color {
     Color(color.channels())
 }
 
+const PEN_MASK_TILE_SIZE: u32 = 256;
+
+pub(crate) fn stroke_mask_tiles(output: DesktopRect, stroke: &Stroke) -> Vec<DesktopRect> {
+    use std::collections::BTreeSet;
+
+    if output.is_empty() || stroke.points.len() < 2 {
+        return Vec::new();
+    }
+    let margin = (stroke.thickness.max(1.0) * 0.5).ceil() as i64 + 2;
+    let mut occupied = BTreeSet::new();
+    for segment in stroke.points.windows(2) {
+        let from = segment[0].position;
+        let to = segment[1].position;
+        let dx = i64::from(to.x) - i64::from(from.x);
+        let dy = i64::from(to.y) - i64::from(from.y);
+        let sample_step = i64::from(PEN_MASK_TILE_SIZE / 2);
+        let steps = ((dx.abs().max(dy.abs()) + sample_step - 1) / sample_step).max(1);
+        // Consecutive samples are at most `sample_step` apart on either axis.
+        // Expanding each sample by half that interval plus the stroke radius
+        // conservatively covers the complete segment, including both
+        // orthogonal neighbors when it crosses a tile corner. The GDI mask
+        // still decides which pixels are actually blended.
+        let coverage_margin = margin + (sample_step + 1) / 2;
+        for step in 0..=steps {
+            let x = i64::from(from.x) + dx * step / steps;
+            let y = i64::from(from.y) + dy * step / steps;
+            let left = (x - coverage_margin).max(i64::from(output.x));
+            let top = (y - coverage_margin).max(i64::from(output.y));
+            let right = (x + coverage_margin + 1).min(output.right());
+            let bottom = (y + coverage_margin + 1).min(output.bottom());
+            if right <= left || bottom <= top {
+                continue;
+            }
+            let local_left = u32::try_from(left - i64::from(output.x)).unwrap_or(0);
+            let local_top = u32::try_from(top - i64::from(output.y)).unwrap_or(0);
+            let local_right = u32::try_from(right - i64::from(output.x)).unwrap_or(output.width);
+            let local_bottom = u32::try_from(bottom - i64::from(output.y)).unwrap_or(output.height);
+            for tile_y in local_top / PEN_MASK_TILE_SIZE
+                ..=(local_bottom.saturating_sub(1) / PEN_MASK_TILE_SIZE)
+            {
+                for tile_x in local_left / PEN_MASK_TILE_SIZE
+                    ..=(local_right.saturating_sub(1) / PEN_MASK_TILE_SIZE)
+                {
+                    occupied.insert((tile_x, tile_y));
+                }
+            }
+        }
+    }
+    occupied
+        .into_iter()
+        .map(|(tile_x, tile_y)| {
+            let local_x = tile_x * PEN_MASK_TILE_SIZE;
+            let local_y = tile_y * PEN_MASK_TILE_SIZE;
+            DesktopRect::new(
+                output.x.saturating_add(local_x as i32),
+                output.y.saturating_add(local_y as i32),
+                PEN_MASK_TILE_SIZE.min(output.width - local_x),
+                PEN_MASK_TILE_SIZE.min(output.height - local_y),
+            )
+        })
+        .collect()
+}
+
 #[cfg(windows)]
 fn render_pen_stroke(
     output: &mut RgbaImage,
     origin: DesktopPoint,
     stroke: &Stroke,
+) -> Result<(), RasterError> {
+    let output_bounds = DesktopRect::new(origin.x, origin.y, output.width(), output.height());
+    render_pen_stroke_in_tiles(
+        output,
+        origin,
+        stroke,
+        &stroke_mask_tiles(output_bounds, stroke),
+    )
+}
+
+#[cfg(windows)]
+fn render_pen_stroke_in_tiles(
+    output: &mut RgbaImage,
+    origin: DesktopPoint,
+    stroke: &Stroke,
+    tiles: &[DesktopRect],
 ) -> Result<(), RasterError> {
     use std::{mem, ptr, slice};
     use windows::Win32::Graphics::Gdi::{
@@ -292,62 +371,63 @@ fn render_pen_stroke(
     if output.width() == 0 || output.height() == 0 || stroke.points.len() < 2 {
         return Ok(());
     }
-    let width = i32::try_from(output.width()).map_err(|_| RasterError::DimensionsTooLarge)?;
-    let height = i32::try_from(output.height()).map_err(|_| RasterError::DimensionsTooLarge)?;
-    let byte_len = (output.width() as usize)
-        .checked_mul(output.height() as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or(RasterError::DimensionsTooLarge)?;
-
-    unsafe {
-        let dc = CreateCompatibleDC(None);
-        if dc.0.is_null() {
-            return Err(RasterError::GdiAllocationFailed);
-        }
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            bmiColors: [Default::default()],
-        };
-        let mut bits = ptr::null_mut();
-        let dib = match CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
-            Ok(dib) if !bits.is_null() => dib,
-            _ => {
-                let _ = DeleteDC(dc);
+    for tile in tiles.iter().copied() {
+        let width = i32::try_from(tile.width).map_err(|_| RasterError::DimensionsTooLarge)?;
+        let height = i32::try_from(tile.height).map_err(|_| RasterError::DimensionsTooLarge)?;
+        let byte_len = (tile.width as usize)
+            .checked_mul(tile.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(RasterError::DimensionsTooLarge)?;
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            if dc.0.is_null() {
                 return Err(RasterError::GdiAllocationFailed);
             }
-        };
-        let old_bitmap = SelectObject(dc, dib);
-        ptr::write_bytes(bits as *mut u8, 0, byte_len);
-        for segment in stroke.points.windows(2) {
-            crate::platform::gdi_stroke::draw_solid_segment(
-                dc,
-                (segment[0].position.x as f32, segment[0].position.y as f32),
-                (segment[1].position.x as f32, segment[1].position.y as f32),
-                (origin.x, origin.y),
-                [255, 255, 255],
-                stroke.thickness,
-            );
-        }
-        let mask = slice::from_raw_parts(bits as *const u8, byte_len);
-        let stroke_color = color(stroke.color);
-        for (index, pixel) in mask.chunks_exact(4).enumerate() {
-            if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
-                let x = (index % output.width() as usize) as i32;
-                let y = (index / output.width() as usize) as i32;
-                software::blend_pixel(output, x, y, stroke_color);
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                bmiColors: [Default::default()],
+            };
+            let mut bits = ptr::null_mut();
+            let dib = match CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(dib) if !bits.is_null() => dib,
+                _ => {
+                    let _ = DeleteDC(dc);
+                    return Err(RasterError::GdiAllocationFailed);
+                }
+            };
+            let old_bitmap = SelectObject(dc, dib);
+            ptr::write_bytes(bits as *mut u8, 0, byte_len);
+            for segment in stroke.points.windows(2) {
+                crate::platform::gdi_stroke::draw_solid_segment(
+                    dc,
+                    (segment[0].position.x as f32, segment[0].position.y as f32),
+                    (segment[1].position.x as f32, segment[1].position.y as f32),
+                    (tile.x, tile.y),
+                    [255, 255, 255],
+                    stroke.thickness,
+                );
             }
+            let mask = slice::from_raw_parts(bits as *const u8, byte_len);
+            let stroke_color = color(stroke.color);
+            for (index, pixel) in mask.chunks_exact(4).enumerate() {
+                if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                    let x = tile.x - origin.x + (index % tile.width as usize) as i32;
+                    let y = tile.y - origin.y + (index / tile.width as usize) as i32;
+                    software::blend_pixel(output, x, y, stroke_color);
+                }
+            }
+            let _ = SelectObject(dc, old_bitmap);
+            let _ = DeleteObject(dib);
+            let _ = DeleteDC(dc);
         }
-        let _ = SelectObject(dc, old_bitmap);
-        let _ = DeleteObject(dib);
-        let _ = DeleteDC(dc);
     }
     Ok(())
 }
@@ -381,6 +461,73 @@ mod tests {
             color,
             thickness: 3.0,
         }
+    }
+
+    #[test]
+    fn pen_masks_visit_only_occupied_fixed_size_tiles_on_an_8k_target() {
+        let diagonal = stroke(
+            RgbaColor::RED,
+            DesktopPoint::new(-3830, -2150),
+            DesktopPoint::new(3829, 2149),
+        );
+        let output = DesktopRect::new(-3840, -2160, 7680, 4320);
+        let tiles = stroke_mask_tiles(output, &diagonal);
+        assert!(!tiles.is_empty());
+        assert!(
+            tiles.iter().all(|tile| {
+                tile.width <= PEN_MASK_TILE_SIZE && tile.height <= PEN_MASK_TILE_SIZE
+            })
+        );
+        let visited_pixels: u64 = tiles
+            .iter()
+            .map(|tile| u64::from(tile.width) * u64::from(tile.height))
+            .sum();
+        let full_pixels = u64::from(output.width) * u64::from(output.height);
+        assert!(visited_pixels < full_pixels / 4);
+    }
+
+    #[test]
+    fn thick_diagonal_corner_crossing_includes_both_orthogonal_neighbor_tiles() {
+        let mut diagonal = stroke(
+            RgbaColor::RED,
+            DesktopPoint::new(200, 200),
+            DesktopPoint::new(312, 312),
+        );
+        diagonal.thickness = 80.0;
+        let tiles = stroke_mask_tiles(DesktopRect::new(0, 0, 512, 512), &diagonal);
+        for expected in [
+            DesktopPoint::new(0, 0),
+            DesktopPoint::new(256, 0),
+            DesktopPoint::new(0, 256),
+            DesktopPoint::new(256, 256),
+        ] {
+            assert!(
+                tiles.iter().any(|tile| tile.origin() == expected),
+                "missing tile at {expected:?}: {tiles:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tiled_gdi_pen_mask_matches_a_single_output_sized_mask() {
+        let origin = DesktopPoint::new(-300, -300);
+        let bounds = DesktopRect::new(origin.x, origin.y, 600, 600);
+        let stroke = Stroke {
+            points: vec![
+                StrokePoint::mouse(DesktopPoint::new(-270, -250)),
+                StrokePoint::mouse(DesktopPoint::new(-40, 10)),
+                StrokePoint::mouse(DesktopPoint::new(270, 260)),
+            ],
+            color: RgbaColor::rgba(220, 30, 60, 173),
+            thickness: 37.0,
+        };
+        let mut tiled = RgbaImage::new(bounds.width, bounds.height);
+        let mut reference = RgbaImage::new(bounds.width, bounds.height);
+        let tiles = stroke_mask_tiles(bounds, &stroke);
+        render_pen_stroke_in_tiles(&mut tiled, origin, &stroke, &tiles).unwrap();
+        render_pen_stroke_in_tiles(&mut reference, origin, &stroke, &[bounds]).unwrap();
+        assert_eq!(tiled, reference);
     }
 
     #[test]

@@ -1146,15 +1146,9 @@ impl eframe::App for LauncherApp {
                         }
                     });
                     if ui.button("Close Application").clicked() {
+                        // eframe's `on_exit` is the single shutdown boundary. It
+                        // tears down Screen Draw before flushing preferences.
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        self.unregister_all_hotkeys();
-                        self.visible_flag.store(false, Ordering::SeqCst);
-                        #[allow(unused_assignments)]
-                        {
-                            self.last_visible = false;
-                        }
-                        #[cfg(not(test))]
-                        std::process::exit(0);
                     }
                 });
                 ui.menu_button("Settings", |ui| {
@@ -1879,8 +1873,6 @@ impl eframe::App for LauncherApp {
             Ok(())
         });
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
-        #[cfg(not(test))]
-        std::process::exit(0);
     }
 }
 
@@ -1906,6 +1898,9 @@ impl LauncherApp {
             self.visible_flag.store(true, Ordering::SeqCst);
             self.restore_flag.store(true, Ordering::SeqCst);
             ctx.request_repaint();
+        }
+        if let Some(delay) = poll.repoll_after {
+            ctx.request_repaint_after(delay);
         }
         if let Some(ready) = poll.region_picker_ready {
             self.begin_screen_draw_region_picker(ready);

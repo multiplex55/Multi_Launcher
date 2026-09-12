@@ -5,11 +5,12 @@ use eframe::egui;
 use crate::screen_draw::{
     CanvasBackground, DesktopPoint, DesktopRect, DesktopSize, ExportBackground, ExportDestination,
     ExportRequest, ExportScope, RgbaColor, ScreenDrawController, ScreenDrawSettings,
-    ScreenDrawState, ScreenDrawTool, clamp_toolbar_position,
+    ScreenDrawState, ScreenDrawTool, ToolbarOrientation, clamp_toolbar_position,
 };
 
 const SETTINGS_KEY: &str = "screen_draw";
-const TOOLBAR_SIZE_POINTS: egui::Vec2 = egui::vec2(264.0, 700.0);
+const VERTICAL_TOOLBAR_SIZE_POINTS: egui::Vec2 = egui::vec2(264.0, 700.0);
+const HORIZONTAL_TOOLBAR_SIZE_POINTS: egui::Vec2 = egui::vec2(700.0, 264.0);
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(750);
 
 pub(crate) fn viewport_id() -> egui::ViewportId {
@@ -28,6 +29,7 @@ enum ToolbarAction {
     Redo,
     SetAnnotationsVisible(bool),
     SetBackground(CanvasBackground),
+    ToggleOrientation,
     Clear,
     Ghost,
     Resume,
@@ -78,6 +80,7 @@ fn controls_for_state(state: &ScreenDrawState) -> &'static [ToolbarControl] {
         ScreenDrawState::Finish { .. } => &[Resume, Eye, Export, Clear, SessionControls],
         ScreenDrawState::DisplayChanged { .. } => &[Export, SessionControls],
         ScreenDrawState::AwaitingLauncherHide { .. }
+        | ScreenDrawState::AwaitingNativeTeardown { .. }
         | ScreenDrawState::Capturing { .. }
         | ScreenDrawState::SelectingRegion { .. } => &[SessionControls],
     }
@@ -99,7 +102,10 @@ impl ScreenDrawToolbarUi {
         let requested = settings
             .toolbar_position
             .unwrap_or(DesktopPoint::new(24, 24));
-        let toolbar_size = logical_size_to_physical(TOOLBAR_SIZE_POINTS, pixels_per_point);
+        let toolbar_size = logical_size_to_physical(
+            toolbar_size_points(settings.toolbar_orientation),
+            pixels_per_point,
+        );
         let recovered = recover_toolbar_position(requested, toolbar_size, &self.known_monitors);
         self.initial_position_points = Some(physical_to_logical(recovered, pixels_per_point));
         self.last_physical_position = Some(recovered);
@@ -165,12 +171,14 @@ impl super::LauncherApp {
         let mut close_requested = false;
         let mut observed_position = None;
         let mut observed_scale = None;
+        let mut escape_pressed = false;
 
+        let toolbar_size = toolbar_size_points(settings.toolbar_orientation);
         let mut builder = egui::ViewportBuilder::default()
             .with_title("Screen Draw")
-            .with_inner_size(TOOLBAR_SIZE_POINTS)
-            .with_min_inner_size(TOOLBAR_SIZE_POINTS)
-            .with_max_inner_size(TOOLBAR_SIZE_POINTS)
+            .with_inner_size(toolbar_size)
+            .with_min_inner_size(toolbar_size)
+            .with_max_inner_size(toolbar_size)
             .with_resizable(false)
             .with_always_on_top()
             .with_taskbar(false)
@@ -197,6 +205,7 @@ impl super::LauncherApp {
                 observed_scale = viewport.native_pixels_per_point;
                 close_requested = viewport.close_requested();
             });
+            escape_pressed = consume_drawing_escape(child, &state);
         });
         self.screen_draw_toolbar.export_background = export_background;
 
@@ -210,6 +219,9 @@ impl super::LauncherApp {
         }
         if close_requested {
             actions.push(ToolbarAction::Close);
+        }
+        if escape_pressed {
+            actions.insert(0, ToolbarAction::Ghost);
         }
 
         let mut preferences_changed = false;
@@ -264,6 +276,14 @@ impl super::LauncherApp {
             self.persist_screen_draw_settings();
         }
     }
+}
+
+fn consume_drawing_escape(ctx: &egui::Context, state: &ScreenDrawState) -> bool {
+    matches!(state, ScreenDrawState::Drawing { .. })
+        && ctx.input_mut(|input| {
+            let modifiers = input.modifiers;
+            input.consume_key(modifiers, egui::Key::Escape)
+        })
 }
 
 #[derive(Default)]
@@ -357,6 +377,15 @@ fn apply_toolbar_action(
             controller.update_settings(settings);
             effect.preferences_changed = true;
         }
+        ToolbarAction::ToggleOrientation => {
+            let mut settings = controller.settings().clone();
+            settings.toolbar_orientation = match settings.toolbar_orientation {
+                ToolbarOrientation::Vertical => ToolbarOrientation::Horizontal,
+                ToolbarOrientation::Horizontal => ToolbarOrientation::Vertical,
+            };
+            controller.update_settings(settings);
+            effect.preferences_changed = true;
+        }
         ToolbarAction::Clear => controller
             .request_clear()
             .map_err(|error| error.to_string())?,
@@ -408,100 +437,148 @@ fn render_toolbar(
     actions: &mut Vec<ToolbarAction>,
 ) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Screen Draw");
-            ui.small(state_label(state));
-            ui.separator();
+        let mut contents = |ui: &mut egui::Ui| {
+            render_toolbar_contents(
+                ui,
+                state,
+                runtime,
+                settings,
+                export_error,
+                export_in_flight,
+                export_background,
+                actions,
+            )
+        };
+        match settings.toolbar_orientation {
+            ToolbarOrientation::Vertical => {
+                egui::ScrollArea::vertical().show(ui, &mut contents);
+            }
+            ToolbarOrientation::Horizontal => {
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal(&mut contents);
+                });
+            }
+        }
+    });
+}
 
-            match state {
-                ScreenDrawState::NoSession | ScreenDrawState::Failed { .. } => {
-                    if ui.button("Start / New Capture").clicked() {
-                        actions.push(ToolbarAction::Start);
-                    }
-                    if let ScreenDrawState::Failed { message, .. } = state {
-                        ui.colored_label(egui::Color32::LIGHT_RED, message);
-                    }
-                    idle_preferences(ui, settings, actions);
-                    ui.separator();
-                    if ui.button("Close Toolbar").clicked() {
-                        actions.push(ToolbarAction::Close);
-                    }
-                }
-                ScreenDrawState::Drawing { .. } => {
-                    drawing_controls(ui, runtime, settings, actions);
-                    if ui.button("Ghost").clicked() {
-                        actions.push(ToolbarAction::Ghost);
-                    }
-                    if ui.button("Done").clicked() {
-                        actions.push(ToolbarAction::Finish);
-                    }
-                    session_controls(ui, actions);
-                }
-                ScreenDrawState::Ghost { .. } => {
-                    if ui.button("Resume Drawing").clicked() {
-                        actions.push(ToolbarAction::Resume);
-                    }
-                    history_controls(ui, actions);
-                    visibility_controls(ui, runtime, actions);
-                    background_controls(ui, runtime, settings, actions);
-                    if ui.button("Clear").clicked() {
-                        actions.push(ToolbarAction::Clear);
-                    }
-                    if ui.button("Done").clicked() {
-                        actions.push(ToolbarAction::Finish);
-                    }
-                    session_controls(ui, actions);
-                }
-                ScreenDrawState::Finish { .. } => {
-                    if ui.button("Resume Drawing").clicked() {
-                        actions.push(ToolbarAction::Resume);
-                    }
-                    visibility_controls(ui, runtime, actions);
-                    export_controls(
-                        ui,
-                        "Export",
-                        settings,
-                        export_error,
-                        export_in_flight,
-                        export_background,
-                        actions,
-                    );
-                    session_controls(ui, actions);
-                }
-                ScreenDrawState::DisplayChanged { .. } => {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Display layout changed. The session is safely paused.",
-                    );
-                    ui.small("Drawing cannot resume, but the original capture and annotations remain exportable.");
-                    export_controls(
-                        ui,
-                        "Export Original Capture",
-                        settings,
-                        export_error,
-                        export_in_flight,
-                        export_background,
-                        actions,
-                    );
-                    session_controls(ui, actions);
-                }
-                ScreenDrawState::AwaitingLauncherHide { .. } => {
-                    ui.spinner();
-                    ui.label("Hiding launcher…");
-                    session_controls(ui, actions);
-                }
-                ScreenDrawState::Capturing { .. } => {
-                    ui.spinner();
-                    ui.label("Capturing desktop…");
-                    session_controls(ui, actions);
-                }
-                ScreenDrawState::SelectingRegion { .. } => {
-                    ui.label("Select an export region on the desktop.");
-                    session_controls(ui, actions);
-                }
+fn render_toolbar_contents(
+    ui: &mut egui::Ui,
+    state: &ScreenDrawState,
+    runtime: Option<crate::screen_draw::NativeRuntimeState>,
+    settings: &ScreenDrawSettings,
+    export_error: Option<&str>,
+    export_in_flight: bool,
+    export_background: &mut ExportBackground,
+    actions: &mut Vec<ToolbarAction>,
+) {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.heading("Screen Draw");
+            let label = match settings.toolbar_orientation {
+                ToolbarOrientation::Vertical => "Use horizontal layout",
+                ToolbarOrientation::Horizontal => "Use vertical layout",
+            };
+            if ui.small_button("↔").on_hover_text(label).clicked() {
+                actions.push(ToolbarAction::ToggleOrientation);
             }
         });
+        ui.small(state_label(state));
     });
+    ui.separator();
+
+    match state {
+        ScreenDrawState::NoSession | ScreenDrawState::Failed { .. } => {
+            if ui.button("Start / New Capture").clicked() {
+                actions.push(ToolbarAction::Start);
+            }
+            if let ScreenDrawState::Failed { message, .. } = state {
+                ui.colored_label(egui::Color32::LIGHT_RED, message);
+            }
+            idle_preferences(ui, settings, actions);
+            ui.separator();
+            if ui.button("Close Toolbar").clicked() {
+                actions.push(ToolbarAction::Close);
+            }
+        }
+        ScreenDrawState::Drawing { .. } => {
+            drawing_controls(ui, runtime, settings, actions);
+            if ui.button("Ghost").clicked() {
+                actions.push(ToolbarAction::Ghost);
+            }
+            if ui.button("Done").clicked() {
+                actions.push(ToolbarAction::Finish);
+            }
+            session_controls(ui, actions);
+        }
+        ScreenDrawState::Ghost { .. } => {
+            if ui.button("Resume Drawing").clicked() {
+                actions.push(ToolbarAction::Resume);
+            }
+            history_controls(ui, actions);
+            visibility_controls(ui, runtime, actions);
+            background_controls(ui, runtime, settings, actions);
+            if ui.button("Clear").clicked() {
+                actions.push(ToolbarAction::Clear);
+            }
+            if ui.button("Done").clicked() {
+                actions.push(ToolbarAction::Finish);
+            }
+            session_controls(ui, actions);
+        }
+        ScreenDrawState::Finish { .. } => {
+            if ui.button("Resume Drawing").clicked() {
+                actions.push(ToolbarAction::Resume);
+            }
+            visibility_controls(ui, runtime, actions);
+            export_controls(
+                ui,
+                "Export",
+                settings,
+                export_error,
+                export_in_flight,
+                export_background,
+                actions,
+            );
+            session_controls(ui, actions);
+        }
+        ScreenDrawState::DisplayChanged { .. } => {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Display layout changed. The session is safely paused.",
+            );
+            ui.small("Drawing cannot resume, but the original capture and annotations remain exportable.");
+            export_controls(
+                ui,
+                "Export Original Capture",
+                settings,
+                export_error,
+                export_in_flight,
+                export_background,
+                actions,
+            );
+            session_controls(ui, actions);
+        }
+        ScreenDrawState::AwaitingLauncherHide { .. } => {
+            ui.spinner();
+            ui.label("Hiding launcher…");
+            session_controls(ui, actions);
+        }
+        ScreenDrawState::AwaitingNativeTeardown { .. } => {
+            ui.spinner();
+            ui.label("Closing previous drawing surface…");
+            session_controls(ui, actions);
+        }
+        ScreenDrawState::Capturing { .. } => {
+            ui.spinner();
+            ui.label("Capturing desktop…");
+            session_controls(ui, actions);
+        }
+        ScreenDrawState::SelectingRegion { .. } => {
+            ui.label("Select an export region on the desktop.");
+            session_controls(ui, actions);
+        }
+    }
 }
 
 fn export_controls(
@@ -821,6 +898,7 @@ fn state_label(state: &ScreenDrawState) -> &'static str {
     match state {
         ScreenDrawState::NoSession => "Idle",
         ScreenDrawState::AwaitingLauncherHide { .. } => "Preparing capture",
+        ScreenDrawState::AwaitingNativeTeardown { .. } => "Closing previous capture",
         ScreenDrawState::Capturing { .. } => "Capturing",
         ScreenDrawState::Drawing { .. } => "Drawing",
         ScreenDrawState::Ghost { .. } => "Ghost",
@@ -867,6 +945,13 @@ const ALL_TOOLS: [ScreenDrawTool; 10] = [
     ScreenDrawTool::FadingInk,
     ScreenDrawTool::Eyedropper,
 ];
+
+fn toolbar_size_points(orientation: ToolbarOrientation) -> egui::Vec2 {
+    match orientation {
+        ToolbarOrientation::Vertical => VERTICAL_TOOLBAR_SIZE_POINTS,
+        ToolbarOrientation::Horizontal => HORIZONTAL_TOOLBAR_SIZE_POINTS,
+    }
+}
 
 fn rgba_to_egui(color: RgbaColor) -> egui::Color32 {
     let [r, g, b, a] = color.channels();
@@ -946,6 +1031,35 @@ mod tests {
     use crate::screen_draw::ScreenDrawGeneration;
 
     #[test]
+    fn focused_toolbar_escape_is_consumed_and_requests_safe_pause_only_while_drawing() {
+        let generation = ScreenDrawGeneration::from_raw(1);
+        for (state, expected) in [
+            (ScreenDrawState::Drawing { generation }, true),
+            (ScreenDrawState::Ghost { generation }, false),
+            (ScreenDrawState::Finish { generation }, false),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.begin_frame(egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            });
+            assert_eq!(consume_drawing_escape(&ctx, &state), expected);
+            if expected {
+                assert!(!ctx.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                }));
+            }
+            let _ = ctx.end_frame();
+        }
+    }
+
+    #[test]
     fn state_controls_map_to_the_expected_session_capabilities() {
         let generation = ScreenDrawGeneration::from_raw(1);
         assert_eq!(
@@ -980,6 +1094,26 @@ mod tests {
         assert_eq!(
             logical_size_to_physical(egui::vec2(200.0, 300.0), 1.5),
             DesktopSize::new(300, 450)
+        );
+    }
+
+    #[test]
+    fn orientation_switch_changes_geometry_and_is_a_persisted_preference() {
+        assert_eq!(
+            toolbar_size_points(ToolbarOrientation::Vertical),
+            egui::vec2(264.0, 700.0)
+        );
+        assert_eq!(
+            toolbar_size_points(ToolbarOrientation::Horizontal),
+            egui::vec2(700.0, 264.0)
+        );
+        let mut controller = ScreenDrawController::default();
+        let effect =
+            apply_toolbar_action(&mut controller, ToolbarAction::ToggleOrientation).unwrap();
+        assert!(effect.preferences_changed);
+        assert_eq!(
+            controller.settings().toolbar_orientation,
+            ToolbarOrientation::Horizontal
         );
     }
 

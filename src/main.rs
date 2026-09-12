@@ -10,6 +10,7 @@ use multi_launcher::platform::{
     single_instance::{SingleInstanceAcquire, SingleInstanceGuard},
 };
 use multi_launcher::plugin::PluginManager;
+use multi_launcher::screen_draw::ScreenDrawSettings;
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::handle_visibility_trigger;
@@ -75,7 +76,64 @@ fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
     {
         reserved.push(("help launcher".into(), hotkey.into()));
     }
+    if let Ok(Some(hotkey)) = screen_draw_launch_hotkey_text(settings) {
+        reserved.push(("launch Screen Draw".into(), hotkey.into()));
+    }
     reserved
+}
+
+fn screen_draw_launch_hotkey_text(settings: &Settings) -> Result<Option<String>, String> {
+    let Some(value) = settings.plugin_settings.get("screen_draw") else {
+        return Ok(None);
+    };
+    let screen_draw: ScreenDrawSettings = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid Screen Draw settings: {error}"))?;
+    match screen_draw.launch_hotkey.as_ref() {
+        Some(chord) if chord.is_valid() => {
+            let parsed = parse_hotkey(chord.as_str()).expect("validated Screen Draw hotkey");
+            let conflicts = [
+                ("launcher toggle", Some(settings.hotkey())),
+                ("quit launcher", settings.quit_hotkey()),
+                ("help launcher", settings.help_hotkey()),
+            ];
+            if let Some((name, _)) = conflicts.into_iter().find(|(_, existing)| {
+                existing.is_some_and(|existing| same_hotkey(parsed, existing))
+            }) {
+                return Err(format!(
+                    "Screen Draw launch hotkey '{}' conflicts with {name}; global launch hotkey disabled",
+                    chord.as_str()
+                ));
+            }
+            Ok(Some(chord.as_str().to_owned()))
+        }
+        Some(chord) => Err(format!(
+            "invalid Screen Draw launch hotkey '{}'; global launch hotkey disabled",
+            chord.as_str()
+        )),
+        None => Ok(None),
+    }
+}
+
+fn same_hotkey(
+    left: multi_launcher::hotkey::Hotkey,
+    right: multi_launcher::hotkey::Hotkey,
+) -> bool {
+    left.key == right.key
+        && left.ctrl == right.ctrl
+        && left.shift == right.shift
+        && left.alt == right.alt
+        && left.win == right.win
+}
+
+fn screen_draw_launch_trigger(settings: &Settings) -> Option<Arc<HotkeyTrigger>> {
+    match screen_draw_launch_hotkey_text(settings) {
+        Ok(Some(chord)) => parse_hotkey(&chord).map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey))),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "Screen Draw launch hotkey is unavailable");
+            None
+        }
+    }
 }
 
 pub fn request_hotkey_restart(settings: Settings) {
@@ -311,6 +369,7 @@ fn main() -> anyhow::Result<()> {
     let mut help_trigger = settings
         .help_hotkey()
         .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+    let mut screen_draw_trigger = screen_draw_launch_trigger(&settings);
 
     let mut watched = vec![trigger.clone()];
     if let Some(qt) = &quit_trigger {
@@ -318,6 +377,9 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(ht) = &help_trigger {
         watched.push(ht.clone());
+    }
+    if let Some(sd) = &screen_draw_trigger {
+        watched.push(sd.clone());
     }
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
@@ -379,6 +441,17 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        if let Some(sd) = &screen_draw_trigger
+            && sd.take()
+        {
+            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::ScreenDrawStart);
+            if let Ok(guard) = ctx.lock()
+                && let Some(c) = &*guard
+            {
+                c.request_repaint();
+            }
+        }
+
         if let Ok(new_settings) = restart_rx.try_recv() {
             listener.stop();
             settings = new_settings.clone();
@@ -389,12 +462,16 @@ fn main() -> anyhow::Result<()> {
             help_trigger = settings
                 .help_hotkey()
                 .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+            screen_draw_trigger = screen_draw_launch_trigger(&settings);
             let mut watched = vec![trigger.clone()];
             if let Some(qt) = &quit_trigger {
                 watched.push(qt.clone());
             }
             if let Some(ht) = &help_trigger {
                 watched.push(ht.clone());
+            }
+            if let Some(sd) = &screen_draw_trigger {
+                watched.push(sd.clone());
             }
             listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
         }
@@ -442,5 +519,57 @@ mod tests {
         let settings = Settings::default();
         let result = std::panic::catch_unwind(|| build_viewport_with_icon(&settings, b"not-a-png"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screen_draw_launch_hotkey_is_reserved_and_parsed() {
+        let mut settings = Settings::default();
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({ "launch_hotkey": "Ctrl+Shift+D" }),
+        );
+        assert_eq!(
+            screen_draw_launch_hotkey_text(&settings),
+            Ok(Some("Ctrl+Shift+D".into()))
+        );
+        assert!(
+            reserved_launcher_hotkeys(&settings)
+                .contains(&("launch Screen Draw".into(), "Ctrl+Shift+D".into()))
+        );
+        assert!(screen_draw_launch_trigger(&settings).is_some());
+    }
+
+    #[test]
+    fn invalid_screen_draw_launch_hotkey_is_safely_disabled() {
+        let mut settings = Settings::default();
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({ "launch_hotkey": "Ctrl+DefinitelyNotAKey" }),
+        );
+        assert!(screen_draw_launch_hotkey_text(&settings).is_err());
+        assert!(screen_draw_launch_trigger(&settings).is_none());
+        assert!(
+            !reserved_launcher_hotkeys(&settings)
+                .iter()
+                .any(|(name, _)| name == "launch Screen Draw")
+        );
+    }
+
+    #[test]
+    fn conflicting_screen_draw_launch_hotkey_is_safely_disabled() {
+        let mut settings = Settings {
+            quit_hotkey: Some("Ctrl+Q".into()),
+            help_hotkey: Some("Ctrl+H".into()),
+            ..Settings::default()
+        };
+        for chord in ["F2", "Ctrl+Q", "Ctrl+H"] {
+            settings.plugin_settings.insert(
+                "screen_draw".into(),
+                serde_json::json!({ "launch_hotkey": chord }),
+            );
+            let error = screen_draw_launch_hotkey_text(&settings).unwrap_err();
+            assert!(error.contains("conflicts"), "{error}");
+            assert!(screen_draw_launch_trigger(&settings).is_none());
+        }
     }
 }

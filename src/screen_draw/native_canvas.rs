@@ -17,6 +17,16 @@ pub(crate) enum PointerButton {
     Right,
 }
 
+fn passive_fade_refresh_region(
+    passive_mode: bool,
+    annotations_visible: bool,
+    transient_bounds: Option<DesktopRect>,
+) -> Option<DesktopRect> {
+    (passive_mode && annotations_visible)
+        .then_some(transient_bounds)
+        .flatten()
+}
+
 #[derive(Debug)]
 pub(crate) struct CanvasDocument {
     bounds: DesktopRect,
@@ -649,6 +659,7 @@ mod windows_canvas {
         canvas: CanvasDocument,
         backing: Option<BackingDib>,
         passive: Option<NativeOverlaySurface>,
+        passive_transient: Vec<(DesktopRect, NativeOverlaySurface)>,
         passive_mode: bool,
         destroying_surfaces: bool,
         background: CanvasBackground,
@@ -704,19 +715,68 @@ mod windows_canvas {
 
         fn rebuild_passive(&mut self) -> Result<(), String> {
             let mut image = RgbaImage::new(self.bounds.width, self.bounds.height);
-            let transient = self.canvas.transient_strokes(self.elapsed());
             render_document_into(
                 &mut image,
                 self.bounds.origin(),
                 crate::screen_draw::RasterBackground::Transparent,
                 self.canvas.document(),
-                &transient,
+                &[],
             )
             .map_err(|error| format!("failed to rebuild passive Screen Draw overlay: {error:?}"))?;
             let Some(passive) = self.passive.as_mut() else {
                 return Ok(());
             };
-            passive.update(&image)
+            passive.update(&image)?;
+            self.rebuild_passive_transient()
+        }
+
+        fn rebuild_passive_transient(&mut self) -> Result<(), String> {
+            if !self.canvas.document().annotations_visible() {
+                for (_, surface) in &mut self.passive_transient {
+                    surface.hide();
+                }
+                return Ok(());
+            }
+            let transient = self.canvas.transient_strokes(self.elapsed());
+            if transient.is_empty() {
+                self.passive_transient.clear();
+                return Ok(());
+            }
+            let mut bounds: Vec<_> = transient
+                .iter()
+                .flat_map(|stroke| {
+                    crate::screen_draw::raster::stroke_mask_tiles(self.bounds, stroke)
+                })
+                .collect();
+            bounds.sort_by_key(|tile| (tile.y, tile.x));
+            bounds.dedup();
+            if self
+                .passive_transient
+                .iter()
+                .map(|(bounds, _)| *bounds)
+                .ne(bounds.iter().copied())
+            {
+                self.passive_transient.clear();
+                for bounds in &bounds {
+                    self.passive_transient
+                        .push((*bounds, NativeOverlaySurface::create(*bounds)?));
+                }
+            }
+            for (bounds, surface) in &mut self.passive_transient {
+                let mut image = RgbaImage::new(bounds.width, bounds.height);
+                crate::screen_draw::raster::render_annotations_into(
+                    &mut image,
+                    bounds.origin(),
+                    crate::screen_draw::RasterBackground::Transparent,
+                    &[],
+                    true,
+                    &transient,
+                )
+                .map_err(|error| format!("failed to rebuild passive fading ink: {error:?}"))?;
+                surface.update(&image)?;
+                surface.show();
+            }
+            Ok(())
         }
 
         fn rebuild_region(&mut self, dirty: DesktopRect, preview: bool) -> Result<(), String> {
@@ -1039,7 +1099,11 @@ mod windows_canvas {
         }
 
         fn destroy_surfaces(&mut self) {
-            if self.hwnd.0.is_null() && self.passive.is_none() && self.backing.is_none() {
+            if self.hwnd.0.is_null()
+                && self.passive.is_none()
+                && self.passive_transient.is_empty()
+                && self.backing.is_none()
+            {
                 return;
             }
             self.input_enabled = false;
@@ -1056,6 +1120,7 @@ mod windows_canvas {
             // Drop the passive HWND/DIB first, then destroy the interactive
             // HWND while its WndProc can still access this retained state.
             self.passive.take();
+            self.passive_transient.clear();
             let hwnd = std::mem::take(&mut self.hwnd);
             if !hwnd.0.is_null() {
                 self.destroying_surfaces = true;
@@ -1159,8 +1224,14 @@ mod windows_canvas {
                 if removed > 0 {
                     (state.event)(CanvasEvent::DocumentChanged);
                 }
-                if state.passive_mode {
-                    let _ = state.rebuild_passive();
+                if passive_fade_refresh_region(
+                    state.passive_mode,
+                    state.canvas.document().annotations_visible(),
+                    dirty,
+                )
+                .is_some()
+                {
+                    let _ = state.rebuild_passive_transient();
                 }
                 state.update_fade_timer();
                 LRESULT(0)
@@ -1262,6 +1333,7 @@ mod windows_canvas {
                 canvas: CanvasDocument::new(bounds),
                 backing: Some(unsafe { BackingDib::new(bounds.width, bounds.height)? }),
                 passive: Some(NativeOverlaySurface::create(bounds)?),
+                passive_transient: Vec::new(),
                 passive_mode: false,
                 destroying_surfaces: false,
                 background: initial_background,
@@ -1352,9 +1424,15 @@ mod windows_canvas {
             if let Some(passive) = self.state.passive.as_mut() {
                 passive.hide();
             }
+            for (_, passive) in &mut self.state.passive_transient {
+                passive.hide();
+            }
         }
         pub(crate) fn show_export_preview(&mut self, image: &RgbaImage) -> Result<(), String> {
             self.state.passive_mode = true;
+            for (_, transient) in &mut self.state.passive_transient {
+                transient.hide();
+            }
             let passive =
                 self.state.passive.as_mut().ok_or_else(|| {
                     "Screen Draw passive preview surface is unavailable".to_string()
@@ -1427,6 +1505,13 @@ mod windows_canvas {
                         passive.hide();
                     }
                 }
+                for (_, passive) in &mut self.state.passive_transient {
+                    if visible {
+                        passive.show();
+                    } else {
+                        passive.hide();
+                    }
+                }
             }
         }
         pub(crate) fn annotations_visible(&self) -> bool {
@@ -1476,6 +1561,18 @@ mod tests {
     use super::*;
     use crate::screen_draw::{render_document_into, selected_background};
     use image::RgbaImage;
+
+    #[test]
+    fn passive_fade_refresh_is_bounded_and_idle_without_transient_ink() {
+        let dirty = DesktopRect::new(-1800, -100, 120, 80);
+        assert_eq!(
+            passive_fade_refresh_region(true, true, Some(dirty)),
+            Some(dirty)
+        );
+        assert_eq!(passive_fade_refresh_region(false, true, Some(dirty)), None);
+        assert_eq!(passive_fade_refresh_region(true, false, Some(dirty)), None);
+        assert_eq!(passive_fade_refresh_region(true, true, None), None);
+    }
 
     #[test]
     fn both_buttons_start_pen_immediately_without_deadzone() {

@@ -201,6 +201,13 @@ impl LauncherApp {
                 WatchEvent::ExecuteAction(action) => {
                     self.activate_action(action, None, ActivationSource::Gesture);
                 }
+                WatchEvent::ScreenDrawStart => {
+                    if let Err(error) = self.screen_draw_controller.request_start() {
+                        // A repeated global chord is intentionally a no-op while a
+                        // session (including capture/export handshakes) is active.
+                        tracing::debug!(%error, "ignored Screen Draw launch hotkey");
+                    }
+                }
                 WatchEvent::ClipboardModify(ev) => {
                     self.handle_clipboard_modify_gui_event(ev);
                 }
@@ -285,6 +292,26 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn screen_draw_launch_event_stages_capture_once() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
+        app.process_watch_events();
+        let generation = app.screen_draw_controller.state().generation().unwrap();
+        assert!(matches!(
+            app.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::AwaitingLauncherHide { .. }
+        ));
+
+        app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
+        app.process_watch_events();
+        assert_eq!(
+            app.screen_draw_controller.state().generation(),
+            Some(generation)
+        );
     }
 
     #[test]

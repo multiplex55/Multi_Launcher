@@ -245,20 +245,24 @@ impl SharedVisualOverlayController {
         buffered: Vec<VisualOverlayEvent>,
         failure: Option<String>,
     ) -> OperationId {
-        let mut events = self.0.editor_events.lock().unwrap();
-        events.extend(buffered);
+        self.0.editor_events.lock().unwrap().extend(buffered);
         if let Some(message) = failure {
             let _ = self
                 .0
                 .active_id
                 .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
-            events.push_back(VisualOverlayEvent::Error {
+            let event = VisualOverlayEvent::Error {
                 operation_id: id,
                 error: VisualOverlayError {
                     kind: OverlayErrorKind::Platform,
                     message,
                 },
-            });
+            };
+            if self.0.screen_draw_id.load(Ordering::Acquire) == id {
+                self.0.screen_draw_events.lock().unwrap().push_back(event);
+            } else {
+                self.0.editor_events.lock().unwrap().push_back(event);
+            }
         }
         id
     }
@@ -982,6 +986,24 @@ mod tests {
                 rect: ScreenRect::new(-1800, -100, 2100, 800),
             })
         );
+    }
+
+    #[test]
+    fn synchronous_screen_draw_start_failure_uses_the_screen_draw_event_queue() {
+        let controller = SharedVisualOverlayController::new_with_controller_factory(|| {
+            Err(std::io::Error::other("fixture startup failure"))
+        });
+        let operation_id = controller.begin_rectangle_pick(
+            RectanglePurpose::ScreenDrawExport,
+            ScreenRect::new(-1920, -240, 3840, 1320),
+        );
+        assert!(controller.poll().is_empty());
+        assert!(matches!(
+            controller.poll_rectangle_event(operation_id),
+            Some(VisualOverlayEvent::Error { operation_id: id, error })
+                if id == operation_id && error.message.contains("fixture startup failure")
+        ));
+        assert_eq!(controller.operation_id(), None);
     }
     #[test]
     fn one_service_orders_every_operation_type_and_replaces_each_predecessor_once() {

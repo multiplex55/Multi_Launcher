@@ -3274,7 +3274,8 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Todos
             | WatchEvent::Favorites
             | WatchEvent::Gestures
-            | WatchEvent::ExecuteAction(_) => {
+            | WatchEvent::ExecuteAction(_)
+            | WatchEvent::ScreenDrawStart => {
                 continue;
             }
             WatchEvent::ClipboardModify(_) => return Some(ev.into()),
