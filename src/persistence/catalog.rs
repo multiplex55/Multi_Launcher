@@ -14,6 +14,7 @@ use crate::plugins::macros::MacroEntry;
 use crate::plugins::shell::ShellCmdEntry;
 use crate::plugins::snippets::SnippetEntry;
 use crate::plugins::todo::TodoEntry;
+use crate::radial::model::RadialDocument;
 use crate::settings::Settings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -56,10 +57,12 @@ pub enum PersistentStoreId {
     Alarms,
     LauncherLog,
     ToastLog,
+    RadialDocument,
+    RadialAssets,
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 37] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -95,6 +98,8 @@ impl PersistentStoreId {
         Self::Alarms,
         Self::LauncherLog,
         Self::ToastLog,
+        Self::RadialDocument,
+        Self::RadialAssets,
     ];
 }
 
@@ -672,6 +677,24 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             false,
             ProbeKind::OpaqueFile,
         ),
+        Id::RadialDocument => s(
+            "Radial menu configuration",
+            File,
+            Critical,
+            Ordinary,
+            Low,
+            true,
+            ProbeKind::Json(probe_radial),
+        ),
+        Id::RadialAssets => s(
+            "Radial menu assets",
+            Directory,
+            Critical,
+            Ordinary,
+            Low,
+            false,
+            ProbeKind::AssetsDirectory,
+        ),
     }
 }
 
@@ -792,6 +815,12 @@ fn descriptor_for(
             (absolute_from(current_dir, &path), configured)
         }
         Id::ToastLog => cwd(current_dir, crate::toast_log::TOAST_LOG_FILE),
+        Id::RadialDocument => (root.path().join(crate::radial::model::RADIAL_FILE), false),
+        Id::RadialAssets => (
+            root.path()
+                .join(crate::radial::model::RADIAL_ASSETS_DIRECTORY),
+            false,
+        ),
     };
     let path = lexical_absolute(path, current_dir);
     let ownership = if path_is_within(root.path(), &path) {
@@ -945,6 +974,29 @@ fn probe_json<T: DeserializeOwned>(_: &Path, bytes: &[u8]) -> ProbeResult {
     serde_json::from_slice::<T>(bytes)
         .map(|_| ProbeResult::Healthy)
         .unwrap_or(ProbeResult::Malformed)
+}
+
+fn probe_radial(_: &Path, bytes: &[u8]) -> ProbeResult {
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(_) => return ProbeResult::Malformed,
+    };
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if version > crate::radial::model::CURRENT_SCHEMA_VERSION as u64 {
+        return ProbeResult::UnsupportedSchema(version.to_string());
+    }
+    let document: RadialDocument = match serde_json::from_value(value) {
+        Ok(document) => document,
+        Err(_) => return ProbeResult::Malformed,
+    };
+    if crate::radial::validation::validate(&document).is_ok() {
+        ProbeResult::Healthy
+    } else {
+        ProbeResult::Malformed
+    }
 }
 
 fn probe_bookmarks(_: &Path, bytes: &[u8]) -> ProbeResult {
@@ -1173,6 +1225,31 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<PersistentStoreId>(r#""NotesAssets""#).unwrap(),
             PersistentStoreId::NotesAssets
+        );
+    }
+
+    #[test]
+    fn radial_stores_are_application_owned_and_domain_probed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = root(directory.path());
+        let catalog = PersistenceCatalog::new(&root, &Settings::default());
+        let document = catalog.get(PersistentStoreId::RadialDocument);
+        let assets = catalog.get(PersistentStoreId::RadialAssets);
+        assert_eq!(
+            document.path,
+            directory.path().join(crate::radial::model::RADIAL_FILE)
+        );
+        assert_eq!(document.backup_policy, BackupPolicy::Include);
+        assert_eq!(assets.kind, StoreKind::Directory);
+        crate::common::persistence::save_json_atomic(&document.path, &RadialDocument::starter())
+            .unwrap();
+        assert_eq!(document.probe(), StoreHealth::Healthy);
+        std::fs::write(&document.path, r#"{"schema_version":999}"#).unwrap();
+        assert_eq!(
+            document.probe(),
+            StoreHealth::UnsupportedSchema {
+                version: "999".into()
+            }
         );
     }
 

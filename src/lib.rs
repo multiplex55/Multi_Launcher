@@ -50,6 +50,7 @@ pub mod plugin_editor;
 pub mod plugins;
 pub mod plugins_builtin;
 pub mod process;
+pub mod radial;
 pub mod screen_draw;
 pub mod settings;
 pub mod settings_editor;

@@ -1,6 +1,6 @@
 # Native radial menu implementation ledger
 
-Status: approved, M0 complete; M1 pending
+Status: approved, M0-M1 complete; M2 pending
 
 Canonical requirements: `docs/multi_launcher_radial_codex_plan.md`
 Historical navigation notes: `docs/multi_launcher_radial_source_notes.md`
@@ -155,7 +155,7 @@ never by executing or initializing imported code.
 | Milestone | State | Acceptance/verification boundary |
 |---|---|---|
 | M0 source audit, parity, ledger | complete | ledger reviewed against the approved brief; `git diff --check` passed; no baseline suite |
-| M1 model/store/reducer/session/geometry | pending | one focused nonzero core/unit Nextest batch plus compile check |
+| M1 model/store/reducer/session/geometry | complete | reviewer remediation passed a source-identical focused core/unit Nextest batch |
 | M2 native input and host | pending | focused adapter/lifecycle batch and bounded opt-in Windows probe |
 | M3 actions/context/submenus/handoffs | pending | focused integrated/regression batch |
 | M4 skins/assets/import/export/recovery | pending | focused store/skin/import/resource batch |
@@ -177,6 +177,69 @@ required 60/120/180/up-to-300-second observation cadence.
 
 M0 verification: baseline/ref/source audits completed read-only; the planned
 seven-milestone boundaries were independently reviewed; `git diff --check` exited 0.
+
+M1 focused gate job (launch record):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | `HEAD adf98d4771d673adad5c24d149fa860b4db5910d` plus the M1 paths reported by `git status --short`; radial source SHA-256 values captured at launch (`geometry A8281D81...`, `invocation 640C051A...`, `model 23E89C61...`, `session 463B64A0...`, `store F5839BD2...`, `validation 9AC6ED1D...`) |
+| profile/environment | default Nextest profile; existing incremental target; no toolchain/dependency/profile changes |
+| requested start | `2026-09-13T10:59:50.7340247-04:00` |
+| preflight | no `cargo`, `cargo-nextest`, or `rustc` process was active |
+| session/PID | exec session `41032`; observed `cargo` PID `1992`, `cargo-nextest` PID `41516`, child Cargo PID `47532` |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m1-nextest.log` |
+| exit/result | exit `0`; compile completed in `25m 11s`; Nextest run `52357e71-27da-4df5-8ea8-ef0e8c393edd`; 38 passed, 0 failed, 4,008 filtered/skipped across 70 discovered binaries; test execution `0.425s` |
+
+The compiler reported one unused tuple binding in `radial::invocation`; after the
+successful gate, that binding alone was removed without changing control flow. Its
+post-cleanup file SHA-256 is
+`E6B3B2129ACE9F45EBAAF8126B5515790FCD23EED33AED3B7451ED23F018FEB7`.
+The milestone's exactly-one focused Nextest constraint precluded a duplicate rebuild.
+`git diff --check` passed after this mechanical cleanup, and no Cargo/Nextest/rustc
+process remained active. No full suite or native probe was run at M1.
+
+M1 reviewer-remediation focused gate (launch record):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | `HEAD adf98d4771d673adad5c24d149fa860b4db5910d` plus the M1 worktree; remediation source SHA-256: geometry `35DE11EC...`, invocation `354C9433...`, session `614D0416...`, store `65ADB2A4...`, validation `606F54F8...`; unchanged model `23E89C61...`, module root `180BAD7B...` |
+| profile/environment | default Nextest profile; existing incremental target; no toolchain/dependency/profile changes |
+| requested start | `2026-09-13T11:45:26.5196456-04:00` |
+| preflight | no `cargo`, `cargo-nextest`, or `rustc` process was active |
+| session/PID | exec session `68264` |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m1-remediation-nextest.log` |
+| exit/result | exit `101`; compile stopped on ambiguous float literals in the new one-cell-wedge test before tests executed |
+
+The first remediation attempt exposed a compile-only fixture defect: the angle array
+needed an explicit `f32` element before calling `sin`/`cos`. The fixture was corrected
+without changing production behavior. A successful replacement gate is required below.
+
+M1 reviewer-remediation replacement gate (launch record):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | same recorded remediation snapshot except corrected geometry fixture SHA-256 `C8D270DD6B67EF76DF1F6ABE4CFB5FAC4D4B5C461D0BFC156D39F90F1AD8BAF3` |
+| profile/environment | default Nextest profile; existing incremental target |
+| requested start | `2026-09-13T11:50:11.1217531-04:00` |
+| preflight | failed job fully exited `101`; no `cargo`, `cargo-nextest`, or `rustc` process remained active |
+| session/PID | exec session `98655` |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m1-remediation-retry-nextest.log` |
+| exit/result | exit `0`; compile completed in `19m 49s`; Nextest run `afe26368-e578-4ddf-a645-f7b798eade1b`; 46 passed, 0 failed, 4,008 filtered/skipped across 70 discovered binaries; test execution `0.526s` |
+
+The successful replacement used the corrected, recorded source without further source
+changes. It covered all nine reviewer remediations: safe release-selection cancellation,
+exclusive-release draining, generation-safe arming resets, sticky drag cancellation,
+one-cell/wrap wedge ownership, bounded memoized DAG validation, frame-scoped dynamic
+snapshots, parsed canonical hotkey conflicts, and validated store initialization with
+explicit revision overflow. `git diff --check` passed afterward and no Cargo tree
+remained active. The failed compile attempt and successful replacement are both retained
+above rather than being collapsed into a false first-pass success.
 
 ## Known evidence gaps
 

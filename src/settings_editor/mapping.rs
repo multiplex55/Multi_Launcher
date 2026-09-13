@@ -326,6 +326,7 @@ impl SettingsEditor {
             },
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
+            radial: current.radial.clone(),
         }
     }
 }

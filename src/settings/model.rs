@@ -571,6 +571,8 @@ pub struct Settings {
     pub query_results_layout: QueryResultsLayoutSettings,
     #[serde(default)]
     pub multi_manager: MultiManagerSettings,
+    #[serde(default)]
+    pub radial: crate::radial::model::RadialFeatureSettings,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -641,6 +643,7 @@ impl Default for Settings {
             note_graph: NoteGraphSettings::default(),
             query_results_layout: QueryResultsLayoutSettings::default(),
             multi_manager: MultiManagerSettings::default(),
+            radial: crate::radial::model::RadialFeatureSettings::default(),
         }
     }
 }
@@ -701,15 +704,32 @@ mod tests {
     use super::{
         MultiManagerSettings, NoteSettings, NoteViewMode, QueryResultsLayoutSettings, Settings,
     };
+    use crate::radial::model::RadialFeatureSettings;
 
     #[test]
     fn empty_settings_deserializes_with_note_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(parsed.note, NoteSettings::default());
+        assert_eq!(parsed.radial, RadialFeatureSettings::default());
         assert_eq!(
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
         );
+    }
+
+    #[test]
+    fn radial_explicit_disable_and_zero_threshold_are_preserved() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{"radial":{"enabled":false,"shared_tap_hold":false,"hold_threshold_ms":0}}"#,
+        )
+        .unwrap();
+        assert!(!parsed.radial.enabled);
+        assert!(!parsed.radial.shared_tap_hold);
+        assert_eq!(parsed.radial.hold_threshold_ms, 0);
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+        assert!(!restored.radial.enabled);
+        assert_eq!(restored.radial.hold_threshold_ms, 0);
     }
 
     #[test]
