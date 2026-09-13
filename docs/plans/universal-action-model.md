@@ -18,7 +18,7 @@ types only when an action-oriented surface requests them.
 - Acceptance: model tests, `cargo fmt --all --check`, and `cargo check` pass;
   legacy `Action` and `Plugin` definitions remain unchanged.
 
-### 2. Target resolver — `pending`
+### 2. Target resolver — `complete`
 
 - Resolve legacy search actions into typed runtime targets using typed command
   parsing and existing in-memory catalogs.
