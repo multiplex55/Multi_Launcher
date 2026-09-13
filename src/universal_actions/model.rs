@@ -324,6 +324,9 @@ pub enum UniversalUiIntent {
     EditClipboardEntry {
         index: usize,
     },
+    RemoveClipboardEntry {
+        index: usize,
+    },
     EditTodo {
         index: usize,
     },

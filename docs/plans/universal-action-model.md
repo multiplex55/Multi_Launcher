@@ -25,7 +25,7 @@ types only when an action-oriented surface requests them.
 - Cover all existing result-context-menu identities plus Window, MkMacro, and
   Browser Tab, with a safe generic fallback.
 
-### 3. Provider registry and built-in providers — `pending`
+### 3. Provider registry and built-in providers — `complete`
 
 - Add pure, read-only providers that discover semantic actions lazily.
 - Preserve current context-menu capabilities and add only currently supported
