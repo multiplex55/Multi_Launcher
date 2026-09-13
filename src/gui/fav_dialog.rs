@@ -1,3 +1,4 @@
+use crate::actions::Action;
 use crate::gui::LauncherApp;
 use crate::plugins::fav::{
     FAV_FILE, FavEntry, join_command_args, load_favs, replace_favs, resolve_with_plugin,
@@ -47,6 +48,27 @@ impl FavDialog {
             self.command.clear();
             self.args.clear();
         }
+        self.open = true;
+    }
+
+    /// Open the add form with a launcher's existing action prefilled without
+    /// changing the persisted Favorites schema.
+    pub fn open_prefilled_add(&mut self, action: &Action) {
+        self.open_prefilled_add_from(action, FAV_FILE);
+    }
+
+    fn open_prefilled_add_from(&mut self, action: &Action, path: &str) {
+        if self.load_from(path).is_err() {
+            self.edit_idx = None;
+            self.open = true;
+            return;
+        }
+        self.edit_idx = Some(self.entries.len());
+        self.label.clone_from(&action.label);
+        self.command.clone_from(&action.action);
+        self.args = action.args.clone().unwrap_or_default();
+        self.add_plugin.clear();
+        self.add_filter.clear();
         self.open = true;
     }
 
@@ -298,6 +320,7 @@ impl FavDialog {
 #[cfg(test)]
 mod tests {
     use super::FavDialog;
+    use crate::actions::Action;
     use crate::plugins::fav::{FavEntry, save_favs};
 
     fn fav(label: &str) -> FavEntry {
@@ -330,5 +353,27 @@ mod tests {
         assert_eq!(dialog.entries, initial);
         assert_eq!(std::fs::read(path).unwrap(), invalid);
         assert!(dialog.load_error.is_some());
+    }
+
+    #[test]
+    fn prefilled_add_preserves_legacy_favorite_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        save_favs(path.to_str().unwrap(), &[fav("saved")]).unwrap();
+        let action = Action {
+            label: "Project".into(),
+            desc: "Folder".into(),
+            action: r#"C:\work\project"#.into(),
+            args: Some("--reuse-window".into()),
+        };
+        let mut dialog = FavDialog::default();
+
+        dialog.open_prefilled_add_from(&action, path.to_str().unwrap());
+
+        assert!(dialog.open);
+        assert_eq!(dialog.edit_idx, Some(1));
+        assert_eq!(dialog.label, action.label);
+        assert_eq!(dialog.command, action.action);
+        assert_eq!(dialog.args, action.args.unwrap());
     }
 }

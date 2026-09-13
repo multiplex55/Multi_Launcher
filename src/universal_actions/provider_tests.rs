@@ -233,9 +233,10 @@ fn browser_copy_url_is_disabled_without_cached_url() {
     assert!(copy.availability.disabled_reason().unwrap().contains("URL"));
     assert!(matches!(
         copy.operation,
-        UniversalActionOperation::Command(Command::Clipboard(
-            ClipboardCommand::SetText { ref text }
-        )) if text.is_empty()
+        UniversalActionOperation::Command {
+            command: Command::Clipboard(ClipboardCommand::SetText { ref text }),
+            ..
+        } if text.is_empty()
     ));
 }
 

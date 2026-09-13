@@ -58,12 +58,16 @@ fn command_action(
     group: ActionGroup,
     priority: ActionPriority,
     command: Command,
+    original_action: &crate::actions::Action,
 ) -> UniversalAction {
     action(
         id,
         target,
         presentation(label, short_label, icon, group, priority),
-        UniversalActionOperation::Command(command),
+        UniversalActionOperation::Command {
+            command,
+            original_action: original_action.clone(),
+        },
     )
 }
 
@@ -246,69 +250,69 @@ macro_rules! provider {
 
 provider!(FolderProvider, resolved, ActionTarget::Folder { path } => vec![
     ui_action(action_ids::FOLDER_SET_ALIAS, &resolved.target, "Set Alias", "Alias", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::OpenFolderAlias { path: path.clone() }),
-    destructive(command_action(action_ids::FOLDER_REMOVE, &resolved.target, "Remove Folder", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::FolderRemove(path.clone())))),
+    destructive(command_action(action_ids::FOLDER_REMOVE, &resolved.target, "Remove Folder", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::FolderRemove(path.clone())), &resolved.selected_action)),
 ]);
 
 provider!(BookmarkProvider, resolved, ActionTarget::Bookmark { url } => vec![
     ui_action(action_ids::BOOKMARK_SET_ALIAS, &resolved.target, "Set Alias", "Alias", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::OpenBookmarkAlias { url: url.clone() }),
-    destructive(command_action(action_ids::BOOKMARK_REMOVE, &resolved.target, "Remove Bookmark", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::BookmarkRemove(url.clone())))),
+    destructive(command_action(action_ids::BOOKMARK_REMOVE, &resolved.target, "Remove Bookmark", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::BookmarkRemove(url.clone())), &resolved.selected_action)),
 ]);
 
 provider!(TimerProvider, resolved, ActionTarget::Timer { id } => vec![
-    command_action(action_ids::TIMER_PAUSE, &resolved.target, "Pause Timer", "Pause", ActionIconKey::Timer, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::Pause(*id))),
-    destructive(command_action(action_ids::TIMER_CANCEL, &resolved.target, "Remove Timer", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Timer(TimerCommand::Cancel(*id)))),
+    command_action(action_ids::TIMER_PAUSE, &resolved.target, "Pause Timer", "Pause", ActionIconKey::Timer, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::Pause(*id)), &resolved.selected_action),
+    destructive(command_action(action_ids::TIMER_CANCEL, &resolved.target, "Remove Timer", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Timer(TimerCommand::Cancel(*id)), &resolved.selected_action)),
 ]);
 
 provider!(StopwatchProvider, resolved, ActionTarget::Stopwatch { id } => vec![
-    command_action(action_ids::STOPWATCH_PAUSE, &resolved.target, "Pause Stopwatch", "Pause", ActionIconKey::Stopwatch, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::StopwatchPause(*id))),
-    command_action(action_ids::STOPWATCH_RESUME, &resolved.target, "Resume Stopwatch", "Resume", ActionIconKey::Stopwatch, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::StopwatchResume(*id))),
-    destructive(command_action(action_ids::STOPWATCH_STOP, &resolved.target, "Stop Stopwatch", "Stop", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Timer(TimerCommand::StopwatchStop(*id)))),
+    command_action(action_ids::STOPWATCH_PAUSE, &resolved.target, "Pause Stopwatch", "Pause", ActionIconKey::Stopwatch, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::StopwatchPause(*id)), &resolved.selected_action),
+    command_action(action_ids::STOPWATCH_RESUME, &resolved.target, "Resume Stopwatch", "Resume", ActionIconKey::Stopwatch, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::StopwatchResume(*id)), &resolved.selected_action),
+    destructive(command_action(action_ids::STOPWATCH_STOP, &resolved.target, "Stop Stopwatch", "Stop", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Timer(TimerCommand::StopwatchStop(*id)), &resolved.selected_action)),
     ui_action(action_ids::STOPWATCH_COPY_TIME, &resolved.target, "Copy Time", "Copy", ActionIconKey::Copy, ActionGroup::CopyShare, ActionPriority::High, UniversalUiIntent::CopyStopwatchTime { id: *id }),
 ]);
 
 provider!(SnippetProvider, resolved, ActionTarget::Snippet { alias } => vec![
     ui_action(action_ids::SNIPPET_EDIT, &resolved.target, "Edit Snippet", "Edit", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::EditSnippet { alias: alias.clone() }),
-    destructive(command_action(action_ids::SNIPPET_REMOVE, &resolved.target, "Remove Snippet", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::SnippetRemove(alias.clone())))),
+    destructive(command_action(action_ids::SNIPPET_REMOVE, &resolved.target, "Remove Snippet", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::SnippetRemove(alias.clone())), &resolved.selected_action)),
 ]);
 
 provider!(TempfileProvider, resolved, ActionTarget::Tempfile { path } => vec![
     ui_action(action_ids::TEMPFILE_SET_ALIAS, &resolved.target, "Set Alias", "Alias", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::OpenTempfileAlias { path: path.clone() }),
-    destructive(command_action(action_ids::TEMPFILE_DELETE, &resolved.target, "Delete File", "Delete", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::TempfileRemove(path.clone())))),
+    destructive(command_action(action_ids::TEMPFILE_DELETE, &resolved.target, "Delete File", "Delete", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::TempfileRemove(path.clone())), &resolved.selected_action)),
 ]);
 
 provider!(NoteProvider, resolved, ActionTarget::Note { slug } => vec![
     ui_action(action_ids::NOTE_EDIT, &resolved.target, "Edit Note", "Edit", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::EditNote { slug: slug.clone() }),
     ui_action(action_ids::NOTE_OPEN_NOTEPAD, &resolved.target, "Open in Notepad", "Notepad", ActionIconKey::Note, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::OpenNoteExternal { slug: slug.clone(), editor: NoteExternalEditor::Notepad }),
     ui_action(action_ids::NOTE_OPEN_NEOVIM, &resolved.target, "Open in Neovim", "Neovim", ActionIconKey::Terminal, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::OpenNoteExternal { slug: slug.clone(), editor: NoteExternalEditor::Neovim }),
-    destructive(command_action(action_ids::NOTE_REMOVE, &resolved.target, "Remove Note", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Note(NoteCommand::Remove { slug: slug.clone() }))),
+    destructive(command_action(action_ids::NOTE_REMOVE, &resolved.target, "Remove Note", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Note(NoteCommand::Remove { slug: slug.clone() }), &resolved.selected_action)),
 ]);
 
 provider!(ClipboardProvider, resolved, ActionTarget::ClipboardEntry { index } => vec![
     ui_action(action_ids::CLIPBOARD_EDIT, &resolved.target, "Edit Entry", "Edit", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::EditClipboardEntry { index: *index }),
-    destructive(ui_action(action_ids::CLIPBOARD_REMOVE, &resolved.target, "Remove Entry", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, UniversalUiIntent::RemoveClipboardEntry { index: *index })),
+    destructive(ui_action(action_ids::CLIPBOARD_REMOVE, &resolved.target, "Remove Entry", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, UniversalUiIntent::RemoveClipboardEntry { index: *index, label: resolved.selected_action.label.clone() })),
 ]);
 
 provider!(TodoProvider, resolved, ActionTarget::Todo { index } => vec![
-    command_action(action_ids::TODO_EDIT, &resolved.target, "Edit Todo", "Edit", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, Command::Todo(TodoCommand::Edit { index: *index })),
+    command_action(action_ids::TODO_EDIT, &resolved.target, "Edit Todo", "Edit", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, Command::Todo(TodoCommand::Edit { index: *index }), &resolved.selected_action),
 ]);
 
 provider!(WindowProvider, resolved, ActionTarget::Window { hwnd } => vec![
-    command_action(action_ids::WINDOW_ACTIVATE, &resolved.target, "Activate Window", "Activate", ActionIconKey::Window, ActionGroup::Window, ActionPriority::High, Command::System(SystemCommand::WindowSwitch(*hwnd))),
-    destructive(command_action(action_ids::WINDOW_CLOSE, &resolved.target, "Close Window", "Close", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::System(SystemCommand::WindowClose(*hwnd)))),
+    command_action(action_ids::WINDOW_ACTIVATE, &resolved.target, "Activate Window", "Activate", ActionIconKey::Window, ActionGroup::Window, ActionPriority::High, Command::System(SystemCommand::WindowSwitch(*hwnd)), &resolved.selected_action),
+    destructive(command_action(action_ids::WINDOW_CLOSE, &resolved.target, "Close Window", "Close", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::System(SystemCommand::WindowClose(*hwnd)), &resolved.selected_action)),
 ]);
 
 provider!(MkMacroProvider, resolved, ActionTarget::MkMacro { id } => vec![
-    command_action(action_ids::MKMACRO_RUN, &resolved.target, "Run Macro", "Run", ActionIconKey::Run, ActionGroup::Automation, ActionPriority::High, Command::Macro(MacroCommand::MkRun(*id))),
+    command_action(action_ids::MKMACRO_RUN, &resolved.target, "Run Macro", "Run", ActionIconKey::Run, ActionGroup::Automation, ActionPriority::High, Command::Macro(MacroCommand::MkRun(*id)), &resolved.selected_action),
     ui_action(action_ids::MKMACRO_EDIT, &resolved.target, "Edit in MkMacro", "Edit", ActionIconKey::Macro, ActionGroup::OpenEdit, ActionPriority::Normal, UniversalUiIntent::OpenMkMacro { id: *id }),
 ]);
 
 provider!(BrowserTabProvider, resolved, ActionTarget::BrowserTab { runtime_id, url } => {
-    let mut copy = command_action(action_ids::BROWSER_TAB_COPY_URL, &resolved.target, "Copy URL", "Copy URL", ActionIconKey::Copy, ActionGroup::CopyShare, ActionPriority::High, Command::Clipboard(ClipboardCommand::SetText { text: url.clone().unwrap_or_default() }));
+    let mut copy = command_action(action_ids::BROWSER_TAB_COPY_URL, &resolved.target, "Copy URL", "Copy URL", ActionIconKey::Copy, ActionGroup::CopyShare, ActionPriority::High, Command::Clipboard(ClipboardCommand::SetText { text: url.clone().unwrap_or_default() }), &resolved.selected_action);
     if url.is_none() {
         copy.availability = ActionAvailability::Disabled { reason: "This browser tab did not expose a URL".into() };
     }
     vec![
-        command_action(action_ids::BROWSER_TAB_ACTIVATE, &resolved.target, "Activate Tab", "Activate", ActionIconKey::Browser, ActionGroup::Navigation, ActionPriority::High, Command::BrowserTab(BrowserTabCommand::Switch(runtime_id.clone()))),
+        command_action(action_ids::BROWSER_TAB_ACTIVATE, &resolved.target, "Activate Tab", "Activate", ActionIconKey::Browser, ActionGroup::Navigation, ActionPriority::High, Command::BrowserTab(BrowserTabCommand::Switch(runtime_id.clone())), &resolved.selected_action),
         copy,
     ]
 });

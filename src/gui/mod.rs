@@ -48,6 +48,7 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod volume_data;
 mod volume_dialog;
@@ -178,7 +179,9 @@ use watch::watch_file;
 
 pub use crate::commands::ActivationSource;
 pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, VirtualDesktopGuiCompletion, WatchEvent};
-pub(crate) use state::{PendingConfirmCommand, ResultContextMenuKind, UiErrorEvent};
+pub(crate) use state::{
+    PendingConfirmCommand, PendingUniversalActionInvocation, ResultContextMenuKind, UiErrorEvent,
+};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -672,6 +675,7 @@ pub struct LauncherApp {
     pending_query: Option<String>,
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmCommand>,
+    pending_universal_confirm: Option<PendingUniversalActionInvocation>,
     pending_data_recovery: Option<PendingRecoveryIntent>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
@@ -1803,6 +1807,7 @@ impl LauncherApp {
             pending_query: None,
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
+            pending_universal_confirm: None,
             pending_data_recovery: None,
             action_cache: Vec::new(),
             action_filter_metadata: Vec::new(),

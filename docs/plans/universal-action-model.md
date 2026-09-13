@@ -31,7 +31,7 @@ types only when an action-oriented surface requests them.
 - Preserve current context-menu capabilities and add only currently supported
   Window, MkMacro, and Browser Tab capabilities.
 
-### 4. Execution bridge and UI intents — `pending`
+### 4. Execution bridge and UI intents — `complete`
 
 - Execute primary actions through the existing activation path, typed secondary
   commands through the command bus, and GUI-owned work through typed UI intents.

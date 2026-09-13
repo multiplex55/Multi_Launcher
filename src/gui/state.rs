@@ -95,6 +95,13 @@ pub(crate) struct PendingConfirmCommand {
     pub(crate) invocation: crate::commands::CommandInvocation,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingUniversalActionInvocation {
+    pub(crate) action: crate::universal_actions::UniversalAction,
+    pub(crate) surface: crate::universal_actions::ActionSurface,
+    pub(crate) source: crate::commands::ActivationSource,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestWatchEvent {
     Actions,

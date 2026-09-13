@@ -326,6 +326,7 @@ pub enum UniversalUiIntent {
     },
     RemoveClipboardEntry {
         index: usize,
+        label: String,
     },
     EditTodo {
         index: usize,
@@ -357,7 +358,10 @@ pub enum UniversalUiIntent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum UniversalActionOperation {
     InvokePrimary(Action),
-    Command(Command),
+    Command {
+        command: Command,
+        original_action: Action,
+    },
     UiIntent(UniversalUiIntent),
 }
 
