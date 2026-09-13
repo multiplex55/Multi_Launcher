@@ -183,14 +183,17 @@ pub(crate) fn resolve_local_shortcut(
     if input.text_editing {
         return None;
     }
-    if input.modifiers.ctrl && input.key == LocalShortcutKey::Standard(Key::KeyZ) {
-        return Some(if input.modifiers.shift {
-            LocalShortcutAction::Redo
-        } else {
-            LocalShortcutAction::Undo
-        });
+    if input.key == LocalShortcutKey::Standard(Key::KeyZ) {
+        if input.modifiers == builtin_history_modifiers(false) {
+            return Some(LocalShortcutAction::Undo);
+        }
+        if input.modifiers == builtin_history_modifiers(true) {
+            return Some(LocalShortcutAction::Redo);
+        }
     }
-    if input.modifiers.ctrl && input.key == LocalShortcutKey::Standard(Key::KeyY) {
+    if input.key == LocalShortcutKey::Standard(Key::KeyY)
+        && input.modifiers == builtin_history_modifiers(false)
+    {
         return Some(LocalShortcutAction::Redo);
     }
     for (tool, chord) in &settings.tool_hotkeys {
@@ -221,6 +224,14 @@ pub(crate) fn resolve_local_shortcut(
         }
     }
     None
+}
+
+fn builtin_history_modifiers(shift: bool) -> LocalShortcutModifiers {
+    LocalShortcutModifiers {
+        ctrl: true,
+        shift,
+        ..Default::default()
+    }
 }
 
 fn chord_matches(
@@ -447,6 +458,21 @@ mod tests {
         assert_eq!(
             resolve(b'Z' as u32, MOD_CONTROL_VALUE | MOD_SHIFT_VALUE),
             Some(LocalShortcutAction::Redo)
+        );
+        for extras in [MOD_ALT_VALUE, MOD_WIN_VALUE, MOD_ALT_VALUE | MOD_WIN_VALUE] {
+            assert_eq!(resolve(b'Z' as u32, MOD_CONTROL_VALUE | extras), None);
+            assert_eq!(resolve(b'Y' as u32, MOD_CONTROL_VALUE | extras), None);
+        }
+        assert_eq!(
+            resolve(b'Y' as u32, MOD_CONTROL_VALUE | MOD_SHIFT_VALUE),
+            None
+        );
+        assert_eq!(
+            resolve(
+                b'Z' as u32,
+                MOD_CONTROL_VALUE | MOD_SHIFT_VALUE | MOD_ALT_VALUE
+            ),
+            None
         );
         assert_eq!(resolve(b'P' as u32, MOD_SHIFT_VALUE), None);
     }

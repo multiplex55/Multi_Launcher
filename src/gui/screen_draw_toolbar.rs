@@ -13,8 +13,9 @@ use crate::screen_draw::window_layers::{
 };
 use crate::screen_draw::{
     CanvasBackground, DesktopPoint, DesktopRect, DesktopSize, ExportBackground, ExportDestination,
-    ExportRequest, ExportScope, RgbaColor, ScreenDrawController, ScreenDrawSettings,
-    ScreenDrawState, ScreenDrawTool, ToolbarOrientation, clamp_toolbar_position,
+    ExportRequest, ExportScope, RgbaColor, ScreenDrawController, ScreenDrawMode,
+    ScreenDrawSettings, ScreenDrawState, ScreenDrawTool, ToolbarOrientation,
+    clamp_toolbar_position,
 };
 
 const SETTINGS_KEY: &str = "screen_draw";
@@ -108,6 +109,7 @@ pub(crate) struct ScreenDrawToolbarUi {
     last_physical_position: Option<DesktopPoint>,
     last_physical_bounds: Option<DesktopRect>,
     native_bridge: ScreenDrawToolbarNativeBridge,
+    last_observed_mode: Option<ScreenDrawMode>,
     settings_dirty_since: Option<Instant>,
     export_background: ExportBackground,
     #[cfg(test)]
@@ -117,6 +119,7 @@ pub(crate) struct ScreenDrawToolbarUi {
 impl ScreenDrawToolbarUi {
     fn begin_open(&mut self, settings: &ScreenDrawSettings, pixels_per_point: f32) {
         self.native_bridge.begin_viewport();
+        self.last_observed_mode = None;
         self.last_physical_bounds = None;
         self.known_monitors = current_monitor_rects();
         let requested = settings
@@ -355,6 +358,15 @@ impl super::LauncherApp {
 
         let state = self.screen_draw_controller.state().clone();
         let runtime = self.screen_draw_controller.runtime_state();
+        let observed_mode = runtime.map(|runtime| runtime.mode);
+        if self.screen_draw_toolbar.last_observed_mode.is_some()
+            && self.screen_draw_toolbar.last_observed_mode != observed_mode
+        {
+            self.screen_draw_toolbar
+                .native_bridge
+                .observe_layer_transition();
+        }
+        self.screen_draw_toolbar.last_observed_mode = observed_mode;
         let settings = self.screen_draw_controller.settings().clone();
         let export_error = self
             .screen_draw_controller
@@ -371,21 +383,18 @@ impl super::LauncherApp {
         let mut escape_pressed = false;
 
         let toolbar_size = toolbar_size_points(settings.toolbar_orientation);
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title(TOOLBAR_WINDOW_TITLE)
-            .with_inner_size(toolbar_size)
-            .with_min_inner_size(toolbar_size)
-            .with_max_inner_size(toolbar_size)
-            .with_resizable(false)
-            .with_always_on_top()
-            .with_taskbar(false)
-            .with_minimize_button(false)
-            .with_maximize_button(false);
-        if let Some(position) = initial_position {
-            builder = builder.with_position(position);
-        }
+        let builder = toolbar_viewport_builder(toolbar_size, initial_position);
 
         ctx.show_viewport_immediate(viewport_id(), builder, |child, _| {
+            // Consume configured shortcuts before widgets see this frame's key
+            // events. Otherwise Space/Enter may both switch tools and activate
+            // whichever toolbar button retained focus from the prior frame.
+            let shortcut_actions = consume_toolbar_local_shortcuts(child, &state, &settings);
+            let thickness = runtime.map_or(settings.default_thickness, |state| state.thickness);
+            actions.extend(toolbar_actions_for_local_shortcuts(
+                shortcut_actions,
+                thickness,
+            ));
             render_toolbar(
                 child,
                 &state,
@@ -396,12 +405,6 @@ impl super::LauncherApp {
                 &mut export_background,
                 &mut actions,
             );
-            let shortcut_actions = consume_toolbar_local_shortcuts(child, &state, &settings);
-            let thickness = runtime.map_or(settings.default_thickness, |state| state.thickness);
-            actions.extend(toolbar_actions_for_local_shortcuts(
-                shortcut_actions,
-                thickness,
-            ));
             child.input(|input| {
                 let viewport = input.viewport();
                 observed_position = viewport.outer_rect.map(|rect| rect.min);
@@ -457,6 +460,11 @@ impl super::LauncherApp {
         let mut preferences_changed = false;
         let mut should_close_viewport = false;
         for action in actions {
+            if matches!(action, ToolbarAction::Ghost | ToolbarAction::Finish)
+                && let Err(error) = self.revalidate_screen_draw_toolbar_for_layer_transition()
+            {
+                self.report_error_message("screen_draw.toolbar", error);
+            }
             let result = match action {
                 ToolbarAction::Lifecycle(action) => self.apply_screen_draw_lifecycle(action),
                 action => apply_controller_toolbar_action(&mut self.screen_draw_controller, action),
@@ -521,6 +529,48 @@ impl super::LauncherApp {
             }
         }
         self.screen_draw_toolbar.last_physical_bounds = None;
+        self.screen_draw_toolbar.last_observed_mode = None;
+    }
+
+    fn revalidate_screen_draw_toolbar_for_layer_transition(&mut self) -> Result<(), String> {
+        self.screen_draw_toolbar
+            .native_bridge
+            .observe_layer_transition();
+        let generation = self
+            .screen_draw_controller
+            .state()
+            .generation()
+            .map(|generation| generation.get());
+        if let Some(toolbar) = self.screen_draw_toolbar.native_bridge.synchronize(
+            generation,
+            self.screen_draw_toolbar.last_physical_bounds,
+            &SystemToolbarWindowBackend,
+        ) {
+            self.screen_draw_controller
+                .set_toolbar_window(toolbar)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+fn toolbar_viewport_builder(
+    toolbar_size: egui::Vec2,
+    initial_position: Option<egui::Pos2>,
+) -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default()
+        .with_title(TOOLBAR_WINDOW_TITLE)
+        .with_inner_size(toolbar_size)
+        .with_min_inner_size(toolbar_size)
+        .with_max_inner_size(toolbar_size)
+        .with_resizable(false)
+        .with_always_on_top()
+        .with_taskbar(false)
+        .with_minimize_button(false)
+        .with_maximize_button(false);
+    match initial_position {
+        Some(position) => builder.with_position(position),
+        None => builder,
     }
 }
 
@@ -1511,6 +1561,23 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_viewport_policy_is_fixed_topmost_and_absent_from_taskbar() {
+        let size = egui::vec2(700.0, 264.0);
+        let position = egui::pos2(-500.0, 25.0);
+        let builder = toolbar_viewport_builder(size, Some(position));
+        assert_eq!(builder.title.as_deref(), Some(TOOLBAR_WINDOW_TITLE));
+        assert_eq!(builder.position, Some(position));
+        assert_eq!(builder.inner_size, Some(size));
+        assert_eq!(builder.min_inner_size, Some(size));
+        assert_eq!(builder.max_inner_size, Some(size));
+        assert_eq!(builder.resizable, Some(false));
+        assert_eq!(builder.taskbar, Some(false));
+        assert_eq!(builder.minimize_button, Some(false));
+        assert_eq!(builder.maximize_button, Some(false));
+        assert_eq!(builder.window_level, Some(egui::WindowLevel::AlwaysOnTop));
+    }
+
+    #[test]
     fn focused_toolbar_escape_is_consumed_and_requests_safe_pause_only_while_drawing() {
         let generation = ScreenDrawGeneration::from_raw(1);
         for (state, expected) in [
@@ -1814,6 +1881,72 @@ mod tests {
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
         );
         let _ = button_ctx.end_frame();
+    }
+
+    #[test]
+    fn space_and_enter_shortcuts_are_consumed_before_a_focused_button_can_activate() {
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(1),
+        };
+        for (key, chord) in [(egui::Key::Space, "Space"), (egui::Key::Enter, "Enter")] {
+            let mut settings = ScreenDrawSettings::default();
+            settings.tool_hotkeys.insert(
+                ScreenDrawTool::Pen,
+                crate::screen_draw::HotkeyChord::from_unchecked(chord),
+            );
+            let ctx = egui::Context::default();
+            ctx.begin_frame(raw_input(Vec::new()));
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                ui.button("Focused button").request_focus();
+            });
+            let _ = ctx.end_frame();
+
+            ctx.begin_frame(raw_input(vec![key_press(key, egui::Modifiers::NONE)]));
+            assert_eq!(
+                consume_toolbar_local_shortcuts(&ctx, &state, &settings),
+                vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
+            );
+            let mut clicked = false;
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                clicked = ui.button("Focused button").clicked();
+            });
+            assert!(!clicked, "{chord} activated the focused button");
+            let _ = ctx.end_frame();
+        }
+    }
+
+    #[test]
+    fn egui_history_adapter_rejects_extra_modifiers() {
+        let settings = ScreenDrawSettings::default();
+        let key = egui_key_to_local_shortcut(egui::Key::Z).unwrap();
+        for modifiers in [
+            egui::Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Default::default()
+            },
+            egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                alt: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                resolve_local_shortcut(
+                    &settings,
+                    egui_local_shortcut_input(key, modifiers, false, false)
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            resolve_local_shortcut(
+                &settings,
+                egui_local_shortcut_input(key, ctrl_shift(), false, false)
+            ),
+            Some(LocalShortcutAction::Redo)
+        );
     }
 
     #[test]

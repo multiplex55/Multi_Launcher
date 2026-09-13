@@ -100,6 +100,25 @@ impl DesktopRect {
             && i64::from(point.y) < self.bottom()
     }
 
+    /// Expands this rectangle in signed desktop space without overflowing at
+    /// either edge of the physical-coordinate domain.
+    pub(crate) fn inflated(self, radius: u32) -> Self {
+        if self.is_empty() || radius == 0 {
+            return self;
+        }
+        let radius = i64::from(radius);
+        let left = (i64::from(self.x) - radius).max(i64::from(i32::MIN));
+        let top = (i64::from(self.y) - radius).max(i64::from(i32::MIN));
+        let right = (self.right() + radius).min(i64::from(i32::MAX) + 1);
+        let bottom = (self.bottom() + radius).min(i64::from(i32::MAX) + 1);
+        Self::new(
+            left as i32,
+            top as i32,
+            u32::try_from(right - left).unwrap_or(u32::MAX),
+            u32::try_from(bottom - top).unwrap_or(u32::MAX),
+        )
+    }
+
     pub fn intersection(self, other: Self) -> Option<Self> {
         let left = i64::from(self.x).max(i64::from(other.x));
         let top = i64::from(self.y).max(i64::from(other.y));
@@ -363,6 +382,18 @@ mod tests {
                 &[DesktopRect::new(-100, -50, 300, 200)],
             ),
             Some(DesktopPoint::new(-100, -50))
+        );
+    }
+
+    #[test]
+    fn rectangle_inflation_is_signed_and_overflow_safe() {
+        assert_eq!(
+            DesktopRect::new(-100, -50, 200, 100).inflated(34),
+            DesktopRect::new(-134, -84, 268, 168)
+        );
+        assert_eq!(
+            DesktopRect::new(i32::MIN + 2, i32::MAX - 20, 10, 10).inflated(100),
+            DesktopRect::new(i32::MIN, i32::MAX - 120, 112, 121)
         );
     }
 

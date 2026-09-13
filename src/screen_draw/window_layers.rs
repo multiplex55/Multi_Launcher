@@ -141,6 +141,7 @@ pub(crate) struct ScreenDrawToolbarNativeBridge {
     last_sent: Option<(u64, Option<ToolbarWindowInfo>)>,
     resolution_attempts_left: u8,
     ensure_topmost_pending: bool,
+    transition_refresh_pending: bool,
     resolution_warning_emitted: bool,
 }
 
@@ -151,7 +152,20 @@ impl ScreenDrawToolbarNativeBridge {
         self.last_fallback = None;
         self.resolution_attempts_left = TOOLBAR_RESOLUTION_ATTEMPTS;
         self.ensure_topmost_pending = true;
+        self.transition_refresh_pending = true;
         self.resolution_warning_emitted = false;
+    }
+
+    /// Rearms native identity validation at an observable layer/lifecycle
+    /// boundary. This is deliberately event-driven: idle frames do not inspect
+    /// or enumerate windows, while an explicit Ghost/Finish/Resume transition
+    /// can recover even after the initial attempt budget was exhausted.
+    pub(crate) fn observe_layer_transition(&mut self) {
+        self.transition_refresh_pending = true;
+        self.ensure_topmost_pending = true;
+        if self.cached_handle.is_none() && self.resolution_attempts_left == 0 {
+            self.arm_resolution();
+        }
     }
 
     /// Returns a nested option only when the native session needs an update:
@@ -168,11 +182,10 @@ impl ScreenDrawToolbarNativeBridge {
         });
         let geometry_changed = fallback_bounds != self.last_fallback;
         self.last_fallback = fallback_bounds;
-        self.refresh(
-            fallback_bounds,
-            generation_changed || geometry_changed,
-            backend,
-        );
+        let inspect_cached =
+            generation_changed || geometry_changed || self.transition_refresh_pending;
+        self.transition_refresh_pending = false;
+        self.refresh(fallback_bounds, inspect_cached, backend);
         let generation = generation?;
         let next = (generation, self.current);
         if self.last_sent == Some(next) {
@@ -192,6 +205,7 @@ impl ScreenDrawToolbarNativeBridge {
         backend: &B,
     ) -> Option<ToolbarWindowInfo> {
         self.ensure_topmost_pending = true;
+        self.transition_refresh_pending = false;
         if self.cached_handle.is_none() && self.resolution_attempts_left == 0 {
             self.arm_resolution();
         }
@@ -230,15 +244,33 @@ impl ScreenDrawToolbarNativeBridge {
                 return;
             }
             if let Some(info) = backend.inspect(handle, TOOLBAR_WINDOW_TITLE) {
-                self.current = Some(info);
                 if self.ensure_topmost_pending {
-                    let _ = backend.ensure_topmost(handle);
-                    self.ensure_topmost_pending = false;
+                    if !backend.ensure_topmost(handle) {
+                        self.cached_handle = None;
+                        self.current = fallback_bounds.map(|bounds| ToolbarWindowInfo {
+                            handle: None,
+                            bounds,
+                        });
+                        self.arm_resolution();
+                    } else {
+                        self.current = Some(info);
+                        self.ensure_topmost_pending = false;
+                    }
+                    if self.cached_handle.is_none() {
+                        // Continue below and attempt one bounded replacement
+                        // resolution during this explicit refresh.
+                    } else {
+                        return;
+                    }
+                } else {
+                    self.current = Some(info);
+                    return;
                 }
-                return;
             }
-            self.cached_handle = None;
-            self.arm_resolution();
+            if self.cached_handle.is_some() {
+                self.cached_handle = None;
+                self.arm_resolution();
+            }
         }
 
         self.current = fallback_bounds.map(|bounds| ToolbarWindowInfo {
@@ -254,13 +286,31 @@ impl ScreenDrawToolbarNativeBridge {
             && let Some(handle) = info.handle
         {
             self.cached_handle = Some(handle);
-            self.current = Some(info);
             if self.ensure_topmost_pending {
-                let _ = backend.ensure_topmost(handle);
-                self.ensure_topmost_pending = false;
+                if backend.ensure_topmost(handle) {
+                    self.current = Some(info);
+                    self.ensure_topmost_pending = false;
+                } else {
+                    self.cached_handle = None;
+                    self.current = fallback_bounds.map(|bounds| ToolbarWindowInfo {
+                        handle: None,
+                        bounds,
+                    });
+                    // This candidate consumed one bounded attempt. Do not
+                    // replenish the budget here or an HWND that consistently
+                    // rejects SetWindowPos would create an idle repaint loop.
+                }
+            } else {
+                self.current = Some(info);
             }
-            self.resolution_warning_emitted = false;
-        } else if self.resolution_attempts_left == 0 && !self.resolution_warning_emitted {
+            if self.cached_handle.is_some() {
+                self.resolution_warning_emitted = false;
+            }
+        }
+        if self.cached_handle.is_none()
+            && self.resolution_attempts_left == 0
+            && !self.resolution_warning_emitted
+        {
             tracing::warn!(
                 title = TOOLBAR_WINDOW_TITLE,
                 "Screen Draw toolbar HWND was not resolved during the bounded creation window"
@@ -561,6 +611,7 @@ mod tests {
         resolve_calls: RefCell<Vec<String>>,
         inspect_calls: RefCell<Vec<(NativeWindowHandle, String)>>,
         topmost_calls: RefCell<Vec<NativeWindowHandle>>,
+        topmost_results: RefCell<VecDeque<bool>>,
     }
 
     impl FakeToolbarBackend {
@@ -572,6 +623,10 @@ mod tests {
             self.inspected
                 .borrow_mut()
                 .insert(info.handle.unwrap(), info);
+        }
+
+        fn queue_topmost_result(&self, result: bool) {
+            self.topmost_results.borrow_mut().push_back(result);
         }
     }
 
@@ -598,7 +653,10 @@ mod tests {
 
         fn ensure_topmost(&self, handle: NativeWindowHandle) -> bool {
             self.topmost_calls.borrow_mut().push(handle);
-            true
+            self.topmost_results
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(true)
         }
     }
 
@@ -797,6 +855,120 @@ mod tests {
         assert!(bridge.close_viewport());
         assert!(!bridge.close_viewport());
         assert_eq!(bridge, ScreenDrawToolbarNativeBridge::default());
+    }
+
+    #[test]
+    fn explicit_transition_recovers_after_attempt_budget_exhaustion_without_idle_polling() {
+        let backend = FakeToolbarBackend::default();
+        let fallback = DesktopRect::new(20, 30, 300, 700);
+        let recovered = toolbar_info(41, DesktopRect::new(18, 28, 304, 704));
+        let mut bridge = ScreenDrawToolbarNativeBridge::default();
+        bridge.begin_viewport();
+        for _ in 0..TOOLBAR_RESOLUTION_ATTEMPTS {
+            let _ = bridge.synchronize(Some(9), Some(fallback), &backend);
+        }
+        let exhausted_calls = backend.resolve_calls.borrow().len();
+        assert_eq!(exhausted_calls, usize::from(TOOLBAR_RESOLUTION_ATTEMPTS));
+        assert_eq!(bridge.synchronize(Some(9), Some(fallback), &backend), None);
+        assert_eq!(backend.resolve_calls.borrow().len(), exhausted_calls);
+
+        backend.queue_resolution(Some(recovered));
+        bridge.observe_layer_transition();
+        assert_eq!(
+            bridge.synchronize(Some(9), Some(fallback), &backend),
+            Some(Some(recovered))
+        );
+        assert_eq!(backend.resolve_calls.borrow().len(), exhausted_calls + 1);
+    }
+
+    #[test]
+    fn persistent_topmost_failure_exhausts_exact_budget_and_then_stays_idle() {
+        let backend = FakeToolbarBackend::default();
+        let fallback = DesktopRect::new(-20, 30, 300, 700);
+        for raw in 70..70 + isize::from(TOOLBAR_RESOLUTION_ATTEMPTS) {
+            backend.queue_resolution(Some(toolbar_info(raw, fallback)));
+            backend.queue_topmost_result(false);
+        }
+        let mut bridge = ScreenDrawToolbarNativeBridge::default();
+        bridge.begin_viewport();
+
+        for _ in 0..TOOLBAR_RESOLUTION_ATTEMPTS {
+            let _ = bridge.synchronize(Some(15), Some(fallback), &backend);
+        }
+        assert!(!bridge.resolution_pending());
+        assert!(bridge.resolution_warning_emitted);
+        assert_eq!(
+            backend.resolve_calls.borrow().len(),
+            usize::from(TOOLBAR_RESOLUTION_ATTEMPTS)
+        );
+        assert_eq!(
+            backend.topmost_calls.borrow().len(),
+            usize::from(TOOLBAR_RESOLUTION_ATTEMPTS)
+        );
+
+        for _ in 0..5 {
+            assert_eq!(bridge.synchronize(Some(15), Some(fallback), &backend), None);
+        }
+        assert_eq!(
+            backend.resolve_calls.borrow().len(),
+            usize::from(TOOLBAR_RESOLUTION_ATTEMPTS)
+        );
+        assert_eq!(
+            backend.topmost_calls.borrow().len(),
+            usize::from(TOOLBAR_RESOLUTION_ATTEMPTS)
+        );
+    }
+
+    #[test]
+    fn topmost_failure_marks_same_bounds_handle_stale_and_uses_replacement() {
+        let backend = FakeToolbarBackend::default();
+        let bounds = DesktopRect::new(100, 100, 300, 700);
+        let stale = toolbar_info(51, bounds);
+        let replacement = toolbar_info(52, bounds);
+        backend.queue_resolution(Some(stale));
+        let mut bridge = ScreenDrawToolbarNativeBridge::default();
+        bridge.begin_viewport();
+        assert_eq!(
+            bridge.synchronize(Some(4), Some(bounds), &backend),
+            Some(Some(stale))
+        );
+
+        backend.queue_topmost_result(false);
+        backend.queue_resolution(Some(replacement));
+        bridge.observe_layer_transition();
+        assert_eq!(
+            bridge.synchronize(Some(4), Some(bounds), &backend),
+            Some(Some(replacement))
+        );
+        assert_eq!(
+            *backend.topmost_calls.borrow(),
+            vec![handle(51), handle(51), handle(52)]
+        );
+    }
+
+    #[test]
+    fn explicit_transition_recovers_stale_handle_without_generation_or_bounds_change() {
+        let backend = FakeToolbarBackend::default();
+        let bounds = DesktopRect::new(-300, 50, 300, 700);
+        let stale = toolbar_info(61, bounds);
+        let replacement = toolbar_info(62, bounds);
+        backend.queue_resolution(Some(stale));
+        let mut bridge = ScreenDrawToolbarNativeBridge::default();
+        bridge.begin_viewport();
+        assert_eq!(
+            bridge.synchronize(Some(12), Some(bounds), &backend),
+            Some(Some(stale))
+        );
+
+        backend.inspected.borrow_mut().remove(&handle(61));
+        backend.queue_resolution(Some(replacement));
+        bridge.observe_layer_transition();
+        assert_eq!(
+            bridge.synchronize(Some(12), Some(bounds), &backend),
+            Some(Some(replacement))
+        );
+        assert_eq!(backend.inspect_calls.borrow().len(), 1);
+        assert_eq!(backend.resolve_calls.borrow().len(), 2);
     }
 
     #[cfg(windows)]
