@@ -58,6 +58,14 @@ impl LauncherApp {
         query_has_focus
     }
 
+    pub(crate) fn launcher_action_sheet_shortcut_enabled(
+        query_has_focus: bool,
+        file_search_open: bool,
+        another_panel_open: bool,
+    ) -> bool {
+        query_has_focus && !file_search_open && !another_panel_open
+    }
+
     fn consume_query_history_shortcut(
         query_has_focus: bool,
         input: &mut egui::InputState,
@@ -161,11 +169,15 @@ impl LauncherApp {
         (just_became_visible || focus_query) && !file_search_open
     }
 
-    pub(crate) fn resolve_context_menu_actions(
+    fn resolve_universal_actions(
         &self,
         action: &Action,
         pin: crate::universal_actions::PinCapability,
-    ) -> Vec<crate::universal_actions::UniversalAction> {
+        surface: crate::universal_actions::ActionSurface,
+    ) -> (
+        crate::universal_actions::ResolvedActionTarget,
+        Vec<crate::universal_actions::UniversalAction>,
+    ) {
         let custom_len = self.custom_len.min(self.actions.len());
         let resolver_context = crate::universal_actions::ActionTargetResolverContext::new(
             &self.folder_aliases,
@@ -174,14 +186,79 @@ impl LauncherApp {
         );
         let resolved =
             crate::universal_actions::ActionTargetResolver.resolve(action, &resolver_context);
-        let mut action_context = crate::universal_actions::ActionResolutionContext::new(
-            crate::universal_actions::ActionSurface::ContextMenu,
-            self.query.trim(),
-        );
+        let mut action_context =
+            crate::universal_actions::ActionResolutionContext::new(surface, self.query.trim());
         action_context.pin = pin;
         action_context.can_add_favorite = true;
 
-        crate::universal_actions::UniversalActionRegistry.resolve(&resolved, &action_context)
+        let actions =
+            crate::universal_actions::UniversalActionRegistry.resolve(&resolved, &action_context);
+        (resolved, actions)
+    }
+
+    pub(crate) fn resolve_context_menu_actions(
+        &self,
+        action: &Action,
+        pin: crate::universal_actions::PinCapability,
+    ) -> Vec<crate::universal_actions::UniversalAction> {
+        self.resolve_universal_actions(
+            action,
+            pin,
+            crate::universal_actions::ActionSurface::ContextMenu,
+        )
+        .1
+    }
+
+    fn pin_capability_for(&self, action: &Action) -> crate::universal_actions::PinCapability {
+        match history::load_pins(HISTORY_PINS_FILE) {
+            Ok(pins) => crate::universal_actions::PinCapability::Writable {
+                is_pinned: pins.iter().any(|pin| pin.matches_action(action)),
+            },
+            Err(error) => crate::universal_actions::PinCapability::ReadOnly {
+                is_pinned: false,
+                reason: format!("Pinned results are read-only: {error}"),
+            },
+        }
+    }
+
+    pub(crate) fn open_action_sheet_for_index(&mut self, index: usize) -> bool {
+        let Some(action) = self.results.get(index).cloned() else {
+            return false;
+        };
+        let pin = self.pin_capability_for(&action);
+        let (target, actions) = self.resolve_universal_actions(
+            &action,
+            pin,
+            crate::universal_actions::ActionSurface::ActionSheet,
+        );
+        self.action_sheet
+            .open(target, action, actions, &self.matcher);
+        true
+    }
+
+    fn close_action_sheet(&mut self) {
+        self.action_sheet.close();
+        self.focus_input();
+    }
+
+    pub(crate) fn handle_action_sheet_key(
+        &mut self,
+        key: Option<action_sheet::ActionSheetKey>,
+    ) -> Option<crate::universal_actions::UniversalAction> {
+        match key {
+            Some(action_sheet::ActionSheetKey::Escape) => self.close_action_sheet(),
+            Some(action_sheet::ActionSheetKey::Up) => self.action_sheet.move_selection(-1),
+            Some(action_sheet::ActionSheetKey::Down) => self.action_sheet.move_selection(1),
+            Some(action_sheet::ActionSheetKey::Enter) => {
+                let selected = self.action_sheet.selected_action();
+                if selected.is_some() {
+                    self.close_action_sheet();
+                }
+                return selected;
+            }
+            None => {}
+        }
+        None
     }
 
     fn attach_result_context_menu(
@@ -195,15 +272,7 @@ impl LauncherApp {
         // resolution and pin I/O here so ordinary list/grid rendering remains
         // on the legacy primary-action fast path.
         menu_resp.clone().context_menu(|ui| {
-            let pin = match history::load_pins(HISTORY_PINS_FILE) {
-                Ok(pins) => crate::universal_actions::PinCapability::Writable {
-                    is_pinned: pins.iter().any(|pin| pin.matches_action(action)),
-                },
-                Err(error) => crate::universal_actions::PinCapability::ReadOnly {
-                    is_pinned: false,
-                    reason: format!("Pinned results are read-only: {error}"),
-                },
-            };
+            let pin = self.pin_capability_for(action);
             let actions = self.resolve_context_menu_actions(action, pin);
 
             if let Some(action) = render_universal_context_menu(ui, &actions) {
@@ -679,6 +748,49 @@ impl eframe::App for LauncherApp {
             self.last_net_update = Instant::now();
         }
 
+        // The Action Sheet owns keyboard input before the launcher query and
+        // navigation paths see it. Opening is also resolved before rendering,
+        // so the filter can take focus in the same frame as Ctrl+Enter.
+        let query_input_id = egui::Id::new("query_input");
+        let action_sheet_was_open = self.action_sheet.is_open();
+        let mut selected_sheet_action = None;
+        if action_sheet_was_open {
+            let key = ctx.input_mut(action_sheet::ActionSheetState::consume_key);
+            selected_sheet_action = self.handle_action_sheet_key(key);
+        } else {
+            let query_has_focus = ctx.memory(|memory| memory.has_focus(query_input_id));
+            let shortcut_enabled = Self::launcher_action_sheet_shortcut_enabled(
+                query_has_focus,
+                self.file_search_dialog.open,
+                self.any_panel_open(),
+            );
+            if shortcut_enabled
+                && ctx.input_mut(action_sheet::ActionSheetState::consume_open_shortcut)
+                && let Some(index) = self.current_actionable_result_index()
+            {
+                self.open_action_sheet_for_index(index);
+            }
+        }
+
+        if self.action_sheet.is_open() {
+            if let Some(action) = action_sheet::render(ctx, &mut self.action_sheet, &self.matcher) {
+                self.close_action_sheet();
+                selected_sheet_action = Some(action);
+            } else if !self.action_sheet.is_open() {
+                self.focus_input();
+            }
+        }
+        if let Some(action) = selected_sheet_action {
+            // Closing first prevents primary and UI-intent execution from
+            // competing with the sheet's focus or modal state.
+            self.execute_universal_action(
+                action,
+                crate::universal_actions::ActionSurface::ActionSheet,
+                ActivationSource::Enter,
+            );
+        }
+        let action_sheet_blocks_launcher_input = self.action_sheet.is_open();
+
         CentralPanel::default().show(ctx, |ui| {
             let mut deferred_activation: Option<DeferredActivation> = None;
             ui.heading("🚀 Multi Lnchr");
@@ -688,7 +800,7 @@ impl eframe::App for LauncherApp {
                 }
 
             scale_ui(ui, self.query_scale, |ui| {
-                let input_id = egui::Id::new("query_input");
+                let input_id = query_input_id;
 
                 let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
                 let numpad_navigation = ui.ctx().input_mut(|input| {
@@ -723,13 +835,15 @@ impl eframe::App for LauncherApp {
                 let query_response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id(input_id)
+                        .interactive(!action_sheet_blocks_launcher_input)
                         .desired_width(f32::INFINITY),
                 );
                 if Self::launcher_query_focus_should_be_requested(
                     just_became_visible,
                     self.focus_query,
                     self.file_search_dialog.open,
-                ) {
+                ) && !action_sheet_blocks_launcher_input
+                {
                     query_response.request_focus();
                     self.focus_query = false;
                 }
@@ -740,15 +854,21 @@ impl eframe::App for LauncherApp {
                     self.handle_query_text_changed();
                 }
 
-                let history_direction = ctx.input_mut(|input| {
-                    Self::consume_query_history_shortcut(query_has_focus, input)
-                });
+                let history_direction = if action_sheet_blocks_launcher_input {
+                    None
+                } else {
+                    ctx.input_mut(|input| {
+                        Self::consume_query_history_shortcut(query_has_focus, input)
+                    })
+                };
                 if let Some(direction) = history_direction {
                     self.navigate_query_history(direction);
                 }
 
-                for direction in numpad_navigation {
-                    self.handle_key(direction.navigation_key());
+                if !action_sheet_blocks_launcher_input {
+                    for direction in numpad_navigation {
+                        self.handle_key(direction.navigation_key());
+                    }
                 }
 
                 if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
@@ -759,7 +879,8 @@ impl eframe::App for LauncherApp {
                     });
                 }
 
-                if Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
+                if !action_sheet_blocks_launcher_input
+                    && Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     if self.any_panel_open() {
@@ -777,7 +898,8 @@ impl eframe::App for LauncherApp {
                             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
                         }
 
-                if history_direction.is_none()
+                if !action_sheet_blocks_launcher_input
+                    && history_direction.is_none()
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                 {
                     for key in [
@@ -797,7 +919,8 @@ impl eframe::App for LauncherApp {
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
-                if Self::launcher_query_keyboard_enabled(query_has_focus)
+                if !action_sheet_blocks_launcher_input
+                    && Self::launcher_query_keyboard_enabled(query_has_focus)
                     && (tab || (enter && self.selected.is_none()))
                 {
                     accepted_suggestion = self.accept_suggestion(tab);
@@ -814,7 +937,8 @@ impl eframe::App for LauncherApp {
                 }
 
                 let mut launch_idx: Option<usize> = None;
-                if !accepted_suggestion
+                if !action_sheet_blocks_launcher_input
+                    && !accepted_suggestion
                     && enter
                     && Self::launcher_enter_activation_enabled(
                         query_has_focus,

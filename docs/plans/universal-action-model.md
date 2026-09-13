@@ -44,7 +44,7 @@ types only when an action-oriented surface requests them.
   parity in List and Grid modes.
 - Remove the legacy `ResultContextMenuKind` normal path after parity is proven.
 
-### 6. Keyboard Action Sheet — `pending`
+### 6. Keyboard Action Sheet — `complete`
 
 - Add the searchable Ctrl+Enter Action Sheet with shared selected/sole-result
   targeting, independent filter state, keyboard navigation, and focus safety.

@@ -1,3 +1,4 @@
+mod action_sheet;
 mod actions;
 mod add_action_dialog;
 mod add_bookmark_dialog;
@@ -147,6 +148,7 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::{VisiblePlacementPolicy, apply_visibility};
+use action_sheet::ActionSheetState;
 use chrono::NaiveDate;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use dashboard_editor_dialog::DashboardEditorDialog;
@@ -472,6 +474,7 @@ pub struct LauncherApp {
         Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
     pub selected: Option<usize>,
+    action_sheet: ActionSheetState,
     /// Test seam for verifying that command dispatch used normal activation,
     /// including the activation source, without launching an external process.
     #[cfg(test)]
@@ -1603,6 +1606,7 @@ impl LauncherApp {
             screen_draw_launcher_parking: None,
             screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi::default(),
             selected: None,
+            action_sheet: ActionSheetState::default(),
             #[cfg(test)]
             test_last_activation: None,
             #[cfg(test)]
@@ -2087,17 +2091,15 @@ impl LauncherApp {
                 }
                 None
             }
-            egui::Key::Enter => {
-                if let Some(i) = self.selected {
-                    Some(i)
-                } else if self.results.len() == 1 {
-                    Some(0)
-                } else {
-                    None
-                }
-            }
+            egui::Key::Enter => self.current_actionable_result_index(),
             _ => None,
         }
+    }
+
+    /// Shared target rule for normal Enter and the keyboard Action Sheet.
+    pub(crate) fn current_actionable_result_index(&self) -> Option<usize> {
+        self.selected
+            .or_else(|| (self.results.len() == 1).then_some(0))
     }
 
     pub fn focus_input(&mut self) {
@@ -5173,6 +5175,110 @@ mod tests {
         assert_eq!(app.selected, Some(1));
         app.handle_key(egui::Key::ArrowRight);
         assert_eq!(app.selected, Some(1));
+    }
+
+    #[test]
+    fn enter_and_action_sheet_share_selected_or_sole_target_semantics() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results.clear();
+        app.selected = None;
+        assert_eq!(app.current_actionable_result_index(), None);
+        assert_eq!(app.handle_key(egui::Key::Enter), None);
+
+        app.results.push(Action {
+            label: "Only".into(),
+            desc: "Test".into(),
+            action: "only".into(),
+            args: None,
+        });
+        assert_eq!(app.current_actionable_result_index(), Some(0));
+        assert_eq!(app.handle_key(egui::Key::Enter), Some(0));
+
+        app.results.push(Action {
+            label: "Second".into(),
+            desc: "Test".into(),
+            action: "second".into(),
+            args: None,
+        });
+        assert_eq!(app.current_actionable_result_index(), None);
+        app.selected = Some(1);
+        assert_eq!(app.current_actionable_result_index(), Some(1));
+        assert_eq!(app.handle_key(egui::Key::Enter), Some(1));
+    }
+
+    #[test]
+    fn action_sheet_shortcut_obeys_launcher_input_gates() {
+        assert!(LauncherApp::launcher_action_sheet_shortcut_enabled(
+            true, false, false
+        ));
+        assert!(!LauncherApp::launcher_action_sheet_shortcut_enabled(
+            false, false, false
+        ));
+        assert!(!LauncherApp::launcher_action_sheet_shortcut_enabled(
+            true, true, false
+        ));
+        assert!(!LauncherApp::launcher_action_sheet_shortcut_enabled(
+            true, false, true
+        ));
+    }
+
+    #[test]
+    fn action_sheet_escape_preserves_query_and_does_not_activate_result() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep this query".into();
+        app.results = vec![Action {
+            label: "Generic".into(),
+            desc: "Test".into(),
+            action: "generic:test".into(),
+            args: None,
+        }];
+
+        assert!(app.open_action_sheet_for_index(0));
+        assert!(app.action_sheet.is_open());
+        assert!(app.test_last_activation.is_none());
+        assert!(
+            app.handle_action_sheet_key(Some(action_sheet::ActionSheetKey::Escape))
+                .is_none()
+        );
+
+        assert!(!app.action_sheet.is_open());
+        assert_eq!(app.query, "keep this query");
+        assert!(app.test_last_activation.is_none());
+    }
+
+    #[test]
+    fn action_sheet_resolves_the_same_actions_in_list_and_grid() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results = vec![Action {
+            label: "Generic".into(),
+            desc: "Test".into(),
+            action: "generic:test".into(),
+            args: None,
+        }];
+
+        app.resolved_grid_layout = false;
+        assert!(app.open_action_sheet_for_index(0));
+        let list_ids = app
+            .action_sheet
+            .actions
+            .iter()
+            .map(|action| action.id.clone())
+            .collect::<Vec<_>>();
+        app.action_sheet.close();
+
+        app.resolved_grid_layout = true;
+        assert!(app.open_action_sheet_for_index(0));
+        let grid_ids = app
+            .action_sheet
+            .actions
+            .iter()
+            .map(|action| action.id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(grid_ids, list_ids);
     }
 
     #[test]
