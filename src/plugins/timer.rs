@@ -68,6 +68,14 @@ fn save_persistent_alarms_to(path: &str, timers: &HashMap<u64, TimerEntry>) -> a
 pub static ACTIVE_TIMERS: Lazy<Mutex<HashMap<u64, TimerEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerMutation {
+    Updated,
+    Missing,
+    AlreadyPaused,
+    AlreadyRunning,
+}
+
 struct TimerManager {
     inner: Arc<Inner>,
 }
@@ -494,8 +502,21 @@ pub fn timer_start_ts(id: u64) -> Option<u64> {
     timers.get(&id).map(|t| t.start_ts)
 }
 
+/// Return the current pause state of one live timer without performing I/O.
+pub fn timer_paused(id: u64) -> Option<bool> {
+    ACTIVE_TIMERS
+        .lock()
+        .ok()?
+        .get(&id)
+        .map(|timer| timer.paused)
+}
+
 /// Cancel the timer with the given `id` if it exists.
 pub fn cancel_timer(id: u64) {
+    let _ = try_cancel_timer(id);
+}
+
+pub fn try_cancel_timer(id: u64) -> TimerMutation {
     if let Ok(mut timers) = ACTIVE_TIMERS.lock()
         && let Some(entry) = timers.remove(&id)
     {
@@ -503,15 +524,23 @@ pub fn cancel_timer(id: u64) {
             save_persistent_alarms_locked(&timers);
         }
         TIMER_MANAGER.remove(id);
+        return TimerMutation::Updated;
     }
+    TimerMutation::Missing
 }
 
 /// Pause the timer with the given `id` if it exists.
 pub fn pause_timer(id: u64) {
+    let _ = try_pause_timer(id);
+}
+
+pub fn try_pause_timer(id: u64) -> TimerMutation {
     if let Ok(mut timers) = ACTIVE_TIMERS.lock()
         && let Some(t) = timers.get_mut(&id)
-        && !t.paused
     {
+        if t.paused {
+            return TimerMutation::AlreadyPaused;
+        }
         t.remaining = t.deadline.saturating_duration_since(Instant::now());
         t.paused = true;
         t.generation = t.generation.wrapping_add(1);
@@ -520,15 +549,23 @@ pub fn pause_timer(id: u64) {
         }
         TIMER_MANAGER.remove(id);
         TIMER_MANAGER.wakeup();
+        return TimerMutation::Updated;
     }
+    TimerMutation::Missing
 }
 
 /// Resume the timer with the given `id` if it is paused.
 pub fn resume_timer(id: u64) {
+    let _ = try_resume_timer(id);
+}
+
+pub fn try_resume_timer(id: u64) -> TimerMutation {
     if let Ok(mut timers) = ACTIVE_TIMERS.lock()
         && let Some(t) = timers.get_mut(&id)
-        && t.paused
     {
+        if !t.paused {
+            return TimerMutation::AlreadyRunning;
+        }
         t.paused = false;
         t.deadline = Instant::now() + t.remaining;
         t.generation = t.generation.wrapping_add(1);
@@ -537,7 +574,9 @@ pub fn resume_timer(id: u64) {
             save_persistent_alarms_locked(&timers);
         }
         TIMER_MANAGER.wakeup();
+        return TimerMutation::Updated;
     }
+    TimerMutation::Missing
 }
 
 fn notify(_msg: &str) {}
@@ -899,5 +938,33 @@ mod persistence_tests {
         std::fs::write(&path, invalid).unwrap();
         assert!(save_persistent_alarms_to(path_str, &HashMap::new()).is_err());
         assert_eq!(std::fs::read(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn timer_paused_reads_only_the_requested_live_entry() {
+        let id = u64::MAX - 1;
+        ACTIVE_TIMERS.lock().unwrap().insert(
+            id,
+            TimerEntry {
+                id,
+                label: "state test".into(),
+                deadline: Instant::now() + Duration::from_secs(60),
+                persist: false,
+                end_ts: 0,
+                start_ts: 0,
+                paused: true,
+                remaining: Duration::from_secs(60),
+                generation: 0,
+                sound: String::new(),
+            },
+        );
+
+        assert_eq!(timer_paused(id), Some(true));
+        assert_eq!(timer_paused(id - 1), None);
+        assert_eq!(try_pause_timer(id), TimerMutation::AlreadyPaused);
+        assert_eq!(try_resume_timer(id), TimerMutation::Updated);
+        assert_eq!(try_resume_timer(id), TimerMutation::AlreadyRunning);
+        assert_eq!(try_cancel_timer(id), TimerMutation::Updated);
+        assert_eq!(try_cancel_timer(id), TimerMutation::Missing);
     }
 }

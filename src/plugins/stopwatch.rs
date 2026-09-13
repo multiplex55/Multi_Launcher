@@ -27,6 +27,14 @@ pub struct StopwatchEntry {
 pub static STOPWATCHES: Lazy<Mutex<HashMap<u64, StopwatchEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopwatchMutation {
+    Updated,
+    Missing,
+    AlreadyPaused,
+    AlreadyRunning,
+}
+
 fn precision() -> u32 {
     PRECISION.load(Ordering::Relaxed)
 }
@@ -66,32 +74,66 @@ pub fn start_stopwatch_named(name: Option<String>) -> u64 {
 }
 
 pub fn pause_stopwatch(id: u64) {
+    let _ = try_pause_stopwatch(id);
+}
+
+pub fn try_pause_stopwatch(id: u64) -> StopwatchMutation {
     if let Ok(mut guard) = STOPWATCHES.lock()
         && let Some(sw) = guard.get_mut(&id)
-        && !sw.paused
     {
+        if sw.paused {
+            return StopwatchMutation::AlreadyPaused;
+        }
         let now = Instant::now();
         sw.elapsed += now.saturating_duration_since(sw.start);
         sw.paused = true;
         sw.generation += 1;
+        return StopwatchMutation::Updated;
     }
+    StopwatchMutation::Missing
 }
 
 pub fn resume_stopwatch(id: u64) {
+    let _ = try_resume_stopwatch(id);
+}
+
+pub fn try_resume_stopwatch(id: u64) -> StopwatchMutation {
     if let Ok(mut guard) = STOPWATCHES.lock()
         && let Some(sw) = guard.get_mut(&id)
-        && sw.paused
     {
+        if !sw.paused {
+            return StopwatchMutation::AlreadyRunning;
+        }
         sw.start = Instant::now();
         sw.paused = false;
         sw.generation += 1;
+        return StopwatchMutation::Updated;
     }
+    StopwatchMutation::Missing
 }
 
 pub fn stop_stopwatch(id: u64) {
+    let _ = try_stop_stopwatch(id);
+}
+
+pub fn try_stop_stopwatch(id: u64) -> StopwatchMutation {
     if let Ok(mut guard) = STOPWATCHES.lock() {
-        guard.remove(&id);
+        return if guard.remove(&id).is_some() {
+            StopwatchMutation::Updated
+        } else {
+            StopwatchMutation::Missing
+        };
     }
+    StopwatchMutation::Missing
+}
+
+/// Return the current pause state of one live stopwatch without performing I/O.
+pub fn stopwatch_paused(id: u64) -> Option<bool> {
+    STOPWATCHES
+        .lock()
+        .ok()?
+        .get(&id)
+        .map(|stopwatch| stopwatch.paused)
 }
 
 pub fn running_stopwatches() -> Vec<(u64, String, Duration)> {
@@ -424,5 +466,23 @@ impl Plugin for StopwatchPlugin {
             Err(e) => tracing::error!("failed to serialize stopwatch settings: {e}"),
         }
         self.apply_settings(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopwatch_paused_tracks_live_pause_state_and_missing_entries() {
+        let id = start_stopwatch_named(Some("state test".into()));
+        assert_eq!(stopwatch_paused(id), Some(false));
+        assert_eq!(try_resume_stopwatch(id), StopwatchMutation::AlreadyRunning);
+        assert_eq!(try_pause_stopwatch(id), StopwatchMutation::Updated);
+        assert_eq!(stopwatch_paused(id), Some(true));
+        assert_eq!(try_pause_stopwatch(id), StopwatchMutation::AlreadyPaused);
+        assert_eq!(try_stop_stopwatch(id), StopwatchMutation::Updated);
+        assert_eq!(try_stop_stopwatch(id), StopwatchMutation::Missing);
+        assert_eq!(stopwatch_paused(id), None);
     }
 }

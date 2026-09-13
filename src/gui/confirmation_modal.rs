@@ -25,6 +25,14 @@ pub enum DestructiveAction {
     EmptyRecycleBin,
     ResetWidgetSettings,
     DeleteMacro,
+    RemoveFolder,
+    RemoveBookmark,
+    CancelTimer,
+    StopStopwatch,
+    RemoveSnippet,
+    DeleteTempfile,
+    RemoveClipboardEntry,
+    CloseWindow,
 }
 
 impl DestructiveAction {
@@ -59,6 +67,14 @@ impl DestructiveAction {
             Self::EmptyRecycleBin => "Empty recycle bin",
             Self::ResetWidgetSettings => "Reset widget settings",
             Self::DeleteMacro => "Delete macro",
+            Self::RemoveFolder => "Remove folder",
+            Self::RemoveBookmark => "Remove bookmark",
+            Self::CancelTimer => "Remove timer",
+            Self::StopStopwatch => "Stop stopwatch",
+            Self::RemoveSnippet => "Remove snippet",
+            Self::DeleteTempfile => "Delete temporary file",
+            Self::RemoveClipboardEntry => "Remove clipboard entry",
+            Self::CloseWindow => "Close window",
         }
     }
 
@@ -67,11 +83,38 @@ impl DestructiveAction {
     }
 }
 
+impl DestructiveAction {
+    pub fn from_universal_action(
+        action: &crate::universal_actions::UniversalAction,
+    ) -> Option<Self> {
+        use crate::universal_actions::action_ids;
+
+        match action.id.as_str() {
+            value if value == action_ids::FOLDER_REMOVE.as_str() => Some(Self::RemoveFolder),
+            value if value == action_ids::BOOKMARK_REMOVE.as_str() => Some(Self::RemoveBookmark),
+            value if value == action_ids::TIMER_CANCEL.as_str() => Some(Self::CancelTimer),
+            value if value == action_ids::STOPWATCH_STOP.as_str() => Some(Self::StopStopwatch),
+            value if value == action_ids::SNIPPET_REMOVE.as_str() => Some(Self::RemoveSnippet),
+            value if value == action_ids::TEMPFILE_DELETE.as_str() => Some(Self::DeleteTempfile),
+            value if value == action_ids::NOTE_REMOVE.as_str() => Some(Self::DeleteNote),
+            value if value == action_ids::CLIPBOARD_REMOVE.as_str() => {
+                Some(Self::RemoveClipboardEntry)
+            }
+            value if value == action_ids::WINDOW_CLOSE.as_str() => Some(Self::CloseWindow),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ConfirmationModal, DestructiveAction};
     use crate::actions::Action;
     use crate::commands::{ActivationSource, Command, NoteCommand, parse_action};
+    use crate::universal_actions::{
+        ActionAvailability, ActionPresentation, ActionSafety, ActionTarget, UniversalAction,
+        UniversalActionOperation, action_ids,
+    };
 
     fn command(raw: &str) -> Command {
         parse_action(&Action {
@@ -122,6 +165,42 @@ mod tests {
             Some(ActivationSource::Macro),
         );
         assert_eq!(modal.source_label.as_deref(), Some("Triggered by macro"));
+    }
+
+    #[test]
+    fn every_universal_destructive_action_has_central_confirmation_metadata() {
+        let legacy = Action {
+            label: "target".into(),
+            desc: "test".into(),
+            action: "noop".into(),
+            args: None,
+        };
+        for id in [
+            action_ids::FOLDER_REMOVE,
+            action_ids::BOOKMARK_REMOVE,
+            action_ids::TIMER_CANCEL,
+            action_ids::STOPWATCH_STOP,
+            action_ids::SNIPPET_REMOVE,
+            action_ids::TEMPFILE_DELETE,
+            action_ids::NOTE_REMOVE,
+            action_ids::CLIPBOARD_REMOVE,
+            action_ids::WINDOW_CLOSE,
+        ] {
+            let action = UniversalAction {
+                id: id.clone(),
+                target: ActionTarget::Generic {
+                    action: legacy.clone(),
+                },
+                presentation: ActionPresentation::new("Remove"),
+                availability: ActionAvailability::Available,
+                safety: ActionSafety::Destructive,
+                operation: UniversalActionOperation::InvokePrimary(legacy.clone()),
+            };
+            assert!(
+                DestructiveAction::from_universal_action(&action).is_some(),
+                "missing metadata for {id}"
+            );
+        }
     }
 }
 #[derive(Debug, Clone)]

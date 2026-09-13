@@ -67,6 +67,9 @@ impl LauncherApp {
     }
 
     pub(crate) fn resolve_pending_confirmation(&mut self, confirmed: bool) {
+        if self.resolve_pending_universal_action_confirmation(confirmed) {
+            return;
+        }
         let pending = self.pending_confirm.take();
         if confirmed && let Some(pending) = pending {
             self.dispatch_command_invocation(pending.invocation);
@@ -84,7 +87,8 @@ impl LauncherApp {
             .collect();
         LauncherInteractionSnapshot {
             panel_instances,
-            confirmation_open: self.pending_confirm.is_some(),
+            confirmation_open: self.pending_confirm.is_some()
+                || self.pending_universal_confirm.is_some(),
         }
     }
 
@@ -521,7 +525,7 @@ impl LauncherApp {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
         common::slug::reset_slug_lookup,
@@ -537,7 +541,7 @@ mod tests {
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    pub(super) fn new_app(ctx: &egui::Context) -> LauncherApp {
+    pub(crate) fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),

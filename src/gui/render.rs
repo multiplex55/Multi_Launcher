@@ -7,6 +7,24 @@ pub(crate) struct DeferredActivation {
     pub(crate) source: ActivationSource,
 }
 
+#[derive(Clone, Debug)]
+struct DeferredUniversalAction {
+    action: crate::universal_actions::UniversalAction,
+    surface: crate::universal_actions::ActionSurface,
+    source: ActivationSource,
+}
+
+fn defer_universal_context_action(
+    deferred: &mut Option<DeferredUniversalAction>,
+    action: crate::universal_actions::UniversalAction,
+) {
+    *deferred = Some(DeferredUniversalAction {
+        action,
+        surface: crate::universal_actions::ActionSurface::ContextMenu,
+        source: ActivationSource::Click,
+    });
+}
+
 pub(crate) fn deferred_activation_from_results(
     results: &[Action],
     idx: usize,
@@ -19,9 +37,51 @@ pub(crate) fn deferred_activation_from_results(
     })
 }
 
+fn render_universal_context_menu(
+    ui: &mut egui::Ui,
+    actions: &[crate::universal_actions::UniversalAction],
+) -> Option<crate::universal_actions::UniversalAction> {
+    let surface = crate::universal_actions::ActionSurface::ContextMenu;
+    let mut previous_group = None;
+    let mut selected = None;
+
+    for action in actions {
+        let presentation = action.effective_presentation(surface);
+        if !presentation.visible {
+            continue;
+        }
+        if previous_group.is_some() && previous_group != Some(presentation.group) {
+            ui.separator();
+        }
+        previous_group = Some(presentation.group);
+
+        let response = ui.add_enabled(
+            action.is_available(),
+            egui::Button::new(&presentation.label),
+        );
+        let response = match action.availability.disabled_reason() {
+            Some(reason) => response.on_hover_text(reason),
+            None => response,
+        };
+        if response.clicked() {
+            selected = Some(action.clone());
+        }
+    }
+
+    selected
+}
+
 impl LauncherApp {
     pub(crate) fn launcher_query_keyboard_enabled(query_has_focus: bool) -> bool {
         query_has_focus
+    }
+
+    pub(crate) fn launcher_action_sheet_shortcut_enabled(
+        query_has_focus: bool,
+        file_search_open: bool,
+        another_panel_open: bool,
+    ) -> bool {
+        query_has_focus && !file_search_open && !another_panel_open
     }
 
     fn consume_query_history_shortcut(
@@ -127,629 +187,161 @@ impl LauncherApp {
         (just_became_visible || focus_query) && !file_search_open
     }
 
-    pub(crate) fn result_context_menu_kind(&self, action: &Action) -> ResultContextMenuKind {
-        if self.folder_aliases.contains_key(&action.action) && !action.action.starts_with("folder:")
-        {
-            ResultContextMenuKind::Folder
-        } else if self.bookmark_aliases.contains_key(&action.action) {
-            ResultContextMenuKind::Bookmark
-        } else if action.desc == "Timer" && action.action.starts_with("timer:show:") {
-            action.action[11..]
-                .parse::<u64>()
-                .map(|id| ResultContextMenuKind::Timer { id })
-                .unwrap_or(ResultContextMenuKind::Default)
-        } else if action.desc == "Stopwatch" && action.action.starts_with("stopwatch:show:") {
-            action.action["stopwatch:show:".len()..]
-                .parse::<u64>()
-                .map(|id| ResultContextMenuKind::Stopwatch { id })
-                .unwrap_or(ResultContextMenuKind::Default)
-        } else if action.desc == "Snippet" {
-            ResultContextMenuKind::Snippet
-        } else if action.desc == "Tempfile" && !action.action.starts_with("tempfile:") {
-            ResultContextMenuKind::Tempfile
-        } else if action.desc == "Note" && action.action.starts_with("note:open:") {
-            let slug = action.action.rsplit(':').next().unwrap_or("").to_string();
-            ResultContextMenuKind::Note { slug }
-        } else if action.desc == "Clipboard" && action.action.starts_with("clipboard:copy:") {
-            if let Ok(idx) = action
-                .action
-                .rsplit(':')
-                .next()
-                .unwrap_or("")
-                .parse::<usize>()
-            {
-                ResultContextMenuKind::Clipboard {
-                    idx,
-                    label: action.label.clone(),
-                }
-            } else {
-                ResultContextMenuKind::Default
+    fn resolve_universal_actions(
+        &self,
+        action: &Action,
+        pin: crate::universal_actions::PinCapability,
+        surface: crate::universal_actions::ActionSurface,
+    ) -> (
+        crate::universal_actions::ResolvedActionTarget,
+        Vec<crate::universal_actions::UniversalAction>,
+    ) {
+        let custom_len = self.custom_len.min(self.actions.len());
+        let resolver_context = crate::universal_actions::ActionTargetResolverContext::new(
+            &self.folder_aliases,
+            &self.bookmark_aliases,
+            &self.actions[..custom_len],
+        );
+        let resolved =
+            crate::universal_actions::ActionTargetResolver.resolve(action, &resolver_context);
+        let mut action_context =
+            crate::universal_actions::ActionResolutionContext::new(surface, self.query.trim());
+        action_context.pin = pin;
+        action_context.can_add_favorite = resolved.target.persistent_ref().is_some();
+        match &resolved.target {
+            crate::universal_actions::ActionTarget::Timer { id } => {
+                action_context.timer_paused = crate::plugins::timer::timer_paused(*id);
             }
-        } else if action.desc == "Todo" && action.action.starts_with("todo:done:") {
-            action
-                .action
-                .rsplit(':')
-                .next()
-                .unwrap_or("")
-                .parse::<usize>()
-                .map(|idx| ResultContextMenuKind::Todo { idx })
-                .unwrap_or(ResultContextMenuKind::Default)
-        } else {
-            ResultContextMenuKind::Default
+            crate::universal_actions::ActionTarget::Stopwatch { id } => {
+                action_context.stopwatch_paused = crate::plugins::stopwatch::stopwatch_paused(*id);
+            }
+            _ => {}
         }
+
+        let actions =
+            crate::universal_actions::UniversalActionRegistry.resolve(&resolved, &action_context);
+        (resolved, actions)
+    }
+
+    pub(crate) fn resolve_context_menu_actions(
+        &self,
+        action: &Action,
+        pin: crate::universal_actions::PinCapability,
+    ) -> Vec<crate::universal_actions::UniversalAction> {
+        self.resolve_universal_actions(
+            action,
+            pin,
+            crate::universal_actions::ActionSurface::ContextMenu,
+        )
+        .1
+    }
+
+    fn pin_capability_for(&self, action: &Action) -> crate::universal_actions::PinCapability {
+        match history::load_pins(HISTORY_PINS_FILE) {
+            Ok(pins) => crate::universal_actions::PinCapability::Writable {
+                is_pinned: pins.iter().any(|pin| pin.matches_action(action)),
+            },
+            Err(error) => crate::universal_actions::PinCapability::ReadOnly {
+                is_pinned: false,
+                reason: format!("Pinned results are read-only: {error}"),
+            },
+        }
+    }
+
+    pub(crate) fn open_action_sheet_for_index(&mut self, index: usize) -> bool {
+        let Some(action) = self.results.get(index).cloned() else {
+            return false;
+        };
+        let pin = self.pin_capability_for(&action);
+        let (target, actions) = self.resolve_universal_actions(
+            &action,
+            pin,
+            crate::universal_actions::ActionSurface::ActionSheet,
+        );
+        self.action_sheet
+            .open(target, action, actions, &self.matcher);
+        true
+    }
+
+    fn close_action_sheet(&mut self) {
+        self.action_sheet.close();
+        self.focus_input();
+    }
+
+    fn route_action_sheet_keyboard(
+        &mut self,
+        ctx: &egui::Context,
+        query_input_id: egui::Id,
+    ) -> Option<(crate::universal_actions::UniversalAction, ActivationSource)> {
+        if self.action_sheet.is_open() {
+            let key = ctx.input_mut(action_sheet::ActionSheetState::consume_key);
+            return self.handle_action_sheet_key(key);
+        }
+
+        let query_has_focus = ctx.memory(|memory| memory.has_focus(query_input_id));
+        let shortcut_enabled = Self::launcher_action_sheet_shortcut_enabled(
+            query_has_focus,
+            self.file_search_dialog.open,
+            self.any_panel_open(),
+        );
+        if shortcut_enabled
+            && ctx.input_mut(action_sheet::ActionSheetState::consume_open_shortcut)
+            && let Some(index) = self.current_actionable_result_index()
+        {
+            self.open_action_sheet_for_index(index);
+        }
+        None
+    }
+
+    pub(crate) fn handle_action_sheet_key(
+        &mut self,
+        key: Option<action_sheet::ActionSheetKey>,
+    ) -> Option<(crate::universal_actions::UniversalAction, ActivationSource)> {
+        match key {
+            Some(action_sheet::ActionSheetKey::Escape) => self.close_action_sheet(),
+            Some(action_sheet::ActionSheetKey::Up) => self.action_sheet.move_selection(-1),
+            Some(action_sheet::ActionSheetKey::Down) => self.action_sheet.move_selection(1),
+            Some(action_sheet::ActionSheetKey::Enter) => {
+                let selected = self
+                    .action_sheet
+                    .selected_invocation(ActivationSource::Enter);
+                if selected.is_some() {
+                    self.close_action_sheet();
+                }
+                return selected;
+            }
+            None => {}
+        }
+        None
     }
 
     fn attach_result_context_menu(
         &mut self,
         action: &Action,
         menu_resp: egui::Response,
-        refresh: &mut bool,
-        set_focus: &mut bool,
+        _refresh: &mut bool,
+        _set_focus: &mut bool,
+        deferred: &mut Option<DeferredUniversalAction>,
     ) -> egui::Response {
-        let custom_idx = self
-            .actions
-            .iter()
-            .take(self.custom_len)
-            .position(|act| act.action == action.action && act.label == action.label);
-        let query = self.query.trim().to_string();
+        // egui only invokes this closure while the popup is open. Keep target
+        // resolution and pin I/O here so ordinary list/grid rendering remains
+        // on the legacy primary-action fast path.
+        menu_resp.clone().context_menu(|ui| {
+            let pin = self.pin_capability_for(action);
+            let actions = self.resolve_context_menu_actions(action, pin);
 
-        match self.result_context_menu_kind(action) {
-            ResultContextMenuKind::Folder => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Set Alias").clicked() {
-                        self.alias_dialog.open(&action.action);
-                        ui.close_menu();
-                    }
-                    if ui.button("Remove Folder").clicked() {
-                        if let Err(e) = crate::plugins::folders::remove_folder(
-                            crate::plugins::folders::FOLDERS_FILE,
-                            &action.action,
-                        ) {
-                            self.report_error_message(
-                                "launcher",
-                                format!("Failed to remove folder: {e}"),
-                            );
-                        } else {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Removed folder {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
+            if let Some(action) = render_universal_context_menu(ui, &actions) {
+                defer_universal_context_action(deferred, action);
+                ui.close_menu();
             }
-            ResultContextMenuKind::Bookmark => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Set Alias").clicked() {
-                        self.bookmark_alias_dialog.open(&action.action);
-                        ui.close_menu();
-                    }
-                    if ui.button("Remove Bookmark").clicked() {
-                        if let Err(e) = crate::plugins::bookmarks::remove_bookmark(
-                            crate::plugins::bookmarks::BOOKMARKS_FILE,
-                            &action.action,
-                        ) {
-                            self.report_error_message(
-                                "launcher",
-                                format!("Failed to remove bookmark: {e}"),
-                            );
-                        } else {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Removed bookmark {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Timer { id } => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Pause Timer").clicked() {
-                        crate::plugins::timer::pause_timer(id);
-                        if query.starts_with("timer list") {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Paused timer {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Remove Timer").clicked() {
-                        crate::plugins::timer::cancel_timer(id);
-                        if query.starts_with("timer list") {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Removed timer {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Stopwatch { id } => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Pause Stopwatch").clicked() {
-                        crate::plugins::stopwatch::pause_stopwatch(id);
-                        if query.starts_with("sw list") {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Paused stopwatch {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Resume Stopwatch").clicked() {
-                        crate::plugins::stopwatch::resume_stopwatch(id);
-                        if query.starts_with("sw list") {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Resumed stopwatch {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Stop Stopwatch").clicked() {
-                        crate::plugins::stopwatch::stop_stopwatch(id);
-                        if query.starts_with("sw list") {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Stopped stopwatch {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Copy Time").clicked() {
-                        if let Some(time) = crate::plugins::stopwatch::format_elapsed(id) {
-                            if let Err(e) = crate::actions::clipboard::set_text(&time) {
-                                self.report_error_message(
-                                    "launcher",
-                                    format!("Failed to copy time: {e}"),
-                                );
-                            } else if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Copied {time}").into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Snippet => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Edit Snippet").clicked() {
-                        self.snippet_dialog.open_edit(&action.label);
-                        ui.close_menu();
-                    }
-                    if ui.button("Remove Snippet").clicked() {
-                        if let Err(e) = remove_snippet(SNIPPETS_FILE, &action.label) {
-                            self.report_error_message(
-                                "launcher",
-                                format!("Failed to remove snippet: {e}"),
-                            );
-                        } else {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Removed snippet {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Tempfile => {
-                let file_path = action.action.clone();
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Set Alias").clicked() {
-                        self.tempfile_alias_dialog.open(&file_path);
-                        ui.close_menu();
-                    }
-                    if ui.button("Delete File").clicked() {
-                        if let Err(e) =
-                            crate::plugins::tempfile::remove_file(std::path::Path::new(&file_path))
-                        {
-                            self.report_error_message(
-                                "launcher",
-                                format!("Failed to delete file: {e}"),
-                            );
-                        } else {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Removed file {}", action.label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Note { slug } => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Edit Note").clicked() {
-                        self.open_note_panel(&slug, None);
-                        ui.close_menu();
-                    }
-                    if ui.button("Open in Notepad").clicked() {
-                        match crate::plugins::note::load_notes() {
-                            Ok(notes) => {
-                                if let Some(note) = notes.iter().find(|n| n.slug == slug) {
-                                    if let Err(e) = std::process::Command::new("notepad.exe")
-                                        .arg(&note.path)
-                                        .spawn()
-                                    {
-                                        self.report_error_message("launcher", e.to_string());
-                                    }
-                                } else {
-                                    self.report_error_message(
-                                        "launcher",
-                                        "Note not found".to_string(),
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                self.report_error_message("launcher", e.to_string());
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Open in Neovim").clicked()
-                        && self.open_note_in_neovim(
-                            &slug,
-                            crate::plugins::note::load_notes,
-                            |path| spawn_external(path, NoteExternalOpen::Wezterm),
-                        )
-                    {
-                        ui.close_menu();
-                    }
-                    if ui.button("Remove Note").clicked() {
-                        self.delete_note(&slug);
-                        *refresh = true;
-                        *set_focus = true;
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Clipboard { idx, label } => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Edit Entry").clicked() {
-                        self.clipboard_dialog.open_edit(idx);
-                        ui.close_menu();
-                    }
-                    if ui.button("Remove Entry").clicked() {
-                        if let Err(e) = crate::plugins::clipboard::remove_entry(
-                            crate::plugins::clipboard::CLIPBOARD_FILE,
-                            idx,
-                        ) {
-                            self.report_error_message(
-                                "launcher",
-                                format!("Failed to remove entry: {e}"),
-                            );
-                        } else {
-                            *refresh = true;
-                            *set_focus = true;
-                            if self.enable_toasts {
-                                push_toast(
-                                    &mut self.toasts,
-                                    Toast {
-                                        text: format!("Removed entry {}", label).into(),
-                                        kind: ToastKind::Success,
-                                        options: ToastOptions::default()
-                                            .duration_in_seconds(self.toast_duration as f64),
-                                    },
-                                );
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Todo { idx } => {
-                menu_resp.clone().context_menu(|ui| {
-                    if ui.button("Edit Todo").clicked() {
-                        self.todo_view_dialog.open_edit(idx);
-                        ui.close_menu();
-                    }
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-            ResultContextMenuKind::Default => {
-                menu_resp.clone().context_menu(|ui| {
-                    if let Some(idx_act) = custom_idx
-                        && ui.button("Edit App").clicked()
-                    {
-                        self.editor.open_edit(idx_act, &self.actions[idx_act]);
-                        self.show_editor = true;
-                        ui.close_menu();
-                    }
-                    self.pin_result_menu(ui, action);
-                });
-            }
-        }
+        });
 
         menu_resp
     }
 
-    fn pin_result_menu(&mut self, ui: &mut egui::Ui, action: &Action) {
-        ui.separator();
-        let pins = match history::load_pins(HISTORY_PINS_FILE) {
-            Ok(pins) => pins,
-            Err(error) => {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    format!("Pinned results are read-only: {error}"),
-                );
-                return;
-            }
-        };
-        let is_pinned = pins.iter().any(|pin| pin.matches_action(action));
-        let pin = HistoryPin {
-            action_id: action.action.clone(),
-            label: action.label.clone(),
-            desc: action.desc.clone(),
-            args: action.args.clone(),
-            query: self.query.clone(),
-            timestamp: chrono::Utc::now().timestamp(),
-        };
-
-        if !is_pinned {
-            if ui.button("Pin current query result").clicked() {
-                match history::upsert_pin(HISTORY_PINS_FILE, &pin) {
-                    Ok(_) => {
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: format!("Pinned {}", action.label).into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        self.report_error_message("launcher", format!("Failed to pin result: {e}"));
-                    }
-                }
-                ui.close_menu();
-            }
-        } else {
-            if ui.button("Unpin result").clicked() {
-                if let Err(e) =
-                    history::remove_pin(HISTORY_PINS_FILE, &action.action, action.args.as_deref())
-                {
-                    self.report_error_message("launcher", format!("Failed to unpin result: {e}"));
-                } else if self.enable_toasts {
-                    push_toast(
-                        &mut self.toasts,
-                        Toast {
-                            text: format!("Unpinned {}", action.label).into(),
-                            kind: ToastKind::Success,
-                            options: ToastOptions::default()
-                                .duration_in_seconds(self.toast_duration as f64),
-                        },
-                    );
-                }
-                ui.close_menu();
-            }
-            if ui.button("Replace pin with current result").clicked() {
-                match history::upsert_pin(HISTORY_PINS_FILE, &pin) {
-                    Ok(_) => {
-                        if self.enable_toasts {
-                            push_toast(
-                                &mut self.toasts,
-                                Toast {
-                                    text: format!("Updated pin for {}", action.label).into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(self.toast_duration as f64),
-                                },
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        self.report_error_message("launcher", format!("Failed to update pin: {e}"));
-                    }
-                }
-                ui.close_menu();
-            }
-        }
-
-        if ui.button("Recompute pinned results").clicked() {
-            match history::recompute_pins(HISTORY_PINS_FILE, |pin| self.resolve_pin_action(pin)) {
-                Ok(report) => {
-                    if self.enable_toasts {
-                        let text = if report.updated == 0 && report.missing == 0 {
-                            "Pinned results are up to date.".to_string()
-                        } else if report.updated > 0 && report.missing > 0 {
-                            format!(
-                                "Updated {} pinned results ({} missing).",
-                                report.updated, report.missing
-                            )
-                        } else if report.updated > 0 {
-                            format!("Updated {} pinned results.", report.updated)
-                        } else {
-                            format!("{} pinned results missing.", report.missing)
-                        };
-                        push_toast(
-                            &mut self.toasts,
-                            Toast {
-                                text: text.into(),
-                                kind: if report.missing > 0 {
-                                    ToastKind::Warning
-                                } else {
-                                    ToastKind::Success
-                                },
-                                options: ToastOptions::default()
-                                    .duration_in_seconds(self.toast_duration as f64),
-                            },
-                        );
-                    }
-                }
-                Err(e) => {
-                    self.report_error_message("launcher", format!("Failed to recompute pins: {e}"));
-                }
-            }
-            ui.close_menu();
+    fn execute_deferred_result_action(&mut self, deferred: Option<DeferredUniversalAction>) {
+        if let Some(deferred) = deferred {
+            self.execute_universal_action(deferred.action, deferred.surface, deferred.source);
         }
     }
 }
@@ -1213,6 +805,32 @@ impl eframe::App for LauncherApp {
             self.last_net_update = Instant::now();
         }
 
+        // The Action Sheet owns keyboard input before the launcher query and
+        // navigation paths see it. Opening is also resolved before rendering,
+        // so the filter can take focus in the same frame as Ctrl+Enter.
+        let query_input_id = egui::Id::new("query_input");
+        let mut selected_sheet_action = self.route_action_sheet_keyboard(ctx, query_input_id);
+
+        if self.action_sheet.is_open() {
+            if let Some(action) = action_sheet::render(ctx, &mut self.action_sheet, &self.matcher) {
+                self.close_action_sheet();
+                selected_sheet_action = Some(action);
+            } else if !self.action_sheet.is_open() {
+                self.focus_input();
+            }
+        }
+        if let Some((action, source)) = selected_sheet_action {
+            // Closing first prevents primary and UI-intent execution from
+            // competing with the sheet's focus or modal state.
+            self.execute_universal_action(
+                action,
+                crate::universal_actions::ActionSurface::ActionSheet,
+                source,
+            );
+        }
+        let action_sheet_blocks_launcher_input = self.action_sheet.is_open();
+
+        let mut deferred_universal_action = None;
         CentralPanel::default().show(ctx, |ui| {
             let mut deferred_activation: Option<DeferredActivation> = None;
             ui.heading("🚀 Multi Lnchr");
@@ -1222,7 +840,7 @@ impl eframe::App for LauncherApp {
                 }
 
             scale_ui(ui, self.query_scale, |ui| {
-                let input_id = egui::Id::new("query_input");
+                let input_id = query_input_id;
 
                 let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
                 let numpad_navigation = ui.ctx().input_mut(|input| {
@@ -1257,13 +875,15 @@ impl eframe::App for LauncherApp {
                 let query_response = ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .id(input_id)
+                        .interactive(!action_sheet_blocks_launcher_input)
                         .desired_width(f32::INFINITY),
                 );
                 if Self::launcher_query_focus_should_be_requested(
                     just_became_visible,
                     self.focus_query,
                     self.file_search_dialog.open,
-                ) {
+                ) && !action_sheet_blocks_launcher_input
+                {
                     query_response.request_focus();
                     self.focus_query = false;
                 }
@@ -1274,15 +894,21 @@ impl eframe::App for LauncherApp {
                     self.handle_query_text_changed();
                 }
 
-                let history_direction = ctx.input_mut(|input| {
-                    Self::consume_query_history_shortcut(query_has_focus, input)
-                });
+                let history_direction = if action_sheet_blocks_launcher_input {
+                    None
+                } else {
+                    ctx.input_mut(|input| {
+                        Self::consume_query_history_shortcut(query_has_focus, input)
+                    })
+                };
                 if let Some(direction) = history_direction {
                     self.navigate_query_history(direction);
                 }
 
-                for direction in numpad_navigation {
-                    self.handle_key(direction.navigation_key());
+                if !action_sheet_blocks_launcher_input {
+                    for direction in numpad_navigation {
+                        self.handle_key(direction.navigation_key());
+                    }
                 }
 
                 if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
@@ -1293,7 +919,8 @@ impl eframe::App for LauncherApp {
                     });
                 }
 
-                if Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
+                if !action_sheet_blocks_launcher_input
+                    && Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     if self.any_panel_open() {
@@ -1311,7 +938,8 @@ impl eframe::App for LauncherApp {
                             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
                         }
 
-                if history_direction.is_none()
+                if !action_sheet_blocks_launcher_input
+                    && history_direction.is_none()
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                 {
                     for key in [
@@ -1331,7 +959,8 @@ impl eframe::App for LauncherApp {
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
-                if Self::launcher_query_keyboard_enabled(query_has_focus)
+                if !action_sheet_blocks_launcher_input
+                    && Self::launcher_query_keyboard_enabled(query_has_focus)
                     && (tab || (enter && self.selected.is_none()))
                 {
                     accepted_suggestion = self.accept_suggestion(tab);
@@ -1348,7 +977,8 @@ impl eframe::App for LauncherApp {
                 }
 
                 let mut launch_idx: Option<usize> = None;
-                if !accepted_suggestion
+                if !action_sheet_blocks_launcher_input
+                    && !accepted_suggestion
                     && enter
                     && Self::launcher_enter_activation_enabled(
                         query_has_focus,
@@ -1473,6 +1103,7 @@ impl eframe::App for LauncherApp {
                                                 resp,
                                                 &mut refresh,
                                                 &mut set_focus,
+                                                &mut deferred_universal_action,
                                             );
                                             if self.selected == Some(idx) {
                                                 menu_resp.scroll_to_me(Some(egui::Align::Center));
@@ -1519,7 +1150,7 @@ impl eframe::App for LauncherApp {
                                         a.action.clone()
                                     };
                                     let menu_resp =
-                                        self.attach_result_context_menu(&a, resp.on_hover_text(tooltip), &mut refresh, &mut set_focus);
+                                        self.attach_result_context_menu(&a, resp.on_hover_text(tooltip), &mut refresh, &mut set_focus, &mut deferred_universal_action);
                                     if self.selected == Some(idx) {
                                         menu_resp.scroll_to_me(Some(egui::Align::Center));
                                     }
@@ -1554,6 +1185,7 @@ impl eframe::App for LauncherApp {
                 );
             }
         });
+        self.execute_deferred_result_action(deferred_universal_action);
         let show_editor = self.show_editor;
         if show_editor {
             let mut editor = std::mem::take(&mut self.editor);
@@ -3267,6 +2899,17 @@ mod tests {
         }
     }
 
+    fn focus_launcher_query(ctx: &egui::Context, app: &mut LauncherApp) {
+        let query_id = egui::Id::new("query_input");
+        ctx.begin_frame(egui::RawInput::default());
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut app.query).id(query_id))
+                .request_focus();
+        });
+        let _ = ctx.end_frame();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+    }
+
     struct FakeNumpadProbe {
         down: Option<PhysicalNumpadKey>,
         top_row_down: bool,
@@ -3699,6 +3342,12 @@ mod tests {
                     desc: "Note".into(),
                     action: "note:open:alpha".into(),
                     args: None,
+                }],
+                "dynamic universal" => vec![Action {
+                    label: "Dynamic Universal".into(),
+                    desc: "Third-party result".into(),
+                    action: "third_party:opaque:command".into(),
+                    args: Some("payload".into()),
                 }],
                 "note list" => ["alpha", "beta", "gamma"]
                     .into_iter()
@@ -4195,52 +3844,385 @@ mod tests {
     }
 
     #[test]
-    fn list_and_grid_modes_share_context_menu_resolution() {
+    fn context_menu_resolves_semantic_actions_with_list_grid_parity() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let actions = vec![
+        let folder = Action {
+            label: "Projects".into(),
+            desc: "Folder".into(),
+            action: "C:/work".into(),
+            args: None,
+        };
+        let bookmark = Action {
+            label: "Bookmark".into(),
+            desc: "Web".into(),
+            action: "https://example.com".into(),
+            args: None,
+        };
+        app.folder_aliases
+            .insert(folder.action.clone(), Some("work".into()));
+        app.bookmark_aliases
+            .insert(bookmark.action.clone(), Some("Docs".into()));
+
+        let cases = vec![
+            (folder, "folder.set_alias", true),
+            (bookmark, "bookmark.set_alias", true),
             (
                 Action {
-                    label: "Bookmark".into(),
-                    desc: "Web".into(),
-                    action: "https://example.com".into(),
+                    label: "Timer".into(),
+                    desc: "Timer".into(),
+                    action: "timer:show:1".into(),
                     args: None,
                 },
-                ResultContextMenuKind::Bookmark,
+                "timer.pause",
+                false,
             ),
             (
                 Action {
-                    label: "Todo".into(),
-                    desc: "Todo".into(),
-                    action: "todo:done:7".into(),
+                    label: "Stopwatch".into(),
+                    desc: "Stopwatch".into(),
+                    action: "stopwatch:show:2".into(),
                     args: None,
                 },
-                ResultContextMenuKind::Todo { idx: 7 },
+                "stopwatch.copy_time",
+                false,
+            ),
+            (
+                Action {
+                    label: "sig".into(),
+                    desc: "Snippet".into(),
+                    action: "clipboard:Regards".into(),
+                    args: None,
+                },
+                "snippet.edit",
+                true,
+            ),
+            (
+                Action {
+                    label: "scratch.txt".into(),
+                    desc: "Tempfile".into(),
+                    action: "C:/tmp/scratch.txt".into(),
+                    args: None,
+                },
+                "tempfile.set_alias",
+                true,
+            ),
+            (
+                Action {
+                    label: "Daily".into(),
+                    desc: "Note".into(),
+                    action: "note:open:daily".into(),
+                    args: None,
+                },
+                "note.edit",
+                true,
             ),
             (
                 Action {
                     label: "Clipboard entry".into(),
                     desc: "Clipboard".into(),
-                    action: "clipboard:copy:2".into(),
+                    action: "clipboard:copy:3".into(),
                     args: None,
                 },
-                ResultContextMenuKind::Clipboard {
-                    idx: 2,
-                    label: "Clipboard entry".into(),
+                "clipboard.edit",
+                false,
+            ),
+            (
+                Action {
+                    label: "Todo".into(),
+                    desc: "Todo".into(),
+                    action: "todo:done:4".into(),
+                    args: None,
                 },
+                "todo.edit",
+                false,
+            ),
+            (
+                Action {
+                    label: "Dynamic".into(),
+                    desc: "Plugin value".into(),
+                    action: "plugin:future".into(),
+                    args: None,
+                },
+                "result.favorite",
+                true,
             ),
         ];
-        app.bookmark_aliases
-            .insert("https://example.com".into(), Some("Docs".into()));
 
-        for (action, expected) in actions {
+        for (action, expected_id, favorite_expected) in cases {
             app.resolved_grid_layout = false;
-            let list_kind = app.result_context_menu_kind(&action);
+            let list = app.resolve_context_menu_actions(
+                &action,
+                crate::universal_actions::PinCapability::Writable { is_pinned: false },
+            );
             app.resolved_grid_layout = true;
-            let grid_kind = app.result_context_menu_kind(&action);
-            assert_eq!(list_kind, expected);
-            assert_eq!(grid_kind, expected);
+            let grid = app.resolve_context_menu_actions(
+                &action,
+                crate::universal_actions::PinCapability::Writable { is_pinned: false },
+            );
+            let ids = |actions: &[crate::universal_actions::UniversalAction]| {
+                actions
+                    .iter()
+                    .map(|action| action.id.as_str().to_string())
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                ids(&list).iter().any(|id| id == expected_id),
+                "missing {expected_id}"
+            );
+            assert!(ids(&list).iter().any(|id| id == "result.pin"));
+            assert_eq!(
+                ids(&list).iter().any(|id| id == "result.favorite"),
+                favorite_expected,
+                "favorite persistence policy mismatch for {}",
+                action.action
+            );
+            assert_eq!(ids(&list), ids(&grid));
         }
+    }
+
+    #[test]
+    fn context_action_is_deferred_until_all_result_rows_have_been_visited() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        set_execute_action_hook(Some(Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+        let selected = Action {
+            label: "First folder".into(),
+            desc: "Folder".into(),
+            action: "C:/first".into(),
+            args: None,
+        };
+        let resolved = crate::universal_actions::ResolvedActionTarget {
+            target: crate::universal_actions::ActionTarget::Folder {
+                path: selected.action.clone(),
+            },
+            selected_action: selected.clone(),
+            custom_action_index: None,
+        };
+        let action = crate::universal_actions::UniversalActionRegistry
+            .resolve(
+                &resolved,
+                &crate::universal_actions::ActionResolutionContext::new(
+                    crate::universal_actions::ActionSurface::ContextMenu,
+                    "query",
+                ),
+            )
+            .into_iter()
+            .find(|action| action.id == crate::universal_actions::action_ids::FOLDER_REMOVE)
+            .unwrap();
+        let mut rows = vec![0, 1, 2];
+        let mut visited = Vec::new();
+        let mut deferred = None;
+
+        for row in rows.iter().copied() {
+            visited.push(row);
+            if row == 0 {
+                defer_universal_context_action(&mut deferred, action.clone());
+            }
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(visited, [0, 1, 2]);
+        assert_eq!(rows, [0, 1, 2]);
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = false;
+        if deferred.is_some() {
+            app.execute_deferred_result_action(deferred.take());
+            rows.remove(0);
+        }
+        assert_eq!(rows, [1, 2]);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(app.pending_universal_confirm.is_none());
+        set_execute_action_hook(None);
+    }
+
+    #[test]
+    fn production_action_sheet_router_consumes_exact_ctrl_enter_and_preserves_tab() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results = vec![Action {
+            label: "Dynamic".into(),
+            desc: "Plugin value".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        focus_launcher_query(&ctx, &mut app);
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![
+                key_press(egui::Key::Enter, egui::Modifiers::CTRL),
+                key_press(egui::Key::Tab, egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        });
+        assert!(
+            app.route_action_sheet_keyboard(&ctx, egui::Id::new("query_input"))
+                .is_none()
+        );
+        assert!(app.action_sheet.is_open());
+        assert!(app.test_activation_trace.is_empty());
+        assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+        assert!(ctx.input(|input| input.key_pressed(egui::Key::Tab)));
+        let _ = ctx.end_frame();
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)],
+            ..Default::default()
+        });
+        assert!(
+            app.route_action_sheet_keyboard(&ctx, egui::Id::new("query_input"))
+                .is_none()
+        );
+        assert!(app.action_sheet.is_open());
+        assert!(app.test_activation_trace.is_empty());
+        assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn production_action_sheet_router_leaves_shifted_and_plain_enter_for_launcher() {
+        for modifiers in [
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            egui::Modifiers::NONE,
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.results = vec![Action {
+                label: "Dynamic".into(),
+                desc: "Plugin value".into(),
+                action: "help:show".into(),
+                args: None,
+            }];
+            focus_launcher_query(&ctx, &mut app);
+            ctx.begin_frame(egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, modifiers)],
+                ..Default::default()
+            });
+            assert!(
+                app.route_action_sheet_keyboard(&ctx, egui::Id::new("query_input"))
+                    .is_none()
+            );
+            assert!(!app.action_sheet.is_open());
+            assert!(ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+            let _ = ctx.end_frame();
+        }
+    }
+
+    #[test]
+    fn dynamic_fallback_executes_through_normal_enter_and_action_sheet_paths() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        set_execute_action_hook(Some(Box::new(move |action| {
+            assert_eq!(action.action, "third_party:opaque:command");
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
+        let ctx = egui::Context::default();
+        let mut app = app_with_fake(&ctx);
+        app.query = "dynamic universal".into();
+        app.search();
+        assert_eq!(app.results.len(), 1);
+        let selected = app.results[0].clone();
+        assert_eq!(selected.action, "third_party:opaque:command");
+
+        let index = app.handle_key(egui::Key::Enter).unwrap();
+        let deferred =
+            deferred_activation_from_results(&app.results, index, ActivationSource::Enter).unwrap();
+        app.activate_action(deferred.action, deferred.query_override, deferred.source);
+        assert_eq!(
+            app.test_activation_trace.last().unwrap().1,
+            ActivationSource::Enter
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        app.test_activation_trace.clear();
+        app.results = vec![selected];
+        assert!(app.open_action_sheet_for_index(0));
+        assert!(matches!(
+            app.action_sheet
+                .target
+                .as_ref()
+                .map(|target| &target.target),
+            Some(crate::universal_actions::ActionTarget::Generic { .. })
+        ));
+        let (action, source) = app
+            .handle_action_sheet_key(Some(action_sheet::ActionSheetKey::Enter))
+            .unwrap();
+        app.execute_universal_action(
+            action,
+            crate::universal_actions::ActionSurface::ActionSheet,
+            source,
+        );
+        assert_eq!(
+            app.test_activation_trace.last().unwrap().1,
+            ActivationSource::Enter
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+        set_execute_action_hook(None);
+    }
+
+    #[test]
+    fn context_menu_includes_custom_pin_and_favorite_capabilities() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let selected = Action {
+            label: "Custom Tool".into(),
+            desc: "Custom".into(),
+            action: "tool.exe".into(),
+            args: Some("--run".into()),
+        };
+        app.actions = Arc::new(vec![selected.clone()]);
+        app.custom_len = 1;
+
+        let actions = app.resolve_context_menu_actions(
+            &selected,
+            crate::universal_actions::PinCapability::Writable { is_pinned: true },
+        );
+        let ids = actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"custom_action.edit"));
+        assert!(ids.contains(&"result.unpin"));
+        assert!(ids.contains(&"result.replace_pin"));
+        assert!(ids.contains(&"result.recompute_pins"));
+        assert!(ids.contains(&"result.favorite"));
+        assert!(!ids.contains(&"result.pin"));
+        assert!(
+            actions
+                .iter()
+                .find(|action| action.id.as_str() == "result.execute")
+                .is_some_and(|action| !action
+                    .effective_presentation(crate::universal_actions::ActionSurface::ContextMenu)
+                    .visible)
+        );
+
+        let read_only = app.resolve_context_menu_actions(
+            &selected,
+            crate::universal_actions::PinCapability::ReadOnly {
+                is_pinned: false,
+                reason: "pins unavailable".into(),
+            },
+        );
+        assert_eq!(
+            read_only
+                .iter()
+                .find(|action| action.id.as_str() == "result.pin")
+                .and_then(|action| action.availability.disabled_reason()),
+            Some("pins unavailable")
+        );
+        assert!(
+            read_only
+                .iter()
+                .find(|action| action.id.as_str() == "result.favorite")
+                .is_some_and(|action| action.is_available())
+        );
     }
 
     #[test]

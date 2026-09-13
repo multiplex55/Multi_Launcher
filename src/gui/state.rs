@@ -76,23 +76,16 @@ impl UiErrorEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResultContextMenuKind {
-    Folder,
-    Bookmark,
-    Timer { id: u64 },
-    Stopwatch { id: u64 },
-    Snippet,
-    Tempfile,
-    Note { slug: String },
-    Clipboard { idx: usize, label: String },
-    Todo { idx: usize },
-    Default,
-}
-
 #[derive(Clone)]
 pub(crate) struct PendingConfirmCommand {
     pub(crate) invocation: crate::commands::CommandInvocation,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingUniversalActionInvocation {
+    pub(crate) action: crate::universal_actions::UniversalAction,
+    pub(crate) surface: crate::universal_actions::ActionSurface,
+    pub(crate) source: crate::commands::ActivationSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

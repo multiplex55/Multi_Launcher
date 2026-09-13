@@ -1,3 +1,4 @@
+mod action_sheet;
 mod actions;
 mod add_action_dialog;
 mod add_bookmark_dialog;
@@ -48,6 +49,7 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod volume_data;
 mod volume_dialog;
@@ -146,6 +148,7 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::{VisiblePlacementPolicy, apply_visibility};
+use action_sheet::ActionSheetState;
 use chrono::NaiveDate;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
 use dashboard_editor_dialog::DashboardEditorDialog;
@@ -178,7 +181,7 @@ use watch::watch_file;
 
 pub use crate::commands::ActivationSource;
 pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, VirtualDesktopGuiCompletion, WatchEvent};
-pub(crate) use state::{PendingConfirmCommand, ResultContextMenuKind, UiErrorEvent};
+pub(crate) use state::{PendingConfirmCommand, PendingUniversalActionInvocation, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -471,6 +474,7 @@ pub struct LauncherApp {
         Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
     pub selected: Option<usize>,
+    action_sheet: ActionSheetState,
     /// Test seam for verifying that command dispatch used normal activation,
     /// including the activation source, without launching an external process.
     #[cfg(test)]
@@ -672,6 +676,7 @@ pub struct LauncherApp {
     pending_query: Option<String>,
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmCommand>,
+    pending_universal_confirm: Option<PendingUniversalActionInvocation>,
     pending_data_recovery: Option<PendingRecoveryIntent>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
@@ -1601,6 +1606,7 @@ impl LauncherApp {
             screen_draw_launcher_parking: None,
             screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi::default(),
             selected: None,
+            action_sheet: ActionSheetState::default(),
             #[cfg(test)]
             test_last_activation: None,
             #[cfg(test)]
@@ -1803,6 +1809,7 @@ impl LauncherApp {
             pending_query: None,
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
+            pending_universal_confirm: None,
             pending_data_recovery: None,
             action_cache: Vec::new(),
             action_filter_metadata: Vec::new(),
@@ -2084,17 +2091,15 @@ impl LauncherApp {
                 }
                 None
             }
-            egui::Key::Enter => {
-                if let Some(i) = self.selected {
-                    Some(i)
-                } else if self.results.len() == 1 {
-                    Some(0)
-                } else {
-                    None
-                }
-            }
+            egui::Key::Enter => self.current_actionable_result_index(),
             _ => None,
         }
+    }
+
+    /// Shared target rule for normal Enter and the keyboard Action Sheet.
+    pub(crate) fn current_actionable_result_index(&self) -> Option<usize> {
+        self.selected
+            .or_else(|| (self.results.len() == 1).then_some(0))
     }
 
     pub fn focus_input(&mut self) {
@@ -5019,7 +5024,7 @@ mod tests {
     }
 
     #[test]
-    fn grid_context_menu_eligibility_uses_result_actions() {
+    fn grid_context_menu_uses_universal_bookmark_actions() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.resolved_grid_layout = true;
@@ -5032,8 +5037,15 @@ mod tests {
             args: None,
         }];
 
-        let kind = app.result_context_menu_kind(&app.results[0]);
-        assert_eq!(kind, ResultContextMenuKind::Bookmark);
+        let actions = app.resolve_context_menu_actions(
+            &app.results[0],
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.id == crate::universal_actions::action_ids::BOOKMARK_SET_ALIAS)
+        );
     }
 
     #[test]
@@ -5050,12 +5062,24 @@ mod tests {
             .insert(action.action.clone(), Some("docs".into()));
 
         app.resolved_grid_layout = false;
-        let list_kind = app.result_context_menu_kind(&action);
+        let list = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
         app.resolved_grid_layout = true;
-        let grid_kind = app.result_context_menu_kind(&action);
+        let grid = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
 
-        assert_eq!(list_kind, ResultContextMenuKind::Bookmark);
-        assert_eq!(grid_kind, list_kind);
+        let ids = |actions: &[crate::universal_actions::UniversalAction]| {
+            actions
+                .iter()
+                .map(|action| action.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(ids(&list).contains(&crate::universal_actions::action_ids::BOOKMARK_SET_ALIAS));
+        assert_eq!(ids(&grid), ids(&list));
     }
 
     #[test]
@@ -5070,12 +5094,24 @@ mod tests {
         };
 
         app.resolved_grid_layout = false;
-        let list_kind = app.result_context_menu_kind(&action);
+        let list = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
         app.resolved_grid_layout = true;
-        let grid_kind = app.result_context_menu_kind(&action);
+        let grid = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
 
-        assert_eq!(list_kind, ResultContextMenuKind::Todo { idx: 7 });
-        assert_eq!(grid_kind, list_kind);
+        let ids = |actions: &[crate::universal_actions::UniversalAction]| {
+            actions
+                .iter()
+                .map(|action| action.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(ids(&list).contains(&crate::universal_actions::action_ids::TODO_EDIT));
+        assert_eq!(ids(&grid), ids(&list));
     }
     #[test]
     fn handle_key_grid_navigation_arrows_and_numpad() {
@@ -5139,6 +5175,110 @@ mod tests {
         assert_eq!(app.selected, Some(1));
         app.handle_key(egui::Key::ArrowRight);
         assert_eq!(app.selected, Some(1));
+    }
+
+    #[test]
+    fn enter_and_action_sheet_share_selected_or_sole_target_semantics() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results.clear();
+        app.selected = None;
+        assert_eq!(app.current_actionable_result_index(), None);
+        assert_eq!(app.handle_key(egui::Key::Enter), None);
+
+        app.results.push(Action {
+            label: "Only".into(),
+            desc: "Test".into(),
+            action: "only".into(),
+            args: None,
+        });
+        assert_eq!(app.current_actionable_result_index(), Some(0));
+        assert_eq!(app.handle_key(egui::Key::Enter), Some(0));
+
+        app.results.push(Action {
+            label: "Second".into(),
+            desc: "Test".into(),
+            action: "second".into(),
+            args: None,
+        });
+        assert_eq!(app.current_actionable_result_index(), None);
+        app.selected = Some(1);
+        assert_eq!(app.current_actionable_result_index(), Some(1));
+        assert_eq!(app.handle_key(egui::Key::Enter), Some(1));
+    }
+
+    #[test]
+    fn action_sheet_shortcut_obeys_launcher_input_gates() {
+        assert!(LauncherApp::launcher_action_sheet_shortcut_enabled(
+            true, false, false
+        ));
+        assert!(!LauncherApp::launcher_action_sheet_shortcut_enabled(
+            false, false, false
+        ));
+        assert!(!LauncherApp::launcher_action_sheet_shortcut_enabled(
+            true, true, false
+        ));
+        assert!(!LauncherApp::launcher_action_sheet_shortcut_enabled(
+            true, false, true
+        ));
+    }
+
+    #[test]
+    fn action_sheet_escape_preserves_query_and_does_not_activate_result() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep this query".into();
+        app.results = vec![Action {
+            label: "Generic".into(),
+            desc: "Test".into(),
+            action: "generic:test".into(),
+            args: None,
+        }];
+
+        assert!(app.open_action_sheet_for_index(0));
+        assert!(app.action_sheet.is_open());
+        assert!(app.test_last_activation.is_none());
+        assert!(
+            app.handle_action_sheet_key(Some(action_sheet::ActionSheetKey::Escape))
+                .is_none()
+        );
+
+        assert!(!app.action_sheet.is_open());
+        assert_eq!(app.query, "keep this query");
+        assert!(app.test_last_activation.is_none());
+    }
+
+    #[test]
+    fn action_sheet_resolves_the_same_actions_in_list_and_grid() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results = vec![Action {
+            label: "Generic".into(),
+            desc: "Test".into(),
+            action: "generic:test".into(),
+            args: None,
+        }];
+
+        app.resolved_grid_layout = false;
+        assert!(app.open_action_sheet_for_index(0));
+        let list_ids = app
+            .action_sheet
+            .actions
+            .iter()
+            .map(|action| action.id.clone())
+            .collect::<Vec<_>>();
+        app.action_sheet.close();
+
+        app.resolved_grid_layout = true;
+        assert!(app.open_action_sheet_for_index(0));
+        let grid_ids = app
+            .action_sheet
+            .actions
+            .iter()
+            .map(|action| action.id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(grid_ids, list_ids);
     }
 
     #[test]
