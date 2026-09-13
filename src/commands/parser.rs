@@ -22,6 +22,47 @@ pub fn parse_command(
     })
 }
 
+#[cfg(test)]
+mod screen_draw_parser_tests {
+    use super::*;
+
+    fn action(raw: &str) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn every_screen_draw_wire_action_has_one_typed_representation() {
+        let cases = [
+            ("screen_draw:start", ScreenDrawCommand::Start),
+            ("screen_draw:toolbar", ScreenDrawCommand::OpenToolbar),
+            ("screen_draw:new_capture", ScreenDrawCommand::NewCapture),
+            ("screen_draw:ghost", ScreenDrawCommand::Ghost),
+            ("screen_draw:done", ScreenDrawCommand::Done),
+            ("screen_draw:clear", ScreenDrawCommand::Clear),
+            ("screen_draw:close", ScreenDrawCommand::Close),
+        ];
+        for (raw, expected) in cases {
+            let parsed = parse_action(&action(raw)).unwrap();
+            assert_eq!(parsed, Command::ScreenDraw(expected));
+            assert_eq!(parsed.domain(), "screen_draw");
+            assert_eq!(parsed.kind_name(), expected.kind_name());
+        }
+    }
+
+    #[test]
+    fn unknown_screen_draw_wire_action_keeps_external_compatibility() {
+        assert!(matches!(
+            parse_action(&action("screen_draw:future")).unwrap(),
+            Command::External(ExternalCommand { target, .. }) if target == "screen_draw:future"
+        ));
+    }
+}
+
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
 
@@ -31,6 +72,10 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
 
     if s.starts_with("data:") {
         return Ok(Command::Data(parse_data(action)));
+    }
+
+    if let Some(command) = parse_screen_draw(s) {
+        return Ok(Command::ScreenDraw(command));
     }
 
     // These protocols bypass query-override application in the existing activation path.
@@ -121,6 +166,19 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         _ => return parse_prefixed(action),
     };
     Ok(command)
+}
+
+fn parse_screen_draw(action: &str) -> Option<ScreenDrawCommand> {
+    Some(match action {
+        "screen_draw:start" => ScreenDrawCommand::Start,
+        "screen_draw:toolbar" => ScreenDrawCommand::OpenToolbar,
+        "screen_draw:new_capture" => ScreenDrawCommand::NewCapture,
+        "screen_draw:ghost" => ScreenDrawCommand::Ghost,
+        "screen_draw:done" => ScreenDrawCommand::Done,
+        "screen_draw:clear" => ScreenDrawCommand::Clear,
+        "screen_draw:close" => ScreenDrawCommand::Close,
+        _ => return None,
+    })
 }
 
 fn parse_virtual_desktop(action: &Action) -> VirtualDesktopCommand {

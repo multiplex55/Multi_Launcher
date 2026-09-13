@@ -201,6 +201,18 @@ impl LauncherApp {
                 WatchEvent::ExecuteAction(action) => {
                     self.activate_action(action, None, ActivationSource::Gesture);
                 }
+                WatchEvent::ScreenDrawStart => {
+                    if let Err(error) = self.start_or_focus_screen_draw() {
+                        self.report_error_message("screen_draw.start", error);
+                    }
+                    self.screen_draw_controller.reconcile_recovery_publication();
+                }
+                WatchEvent::ScreenDrawRecover => {
+                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+                }
+                WatchEvent::ScreenDrawEmergency => {
+                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::Emergency);
+                }
                 WatchEvent::ClipboardModify(ev) => {
                     self.handle_clipboard_modify_gui_event(ev);
                 }
@@ -285,6 +297,37 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn repeated_pre_capture_screen_draw_launch_event_is_idempotent_without_toolbar() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
+        app.process_watch_events();
+        let generation = app.screen_draw_controller.state().generation().unwrap();
+        assert!(matches!(
+            app.screen_draw_controller.state(),
+            crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
+        ));
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
+        app.process_watch_events();
+        app.show_screen_draw_toolbar(&ctx);
+        let _ = ctx.end_frame();
+        assert_eq!(
+            app.screen_draw_controller.state().generation(),
+            Some(generation)
+        );
+        assert!(!app.screen_draw_controller.toolbar_open());
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
+        app.process_watch_events();
+        let _ = ctx.end_frame();
+        assert!(!app.screen_draw_toolbar.was_open);
+        assert_eq!(app.screen_draw_toolbar.focus_request_count, 0);
     }
 
     #[test]
@@ -532,6 +575,14 @@ mod tests {
                 crate::dashboard::DashboardEvent::Reloaded
             )),
             TestWatchEvent::Actions
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::ScreenDrawRecover),
+            TestWatchEvent::ScreenDrawRecover
+        );
+        assert_eq!(
+            TestWatchEvent::from(WatchEvent::ScreenDrawEmergency),
+            TestWatchEvent::ScreenDrawEmergency
         );
 
         let (tx, rx) = channel();

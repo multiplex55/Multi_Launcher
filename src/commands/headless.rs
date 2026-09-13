@@ -17,6 +17,33 @@ pub(crate) fn execute(command: Command, original_action: &Action) -> anyhow::Res
     })
 }
 
+#[cfg(test)]
+mod screen_draw_headless_tests {
+    use super::*;
+
+    #[test]
+    fn clear_requires_the_launcher_interface_without_external_fallback() {
+        let original = Action {
+            label: "Clear Screen Draw".into(),
+            desc: String::new(),
+            action: "screen_draw:clear".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::ScreenDraw(ScreenDrawCommand::Clear),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("require the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
+}
+
 fn execute_with_external(
     command: Command,
     original_action: &Action,
@@ -48,6 +75,9 @@ fn execute_with_external(
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
+        Command::ScreenDraw(_) => {
+            anyhow::bail!("screen draw commands require the launcher interface")
+        }
         Command::VirtualDesktop(command) => execute_virtual_desktop(command, original_action),
         Command::External(command) => external(&command.target, command.args.as_deref()),
 

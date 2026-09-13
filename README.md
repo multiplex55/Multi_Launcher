@@ -30,6 +30,7 @@ It’s designed to be “one hotkey away” from:
 - [MultiManager](#multimanager)
 - [Calendar](#calendar)
 - [Screenshot capture + markup editor](#screenshot-capture--markup-editor)
+- [Screen Draw](#screen-draw)
 - [Configuration](#configuration)
 - [Data files](#data-files)
 - [Data safety and recovery](#data-safety-and-recovery)
@@ -88,6 +89,7 @@ Multi Launcher is centered around a **single query box**:
 | `cb` | Clipboard history | `cb list` / `cb clear` |
 | `cm` | Clipboard Modify operations, templates, pipelines, and undo | `cm trim | uppercase` / `cm template prompt-context` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
+| `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
 | `case` | Text case tools | `case snake Hello World` |
 | `ts` | Timestamp helpers | `ts` / `ts 1700000000` |
@@ -595,6 +597,43 @@ Screenshot behavior is controlled by settings:
 
 ---
 
+## Screen Draw
+
+Screen Draw freezes one snapshot of the complete signed Windows virtual desktop and opens a
+native annotation canvas plus a small always-on-top toolbar. Start it with `sd` or `sa`.
+Subcommands are `toolbar`, `new capture`, `ghost`, `done` (or `finish`), `clear`, and `close`.
+
+- **Drawing** accepts left- or right-button pen input and provides pen, highlighter, line,
+  arrow, rectangle, ellipse, text, eraser, fading ink, and eyedropper tools. Undo/redo,
+  annotation visibility, line thickness, colors, and frozen/white/black/custom backgrounds
+  are available from the toolbar.
+- **Ghost** and **Finish** hide the input canvas and show annotations in a passive,
+  click-through overlay. Resume returns to the same capture and document; **New Capture**
+  deliberately replaces both.
+- **Escape** first cancels an active primitive or text edit, then enters safe Ghost mode.
+  The emergency chord (default `Ctrl+Shift+F12`) pauses from every session mode, releases
+  pointer capture and Mouse Gesture suppression, and leaves the toolbar available for recovery.
+- Finish can export the whole desktop or a selected region to the clipboard, a PNG file, or
+  the existing Screenshot Editor. Exports can use the frozen desktop, white, black, custom,
+  or transparent background. Region selection uses the shared rectangle picker, and editor
+  handoff occurs only after native Screen Draw windows have closed. PNG files use collision-safe
+  names in the same configured directory as ordinary screenshots.
+- Mixed-DPI and negative-origin monitor layouts use signed virtual-desktop coordinates. A
+  Windows display change safely pauses native drawing and preserves the document for export;
+  use **New Capture** before resuming against the new topology.
+
+Screen Draw preferences live at `plugin_settings.screen_draw`. `launch_hotkey` is global and
+disabled by default; malformed persisted chords are reported and disabled. Tool shortcuts are active
+only while Drawing (`P/H/L/A/R/O/T/E/G/V`, `1`–`9`, brackets, and undo/redo). Toolbar
+position/orientation, default tool/color/thickness/background, palette, fade duration, text
+size, the emergency chord, and local shortcuts are persisted with backward-compatible
+defaults when fields are absent.
+
+Pressure-sensitive stylus input and simultaneous multi-touch drawing are roadmap items, not
+part of the current pointer-input implementation.
+
+---
+
 ## MkMacro authoring and reuse
 
 Open **Mouse/Keyboard Macros** and use its **Reuse** menu for packages, libraries,
@@ -659,6 +698,7 @@ Notable settings (high impact):
 * dashboard settings (`dashboard.*`)
 * MultiManager settings (`multi_manager.*`)
 * file-search plugin settings (`plugin_settings.file_search.*`)
+* Screen Draw settings (`plugin_settings.screen_draw.*`)
 
 Note behavior can be customized under the nested `note` settings object:
 

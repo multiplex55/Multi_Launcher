@@ -249,6 +249,105 @@ fn disabling_config_stops_worker_and_blocks_hook_events() {
 }
 
 #[test]
+fn runtime_suppressions_are_nested_and_release_is_idempotent() {
+    let (backend, handle) = MockHookBackend::new();
+    let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    service.update_config(config);
+
+    let first = service.acquire_runtime_suppression();
+    let second = service.acquire_runtime_suppression();
+
+    assert!(!service.is_running());
+    assert_eq!(handle.install_count(), 1);
+    assert_eq!(handle.uninstall_count(), 1);
+    assert!(service.release_runtime_suppression(first));
+    assert!(!service.release_runtime_suppression(first));
+    assert!(!service.is_running());
+    assert_eq!(handle.install_count(), 1);
+
+    assert!(service.release_runtime_suppression(second));
+    assert!(service.is_running());
+    assert_eq!(handle.install_count(), 2);
+
+    service.stop();
+}
+
+#[test]
+fn releasing_suppression_does_not_enable_disabled_gestures() {
+    let (backend, handle) = MockHookBackend::new();
+    let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+
+    let token = service.acquire_runtime_suppression();
+    assert!(service.release_runtime_suppression(token));
+
+    assert!(!service.is_running());
+    assert_eq!(handle.install_count(), 0);
+    assert_eq!(handle.uninstall_count(), 0);
+}
+
+#[test]
+fn config_changes_while_suppressed_update_desired_state_only() {
+    let (backend, handle) = MockHookBackend::new();
+    let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+    let token = service.acquire_runtime_suppression();
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    config.trail_width = 7.0;
+
+    service.update_config(config.clone());
+    service.update_config(config);
+
+    assert!(!service.is_running());
+    assert_eq!(handle.install_count(), 0);
+    assert!(service.release_runtime_suppression(token));
+    assert!(service.is_running());
+    assert_eq!(handle.install_count(), 1);
+
+    service.stop();
+}
+
+#[test]
+fn disabling_while_suppressed_prevents_final_release_restart() {
+    let (backend, handle) = MockHookBackend::new();
+    let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    service.update_config(config.clone());
+    let token = service.acquire_runtime_suppression();
+
+    config.enabled = false;
+    service.update_config(config);
+    assert!(service.release_runtime_suppression(token));
+
+    assert!(!service.is_running());
+    assert_eq!(handle.install_count(), 1);
+    assert_eq!(handle.uninstall_count(), 1);
+}
+
+#[test]
+fn db_update_while_suppressed_waits_for_final_release() {
+    let (backend, handle) = MockHookBackend::new();
+    let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    service.update_config(config);
+    let token = service.acquire_runtime_suppression();
+
+    service.update_db(Some(Arc::new(Mutex::new(GestureDb::default()))));
+
+    assert!(!service.is_running());
+    assert_eq!(handle.install_count(), 1);
+    assert_eq!(handle.uninstall_count(), 1);
+    assert!(service.release_runtime_suppression(token));
+    assert!(service.is_running());
+    assert_eq!(handle.install_count(), 2);
+
+    service.stop();
+}
+
+#[test]
 fn cancel_event_clears_overlays_and_does_not_click() {
     let (backend, handle) = MockHookBackend::new();
     let overlay_state = Arc::new(TestOverlayState::default());

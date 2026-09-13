@@ -26,6 +26,12 @@ pub enum WatchEvent {
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
     ExecuteAction(Action),
+    /// Event-driven request from the process-wide launcher hotkey listener.
+    ScreenDrawStart,
+    /// Launcher hotkey was pressed while Screen Draw owns the foreground flow.
+    ScreenDrawRecover,
+    /// Process-wide emergency chord was pressed.
+    ScreenDrawEmergency,
     ClipboardModify(ClipboardModifyGuiEvent),
     VirtualDesktop(VirtualDesktopGuiCompletion),
 }
@@ -94,6 +100,8 @@ pub enum TestWatchEvent {
     Actions,
     Folders,
     Bookmarks,
+    ScreenDrawRecover,
+    ScreenDrawEmergency,
     ClipboardModify(ClipboardModifyGuiEvent),
 }
 
@@ -112,6 +120,9 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
             WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
+            WatchEvent::ScreenDrawStart => TestWatchEvent::Actions,
+            WatchEvent::ScreenDrawRecover => TestWatchEvent::ScreenDrawRecover,
+            WatchEvent::ScreenDrawEmergency => TestWatchEvent::ScreenDrawEmergency,
             WatchEvent::ClipboardModify(event) => TestWatchEvent::ClipboardModify(event),
             WatchEvent::VirtualDesktop(_) => TestWatchEvent::Actions,
         }

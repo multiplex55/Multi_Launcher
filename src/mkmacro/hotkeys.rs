@@ -195,7 +195,7 @@ fn reserved_primary(token: &str) -> Option<MkKey> {
 /// Canonicalizes a caller-provided chord through the same `MkHotkey` compiler
 /// used by macro hotkeys. Whitespace, case, modifier aliases, and modifier
 /// ordering therefore cannot change conflict identity.
-fn canonical_reserved_chord(chord: &str) -> Option<String> {
+fn canonical_reserved_identity(chord: &str) -> Option<(String, String)> {
     let mut modifiers = Vec::new();
     let mut primary = None;
     for token in chord.split('+') {
@@ -210,12 +210,14 @@ fn canonical_reserved_chord(chord: &str) -> Option<String> {
         }
     }
     let key = primary?;
-    compiled_canonical_hotkey(&MkHotkey { key, modifiers })
+    let primary = key_name(&key);
+    compiled_canonical_hotkey(&MkHotkey { key, modifiers }).map(|chord| (chord, primary))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct NormalizedReservedChords {
     by_chord: BTreeMap<String, String>,
+    caller_by_primary: BTreeMap<String, String>,
 }
 
 fn normalize_reserved_chords(
@@ -248,9 +250,13 @@ fn normalize_reserved_chords(
     }
 
     for (name, chord) in reserved {
-        let Some(chord) = canonical_reserved_chord(&chord) else {
+        let Some((chord, primary)) = canonical_reserved_identity(&chord) else {
             continue;
         };
+        normalized
+            .caller_by_primary
+            .entry(primary)
+            .or_insert_with(|| name.clone());
         normalized.by_chord.entry(chord).or_insert(name);
     }
     normalized
@@ -285,7 +291,14 @@ pub fn validate_hotkeys(doc: &MkMacroDocument, reserved: &[(&str, &str)]) -> Vec
             });
             continue;
         };
-        if let Some(name) = reserved.by_chord.get(&c) {
+        let primary = compile_hotkey(h)
+            .map(|(_, primary)| key_name(&primary))
+            .expect("canonical hotkey has a usable primary");
+        if let Some(name) = reserved
+            .by_chord
+            .get(&c)
+            .or_else(|| reserved.caller_by_primary.get(&primary))
+        {
             out.push(HotkeyDiagnostic {
                 severity: HotkeyDiagnosticSeverity::Error,
                 macro_id: m.id,
@@ -448,7 +461,9 @@ fn compile_hotkey_groups_with_reserved(
             continue;
         };
         let canonical_chord = canonical_hotkey(&normalized_hotkey(&modifiers, &primary));
-        if reserved.by_chord.contains_key(&canonical_chord) {
+        if reserved.caller_by_primary.contains_key(&key_name(&primary))
+            || reserved.by_chord.contains_key(&canonical_chord)
+        {
             continue;
         }
 
@@ -702,12 +717,49 @@ impl MkMacroHotkeyService {
             trigger,
         }
     }
+
+    pub fn replace_reserved(&self, reserved: &[(&str, &str)]) -> Result<(), String> {
+        replace_reserved_poll_state(
+            &self.store,
+            &self.state,
+            reserved
+                .iter()
+                .map(|(name, chord)| ((*name).to_string(), (*chord).to_string()))
+                .collect(),
+        )
+    }
+
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(h) = self.worker.lock().unwrap().take() {
             let _ = h.join();
         }
     }
+}
+
+fn replace_reserved_poll_state(
+    store: &MkMacroStore,
+    state: &Mutex<PollState>,
+    reserved: Vec<(String, String)>,
+) -> Result<(), String> {
+    let snapshot = store.snapshot();
+    let normalized = normalize_reserved_chords(&snapshot, reserved.iter().cloned());
+    let mut state = state
+        .lock()
+        .map_err(|_| "macro hotkey reservation state is poisoned".to_string())?;
+    let previously_triggered = state
+        .groups
+        .iter()
+        .filter(|group| group.triggered)
+        .map(|group| group.canonical_chord.clone())
+        .collect::<BTreeSet<_>>();
+    state.groups = compile_hotkey_groups_with_reserved(&snapshot, &normalized);
+    for group in &mut state.groups {
+        group.triggered = previously_triggered.contains(&group.canonical_chord);
+    }
+    state.snapshot = snapshot;
+    state.reserved = reserved;
+    Ok(())
 }
 impl Drop for MkMacroHotkeyService {
     fn drop(&mut self) {
@@ -1538,6 +1590,60 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].canonical_chord, "CONTROL+J");
     }
+
+    #[test]
+    fn caller_reservation_blocks_same_primary_with_more_or_fewer_modifiers() {
+        for (reserved_chord, macro_modifiers) in [
+            ("F12", vec![MkKey::Control, MkKey::Shift]),
+            ("Ctrl+Shift+F12", Vec::new()),
+        ] {
+            let mut candidate = mac(17, true);
+            candidate.hotkey = Some(MkHotkey {
+                key: MkKey::Function(12),
+                modifiers: macro_modifiers,
+            });
+            let document = MkMacroDocument {
+                settings: Default::default(),
+                schema_version: 1,
+                folders: vec![],
+                macros: vec![candidate],
+            };
+            let reserved = normalize_reserved_chords(
+                &document,
+                [("launcher".to_string(), reserved_chord.to_string())],
+            );
+
+            assert!(compile_hotkey_groups_with_reserved(&document, &reserved).is_empty());
+            assert_eq!(
+                validate_hotkeys(&document, &[("launcher", reserved_chord)])[0].message,
+                "hotkey conflicts with launcher"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_reservation_refresh_disables_and_reenables_conflicting_dispatch() {
+        let harness = TickHarness::new(vec![mac(18, true)], None);
+
+        harness.replace_reserved(vec![("Screen Draw emergency".into(), "F12".into())]);
+        harness.press();
+        assert_eq!(harness.fired.ids(), [18]);
+        harness.release();
+
+        harness.replace_reserved(vec![("Screen Draw launch".into(), "Ctrl+Shift+K".into())]);
+        harness.press();
+        assert_eq!(
+            harness.fired.ids(),
+            [18],
+            "same-primary refreshed reservation must suppress macro dispatch"
+        );
+        harness.release();
+
+        harness.replace_reserved(vec![("Screen Draw launch".into(), "Ctrl+Shift+F12".into())]);
+        harness.press();
+        assert_eq!(harness.fired.ids(), [18, 18]);
+    }
+
     #[test]
     fn service_constructor_applies_caller_reserved_chords() {
         let dir = tempfile::tempdir().unwrap();
@@ -1740,6 +1846,10 @@ mod tests {
 
         fn groups(&self) -> Vec<HotkeyGroup> {
             self.state.lock().unwrap().groups.clone()
+        }
+
+        fn replace_reserved(&self, reserved: Vec<(String, String)>) {
+            replace_reserved_poll_state(&self.store, &self.state, reserved).unwrap();
         }
     }
 

@@ -171,6 +171,7 @@ pub enum PointInteractionPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RectanglePurpose {
     CropScreenshot,
+    ScreenDrawExport,
     SearchRegion,
     ReferenceImageCapture,
 }

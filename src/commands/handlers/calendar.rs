@@ -370,6 +370,14 @@ mod tests {
             false
         }
     }
+    impl crate::commands::ScreenDrawCommandHost for Host {
+        fn execute_screen_draw_command(
+            &mut self,
+            _: crate::commands::ScreenDrawCommand,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
     impl crate::commands::ClipboardModifyCommandHost for Host {
         fn open_clipboard_modify(
             &mut self,

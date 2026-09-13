@@ -10,6 +10,7 @@ use multi_launcher::platform::{
     single_instance::{SingleInstanceAcquire, SingleInstanceGuard},
 };
 use multi_launcher::plugin::PluginManager;
+use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::handle_visibility_trigger;
@@ -75,7 +76,205 @@ fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
     {
         reserved.push(("help launcher".into(), hotkey.into()));
     }
+    if let Ok(Some(hotkey)) = screen_draw_launch_hotkey_text(settings) {
+        reserved.push(("launch Screen Draw".into(), hotkey.into()));
+    }
+    if let Ok(Some(hotkey)) = screen_draw_emergency_hotkey_text(settings) {
+        reserved.push(("Screen Draw emergency".into(), hotkey));
+    }
     reserved
+}
+
+fn configured_screen_draw_settings(settings: &Settings) -> Result<ScreenDrawSettings, String> {
+    settings
+        .plugin_settings
+        .get("screen_draw")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid Screen Draw settings: {error}"))
+        .map(|settings| settings.unwrap_or_default())
+}
+
+fn screen_draw_launch_hotkey_text(settings: &Settings) -> Result<Option<String>, String> {
+    if !settings.plugin_settings.contains_key("screen_draw") {
+        return Ok(None);
+    }
+    let screen_draw = configured_screen_draw_settings(settings)?;
+    match screen_draw.launch_hotkey.as_ref() {
+        Some(chord) if chord.is_valid() => {
+            let parsed = parse_hotkey(chord.as_str()).expect("validated Screen Draw hotkey");
+            let conflicts = [
+                ("launcher toggle", Some(settings.hotkey())),
+                ("quit launcher", settings.quit_hotkey()),
+                ("help launcher", settings.help_hotkey()),
+            ];
+            if let Some((name, _)) = conflicts.into_iter().find(|(_, existing)| {
+                existing.is_some_and(|existing| hotkeys_can_cofire(parsed, existing))
+            }) {
+                return Err(format!(
+                    "Screen Draw launch hotkey '{}' conflicts with {name}; global launch hotkey disabled",
+                    chord.as_str()
+                ));
+            }
+            if screen_draw_emergency_hotkey_text(settings)
+                .ok()
+                .flatten()
+                .and_then(|emergency| parse_hotkey(&emergency))
+                .is_some_and(|emergency| hotkeys_can_cofire(parsed, emergency))
+            {
+                return Err(format!(
+                    "Screen Draw launch hotkey '{}' conflicts with Screen Draw emergency; global launch hotkey disabled",
+                    chord.as_str()
+                ));
+            }
+            Ok(Some(chord.as_str().to_owned()))
+        }
+        Some(chord) => Err(format!(
+            "invalid Screen Draw launch hotkey '{}'; global launch hotkey disabled",
+            chord.as_str()
+        )),
+        None => Ok(None),
+    }
+}
+
+fn screen_draw_emergency_hotkey_text(settings: &Settings) -> Result<Option<String>, String> {
+    let screen_draw = configured_screen_draw_settings(settings)?;
+    let chord = &screen_draw.emergency_hotkey;
+    if !chord.is_valid() {
+        return Err(format!(
+            "invalid Screen Draw emergency hotkey '{}'; emergency hotkey disabled",
+            chord.as_str()
+        ));
+    }
+    let parsed = parse_hotkey(chord.as_str()).expect("validated Screen Draw emergency hotkey");
+    let conflicts = [
+        ("launcher toggle", Some(settings.hotkey())),
+        ("quit launcher", settings.quit_hotkey()),
+        ("help launcher", settings.help_hotkey()),
+    ];
+    if let Some((name, _)) = conflicts
+        .into_iter()
+        .find(|(_, existing)| existing.is_some_and(|existing| hotkeys_can_cofire(parsed, existing)))
+    {
+        return Err(format!(
+            "Screen Draw emergency hotkey '{}' conflicts with {name}; emergency hotkey disabled",
+            chord.as_str()
+        ));
+    }
+    Ok(Some(chord.as_str().to_owned()))
+}
+
+fn hotkeys_can_cofire(
+    left: multi_launcher::hotkey::Hotkey,
+    right: multi_launcher::hotkey::Hotkey,
+) -> bool {
+    // HotkeyTrigger treats configured modifiers as required subsets: extra
+    // modifiers remain accepted. Two chords with the same primary key can
+    // therefore fire together under the union of their modifier sets.
+    if left.key != right.key {
+        return false;
+    }
+    let unmodified_caps_lock = |hotkey: multi_launcher::hotkey::Hotkey| {
+        hotkey.key == multi_launcher::hotkey::Key::CapsLock
+            && !hotkey.ctrl
+            && !hotkey.shift
+            && !hotkey.alt
+            && !hotkey.win
+    };
+    let left_exact_caps_lock = unmodified_caps_lock(left);
+    let right_exact_caps_lock = unmodified_caps_lock(right);
+    (!left_exact_caps_lock && !right_exact_caps_lock)
+        || (left_exact_caps_lock && right_exact_caps_lock)
+}
+
+fn screen_draw_launch_trigger(settings: &Settings) -> Option<Arc<HotkeyTrigger>> {
+    match screen_draw_launch_hotkey_text(settings) {
+        Ok(Some(chord)) => parse_hotkey(&chord).map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey))),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "Screen Draw launch hotkey is unavailable");
+            None
+        }
+    }
+}
+
+fn screen_draw_emergency_trigger(settings: &Settings) -> Option<Arc<HotkeyTrigger>> {
+    match screen_draw_emergency_hotkey_text(settings) {
+        Ok(Some(chord)) => parse_hotkey(&chord).map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey))),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "Screen Draw emergency hotkey is unavailable");
+            None
+        }
+    }
+}
+
+fn rebuild_screen_draw_triggers(
+    settings: &Settings,
+    launch: &mut Option<Arc<HotkeyTrigger>>,
+    emergency: &mut Option<Arc<HotkeyTrigger>>,
+) {
+    *launch = screen_draw_launch_trigger(settings);
+    *emergency = screen_draw_emergency_trigger(settings);
+}
+
+fn refresh_macro_hotkey_reservations(settings: &Settings) {
+    let owned = reserved_launcher_hotkeys(settings);
+    let borrowed = owned
+        .iter()
+        .map(|(name, chord)| (name.as_str(), chord.as_str()))
+        .collect::<Vec<_>>();
+    if let Err(error) =
+        multi_launcher::mkmacro::runtime::refresh_shared_hotkey_reservations(&borrowed)
+    {
+        tracing::warn!(%error, "failed to refresh macro hotkey reservations");
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ScreenDrawTriggerActions {
+    launch: bool,
+    recover: bool,
+    emergency: bool,
+}
+
+fn take_screen_draw_trigger_actions(
+    launcher: &HotkeyTrigger,
+    launch: Option<&HotkeyTrigger>,
+    emergency: Option<&HotkeyTrigger>,
+    recovery_bridge: &ScreenDrawRecoveryBridge,
+) -> ScreenDrawTriggerActions {
+    let emergency_fired = emergency.is_some_and(HotkeyTrigger::take);
+    if emergency_fired && recovery_bridge.is_active() {
+        // Emergency owns this event-loop turn. Consume any defensive co-fire
+        // so the same physical chord cannot also start or recover Screen Draw.
+        if let Some(launch) = launch {
+            let _ = launch.take();
+        }
+        let _ = launcher.take();
+        return ScreenDrawTriggerActions {
+            emergency: true,
+            ..Default::default()
+        };
+    }
+
+    let launch = launch.is_some_and(HotkeyTrigger::take);
+    if launch {
+        // Publish before enqueueing the GUI event. A launcher summon observed
+        // in this same turn is then routed to recovery, never visibility.
+        recovery_bridge.stage_start();
+    }
+    let recover = take_screen_draw_recovery_trigger(launcher, recovery_bridge.is_active());
+    ScreenDrawTriggerActions {
+        launch,
+        recover,
+        emergency: false,
+    }
+}
+
+fn take_screen_draw_recovery_trigger(trigger: &HotkeyTrigger, screen_draw_active: bool) -> bool {
+    screen_draw_active && trigger.take()
 }
 
 pub fn request_hotkey_restart(settings: Settings) {
@@ -112,6 +311,7 @@ fn spawn_gui(
     startup_actions_diagnostic: Option<PersistenceError>,
     startup_recovery: multi_launcher::persistence::RecoveryStartupResult,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
+    screen_draw_recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
     event_tx: Sender<()>,
 ) -> (
     thread::JoinHandle<()>,
@@ -213,6 +413,7 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                app.install_screen_draw_recovery_bridge(screen_draw_recovery_bridge);
                 app.startup_settings_diagnostic = startup_settings_diagnostic;
                 app.actions_persistence_diagnostic = startup_actions_diagnostic;
                 app.set_startup_persistence_context(startup_recovery);
@@ -301,6 +502,7 @@ fn main() -> anyhow::Result<()> {
     }
     index_timer.finish("startup.action_indexing");
     let actions = Arc::new(actions_vec);
+    let screen_draw_recovery_bridge = Arc::new(ScreenDrawRecoveryBridge::default());
 
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
@@ -311,6 +513,8 @@ fn main() -> anyhow::Result<()> {
     let mut help_trigger = settings
         .help_hotkey()
         .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+    let mut screen_draw_trigger = screen_draw_launch_trigger(&settings);
+    let mut emergency_trigger = screen_draw_emergency_trigger(&settings);
 
     let mut watched = vec![trigger.clone()];
     if let Some(qt) = &quit_trigger {
@@ -318,6 +522,12 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(ht) = &help_trigger {
         watched.push(ht.clone());
+    }
+    if let Some(sd) = &screen_draw_trigger {
+        watched.push(sd.clone());
+    }
+    if let Some(emergency) = &emergency_trigger {
+        watched.push(emergency.clone());
     }
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
@@ -333,6 +543,7 @@ fn main() -> anyhow::Result<()> {
         startup_actions_diagnostic,
         startup_recovery,
         settings.enabled_capabilities.clone(),
+        Arc::clone(&screen_draw_recovery_bridge),
         event_tx.clone(),
     );
     let mut queued_visibility: Option<bool> = None;
@@ -349,6 +560,42 @@ fn main() -> anyhow::Result<()> {
             listener.stop();
             let _ = handle.join();
             break Ok(());
+        }
+
+        let screen_draw_actions = take_screen_draw_trigger_actions(
+            &trigger,
+            screen_draw_trigger.as_deref(),
+            emergency_trigger.as_deref(),
+            &screen_draw_recovery_bridge,
+        );
+        if screen_draw_actions.emergency {
+            if let Err(error) = screen_draw_recovery_bridge.emergency_pause() {
+                tracing::error!(%error, "failed to deliver Screen Draw emergency pause");
+            }
+            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::ScreenDrawEmergency);
+            if let Ok(guard) = ctx.lock()
+                && let Some(c) = &*guard
+            {
+                c.request_repaint();
+            }
+        }
+
+        if screen_draw_actions.launch {
+            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::ScreenDrawStart);
+            if let Ok(guard) = ctx.lock()
+                && let Some(c) = &*guard
+            {
+                c.request_repaint();
+            }
+        }
+
+        if screen_draw_actions.recover {
+            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::ScreenDrawRecover);
+            if let Ok(guard) = ctx.lock()
+                && let Some(c) = &*guard
+            {
+                c.request_repaint();
+            }
         }
 
         if let Some(qt) = &quit_trigger
@@ -389,12 +636,24 @@ fn main() -> anyhow::Result<()> {
             help_trigger = settings
                 .help_hotkey()
                 .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
+            rebuild_screen_draw_triggers(
+                &settings,
+                &mut screen_draw_trigger,
+                &mut emergency_trigger,
+            );
+            refresh_macro_hotkey_reservations(&settings);
             let mut watched = vec![trigger.clone()];
             if let Some(qt) = &quit_trigger {
                 watched.push(qt.clone());
             }
             if let Some(ht) = &help_trigger {
                 watched.push(ht.clone());
+            }
+            if let Some(sd) = &screen_draw_trigger {
+                watched.push(sd.clone());
+            }
+            if let Some(emergency) = &emergency_trigger {
+                watched.push(emergency.clone());
             }
             listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
         }
@@ -442,5 +701,264 @@ mod tests {
         let settings = Settings::default();
         let result = std::panic::catch_unwind(|| build_viewport_with_icon(&settings, b"not-a-png"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn screen_draw_launch_hotkey_is_reserved_and_parsed() {
+        let mut settings = Settings::default();
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({ "launch_hotkey": "Ctrl+Shift+D" }),
+        );
+        assert_eq!(
+            screen_draw_launch_hotkey_text(&settings),
+            Ok(Some("Ctrl+Shift+D".into()))
+        );
+        assert!(
+            reserved_launcher_hotkeys(&settings)
+                .contains(&("launch Screen Draw".into(), "Ctrl+Shift+D".into()))
+        );
+        assert!(screen_draw_launch_trigger(&settings).is_some());
+    }
+
+    #[test]
+    fn invalid_screen_draw_launch_hotkey_is_safely_disabled() {
+        let mut settings = Settings::default();
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({ "launch_hotkey": "Ctrl+DefinitelyNotAKey" }),
+        );
+        assert!(screen_draw_launch_hotkey_text(&settings).is_err());
+        assert!(screen_draw_launch_trigger(&settings).is_none());
+        assert!(
+            !reserved_launcher_hotkeys(&settings)
+                .iter()
+                .any(|(name, _)| name == "launch Screen Draw")
+        );
+    }
+
+    #[test]
+    fn conflicting_screen_draw_launch_hotkey_is_safely_disabled() {
+        let mut settings = Settings {
+            quit_hotkey: Some("Ctrl+Q".into()),
+            help_hotkey: Some("Ctrl+H".into()),
+            ..Settings::default()
+        };
+        for chord in ["F2", "Ctrl+Q", "Ctrl+H"] {
+            settings.plugin_settings.insert(
+                "screen_draw".into(),
+                serde_json::json!({ "launch_hotkey": chord }),
+            );
+            let error = screen_draw_launch_hotkey_text(&settings).unwrap_err();
+            assert!(error.contains("conflicts"), "{error}");
+            assert!(screen_draw_launch_trigger(&settings).is_none());
+        }
+    }
+
+    #[test]
+    fn emergency_hotkey_is_process_reserved_and_wins_screen_draw_conflict() {
+        let mut settings = Settings::default();
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({
+                "launch_hotkey": "Ctrl+Shift+F11",
+                "emergency_hotkey": "Ctrl+Shift+F11"
+            }),
+        );
+        assert!(screen_draw_launch_hotkey_text(&settings).is_err());
+        assert_eq!(
+            screen_draw_emergency_hotkey_text(&settings),
+            Ok(Some("Ctrl+Shift+F11".into()))
+        );
+        let reserved = reserved_launcher_hotkeys(&settings);
+        assert!(
+            !reserved
+                .iter()
+                .any(|(name, _)| name == "launch Screen Draw")
+        );
+        assert!(reserved.contains(&("Screen Draw emergency".into(), "Ctrl+Shift+F11".into())));
+    }
+
+    #[test]
+    fn emergency_hotkey_conflicting_with_launcher_is_disabled() {
+        let mut settings = Settings::default();
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({ "emergency_hotkey": "F2" }),
+        );
+        assert!(screen_draw_emergency_hotkey_text(&settings).is_err());
+        assert!(screen_draw_emergency_trigger(&settings).is_none());
+        assert!(
+            !reserved_launcher_hotkeys(&settings)
+                .iter()
+                .any(|(name, _)| name == "Screen Draw emergency")
+        );
+    }
+
+    #[test]
+    fn active_screen_draw_consumes_launcher_trigger_exactly_once() {
+        let trigger = HotkeyTrigger::new(parse_hotkey("F2").unwrap());
+        *trigger.open.lock().unwrap() = true;
+
+        assert!(take_screen_draw_recovery_trigger(&trigger, true));
+        assert!(!trigger.take());
+
+        *trigger.open.lock().unwrap() = true;
+        assert!(!take_screen_draw_recovery_trigger(&trigger, false));
+        assert!(trigger.take());
+    }
+
+    #[test]
+    fn same_primary_conflicts_are_rejected_in_both_modifier_directions() {
+        for (launcher, emergency) in [("F12", "Ctrl+Shift+F12"), ("Ctrl+Shift+F12", "F12")] {
+            let mut settings = Settings {
+                hotkey: Some(launcher.into()),
+                ..Settings::default()
+            };
+            settings.plugin_settings.insert(
+                "screen_draw".into(),
+                serde_json::json!({ "emergency_hotkey": emergency }),
+            );
+            assert!(screen_draw_emergency_hotkey_text(&settings).is_err());
+
+            settings.plugin_settings.insert(
+                "screen_draw".into(),
+                serde_json::json!({ "launch_hotkey": emergency }),
+            );
+            assert!(screen_draw_launch_hotkey_text(&settings).is_err());
+        }
+    }
+
+    #[test]
+    fn unmodified_caps_lock_does_not_cofire_with_modified_caps_lock() {
+        let plain = parse_hotkey("CapsLock").unwrap();
+        let modified = parse_hotkey("Ctrl+CapsLock").unwrap();
+
+        assert!(!hotkeys_can_cofire(plain, modified));
+        assert!(!hotkeys_can_cofire(modified, plain));
+        assert!(hotkeys_can_cofire(plain, plain));
+
+        for (launcher, emergency) in [("CapsLock", "Ctrl+CapsLock"), ("Ctrl+CapsLock", "CapsLock")]
+        {
+            let mut settings = Settings {
+                hotkey: Some(launcher.into()),
+                ..Settings::default()
+            };
+            settings.plugin_settings.insert(
+                "screen_draw".into(),
+                serde_json::json!({ "emergency_hotkey": emergency }),
+            );
+            assert_eq!(
+                screen_draw_emergency_hotkey_text(&settings),
+                Ok(Some(emergency.into()))
+            );
+        }
+    }
+
+    #[test]
+    fn emergency_wins_same_primary_launch_conflict_with_different_modifiers() {
+        for (launch, emergency) in [("F12", "Ctrl+Shift+F12"), ("Ctrl+Shift+F12", "F12")] {
+            let mut settings = Settings::default();
+            settings.plugin_settings.insert(
+                "screen_draw".into(),
+                serde_json::json!({
+                    "launch_hotkey": launch,
+                    "emergency_hotkey": emergency
+                }),
+            );
+            assert!(screen_draw_launch_hotkey_text(&settings).is_err());
+            assert_eq!(
+                screen_draw_emergency_hotkey_text(&settings),
+                Ok(Some(emergency.into()))
+            );
+        }
+    }
+
+    #[test]
+    fn same_loop_launch_then_summon_routes_recovery_without_visibility() {
+        let bridge = ScreenDrawRecoveryBridge::default();
+        let launcher = HotkeyTrigger::new(parse_hotkey("F2").unwrap());
+        let launch = HotkeyTrigger::new(parse_hotkey("Ctrl+Shift+D").unwrap());
+        *launcher.open.lock().unwrap() = true;
+        *launch.open.lock().unwrap() = true;
+
+        let actions = take_screen_draw_trigger_actions(&launcher, Some(&launch), None, &bridge);
+
+        assert_eq!(
+            actions,
+            ScreenDrawTriggerActions {
+                launch: true,
+                recover: true,
+                emergency: false,
+            }
+        );
+        assert!(bridge.is_active());
+        assert!(!launcher.take(), "visibility must not see the summon edge");
+    }
+
+    #[test]
+    fn emergency_priority_consumes_defensive_cofire_without_double_route() {
+        let bridge = ScreenDrawRecoveryBridge::default();
+        bridge.stage_start();
+        let launcher = HotkeyTrigger::new(parse_hotkey("F12").unwrap());
+        let launch = HotkeyTrigger::new(parse_hotkey("Ctrl+F12").unwrap());
+        let emergency = HotkeyTrigger::new(parse_hotkey("Shift+F12").unwrap());
+        for trigger in [&launcher, &launch, &emergency] {
+            *trigger.open.lock().unwrap() = true;
+        }
+
+        assert_eq!(
+            take_screen_draw_trigger_actions(&launcher, Some(&launch), Some(&emergency), &bridge,),
+            ScreenDrawTriggerActions {
+                emergency: true,
+                ..Default::default()
+            }
+        );
+        assert!(!launcher.take());
+        assert!(!launch.take());
+        assert!(!emergency.take());
+    }
+
+    #[test]
+    fn settings_reload_replaces_screen_draw_triggers_without_carrying_edges() {
+        let mut settings = Settings::default();
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({
+                "launch_hotkey": "Ctrl+Shift+F11",
+                "emergency_hotkey": "Ctrl+Shift+F12"
+            }),
+        );
+        let mut launch = None;
+        let mut emergency = None;
+        rebuild_screen_draw_triggers(&settings, &mut launch, &mut emergency);
+        let old_launch = launch.as_ref().unwrap().clone();
+        let old_emergency = emergency.as_ref().unwrap().clone();
+        *old_launch.open.lock().unwrap() = true;
+        *old_emergency.open.lock().unwrap() = true;
+
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({
+                "launch_hotkey": "Ctrl+Shift+F9",
+                "emergency_hotkey": "Ctrl+Shift+F10"
+            }),
+        );
+        rebuild_screen_draw_triggers(&settings, &mut launch, &mut emergency);
+
+        assert!(!Arc::ptr_eq(&old_launch, launch.as_ref().unwrap()));
+        assert!(!Arc::ptr_eq(&old_emergency, emergency.as_ref().unwrap()));
+        assert_eq!(
+            launch.as_ref().unwrap()._key,
+            parse_hotkey("F9").unwrap().key
+        );
+        assert_eq!(
+            emergency.as_ref().unwrap()._key,
+            parse_hotkey("F10").unwrap().key
+        );
+        assert!(!launch.as_ref().unwrap().take());
+        assert!(!emergency.as_ref().unwrap().take());
+        assert!(old_launch.take());
+        assert!(old_emergency.take());
     }
 }

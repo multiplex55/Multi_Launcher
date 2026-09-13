@@ -10,7 +10,7 @@ use crate::mouse_gestures::usage::{GESTURES_USAGE_FILE, GestureUsageEntry, recor
 use anyhow::anyhow;
 use chrono::Local;
 use once_cell::sync::OnceCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -194,6 +194,8 @@ struct WorkerHandle {
 
 pub struct MouseGestureService {
     config: MouseGestureConfig,
+    runtime_suppressions: HashSet<GestureSuppressionToken>,
+    next_suppression_token: u64,
     db: Option<SharedGestureDb>,
     backend: Box<dyn HookBackend>,
     overlay_factory: Arc<dyn OverlayFactory>,
@@ -236,6 +238,8 @@ impl MouseGestureService {
         };
         Self {
             config: MouseGestureConfig::default(),
+            runtime_suppressions: HashSet::new(),
+            next_suppression_token: 0,
             db,
             backend,
             overlay_factory,
@@ -247,12 +251,12 @@ impl MouseGestureService {
 
     pub fn start(&mut self) {
         self.config.enabled = true;
-        self.start_running();
+        self.reconcile_running_state(false);
     }
 
     pub fn stop(&mut self) {
         self.config.enabled = false;
-        self.stop_running();
+        self.reconcile_running_state(false);
     }
 
     pub fn update_config(&mut self, config: MouseGestureConfig) {
@@ -260,40 +264,68 @@ impl MouseGestureService {
             return;
         }
 
-        let enabled = config.enabled;
         let should_restart = self.worker.is_some();
         self.config = config;
         #[cfg(windows)]
         hook_dispatch().set_ignore_window_titles(self.config.ignore_window_titles.clone());
 
-        if enabled {
-            if should_restart {
-                self.stop_running();
-            }
-            self.start_running();
-        } else {
-            self.stop_running();
-        }
+        self.reconcile_running_state(should_restart);
     }
 
     pub fn update_db(&mut self, db: Option<SharedGestureDb>) {
         self.db = db;
         // If the worker is already running, it captured the old Option<db> by value.
         // Restart so the worker sees the new DB.
-        if self.worker.is_some() {
-            self.stop_running();
-            if self.config.enabled {
-                self.start_running();
-            }
-        }
+        self.reconcile_running_state(self.worker.is_some());
     }
 
     pub fn is_running(&self) -> bool {
         self.worker.is_some()
     }
 
+    /// Temporarily prevents the gesture hook from running without changing the
+    /// configured enabled state.
+    pub fn acquire_runtime_suppression(&mut self) -> GestureSuppressionToken {
+        let token = loop {
+            let token = GestureSuppressionToken(self.next_suppression_token);
+            self.next_suppression_token = self.next_suppression_token.wrapping_add(1);
+            if !self.runtime_suppressions.contains(&token) {
+                break token;
+            }
+        };
+        self.runtime_suppressions.insert(token);
+        self.reconcile_running_state(false);
+        token
+    }
+
+    /// Releases a suppression token. Returns `true` only for the first release
+    /// of a token acquired from this service.
+    pub fn release_runtime_suppression(&mut self, token: GestureSuppressionToken) -> bool {
+        if !self.runtime_suppressions.remove(&token) {
+            return false;
+        }
+        self.reconcile_running_state(false);
+        true
+    }
+
+    fn should_run(&self) -> bool {
+        self.config.enabled && self.runtime_suppressions.is_empty()
+    }
+
+    fn reconcile_running_state(&mut self, restart_if_running: bool) {
+        if !self.should_run() {
+            self.stop_running();
+            return;
+        }
+
+        if restart_if_running && self.worker.is_some() {
+            self.stop_running();
+        }
+        self.start_running();
+    }
+
     fn start_running(&mut self) {
-        if self.worker.is_some() || !self.config.enabled {
+        if self.worker.is_some() || !self.should_run() {
             return;
         }
 
@@ -346,14 +378,94 @@ impl MouseGestureService {
     }
 }
 
-static SERVICE: OnceCell<Mutex<MouseGestureService>> = OnceCell::new();
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GestureSuppressionToken(u64);
+
+/// Owns one runtime suppression and releases it on explicit release or drop.
+///
+/// The guard is `Send`, so a native input worker can own it and restore mouse
+/// gestures directly during fail-safe teardown.
+#[must_use = "dropping the guard immediately releases gesture suppression"]
+pub struct GestureSuppressionGuard {
+    service: Arc<Mutex<MouseGestureService>>,
+    token: Option<GestureSuppressionToken>,
+}
+
+impl GestureSuppressionGuard {
+    fn acquire(service: Arc<Mutex<MouseGestureService>>) -> Self {
+        let token = match service.lock() {
+            Ok(mut service) => service.acquire_runtime_suppression(),
+            Err(error) => {
+                tracing::error!("mouse gesture service lock was poisoned while suppressing");
+                error.into_inner().acquire_runtime_suppression()
+            }
+        };
+        Self {
+            service,
+            token: Some(token),
+        }
+    }
+
+    pub fn release(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        release_guard_token(Arc::clone(&self.service), token);
+    }
+}
+
+impl Drop for GestureSuppressionGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn release_guard_token(service: Arc<Mutex<MouseGestureService>>, token: GestureSuppressionToken) {
+    let deferred_service = Arc::clone(&service);
+    match service.try_lock() {
+        Ok(mut service) => {
+            service.release_runtime_suppression(token);
+        }
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+            tracing::error!("mouse gesture service lock was poisoned while restoring");
+            error.into_inner().release_runtime_suppression(token);
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            if let Err(error) = thread::Builder::new()
+                .name("gesture-suppression-release".into())
+                .spawn(move || match deferred_service.lock() {
+                    Ok(mut service) => {
+                        service.release_runtime_suppression(token);
+                    }
+                    Err(error) => {
+                        tracing::error!("mouse gesture service lock was poisoned while restoring");
+                        error.into_inner().release_runtime_suppression(token);
+                    }
+                })
+            {
+                tracing::error!(?error, "failed to defer mouse gesture suppression release");
+            }
+        }
+    }
+}
+
+static SERVICE: OnceCell<Arc<Mutex<MouseGestureService>>> = OnceCell::new();
+
+fn global_service() -> &'static Arc<Mutex<MouseGestureService>> {
+    SERVICE.get_or_init(|| Arc::new(Mutex::new(MouseGestureService::default())))
+}
+
+/// Suppresses the process-wide mouse gesture runtime until the returned guard
+/// is released or dropped.
+pub fn acquire_gesture_suppression() -> GestureSuppressionGuard {
+    GestureSuppressionGuard::acquire(Arc::clone(global_service()))
+}
 
 pub fn with_service<F>(f: F)
 where
     F: FnOnce(&mut MouseGestureService),
 {
-    let service = SERVICE.get_or_init(|| Mutex::new(MouseGestureService::default()));
-    match service.lock() {
+    match global_service().lock() {
         Ok(mut guard) => f(&mut guard),
         Err(err) => tracing::error!(?err, "failed to lock mouse gesture service"),
     }
@@ -1319,6 +1431,48 @@ mod tests {
         assert!(!should_allow_wheel_cycle(WheelCycleGate::Deadzone, false));
         assert!(should_allow_wheel_cycle(WheelCycleGate::Deadzone, true));
         assert!(should_allow_wheel_cycle(WheelCycleGate::Shift, false));
+    }
+
+    #[test]
+    fn suppression_guard_drop_restores_enabled_service() {
+        fn assert_send<T: Send>() {}
+        assert_send::<GestureSuppressionGuard>();
+
+        let (backend, handle) = MockHookBackend::new();
+        let service = Arc::new(Mutex::new(MouseGestureService::new_with_backend(Box::new(
+            backend,
+        ))));
+        service.lock().unwrap().start();
+
+        let guard = GestureSuppressionGuard::acquire(Arc::clone(&service));
+        assert!(!service.lock().unwrap().is_running());
+        drop(guard);
+
+        assert!(service.lock().unwrap().is_running());
+        assert_eq!(handle.install_count(), 2);
+        service.lock().unwrap().stop();
+    }
+
+    #[test]
+    fn suppression_guard_drop_does_not_deadlock_when_service_is_locked() {
+        let (backend, handle) = MockHookBackend::new();
+        let service = Arc::new(Mutex::new(MouseGestureService::new_with_backend(Box::new(
+            backend,
+        ))));
+        service.lock().unwrap().start();
+        let guard = GestureSuppressionGuard::acquire(Arc::clone(&service));
+
+        let service_lock = service.lock().unwrap();
+        drop(guard);
+        assert_eq!(handle.install_count(), 1);
+        drop(service_lock);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while handle.install_count() != 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(handle.install_count(), 2);
+        service.lock().unwrap().stop();
     }
 }
 

@@ -15,7 +15,7 @@ use crate::mkmacro::{
     ScreenCaptureBackend,
 };
 use image::RgbaImage;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -37,6 +37,9 @@ struct SharedOverlayClient {
     next_id: AtomicU64,
     active_id: AtomicU64,
     editor_events: Mutex<VecDeque<VisualOverlayEvent>>,
+    screen_draw_id: AtomicU64,
+    screen_draw_events: Mutex<VecDeque<VisualOverlayEvent>>,
+    discarded_screen_draw_ids: Mutex<HashSet<OperationId>>,
 }
 struct OverlayServiceState {
     service: Option<NativeVisualOverlayService>,
@@ -74,6 +77,9 @@ impl SharedVisualOverlayController {
             next_id: AtomicU64::new(1),
             active_id: AtomicU64::new(0),
             editor_events: Mutex::new(VecDeque::new()),
+            screen_draw_id: AtomicU64::new(0),
+            screen_draw_events: Mutex::new(VecDeque::new()),
+            discarded_screen_draw_ids: Mutex::new(HashSet::new()),
         }))
     }
 
@@ -108,6 +114,15 @@ impl SharedVisualOverlayController {
     #[cfg(test)]
     pub(crate) fn inject_editor_event_for_test(&self, event: VisualOverlayEvent) {
         self.0.editor_events.lock().unwrap().push_back(event);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn screen_draw_discard_pending_for_test(&self, operation_id: OperationId) -> bool {
+        self.0
+            .discarded_screen_draw_ids
+            .lock()
+            .unwrap()
+            .contains(&operation_id)
     }
 
     #[cfg(test)]
@@ -230,20 +245,24 @@ impl SharedVisualOverlayController {
         buffered: Vec<VisualOverlayEvent>,
         failure: Option<String>,
     ) -> OperationId {
-        let mut events = self.0.editor_events.lock().unwrap();
-        events.extend(buffered);
+        self.0.editor_events.lock().unwrap().extend(buffered);
         if let Some(message) = failure {
             let _ = self
                 .0
                 .active_id
                 .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
-            events.push_back(VisualOverlayEvent::Error {
+            let event = VisualOverlayEvent::Error {
                 operation_id: id,
                 error: VisualOverlayError {
                     kind: OverlayErrorKind::Platform,
                     message,
                 },
-            });
+            };
+            if self.0.screen_draw_id.load(Ordering::Acquire) == id {
+                self.0.screen_draw_events.lock().unwrap().push_back(event);
+            } else {
+                self.0.editor_events.lock().unwrap().push_back(event);
+            }
         }
         id
     }
@@ -253,6 +272,9 @@ impl SharedVisualOverlayController {
         virtual_desktop: ScreenRect,
     ) -> OperationId {
         let id = self.allocate();
+        if purpose == RectanglePurpose::ScreenDrawExport {
+            self.0.screen_draw_id.store(id, Ordering::Release);
+        }
         self.send_with_recovery(
             id,
             VisualOverlayCommand::BeginRectanglePick {
@@ -371,6 +393,16 @@ impl SharedVisualOverlayController {
             }
         }
     }
+    pub fn cancel_screen_draw_operation(&self, expected_operation_id: OperationId) {
+        if self.0.screen_draw_id.load(Ordering::Acquire) == expected_operation_id {
+            self.0
+                .discarded_screen_draw_ids
+                .lock()
+                .unwrap()
+                .insert(expected_operation_id);
+        }
+        self.cancel_operation(expected_operation_id);
+    }
     /// Cancels the operation which is current at the instant this method is called.
     /// Prefer [`Self::cancel_operation`] when an owner has retained its operation id.
     pub fn cancel(&self) {
@@ -396,7 +428,31 @@ impl SharedVisualOverlayController {
                 .active_id
                 .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
         }
-        self.0.editor_events.lock().unwrap().extend(incoming);
+        let screen_draw_id = self.0.screen_draw_id.load(Ordering::Acquire);
+        let mut editor = self.0.editor_events.lock().unwrap();
+        let mut screen_draw = self.0.screen_draw_events.lock().unwrap();
+        let mut discarded = self.0.discarded_screen_draw_ids.lock().unwrap();
+        for event in incoming {
+            let id = match &event {
+                VisualOverlayEvent::PointConfirmed { operation_id, .. }
+                | VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
+                | VisualOverlayEvent::Cancelled { operation_id }
+                | VisualOverlayEvent::Expired { operation_id }
+                | VisualOverlayEvent::Error { operation_id, .. } => *operation_id,
+            };
+            if discarded.remove(&id) {
+                let _ = self.0.screen_draw_id.compare_exchange(
+                    id,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            } else if id == screen_draw_id {
+                screen_draw.push_back(event);
+            } else {
+                editor.push_back(event);
+            }
+        }
     }
     /// Drains events already produced by the native worker; it never advances native input.
     pub fn poll(&self) -> Vec<VisualOverlayEvent> {
@@ -409,7 +465,12 @@ impl SharedVisualOverlayController {
 
     fn poll_rectangle(&self, expected: OperationId) -> Option<VisualOverlayEvent> {
         self.receive_into_editor();
-        let mut queue = self.0.editor_events.lock().unwrap();
+        let is_screen_draw = self.0.screen_draw_id.load(Ordering::Acquire) == expected;
+        let mut queue = if is_screen_draw {
+            self.0.screen_draw_events.lock().unwrap()
+        } else {
+            self.0.editor_events.lock().unwrap()
+        };
         let position = queue.iter().position(|event| {
             matches!(event,
             VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
@@ -423,6 +484,14 @@ impl SharedVisualOverlayController {
                 self.0
                     .active_id
                     .compare_exchange(expected, 0, Ordering::AcqRel, Ordering::Acquire);
+            if is_screen_draw {
+                let _ = self.0.screen_draw_id.compare_exchange(
+                    expected,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
         }
         event
     }
@@ -873,6 +942,68 @@ mod tests {
             })
         );
         assert_eq!(fixture.controller.operation_id(), None);
+    }
+
+    #[test]
+    fn screen_draw_rectangle_events_are_not_drained_by_macro_editor_polling() {
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let desktop = ScreenRect::new(-1920, -240, 3840, 1320);
+        let operation_id = fixture
+            .controller
+            .begin_rectangle_pick(RectanglePurpose::ScreenDrawExport, desktop);
+        fixture.observer.wait_for_commands(1);
+        assert!(matches!(
+            fixture.observer.commands.lock().unwrap()[0],
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::ScreenDrawExport,
+                virtual_desktop,
+            } if id == operation_id && virtual_desktop == desktop
+        ));
+        fixture.observer.confirm_rectangle(
+            operation_id,
+            crate::mkmacro::MkPoint { x: -1800, y: -100 },
+            crate::mkmacro::MkPoint { x: 300, y: 700 },
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            assert!(
+                fixture.controller.poll().is_empty(),
+                "macro editor polling must not steal Screen Draw events"
+            );
+            if fixture.controller.operation_id().is_none() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            fixture.controller.poll_rectangle_event(operation_id),
+            Some(VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose: RectanglePurpose::ScreenDrawExport,
+                rect: ScreenRect::new(-1800, -100, 2100, 800),
+            })
+        );
+    }
+
+    #[test]
+    fn synchronous_screen_draw_start_failure_uses_the_screen_draw_event_queue() {
+        let controller = SharedVisualOverlayController::new_with_controller_factory(|| {
+            Err(std::io::Error::other("fixture startup failure"))
+        });
+        let operation_id = controller.begin_rectangle_pick(
+            RectanglePurpose::ScreenDrawExport,
+            ScreenRect::new(-1920, -240, 3840, 1320),
+        );
+        assert!(controller.poll().is_empty());
+        assert!(matches!(
+            controller.poll_rectangle_event(operation_id),
+            Some(VisualOverlayEvent::Error { operation_id: id, error })
+                if id == operation_id && error.message.contains("fixture startup failure")
+        ));
+        assert_eq!(controller.operation_id(), None);
     }
     #[test]
     fn one_service_orders_every_operation_type_and_replaces_each_predecessor_once() {

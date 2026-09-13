@@ -10523,6 +10523,9 @@ mod tests {
                     RectanglePurpose::CropScreenshot => {
                         panic!("CropScreenshot is owned by the standalone crop workflow")
                     }
+                    RectanglePurpose::ScreenDrawExport => {
+                        panic!("ScreenDrawExport is owned by the Screen Draw workflow")
+                    }
                     RectanglePurpose::ReferenceImageCapture => {
                         VisualRegionDestination::ImageActionReferenceAsset
                     }

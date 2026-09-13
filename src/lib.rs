@@ -19,6 +19,7 @@
 pub mod actions;
 pub mod actions_editor;
 pub mod active_window;
+pub mod annotation;
 
 pub mod clipboard_modify;
 pub mod commands;
@@ -49,6 +50,7 @@ pub mod plugin_editor;
 pub mod plugins;
 pub mod plugins_builtin;
 pub mod process;
+pub mod screen_draw;
 pub mod settings;
 pub mod settings_editor;
 pub mod sound;
