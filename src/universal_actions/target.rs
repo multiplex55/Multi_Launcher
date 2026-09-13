@@ -214,8 +214,10 @@ mod tests {
 
     #[test]
     fn legacy_action_json_remains_unchanged_by_universal_target_wrapping() {
-        let legacy_json = r#"{"label":"Tool","desc":"Custom","action":"tool.exe","args":"--flag"}"#;
+        let legacy_json =
+            r#"{"label":"Example","desc":"Example","action":"something","args":null}"#;
         let action: Action = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(action.args, None);
         let target = ActionTarget::Generic {
             action: action.clone(),
         };
@@ -223,10 +225,9 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&action).unwrap(),
             serde_json::json!({
-                "label": "Tool",
-                "desc": "Custom",
-                "action": "tool.exe",
-                "args": "--flag"
+                "label": "Example",
+                "desc": "Example",
+                "action": "something"
             })
         );
     }

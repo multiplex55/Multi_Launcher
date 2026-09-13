@@ -338,6 +338,12 @@ impl LauncherApp {
 
         menu_resp
     }
+
+    fn execute_deferred_result_action(&mut self, deferred: Option<DeferredUniversalAction>) {
+        if let Some(deferred) = deferred {
+            self.execute_universal_action(deferred.action, deferred.surface, deferred.source);
+        }
+    }
 }
 
 impl LauncherApp {
@@ -1179,9 +1185,7 @@ impl eframe::App for LauncherApp {
                 );
             }
         });
-        if let Some(deferred) = deferred_universal_action {
-            self.execute_universal_action(deferred.action, deferred.surface, deferred.source);
-        }
+        self.execute_deferred_result_action(deferred_universal_action);
         let show_editor = self.show_editor;
         if show_editor {
             let mut editor = std::mem::take(&mut self.editor);
@@ -3339,6 +3343,12 @@ mod tests {
                     action: "note:open:alpha".into(),
                     args: None,
                 }],
+                "dynamic universal" => vec![Action {
+                    label: "Dynamic Universal".into(),
+                    desc: "Third-party result".into(),
+                    action: "third_party:opaque:command".into(),
+                    args: Some("payload".into()),
+                }],
                 "note list" => ["alpha", "beta", "gamma"]
                     .into_iter()
                     .map(|slug| Action {
@@ -4021,8 +4031,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.require_confirm_destructive = false;
-        if let Some(deferred) = deferred.take() {
-            app.execute_universal_action(deferred.action, deferred.surface, deferred.source);
+        if deferred.is_some() {
+            app.execute_deferred_result_action(deferred.take());
             rows.remove(0);
         }
         assert_eq!(rows, [1, 2]);
@@ -4105,27 +4115,32 @@ mod tests {
 
     #[test]
     fn dynamic_fallback_executes_through_normal_enter_and_action_sheet_paths() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        set_execute_action_hook(Some(Box::new(move |action| {
+            assert_eq!(action.action, "third_party:opaque:command");
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
         let ctx = egui::Context::default();
-        let selected = Action {
-            label: "Dynamic Help".into(),
-            desc: "Plugin value".into(),
-            action: "help:show".into(),
-            args: None,
-        };
-        let mut app = new_app(&ctx);
-        app.results = vec![selected.clone()];
+        let mut app = app_with_fake(&ctx);
+        app.query = "dynamic universal".into();
+        app.search();
+        assert_eq!(app.results.len(), 1);
+        let selected = app.results[0].clone();
+        assert_eq!(selected.action, "third_party:opaque:command");
 
         let index = app.handle_key(egui::Key::Enter).unwrap();
         let deferred =
             deferred_activation_from_results(&app.results, index, ActivationSource::Enter).unwrap();
         app.activate_action(deferred.action, deferred.query_override, deferred.source);
-        assert!(app.help_window.open);
         assert_eq!(
             app.test_activation_trace.last().unwrap().1,
             ActivationSource::Enter
         );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
 
-        app.help_window.open = false;
         app.test_activation_trace.clear();
         app.results = vec![selected];
         assert!(app.open_action_sheet_for_index(0));
@@ -4144,11 +4159,12 @@ mod tests {
             crate::universal_actions::ActionSurface::ActionSheet,
             source,
         );
-        assert!(app.help_window.open);
         assert_eq!(
             app.test_activation_trace.last().unwrap().1,
             ActivationSource::Enter
         );
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+        set_execute_action_hook(None);
     }
 
     #[test]
