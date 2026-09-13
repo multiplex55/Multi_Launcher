@@ -38,7 +38,7 @@ types only when an action-oriented surface requests them.
 - Preserve secondary-action interaction behavior and centralized destructive
   confirmation, including confirmation context.
 
-### 5. Launcher context-menu migration — `pending`
+### 5. Launcher context-menu migration — `complete`
 
 - Render launcher-result context menus from Universal Actions with behavioral
   parity in List and Grid modes.

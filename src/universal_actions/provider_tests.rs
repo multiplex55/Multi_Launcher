@@ -166,6 +166,15 @@ fn pinned_and_read_only_pin_states_match_existing_menu_choices() {
     assert!(ids(&actions).contains(&"result.unpin"));
     assert!(ids(&actions).contains(&"result.replace_pin"));
     assert!(!ids(&actions).contains(&"result.pin"));
+    assert_eq!(
+        actions
+            .iter()
+            .find(|action| action.id == action_ids::RESULT_UNPIN)
+            .unwrap()
+            .effective_presentation(ActionSurface::ContextMenu)
+            .label,
+        "Unpin result"
+    );
 
     writable.pin = PinCapability::ReadOnly {
         is_pinned: true,

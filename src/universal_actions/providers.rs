@@ -161,6 +161,13 @@ impl UniversalActionProvider for GenericProvider {
                             action: resolved.selected_action.clone(),
                         },
                     );
+                    unpin.presentation.surface_overrides.insert(
+                        ActionSurface::ContextMenu,
+                        ActionPresentationOverride {
+                            label: Some("Unpin result".into()),
+                            ..Default::default()
+                        },
+                    );
                     unpin.availability = availability.clone();
                     actions.push(unpin);
 
@@ -175,6 +182,13 @@ impl UniversalActionProvider for GenericProvider {
                         UniversalUiIntent::ReplacePin {
                             action: resolved.selected_action.clone(),
                             query: context.query.to_string(),
+                        },
+                    );
+                    replace.presentation.surface_overrides.insert(
+                        ActionSurface::ContextMenu,
+                        ActionPresentationOverride {
+                            label: Some("Replace pin with current result".into()),
+                            ..Default::default()
                         },
                     );
                     replace.availability = availability.clone();
@@ -193,6 +207,13 @@ impl UniversalActionProvider for GenericProvider {
                             query: context.query.to_string(),
                         },
                     );
+                    pin.presentation.surface_overrides.insert(
+                        ActionSurface::ContextMenu,
+                        ActionPresentationOverride {
+                            label: Some("Pin current query result".into()),
+                            ..Default::default()
+                        },
+                    );
                     pin.availability = availability.clone();
                     actions.push(pin);
                 }
@@ -206,6 +227,13 @@ impl UniversalActionProvider for GenericProvider {
                     ActionGroup::Organization,
                     ActionPriority::Low,
                     UniversalUiIntent::RecomputePins,
+                );
+                recompute.presentation.surface_overrides.insert(
+                    ActionSurface::ContextMenu,
+                    ActionPresentationOverride {
+                        label: Some("Recompute pinned results".into()),
+                        ..Default::default()
+                    },
                 );
                 recompute.availability = availability;
                 actions.push(recompute);

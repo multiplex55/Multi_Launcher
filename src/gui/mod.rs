@@ -179,9 +179,7 @@ use watch::watch_file;
 
 pub use crate::commands::ActivationSource;
 pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, VirtualDesktopGuiCompletion, WatchEvent};
-pub(crate) use state::{
-    PendingConfirmCommand, PendingUniversalActionInvocation, ResultContextMenuKind, UiErrorEvent,
-};
+pub(crate) use state::{PendingConfirmCommand, PendingUniversalActionInvocation, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -5024,7 +5022,7 @@ mod tests {
     }
 
     #[test]
-    fn grid_context_menu_eligibility_uses_result_actions() {
+    fn grid_context_menu_uses_universal_bookmark_actions() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.resolved_grid_layout = true;
@@ -5037,8 +5035,15 @@ mod tests {
             args: None,
         }];
 
-        let kind = app.result_context_menu_kind(&app.results[0]);
-        assert_eq!(kind, ResultContextMenuKind::Bookmark);
+        let actions = app.resolve_context_menu_actions(
+            &app.results[0],
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.id == crate::universal_actions::action_ids::BOOKMARK_SET_ALIAS)
+        );
     }
 
     #[test]
@@ -5055,12 +5060,24 @@ mod tests {
             .insert(action.action.clone(), Some("docs".into()));
 
         app.resolved_grid_layout = false;
-        let list_kind = app.result_context_menu_kind(&action);
+        let list = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
         app.resolved_grid_layout = true;
-        let grid_kind = app.result_context_menu_kind(&action);
+        let grid = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
 
-        assert_eq!(list_kind, ResultContextMenuKind::Bookmark);
-        assert_eq!(grid_kind, list_kind);
+        let ids = |actions: &[crate::universal_actions::UniversalAction]| {
+            actions
+                .iter()
+                .map(|action| action.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(ids(&list).contains(&crate::universal_actions::action_ids::BOOKMARK_SET_ALIAS));
+        assert_eq!(ids(&grid), ids(&list));
     }
 
     #[test]
@@ -5075,12 +5092,24 @@ mod tests {
         };
 
         app.resolved_grid_layout = false;
-        let list_kind = app.result_context_menu_kind(&action);
+        let list = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
         app.resolved_grid_layout = true;
-        let grid_kind = app.result_context_menu_kind(&action);
+        let grid = app.resolve_context_menu_actions(
+            &action,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+        );
 
-        assert_eq!(list_kind, ResultContextMenuKind::Todo { idx: 7 });
-        assert_eq!(grid_kind, list_kind);
+        let ids = |actions: &[crate::universal_actions::UniversalAction]| {
+            actions
+                .iter()
+                .map(|action| action.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(ids(&list).contains(&crate::universal_actions::action_ids::TODO_EDIT));
+        assert_eq!(ids(&grid), ids(&list));
     }
     #[test]
     fn handle_key_grid_navigation_arrows_and_numpad() {
