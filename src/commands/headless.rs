@@ -284,14 +284,14 @@ fn execute_timer(command: TimerCommand, original: &Action) -> anyhow::Result<()>
         | TimerCommand::InvalidCancel
         | TimerCommand::InvalidPause
         | TimerCommand::InvalidResume => execute_external(original),
-        TimerCommand::Cancel(id) => effect(|| timer::cancel(id)),
-        TimerCommand::Pause(id) => effect(|| timer::pause(id)),
-        TimerCommand::Resume(id) => effect(|| timer::resume(id)),
+        TimerCommand::Cancel(id) => timer::cancel_checked(id),
+        TimerCommand::Pause(id) => timer::pause_checked(id),
+        TimerCommand::Resume(id) => timer::resume_checked(id),
         TimerCommand::Start { duration, name } => effect(|| timer::start(&duration, &name)),
         TimerCommand::AlarmSet { time, name } => effect(|| timer::set_alarm(&time, &name)),
-        TimerCommand::StopwatchPause(id) => effect(|| stopwatch::pause(id)),
-        TimerCommand::StopwatchResume(id) => effect(|| stopwatch::resume(id)),
-        TimerCommand::StopwatchStop(id) => effect(|| stopwatch::stop(id)),
+        TimerCommand::StopwatchPause(id) => stopwatch::pause_checked(id),
+        TimerCommand::StopwatchResume(id) => stopwatch::resume_checked(id),
+        TimerCommand::StopwatchStop(id) => stopwatch::stop_checked(id),
         TimerCommand::StopwatchStart(name) => effect(|| stopwatch::start(&name)),
         TimerCommand::StopwatchShow(_) => Ok(()),
     }
@@ -574,6 +574,22 @@ mod tests {
             Command::Macro(MacroCommand::MkDialog),
         ] {
             execute(command, &action("unused")).unwrap();
+        }
+    }
+
+    #[test]
+    fn stale_timer_and_stopwatch_commands_report_instead_of_succeeding() {
+        let stale = u64::MAX - 100;
+        for command in [
+            TimerCommand::Cancel(stale),
+            TimerCommand::Pause(stale),
+            TimerCommand::Resume(stale),
+            TimerCommand::StopwatchPause(stale),
+            TimerCommand::StopwatchResume(stale),
+            TimerCommand::StopwatchStop(stale),
+        ] {
+            let error = execute_timer(command, &action("unused")).unwrap_err();
+            assert!(error.to_string().contains("no longer available"));
         }
     }
 

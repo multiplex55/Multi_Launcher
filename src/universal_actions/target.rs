@@ -211,4 +211,23 @@ mod tests {
             reference
         );
     }
+
+    #[test]
+    fn legacy_action_json_remains_unchanged_by_universal_target_wrapping() {
+        let legacy_json = r#"{"label":"Tool","desc":"Custom","action":"tool.exe","args":"--flag"}"#;
+        let action: Action = serde_json::from_str(legacy_json).unwrap();
+        let target = ActionTarget::Generic {
+            action: action.clone(),
+        };
+        assert!(target.persistent_ref().is_some());
+        assert_eq!(
+            serde_json::to_value(&action).unwrap(),
+            serde_json::json!({
+                "label": "Tool",
+                "desc": "Custom",
+                "action": "tool.exe",
+                "args": "--flag"
+            })
+        );
+    }
 }

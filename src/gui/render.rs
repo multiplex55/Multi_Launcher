@@ -268,6 +268,31 @@ impl LauncherApp {
         self.focus_input();
     }
 
+    fn route_action_sheet_keyboard(
+        &mut self,
+        ctx: &egui::Context,
+        query_input_id: egui::Id,
+    ) -> Option<(crate::universal_actions::UniversalAction, ActivationSource)> {
+        if self.action_sheet.is_open() {
+            let key = ctx.input_mut(action_sheet::ActionSheetState::consume_key);
+            return self.handle_action_sheet_key(key);
+        }
+
+        let query_has_focus = ctx.memory(|memory| memory.has_focus(query_input_id));
+        let shortcut_enabled = Self::launcher_action_sheet_shortcut_enabled(
+            query_has_focus,
+            self.file_search_dialog.open,
+            self.any_panel_open(),
+        );
+        if shortcut_enabled
+            && ctx.input_mut(action_sheet::ActionSheetState::consume_open_shortcut)
+            && let Some(index) = self.current_actionable_result_index()
+        {
+            self.open_action_sheet_for_index(index);
+        }
+        None
+    }
+
     pub(crate) fn handle_action_sheet_key(
         &mut self,
         key: Option<action_sheet::ActionSheetKey>,
@@ -778,25 +803,7 @@ impl eframe::App for LauncherApp {
         // navigation paths see it. Opening is also resolved before rendering,
         // so the filter can take focus in the same frame as Ctrl+Enter.
         let query_input_id = egui::Id::new("query_input");
-        let action_sheet_was_open = self.action_sheet.is_open();
-        let mut selected_sheet_action = None;
-        if action_sheet_was_open {
-            let key = ctx.input_mut(action_sheet::ActionSheetState::consume_key);
-            selected_sheet_action = self.handle_action_sheet_key(key);
-        } else {
-            let query_has_focus = ctx.memory(|memory| memory.has_focus(query_input_id));
-            let shortcut_enabled = Self::launcher_action_sheet_shortcut_enabled(
-                query_has_focus,
-                self.file_search_dialog.open,
-                self.any_panel_open(),
-            );
-            if shortcut_enabled
-                && ctx.input_mut(action_sheet::ActionSheetState::consume_open_shortcut)
-                && let Some(index) = self.current_actionable_result_index()
-            {
-                self.open_action_sheet_for_index(index);
-            }
-        }
+        let mut selected_sheet_action = self.route_action_sheet_keyboard(ctx, query_input_id);
 
         if self.action_sheet.is_open() {
             if let Some(action) = action_sheet::render(ctx, &mut self.action_sheet, &self.matcher) {
@@ -2888,6 +2895,17 @@ mod tests {
         }
     }
 
+    fn focus_launcher_query(ctx: &egui::Context, app: &mut LauncherApp) {
+        let query_id = egui::Id::new("query_input");
+        ctx.begin_frame(egui::RawInput::default());
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut app.query).id(query_id))
+                .request_focus();
+        });
+        let _ = ctx.end_frame();
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+    }
+
     struct FakeNumpadProbe {
         down: Option<PhysicalNumpadKey>,
         top_row_down: bool,
@@ -3955,15 +3973,22 @@ mod tests {
 
     #[test]
     fn context_action_is_deferred_until_all_result_rows_have_been_visited() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        set_execute_action_hook(Some(Box::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })));
         let selected = Action {
-            label: "Remove first".into(),
-            desc: "Test".into(),
-            action: "plugin:remove:first".into(),
+            label: "First folder".into(),
+            desc: "Folder".into(),
+            action: "C:/first".into(),
             args: None,
         };
         let resolved = crate::universal_actions::ResolvedActionTarget {
-            target: crate::universal_actions::ActionTarget::Generic {
-                action: selected.clone(),
+            target: crate::universal_actions::ActionTarget::Folder {
+                path: selected.action.clone(),
             },
             selected_action: selected.clone(),
             custom_action_index: None,
@@ -3977,7 +4002,7 @@ mod tests {
                 ),
             )
             .into_iter()
-            .next()
+            .find(|action| action.id == crate::universal_actions::action_ids::FOLDER_REMOVE)
             .unwrap();
         let mut rows = vec![0, 1, 2];
         let mut visited = Vec::new();
@@ -3988,14 +4013,142 @@ mod tests {
             if row == 0 {
                 defer_universal_context_action(&mut deferred, action.clone());
             }
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
         }
         assert_eq!(visited, [0, 1, 2]);
         assert_eq!(rows, [0, 1, 2]);
 
-        if deferred.take().is_some() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.require_confirm_destructive = false;
+        if let Some(deferred) = deferred.take() {
+            app.execute_universal_action(deferred.action, deferred.surface, deferred.source);
             rows.remove(0);
         }
         assert_eq!(rows, [1, 2]);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert!(app.pending_universal_confirm.is_none());
+        set_execute_action_hook(None);
+    }
+
+    #[test]
+    fn production_action_sheet_router_consumes_exact_ctrl_enter_and_preserves_tab() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.results = vec![Action {
+            label: "Dynamic".into(),
+            desc: "Plugin value".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        focus_launcher_query(&ctx, &mut app);
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![
+                key_press(egui::Key::Enter, egui::Modifiers::CTRL),
+                key_press(egui::Key::Tab, egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        });
+        assert!(
+            app.route_action_sheet_keyboard(&ctx, egui::Id::new("query_input"))
+                .is_none()
+        );
+        assert!(app.action_sheet.is_open());
+        assert!(app.test_activation_trace.is_empty());
+        assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+        assert!(ctx.input(|input| input.key_pressed(egui::Key::Tab)));
+        let _ = ctx.end_frame();
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)],
+            ..Default::default()
+        });
+        assert!(
+            app.route_action_sheet_keyboard(&ctx, egui::Id::new("query_input"))
+                .is_none()
+        );
+        assert!(app.action_sheet.is_open());
+        assert!(app.test_activation_trace.is_empty());
+        assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+        let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn production_action_sheet_router_leaves_shifted_and_plain_enter_for_launcher() {
+        for modifiers in [
+            egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+            egui::Modifiers::NONE,
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.results = vec![Action {
+                label: "Dynamic".into(),
+                desc: "Plugin value".into(),
+                action: "help:show".into(),
+                args: None,
+            }];
+            focus_launcher_query(&ctx, &mut app);
+            ctx.begin_frame(egui::RawInput {
+                events: vec![key_press(egui::Key::Enter, modifiers)],
+                ..Default::default()
+            });
+            assert!(
+                app.route_action_sheet_keyboard(&ctx, egui::Id::new("query_input"))
+                    .is_none()
+            );
+            assert!(!app.action_sheet.is_open());
+            assert!(ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+            let _ = ctx.end_frame();
+        }
+    }
+
+    #[test]
+    fn dynamic_fallback_executes_through_normal_enter_and_action_sheet_paths() {
+        let ctx = egui::Context::default();
+        let selected = Action {
+            label: "Dynamic Help".into(),
+            desc: "Plugin value".into(),
+            action: "help:show".into(),
+            args: None,
+        };
+        let mut app = new_app(&ctx);
+        app.results = vec![selected.clone()];
+
+        let index = app.handle_key(egui::Key::Enter).unwrap();
+        let deferred =
+            deferred_activation_from_results(&app.results, index, ActivationSource::Enter).unwrap();
+        app.activate_action(deferred.action, deferred.query_override, deferred.source);
+        assert!(app.help_window.open);
+        assert_eq!(
+            app.test_activation_trace.last().unwrap().1,
+            ActivationSource::Enter
+        );
+
+        app.help_window.open = false;
+        app.test_activation_trace.clear();
+        app.results = vec![selected];
+        assert!(app.open_action_sheet_for_index(0));
+        assert!(matches!(
+            app.action_sheet
+                .target
+                .as_ref()
+                .map(|target| &target.target),
+            Some(crate::universal_actions::ActionTarget::Generic { .. })
+        ));
+        let (action, source) = app
+            .handle_action_sheet_key(Some(action_sheet::ActionSheetKey::Enter))
+            .unwrap();
+        app.execute_universal_action(
+            action,
+            crate::universal_actions::ActionSurface::ActionSheet,
+            source,
+        );
+        assert!(app.help_window.open);
+        assert_eq!(
+            app.test_activation_trace.last().unwrap().1,
+            ActivationSource::Enter
+        );
     }
 
     #[test]

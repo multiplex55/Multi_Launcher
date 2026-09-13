@@ -269,6 +269,10 @@ impl LauncherApp {
                             format!("Failed to copy time: {error}"),
                         ),
                     }
+                } else {
+                    self.add_warning_toast(format!(
+                        "Stopwatch {id} is no longer available; nothing was copied"
+                    ));
                 }
             }
             UniversalUiIntent::OpenMkMacro { id } => {
@@ -310,6 +314,13 @@ fn normalize_secondary_outcome(
             .collect(),
         ..CommandOutcome::default()
     };
+    if action_id == action_ids::BROWSER_TAB_COPY_URL.as_str() {
+        for toast in &mut normalized.toasts {
+            if matches!(toast, ToastPolicy::Copied(_)) {
+                *toast = ToastPolicy::Copied("URL".into());
+            }
+        }
+    }
 
     let (refresh, message) = match action_id {
         value if value == action_ids::FOLDER_REMOVE.as_str() => (
@@ -457,6 +468,25 @@ mod tests {
     }
 
     #[test]
+    fn browser_tab_copy_normalization_never_uses_tab_label_as_copy_metadata() {
+        let normalized = normalize_secondary_outcome(
+            action_ids::BROWSER_TAB_COPY_URL.as_str(),
+            &Action {
+                label: "Documentation".into(),
+                desc: "Browser Tab".into(),
+                action: "tab:switch:1".into(),
+                args: None,
+            },
+            "tabs",
+            CommandOutcome {
+                toasts: vec![ToastPolicy::Copied("Documentation".into())],
+                ..CommandOutcome::default()
+            },
+        );
+        assert_eq!(normalized.toasts, [ToastPolicy::Copied("URL".into())]);
+    }
+
+    #[test]
     fn legacy_list_actions_retain_refresh_focus_and_specific_toast() {
         let normalized = normalize_secondary_outcome(
             action_ids::TIMER_CANCEL.as_str(),
@@ -597,5 +627,85 @@ mod tests {
         assert_eq!(app.query, "window query");
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.test_recorded_history_queries.is_empty());
+    }
+
+    #[test]
+    fn stale_stopwatch_copy_reports_benign_no_op() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.enable_toasts = true;
+        let stale = u64::MAX - 200;
+
+        let result = app.execute_universal_action(
+            universal(
+                action_ids::STOPWATCH_COPY_TIME,
+                ActionTarget::Stopwatch { id: stale },
+                ActionSafety::Normal,
+                UniversalActionOperation::UiIntent(UniversalUiIntent::CopyStopwatchTime {
+                    id: stale,
+                }),
+            ),
+            ActionSurface::ContextMenu,
+            ActivationSource::Click,
+        );
+
+        assert_eq!(result, UniversalActionExecution::Executed);
+        assert_eq!(
+            app.test_toast_messages.last(),
+            Some(&format!(
+                "Stopwatch {stale} is no longer available; nothing was copied"
+            ))
+        );
+    }
+
+    #[test]
+    fn stale_timer_and_stopwatch_secondary_actions_surface_runtime_failure() {
+        let ctx = eframe::egui::Context::default();
+        let stale = u64::MAX - 300;
+        for (id, target, command) in [
+            (
+                action_ids::TIMER_PAUSE,
+                ActionTarget::Timer { id: stale },
+                Command::Timer(crate::commands::TimerCommand::Pause(stale)),
+            ),
+            (
+                action_ids::STOPWATCH_STOP,
+                ActionTarget::Stopwatch { id: stale },
+                Command::Timer(crate::commands::TimerCommand::StopwatchStop(stale)),
+            ),
+        ] {
+            let mut app = crate::gui::actions::tests::new_app(&ctx);
+            app.enable_toasts = true;
+            app.show_error_toasts = true;
+            let original = Action {
+                label: "Stale runtime item".into(),
+                desc: "Test".into(),
+                action: "unused".into(),
+                args: None,
+            };
+
+            app.execute_universal_action(
+                universal(
+                    id,
+                    target,
+                    ActionSafety::Normal,
+                    UniversalActionOperation::Command {
+                        command,
+                        original_action: original,
+                    },
+                ),
+                ActionSurface::ContextMenu,
+                ActivationSource::Click,
+            );
+
+            assert!(
+                app.test_toast_messages
+                    .iter()
+                    .any(|message| message.contains("no longer available"))
+            );
+            assert!(!app.test_toast_messages.iter().any(|message| {
+                message.starts_with("Paused") || message.starts_with("Stopped")
+            }));
+        }
     }
 }
