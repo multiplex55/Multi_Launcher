@@ -57,6 +57,7 @@ pub mod sound;
 pub mod startup;
 pub mod text_transform;
 pub mod toast_log;
+pub mod universal_actions;
 pub mod usage;
 pub mod virtual_desktop;
 pub mod visibility;
