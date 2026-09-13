@@ -94,7 +94,7 @@ fn send_vk(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> anyhow::Result<()> {
                     wScan: 0,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: crate::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG,
                 },
             },
         };
@@ -125,7 +125,7 @@ fn send_text(text: &str) -> anyhow::Result<()> {
                         wScan: code,
                         dwFlags: KEYEVENTF_UNICODE,
                         time: 0,
-                        dwExtraInfo: 0,
+                        dwExtraInfo: crate::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG,
                     },
                 },
             };

@@ -24,10 +24,18 @@ impl ScreenDrawRecoveryBridge {
     /// Optimistically publishes a process trigger before its GUI start event
     /// is reduced. The controller subsequently reconciles authoritative state.
     pub fn stage_start(&self) {
+        crate::hotkey::launcher_invocation::set_exclusive_owner(
+            crate::hotkey::launcher_invocation::ExclusiveOwner::ScreenDraw,
+            true,
+        );
         self.active.store(true, Ordering::Release);
     }
 
     pub(crate) fn set_active(&self, active: bool) {
+        crate::hotkey::launcher_invocation::set_exclusive_owner(
+            crate::hotkey::launcher_invocation::ExclusiveOwner::ScreenDraw,
+            active,
+        );
         self.active.store(active, Ordering::Release);
         if !active {
             self.clear_emergency_handle();

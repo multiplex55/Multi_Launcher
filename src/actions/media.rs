@@ -12,7 +12,7 @@ fn send_key(vk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) {
                     wScan: 0,
                     dwFlags: KEYBD_EVENT_FLAGS(0),
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: crate::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG,
                 },
             },
         };

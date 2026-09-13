@@ -237,8 +237,8 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
         match crate::hotkey::parse_hotkey(&trigger.chord) {
             Some(parsed) => {
                 let canonical = format!(
-                    "{:?}:{}:{}:{}:{}",
-                    parsed.key, parsed.ctrl, parsed.shift, parsed.alt, parsed.win
+                    "{:?}:{}:{}:{}:{}:{}",
+                    parsed.key, parsed.ctrl, parsed.shift, parsed.alt, parsed.alt_gr, parsed.win
                 );
                 if let Some(previous) = chords.insert(canonical, ti) {
                     errors.push(issue(

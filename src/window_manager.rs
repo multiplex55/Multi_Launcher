@@ -224,7 +224,7 @@ pub fn send_end_key() {
                     wScan: 0,
                     dwFlags: KEYBD_EVENT_FLAGS(0),
                     time: 0,
-                    dwExtraInfo: 0,
+                    dwExtraInfo: crate::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG,
                 },
             },
         };

@@ -663,6 +663,7 @@ impl Settings {
             ctrl: false,
             shift: false,
             alt: false,
+            alt_gr: false,
             win: false,
         }
     }

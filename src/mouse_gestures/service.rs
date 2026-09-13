@@ -1518,7 +1518,7 @@ fn get_foreground_window_title() -> Option<String> {
 }
 
 #[cfg(windows)]
-const MG_INJECT_TAG: usize = 0x004D_4749_4E4A; // "MG_INJ"
+pub(crate) const MG_INJECT_TAG: usize = 0x004D_4749_4E4A; // "MG_INJ"
 
 #[cfg(windows)]
 fn send_right_click() {

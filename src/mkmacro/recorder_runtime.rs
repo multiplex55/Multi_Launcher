@@ -224,6 +224,10 @@ impl RecorderRuntime {
         }
     }
     fn publish(&self, s: &State) {
+        crate::hotkey::launcher_invocation::set_exclusive_owner(
+            crate::hotkey::launcher_invocation::ExclusiveOwner::MacroRecorder,
+            s.mode != RecorderRuntimeState::Idle,
+        );
         let now = self.clock.now_us();
         let elapsed = if s.mode == RecorderRuntimeState::Idle {
             0
