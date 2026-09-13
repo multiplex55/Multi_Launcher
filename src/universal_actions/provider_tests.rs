@@ -47,7 +47,12 @@ fn each_target_gets_primary_and_current_specialized_capabilities() {
         ),
         (
             ActionTarget::Timer { id: 1 },
-            vec!["result.execute", "timer.pause", "timer.cancel"],
+            vec![
+                "result.execute",
+                "timer.pause",
+                "timer.resume",
+                "timer.cancel",
+            ],
         ),
         (
             ActionTarget::Stopwatch { id: 2 },
@@ -116,6 +121,64 @@ fn each_target_gets_primary_and_current_specialized_capabilities() {
         let actions = UniversalActionRegistry
             .resolve(&resolved(target), &context(ActionSurface::ActionSheet));
         assert_eq!(ids(&actions), expected);
+    }
+}
+
+#[test]
+fn timer_and_stopwatch_pause_resume_availability_uses_open_time_snapshot() {
+    let timer = resolved(ActionTarget::Timer { id: 7 });
+    let mut timer_context = context(ActionSurface::ActionSheet);
+    timer_context.timer_paused = Some(false);
+    let actions = UniversalActionRegistry.resolve(&timer, &timer_context);
+    assert!(
+        actions
+            .iter()
+            .find(|action| action.id == action_ids::TIMER_PAUSE)
+            .unwrap()
+            .is_available()
+    );
+    assert!(
+        !actions
+            .iter()
+            .find(|action| action.id == action_ids::TIMER_RESUME)
+            .unwrap()
+            .is_available()
+    );
+
+    timer_context.timer_paused = Some(true);
+    let actions = UniversalActionRegistry.resolve(&timer, &timer_context);
+    assert!(
+        !actions
+            .iter()
+            .find(|action| action.id == action_ids::TIMER_PAUSE)
+            .unwrap()
+            .is_available()
+    );
+    assert!(
+        actions
+            .iter()
+            .find(|action| action.id == action_ids::TIMER_RESUME)
+            .unwrap()
+            .is_available()
+    );
+
+    let stopwatch = resolved(ActionTarget::Stopwatch { id: 8 });
+    let mut stopwatch_context = context(ActionSurface::ContextMenu);
+    stopwatch_context.stopwatch_paused = None;
+    let actions = UniversalActionRegistry.resolve(&stopwatch, &stopwatch_context);
+    for id in [
+        action_ids::STOPWATCH_PAUSE,
+        action_ids::STOPWATCH_RESUME,
+        action_ids::STOPWATCH_COPY_TIME,
+        action_ids::STOPWATCH_STOP,
+    ] {
+        assert_eq!(
+            actions
+                .iter()
+                .find(|action| action.id == id)
+                .and_then(|action| action.availability.disabled_reason()),
+            Some("Stopwatch is no longer available")
+        );
     }
 }
 

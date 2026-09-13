@@ -25,6 +25,12 @@ pub struct ActionResolutionContext<'a> {
     pub query: &'a str,
     pub pin: PinCapability,
     pub can_add_favorite: bool,
+    /// Snapshot of the selected live timer's pause state. `None` means the
+    /// timer no longer exists (or this is not a timer target).
+    pub timer_paused: Option<bool>,
+    /// Snapshot of the selected live stopwatch's pause state. `None` means
+    /// the stopwatch no longer exists (or this is not a stopwatch target).
+    pub stopwatch_paused: Option<bool>,
 }
 
 impl<'a> ActionResolutionContext<'a> {
@@ -34,6 +40,8 @@ impl<'a> ActionResolutionContext<'a> {
             query,
             pin: PinCapability::Unsupported,
             can_add_favorite: false,
+            timer_paused: None,
+            stopwatch_paused: None,
         }
     }
 }

@@ -248,7 +248,11 @@ impl LauncherApp {
                         } else {
                             format!("{} pinned results missing.", report.missing)
                         };
-                        self.add_success_toast(text);
+                        if report.missing > 0 {
+                            self.add_warning_toast(text);
+                        } else {
+                            self.add_success_toast(text);
+                        }
                     }
                     Err(error) => self.report_error_message(
                         "launcher",
@@ -327,6 +331,10 @@ fn normalize_secondary_outcome(
         value if value == action_ids::TIMER_PAUSE.as_str() && query.starts_with("timer list") => (
             true,
             Some(format!("Paused timer {}", original_action.label)),
+        ),
+        value if value == action_ids::TIMER_RESUME.as_str() && query.starts_with("timer list") => (
+            true,
+            Some(format!("Resumed timer {}", original_action.label)),
         ),
         value if value == action_ids::TIMER_CANCEL.as_str() && query.starts_with("timer list") => (
             true,
@@ -462,6 +470,18 @@ mod tests {
         assert_eq!(
             normalized.toasts,
             vec![ToastPolicy::Success("Removed timer Project".into())]
+        );
+
+        let resumed = normalize_secondary_outcome(
+            action_ids::TIMER_RESUME.as_str(),
+            &action(),
+            "timer list",
+            CommandOutcome::default(),
+        );
+        assert!(resumed.search && resumed.invalidate_results && resumed.focus);
+        assert_eq!(
+            resumed.toasts,
+            vec![ToastPolicy::Success("Resumed timer Project".into())]
         );
     }
 

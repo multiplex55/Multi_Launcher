@@ -140,6 +140,31 @@ mod tests {
                 slug: "daily-note".into()
             })
         );
+
+        let stable = [
+            ActionTarget::Generic { action: action() },
+            ActionTarget::Folder {
+                path: "C:/work".into(),
+            },
+            ActionTarget::Bookmark {
+                url: "https://example.test".into(),
+            },
+            ActionTarget::Snippet {
+                alias: "sig".into(),
+            },
+            ActionTarget::Tempfile {
+                path: "C:/tmp/a".into(),
+            },
+            ActionTarget::Note {
+                slug: "daily-note".into(),
+            },
+            ActionTarget::MkMacro { id: 9 },
+        ];
+        assert!(
+            stable
+                .iter()
+                .all(|target| target.persistent_ref().is_some())
+        );
         assert_eq!(
             ActionTarget::CustomAction {
                 index: 17,

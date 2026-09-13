@@ -3,6 +3,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 
 use crate::actions::Action;
+use crate::commands::ActivationSource;
 use crate::universal_actions::{ActionGroup, ActionSurface, ResolvedActionTarget, UniversalAction};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +135,26 @@ impl ActionSheetState {
             .cloned()
     }
 
+    pub(crate) fn selected_invocation(
+        &self,
+        source: ActivationSource,
+    ) -> Option<(UniversalAction, ActivationSource)> {
+        self.selected_action().map(|action| (action, source))
+    }
+
+    fn invocation_at_filtered_position(
+        &self,
+        position: usize,
+        source: ActivationSource,
+    ) -> Option<(UniversalAction, ActivationSource)> {
+        let action_index = *self.filtered_indices.get(position)?;
+        self.actions
+            .get(action_index)
+            .filter(|action| action.is_available())
+            .cloned()
+            .map(|action| (action, source))
+    }
+
     pub(crate) fn select_filtered_position(&mut self, position: usize) {
         if self
             .filtered_indices
@@ -201,7 +222,7 @@ pub(crate) fn render(
     ctx: &egui::Context,
     state: &mut ActionSheetState,
     matcher: &SkimMatcherV2,
-) -> Option<UniversalAction> {
+) -> Option<(UniversalAction, ActivationSource)> {
     if !state.is_open() {
         return None;
     }
@@ -267,7 +288,8 @@ pub(crate) fn render(
                             state.select_filtered_position(position);
                         }
                         if response.clicked() {
-                            selected = Some(action);
+                            selected = state
+                                .invocation_at_filtered_position(position, ActivationSource::Click);
                         }
                     }
                     if state.filtered_indices.is_empty() {
@@ -431,5 +453,20 @@ mod tests {
         assert_eq!(ctx.input_mut(ActionSheetState::consume_key), None);
         assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
         let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn sheet_selection_preserves_keyboard_and_mouse_activation_sources() {
+        let state = state();
+        let (keyboard_action, keyboard_source) =
+            state.selected_invocation(ActivationSource::Enter).unwrap();
+        let (mouse_action, mouse_source) = state
+            .invocation_at_filtered_position(0, ActivationSource::Click)
+            .unwrap();
+
+        assert_eq!(keyboard_action.id.as_str(), "open.nvim");
+        assert_eq!(mouse_action.id.as_str(), "open.nvim");
+        assert_eq!(keyboard_source, ActivationSource::Enter);
+        assert_eq!(mouse_source, ActivationSource::Click);
     }
 }

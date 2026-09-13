@@ -286,17 +286,152 @@ provider!(BookmarkProvider, resolved, ActionTarget::Bookmark { url } => vec![
     destructive(command_action(action_ids::BOOKMARK_REMOVE, &resolved.target, "Remove Bookmark", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Storage(StorageCommand::BookmarkRemove(url.clone())), &resolved.selected_action)),
 ]);
 
-provider!(TimerProvider, resolved, ActionTarget::Timer { id } => vec![
-    command_action(action_ids::TIMER_PAUSE, &resolved.target, "Pause Timer", "Pause", ActionIconKey::Timer, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::Pause(*id)), &resolved.selected_action),
-    destructive(command_action(action_ids::TIMER_CANCEL, &resolved.target, "Remove Timer", "Remove", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Timer(TimerCommand::Cancel(*id)), &resolved.selected_action)),
-]);
+pub(super) struct TimerProvider;
 
-provider!(StopwatchProvider, resolved, ActionTarget::Stopwatch { id } => vec![
-    command_action(action_ids::STOPWATCH_PAUSE, &resolved.target, "Pause Stopwatch", "Pause", ActionIconKey::Stopwatch, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::StopwatchPause(*id)), &resolved.selected_action),
-    command_action(action_ids::STOPWATCH_RESUME, &resolved.target, "Resume Stopwatch", "Resume", ActionIconKey::Stopwatch, ActionGroup::Automation, ActionPriority::High, Command::Timer(TimerCommand::StopwatchResume(*id)), &resolved.selected_action),
-    destructive(command_action(action_ids::STOPWATCH_STOP, &resolved.target, "Stop Stopwatch", "Stop", ActionIconKey::Delete, ActionGroup::Destructive, ActionPriority::Low, Command::Timer(TimerCommand::StopwatchStop(*id)), &resolved.selected_action)),
-    ui_action(action_ids::STOPWATCH_COPY_TIME, &resolved.target, "Copy Time", "Copy", ActionIconKey::Copy, ActionGroup::CopyShare, ActionPriority::High, UniversalUiIntent::CopyStopwatchTime { id: *id }),
-]);
+impl UniversalActionProvider for TimerProvider {
+    fn actions(
+        &self,
+        resolved: &ResolvedActionTarget,
+        context: &ActionResolutionContext<'_>,
+    ) -> Vec<UniversalAction> {
+        let ActionTarget::Timer { id } = &resolved.target else {
+            return Vec::new();
+        };
+        let mut pause = command_action(
+            action_ids::TIMER_PAUSE,
+            &resolved.target,
+            "Pause Timer",
+            "Pause",
+            ActionIconKey::Timer,
+            ActionGroup::Automation,
+            ActionPriority::High,
+            Command::Timer(TimerCommand::Pause(*id)),
+            &resolved.selected_action,
+        );
+        let mut resume = command_action(
+            action_ids::TIMER_RESUME,
+            &resolved.target,
+            "Resume Timer",
+            "Resume",
+            ActionIconKey::Timer,
+            ActionGroup::Automation,
+            ActionPriority::High,
+            Command::Timer(TimerCommand::Resume(*id)),
+            &resolved.selected_action,
+        );
+        let mut cancel = destructive(command_action(
+            action_ids::TIMER_CANCEL,
+            &resolved.target,
+            "Remove Timer",
+            "Remove",
+            ActionIconKey::Delete,
+            ActionGroup::Destructive,
+            ActionPriority::Low,
+            Command::Timer(TimerCommand::Cancel(*id)),
+            &resolved.selected_action,
+        ));
+        match context.timer_paused {
+            Some(true) => {
+                pause.availability = ActionAvailability::Disabled {
+                    reason: "Timer is already paused".into(),
+                }
+            }
+            Some(false) => {
+                resume.availability = ActionAvailability::Disabled {
+                    reason: "Timer is already running".into(),
+                }
+            }
+            None => {
+                let unavailable = ActionAvailability::Disabled {
+                    reason: "Timer is no longer available".into(),
+                };
+                pause.availability = unavailable.clone();
+                resume.availability = unavailable.clone();
+                cancel.availability = unavailable;
+            }
+        }
+        vec![pause, resume, cancel]
+    }
+}
+
+pub(super) struct StopwatchProvider;
+
+impl UniversalActionProvider for StopwatchProvider {
+    fn actions(
+        &self,
+        resolved: &ResolvedActionTarget,
+        context: &ActionResolutionContext<'_>,
+    ) -> Vec<UniversalAction> {
+        let ActionTarget::Stopwatch { id } = &resolved.target else {
+            return Vec::new();
+        };
+        let mut pause = command_action(
+            action_ids::STOPWATCH_PAUSE,
+            &resolved.target,
+            "Pause Stopwatch",
+            "Pause",
+            ActionIconKey::Stopwatch,
+            ActionGroup::Automation,
+            ActionPriority::High,
+            Command::Timer(TimerCommand::StopwatchPause(*id)),
+            &resolved.selected_action,
+        );
+        let mut resume = command_action(
+            action_ids::STOPWATCH_RESUME,
+            &resolved.target,
+            "Resume Stopwatch",
+            "Resume",
+            ActionIconKey::Stopwatch,
+            ActionGroup::Automation,
+            ActionPriority::High,
+            Command::Timer(TimerCommand::StopwatchResume(*id)),
+            &resolved.selected_action,
+        );
+        let mut copy = ui_action(
+            action_ids::STOPWATCH_COPY_TIME,
+            &resolved.target,
+            "Copy Time",
+            "Copy",
+            ActionIconKey::Copy,
+            ActionGroup::CopyShare,
+            ActionPriority::High,
+            UniversalUiIntent::CopyStopwatchTime { id: *id },
+        );
+        let mut stop = destructive(command_action(
+            action_ids::STOPWATCH_STOP,
+            &resolved.target,
+            "Stop Stopwatch",
+            "Stop",
+            ActionIconKey::Delete,
+            ActionGroup::Destructive,
+            ActionPriority::Low,
+            Command::Timer(TimerCommand::StopwatchStop(*id)),
+            &resolved.selected_action,
+        ));
+        match context.stopwatch_paused {
+            Some(true) => {
+                pause.availability = ActionAvailability::Disabled {
+                    reason: "Stopwatch is already paused".into(),
+                }
+            }
+            Some(false) => {
+                resume.availability = ActionAvailability::Disabled {
+                    reason: "Stopwatch is already running".into(),
+                }
+            }
+            None => {
+                let unavailable = ActionAvailability::Disabled {
+                    reason: "Stopwatch is no longer available".into(),
+                };
+                pause.availability = unavailable.clone();
+                resume.availability = unavailable.clone();
+                copy.availability = unavailable.clone();
+                stop.availability = unavailable;
+            }
+        }
+        vec![pause, resume, copy, stop]
+    }
+}
 
 provider!(SnippetProvider, resolved, ActionTarget::Snippet { alias } => vec![
     ui_action(action_ids::SNIPPET_EDIT, &resolved.target, "Edit Snippet", "Edit", ActionIconKey::Edit, ActionGroup::OpenEdit, ActionPriority::High, UniversalUiIntent::EditSnippet { alias: alias.clone() }),

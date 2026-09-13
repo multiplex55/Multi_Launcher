@@ -7,6 +7,24 @@ pub(crate) struct DeferredActivation {
     pub(crate) source: ActivationSource,
 }
 
+#[derive(Clone, Debug)]
+struct DeferredUniversalAction {
+    action: crate::universal_actions::UniversalAction,
+    surface: crate::universal_actions::ActionSurface,
+    source: ActivationSource,
+}
+
+fn defer_universal_context_action(
+    deferred: &mut Option<DeferredUniversalAction>,
+    action: crate::universal_actions::UniversalAction,
+) {
+    *deferred = Some(DeferredUniversalAction {
+        action,
+        surface: crate::universal_actions::ActionSurface::ContextMenu,
+        source: ActivationSource::Click,
+    });
+}
+
 pub(crate) fn deferred_activation_from_results(
     results: &[Action],
     idx: usize,
@@ -189,7 +207,16 @@ impl LauncherApp {
         let mut action_context =
             crate::universal_actions::ActionResolutionContext::new(surface, self.query.trim());
         action_context.pin = pin;
-        action_context.can_add_favorite = true;
+        action_context.can_add_favorite = resolved.target.persistent_ref().is_some();
+        match &resolved.target {
+            crate::universal_actions::ActionTarget::Timer { id } => {
+                action_context.timer_paused = crate::plugins::timer::timer_paused(*id);
+            }
+            crate::universal_actions::ActionTarget::Stopwatch { id } => {
+                action_context.stopwatch_paused = crate::plugins::stopwatch::stopwatch_paused(*id);
+            }
+            _ => {}
+        }
 
         let actions =
             crate::universal_actions::UniversalActionRegistry.resolve(&resolved, &action_context);
@@ -244,13 +271,15 @@ impl LauncherApp {
     pub(crate) fn handle_action_sheet_key(
         &mut self,
         key: Option<action_sheet::ActionSheetKey>,
-    ) -> Option<crate::universal_actions::UniversalAction> {
+    ) -> Option<(crate::universal_actions::UniversalAction, ActivationSource)> {
         match key {
             Some(action_sheet::ActionSheetKey::Escape) => self.close_action_sheet(),
             Some(action_sheet::ActionSheetKey::Up) => self.action_sheet.move_selection(-1),
             Some(action_sheet::ActionSheetKey::Down) => self.action_sheet.move_selection(1),
             Some(action_sheet::ActionSheetKey::Enter) => {
-                let selected = self.action_sheet.selected_action();
+                let selected = self
+                    .action_sheet
+                    .selected_invocation(ActivationSource::Enter);
                 if selected.is_some() {
                     self.close_action_sheet();
                 }
@@ -267,6 +296,7 @@ impl LauncherApp {
         menu_resp: egui::Response,
         _refresh: &mut bool,
         _set_focus: &mut bool,
+        deferred: &mut Option<DeferredUniversalAction>,
     ) -> egui::Response {
         // egui only invokes this closure while the popup is open. Keep target
         // resolution and pin I/O here so ordinary list/grid rendering remains
@@ -276,11 +306,7 @@ impl LauncherApp {
             let actions = self.resolve_context_menu_actions(action, pin);
 
             if let Some(action) = render_universal_context_menu(ui, &actions) {
-                self.execute_universal_action(
-                    action,
-                    crate::universal_actions::ActionSurface::ContextMenu,
-                    ActivationSource::Click,
-                );
+                defer_universal_context_action(deferred, action);
                 ui.close_menu();
             }
         });
@@ -780,17 +806,18 @@ impl eframe::App for LauncherApp {
                 self.focus_input();
             }
         }
-        if let Some(action) = selected_sheet_action {
+        if let Some((action, source)) = selected_sheet_action {
             // Closing first prevents primary and UI-intent execution from
             // competing with the sheet's focus or modal state.
             self.execute_universal_action(
                 action,
                 crate::universal_actions::ActionSurface::ActionSheet,
-                ActivationSource::Enter,
+                source,
             );
         }
         let action_sheet_blocks_launcher_input = self.action_sheet.is_open();
 
+        let mut deferred_universal_action = None;
         CentralPanel::default().show(ctx, |ui| {
             let mut deferred_activation: Option<DeferredActivation> = None;
             ui.heading("🚀 Multi Lnchr");
@@ -1063,6 +1090,7 @@ impl eframe::App for LauncherApp {
                                                 resp,
                                                 &mut refresh,
                                                 &mut set_focus,
+                                                &mut deferred_universal_action,
                                             );
                                             if self.selected == Some(idx) {
                                                 menu_resp.scroll_to_me(Some(egui::Align::Center));
@@ -1109,7 +1137,7 @@ impl eframe::App for LauncherApp {
                                         a.action.clone()
                                     };
                                     let menu_resp =
-                                        self.attach_result_context_menu(&a, resp.on_hover_text(tooltip), &mut refresh, &mut set_focus);
+                                        self.attach_result_context_menu(&a, resp.on_hover_text(tooltip), &mut refresh, &mut set_focus, &mut deferred_universal_action);
                                     if self.selected == Some(idx) {
                                         menu_resp.scroll_to_me(Some(egui::Align::Center));
                                     }
@@ -1144,6 +1172,9 @@ impl eframe::App for LauncherApp {
                 );
             }
         });
+        if let Some(deferred) = deferred_universal_action {
+            self.execute_universal_action(deferred.action, deferred.surface, deferred.source);
+        }
         let show_editor = self.show_editor;
         if show_editor {
             let mut editor = std::mem::take(&mut self.editor);
@@ -3806,8 +3837,8 @@ mod tests {
             .insert(bookmark.action.clone(), Some("Docs".into()));
 
         let cases = vec![
-            (folder, "folder.set_alias"),
-            (bookmark, "bookmark.set_alias"),
+            (folder, "folder.set_alias", true),
+            (bookmark, "bookmark.set_alias", true),
             (
                 Action {
                     label: "Timer".into(),
@@ -3816,6 +3847,7 @@ mod tests {
                     args: None,
                 },
                 "timer.pause",
+                false,
             ),
             (
                 Action {
@@ -3825,6 +3857,7 @@ mod tests {
                     args: None,
                 },
                 "stopwatch.copy_time",
+                false,
             ),
             (
                 Action {
@@ -3834,6 +3867,7 @@ mod tests {
                     args: None,
                 },
                 "snippet.edit",
+                true,
             ),
             (
                 Action {
@@ -3843,6 +3877,7 @@ mod tests {
                     args: None,
                 },
                 "tempfile.set_alias",
+                true,
             ),
             (
                 Action {
@@ -3852,6 +3887,7 @@ mod tests {
                     args: None,
                 },
                 "note.edit",
+                true,
             ),
             (
                 Action {
@@ -3861,6 +3897,7 @@ mod tests {
                     args: None,
                 },
                 "clipboard.edit",
+                false,
             ),
             (
                 Action {
@@ -3870,6 +3907,7 @@ mod tests {
                     args: None,
                 },
                 "todo.edit",
+                false,
             ),
             (
                 Action {
@@ -3879,10 +3917,11 @@ mod tests {
                     args: None,
                 },
                 "result.favorite",
+                true,
             ),
         ];
 
-        for (action, expected_id) in cases {
+        for (action, expected_id, favorite_expected) in cases {
             app.resolved_grid_layout = false;
             let list = app.resolve_context_menu_actions(
                 &action,
@@ -3904,9 +3943,59 @@ mod tests {
                 "missing {expected_id}"
             );
             assert!(ids(&list).iter().any(|id| id == "result.pin"));
-            assert!(ids(&list).iter().any(|id| id == "result.favorite"));
+            assert_eq!(
+                ids(&list).iter().any(|id| id == "result.favorite"),
+                favorite_expected,
+                "favorite persistence policy mismatch for {}",
+                action.action
+            );
             assert_eq!(ids(&list), ids(&grid));
         }
+    }
+
+    #[test]
+    fn context_action_is_deferred_until_all_result_rows_have_been_visited() {
+        let selected = Action {
+            label: "Remove first".into(),
+            desc: "Test".into(),
+            action: "plugin:remove:first".into(),
+            args: None,
+        };
+        let resolved = crate::universal_actions::ResolvedActionTarget {
+            target: crate::universal_actions::ActionTarget::Generic {
+                action: selected.clone(),
+            },
+            selected_action: selected.clone(),
+            custom_action_index: None,
+        };
+        let action = crate::universal_actions::UniversalActionRegistry
+            .resolve(
+                &resolved,
+                &crate::universal_actions::ActionResolutionContext::new(
+                    crate::universal_actions::ActionSurface::ContextMenu,
+                    "query",
+                ),
+            )
+            .into_iter()
+            .next()
+            .unwrap();
+        let mut rows = vec![0, 1, 2];
+        let mut visited = Vec::new();
+        let mut deferred = None;
+
+        for row in rows.iter().copied() {
+            visited.push(row);
+            if row == 0 {
+                defer_universal_context_action(&mut deferred, action.clone());
+            }
+        }
+        assert_eq!(visited, [0, 1, 2]);
+        assert_eq!(rows, [0, 1, 2]);
+
+        if deferred.take().is_some() {
+            rows.remove(0);
+        }
+        assert_eq!(rows, [1, 2]);
     }
 
     #[test]

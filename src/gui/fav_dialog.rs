@@ -63,7 +63,18 @@ impl FavDialog {
             self.open = true;
             return;
         }
-        self.edit_idx = Some(self.entries.len());
+        self.edit_idx = self
+            .entries
+            .iter()
+            .position(|entry| {
+                entry.action == action.action && entry.args.as_deref() == action.args.as_deref()
+            })
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .position(|entry| entry.label.eq_ignore_ascii_case(&action.label))
+            })
+            .or(Some(self.entries.len()));
         self.label.clone_from(&action.label);
         self.command.clone_from(&action.action);
         self.args = action.args.clone().unwrap_or_default();
@@ -375,5 +386,48 @@ mod tests {
         assert_eq!(dialog.label, action.label);
         assert_eq!(dialog.command, action.action);
         assert_eq!(dialog.args, action.args.unwrap());
+    }
+
+    #[test]
+    fn prefilled_add_edits_exact_command_or_case_insensitive_label_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fav.json");
+        let entries = vec![
+            FavEntry {
+                label: "Other label".into(),
+                action: "same:command".into(),
+                args: Some("--same".into()),
+            },
+            FavEntry {
+                label: "PROJECT".into(),
+                action: "old:command".into(),
+                args: None,
+            },
+        ];
+        save_favs(path.to_str().unwrap(), &entries).unwrap();
+        let mut dialog = FavDialog::default();
+
+        dialog.open_prefilled_add_from(
+            &Action {
+                label: "New label".into(),
+                desc: String::new(),
+                action: "same:command".into(),
+                args: Some("--same".into()),
+            },
+            path.to_str().unwrap(),
+        );
+        assert_eq!(dialog.edit_idx, Some(0));
+
+        dialog.open_prefilled_add_from(
+            &Action {
+                label: "project".into(),
+                desc: String::new(),
+                action: "new:command".into(),
+                args: None,
+            },
+            path.to_str().unwrap(),
+        );
+        assert_eq!(dialog.edit_idx, Some(1));
+        assert_eq!(dialog.command, "new:command");
     }
 }

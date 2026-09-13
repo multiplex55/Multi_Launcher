@@ -94,6 +94,15 @@ pub fn stop_stopwatch(id: u64) {
     }
 }
 
+/// Return the current pause state of one live stopwatch without performing I/O.
+pub fn stopwatch_paused(id: u64) -> Option<bool> {
+    STOPWATCHES
+        .lock()
+        .ok()?
+        .get(&id)
+        .map(|stopwatch| stopwatch.paused)
+}
+
 pub fn running_stopwatches() -> Vec<(u64, String, Duration)> {
     if let Ok(guard) = STOPWATCHES.lock() {
         guard
@@ -424,5 +433,20 @@ impl Plugin for StopwatchPlugin {
             Err(e) => tracing::error!("failed to serialize stopwatch settings: {e}"),
         }
         self.apply_settings(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopwatch_paused_tracks_live_pause_state_and_missing_entries() {
+        let id = start_stopwatch_named(Some("state test".into()));
+        assert_eq!(stopwatch_paused(id), Some(false));
+        pause_stopwatch(id);
+        assert_eq!(stopwatch_paused(id), Some(true));
+        stop_stopwatch(id);
+        assert_eq!(stopwatch_paused(id), None);
     }
 }

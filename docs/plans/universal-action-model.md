@@ -49,7 +49,7 @@ types only when an action-oriented surface requests them.
 - Add the searchable Ctrl+Enter Action Sheet with shared selected/sole-result
   targeting, independent filter state, keyboard navigation, and focus safety.
 
-### 7. Compatibility hardening and full verification — `pending`
+### 7. Compatibility hardening and full verification — `in_progress`
 
 - Add resolver/provider/executor/UI regression coverage, confirm persistence and
   launcher behavior compatibility, complete independent review, and pass the

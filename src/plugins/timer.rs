@@ -494,6 +494,15 @@ pub fn timer_start_ts(id: u64) -> Option<u64> {
     timers.get(&id).map(|t| t.start_ts)
 }
 
+/// Return the current pause state of one live timer without performing I/O.
+pub fn timer_paused(id: u64) -> Option<bool> {
+    ACTIVE_TIMERS
+        .lock()
+        .ok()?
+        .get(&id)
+        .map(|timer| timer.paused)
+}
+
 /// Cancel the timer with the given `id` if it exists.
 pub fn cancel_timer(id: u64) {
     if let Ok(mut timers) = ACTIVE_TIMERS.lock()
@@ -899,5 +908,29 @@ mod persistence_tests {
         std::fs::write(&path, invalid).unwrap();
         assert!(save_persistent_alarms_to(path_str, &HashMap::new()).is_err());
         assert_eq!(std::fs::read(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn timer_paused_reads_only_the_requested_live_entry() {
+        let id = u64::MAX - 1;
+        ACTIVE_TIMERS.lock().unwrap().insert(
+            id,
+            TimerEntry {
+                id,
+                label: "state test".into(),
+                deadline: Instant::now() + Duration::from_secs(60),
+                persist: false,
+                end_ts: 0,
+                start_ts: 0,
+                paused: true,
+                remaining: Duration::from_secs(60),
+                generation: 0,
+                sound: String::new(),
+            },
+        );
+
+        assert_eq!(timer_paused(id), Some(true));
+        assert_eq!(timer_paused(id - 1), None);
+        ACTIVE_TIMERS.lock().unwrap().remove(&id);
     }
 }
