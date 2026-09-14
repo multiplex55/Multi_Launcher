@@ -171,9 +171,22 @@ pub enum ActionBinding {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DynamicSource {
-    LauncherResults { max_items: usize },
+    /// Compatibility form from schema v1. It reads the invocation's explicitly
+    /// supplied query and never the mutable root launcher query field.
+    LauncherResults {
+        max_items: usize,
+    },
+    LauncherQuery {
+        query: String,
+        max_items: usize,
+    },
     Favorites,
     RecentItems,
+    Clipboard,
+    Snippets,
+    Notes,
+    Windows,
+    Macros,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +196,7 @@ pub enum Control {
     Close,
     NextPage,
     PreviousPage,
+    Drag,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -245,7 +259,31 @@ pub struct MenuDefinition {
     pub layout: LayoutKind,
     pub interaction: InteractionMode,
     #[serde(default)]
+    pub hover_dwell_ms: Option<u64>,
+    #[serde(default)]
     pub submenu_presentation: SubmenuPresentation,
+    #[serde(default)]
+    pub after_action: AfterActionPolicy,
+    #[serde(default)]
+    pub center_action: Option<ActionBinding>,
+    #[serde(default)]
+    pub center_primary_after_action: AfterActionPolicy,
+    #[serde(default)]
+    pub center_secondary_action: Option<ActionBinding>,
+    #[serde(default)]
+    pub center_secondary_after_action: AfterActionPolicy,
+    #[serde(default)]
+    pub center_control: Option<Control>,
+    #[serde(default)]
+    pub background_action: Option<ActionBinding>,
+    #[serde(default)]
+    pub background_primary_after_action: AfterActionPolicy,
+    #[serde(default)]
+    pub background_secondary_action: Option<ActionBinding>,
+    #[serde(default)]
+    pub background_secondary_after_action: AfterActionPolicy,
+    #[serde(default)]
+    pub mirror_primary_to_secondary: bool,
     pub skin_id: SkinId,
     pub center_radius: f32,
     pub rings: Vec<RingDefinition>,
@@ -284,6 +322,10 @@ pub struct ContextRule {
     pub enabled: bool,
     pub priority: i32,
     pub process_name: Option<String>,
+    #[serde(default)]
+    pub window_title_contains: Option<String>,
+    #[serde(default)]
+    pub monitor_id: Option<String>,
     pub menu_id: MenuId,
 }
 
@@ -292,6 +334,8 @@ pub struct RadialDocument {
     pub schema_version: u32,
     pub revision: ConfigRevision,
     pub default_menu_id: MenuId,
+    #[serde(default)]
+    pub after_action: AfterActionPolicy,
     pub menus: Vec<MenuDefinition>,
     pub skins: Vec<SkinDefinition>,
     #[serde(default)]
@@ -318,7 +362,10 @@ impl RadialDocument {
             (
                 "results",
                 "Launcher results",
-                DynamicSource::LauncherResults { max_items: 12 },
+                DynamicSource::LauncherQuery {
+                    query: String::new(),
+                    max_items: 12,
+                },
             ),
         ]
         .into_iter()
@@ -335,12 +382,25 @@ impl RadialDocument {
             schema_version: CURRENT_SCHEMA_VERSION,
             revision: ConfigRevision(1),
             default_menu_id: menu_id.clone(),
+            after_action: AfterActionPolicy::Inherit,
             menus: vec![MenuDefinition {
                 id: menu_id,
                 name: "Starter".into(),
                 layout: LayoutKind::CircularCells,
                 interaction: InteractionMode::StickyClick,
+                hover_dwell_ms: None,
                 submenu_presentation: SubmenuPresentation::Cascade,
+                after_action: AfterActionPolicy::Inherit,
+                center_action: None,
+                center_primary_after_action: AfterActionPolicy::Inherit,
+                center_secondary_action: None,
+                center_secondary_after_action: AfterActionPolicy::Inherit,
+                center_control: Some(Control::Drag),
+                background_action: None,
+                background_primary_after_action: AfterActionPolicy::Inherit,
+                background_secondary_action: None,
+                background_secondary_after_action: AfterActionPolicy::Inherit,
+                mirror_primary_to_secondary: false,
                 skin_id: skin_id.clone(),
                 center_radius: 30.0,
                 rings: vec![RingDefinition {
@@ -366,13 +426,46 @@ impl RadialDocument {
     }
 }
 
+pub fn effective_after_action(
+    document: &RadialDocument,
+    menu: &MenuDefinition,
+    cell: AfterActionPolicy,
+) -> AfterActionPolicy {
+    for policy in [cell, menu.after_action, document.after_action] {
+        if policy != AfterActionPolicy::Inherit {
+            return policy;
+        }
+    }
+    if menu.interaction == InteractionMode::StickyClick {
+        AfterActionPolicy::KeepOpen
+    } else {
+        AfterActionPolicy::CloseTree
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn after_action_inherits_cell_menu_document_then_interaction_default() {
+        let mut document = RadialDocument::starter();
+        let menu = &document.menus[0];
+        assert_eq!(
+            effective_after_action(&document, menu, AfterActionPolicy::Inherit),
+            AfterActionPolicy::KeepOpen
+        );
+        document.after_action = AfterActionPolicy::CloseTree;
+        assert_eq!(
+            effective_after_action(&document, &document.menus[0], AfterActionPolicy::Inherit),
+            AfterActionPolicy::CloseTree
+        );
+    }
+
+    #[test]
     fn starter_is_versioned_and_uses_stable_references() {
         let document = RadialDocument::starter();
+        assert_eq!(document.menus[0].center_control, Some(Control::Drag));
         assert_eq!(document.schema_version, CURRENT_SCHEMA_VERSION);
         assert!(
             document
@@ -402,6 +495,47 @@ mod tests {
             )
             .unwrap(),
             overrides
+        );
+
+        let mut menu_json = serde_json::to_value(&RadialDocument::starter().menus[0]).unwrap();
+        let object = menu_json.as_object_mut().unwrap();
+        object.remove("center_primary_after_action");
+        object.remove("background_primary_after_action");
+        let legacy: MenuDefinition = serde_json::from_value(menu_json).unwrap();
+        assert_eq!(
+            legacy.center_primary_after_action,
+            AfterActionPolicy::Inherit
+        );
+        assert_eq!(
+            legacy.background_primary_after_action,
+            AfterActionPolicy::Inherit
+        );
+    }
+
+    #[test]
+    fn special_surface_button_policies_round_trip_independently() {
+        let mut menu = RadialDocument::starter().menus.remove(0);
+        menu.center_primary_after_action = AfterActionPolicy::CloseCurrentMenu;
+        menu.center_secondary_after_action = AfterActionPolicy::KeepOpen;
+        menu.background_primary_after_action = AfterActionPolicy::CloseTree;
+        menu.background_secondary_after_action = AfterActionPolicy::CloseCurrentMenu;
+        let decoded: MenuDefinition =
+            serde_json::from_value(serde_json::to_value(&menu).unwrap()).unwrap();
+        assert_eq!(
+            decoded.center_primary_after_action,
+            AfterActionPolicy::CloseCurrentMenu
+        );
+        assert_eq!(
+            decoded.center_secondary_after_action,
+            AfterActionPolicy::KeepOpen
+        );
+        assert_eq!(
+            decoded.background_primary_after_action,
+            AfterActionPolicy::CloseTree
+        );
+        assert_eq!(
+            decoded.background_secondary_after_action,
+            AfterActionPolicy::CloseCurrentMenu
         );
     }
 }

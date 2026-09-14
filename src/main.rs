@@ -713,7 +713,6 @@ fn main() -> anyhow::Result<()> {
     );
     let mut queued_visibility: Option<bool> = None;
     let mut previous_exclusive = false;
-    let mut next_direct_invocation = 1_000_000u64;
     let mut pending_launcher_route: Option<PendingLauncherRoute> = None;
 
     loop {
@@ -815,11 +814,7 @@ fn main() -> anyhow::Result<()> {
                                 }
                             }
                         }
-                        RelatedAction::DirectMenu { menu_id, .. } => {
-                            notice.intents.push(multi_launcher::radial::invocation::InvocationIntent::ToggleDirectMenu{id:multi_launcher::radial::model::InvocationId(next_direct_invocation),menu_id});
-                            next_direct_invocation =
-                                next_direct_invocation.checked_add(1).unwrap_or(1_000_000);
-                        }
+                        RelatedAction::DirectMenu { .. } => {}
                     }
                 }
                 radial_notices.push(notice)
@@ -933,10 +928,32 @@ fn main() -> anyhow::Result<()> {
                             let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionOpened{id:invocation_id,session_id});
                         }
                     }
-                    ControllerEvent::Closed { invocation_id, .. } => {
+                    ControllerEvent::Closed {
+                        invocation_id,
+                        reason,
+                        ..
+                    } => {
                         if let Some(service) = invocation_service.as_ref() {
-                            let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id});
+                            let event = if reason
+                                == multi_launcher::radial::native::CloseReason::ActionHandoff
+                            {
+                                multi_launcher::radial::invocation::InvocationEvent::RadialClosedForAction{id:invocation_id}
+                            } else {
+                                multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id}
+                            };
+                            let _ = service.feedback(event);
                         }
+                    }
+                    ControllerEvent::DispatchRequested(request) => {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialDispatch(request),
+                        );
+                    }
+                    ControllerEvent::InvocationReleaseAcknowledged { .. } => {}
+                    ControllerEvent::PrepareRequested(envelope) => {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialPrepare(envelope),
+                        );
                     }
                 }
             }
@@ -961,12 +978,34 @@ fn main() -> anyhow::Result<()> {
                         let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionOpened{id:invocation_id,session_id});
                     }
                 }
-                ControllerEvent::Closed { invocation_id, .. } => {
+                ControllerEvent::Closed {
+                    invocation_id,
+                    reason,
+                    ..
+                } => {
                     if let Some(service) = invocation_service.as_ref() {
-                        let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id});
+                        let event = if reason
+                            == multi_launcher::radial::native::CloseReason::ActionHandoff
+                        {
+                            multi_launcher::radial::invocation::InvocationEvent::RadialClosedForAction{id:invocation_id}
+                        } else {
+                            multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id}
+                        };
+                        let _ = service.feedback(event);
                     }
                 }
                 ControllerEvent::ToggleLegacyLauncher => {}
+                ControllerEvent::DispatchRequested(request) => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialDispatch(request),
+                    );
+                }
+                ControllerEvent::InvocationReleaseAcknowledged { .. } => {}
+                ControllerEvent::PrepareRequested(envelope) => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialPrepare(envelope),
+                    );
+                }
             }
         }
 
@@ -983,6 +1022,8 @@ fn main() -> anyhow::Result<()> {
         }
 
         if let Ok(new_settings) = restart_rx.try_recv() {
+            let _ =
+                multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
             radial_controller.close(
                 multi_launcher::radial::native::CloseReason::SettingsReload,
                 None,
@@ -1454,6 +1495,9 @@ mod tests {
                 multi_launcher::radial::invocation::InvocationIntent::ToggleDirectMenu {
                     id: multi_launcher::radial::model::InvocationId(2),
                     menu_id: multi_launcher::radial::model::MenuId::new("starter"),
+                    primary_key: 0x54,
+                    provenance: multi_launcher::radial::invocation::InputProvenance::Physical,
+                    trigger_still_down: true,
                 },
                 multi_launcher::radial::invocation::InvocationIntent::ToggleLegacyLauncher {
                     id: multi_launcher::radial::model::InvocationId(3),

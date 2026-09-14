@@ -1,3 +1,4 @@
+use super::dynamic::FrozenRadialEntry;
 use super::geometry::{LogicalPoint, PhysicalPoint};
 use super::model::{CellId, ConfigRevision, InteractionMode, InvocationId, MenuId, SessionId};
 use std::collections::BTreeMap;
@@ -15,10 +16,32 @@ pub enum PointerButton {
     Primary,
     Secondary,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NavigationModifiers {
+    pub control: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub alt_gr: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavigationCommand {
+    Next,
+    Previous,
+    ActivatePrimary,
+    ActivateSecondary,
+    Back,
+    NextPage,
+    PreviousPage,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellRole {
     Action,
     Submenu,
+    Back,
+    Close,
+    NextPage,
+    PreviousPage,
     Spacer,
     Unavailable,
 }
@@ -29,10 +52,14 @@ pub struct FrameId(pub u64);
 #[derive(Clone, Debug, PartialEq)]
 pub struct MenuFrame {
     pub frame_id: FrameId,
+    pub parent_frame_id: Option<FrameId>,
     pub menu_id: MenuId,
     pub origin: PhysicalPoint,
     pub geometry_generation: u64,
+    pub scale_factor: f64,
     pub page: usize,
+    pub page_count: usize,
+    pub selected: Option<CellId>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,7 +90,7 @@ pub struct SessionState {
     pub session_id: SessionId,
     pub definition_revision: ConfigRevision,
     pub stack: Vec<MenuFrame>,
-    pub frozen_dynamic_results: BTreeMap<DynamicCacheKey, Vec<String>>,
+    pub frozen_dynamic_results: BTreeMap<DynamicCacheKey, Vec<FrozenRadialEntry>>,
     pub hovered: Option<CellId>,
     pub selected: Option<CellId>,
     pub keyboard_ownership: KeyboardOwnership,
@@ -73,6 +100,8 @@ pub struct SessionState {
     pub session_generation: u64,
     pub armed: bool,
     pub arming_baseline: ArmingBaseline,
+    pub modifiers: NavigationModifiers,
+    pub dwell_candidate: Option<(CellId, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,10 +155,29 @@ pub enum SessionEvent {
     SelectKeyboard {
         cell: CellId,
     },
+    Navigate {
+        command: NavigationCommand,
+        cells: Vec<(CellId, CellRole)>,
+        pointer_baseline: LogicalPoint,
+        geometry_generation: u64,
+    },
+    ModifiersChanged(NavigationModifiers),
+    StartDwell {
+        cell: CellId,
+        role: CellRole,
+        deadline: u64,
+    },
+    DwellExpired {
+        cell: CellId,
+        role: CellRole,
+        at: u64,
+        point: LogicalPoint,
+        geometry_generation: u64,
+    },
     FreezeDynamic {
         frame_id: FrameId,
         source_cell: CellId,
-        results: Vec<String>,
+        results: Vec<FrozenRadialEntry>,
     },
     Close,
 }
@@ -139,12 +187,18 @@ pub enum SessionIntent {
     Dispatch {
         cell_id: CellId,
         token: DispatchToken,
+        button: PointerButton,
+        modifiers: NavigationModifiers,
+        source: crate::commands::ActivationSource,
     },
     OpenSubmenu {
         cell_id: CellId,
     },
     CloseTree,
     Back,
+    PageChanged {
+        page: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -178,10 +232,14 @@ impl SessionReducer {
                 definition_revision,
                 stack: vec![MenuFrame {
                     frame_id: FrameId(1),
+                    parent_frame_id: None,
                     menu_id: root_menu,
                     origin,
                     geometry_generation,
+                    scale_factor: 1.0,
                     page: 0,
+                    page_count: 1,
+                    selected: None,
                 }],
                 frozen_dynamic_results: BTreeMap::new(),
                 hovered: None,
@@ -196,6 +254,8 @@ impl SessionReducer {
                     point: open_pointer,
                     geometry_generation,
                 },
+                modifiers: NavigationModifiers::default(),
+                dwell_candidate: None,
             },
             invocation_id: invocation,
             next_dispatch: 1,
@@ -218,6 +278,14 @@ impl SessionReducer {
                     return vec![];
                 }
                 self.state.hovered = hovered;
+                if self
+                    .state
+                    .dwell_candidate
+                    .as_ref()
+                    .is_some_and(|(cell, _)| Some(cell) != self.state.hovered.as_ref())
+                {
+                    self.state.dwell_candidate = None;
+                }
                 if let Some(press) = self.state.pending_press.as_mut() {
                     if press.geometry_generation == geometry_generation
                         && distance2(point, press.origin) > DRAG_DISTANCE_SQUARED
@@ -239,6 +307,7 @@ impl SessionReducer {
                 button,
                 geometry_generation,
             } if actionable(role) && self.current_geometry() == geometry_generation => {
+                self.state.dwell_candidate = None;
                 self.state.armed = true;
                 self.state.pending_press = Some(PendingPress {
                     cell_id,
@@ -252,6 +321,7 @@ impl SessionReducer {
             }
             SessionEvent::PointerDown { .. } => {
                 self.state.pending_press = None;
+                self.state.dwell_candidate = None;
                 vec![]
             }
             SessionEvent::PointerUp {
@@ -276,7 +346,14 @@ impl SessionReducer {
                 {
                     return vec![];
                 }
-                self.activate(press.cell_id, role, point, geometry_generation)
+                self.activate(
+                    press.cell_id,
+                    role,
+                    point,
+                    geometry_generation,
+                    button,
+                    crate::commands::ActivationSource::Click,
+                )
             }
             SessionEvent::TriggerReleased {
                 point,
@@ -298,7 +375,14 @@ impl SessionReducer {
                 let Some(cell_id) = cell else {
                     return self.cancel_tree();
                 };
-                self.activate(cell_id, role, point, geometry_generation)
+                self.activate(
+                    cell_id,
+                    role,
+                    point,
+                    geometry_generation,
+                    PointerButton::Primary,
+                    crate::commands::ActivationSource::RadialRelease,
+                )
             }
             SessionEvent::OpenChild {
                 menu_id,
@@ -306,15 +390,33 @@ impl SessionReducer {
                 geometry_generation,
                 pointer_baseline,
             } => {
-                self.bump_generation();
+                if !self.bump_generation() {
+                    return self.cancel_tree();
+                }
                 let frame_id = FrameId(self.next_frame);
-                self.next_frame = self.next_frame.saturating_add(1);
+                let Some(next_frame) = self.next_frame.checked_add(1) else {
+                    return self.cancel_tree();
+                };
+                self.next_frame = next_frame;
+                let parent_frame_id = self.state.stack.last().map(|frame| frame.frame_id);
+                let scale_factor = self
+                    .state
+                    .stack
+                    .last()
+                    .map_or(1.0, |frame| frame.scale_factor);
+                if let Some(parent) = self.state.stack.last_mut() {
+                    parent.selected = self.state.selected.clone();
+                }
                 self.state.stack.push(MenuFrame {
                     frame_id,
+                    parent_frame_id,
                     menu_id,
                     origin,
                     geometry_generation,
+                    scale_factor,
                     page: 0,
+                    page_count: 1,
+                    selected: None,
                 });
                 self.disarm(pointer_baseline, geometry_generation);
                 vec![]
@@ -326,12 +428,20 @@ impl SessionReducer {
                 let popped = self.state.stack.len() > 1;
                 if popped {
                     self.state.stack.pop();
-                    self.bump_generation();
+                    if !self.bump_generation() {
+                        return self.cancel_tree();
+                    }
                 }
                 if let Some(frame) = self.state.stack.last_mut() {
                     frame.geometry_generation = geometry_generation;
                 }
+                let restored = self
+                    .state
+                    .stack
+                    .last()
+                    .and_then(|frame| frame.selected.clone());
                 self.disarm(pointer_baseline, geometry_generation);
+                self.state.selected = restored;
                 if popped {
                     vec![SessionIntent::Back]
                 } else {
@@ -339,15 +449,18 @@ impl SessionReducer {
                 }
             }
             SessionEvent::PageChanged {
-                page,
+                mut page,
                 geometry_generation,
                 pointer_baseline,
             } => {
                 if let Some(frame) = self.state.stack.last_mut() {
+                    page = page.min(frame.page_count.saturating_sub(1));
                     frame.page = page;
                     frame.geometry_generation = geometry_generation;
                 }
-                self.bump_generation();
+                if !self.bump_generation() {
+                    return self.cancel_tree();
+                }
                 self.disarm(pointer_baseline, geometry_generation);
                 vec![]
             }
@@ -358,13 +471,16 @@ impl SessionReducer {
                 if let Some(frame) = self.state.stack.last_mut() {
                     frame.geometry_generation = geometry_generation;
                 }
-                self.bump_generation();
+                if !self.bump_generation() {
+                    return self.cancel_tree();
+                }
                 self.disarm(pointer_baseline, geometry_generation);
                 vec![]
             }
             SessionEvent::OutsideInteraction => {
                 self.state.keyboard_ownership = KeyboardOwnership::ExternalApplication;
                 self.state.pending_press = None;
+                self.state.dwell_candidate = None;
                 vec![]
             }
             SessionEvent::MenuInteraction => {
@@ -373,10 +489,67 @@ impl SessionReducer {
             }
             SessionEvent::SelectKeyboard { cell } => {
                 if self.state.keyboard_ownership == KeyboardOwnership::MenuNavigation {
-                    self.state.selected = Some(cell);
+                    self.state.selected = Some(cell.clone());
+                    if let Some(frame) = self.state.stack.last_mut() {
+                        frame.selected = Some(cell);
+                    }
                     self.state.armed = true;
                 }
                 vec![]
+            }
+            SessionEvent::ModifiersChanged(modifiers) => {
+                self.state.modifiers = modifiers;
+                vec![]
+            }
+            SessionEvent::Navigate {
+                command,
+                cells,
+                pointer_baseline,
+                geometry_generation,
+            } => self.navigate(command, cells, pointer_baseline, geometry_generation),
+            SessionEvent::StartDwell {
+                cell,
+                role,
+                deadline,
+            } => {
+                if role != CellRole::Submenu {
+                    self.state.dwell_candidate = None;
+                    return vec![];
+                }
+                if self
+                    .state
+                    .dwell_candidate
+                    .as_ref()
+                    .is_none_or(|(current, _)| current != &cell)
+                {
+                    self.state.dwell_candidate = Some((cell, deadline));
+                }
+                vec![]
+            }
+            SessionEvent::DwellExpired {
+                cell,
+                role,
+                at,
+                point,
+                geometry_generation,
+            } => {
+                if self.state.dwell_candidate.as_ref() != Some(&(cell.clone(), at))
+                    || self.current_geometry() != geometry_generation
+                {
+                    return vec![];
+                }
+                self.state.dwell_candidate = None;
+                if role != CellRole::Submenu {
+                    return vec![];
+                }
+                self.activate(
+                    cell,
+                    role,
+                    point,
+                    geometry_generation,
+                    PointerButton::Primary,
+                    crate::commands::ActivationSource::Click,
+                )
             }
             SessionEvent::FreezeDynamic {
                 frame_id,
@@ -410,7 +583,33 @@ impl SessionReducer {
         role: CellRole,
         point: LogicalPoint,
         geometry_generation: u64,
+        button: PointerButton,
+        source: crate::commands::ActivationSource,
     ) -> Vec<SessionIntent> {
+        if role == CellRole::Back {
+            return self.reduce(SessionEvent::Back {
+                geometry_generation,
+                pointer_baseline: point,
+            });
+        }
+        if role == CellRole::Close {
+            return self.cancel_tree();
+        }
+        if matches!(role, CellRole::NextPage | CellRole::PreviousPage) {
+            let page = self.state.stack.last().map_or(0, |frame| frame.page);
+            let page = if role == CellRole::NextPage {
+                page.saturating_add(1)
+            } else {
+                page.saturating_sub(1)
+            };
+            self.reduce(SessionEvent::PageChanged {
+                page,
+                geometry_generation,
+                pointer_baseline: point,
+            });
+            let page = self.state.stack.last().map_or(0, |frame| frame.page);
+            return vec![SessionIntent::PageChanged { page }];
+        }
         if role == CellRole::Submenu {
             if self.state.interaction == InteractionMode::ReleaseToSelect {
                 self.state.interaction = InteractionMode::StickyClick;
@@ -432,12 +631,103 @@ impl SessionReducer {
             session_generation: self.state.session_generation,
             ordinal: self.next_dispatch,
         };
-        self.next_dispatch = self.next_dispatch.saturating_add(1);
-        vec![SessionIntent::Dispatch { cell_id, token }]
+        let Some(next_dispatch) = self.next_dispatch.checked_add(1) else {
+            return self.cancel_tree();
+        };
+        self.next_dispatch = next_dispatch;
+        vec![SessionIntent::Dispatch {
+            cell_id,
+            token,
+            button,
+            modifiers: self.state.modifiers,
+            source,
+        }]
+    }
+    fn navigate(
+        &mut self,
+        command: NavigationCommand,
+        cells: Vec<(CellId, CellRole)>,
+        point: LogicalPoint,
+        geometry_generation: u64,
+    ) -> Vec<SessionIntent> {
+        if self.state.keyboard_ownership != KeyboardOwnership::MenuNavigation
+            || self.current_geometry() != geometry_generation
+        {
+            return vec![];
+        }
+        let actionable: Vec<_> = cells
+            .into_iter()
+            .filter(|(_, role)| actionable(*role))
+            .collect();
+        match command {
+            NavigationCommand::Next | NavigationCommand::Previous => {
+                if actionable.is_empty() {
+                    return vec![];
+                }
+                let current = self
+                    .state
+                    .selected
+                    .as_ref()
+                    .and_then(|selected| actionable.iter().position(|(id, _)| id == selected));
+                let index = match (command, current) {
+                    (NavigationCommand::Next, Some(i)) => (i + 1) % actionable.len(),
+                    (NavigationCommand::Previous, Some(0)) => actionable.len() - 1,
+                    (NavigationCommand::Previous, Some(i)) => i - 1,
+                    (NavigationCommand::Previous, None) => actionable.len() - 1,
+                    _ => 0,
+                };
+                self.state.selected = Some(actionable[index].0.clone());
+                if let Some(frame) = self.state.stack.last_mut() {
+                    frame.selected = self.state.selected.clone();
+                }
+                self.state.armed = true;
+                vec![]
+            }
+            NavigationCommand::ActivatePrimary | NavigationCommand::ActivateSecondary => {
+                let Some(selected) = self.state.selected.clone() else {
+                    return vec![];
+                };
+                let Some((_, role)) = actionable.into_iter().find(|(id, _)| id == &selected) else {
+                    return vec![];
+                };
+                self.activate(
+                    selected,
+                    role,
+                    point,
+                    geometry_generation,
+                    if command == NavigationCommand::ActivateSecondary {
+                        PointerButton::Secondary
+                    } else {
+                        PointerButton::Primary
+                    },
+                    crate::commands::ActivationSource::Enter,
+                )
+            }
+            NavigationCommand::Back => self.reduce(SessionEvent::Back {
+                geometry_generation,
+                pointer_baseline: point,
+            }),
+            NavigationCommand::NextPage | NavigationCommand::PreviousPage => {
+                let current = self.state.stack.last().map_or(0, |frame| frame.page);
+                let page = if command == NavigationCommand::NextPage {
+                    current.saturating_add(1)
+                } else {
+                    current.saturating_sub(1)
+                };
+                self.reduce(SessionEvent::PageChanged {
+                    page,
+                    geometry_generation,
+                    pointer_baseline: point,
+                });
+                let page = self.state.stack.last().map_or(0, |frame| frame.page);
+                vec![SessionIntent::PageChanged { page }]
+            }
+        }
     }
     fn cancel_tree(&mut self) -> Vec<SessionIntent> {
         self.closed = true;
         self.state.pending_press = None;
+        self.state.dwell_candidate = None;
         vec![SessionIntent::CloseTree]
     }
     fn current_geometry(&self) -> u64 {
@@ -446,14 +736,19 @@ impl SessionReducer {
             .last()
             .map_or(0, |frame| frame.geometry_generation)
     }
-    fn bump_generation(&mut self) {
-        self.state.session_generation = self.state.session_generation.saturating_add(1);
+    fn bump_generation(&mut self) -> bool {
+        let Some(next) = self.state.session_generation.checked_add(1) else {
+            return false;
+        };
+        self.state.session_generation = next;
+        true
     }
     fn disarm(&mut self, point: LogicalPoint, geometry_generation: u64) {
         self.state.armed = false;
         self.state.hovered = None;
         self.state.selected = None;
         self.state.pending_press = None;
+        self.state.dwell_candidate = None;
         self.state.arming_baseline = ArmingBaseline {
             point,
             geometry_generation,
@@ -462,7 +757,15 @@ impl SessionReducer {
 }
 
 fn actionable(role: CellRole) -> bool {
-    matches!(role, CellRole::Action | CellRole::Submenu)
+    matches!(
+        role,
+        CellRole::Action
+            | CellRole::Submenu
+            | CellRole::Back
+            | CellRole::Close
+            | CellRole::NextPage
+            | CellRole::PreviousPage
+    )
 }
 fn distance2(a: LogicalPoint, b: LogicalPoint) -> f32 {
     let x = a.x - b.x;
@@ -473,6 +776,7 @@ fn distance2(a: LogicalPoint, b: LogicalPoint) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radial::dynamic::{FrozenAvailability, FrozenEntryId};
     fn reducer(mode: InteractionMode) -> SessionReducer {
         SessionReducer::new(
             SessionId::new("s"),
@@ -487,6 +791,16 @@ mod tests {
     }
     fn p(x: f32, y: f32) -> LogicalPoint {
         LogicalPoint { x, y }
+    }
+    fn frozen(id: &str) -> FrozenRadialEntry {
+        FrozenRadialEntry {
+            id: FrozenEntryId(id.into()),
+            label: id.into(),
+            binding: None,
+            availability: FrozenAvailability::Available,
+            history_query: String::new(),
+            requirement: super::super::handoff::InteractionRequirement::None,
+        }
     }
     fn move_to(
         r: &mut SessionReducer,
@@ -649,7 +963,7 @@ mod tests {
         r.reduce(SessionEvent::FreezeDynamic {
             frame_id: FrameId(1),
             source_cell: cell.clone(),
-            results: vec!["root".into()],
+            results: vec![frozen("root")],
         });
         r.reduce(SessionEvent::OpenChild {
             menu_id: MenuId::new("child"),
@@ -660,36 +974,136 @@ mod tests {
         r.reduce(SessionEvent::FreezeDynamic {
             frame_id: FrameId(1),
             source_cell: cell.clone(),
-            results: vec!["stale".into()],
+            results: vec![frozen("stale")],
         });
         r.reduce(SessionEvent::FreezeDynamic {
             frame_id: FrameId(2),
             source_cell: cell.clone(),
-            results: vec!["child".into()],
+            results: vec![frozen("child")],
         });
         assert_eq!(r.state.frozen_dynamic_results.len(), 2);
         assert!(
             r.state
                 .frozen_dynamic_results
                 .iter()
-                .any(|(key, value)| key.menu_id == MenuId::new("root") && value == &vec!["root"])
+                .any(|(key, value)| key.menu_id == MenuId::new("root")
+                    && value == &vec![frozen("root")])
         );
         assert!(
             r.state
                 .frozen_dynamic_results
                 .iter()
-                .any(|(key, value)| key.menu_id == MenuId::new("child") && value == &vec!["child"])
+                .any(|(key, value)| key.menu_id == MenuId::new("child")
+                    && value == &vec![frozen("child")])
         );
+    }
+
+    #[test]
+    fn keyboard_navigation_wraps_and_dispatches_selected_cell() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        let cells = vec![
+            (CellId::new("a"), CellRole::Action),
+            (CellId::new("gap"), CellRole::Spacer),
+            (CellId::new("b"), CellRole::Action),
+        ];
+        reducer.reduce(SessionEvent::Navigate {
+            command: NavigationCommand::Previous,
+            cells: cells.clone(),
+            pointer_baseline: LogicalPoint::default(),
+            geometry_generation: 10,
+        });
+        assert_eq!(reducer.state.selected, Some(CellId::new("b")));
+        assert!(matches!(
+            reducer
+                .reduce(SessionEvent::Navigate {
+                    command: NavigationCommand::ActivatePrimary,
+                    cells,
+                    pointer_baseline: LogicalPoint::default(),
+                    geometry_generation: 10,
+                })
+                .as_slice(),
+            [SessionIntent::Dispatch { cell_id, .. }] if cell_id == &CellId::new("b")
+        ));
+    }
+
+    #[test]
+    fn back_restores_parent_selection_and_frozen_frame_metadata() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.reduce(SessionEvent::SelectKeyboard {
+            cell: CellId::new("parent"),
+        });
+        reducer.state.stack[0].scale_factor = 1.5;
+        reducer.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("child"),
+            origin: PhysicalPoint { x: -30.0, y: 40.0 },
+            geometry_generation: 11,
+            pointer_baseline: LogicalPoint::default(),
+        });
+        assert_eq!(reducer.state.stack[1].parent_frame_id, Some(FrameId(1)));
+        assert_eq!(reducer.state.stack[1].scale_factor, 1.5);
+        reducer.reduce(SessionEvent::SelectKeyboard {
+            cell: CellId::new("child-cell"),
+        });
+        reducer.reduce(SessionEvent::Back {
+            geometry_generation: 12,
+            pointer_baseline: LogicalPoint::default(),
+        });
+        assert_eq!(reducer.state.selected, Some(CellId::new("parent")));
+        assert_eq!(reducer.state.stack[0].selected, Some(CellId::new("parent")));
+        assert_eq!(reducer.state.stack[0].scale_factor, 1.5);
+    }
+
+    #[test]
+    fn stale_dwell_cannot_dispatch_after_navigation_generation_changes() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.reduce(SessionEvent::StartDwell {
+            cell: CellId::new("a"),
+            role: CellRole::Submenu,
+            deadline: 50,
+        });
+        reducer.reduce(SessionEvent::PageChanged {
+            page: 1,
+            geometry_generation: 11,
+            pointer_baseline: LogicalPoint::default(),
+        });
+        assert!(
+            reducer
+                .reduce(SessionEvent::DwellExpired {
+                    cell: CellId::new("a"),
+                    role: CellRole::Action,
+                    at: 50,
+                    point: LogicalPoint::default(),
+                    geometry_generation: 10,
+                })
+                .is_empty()
+        );
+    }
+    #[test]
+    fn page_state_is_clamped_to_prepared_frame_count() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.state.stack[0].page_count = 3;
+        reducer.reduce(SessionEvent::PageChanged {
+            page: usize::MAX,
+            geometry_generation: 11,
+            pointer_baseline: LogicalPoint::default(),
+        });
+        assert_eq!(reducer.state.stack[0].page, 2);
     }
     #[test]
     fn outside_interaction_releases_only_keyboard_navigation() {
         let mut r = reducer(InteractionMode::StickyClick);
+        r.reduce(SessionEvent::StartDwell {
+            cell: CellId::new("submenu"),
+            role: CellRole::Submenu,
+            deadline: 10,
+        });
         r.reduce(SessionEvent::OutsideInteraction);
         assert_eq!(
             r.state.keyboard_ownership,
             KeyboardOwnership::ExternalApplication
         );
         assert_eq!(r.state.stack.len(), 1);
+        assert!(r.state.dwell_candidate.is_none());
         r.reduce(SessionEvent::SelectKeyboard {
             cell: CellId::new("a"),
         });

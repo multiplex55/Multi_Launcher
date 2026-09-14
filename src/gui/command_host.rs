@@ -598,6 +598,7 @@ impl HeadlessCommandHost for LauncherApp {
                             interaction_token: self.virtual_desktop_interaction_token,
                             expected_query: self.query.clone(),
                             expected_visible: self.visible_flag.load(Ordering::SeqCst),
+                            root_policy: self.command_root_policy,
                             result: Err(error),
                         },
                     ));
@@ -636,6 +637,7 @@ impl HeadlessCommandHost for LauncherApp {
         let interaction_token = self.virtual_desktop_interaction_token;
         let expected_query = self.query.clone();
         let expected_visible = self.visible_flag.load(Ordering::SeqCst);
+        let root_policy = self.command_root_policy;
         let catalog = std::sync::Arc::clone(&self.plugins.internal_services().window_catalog);
         let tx = self.event_tx.clone();
         let ctx = self.egui_ctx.clone();
@@ -657,6 +659,7 @@ impl HeadlessCommandHost for LauncherApp {
                     interaction_token,
                     expected_query,
                     expected_visible,
+                    root_policy,
                     result,
                 },
             ));
@@ -694,6 +697,14 @@ fn command_accepts_query_override(command: &Command) -> bool {
 
 impl LauncherApp {
     pub(crate) fn dispatch_command_invocation(&mut self, invocation: CommandInvocation) {
+        self.dispatch_command_invocation_with_history(invocation, None);
+    }
+
+    pub(crate) fn dispatch_command_invocation_with_history(
+        &mut self,
+        invocation: CommandInvocation,
+        captured_history_query: Option<&str>,
+    ) {
         self.virtual_desktop_interaction_token = self
             .virtual_desktop_interaction_token
             .wrapping_add(1)
@@ -713,7 +724,11 @@ impl LauncherApp {
 
         let bus = std::sync::Arc::clone(&self.command_bus);
         match bus.dispatch(&invocation, self) {
-            Ok(outcome) => self.apply_command_outcome(outcome, &invocation),
+            Ok(outcome) => self.apply_command_outcome_with_history_query(
+                outcome,
+                &invocation,
+                captured_history_query,
+            ),
             Err(error) => {
                 if let Some(favorite) = error.favorite.as_ref() {
                     tracing::error!(fav = %favorite, error = %error.message, "failed to run favorite");

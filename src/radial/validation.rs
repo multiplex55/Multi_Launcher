@@ -95,6 +95,12 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
     let mut total_cells = 0;
     for (mi, menu) in document.menus.iter().enumerate() {
         let path = format!("menus[{mi}]");
+        if menu.hover_dwell_ms.is_some_and(|value| value > 60_000) {
+            errors.push(issue(
+                format!("{path}.hover_dwell_ms"),
+                "hover dwell exceeds 60 seconds",
+            ));
+        }
         if menu.name.trim().is_empty() {
             errors.push(issue(format!("{path}.name"), "name cannot be empty"));
         }
@@ -103,6 +109,64 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 format!("{path}.skin_id"),
                 format!("missing skin {}", menu.skin_id),
             ));
+        }
+        if let Some(binding) = &menu.center_action {
+            validate_binding(binding, &format!("{path}.center_action"), &mut errors);
+            validate_keep_open(
+                document,
+                menu,
+                menu.center_primary_after_action,
+                binding,
+                &format!("{path}.center_action"),
+                &mut errors,
+            );
+        }
+        if menu.center_control == Some(Control::Drag) && menu.center_action.is_some() {
+            errors.push(issue(
+                format!("{path}.center_action"),
+                "primary center action is unreachable while the center control is Drag",
+            ));
+        }
+        if let Some(binding) = &menu.center_secondary_action {
+            validate_binding(
+                binding,
+                &format!("{path}.center_secondary_action"),
+                &mut errors,
+            );
+            validate_keep_open(
+                document,
+                menu,
+                menu.center_secondary_after_action,
+                binding,
+                &format!("{path}.center_secondary_action"),
+                &mut errors,
+            );
+        }
+        if let Some(binding) = &menu.background_action {
+            validate_binding(binding, &format!("{path}.background_action"), &mut errors);
+            validate_keep_open(
+                document,
+                menu,
+                menu.background_primary_after_action,
+                binding,
+                &format!("{path}.background_action"),
+                &mut errors,
+            );
+        }
+        if let Some(binding) = &menu.background_secondary_action {
+            validate_binding(
+                binding,
+                &format!("{path}.background_secondary_action"),
+                &mut errors,
+            );
+            validate_keep_open(
+                document,
+                menu,
+                menu.background_secondary_after_action,
+                binding,
+                &format!("{path}.background_secondary_action"),
+                &mut errors,
+            );
         }
         finite_range(
             format!("{path}.center_radius"),
@@ -128,6 +192,20 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
             &format!("{path}.rings"),
             &mut errors,
         );
+        for (left_index, left) in menu.rings.iter().enumerate() {
+            for (right_index, right) in menu.rings.iter().enumerate().skip(left_index + 1) {
+                let radial_separation = (left.radius - right.radius).abs();
+                let required = left.cell_radius + right.cell_radius + left.gap.max(right.gap);
+                if radial_separation + 0.001 < required {
+                    errors.push(issue(
+                        format!("{path}.rings[{right_index}].radius"),
+                        format!(
+                            "ring overlaps rings[{left_index}]; radial separation must be at least {required}"
+                        ),
+                    ));
+                }
+            }
+        }
         let mut cell_ids = BTreeSet::new();
         for (ri, ring) in menu.rings.iter().enumerate() {
             let rp = format!("{path}.rings[{ri}]");
@@ -159,6 +237,24 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 limits::MAX_CELLS_PER_RING,
                 &mut errors,
             );
+            let static_cells = ring
+                .cells
+                .iter()
+                .filter(|cell| !matches!(cell.content, CellContent::Dynamic { .. }))
+                .count();
+            if ring
+                .cells
+                .iter()
+                .any(|cell| matches!(cell.content, CellContent::Dynamic { .. }))
+                && crate::radial::bindings::ring_accessible_capacity(ring)
+                    .saturating_sub(static_cells)
+                    < 3
+            {
+                errors.push(issue(
+                    format!("{rp}.cells"),
+                    "dynamic ring geometry must leave room for an entry and paging controls",
+                ));
+            }
             total_cells += ring.cells.len();
             if ring.radius <= menu.center_radius + ring.cell_radius {
                 errors.push(issue(
@@ -184,6 +280,26 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                         "cell ID is empty or duplicated within its menu",
                     ));
                 }
+                let generated_page_control = [
+                    ("__radial_page_previous:", Control::PreviousPage),
+                    ("__radial_page_next:", Control::NextPage),
+                ]
+                .into_iter()
+                .any(|(prefix, control)| {
+                    cell.id.as_str().strip_prefix(prefix) == Some(ring.id.as_str())
+                        && matches!(&cell.content, CellContent::Control { control: actual } if *actual == control)
+                });
+                if (cell.id.as_str() == "__center"
+                    || cell.id.as_str() == "__background"
+                    || cell.id.as_str().starts_with("__radial_page_previous")
+                    || cell.id.as_str().starts_with("__radial_page_next"))
+                    && !generated_page_control
+                {
+                    errors.push(issue(
+                        format!("{cp}.id"),
+                        "cell ID is reserved by the runtime",
+                    ));
+                }
                 validate_content(
                     &cell.content,
                     &cp,
@@ -192,6 +308,16 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                     &menu.id,
                     &mut errors,
                 );
+                if let CellContent::Action { binding } = &cell.content {
+                    validate_keep_open(
+                        document,
+                        menu,
+                        cell.after_action,
+                        binding,
+                        &cp,
+                        &mut errors,
+                    );
+                }
                 let mut gestures = BTreeSet::new();
                 for (bi, binding) in cell.alternate_clicks.iter().enumerate() {
                     if !gestures.insert(binding.gesture) {
@@ -201,6 +327,14 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                         ));
                     }
                     validate_binding(
+                        &binding.action,
+                        &format!("{cp}.alternate_clicks[{bi}]"),
+                        &mut errors,
+                    );
+                    validate_keep_open(
+                        document,
+                        menu,
+                        binding.after_action,
                         &binding.action,
                         &format!("{cp}.alternate_clicks[{bi}]"),
                         &mut errors,
@@ -230,6 +364,21 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 format!("context_rules[{ri}].menu_id"),
                 "missing menu",
             ));
+        }
+        for (field, value) in [
+            ("process_name", rule.process_name.as_deref()),
+            (
+                "window_title_contains",
+                rule.window_title_contains.as_deref(),
+            ),
+            ("monitor_id", rule.monitor_id.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.len() > 512) {
+                errors.push(issue(
+                    format!("context_rules[{ri}].{field}"),
+                    "context matcher exceeds 512 bytes",
+                ));
+            }
         }
     }
     let mut chords = BTreeMap::<String, usize>::new();
@@ -267,6 +416,40 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
     }
 }
 
+fn validate_keep_open(
+    document: &RadialDocument,
+    menu: &MenuDefinition,
+    policy: AfterActionPolicy,
+    binding: &ActionBinding,
+    path: &str,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    if effective_after_action(document, menu, policy) != AfterActionPolicy::KeepOpen {
+        return;
+    }
+    let ActionBinding::Persisted { action } = binding else {
+        return;
+    };
+    let requirement = match action.target.as_ref() {
+        Some(
+            PersistableActionTargetRef::LegacyAction { action }
+            | PersistableActionTargetRef::CustomAction { action },
+        ) => crate::commands::parse_action(action)
+            .map(|command| crate::radial::handoff::command_requirement(&command))
+            .unwrap_or(crate::radial::handoff::InteractionRequirement::ExternalInput),
+        _ => match crate::radial::handoff::action_id_requirement(&action.action_id) {
+            Some(requirement) => requirement,
+            None => return,
+        },
+    };
+    if requirement != crate::radial::handoff::InteractionRequirement::None {
+        errors.push(issue(
+            format!("{path}.after_action"),
+            format!("KeepOpen is incompatible with {requirement:?}"),
+        ));
+    }
+}
+
 fn validate_content(
     content: &CellContent,
     path: &str,
@@ -290,10 +473,18 @@ fn validate_content(
                 .push(menu_id.clone());
         }
         CellContent::Dynamic {
-            source: DynamicSource::LauncherResults { max_items },
+            source:
+                DynamicSource::LauncherResults { max_items }
+                | DynamicSource::LauncherQuery { max_items, .. },
         } if *max_items == 0 || *max_items > limits::MAX_CELLS_PER_RING => errors.push(issue(
             format!("{path}.content.max_items"),
             "dynamic result limit is out of range",
+        )),
+        CellContent::Dynamic {
+            source: DynamicSource::LauncherQuery { query, .. },
+        } if query.len() > 512 => errors.push(issue(
+            format!("{path}.content.query"),
+            "dynamic launcher query is too long",
         )),
         _ => {}
     }
@@ -435,6 +626,41 @@ mod tests {
     fn starter_validates() {
         validate(&valid()).unwrap();
     }
+
+    #[test]
+    fn rejects_dynamic_ring_geometry_that_cannot_fit_paging_controls() {
+        let mut document = valid();
+        document.menus[0].rings[0].radius = 70.0;
+        document.menus[0].rings[0].cell_radius = 28.0;
+        document.menus[0].rings[0].gap = 4.0;
+        for cell in &mut document.menus[0].rings[0].cells[1..] {
+            cell.content = CellContent::Spacer;
+        }
+        for index in 0..3 {
+            let mut spacer = document.menus[0].rings[0].cells[1].clone();
+            spacer.id = CellId::new(format!("spacer-{index}"));
+            document.menus[0].rings[0].cells.push(spacer);
+        }
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.ends_with("rings[0].cells") && issue.message.contains("paging controls")
+        }));
+    }
+
+    #[test]
+    fn drag_center_rejects_an_unreachable_primary_action_but_starter_is_valid() {
+        let mut document = valid();
+        document.menus[0].center_action = Some(ActionBinding::Contextual {
+            selector: TargetSelector::CapturedForeground,
+            action_id: crate::universal_actions::action_ids::WINDOW_ACTIVATE,
+        });
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.ends_with("center_action") && issue.message.contains("unreachable")
+        }));
+        document.menus[0].center_action = None;
+        validate(&document).unwrap();
+    }
     #[test]
     fn rejects_duplicates_missing_refs_and_bad_numbers() {
         let mut d = valid();
@@ -543,6 +769,58 @@ mod tests {
                 .0
                 .iter()
                 .any(|error| error.message.contains("target identity"))
+        );
+    }
+
+    #[test]
+    fn keep_open_incompatibility_is_reported_for_secondary_special_surfaces() {
+        let mut document = valid();
+        let action = crate::actions::Action {
+            label: "Draw".into(),
+            desc: String::new(),
+            action: "screen_draw:start".into(),
+            args: None,
+        };
+        document.menus[0].center_secondary_action = Some(ActionBinding::Persisted {
+            action: PersistedUniversalActionRef {
+                target: Some(PersistableActionTargetRef::CustomAction { action }),
+                action_id: crate::universal_actions::ActionId::new("result.execute"),
+            },
+        });
+        document.menus[0].center_secondary_after_action = AfterActionPolicy::KeepOpen;
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.contains("center_secondary_action")
+                && issue.message.contains("ExclusiveCapture")
+        }));
+    }
+
+    #[test]
+    fn primary_special_surface_policy_is_validated_independently() {
+        let mut document = valid();
+        document.menus[0].center_control = None;
+        let binding = ActionBinding::Persisted {
+            action: PersistedUniversalActionRef {
+                target: Some(PersistableActionTargetRef::Note {
+                    slug: "daily".into(),
+                }),
+                action_id: crate::universal_actions::action_ids::NOTE_OPEN_NOTEPAD,
+            },
+        };
+        document.menus[0].center_action = Some(binding.clone());
+        document.menus[0].center_primary_after_action = AfterActionPolicy::CloseTree;
+        document.menus[0].background_action = Some(binding);
+        document.menus[0].background_primary_after_action = AfterActionPolicy::KeepOpen;
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.contains("background_action.after_action")
+                && issue.message.contains("ExternalInput")
+        }));
+        assert!(
+            !errors
+                .0
+                .iter()
+                .any(|issue| issue.path.contains("center_action.after_action"))
         );
     }
 

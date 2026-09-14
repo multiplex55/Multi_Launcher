@@ -1,6 +1,7 @@
 use super::geometry::{LayoutSnapshot, LogicalPoint};
 use super::model::{CellId, SessionId};
 use super::render::{InputOwner, VectorScene, input_owner};
+use super::session::{NavigationCommand, NavigationModifiers, PointerButton};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
     Arc,
@@ -34,6 +35,14 @@ pub enum NativeCommand {
         layout: LayoutSnapshot,
         always_on_top: bool,
     },
+    /// Atomically replaces the scene for the same logical session. No Closed
+    /// event is emitted, so navigation cannot be mistaken for teardown.
+    Replace {
+        session_id: SessionId,
+        scene: VectorScene,
+        layout: LayoutSnapshot,
+        always_on_top: bool,
+    },
     Close {
         session_id: SessionId,
         reason: CloseReason,
@@ -44,6 +53,7 @@ pub enum NativeCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseReason {
     Dismissed,
+    ActionHandoff,
     ExclusiveTool,
     SettingsReload,
     DisplayRelayout,
@@ -61,22 +71,32 @@ pub enum NativeEvent {
         session_id: SessionId,
         owner: InputOwner,
         point: LogicalPoint,
+        button: PointerButton,
     },
     PointerMoved {
         session_id: SessionId,
         owner: InputOwner,
         point: LogicalPoint,
     },
+    PointerLeft {
+        session_id: SessionId,
+    },
     PointerUp {
         session_id: SessionId,
         owner: InputOwner,
         point: LogicalPoint,
+        button: PointerButton,
     },
     CaptureLost {
         session_id: SessionId,
     },
     Escape {
         session_id: SessionId,
+    },
+    Navigate {
+        session_id: SessionId,
+        command: NavigationCommand,
+        modifiers: NavigationModifiers,
     },
     DisplayChanged {
         session_id: SessionId,
@@ -90,6 +110,16 @@ pub enum NativeEvent {
         message: String,
     },
     Stopped,
+}
+
+fn is_drag_owner(layout: &LayoutSnapshot, owner: &InputOwner) -> bool {
+    let InputOwner::Actionable(id) = owner else {
+        return false;
+    };
+    layout
+        .cells
+        .iter()
+        .any(|cell| &cell.cell_id == id && cell.control == Some(super::model::Control::Drag))
 }
 
 struct Wake {
@@ -346,6 +376,49 @@ fn handle(
             }
             true
         }
+        NativeCommand::Replace {
+            session_id,
+            scene,
+            layout,
+            always_on_top,
+        } => {
+            if active
+                .as_ref()
+                .is_none_or(|current| current.id != session_id)
+            {
+                events.send(NativeEvent::Failed {
+                    session_id: Some(session_id),
+                    message: "cannot replace a stale radial session".into(),
+                });
+                return true;
+            }
+            drop(active.take());
+            match surface_factory(
+                session_id.clone(),
+                scene.clone(),
+                layout,
+                always_on_top,
+                events.clone(),
+            ) {
+                Ok(surface) => {
+                    let suppression = crate::mouse_gestures::service::acquire_gesture_suppression();
+                    *active = Some(Active {
+                        id: session_id.clone(),
+                        surface,
+                        _suppression: suppression,
+                    });
+                    events.send(NativeEvent::Ready {
+                        session_id,
+                        layout_generation: scene.generation,
+                    });
+                }
+                Err(message) => events.send(NativeEvent::Failed {
+                    session_id: Some(session_id),
+                    message,
+                }),
+            }
+            true
+        }
         NativeCommand::Close { session_id, reason } => {
             if active.as_ref().is_some_and(|a| a.id == session_id) {
                 drop(active.take());
@@ -502,6 +575,10 @@ unsafe extern "system" fn wndproc(
     w: windows::Win32::Foundation::WPARAM,
     l: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    };
     use windows::Win32::UI::WindowsAndMessaging::*;
     if msg == WM_NCCREATE {
         let cs = unsafe { &*(l.0 as *const CREATESTRUCTW) };
@@ -517,14 +594,40 @@ unsafe extern "system" fn wndproc(
         }
         return windows::Win32::Foundation::LRESULT(0);
     }
-    if msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
+    if msg == WM_MOUSEMOVE
+        || msg == WM_LBUTTONDOWN
+        || msg == WM_LBUTTONUP
+        || msg == WM_RBUTTONDOWN
+        || msg == WM_RBUTTONUP
+    {
         let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
         if !ptr.is_null() {
+            if msg == WM_MOUSEMOVE {
+                let mut tracking = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = unsafe { TrackMouseEvent(&mut tracking) };
+            }
             let (x, y) = signed_message_point(l);
             let state = unsafe { &*ptr };
             let point = client_physical_to_logical(state.origin, state.scale_factor, x, y);
             let owner = input_owner(&state.layout, point, false);
-            let event = if msg == WM_LBUTTONDOWN {
+            if msg == WM_LBUTTONDOWN && is_drag_owner(&state.layout, &owner) {
+                let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                unsafe {
+                    SendMessageW(
+                        hwnd,
+                        WM_NCLBUTTONDOWN,
+                        windows::Win32::Foundation::WPARAM(HTCAPTION as usize),
+                        l,
+                    )
+                };
+                return windows::Win32::Foundation::LRESULT(0);
+            }
+            let event = if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN {
                 if matches!(owner, InputOwner::Actionable(_)) {
                     let _ =
                         unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd) };
@@ -534,8 +637,13 @@ unsafe extern "system" fn wndproc(
                     session_id: state.session_id.clone(),
                     owner,
                     point,
+                    button: if msg == WM_RBUTTONDOWN {
+                        PointerButton::Secondary
+                    } else {
+                        PointerButton::Primary
+                    },
                 }
-            } else if msg == WM_LBUTTONUP {
+            } else if msg == WM_LBUTTONUP || msg == WM_RBUTTONUP {
                 if unsafe { (*ptr).captured } {
                     unsafe { (*ptr).captured = false };
                     let _ =
@@ -545,6 +653,11 @@ unsafe extern "system" fn wndproc(
                     session_id: state.session_id.clone(),
                     owner,
                     point,
+                    button: if msg == WM_RBUTTONUP {
+                        PointerButton::Secondary
+                    } else {
+                        PointerButton::Primary
+                    },
                 }
             } else {
                 NativeEvent::PointerMoved {
@@ -554,6 +667,16 @@ unsafe extern "system" fn wndproc(
                 }
             };
             let _ = state.events.send(event);
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    if msg == WM_MOUSELEAVE {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
+        if !ptr.is_null() {
+            let state = unsafe { &*ptr };
+            state.events.send(NativeEvent::PointerLeft {
+                session_id: state.session_id.clone(),
+            });
         }
         return windows::Win32::Foundation::LRESULT(0);
     }
@@ -747,7 +870,8 @@ impl SystemPlatformSurface {
         use std::sync::Once;
         use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Gdi::{
-            CreateEllipticRgn, InvalidateRect, SetWindowRgn, UpdateWindow,
+            CombineRgn, CreateEllipticRgn, CreateRectRgn, InvalidateRect, RGN_OR, SetWindowRgn,
+            UpdateWindow,
         };
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::*;
@@ -810,12 +934,42 @@ impl SystemPlatformSurface {
                 return Err(format!("CreateWindowExW failed: {e}"));
             }
         };
-        let region = unsafe { CreateEllipticRgn(0, 0, width, height) };
+        let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
         if region.0.is_null() {
             unsafe {
                 let _ = DestroyWindow(hwnd);
             };
-            return Err("CreateEllipticRgn failed".into());
+            return Err("CreateRectRgn failed".into());
+        }
+        for shape in &unsafe { &*ptr }.layout.input_regions {
+            let super::geometry::HitShape::Circle { center, radius } = shape else {
+                continue;
+            };
+            let left = (((center.x - radius) - logical_origin.x) as f64 * scale_factor.get())
+                .floor() as i32;
+            let top = (((center.y - radius) - logical_origin.y) as f64 * scale_factor.get()).floor()
+                as i32;
+            let right = (((center.x + radius) - logical_origin.x) as f64 * scale_factor.get())
+                .ceil() as i32;
+            let bottom = (((center.y + radius) - logical_origin.y) as f64 * scale_factor.get())
+                .ceil() as i32;
+            let piece = unsafe { CreateEllipticRgn(left, top, right, bottom) };
+            if piece.0.is_null() {
+                unsafe {
+                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(region);
+                    let _ = DestroyWindow(hwnd);
+                };
+                return Err("CreateEllipticRgn failed".into());
+            }
+            let combined = unsafe { CombineRgn(region, region, piece, RGN_OR) };
+            let _ = unsafe { windows::Win32::Graphics::Gdi::DeleteObject(piece) };
+            if combined == windows::Win32::Graphics::Gdi::GDI_REGION_TYPE(0) {
+                unsafe {
+                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(region);
+                    let _ = DestroyWindow(hwnd);
+                };
+                return Err("CombineRgn failed".into());
+            }
         }
         if unsafe { SetWindowRgn(hwnd, region, true) } == 0 {
             unsafe {
@@ -1027,6 +1181,30 @@ mod tests {
             assert_eq!(width, (expected_max.x - expected_min.x).ceil() as i32);
             assert_eq!(height, (expected_max.y - expected_min.y).ceil() as i32);
         }
+    }
+
+    #[test]
+    fn drag_control_is_the_only_actionable_owner_that_moves_the_host() {
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].content = crate::radial::model::CellContent::Control {
+            control: crate::radial::model::Control::Drag,
+        };
+        let layout = layout_menu(
+            &document.menus[0],
+            PhysicalPoint { x: 200.0, y: 200.0 },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 500.0, y: 500.0 },
+            },
+            ScaleFactor::new(1.0).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        let drag = InputOwner::Actionable(layout.cells[0].cell_id.clone());
+        let ordinary = InputOwner::Actionable(layout.cells[1].cell_id.clone());
+        assert!(is_drag_owner(&layout, &drag));
+        assert!(!is_drag_owner(&layout, &ordinary));
+        assert!(!is_drag_owner(&layout, &InputOwner::Protective));
     }
     #[test]
     #[ignore = "requires an interactive Windows desktop; verifies nonactivation and cross-process click-through"]

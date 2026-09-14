@@ -48,7 +48,19 @@ pub fn build_scene(layout: &LayoutSnapshot, generation: u64) -> VectorScene {
         radius: layout.center_radius,
         color: Rgba(30, 33, 39, 238),
     }];
-    for cell in &layout.cells {
+    // Background actions own otherwise-protective gaps but render below the
+    // concrete cells they must not obscure.
+    for cell in layout
+        .cells
+        .iter()
+        .filter(|cell| cell.cell_id.as_str() == "__background")
+        .chain(
+            layout
+                .cells
+                .iter()
+                .filter(|cell| cell.cell_id.as_str() != "__background"),
+        )
+    {
         let color = if cell.actionable {
             Rgba(54, 61, 72, 244)
         } else {
@@ -114,14 +126,12 @@ pub fn input_owner(layout: &LayoutSnapshot, point: LogicalPoint, ancestor: bool)
 }
 
 fn inside_owned_background(layout: &LayoutSnapshot, p: LogicalPoint) -> bool {
-    // The host region is the circular wheel/tree background, not the rectangular
-    // visual surface. Internal holes remain owned so clicks cannot leak through.
-    let radius = (layout.input_extent.max.x - layout.input_extent.min.x)
-        .max(layout.input_extent.max.y - layout.input_extent.min.y)
-        * 0.5;
-    let dx = p.x - layout.center.x;
-    let dy = p.y - layout.center.y;
-    dx * dx + dy * dy <= radius * radius
+    // Cascades can contain disjoint wheels in one host. Their union is owned,
+    // while transparent space between them remains true exterior.
+    layout
+        .input_regions
+        .iter()
+        .any(|shape| shape_contains(shape, p))
 }
 
 fn inside_rect(rect: LogicalRect, p: LogicalPoint) -> bool {

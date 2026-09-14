@@ -35,6 +35,7 @@ mod note_panel;
 mod notes_dialog;
 mod numpad_navigation;
 mod query_history;
+mod radial_actions;
 mod render;
 mod screen_draw_toolbar;
 mod screenshot_editor;
@@ -166,7 +167,7 @@ use query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 #[cfg(test)]
 use search::{COMPLETION_REBUILD_DEBOUNCE, NOTE_SEARCH_DEBOUNCE};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::path::Path;
 use std::sync::Mutex;
@@ -523,6 +524,7 @@ pub struct LauncherApp {
     event_tx: Sender<WatchEvent>,
     egui_ctx: egui::Context,
     virtual_desktop_interaction_token: u64,
+    command_root_policy: crate::universal_actions::RootLauncherPolicy,
     folder_aliases: HashMap<String, Option<String>>,
     folder_aliases_lc: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
@@ -677,6 +679,19 @@ pub struct LauncherApp {
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmCommand>,
     pending_universal_confirm: Option<PendingUniversalActionInvocation>,
+    radial_preparations: HashMap<
+        crate::radial::model::InvocationId,
+        (
+            crate::radial::bindings::PreparationGeneration,
+            crate::radial::model::ConfigRevision,
+        ),
+    >,
+    radial_consumed_dispatches: VecDeque<crate::radial::handoff::RadialDispatchIdentity>,
+    radial_current_preparation: Option<(
+        crate::radial::model::InvocationId,
+        crate::radial::bindings::PreparationGeneration,
+        crate::radial::model::ConfigRevision,
+    )>,
     pending_data_recovery: Option<PendingRecoveryIntent>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
@@ -1646,6 +1661,7 @@ impl LauncherApp {
             event_tx: tx,
             egui_ctx: ctx.clone(),
             virtual_desktop_interaction_token: 0,
+            command_root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
             folder_aliases,
             folder_aliases_lc,
             bookmark_aliases,
@@ -1810,6 +1826,9 @@ impl LauncherApp {
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
             pending_universal_confirm: None,
+            radial_preparations: HashMap::new(),
+            radial_consumed_dispatches: VecDeque::new(),
+            radial_current_preparation: None,
             pending_data_recovery: None,
             action_cache: Vec::new(),
             action_filter_metadata: Vec::new(),
@@ -3303,6 +3322,9 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Favorites
             | WatchEvent::Gestures
             | WatchEvent::ExecuteAction(_)
+            | WatchEvent::RadialDispatch(_)
+            | WatchEvent::RadialPrepare(_)
+            | WatchEvent::RadialInvalidate
             | WatchEvent::ScreenDrawStart => {
                 continue;
             }

@@ -292,7 +292,7 @@ impl LauncherApp {
 
         if trimmed_lc.starts_with("g ") {
             let plugins_started = crate::performance::started_if(perf_enabled);
-            res.extend(self.search_plugins(trimmed, &trimmed_lc));
+            res.extend(self.search_plugins_for(&self.query, trimmed, &trimmed_lc));
             crate::performance::log_elapsed("search.plugins", plugins_started);
         } else {
             if search_actions {
@@ -301,7 +301,7 @@ impl LauncherApp {
                 crate::performance::log_elapsed("search.static_candidates", static_started);
             }
             let plugins_started = crate::performance::started_if(perf_enabled);
-            res.extend(self.search_plugins(trimmed, &trimmed_lc));
+            res.extend(self.search_plugins_for(&self.query, trimmed, &trimmed_lc));
             crate::performance::log_elapsed("search.plugins", plugins_started);
         }
 
@@ -372,12 +372,17 @@ impl LauncherApp {
         res
     }
 
-    fn search_plugins(&self, trimmed: &str, trimmed_lc: &str) -> Vec<(Action, f32)> {
+    fn search_plugins_for(
+        &self,
+        raw_query: &str,
+        trimmed: &str,
+        trimmed_lc: &str,
+    ) -> Vec<(Action, f32)> {
         let mut res = Vec::new();
         if trimmed_lc.starts_with("g ") {
             let filter = std::collections::HashSet::from(["web_search".to_string()]);
             let plugin_results = self.plugins.search_filtered(
-                &self.query,
+                raw_query,
                 Some(&filter),
                 self.enabled_capabilities.as_ref(),
             );
@@ -406,12 +411,12 @@ impl LauncherApp {
                         }
                     }
                 } else {
-                    let score = if self.query.is_empty() {
+                    let score = if raw_query.is_empty() {
                         0.0
                     } else {
                         self.matcher
-                            .fuzzy_match(&a.label, &self.query)
-                            .max(self.matcher.fuzzy_match(&a.desc, &self.query))
+                            .fuzzy_match(&a.label, raw_query)
+                            .max(self.matcher.fuzzy_match(&a.desc, raw_query))
                             .unwrap_or(0) as f32
                             * self.fuzzy_weight
                     };
@@ -422,7 +427,7 @@ impl LauncherApp {
         }
 
         let plugin_results = self.plugins.search_filtered(
-            &self.query,
+            raw_query,
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
@@ -485,12 +490,12 @@ impl LauncherApp {
                         }
                     }
                 } else {
-                    let score = if self.query.is_empty() {
+                    let score = if raw_query.is_empty() {
                         0.0
                     } else {
                         self.matcher
-                            .fuzzy_match(&a.label, &self.query)
-                            .max(self.matcher.fuzzy_match(&a.desc, &self.query))
+                            .fuzzy_match(&a.label, raw_query)
+                            .max(self.matcher.fuzzy_match(&a.desc, raw_query))
                             .unwrap_or(0) as f32
                             * self.fuzzy_weight
                     };
@@ -500,6 +505,35 @@ impl LauncherApp {
         }
 
         res
+    }
+
+    /// Runs the established launcher/provider search boundary without mutating GUI state.
+    pub(super) fn search_read_only(&self, raw_query: &str) -> Vec<Action> {
+        let trimmed = raw_query.trim();
+        let trimmed_lc = trimmed.to_lowercase();
+        if trimmed.is_empty() {
+            let mut results = self.command_cache.clone();
+            results.extend(self.actions.iter().map(|action| Action {
+                label: format!("app {}", action.label),
+                desc: action.desc.clone(),
+                action: action.action.clone(),
+                args: action.args.clone(),
+            }));
+            return results;
+        }
+        let search_actions =
+            trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{APP_PREFIX} "));
+        let action_query = search_actions
+            .then(|| trimmed.split_once(' ').map(|value| value.1).unwrap_or(""))
+            .unwrap_or("");
+        let mut scored = Vec::new();
+        if !trimmed_lc.starts_with("g ") && search_actions {
+            scored.extend(self.search_actions(action_query, &action_query.to_lowercase()));
+        }
+        scored.extend(self.search_plugins_for(raw_query, trimmed, &trimmed_lc));
+        self.apply_usage_weight(&mut scored);
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(action, _)| action).collect()
     }
 
     fn apply_usage_weight(&self, res: &mut Vec<(Action, f32)>) {
@@ -605,6 +639,38 @@ mod tests {
 
         assert_eq!(app.results.len(), 1);
         assert_eq!(app.selected, None);
+    }
+
+    #[test]
+    fn read_only_search_uses_launcher_boundary_without_mutating_root_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![Action {
+            label: "Calculator".into(),
+            desc: "App".into(),
+            action: "calc".into(),
+            args: Some("--safe".into()),
+        }]);
+        app.update_action_cache();
+        app.query = "root query".into();
+        app.results = vec![Action {
+            label: "Root result".into(),
+            desc: String::new(),
+            action: "root".into(),
+            args: None,
+        }];
+        app.selected = Some(0);
+        let before = (app.query.clone(), app.results.clone(), app.selected);
+        let results = app.search_read_only("app calc");
+        assert!(
+            results
+                .iter()
+                .any(|action| action.action == "calc" && action.args.as_deref() == Some("--safe"))
+        );
+        assert_eq!(
+            (app.query.clone(), app.results.clone(), app.selected),
+            before
+        );
     }
 
     #[test]

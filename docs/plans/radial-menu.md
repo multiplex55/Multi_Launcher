@@ -1,6 +1,6 @@
 # Native radial menu implementation ledger
 
-Status: approved, M0-M2 complete
+Status: approved, M0-M3 complete
 
 Canonical requirements: `docs/multi_launcher_radial_codex_plan.md`
 Historical navigation notes: `docs/multi_launcher_radial_source_notes.md`
@@ -157,7 +157,7 @@ never by executing or initializing imported code.
 | M0 source audit, parity, ledger | complete | ledger reviewed against the approved brief; `git diff --check` passed; no baseline suite |
 | M1 model/store/reducer/session/geometry | complete | reviewer remediation passed a source-identical focused core/unit Nextest batch |
 | M2 native input and host | complete | recovery ownership provenance remediation passed the source-identical focused gate; interactive native probe remains explicitly unverified |
-| M3 actions/context/submenus/handoffs | pending | focused integrated/regression batch |
+| M3 actions/context/submenus/handoffs | complete | decision-review remediation passed the combined focused M3 Nextest gate; native interactive evidence remains unverified |
 | M4 skins/assets/import/export/recovery | pending | focused store/skin/import/resource batch |
 | M5 complete editors/settings/commands/starters | pending | focused editor/command/serialization batch |
 | M6 hardening/performance/full verification/review | pending | format/check/diff, full Nextest, native evidence, serialized baseline/candidate measurements, independent review |
@@ -419,6 +419,184 @@ native probe remains unrun.
 Post-gate `cargo fmt --all -- --check` and `git diff --check` both exited 0.
 The launcher-invocation and main hashes exactly matched the recorded launch snapshot,
 and no Cargo/Nextest/rustc process remained active.
+
+M3 focused integration gate (launch record):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/) | test(/launcher_invocation/) | test(/universal_actions/) | test(/universal_action_executor/) | test(/gui::actions/) | test(/gui::watch/) | test(/gui::search/) | test(/command_host/) | test(/active_window/) | test(/window_catalog/) | test(/window_activation/) | test(/dashboard::data_cache/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | `HEAD 99ba6a29adc0d551926f2aea64390b4f44e90e5f` plus M3 worktree; tracked source-diff identity `31a0cc2a4c8556c287f50e9e2e76bf8e24617ae3`; SHA-256 bindings `6DB775E5...`, context `BFBA50A4...`, dynamic `790CB014...`, handoff `7571EE13...`, controller `8407F328...`, launcher invocation `EBB76930...`, GUI radial adapter `93777B51...`, executor `7B5EF300...`, persisted resolver `04BBC3F1...` |
+| profile/environment | default Nextest profile; existing incremental target; no new dependency |
+| requested start | `2026-09-13T16:40:46.7397029-04:00` |
+| preflight | `rustfmt --check` parsed the complete touched source set; formatting applied; `git diff --check` exited 0; no `cargo`, `cargo-nextest`, or `rustc` process active |
+| session/PID | exec session `18302`; cargo-nextest PID `16936`, Cargo PIDs `54236`/`56764`, compiler children observed |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m3-nextest.log` |
+| exit/result | exit `101`; compilation stopped before tests on one omitted match arm in the test-only GUI event receiver |
+
+The failed job fully exited. The only correction added the two new radial watch-event
+variants to the existing test receiver's ignored-event branch; production behavior was
+unchanged. Replacement source-diff identity is
+`be49881c9388e0e9940fd47578302bb80e021545`; corrected `gui/mod.rs` SHA-256 is
+`2EDA6399D609E7097EF7D580F9FCD3CE586C3402E9D94B6D84CDE31301E23947`.
+At `2026-09-13T16:44:36.4661818-04:00`, formatting and `git diff --check`
+passed and no Cargo/Nextest/rustc process remained active. The permitted source-identical
+replacement gate uses the same expression and log path with `-retry` suffix.
+
+M3 focused integration replacement gate (result):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/) | test(/launcher_invocation/) | test(/universal_actions/) | test(/universal_action_executor/) | test(/gui::actions/) | test(/gui::watch/) | test(/gui::search/) | test(/command_host/) | test(/active_window/) | test(/window_catalog/) | test(/window_activation/) | test(/dashboard::data_cache/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | `HEAD 99ba6a29adc0d551926f2aea64390b4f44e90e5f` plus M3 worktree; tracked source-diff identity `be49881c9388e0e9940fd47578302bb80e021545`; corrected `gui/mod.rs` SHA-256 `2EDA6399D609E7097EF7D580F9FCD3CE586C3402E9D94B6D84CDE31301E23947`; all other recorded source hashes unchanged |
+| requested start | `2026-09-13T16:44:55-04:00` |
+| preflight | formatting and `git diff --check` passed; no `cargo`, `cargo-nextest`, or `rustc` process active |
+| session/PID | exec session `88739`; cargo-nextest PID `54288`, Cargo PIDs `55592`/`58240`, compiler children observed |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m3-nextest-retry.log` |
+| exit/result | exit `0`; compile completed in `16m 58s`; Nextest run `fdf80343-2369-432d-a167-48d480a758bb`; 238 passed, 0 failed, 3,869 skipped; test execution `8.309s` |
+
+The replacement verified the source-identical root correction and the complete focused
+M3 integration set. Interactive native behavior remains explicitly unverified.
+Post-gate `cargo fmt --all -- --check` and `git diff --check` both exited 0, and no
+Cargo/Nextest/rustc process remained active before the formatting check.
+
+M3 independent-review remediation gate (launch record):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/) | test(/launcher_invocation/) | test(/universal_actions/) | test(/universal_action_executor/) | test(/gui::actions/) | test(/gui::watch/) | test(/gui::search/) | test(/command_host/) | test(/active_window/) | test(/window_catalog/) | test(/window_activation/) | test(/dashboard::data_cache/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | `HEAD 99ba6a29adc0d551926f2aea64390b4f44e90e5f` plus M3 remediation worktree; pre-ledger tracked source-diff identity `6b3692bf3deda728a76102590eeb940cbf1e703f`; SHA-256 bindings `FA022046...`, controller `2114E9BE...`, dynamic `E845EB1E...`, handoff `648CBF3A...`, launcher invocation `B61F722B...`, GUI radial adapter `A34D7763...`, executor `8A2FC98B...`, persisted resolver `737023C4...` |
+| profile/environment | default Nextest profile; existing incremental target; no dependency/profile changes |
+| requested start | `2026-09-13T18:04:36.5362426-04:00` |
+| preflight | direct rustfmt parsed/formatted the complete touched source set; `git diff --check` exited 0; no `cargo`, `cargo-nextest`, or `rustc` process active |
+| session/PID | exec cell `996`, unified session `32312`; cargo-nextest PID `14388`, Cargo PIDs `52760`/`52624`, compiler children observed |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m3-review-remediation-nextest.log` |
+| exit/result | exit `101`; compilation stopped before tests on test-module paths, one inferred scheduler option, a Win32 type path, an immutable menu borrow, and a moved dynamic query |
+
+This gate covers the twelve independent-review remediations, including selectable
+frozen dynamic frames with exact catalog revalidation, effective after-action policy,
+direct-key release ownership, exact-once GUI dispatch leases, composite navigation,
+submenu-only dwell, typed execution policy and async completion preservation, context
+routing, exact custom identities, and scheduled action-handoff timeout. Interactive
+native behavior remains explicitly unverified.
+
+The failed process fully exited. Only those compiler-root issues were corrected:
+test paths were made crate-qualified, the scheduler deadline received its concrete
+`u64` type, `WPARAM` was qualified, the selected menu is cloned before mutation, and
+the frozen source query is cloned into its fingerprint. The permitted replacement
+below uses the same focused expression.
+
+M3 independent-review remediation replacement gate (launch record):
+
+| Field | Value |
+|---|---|
+| command | same focused Nextest expression recorded above |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | failed-gate source plus only the five recorded compiler-root corrections; controller SHA-256 `FE6BF997...`, dynamic `BFE4B0CC...`, native `40818599...`; all other source hashes unchanged |
+| profile/environment | default Nextest profile; existing incremental target; no dependency/profile changes |
+| requested start | `2026-09-13T18:08:04.0959360-04:00` |
+| preflight | failed Cargo tree fully exited; direct rustfmt and `git diff --check` passed; no `cargo`, `cargo-nextest`, or `rustc` process active |
+| session/PID | exec cell `1003`, unified session `47122`; cargo-nextest PID `29872`, Cargo PIDs `30272`/`46704`, compiler children observed |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m3-review-remediation-nextest-retry.log` |
+| exit/result | exit `100`; compile completed in `15m 53s`; Nextest run `cecef543-c03e-420f-9738-2f0565e5a658`; 149 passed, 1 failed, 103 not run after fail-fast, 3,869 skipped |
+
+The replacement exposed a real composite-host defect rather than a fixture issue:
+the unioned extent still modeled one circular input region, so a cascaded parent cell
+could be treated as exterior. The root correction adds explicit disjoint input regions
+to `LayoutSnapshot`, unions them for cascades, uses the same regions for pure ownership,
+and builds the native Win32 region from their union. This preserves protective parent
+gaps and true click-through between separated wheels.
+
+M3 independent-review remediation second replacement (launch record):
+
+| Field | Value |
+|---|---|
+| command | same focused Nextest expression recorded above |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | prior replacement source plus only the composite input-region root correction; geometry SHA-256 `6E4473A9...`, render `BF206EA8...`, controller `F3AEA0B5...`, native `770B0BE3...`; all other source hashes unchanged |
+| profile/environment | default Nextest profile; existing incremental target; no dependency/profile changes |
+| requested start | `2026-09-13T18:28:13.9901425-04:00` |
+| preflight | failed Nextest process fully exited; direct rustfmt and `git diff --check` passed; no `cargo`, `cargo-nextest`, or `rustc` process active |
+| session/PID | exec cell `1031`, unified session `7086`; cargo-nextest PID `50896`, Cargo PIDs `52904`/`59940`, compiler children observed |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m3-review-remediation-nextest-retry2.log` |
+| exit/result | exit `101`; compilation stopped before tests because windows 0.58 returns typed `GDI_REGION_TYPE` from `CombineRgn` |
+
+The failed job fully exited. The sole correction compares the typed region result to
+`GDI_REGION_TYPE(0)`; no control flow or other source changed.
+
+M3 independent-review remediation third replacement (launch record):
+
+| Field | Value |
+|---|---|
+| command | same focused Nextest expression recorded above |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | second-replacement source plus only the typed Windows API comparison; native SHA-256 `7FCEA5CA...`; all other source hashes unchanged |
+| profile/environment | default Nextest profile; existing incremental target; no dependency/profile changes |
+| requested start | `2026-09-13T18:30:30.8076600-04:00` |
+| preflight | failed Cargo tree fully exited; direct rustfmt and `git diff --check` passed; no `cargo`, `cargo-nextest`, or `rustc` process active |
+| session/PID | exec cell `1037`, unified session `12017`; cargo-nextest PID `56172`, Cargo PIDs `11012`/`61836`, compiler children observed |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m3-review-remediation-nextest-retry3.log` |
+| exit/result | exit `0`; compile completed in `17m 14s`; Nextest run `96ec3d1c-c692-4c35-a272-76866532474b`; 253 passed, 0 failed, 3,869 skipped; test execution `8.283s` |
+
+The successful replacement used source identical to the recorded hashes. Direct
+`rustfmt --check` over the complete touched Rust set and `git diff --check` both
+exited 0 afterward, and no Cargo/Nextest/rustc process remained active. The focused
+GUI tests created an untracked default `clipboard_modifiers.json` fixture at the
+repository root; it was removed after inspection without modifying source. No native
+interactive probe was run, so native cross-process behavior remains unverified.
+
+M3 closure remediation gate (result):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/) | test(/launcher_invocation/) | test(/universal_actions/) | test(/universal_action_executor/) | test(/gui::actions/) | test(/gui::watch/) | test(/gui::search/) | test(/command_host/) | test(/active_window/) | test(/window_catalog/) | test(/window_activation/) | test(/dashboard::data_cache/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| initial source | tracked source-diff identity `943e6b887c833b2a2a62f37bae9e0321658306f1` |
+| initial attempt | requested `2026-09-13T19:17:21.9663770-04:00`, exec session `51525`; exit `101` before tests because the new projected-cell role helper omitted the existing `CellContent::Spacer` arm |
+| first replacement | requested `2026-09-13T19:20:29.2584589-04:00`, exec session `5481`, source identity `381b4ecf47b33c37d02e89f7757664ec1d4432ba`; compiled in `16m 54s`, Nextest run `b23c7032-0d5c-4137-9658-a423c4d46781`; 102 passed and 1 new fixture test failed before fail-fast because it attempted a fresh chord while its prior radial lifecycle was intentionally active |
+| successful replacement | requested `2026-09-13T19:39:34.5761841-04:00`, exec session `23006`, source identity `1081befce4cbf7ce00fece9dd22dde3f84c2b5fc`; compiled in `18m 03s`, Nextest run `4cc17c37-b860-4533-a703-8accadb609f4`; 258 passed, 0 failed, 3,869 skipped; test execution `7.452s` |
+
+Both failed trees fully exited before their root-only correction and replacement.
+The only source root correction was the exhaustive spacer role; the second change
+corrected the new test lifecycle to dismiss its first active session before asserting
+a second admitted invocation. No native interactive probe was run.
+
+M3 final closure review gate (result):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/) | test(/launcher_invocation/) | test(/universal_actions/) | test(/universal_action_executor/) | test(/gui::actions/) | test(/gui::watch/) | test(/gui::search/) | test(/command_host/) | test(/active_window/) | test(/window_catalog/) | test(/window_activation/) | test(/dashboard::data_cache/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| initial attempt | requested `2026-09-13T20:16:10.1055848-04:00`, exec session `53778`, source identity `44335b0c25bec3332e6a820a3a1c2f8a4bfe24fa`; exit `101` before tests because windows 0.58 locates pointer tracking types/functions under `UI::Input::KeyboardAndMouse` and `WM_MOUSELEAVE` under `UI::Controls` |
+| first replacement | requested `2026-09-13T20:21:05.2520322-04:00`, exec session `71932`, source identity `3c23ac71a2f5c0676800081d16fe2b3e9ea06d20`; compiled in `17m 32s`, Nextest run `1cdaecfb-4ad3-4160-a615-bb52406cf4bb`; 210 passed and one new validation fixture failed before fail-fast because it used malformed `screen-draw:start` instead of the canonical `screen_draw:start` action |
+| successful root-only replacement | requested `2026-09-13T20:40:16.7302723-04:00`, exec session `82190`, source identity `bc639a0636567f5d514f63f543490460aff08ba5`; compiled in `16m 58s`, Nextest run `fd913367-16e9-4711-a3ca-726833e381d2`; 262 passed, 0 failed, 3,869 skipped; test execution `7.189s` |
+
+Both failed trees fully exited before the narrowly scoped correction and next run.
+No native interactive probe was run; the test-created `clipboard_modifiers.json`
+fixture was inspected and removed after the successful gate.
+
+M3 decision-review remediation replacement gate (launch record):
+
+| Field | Value |
+|---|---|
+| command | `cargo nextest run -E 'test(/radial/) | test(/launcher_invocation/) | test(/universal_actions/) | test(/universal_action_executor/) | test(/gui::actions/) | test(/gui::watch/) | test(/gui::search/) | test(/command_host/) | test(/active_window/) | test(/window_catalog/) | test(/window_activation/) | test(/dashboard::data_cache/)'` |
+| cwd | `G:\Repos\rust\Multi_Launcher` |
+| source | tracked source-diff identity `e775422b704acdc3db91ef055e3601b31534211a`; SHA-256 bindings `BB356254...`, model `AEF436A0...`, validation `F440CC91...`, handoff `1560C8AA...`, controller `C2F08CD4...`, GUI radial adapter `C7A6F17C...` |
+| requested start | `2026-09-13T21:19:09.7431864-04:00` |
+| preflight | `cargo fmt --all -- --check` and `git diff --check` exited 0; no Cargo/Nextest/rustc process active |
+| log | `C:\Users\Jay\AppData\Local\Temp\multi-launcher-m3-decision-review-nextest.log` |
+| initial session/PIDs | exec session `6079`; cargo-nextest PID `47344`, Cargo PIDs `11160`/`50248`, compiler children observed |
+| initial result | exit `101` before tests: the new multi-ring assertion needed an explicit `sum::<usize>()` because multiple dependencies implement `Sum<usize>` |
+| replacement source | root-only test annotation; tracked source-diff identity `a5fa7be8b65513932ef7884a198db0e1f0329be5`; bindings SHA-256 `0E3DC17C...`; all other source hashes unchanged |
+| replacement requested start | `2026-09-13T21:23:48.2898699-04:00`; failed tree fully exited, formatting/diff checks pass, no Cargo tree active |
+| first replacement session/PIDs | exec session `85744`; cargo-nextest PID `60372`, Cargo PIDs `13988`/`52444`, compiler children observed |
+| first replacement result | exit `100`; compile `16m 27s`; 136 passed, 1 new regression fixture failed, 133 not run after fail-fast. The outer ring capacity was exactly 20 for exactly 20 fixture entries, so correctly had no Next control. |
+| second replacement source | root-only fixture correction uses 25 entries per ring to exercise paging on both; tracked source-diff identity `12c7bf21f89f4852fd2db3c630a26eab6832a09e`; bindings SHA-256 `3299125C...`; production source hashes unchanged |
+| second replacement requested start | `2026-09-13T21:42:17.2455136-04:00`; failed tree fully exited, formatting/diff checks pass, no Cargo tree active |
+| second replacement session/PIDs | exec session `98218`; cargo-nextest PID `58164`, Cargo PIDs `50500`/`32692`, compiler children observed |
+| result | exit `0`; compile `14m 22s`; Nextest run `5dca8537-fdff-45a0-9284-f2a540315da6`; 270 passed, 0 failed, 3,869 skipped; test execution `8.418s`; interactive native evidence remains unverified |
 
 ## Known evidence gaps
 

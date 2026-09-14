@@ -42,6 +42,9 @@ impl LauncherApp {
     pub fn process_watch_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
+                WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
+                WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),
+                WatchEvent::RadialInvalidate => self.invalidate_radial_leases(),
                 WatchEvent::Actions => {
                     let _transaction = crate::actions::transaction_guard();
                     let custom = match load_actions_typed(&self.actions_path) {
@@ -219,8 +222,14 @@ impl LauncherApp {
                 WatchEvent::VirtualDesktop(mut completion) => {
                     let interaction_is_current = self.virtual_desktop_interaction_token
                         == completion.interaction_token
-                        && self.query == completion.expected_query
-                        && self.visible_flag.load(Ordering::SeqCst) == completion.expected_visible;
+                        && (completion.root_policy
+                            == crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState
+                            || (self.query == completion.expected_query
+                                && self.visible_flag.load(Ordering::SeqCst)
+                                    == completion.expected_visible));
+                    let preserved_root = (completion.root_policy
+                        == crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState)
+                        .then(|| super::universal_action_executor::RadialRootState::capture(self));
                     match completion.result {
                         Ok(()) => {
                             if !interaction_is_current {
@@ -240,6 +249,9 @@ impl LauncherApp {
                             error,
                             "suppressed stale virtual desktop completion error"
                         ),
+                    }
+                    if let Some(root) = preserved_root {
+                        root.restore(self);
                     }
                 }
             }
@@ -355,6 +367,7 @@ mod tests {
                 interaction_token: 0,
                 expected_query: String::new(),
                 expected_visible: false,
+                root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 result: Err("injected desktop failure".into()),
             }))
             .unwrap();
@@ -399,6 +412,7 @@ mod tests {
                 interaction_token: 1,
                 expected_query: String::new(),
                 expected_visible: false,
+                root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 result: Ok(()),
             }))
             .unwrap();
@@ -408,6 +422,55 @@ mod tests {
         assert_eq!(app.usage.get("vd:create"), Some(&1));
         assert_eq!(app.test_recorded_history_queries, ["vd create"]);
         assert!(app.test_toast_messages.is_empty());
+    }
+
+    #[test]
+    fn radial_async_completion_applies_history_once_without_mutating_root_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let action = Action {
+            label: "Create Virtual Desktop".into(),
+            desc: "Virtual Desktop".into(),
+            action: "vd:create".into(),
+            args: None,
+        };
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::Create,
+            ),
+            original_action: action,
+            query_override: None,
+            source: ActivationSource::RadialRelease,
+        };
+        app.virtual_desktop_interaction_token = 7;
+        app.query = "untouched root".into();
+        app.last_search_query = "old search".into();
+        app.last_results_valid = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.event_tx
+            .send(WatchEvent::VirtualDesktop(VirtualDesktopGuiCompletion {
+                invocation,
+                completion_outcome: crate::commands::CommandOutcome {
+                    query: crate::commands::QueryPolicy::Set("changed".into()),
+                    visibility: crate::commands::VisibilityPolicy::Hide,
+                    history: crate::commands::HistoryPolicy::Record,
+                    ..crate::commands::CommandOutcome::default()
+                },
+                history_query: "captured radial query".into(),
+                interaction_token: 7,
+                expected_query: "transient command state".into(),
+                expected_visible: false,
+                root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                result: Ok(()),
+            }))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.query, "untouched root");
+        assert_eq!(app.last_search_query, "old search");
+        assert!(app.last_results_valid);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
     }
 
     #[test]

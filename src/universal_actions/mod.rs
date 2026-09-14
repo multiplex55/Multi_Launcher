@@ -4,6 +4,7 @@
 //! action sets are intended to be resolved lazily by later provider work.
 
 mod model;
+mod persisted_resolver;
 mod provider;
 mod providers;
 mod registry;
@@ -13,8 +14,11 @@ mod target;
 pub use model::{
     ActionAvailability, ActionGroup, ActionIconKey, ActionId, ActionPresentation,
     ActionPresentationOverride, ActionPriority, ActionSafety, ActionSurface,
-    EffectiveActionPresentation, NoteExternalEditor, UniversalAction, UniversalActionOperation,
-    UniversalUiIntent, action_ids,
+    EffectiveActionPresentation, NoteExternalEditor, RootLauncherPolicy, UniversalAction,
+    UniversalActionInvocationContext, UniversalActionOperation, UniversalUiIntent, action_ids,
+};
+pub use persisted_resolver::{
+    PersistedActionCatalog, PersistedActionUnavailable, ResolvedPersistedAction,
 };
 pub use provider::{ActionResolutionContext, PinCapability, UniversalActionProvider};
 pub use registry::UniversalActionRegistry;

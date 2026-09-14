@@ -26,6 +26,9 @@ pub enum WatchEvent {
     Dashboard(DashboardEvent),
     Recycle(Result<(), String>),
     ExecuteAction(Action),
+    RadialDispatch(crate::radial::handoff::RadialDispatchRequest),
+    RadialPrepare(crate::radial::bindings::RadialPrepareEnvelope),
+    RadialInvalidate,
     /// Event-driven request from the process-wide launcher hotkey listener.
     ScreenDrawStart,
     /// Launcher hotkey was pressed while Screen Draw owns the foreground flow.
@@ -44,6 +47,7 @@ pub struct VirtualDesktopGuiCompletion {
     pub interaction_token: u64,
     pub expected_query: String,
     pub expected_visible: bool,
+    pub root_policy: crate::universal_actions::RootLauncherPolicy,
     pub result: Result<(), String>,
 }
 
@@ -58,6 +62,7 @@ mod tests {
         assert_eq!(ActivationSource::Dashboard.label(), "dashboard");
         assert_eq!(ActivationSource::Gesture.label(), "gesture");
         assert_eq!(ActivationSource::Macro.label(), "macro");
+        assert_eq!(ActivationSource::RadialRelease.label(), "radial_release");
     }
 }
 
@@ -84,8 +89,8 @@ pub(crate) struct PendingConfirmCommand {
 #[derive(Clone)]
 pub(crate) struct PendingUniversalActionInvocation {
     pub(crate) action: crate::universal_actions::UniversalAction,
-    pub(crate) surface: crate::universal_actions::ActionSurface,
-    pub(crate) source: crate::commands::ActivationSource,
+    pub(crate) context: crate::universal_actions::UniversalActionInvocationContext,
+    pub(crate) radial_request: Option<crate::radial::handoff::RadialDispatchRequest>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +118,9 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::Dashboard(_) => TestWatchEvent::Actions,
             WatchEvent::Recycle(_) => unreachable!(),
             WatchEvent::ExecuteAction(_) => TestWatchEvent::Actions,
+            WatchEvent::RadialDispatch(_) => TestWatchEvent::Actions,
+            WatchEvent::RadialPrepare(_) => TestWatchEvent::Actions,
+            WatchEvent::RadialInvalidate => TestWatchEvent::Actions,
             WatchEvent::ScreenDrawStart => TestWatchEvent::Actions,
             WatchEvent::ScreenDrawRecover => TestWatchEvent::ScreenDrawRecover,
             WatchEvent::ScreenDrawEmergency => TestWatchEvent::ScreenDrawEmergency,

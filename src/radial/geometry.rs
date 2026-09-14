@@ -83,6 +83,9 @@ pub struct LayoutSnapshot {
     pub rim_extent: LogicalRect,
     pub visual_extent: LogicalRect,
     pub input_extent: LogicalRect,
+    /// Disjoint owned wheel/tree regions. Keeping these explicit preserves
+    /// click-through between cascaded menus while their internal gaps remain protected.
+    pub input_regions: Vec<HitShape>,
     pub cells: Vec<CellLayout>,
 }
 
@@ -228,6 +231,10 @@ pub fn layout_menu(
         rim_extent: visual_extent,
         visual_extent,
         input_extent,
+        input_regions: vec![HitShape::Circle {
+            center,
+            radius: input_margin,
+        }],
         cells,
     })
 }

@@ -1,8 +1,16 @@
 use super::model::{InteractionMode, InvocationId, MenuId, SessionId};
+use super::session::{NavigationCommand, NavigationModifiers};
 
 pub type Timestamp = u64;
 pub type SettingsGeneration = u64;
 pub type ContextToken = u64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputProvenance {
+    Physical,
+    ExternalInjected,
+    SelfInjected,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvocationEvent {
@@ -44,6 +52,8 @@ pub enum InvocationEvent {
         id: InvocationId,
         menu_id: MenuId,
         at: Timestamp,
+        primary_key: u32,
+        provenance: InputProvenance,
     },
     CancelLifecycle {
         primary_still_down: bool,
@@ -73,9 +83,20 @@ pub enum InvocationIntent {
     ToggleDirectMenu {
         id: InvocationId,
         menu_id: MenuId,
+        primary_key: u32,
+        provenance: InputProvenance,
+        trigger_still_down: bool,
     },
     CloseRadial {
         session_id: Option<SessionId>,
+    },
+    TriggerReleased {
+        id: InvocationId,
+    },
+    Navigate {
+        session_id: SessionId,
+        command: NavigationCommand,
+        modifiers: NavigationModifiers,
     },
     HoldCancelledBeforePresentation {
         id: InvocationId,
@@ -169,13 +190,24 @@ impl InvocationReducer {
                 vec![]
             }
             E::CancelLifecycle { primary_still_down } => self.cancel_current(primary_still_down),
-            E::DirectToggle { id, menu_id, .. }
-                if matches!(
-                    self.state,
-                    InvocationState::Idle | InvocationState::RadialActive { .. }
-                ) =>
+            E::DirectToggle {
+                id,
+                menu_id,
+                primary_key,
+                provenance,
+                ..
+            } if matches!(
+                self.state,
+                InvocationState::Idle | InvocationState::RadialActive { .. }
+            ) =>
             {
-                vec![I::ToggleDirectMenu { id, menu_id }]
+                vec![I::ToggleDirectMenu {
+                    id,
+                    menu_id,
+                    primary_key,
+                    provenance,
+                    trigger_still_down: true,
+                }]
             }
             E::ChordPressed { repeat: true, .. } => vec![],
             E::ChordPressed {
@@ -376,7 +408,7 @@ impl InvocationReducer {
                         {
                             *trigger_still_down = false;
                         }
-                        vec![]
+                        vec![I::TriggerReleased { id }]
                     }
                     InteractionMode::HoldAndClick => {
                         self.state = InvocationState::Idle;
@@ -389,13 +421,17 @@ impl InvocationReducer {
                         {
                             *trigger_still_down = false;
                         }
-                        vec![]
+                        vec![I::TriggerReleased { id }]
                     }
                 }
             }
-            InvocationState::AwaitingOwnedRelease { id: owned, .. } if *owned == id => {
+            InvocationState::AwaitingOwnedRelease { id: owned, reason } if *owned == id => {
+                let acknowledge = *reason == DrainReason::ActionHandoff;
                 self.state = InvocationState::Idle;
-                vec![]
+                acknowledge
+                    .then_some(I::TriggerReleased { id })
+                    .into_iter()
+                    .collect()
             }
             InvocationState::SuppressedByExclusiveTool { owned_release }
                 if *owned_release == Some(id) =>
@@ -608,7 +644,9 @@ mod tests {
             r.reduce(InvocationEvent::DirectToggle {
                 id: InvocationId(3),
                 menu_id: MenuId::new("tools"),
-                at: 1
+                at: 1,
+                primary_key: 0x54,
+                provenance: InputProvenance::Physical,
             })
             .as_slice(),
             [InvocationIntent::ToggleDirectMenu { .. }]
@@ -700,5 +738,38 @@ mod tests {
             id: InvocationId(6),
         });
         assert!(matches!(r.state(), InvocationState::Idle));
+    }
+
+    #[test]
+    fn action_handoff_acknowledges_only_the_exact_owned_release() {
+        let mut reducer = InvocationReducer::default();
+        reducer.reduce(press(20, 0, InteractionMode::StickyClick));
+        reducer.reduce(InvocationEvent::Deadline {
+            id: InvocationId(20),
+            at: 350,
+            generation: 7,
+        });
+        reducer.reduce(InvocationEvent::RadialClosedForAction {
+            id: InvocationId(20),
+        });
+        assert!(
+            reducer
+                .reduce(InvocationEvent::PrimaryReleased {
+                    id: InvocationId(19),
+                    at: 400,
+                })
+                .is_empty()
+        );
+        assert!(matches!(
+            reducer
+                .reduce(InvocationEvent::PrimaryReleased {
+                    id: InvocationId(20),
+                    at: 401,
+                })
+                .as_slice(),
+            [InvocationIntent::TriggerReleased {
+                id: InvocationId(20)
+            }]
+        ));
     }
 }

@@ -229,6 +229,9 @@ impl Default for ConfirmationModal {
 }
 
 impl ConfirmationModal {
+    pub(crate) fn close(&mut self) {
+        self.open = false;
+    }
     pub(crate) fn is_open(&self) -> bool {
         self.open
     }

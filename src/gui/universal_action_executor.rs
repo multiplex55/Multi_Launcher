@@ -7,8 +7,8 @@ use crate::commands::{
 };
 use crate::history::{self, HISTORY_PINS_FILE, HistoryPin};
 use crate::universal_actions::{
-    ActionSafety, ActionSurface, NoteExternalEditor, UniversalAction, UniversalActionOperation,
-    UniversalUiIntent, action_ids,
+    ActionSafety, ActionSurface, NoteExternalEditor, RootLauncherPolicy, UniversalAction,
+    UniversalActionInvocationContext, UniversalActionOperation, UniversalUiIntent, action_ids,
 };
 
 use super::{
@@ -32,6 +32,19 @@ impl LauncherApp {
         surface: ActionSurface,
         source: ActivationSource,
     ) -> UniversalActionExecution {
+        self.execute_universal_action_with_context(
+            action,
+            UniversalActionInvocationContext::legacy(surface, source),
+            None,
+        )
+    }
+
+    pub(crate) fn execute_universal_action_with_context(
+        &mut self,
+        action: UniversalAction,
+        context: UniversalActionInvocationContext,
+        radial_request: Option<crate::radial::handoff::RadialDispatchRequest>,
+    ) -> UniversalActionExecution {
         if let Some(reason) = action.availability.disabled_reason() {
             self.report_error_message("universal_action", reason);
             return UniversalActionExecution::Unavailable;
@@ -48,15 +61,21 @@ impl LauncherApp {
             };
             self.pending_universal_confirm = Some(PendingUniversalActionInvocation {
                 action,
-                surface,
-                source,
+                context: context.clone(),
+                radial_request,
             });
-            self.confirm_modal.open_for_source(kind, Some(source));
+            self.confirm_modal
+                .open_for_source(kind, Some(context.source));
             self.restore_for_new_launcher_interaction(&before);
             return UniversalActionExecution::ConfirmationRequired;
         }
 
-        self.execute_universal_action_confirmed(action, surface, source);
+        let root = (context.root_policy == RootLauncherPolicy::PreserveOrdinaryState)
+            .then(|| RadialRootState::capture(self));
+        self.execute_universal_action_confirmed(action, &context);
+        if let Some(root) = root {
+            root.restore(self);
+        }
         self.restore_for_new_launcher_interaction(&before);
         UniversalActionExecution::Executed
     }
@@ -69,12 +88,34 @@ impl LauncherApp {
             return false;
         };
         if confirmed {
+            let action = if let Some(request) = pending.radial_request.as_ref() {
+                if !self.radial_lease_is_current(request) {
+                    self.report_error_message(
+                        "radial_action",
+                        "Radial action lease expired before confirmation",
+                    );
+                    return true;
+                }
+                match self.resolve_radial_action(request) {
+                    Ok(prepared) => prepared.action,
+                    Err(reason) => {
+                        self.report_error_message(
+                            "radial_action",
+                            format!("Radial action changed before confirmation: {reason:?}"),
+                        );
+                        return true;
+                    }
+                }
+            } else {
+                pending.action
+            };
             let before = self.launcher_interaction_snapshot();
-            self.execute_universal_action_confirmed(
-                pending.action,
-                pending.surface,
-                pending.source,
-            );
+            let root = (pending.context.root_policy == RootLauncherPolicy::PreserveOrdinaryState)
+                .then(|| RadialRootState::capture(self));
+            self.execute_universal_action_confirmed(action, &pending.context);
+            if let Some(root) = root {
+                root.restore(self);
+            }
             self.restore_for_new_launcher_interaction(&before);
         }
         true
@@ -83,14 +124,18 @@ impl LauncherApp {
     fn execute_universal_action_confirmed(
         &mut self,
         action: UniversalAction,
-        _surface: ActionSurface,
-        source: ActivationSource,
+        context: &UniversalActionInvocationContext,
     ) {
+        let source = context.source;
         let action_id = action.id.clone();
         match action.operation {
             UniversalActionOperation::InvokePrimary(action) => {
-                // This is intentionally the exact legacy primary activation path.
-                self.activate_action(action, None, source);
+                if context.surface == ActionSurface::RadialMenu {
+                    self.dispatch_radial_primary(action, context);
+                } else {
+                    // This is intentionally the exact legacy primary activation path.
+                    self.activate_action(action, None, source);
+                }
             }
             UniversalActionOperation::Command {
                 command,
@@ -104,6 +149,7 @@ impl LauncherApp {
                         query_override: None,
                         source,
                     },
+                    context.root_policy,
                 );
             }
             UniversalActionOperation::UiIntent(intent) => {
@@ -112,13 +158,37 @@ impl LauncherApp {
         }
     }
 
+    fn dispatch_radial_primary(
+        &mut self,
+        action: Action,
+        context: &UniversalActionInvocationContext,
+    ) {
+        #[cfg(test)]
+        self.test_activation_trace
+            .push((action.clone(), context.source));
+        let invocation = match crate::commands::parse_command(action, None, context.source) {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                self.report_error_message(error.domain, error.message);
+                return;
+            }
+        };
+        let previous_policy = std::mem::replace(&mut self.command_root_policy, context.root_policy);
+        self.dispatch_command_invocation_with_history(invocation, Some(&context.history_query));
+        self.command_root_policy = previous_policy;
+    }
+
     fn dispatch_universal_secondary_command(
         &mut self,
         action_id: &str,
         invocation: CommandInvocation,
+        root_policy: RootLauncherPolicy,
     ) {
+        let previous_policy = std::mem::replace(&mut self.command_root_policy, root_policy);
         let bus = std::sync::Arc::clone(&self.command_bus);
-        match bus.dispatch(&invocation, self) {
+        let result = bus.dispatch(&invocation, self);
+        self.command_root_policy = previous_policy;
+        match result {
             Ok(outcome) => {
                 let outcome = normalize_secondary_outcome(
                     action_id,
@@ -280,6 +350,61 @@ impl LauncherApp {
                 self.mkmacro_dialog.set_selected_macro(Some(id));
             }
         }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct RadialRootState {
+    query: String,
+    pending_query: Option<String>,
+    results: Vec<Action>,
+    selected: Option<usize>,
+    resolved_grid_layout: bool,
+    visible: bool,
+    restore: bool,
+    focus_query: bool,
+    move_cursor_end: bool,
+    last_results_valid: bool,
+    last_search_query: String,
+    suggestions: Vec<String>,
+    autocomplete_index: usize,
+    query_history: super::query_history::QueryHistoryNavigator,
+}
+
+impl RadialRootState {
+    pub(super) fn capture(app: &LauncherApp) -> Self {
+        Self {
+            query: app.query.clone(),
+            pending_query: app.pending_query.clone(),
+            results: app.results.clone(),
+            selected: app.selected,
+            resolved_grid_layout: app.resolved_grid_layout,
+            visible: app.visible_flag.load(Ordering::SeqCst),
+            restore: app.restore_flag.load(Ordering::SeqCst),
+            focus_query: app.focus_query,
+            move_cursor_end: app.move_cursor_end,
+            last_results_valid: app.last_results_valid,
+            last_search_query: app.last_search_query.clone(),
+            suggestions: app.suggestions.clone(),
+            autocomplete_index: app.autocomplete_index,
+            query_history: app.query_history.clone(),
+        }
+    }
+    pub(super) fn restore(self, app: &mut LauncherApp) {
+        app.query = self.query;
+        app.pending_query = self.pending_query;
+        app.results = self.results;
+        app.selected = self.selected;
+        app.resolved_grid_layout = self.resolved_grid_layout;
+        app.visible_flag.store(self.visible, Ordering::SeqCst);
+        app.restore_flag.store(self.restore, Ordering::SeqCst);
+        app.focus_query = self.focus_query;
+        app.move_cursor_end = self.move_cursor_end;
+        app.last_results_valid = self.last_results_valid;
+        app.last_search_query = self.last_search_query;
+        app.suggestions = self.suggestions;
+        app.autocomplete_index = self.autocomplete_index;
+        app.query_history = self.query_history;
     }
 }
 
@@ -548,6 +673,68 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_radial_execution_preserves_root_launcher_state() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.query = "keep root".into();
+        app.pending_query = Some("pending".into());
+        app.results = vec![action()];
+        app.selected = Some(0);
+        app.resolved_grid_layout = true;
+        app.restore_flag.store(true, Ordering::SeqCst);
+        app.focus_query = true;
+        app.move_cursor_end = true;
+        app.last_results_valid = true;
+        app.last_search_query = "last search".into();
+        app.suggestions = vec!["one".into(), "two".into()];
+        app.autocomplete_index = 1;
+        assert_eq!(
+            app.query_history
+                .older("keep root", || ["older".to_string()]),
+            Some("older".into())
+        );
+        app.visible_flag.store(true, Ordering::SeqCst);
+        let primary = Action {
+            label: "External".into(),
+            desc: "Test".into(),
+            action: "help:show".into(),
+            args: None,
+        };
+        app.execute_universal_action_with_context(
+            universal(
+                action_ids::RESULT_EXECUTE,
+                ActionTarget::Generic {
+                    action: primary.clone(),
+                },
+                ActionSafety::Normal,
+                UniversalActionOperation::InvokePrimary(primary),
+            ),
+            UniversalActionInvocationContext {
+                surface: ActionSurface::RadialMenu,
+                source: ActivationSource::Click,
+                stable_request: None,
+                history_query: "captured".into(),
+                root_policy: RootLauncherPolicy::PreserveOrdinaryState,
+            },
+            None,
+        );
+        assert_eq!(app.query, "keep root");
+        assert_eq!(app.pending_query.as_deref(), Some("pending"));
+        assert_eq!(app.results, vec![action()]);
+        assert_eq!(app.selected, Some(0));
+        assert!(app.resolved_grid_layout);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.focus_query);
+        assert!(app.move_cursor_end);
+        assert!(app.last_results_valid);
+        assert_eq!(app.last_search_query, "last search");
+        assert_eq!(app.suggestions, ["one", "two"]);
+        assert_eq!(app.autocomplete_index, 1);
+        assert_eq!(app.query_history.newer("older"), Some("keep root".into()));
+    }
+
+    #[test]
     fn secondary_command_keeps_launcher_query_visibility_history_and_generic_toasts() {
         let ctx = eframe::egui::Context::default();
         let mut app = crate::gui::actions::tests::new_app(&ctx);
@@ -619,8 +806,8 @@ mod tests {
             .as_ref()
             .expect("pending universal action");
         assert_eq!(pending.action, action);
-        assert_eq!(pending.surface, ActionSurface::RadialMenu);
-        assert_eq!(pending.source, ActivationSource::Gesture);
+        assert_eq!(pending.context.surface, ActionSurface::RadialMenu);
+        assert_eq!(pending.context.source, ActivationSource::Gesture);
 
         app.resolve_pending_confirmation(true);
         assert!(app.pending_universal_confirm.is_none());

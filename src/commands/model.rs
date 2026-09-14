@@ -15,6 +15,7 @@ pub enum ActivationSource {
     Dashboard,
     Gesture,
     Macro,
+    RadialRelease,
 }
 
 impl ActivationSource {
@@ -25,6 +26,7 @@ impl ActivationSource {
             Self::Dashboard => "dashboard",
             Self::Gesture => "gesture",
             Self::Macro => "macro",
+            Self::RadialRelease => "radial_release",
         }
     }
 }

@@ -1,6 +1,7 @@
 //! Complete, timestamped lifecycle adapter for the launcher chord.
 //! The pure adapter is also the synchronous decision core used by the native hook.
 use super::{Hotkey, Key};
+pub use crate::radial::invocation::InputProvenance;
 use crate::radial::invocation::{
     ContextToken, InvocationEvent, InvocationIntent, InvocationReducer, SettingsGeneration,
     Timestamp,
@@ -70,12 +71,6 @@ pub fn classify_provenance(injected: bool, extra_info: usize) -> InputProvenance
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InputProvenance {
-    Physical,
-    ExternalInjected,
-    SelfInjected,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyTransition {
     Down,
     Repeat,
@@ -107,6 +102,20 @@ pub enum RelatedAction {
 pub struct RelatedBinding {
     pub hotkey: Hotkey,
     pub action: RelatedAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DirectCycleOwnership {
+    id: InvocationId,
+    primary_key: u32,
+    provenance: InputProvenance,
+}
+impl DirectCycleOwnership {
+    fn matches_release(self, event: KeyEvent) -> bool {
+        event.transition == KeyTransition::Up
+            && event.vk == self.primary_key
+            && event.provenance == self.provenance
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +234,14 @@ impl LauncherInvocationAdapter {
     }
     pub fn config(&self) -> &InvocationConfig {
         &self.config
+    }
+    fn navigation_modifiers(&self) -> crate::radial::session::NavigationModifiers {
+        crate::radial::session::NavigationModifiers {
+            control: self.modifiers.ctrl_left || self.modifiers.ctrl_right,
+            shift: self.modifiers.shift_left || self.modifiers.shift_right,
+            alt: self.modifiers.alt_left || self.modifiers.alt_right,
+            alt_gr: self.modifiers.alt_right && self.modifiers.ctrl_left,
+        }
     }
     fn has_owned_cycle(&self) -> bool {
         self.owned.is_some() || self.recovery_primary.is_some()
@@ -387,7 +404,7 @@ impl LauncherInvocationAdapter {
                 at,
                 threshold_ms: self.config.threshold_ms,
                 generation: self.config.generation,
-                context_token: self.config.context_token,
+                context_token: id.0,
                 menu_id: self.config.menu_id.clone(),
                 interaction: self.config.interaction,
                 repeat: false,
@@ -420,7 +437,7 @@ impl LauncherInvocationAdapter {
                 at: event.at,
                 threshold_ms: self.config.threshold_ms,
                 generation: self.config.generation,
-                context_token: self.config.context_token,
+                context_token: id.0,
                 menu_id: self.config.menu_id.clone(),
                 interaction: self.config.interaction,
                 repeat: true,
@@ -564,6 +581,7 @@ fn command_generation_is_valid(sequence: u64, invalid_through: u64) -> bool {
 struct EscapeOwnership {
     active_session: Option<(InvocationId, crate::radial::model::SessionId)>,
     owned_provenance: Option<InputProvenance>,
+    owned_vk: Option<u32>,
 }
 
 impl EscapeOwnership {
@@ -573,6 +591,7 @@ impl EscapeOwnership {
                 self.active_session = Some((*id, session_id.clone()))
             }
             InvocationEvent::RadialSessionClosed { id }
+            | InvocationEvent::RadialClosedForAction { id }
                 if self
                     .active_session
                     .as_ref()
@@ -588,16 +607,27 @@ impl EscapeOwnership {
         &mut self,
         event: KeyEvent,
         accept_external_injected: bool,
+        modifiers: crate::radial::session::NavigationModifiers,
     ) -> Option<AdapterOutcome> {
-        if event.vk != 0x1B {
+        let navigation = match event.vk {
+            0x25 | 0x26 => Some(crate::radial::session::NavigationCommand::Previous),
+            0x27 | 0x28 => Some(crate::radial::session::NavigationCommand::Next),
+            0x0D => Some(crate::radial::session::NavigationCommand::ActivatePrimary),
+            0x08 => Some(crate::radial::session::NavigationCommand::Back),
+            0x21 => Some(crate::radial::session::NavigationCommand::PreviousPage),
+            0x22 => Some(crate::radial::session::NavigationCommand::NextPage),
+            _ => None,
+        };
+        if event.vk != 0x1B && navigation.is_none() {
             return None;
         }
         if let Some(owned) = self.owned_provenance {
-            if event.provenance != owned {
+            if event.provenance != owned || self.owned_vk != Some(event.vk) {
                 return Some(AdapterOutcome::pass());
             }
             if event.transition == KeyTransition::Up {
                 self.owned_provenance = None;
+                self.owned_vk = None;
             }
             return Some(AdapterOutcome {
                 consume: true,
@@ -613,12 +643,22 @@ impl EscapeOwnership {
         }
         let (_, session_id) = self.active_session.clone()?;
         self.owned_provenance = Some(event.provenance);
+        self.owned_vk = Some(event.vk);
+        let intents = if let Some(command) = navigation {
+            vec![InvocationIntent::Navigate {
+                session_id,
+                command,
+                modifiers,
+            }]
+        } else {
+            vec![InvocationIntent::CloseRadial {
+                session_id: Some(session_id),
+            }]
+        };
         Some(AdapterOutcome {
             consume: true,
             recovery: false,
-            intents: vec![InvocationIntent::CloseRadial {
-                session_id: Some(session_id),
-            }],
+            intents,
         })
     }
 }
@@ -879,6 +919,8 @@ mod native_service {
         shutdown_requested: bool,
         escape: EscapeOwnership,
         pending_handoffs: PendingRouteHandoffs,
+        next_direct_id: u64,
+        direct_owned: Option<DirectCycleOwnership>,
     }
     static STATE: OnceLock<Mutex<Option<State>>> = OnceLock::new();
     fn publish(state: &State, out: AdapterOutcome) {
@@ -926,6 +968,30 @@ mod native_service {
         let injected = data.flags.contains(LLKHF_INJECTED);
         let provenance = classify_provenance(injected, data.dwExtraInfo);
         let at = state.epoch.elapsed().as_millis() as u64;
+        if transition == KeyTransition::Up
+            && state.direct_owned.is_some_and(|owned| {
+                owned.matches_release(KeyEvent {
+                    vk: data.vkCode,
+                    transition,
+                    at,
+                    provenance,
+                })
+            })
+        {
+            let id = state
+                .direct_owned
+                .take()
+                .expect("matched direct ownership")
+                .id;
+            let _ = state.notices.send(ServiceNotice {
+                recovery: false,
+                intents: vec![InvocationIntent::TriggerReleased { id }],
+                error: None,
+                action: None,
+            });
+            let _ = state.wake.send(());
+        }
+        let navigation_modifiers = state.adapter.navigation_modifiers();
         if let Some(out) = state.escape.process(
             KeyEvent {
                 vk: data.vkCode,
@@ -934,6 +1000,7 @@ mod native_service {
                 provenance,
             },
             state.adapter.config().accept_external_injected,
+            navigation_modifiers,
         ) {
             let consume = out.consume;
             publish(state, out);
@@ -974,27 +1041,47 @@ mod native_service {
             } else {
                 state.down.insert(data.vkCode);
             }
-            let mut selected: Option<(u8, RelatedAction)> = None;
+            let mut selected: Option<(u8, RelatedAction, u32)> = None;
             for (binding, latched) in &mut state.related {
                 let eligible = related_binding_eligible(&state.down, &binding.hotkey);
                 if eligible && !*latched {
                     let priority = related_priority(&binding.action);
-                    if selected.as_ref().is_none_or(|(p, _)| priority < *p) {
-                        selected = Some((priority, binding.action.clone()));
+                    if selected.as_ref().is_none_or(|(p, _, _)| priority < *p) {
+                        if let Some(primary) = vk_from_key(binding.hotkey.key) {
+                            selected = Some((priority, binding.action.clone(), primary));
+                        }
                     }
                 }
                 *latched = eligible;
             }
-            if let Some((_, action)) =
-                selected.filter(|(_, action)| related_allowed(current_owner, action))
+            if let Some((_, action, related_primary)) =
+                selected.filter(|(_, action, _)| related_allowed(current_owner, action))
             {
-                let intents = state.adapter.preempt();
+                let mut intents = state.adapter.preempt();
+                let mut published_action = Some(action.clone());
+                if let RelatedAction::DirectMenu { menu_id, .. } = &action {
+                    let id = InvocationId(state.next_direct_id);
+                    state.next_direct_id = state.next_direct_id.checked_add(1).unwrap_or(1_000_000);
+                    state.direct_owned = Some(DirectCycleOwnership {
+                        id,
+                        primary_key: related_primary,
+                        provenance,
+                    });
+                    intents.push(InvocationIntent::ToggleDirectMenu {
+                        id,
+                        menu_id: menu_id.clone(),
+                        primary_key: related_primary,
+                        provenance,
+                        trigger_still_down: true,
+                    });
+                    published_action = None;
+                }
                 let _ = update_timers(state, &intents);
                 let _ = state.notices.send(ServiceNotice {
                     recovery: false,
                     intents,
                     error: None,
-                    action: Some(action),
+                    action: published_action,
                 });
                 let _ = state.wake.send(());
                 related_preempted = true;
@@ -1155,6 +1242,8 @@ mod native_service {
                         shutdown_requested: false,
                         escape: EscapeOwnership::default(),
                         pending_handoffs: PendingRouteHandoffs::default(),
+                        next_direct_id: 1_000_000,
+                        direct_owned: None,
                     });
                 }
                 if worker_startup.is_cancelled() {
@@ -1443,6 +1532,36 @@ mod tests {
             a.deadline(id2, 850, 4).as_slice(),
             [InvocationIntent::OpenRadial { .. }]
         ));
+    }
+    #[test]
+    fn consecutive_shared_holds_receive_unique_correlated_context_tokens() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let first = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        let first_id = match first.intents[0] {
+            InvocationIntent::ScheduleDeadline { id, .. } => id,
+            _ => panic!(),
+        };
+        let first_token = match adapter.deadline(first_id, 351, 4).as_slice() {
+            [InvocationIntent::OpenRadial { context_token, .. }] => *context_token,
+            _ => panic!(),
+        };
+        adapter.process(e(0x23, KeyTransition::Up, 400), PriorityOwner::Launcher);
+        adapter.dismiss_active();
+        let second = adapter.process(e(0x23, KeyTransition::Down, 500), PriorityOwner::Launcher);
+        let second_id = match second.intents[0] {
+            InvocationIntent::ScheduleDeadline { id, .. } => id,
+            _ => panic!(),
+        };
+        let second_token = match adapter.deadline(second_id, 850, 4).as_slice() {
+            [InvocationIntent::OpenRadial { context_token, .. }] => *context_token,
+            _ => panic!(),
+        };
+        assert_eq!(first_token, first_id.0);
+        assert_eq!(second_token, second_id.0);
+        assert_ne!(first_token, second_token);
     }
     #[test]
     fn reload_invalidates_old_generation_and_drains_release() {
@@ -1857,10 +1976,15 @@ mod tests {
         });
         let mut own = e(0x1B, KeyTransition::Down, 1);
         own.provenance = InputProvenance::SelfInjected;
-        assert!(!escape.process(own, true).unwrap().consume);
+        assert!(
+            !escape
+                .process(own, true, Default::default())
+                .unwrap()
+                .consume
+        );
 
         let down = escape
-            .process(e(0x1B, KeyTransition::Down, 2), true)
+            .process(e(0x1B, KeyTransition::Down, 2), true, Default::default())
             .unwrap();
         assert!(down.consume);
         assert!(matches!(
@@ -1871,7 +1995,7 @@ mod tests {
         ));
         assert!(
             escape
-                .process(e(0x1B, KeyTransition::Repeat, 3), true)
+                .process(e(0x1B, KeyTransition::Repeat, 3), true, Default::default())
                 .unwrap()
                 .consume
         );
@@ -1880,13 +2004,54 @@ mod tests {
         });
         assert!(
             escape
-                .process(e(0x1B, KeyTransition::Up, 4), true)
+                .process(e(0x1B, KeyTransition::Up, 4), true, Default::default())
                 .unwrap()
                 .consume
         );
         assert!(
             !escape
-                .process(e(0x1B, KeyTransition::Up, 5), true)
+                .process(e(0x1B, KeyTransition::Up, 5), true, Default::default())
+                .unwrap()
+                .consume
+        );
+    }
+
+    #[test]
+    fn owned_navigation_key_is_correlated_and_balanced() {
+        let mut ownership = EscapeOwnership::default();
+        let session_id = crate::radial::model::SessionId::new("active");
+        ownership.feedback(&InvocationEvent::RadialSessionOpened {
+            id: InvocationId(8),
+            session_id: session_id.clone(),
+        });
+        let down = ownership
+            .process(
+                e(0x27, KeyTransition::Down, 1),
+                true,
+                crate::radial::session::NavigationModifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(down.consume);
+        assert!(matches!(
+            down.intents.as_slice(),
+            [InvocationIntent::Navigate {
+                session_id: actual,
+                command: crate::radial::session::NavigationCommand::Next,
+                modifiers: crate::radial::session::NavigationModifiers { control: true, .. },
+            }] if actual == &session_id
+        ));
+        assert!(
+            ownership
+                .process(e(0x27, KeyTransition::Repeat, 2), true, Default::default())
+                .unwrap()
+                .consume
+        );
+        assert!(
+            ownership
+                .process(e(0x27, KeyTransition::Up, 3), true, Default::default())
                 .unwrap()
                 .consume
         );
@@ -1915,5 +2080,23 @@ mod tests {
             PriorityOwner::ExclusiveTool,
             &RelatedAction::Quit
         ));
+    }
+
+    #[test]
+    fn direct_release_acknowledgement_requires_matching_key_and_provenance() {
+        let owned = DirectCycleOwnership {
+            id: InvocationId(41),
+            primary_key: 0x54,
+            provenance: InputProvenance::Physical,
+        };
+        let event = |vk, provenance| KeyEvent {
+            vk,
+            transition: KeyTransition::Up,
+            at: 9,
+            provenance,
+        };
+        assert!(!owned.matches_release(event(0x54, InputProvenance::ExternalInjected)));
+        assert!(!owned.matches_release(event(0x55, InputProvenance::Physical)));
+        assert!(owned.matches_release(event(0x54, InputProvenance::Physical)));
     }
 }

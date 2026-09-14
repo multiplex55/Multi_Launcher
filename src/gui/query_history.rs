@@ -10,7 +10,7 @@ pub(crate) enum QueryHistoryDirection {
 ///
 /// The persisted history remains owned by `history`; this type takes one lazy
 /// snapshot when traversal starts and holds it only for that traversal.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct QueryHistoryNavigator {
     entries: Vec<String>,
     cursor: Option<usize>,
