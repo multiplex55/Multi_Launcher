@@ -34,6 +34,7 @@ pub enum NativeCommand {
         scene: VectorScene,
         layout: LayoutSnapshot,
         always_on_top: bool,
+        activate_on_show: bool,
     },
     /// Atomically replaces the scene for the same logical session. No Closed
     /// event is emitted, so navigation cannot be mistaken for teardown.
@@ -42,6 +43,16 @@ pub enum NativeCommand {
         scene: VectorScene,
         layout: LayoutSnapshot,
         always_on_top: bool,
+        activate_on_show: bool,
+    },
+    /// Presents a new frame/layout in the existing HWND. The session remains
+    /// captured and no Closed event is emitted.
+    Present {
+        session_id: SessionId,
+        scene: VectorScene,
+        layout: LayoutSnapshot,
+        always_on_top: bool,
+        activate_on_show: bool,
     },
     Close {
         session_id: SessionId,
@@ -112,14 +123,17 @@ pub enum NativeEvent {
     Stopped,
 }
 
-fn is_drag_owner(layout: &LayoutSnapshot, owner: &InputOwner) -> bool {
+fn is_drag_owner(layout: &LayoutSnapshot, owner: &InputOwner, button: PointerButton) -> bool {
     let InputOwner::Actionable(id) = owner else {
         return false;
     };
-    layout
-        .cells
-        .iter()
-        .any(|cell| &cell.cell_id == id && cell.control == Some(super::model::Control::Drag))
+    layout.cells.iter().any(|cell| {
+        &cell.cell_id == id
+            && match button {
+                PointerButton::Primary => cell.control,
+                PointerButton::Secondary => cell.secondary_control,
+            } == Some(super::model::Control::Drag)
+    })
 }
 
 struct Wake {
@@ -185,6 +199,7 @@ type SurfaceFactory = Arc<
             VectorScene,
             LayoutSnapshot,
             bool,
+            bool,
             HostEvents,
         ) -> Result<PlatformSurface, String>
         + Send
@@ -202,9 +217,18 @@ impl NativeHost {
     pub fn spawn_with_wake(wake_sender: Option<mpsc::Sender<()>>) -> Result<Self, String> {
         Self::spawn_with_factory(
             wake_sender,
-            Arc::new(|session_id, scene, layout, always_on_top, events| {
-                PlatformSurface::create(session_id, scene, layout, always_on_top, events)
-            }),
+            Arc::new(
+                |session_id, scene, layout, always_on_top, activate_on_show, events| {
+                    PlatformSurface::create(
+                        session_id,
+                        scene,
+                        layout,
+                        always_on_top,
+                        activate_on_show,
+                        events,
+                    )
+                },
+            ),
         )
     }
     fn spawn_with_factory(
@@ -339,6 +363,7 @@ fn handle(
             scene,
             layout,
             always_on_top,
+            activate_on_show,
         } => {
             if let Some(old) = active.take() {
                 let id = old.id.clone();
@@ -353,6 +378,7 @@ fn handle(
                 scene.clone(),
                 layout,
                 always_on_top,
+                activate_on_show,
                 events.clone(),
             ) {
                 Ok(surface) => {
@@ -381,6 +407,14 @@ fn handle(
             scene,
             layout,
             always_on_top,
+            activate_on_show,
+        }
+        | NativeCommand::Present {
+            session_id,
+            scene,
+            layout,
+            always_on_top,
+            activate_on_show,
         } => {
             if active
                 .as_ref()
@@ -392,26 +426,16 @@ fn handle(
                 });
                 return true;
             }
-            drop(active.take());
-            match surface_factory(
-                session_id.clone(),
-                scene.clone(),
-                layout,
-                always_on_top,
-                events.clone(),
-            ) {
-                Ok(surface) => {
-                    let suppression = crate::mouse_gestures::service::acquire_gesture_suppression();
-                    *active = Some(Active {
-                        id: session_id.clone(),
-                        surface,
-                        _suppression: suppression,
-                    });
-                    events.send(NativeEvent::Ready {
-                        session_id,
-                        layout_generation: scene.generation,
-                    });
-                }
+            let result = active
+                .as_mut()
+                .expect("validated active session")
+                .surface
+                .present(scene.clone(), layout, always_on_top, activate_on_show);
+            match result {
+                Ok(()) => events.send(NativeEvent::Ready {
+                    session_id,
+                    layout_generation: scene.generation,
+                }),
                 Err(message) => events.send(NativeEvent::Failed {
                     session_id: Some(session_id),
                     message,
@@ -540,9 +564,20 @@ impl PlatformSurface {
         _: VectorScene,
         _: LayoutSnapshot,
         _: bool,
+        _: bool,
         _: HostEvents,
     ) -> Result<Self, String> {
         Ok(Self)
+    }
+
+    fn present(
+        &mut self,
+        _: VectorScene,
+        _: LayoutSnapshot,
+        _: bool,
+        _: bool,
+    ) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -566,6 +601,11 @@ struct WindowState {
     captured: bool,
     destroyed: Arc<std::sync::atomic::AtomicBool>,
     presented: Arc<std::sync::atomic::AtomicBool>,
+    activate_on_show: bool,
+    compositor: super::compositor::CompositorCache,
+    animation_epoch: std::time::Instant,
+    animation_timer: usize,
+    animation_serial: usize,
 }
 
 #[cfg(windows)]
@@ -585,7 +625,35 @@ unsafe extern "system" fn wndproc(
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize) };
     }
     if msg == WM_MOUSEACTIVATE {
-        return windows::Win32::Foundation::LRESULT(MA_NOACTIVATE as isize);
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
+        return windows::Win32::Foundation::LRESULT(
+            if !ptr.is_null() && unsafe { &*ptr }.activate_on_show {
+                MA_ACTIVATE as isize
+            } else {
+                MA_NOACTIVATE as isize
+            },
+        );
+    }
+    if msg == WM_NCHITTEST {
+        use windows::Win32::Foundation::POINT;
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
+        if !ptr.is_null() {
+            let (x, y) = signed_message_point(l);
+            let mut point = POINT { x, y };
+            if unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point) }.as_bool()
+            {
+                let state = unsafe { &*ptr };
+                let logical =
+                    client_physical_to_logical(state.origin, state.scale_factor, point.x, point.y);
+                return windows::Win32::Foundation::LRESULT(
+                    if !native_point_owned(&state.layout, logical) {
+                        HTTRANSPARENT as isize
+                    } else {
+                        HTCLIENT as isize
+                    },
+                );
+            }
+        }
     }
     if msg == WM_PAINT {
         let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
@@ -615,7 +683,14 @@ unsafe extern "system" fn wndproc(
             let state = unsafe { &*ptr };
             let point = client_physical_to_logical(state.origin, state.scale_factor, x, y);
             let owner = input_owner(&state.layout, point, false);
-            if msg == WM_LBUTTONDOWN && is_drag_owner(&state.layout, &owner) {
+            let drag_button = if msg == WM_LBUTTONDOWN {
+                Some(PointerButton::Primary)
+            } else if msg == WM_RBUTTONDOWN {
+                Some(PointerButton::Secondary)
+            } else {
+                None
+            };
+            if drag_button.is_some_and(|button| is_drag_owner(&state.layout, &owner, button)) {
                 let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
                 unsafe {
                     SendMessageW(
@@ -709,11 +784,50 @@ unsafe extern "system" fn wndproc(
         }
         return windows::Win32::Foundation::LRESULT(0);
     }
+    if msg == WM_TIMER {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
+        if !ptr.is_null() && unsafe { (*ptr).animation_timer } == w.0 {
+            let state = unsafe { &mut *ptr };
+            let _ = unsafe { KillTimer(hwnd, state.animation_timer) };
+            state.animation_timer = 0;
+            let elapsed = state.animation_epoch.elapsed().as_millis() as u64;
+            let scene = state.scene.clone();
+            match state
+                .compositor
+                .compose(&scene, state.scale_factor, elapsed)
+            {
+                Ok(frame) => {
+                    let (x, y, _, _) = physical_scene_bounds(scene.bounds, state.scale_factor);
+                    if let Err(message) = present_layered(hwnd, x, y, &frame.image) {
+                        state.events.send(NativeEvent::Failed {
+                            session_id: Some(state.session_id.clone()),
+                            message,
+                        });
+                    } else {
+                        if let Err(message) =
+                            schedule_animation(hwnd, state, frame.animation_deadline_ms)
+                        {
+                            state.events.send(NativeEvent::Failed {
+                                session_id: Some(state.session_id.clone()),
+                                message,
+                            });
+                        }
+                    }
+                }
+                Err(error) => state.events.send(NativeEvent::Failed {
+                    session_id: Some(state.session_id.clone()),
+                    message: format!("radial animation composition failed: {error:?}"),
+                }),
+            }
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
     if msg == WM_NCDESTROY {
         let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
         if !ptr.is_null() {
-            let state = unsafe { Box::from_raw(ptr) };
+            let mut state = unsafe { Box::from_raw(ptr) };
+            cancel_animation(hwnd, &mut state);
             state.destroyed.store(true, Ordering::Release);
             drop(state);
         }
@@ -721,109 +835,53 @@ unsafe extern "system" fn wndproc(
     unsafe { DefWindowProcW(hwnd, msg, w, l) }
 }
 
-#[cfg(windows)]
-fn paint_scene(hwnd: windows::Win32::Foundation::HWND, state: &WindowState) {
-    use super::render::VectorPrimitive;
-    use windows::Win32::Foundation::{COLORREF, RECT};
-    use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreateSolidBrush, DeleteObject, Ellipse, EndPaint, FillRect, PAINTSTRUCT,
-        Polygon, SelectObject,
-    };
-    let mut paint = PAINTSTRUCT::default();
-    let dc = unsafe { BeginPaint(hwnd, &mut paint) };
-    if dc.0.is_null() {
-        return;
-    }
-    let background = unsafe { CreateSolidBrush(COLORREF(0x0021_211e)) };
-    let mut client = RECT::default();
-    let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client) };
-    let _ = unsafe { FillRect(dc, &client, background) };
-    let _ = unsafe { DeleteObject(background) };
-    for primitive in &state.scene.primitives {
-        let (color, draw): (_, Box<dyn FnOnce()>) = match primitive {
-            VectorPrimitive::FilledCircle {
-                center,
-                radius,
-                color,
-            } => {
-                let (cx, cy) = (
-                    ((center.x - state.origin.x) as f64 * state.scale_factor.get()).round() as i32,
-                    ((center.y - state.origin.y) as f64 * state.scale_factor.get()).round() as i32,
-                );
-                let r = (*radius as f64 * state.scale_factor.get()).round() as i32;
-                let brush = unsafe { CreateSolidBrush(colorref(*color)) };
-                let old = unsafe { SelectObject(dc, brush) };
-                let draw = Box::new(move || {
-                    let _ = unsafe { Ellipse(dc, cx - r, cy - r, cx + r, cy + r) };
-                    let _ = unsafe { SelectObject(dc, old) };
-                    let _ = unsafe { DeleteObject(brush) };
-                });
-                (*color, draw)
-            }
-            VectorPrimitive::FilledWedge {
-                center,
-                inner_radius,
-                outer_radius,
-                start_angle,
-                end_angle,
-                color,
-                ..
-            } => {
-                let (cx, cy) = (
-                    ((center.x - state.origin.x) as f64 * state.scale_factor.get()).round() as i32,
-                    ((center.y - state.origin.y) as f64 * state.scale_factor.get()).round() as i32,
-                );
-                let mut span = (*end_angle - *start_angle).rem_euclid(std::f32::consts::TAU);
-                if span == 0.0 {
-                    span = std::f32::consts::TAU;
-                }
-                let steps = ((span / std::f32::consts::TAU) * 48.0).ceil().max(2.0) as usize;
-                let mut points = Vec::with_capacity((steps + 1) * 2);
-                for i in 0..=steps {
-                    let a = *start_angle + span * i as f32 / steps as f32;
-                    points.push(windows::Win32::Foundation::POINT {
-                        x: cx
-                            + (a.cos() as f64 * *outer_radius as f64 * state.scale_factor.get())
-                                .round() as i32,
-                        y: cy
-                            + (a.sin() as f64 * *outer_radius as f64 * state.scale_factor.get())
-                                .round() as i32,
-                    });
-                }
-                for i in (0..=steps).rev() {
-                    let a = *start_angle + span * i as f32 / steps as f32;
-                    points.push(windows::Win32::Foundation::POINT {
-                        x: cx
-                            + (a.cos() as f64 * *inner_radius as f64 * state.scale_factor.get())
-                                .round() as i32,
-                        y: cy
-                            + (a.sin() as f64 * *inner_radius as f64 * state.scale_factor.get())
-                                .round() as i32,
-                    });
-                }
-                let brush = unsafe { CreateSolidBrush(colorref(*color)) };
-                let old = unsafe { SelectObject(dc, brush) };
-                let draw = Box::new(move || {
-                    let _ = unsafe { Polygon(dc, &points) };
-                    let _ = unsafe { SelectObject(dc, old) };
-                    let _ = unsafe { DeleteObject(brush) };
-                });
-                (*color, draw)
-            }
-            VectorPrimitive::Text { .. } => continue,
-        };
-        let _ = color;
-        draw();
-    }
-    let _ = unsafe { EndPaint(hwnd, &paint) };
-    state.presented.store(true, Ordering::Release);
+fn native_point_owned(layout: &LayoutSnapshot, point: LogicalPoint) -> bool {
+    !matches!(input_owner(layout, point, false), InputOwner::Exterior)
 }
 
 #[cfg(windows)]
-fn colorref(color: super::render::Rgba) -> windows::Win32::Foundation::COLORREF {
-    windows::Win32::Foundation::COLORREF(
-        color.0 as u32 | ((color.1 as u32) << 8) | ((color.2 as u32) << 16),
-    )
+fn cancel_animation(hwnd: windows::Win32::Foundation::HWND, state: &mut WindowState) {
+    if state.animation_timer != 0 {
+        let _ = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::KillTimer(hwnd, state.animation_timer)
+        };
+        state.animation_timer = 0;
+    }
+}
+
+#[cfg(windows)]
+fn schedule_animation(
+    hwnd: windows::Win32::Foundation::HWND,
+    state: &mut WindowState,
+    deadline_ms: Option<u64>,
+) -> Result<(), String> {
+    cancel_animation(hwnd, state);
+    let Some(deadline) = deadline_ms else {
+        return Ok(());
+    };
+    let elapsed = state.animation_epoch.elapsed().as_millis() as u64;
+    let delay = deadline.saturating_sub(elapsed).clamp(1, u32::MAX as u64) as u32;
+    state.animation_serial = state.animation_serial.wrapping_add(1).max(1);
+    let timer = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SetTimer(hwnd, state.animation_serial, delay, None)
+    };
+    if timer == 0 {
+        Err("failed to schedule radial animation frame".into())
+    } else {
+        state.animation_timer = timer;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn paint_scene(hwnd: windows::Win32::Foundation::HWND, state: &WindowState) {
+    use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
+    let mut paint = PAINTSTRUCT::default();
+    let dc = unsafe { BeginPaint(hwnd, &mut paint) };
+    if !dc.0.is_null() {
+        let _ = unsafe { EndPaint(hwnd, &paint) };
+    }
+    let _ = state;
 }
 
 /// Correctly sign-extends native client/screen coordinates on negative monitors.
@@ -846,10 +904,12 @@ fn client_physical_to_logical(
     }
 }
 
-fn physical_surface_bounds(layout: &LayoutSnapshot) -> (i32, i32, i32, i32) {
-    let scale = layout.scale_factor;
-    let min = scale.logical_to_physical(layout.input_extent.min);
-    let max = scale.logical_to_physical(layout.input_extent.max);
+fn physical_scene_bounds(
+    bounds: super::geometry::LogicalRect,
+    scale: super::geometry::ScaleFactor,
+) -> (i32, i32, i32, i32) {
+    let min = scale.logical_to_physical(bounds.min);
+    let max = scale.logical_to_physical(bounds.max);
     (
         min.x.floor() as i32,
         min.y.floor() as i32,
@@ -865,14 +925,11 @@ impl SystemPlatformSurface {
         scene: VectorScene,
         layout: LayoutSnapshot,
         always_on_top: bool,
+        activate_on_show: bool,
         events: HostEvents,
     ) -> Result<Self, String> {
         use std::sync::Once;
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Gdi::{
-            CombineRgn, CreateEllipticRgn, CreateRectRgn, InvalidateRect, RGN_OR, SetWindowRgn,
-            UpdateWindow,
-        };
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows::Win32::UI::WindowsAndMessaging::*;
         use windows::core::PCWSTR;
@@ -888,8 +945,8 @@ impl SystemPlatformSurface {
             };
             let _ = unsafe { RegisterClassW(&wc) };
         });
-        let (x, y, width, height) = physical_surface_bounds(&layout);
-        let logical_origin = layout.input_extent.min;
+        let (x, y, width, height) = physical_scene_bounds(scene.bounds, layout.scale_factor);
+        let logical_origin = scene.bounds.min;
         let scale_factor = layout.scale_factor;
         let destroyed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -903,9 +960,17 @@ impl SystemPlatformSurface {
             captured: false,
             destroyed: Arc::clone(&destroyed),
             presented: Arc::clone(&presented),
+            activate_on_show,
+            compositor: super::compositor::CompositorCache::default(),
+            animation_epoch: std::time::Instant::now(),
+            animation_timer: 0,
+            animation_serial: 0,
         });
         let ptr = Box::into_raw(state);
-        let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        let mut ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW;
+        if !activate_on_show {
+            ex |= WS_EX_NOACTIVATE;
+        }
         if always_on_top {
             ex |= WS_EX_TOPMOST;
         }
@@ -934,78 +999,191 @@ impl SystemPlatformSurface {
                 return Err(format!("CreateWindowExW failed: {e}"));
             }
         };
-        let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
-        if region.0.is_null() {
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            };
-            return Err("CreateRectRgn failed".into());
-        }
-        for shape in &unsafe { &*ptr }.layout.input_regions {
-            let super::geometry::HitShape::Circle { center, radius } = shape else {
-                continue;
-            };
-            let left = (((center.x - radius) - logical_origin.x) as f64 * scale_factor.get())
-                .floor() as i32;
-            let top = (((center.y - radius) - logical_origin.y) as f64 * scale_factor.get()).floor()
-                as i32;
-            let right = (((center.x + radius) - logical_origin.x) as f64 * scale_factor.get())
-                .ceil() as i32;
-            let bottom = (((center.y + radius) - logical_origin.y) as f64 * scale_factor.get())
-                .ceil() as i32;
-            let piece = unsafe { CreateEllipticRgn(left, top, right, bottom) };
-            if piece.0.is_null() {
-                unsafe {
-                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(region);
-                    let _ = DestroyWindow(hwnd);
-                };
-                return Err("CreateEllipticRgn failed".into());
-            }
-            let combined = unsafe { CombineRgn(region, region, piece, RGN_OR) };
-            let _ = unsafe { windows::Win32::Graphics::Gdi::DeleteObject(piece) };
-            if combined == windows::Win32::Graphics::Gdi::GDI_REGION_TYPE(0) {
-                unsafe {
-                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(region);
-                    let _ = DestroyWindow(hwnd);
-                };
-                return Err("CombineRgn failed".into());
-            }
-        }
-        if unsafe { SetWindowRgn(hwnd, region, true) } == 0 {
-            unsafe {
-                let _ = windows::Win32::Graphics::Gdi::DeleteObject(region);
-                let _ = DestroyWindow(hwnd);
-            };
-            return Err("SetWindowRgn failed".into());
-        }
-        if let Err(error) = unsafe {
-            SetLayeredWindowAttributes(
-                hwnd,
-                windows::Win32::Foundation::COLORREF(0),
-                245,
-                LWA_ALPHA,
-            )
-        } {
-            let _ = unsafe { DestroyWindow(hwnd) };
-            return Err(format!("SetLayeredWindowAttributes failed: {error}"));
-        }
         presented.store(false, Ordering::Release);
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
-        if unsafe { InvalidateRect(hwnd, None, true) }.0 == 0 {
+        let initial_scene = unsafe { (*ptr).scene.clone() };
+        let frame = match unsafe { &mut *ptr }
+            .compositor
+            .compose(&initial_scene, scale_factor, 0)
+        {
+            Ok(frame) => frame,
+            Err(error) => {
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(format!("initial radial composition failed: {error:?}"));
+            }
+        };
+        if let Err(error) = present_layered(hwnd, x, y, &frame.image) {
             let _ = unsafe { DestroyWindow(hwnd) };
-            return Err(format!(
-                "initial radial invalidation failed: {}",
-                windows::core::Error::from_win32()
-            ));
+            return Err(error);
         }
-        let _ = unsafe { UpdateWindow(hwnd) };
+        presented.store(true, Ordering::Release);
+        unsafe {
+            let _ = ShowWindow(
+                hwnd,
+                if activate_on_show {
+                    SW_SHOW
+                } else {
+                    SW_SHOWNOACTIVATE
+                },
+            );
+        }
+        if let Err(error) =
+            schedule_animation(hwnd, unsafe { &mut *ptr }, frame.animation_deadline_ms)
+        {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(error);
+        }
         if !presented.load(Ordering::Acquire) {
             let _ = unsafe { DestroyWindow(hwnd) };
             return Err("initial radial presentation produced no frame".into());
         }
         Ok(Self { hwnd })
+    }
+
+    fn present(
+        &mut self,
+        scene: VectorScene,
+        layout: LayoutSnapshot,
+        always_on_top: bool,
+        activate_on_show: bool,
+    ) -> Result<(), String> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
+            SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, WS_EX_NOACTIVATE,
+        };
+        let (x, y, width, height) = physical_scene_bounds(scene.bounds, layout.scale_factor);
+        let ptr = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
+                self.hwnd,
+                windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
+            ) as *mut WindowState
+        };
+        if ptr.is_null() {
+            return Err("radial window state is unavailable".into());
+        }
+        cancel_animation(self.hwnd, unsafe { &mut *ptr });
+        unsafe { (*ptr).animation_epoch = std::time::Instant::now() };
+        let frame = unsafe { &mut *ptr }
+            .compositor
+            .compose(&scene, layout.scale_factor, 0)
+            .map_err(|error| format!("radial composition failed: {error:?}"))?;
+        let origin = scene.bounds.min;
+        let mut style = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) };
+        if activate_on_show {
+            style &= !(WS_EX_NOACTIVATE.0 as isize);
+        } else {
+            style |= WS_EX_NOACTIVATE.0 as isize;
+        }
+        unsafe { SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style) };
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                if always_on_top {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                },
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        }
+        .map_err(|error| format!("radial relayout failed: {error}"))?;
+        present_layered(self.hwnd, x, y, &frame.image)?;
+        unsafe {
+            (*ptr).layout = layout;
+            (*ptr).scene = scene;
+            (*ptr).origin = origin;
+            (*ptr).scale_factor = frame.scale_factor;
+            (*ptr).activate_on_show = activate_on_show;
+            (*ptr).presented.store(true, Ordering::Release);
+        }
+        schedule_animation(self.hwnd, unsafe { &mut *ptr }, frame.animation_deadline_ms)?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn present_layered(
+    hwnd: windows::Win32::Foundation::HWND,
+    x: i32,
+    y: i32,
+    image: &image::RgbaImage,
+) -> Result<(), String> {
+    use std::{mem, ptr};
+    use windows::Win32::Foundation::{COLORREF, POINT, SIZE};
+    use windows::Win32::Graphics::Gdi::{
+        AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+        CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, SelectObject,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
+    let width = i32::try_from(image.width()).map_err(|_| "radial frame width is too large")?;
+    let height = i32::try_from(image.height()).map_err(|_| "radial frame height is too large")?;
+    let byte_len = image.as_raw().len();
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.0.is_null() {
+            return Err("CreateCompatibleDC failed for radial frame".into());
+        }
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            bmiColors: [Default::default()],
+        };
+        let mut bits = ptr::null_mut();
+        let bitmap = match CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(bitmap) if !bits.is_null() => bitmap,
+            _ => {
+                let _ = DeleteDC(dc);
+                return Err("CreateDIBSection failed for radial frame".into());
+            }
+        };
+        let old = SelectObject(dc, bitmap);
+        if old.0.is_null() {
+            let _ = DeleteObject(bitmap);
+            let _ = DeleteDC(dc);
+            return Err("SelectObject failed for radial frame".into());
+        }
+        let destination = std::slice::from_raw_parts_mut(bits.cast::<u8>(), byte_len);
+        let converted = crate::platform::pixels::premultiplied_bgra(image, destination);
+        let destination_point = POINT { x, y };
+        let size = SIZE {
+            cx: width,
+            cy: height,
+        };
+        let source_point = POINT::default();
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let updated = converted.map_err(str::to_string).and_then(|_| {
+            UpdateLayeredWindow(
+                hwnd,
+                None,
+                Some(&destination_point),
+                Some(&size),
+                dc,
+                Some(&source_point),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            )
+            .map_err(|error| format!("UpdateLayeredWindow failed: {error}"))
+        });
+        let _ = SelectObject(dc, old);
+        let _ = DeleteObject(bitmap);
+        let _ = DeleteDC(dc);
+        updated
     }
 }
 #[cfg(windows)]
@@ -1040,6 +1218,7 @@ mod tests {
             scene: super::super::render::build_scene(&layout, 7),
             layout,
             always_on_top: false,
+            activate_on_show: false,
         })
         .unwrap();
         assert!(matches!(
@@ -1066,7 +1245,7 @@ mod tests {
     fn surface_failure_publishes_failed_without_ready() {
         let mut host = NativeHost::spawn_with_factory(
             None,
-            Arc::new(|_, _, _, _, _| Err("surface-stage failure".into())),
+            Arc::new(|_, _, _, _, _, _| Err("surface-stage failure".into())),
         )
         .unwrap();
         let layout = layout_menu(
@@ -1085,6 +1264,7 @@ mod tests {
             scene: super::super::render::build_scene(&layout, 3),
             layout,
             always_on_top: false,
+            activate_on_show: false,
         })
         .unwrap();
         assert!(matches!(
@@ -1100,7 +1280,7 @@ mod tests {
         let observed = presented.clone();
         let mut host = NativeHost::spawn_with_factory(
             None,
-            Arc::new(move |_, _, _, _, _| {
+            Arc::new(move |_, _, _, _, _, _| {
                 observed.store(true, Ordering::Release);
                 Ok(PlatformSurface)
             }),
@@ -1122,6 +1302,7 @@ mod tests {
             scene: super::super::render::build_scene(&layout, 4),
             layout,
             always_on_top: false,
+            activate_on_show: false,
         })
         .unwrap();
         assert!(matches!(host.recv().unwrap(), NativeEvent::Ready { .. }));
@@ -1171,9 +1352,9 @@ mod tests {
                 0.5,
             )
             .unwrap();
-            let (x, y, width, height) = physical_surface_bounds(&layout);
-            let expected_min = scale.logical_to_physical(layout.input_extent.min);
-            let expected_max = scale.logical_to_physical(layout.input_extent.max);
+            let (x, y, width, height) = physical_scene_bounds(layout.visual_extent, scale);
+            let expected_min = scale.logical_to_physical(layout.visual_extent.min);
+            let expected_max = scale.logical_to_physical(layout.visual_extent.max);
             assert_eq!(
                 (x, y),
                 (expected_min.x.floor() as i32, expected_min.y.floor() as i32)
@@ -1184,12 +1365,98 @@ mod tests {
     }
 
     #[test]
+    fn visual_overflow_does_not_claim_native_input_or_get_clipped_to_input_extent() {
+        let mut document = RadialDocument::starter();
+        document.menus[0].style.values.effects.glow_enabled =
+            super::super::model::Override::Value(true);
+        document.menus[0].style.values.text.font_size = super::super::model::Override::Value(28.0);
+        let layout = super::super::geometry::layout_document_menu(
+            &document,
+            &document.menus[0],
+            PhysicalPoint { x: 400.0, y: 400.0 },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 900.0, y: 900.0 },
+            },
+            ScaleFactor::new(1.0).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        assert!(layout.visual_extent.min.x < layout.input_extent.min.x);
+        let visual_only = LogicalPoint {
+            x: (layout.visual_extent.min.x + layout.input_extent.min.x) * 0.5,
+            y: layout.center.y,
+        };
+        assert!(!native_point_owned(&layout, visual_only));
+        assert!(native_point_owned(&layout, layout.center));
+    }
+
+    #[test]
+    fn present_updates_same_surface_without_factory_recreation_or_closed_event() {
+        let creates = Arc::new(AtomicU32::new(0));
+        let observed = Arc::clone(&creates);
+        let mut host = NativeHost::spawn_with_factory(
+            None,
+            Arc::new(move |_, _, _, _, _, _| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(PlatformSurface)
+            }),
+        )
+        .unwrap();
+        let layout = layout_menu(
+            &RadialDocument::starter().menus[0],
+            PhysicalPoint { x: 200.0, y: 200.0 },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 500.0, y: 500.0 },
+            },
+            ScaleFactor::new(1.0).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        let id = SessionId::new("in-place");
+        host.send(NativeCommand::Open {
+            session_id: id.clone(),
+            scene: super::super::render::build_scene(&layout, 1),
+            layout: layout.clone(),
+            always_on_top: false,
+            activate_on_show: false,
+        })
+        .unwrap();
+        assert!(matches!(
+            host.recv().unwrap(),
+            NativeEvent::Ready {
+                layout_generation: 1,
+                ..
+            }
+        ));
+        host.send(NativeCommand::Present {
+            session_id: id,
+            scene: super::super::render::build_scene(&layout, 2),
+            layout,
+            always_on_top: false,
+            activate_on_show: false,
+        })
+        .unwrap();
+        assert!(matches!(
+            host.recv().unwrap(),
+            NativeEvent::Ready {
+                layout_generation: 2,
+                ..
+            }
+        ));
+        assert_eq!(creates.load(Ordering::Relaxed), 1);
+        assert!(host.try_recv().is_none());
+        host.shutdown();
+    }
+
+    #[test]
     fn drag_control_is_the_only_actionable_owner_that_moves_the_host() {
         let mut document = RadialDocument::starter();
         document.menus[0].rings[0].cells[0].content = crate::radial::model::CellContent::Control {
             control: crate::radial::model::Control::Drag,
         };
-        let layout = layout_menu(
+        let mut layout = layout_menu(
             &document.menus[0],
             PhysicalPoint { x: 200.0, y: 200.0 },
             PhysicalRect {
@@ -1202,9 +1469,18 @@ mod tests {
         .unwrap();
         let drag = InputOwner::Actionable(layout.cells[0].cell_id.clone());
         let ordinary = InputOwner::Actionable(layout.cells[1].cell_id.clone());
-        assert!(is_drag_owner(&layout, &drag));
-        assert!(!is_drag_owner(&layout, &ordinary));
-        assert!(!is_drag_owner(&layout, &InputOwner::Protective));
+        assert!(is_drag_owner(&layout, &drag, PointerButton::Primary));
+        assert!(!is_drag_owner(&layout, &drag, PointerButton::Secondary));
+        assert!(!is_drag_owner(&layout, &ordinary, PointerButton::Primary));
+        assert!(!is_drag_owner(
+            &layout,
+            &InputOwner::Protective,
+            PointerButton::Primary
+        ));
+        layout.cells[0].control = None;
+        layout.cells[0].secondary_control = Some(crate::radial::model::Control::Drag);
+        assert!(!is_drag_owner(&layout, &drag, PointerButton::Primary));
+        assert!(is_drag_owner(&layout, &drag, PointerButton::Secondary));
     }
     #[test]
     #[ignore = "requires an interactive Windows desktop; verifies nonactivation and cross-process click-through"]
@@ -1241,6 +1517,7 @@ mod tests {
                 super::super::render::build_scene(&layout, 1),
                 layout.clone(),
                 true,
+                false,
                 HostEvents {
                     tx: events,
                     wake: None,

@@ -72,6 +72,16 @@ pub fn project_menu_frame(
     page: usize,
     _legacy_page_size: usize,
 ) -> PreparedMenuFrame {
+    project_menu_frame_with_style(menu, static_cells, dynamic, page, None)
+}
+
+pub fn project_menu_frame_with_style(
+    menu: &MenuDefinition,
+    static_cells: BTreeMap<CellId, PreparedCell>,
+    dynamic: &BTreeMap<CellId, FrozenDynamicFrame>,
+    page: usize,
+    style: Option<&super::skin::EffectiveMenuTree>,
+) -> PreparedMenuFrame {
     let mut projected = menu.clone();
     let source_static = static_cells.clone();
     let mut cells = static_cells;
@@ -79,7 +89,32 @@ pub fn project_menu_frame(
         .rings
         .iter()
         .map(|ring| {
-            let slots = ring_accessible_capacity(ring);
+            let slots = style
+                .and_then(|style| style.rings.get(&ring.id))
+                .map_or_else(
+                    || ring_accessible_capacity(ring),
+                    |style| {
+                        let menu_scale =
+                            super::skin::resolved_f32(&style.values.geometry.menu_scale);
+                        let item_radius = if style_source_is_application(
+                            style,
+                            super::skin::StyleField::ItemSize,
+                        ) {
+                            ring.cell_radius * menu_scale
+                        } else {
+                            super::skin::resolved_f32(&style.values.geometry.item_size)
+                                * menu_scale
+                                * 0.5
+                        };
+                        ring_accessible_capacity_for(
+                            ring.radius
+                                * super::skin::resolved_f32(&style.values.geometry.radius_scale)
+                                * menu_scale,
+                            item_radius,
+                            ring.gap * menu_scale,
+                        )
+                    },
+                );
             let static_count = ring
                 .cells
                 .iter()
@@ -152,8 +187,14 @@ pub fn project_menu_frame(
                         source: source.clone(),
                     },
                     alternate_clicks: Vec::new(),
+                    alternate_controls: Vec::new(),
                     after_action: source_cell.after_action,
+                    secondary_after_action: source_cell.secondary_after_action,
                     icon: source_cell.icon.clone(),
+                    tooltip: source_cell.tooltip.clone(),
+                    style: source_cell.style.clone(),
+                    shortcuts: source_cell.shortcuts.clone(),
+                    hotstrings: source_cell.hotstrings.clone(),
                 });
             }
         }
@@ -177,12 +218,23 @@ pub fn project_menu_frame(
     }
 }
 
+fn style_source_is_application(
+    style: &super::skin::EffectiveRingStyle,
+    field: super::skin::StyleField,
+) -> bool {
+    style.source(field) == Some(&super::skin::StyleSource::ApplicationFallback)
+}
+
 pub fn ring_accessible_capacity(ring: &super::model::RingDefinition) -> usize {
-    let required = 2.0 * ring.cell_radius + ring.gap;
-    if !required.is_finite() || !ring.radius.is_finite() || ring.radius <= 0.0 {
+    ring_accessible_capacity_for(ring.radius, ring.cell_radius, ring.gap)
+}
+
+pub fn ring_accessible_capacity_for(radius: f32, cell_radius: f32, gap: f32) -> usize {
+    let required = 2.0 * cell_radius + gap;
+    if !required.is_finite() || !radius.is_finite() || radius <= 0.0 {
         return 1;
     }
-    let ratio = required / (2.0 * ring.radius);
+    let ratio = required / (2.0 * radius);
     if ratio >= 1.0 {
         1
     } else {
@@ -209,8 +261,14 @@ fn page_control(ring_id: &super::model::RingId, next: bool) -> CellDefinition {
             },
         },
         alternate_clicks: Vec::new(),
+        alternate_controls: Vec::new(),
         after_action: AfterActionPolicy::KeepOpen,
+        secondary_after_action: AfterActionPolicy::KeepOpen,
         icon: Default::default(),
+        tooltip: Default::default(),
+        style: Default::default(),
+        shortcuts: Vec::new(),
+        hotstrings: Vec::new(),
     }
 }
 
@@ -733,6 +791,57 @@ mod tests {
             );
         }
         assert_eq!(seen.len(), 50);
+    }
+
+    #[test]
+    fn effective_item_size_and_radius_scale_bound_dynamic_pagination() {
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells.truncate(1);
+        document.menus[0].style.values.geometry.item_size =
+            super::super::model::Override::Value(88.0);
+        let menu = &document.menus[0];
+        let source = menu.rings[0].cells[0].id.clone();
+        let entries = (0..18)
+            .map(|index| FrozenRadialEntry {
+                id: FrozenEntryId(format!("styled:{index}")),
+                label: format!("Styled {index}"),
+                binding: Some(FrozenBinding::Stable(ActionBinding::Contextual {
+                    selector: TargetSelector::CapturedForeground,
+                    action_id: action_ids::WINDOW_ACTIVATE,
+                })),
+                availability: FrozenAvailability::Available,
+                history_query: String::new(),
+                requirement: InteractionRequirement::None,
+            })
+            .collect();
+        let dynamic = [(
+            source,
+            FrozenDynamicFrame {
+                fingerprint: super::super::dynamic::SourceFingerprint {
+                    generation: 1,
+                    source: "styled".into(),
+                    query: None,
+                },
+                entries,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let unstyled = project_menu_frame(menu, BTreeMap::new(), &dynamic, 0, 12);
+        let style = super::super::skin::compile_menu_tree(&document, menu).unwrap();
+        let styled =
+            project_menu_frame_with_style(menu, BTreeMap::new(), &dynamic, 0, Some(&style));
+        assert!(styled.page_count > unstyled.page_count);
+        let capacity = ring_accessible_capacity_for(92.0, 44.0, menu.rings[0].gap);
+        assert!(styled.menu.rings[0].cells.len() <= capacity);
+        assert!(styled.menu.rings[0].cells.iter().any(|cell| {
+            matches!(
+                cell.content,
+                CellContent::Control {
+                    control: super::super::model::Control::NextPage
+                }
+            )
+        }));
     }
 
     #[test]

@@ -564,11 +564,7 @@ impl DataRecoveryDialog {
                 let reset =
                     store.ownership == StoreOwnership::ApplicationOwned && store.reset_eligible;
                 ui.horizontal(|ui| {
-                    let label = if target == RecoveryTarget::Group(RecoveryGroupId::MkMacro) {
-                        "MkMacro document + assets"
-                    } else {
-                        store.label
-                    };
+                    let label = recovery_target_label(target, store.label);
                     ui.label(label)
                         .on_hover_text(store.path.display().to_string());
                     if ui
@@ -761,11 +757,18 @@ fn restore_enabled(
                                 .skipped
                                 .iter()
                                 .any(|entry| entry.store_id == name)
-                            && snapshot
+                            && (snapshot
                                 .manifest
                                 .included
                                 .iter()
                                 .any(|entry| entry.store_id == name)
+                                || (target == RecoveryTarget::Group(RecoveryGroupId::Radial)
+                                    && id == PersistentStoreId::RadialAssets
+                                    && snapshot
+                                        .manifest
+                                        .missing
+                                        .iter()
+                                        .any(|entry| entry.store_id == name)))
                     })
             })
         })
@@ -775,7 +778,16 @@ fn recovery_target_for_row(id: PersistentStoreId) -> Option<RecoveryTarget> {
     match id {
         PersistentStoreId::MkMacroDocument => Some(RecoveryTarget::Group(RecoveryGroupId::MkMacro)),
         PersistentStoreId::MkMacroAssets => None,
+        PersistentStoreId::RadialDocument => Some(RecoveryTarget::Group(RecoveryGroupId::Radial)),
+        PersistentStoreId::RadialAssets => None,
         id => Some(RecoveryTarget::Store(id)),
+    }
+}
+
+fn recovery_target_label(target: RecoveryTarget, fallback: &'static str) -> &'static str {
+    match target {
+        RecoveryTarget::Group(group) => group.label(),
+        RecoveryTarget::Store(_) => fallback,
     }
 }
 
@@ -910,6 +922,47 @@ mod tests {
     }
 
     #[test]
+    fn radial_group_requires_complete_manifested_document_and_assets() {
+        let target = RecoveryTarget::Group(RecoveryGroupId::Radial);
+        let mut snapshot = record("one", PersistentStoreId::RadialDocument);
+        assert!(!restore_enabled(
+            target,
+            StoreOwnership::ApplicationOwned,
+            true,
+            Some("one"),
+            std::slice::from_ref(&snapshot),
+        ));
+        snapshot.manifest.included.push(SnapshotEntry {
+            store_id: format!("{:?}", PersistentStoreId::RadialAssets),
+            source_path: PathBuf::from("radial_assets"),
+            snapshot_path: Some(PathBuf::from("stores/RadialAssets")),
+            detail: None,
+        });
+        assert!(restore_enabled(
+            target,
+            StoreOwnership::ApplicationOwned,
+            true,
+            Some("one"),
+            std::slice::from_ref(&snapshot),
+        ));
+
+        snapshot.manifest.included.pop();
+        snapshot.manifest.missing.push(SnapshotEntry {
+            store_id: format!("{:?}", PersistentStoreId::RadialAssets),
+            source_path: PathBuf::from("radial_assets"),
+            snapshot_path: None,
+            detail: Some("missing source represented as an empty directory".into()),
+        });
+        assert!(restore_enabled(
+            target,
+            StoreOwnership::ApplicationOwned,
+            true,
+            Some("one"),
+            std::slice::from_ref(&snapshot),
+        ));
+    }
+
+    #[test]
     fn mkmacro_has_one_explicit_document_and_assets_restore_row() {
         assert_eq!(
             recovery_target_for_row(PersistentStoreId::MkMacroDocument),
@@ -918,6 +971,22 @@ mod tests {
         assert_eq!(
             recovery_target_for_row(PersistentStoreId::MkMacroAssets),
             None
+        );
+    }
+
+    #[test]
+    fn radial_has_one_explicit_document_and_assets_restore_row() {
+        assert_eq!(
+            recovery_target_for_row(PersistentStoreId::RadialDocument),
+            Some(RecoveryTarget::Group(RecoveryGroupId::Radial))
+        );
+        assert_eq!(
+            recovery_target_for_row(PersistentStoreId::RadialAssets),
+            None
+        );
+        assert_eq!(
+            recovery_target_label(RecoveryTarget::Group(RecoveryGroupId::Radial), "unused"),
+            "Radial menus + assets"
         );
     }
 
@@ -958,19 +1027,18 @@ mod tests {
 
     #[test]
     fn grouped_confirmation_preserves_explicit_target() {
-        let target = RecoveryTarget::Group(RecoveryGroupId::MkMacro);
-        let command = PendingRecoveryIntent::Restore {
-            target,
-            snapshot_id: "one".into(),
-        }
-        .confirmed_command();
-        assert!(matches!(
-            command,
-            DataRecoveryCommand::Restore {
-                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
-                ..
+        for group in [RecoveryGroupId::MkMacro, RecoveryGroupId::Radial] {
+            let target = RecoveryTarget::Group(group);
+            let command = PendingRecoveryIntent::Restore {
+                target,
+                snapshot_id: "one".into(),
             }
-        ));
+            .confirmed_command();
+            assert!(matches!(
+                command,
+                DataRecoveryCommand::Restore { target: actual, .. } if actual == target
+            ));
+        }
     }
 
     #[test]

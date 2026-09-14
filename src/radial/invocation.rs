@@ -1,4 +1,6 @@
-use super::model::{InteractionMode, InvocationId, MenuId, SessionId};
+use super::model::{
+    CellId, ClickGesture, InteractionMode, InvocationId, MenuId, SessionId, TriggerScope,
+};
 use super::session::{NavigationCommand, NavigationModifiers};
 
 pub type Timestamp = u64;
@@ -97,6 +99,15 @@ pub enum InvocationIntent {
         session_id: SessionId,
         command: NavigationCommand,
         modifiers: NavigationModifiers,
+    },
+    ActivateItem {
+        id: InvocationId,
+        menu_id: MenuId,
+        cell_id: CellId,
+        gesture: ClickGesture,
+        scope: TriggerScope,
+        source: crate::commands::ActivationSource,
+        trigger_still_down: bool,
     },
     HoldCancelledBeforePresentation {
         id: InvocationId,

@@ -29,6 +29,8 @@ pub enum WatchEvent {
     RadialDispatch(crate::radial::handoff::RadialDispatchRequest),
     RadialPrepare(crate::radial::bindings::RadialPrepareEnvelope),
     RadialInvalidate,
+    RadialConfigDiagnostic(Option<String>),
+    RadialRuntimeDiagnostic(String),
     /// Event-driven request from the process-wide launcher hotkey listener.
     ScreenDrawStart,
     /// Launcher hotkey was pressed while Screen Draw owns the foreground flow.
@@ -63,6 +65,11 @@ mod tests {
         assert_eq!(ActivationSource::Gesture.label(), "gesture");
         assert_eq!(ActivationSource::Macro.label(), "macro");
         assert_eq!(ActivationSource::RadialRelease.label(), "radial_release");
+        assert_eq!(ActivationSource::RadialShortcut.label(), "radial_shortcut");
+        assert_eq!(
+            ActivationSource::RadialHotstring.label(),
+            "radial_hotstring"
+        );
     }
 }
 
@@ -121,6 +128,8 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::RadialDispatch(_) => TestWatchEvent::Actions,
             WatchEvent::RadialPrepare(_) => TestWatchEvent::Actions,
             WatchEvent::RadialInvalidate => TestWatchEvent::Actions,
+            WatchEvent::RadialConfigDiagnostic(_) => TestWatchEvent::Actions,
+            WatchEvent::RadialRuntimeDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::ScreenDrawStart => TestWatchEvent::Actions,
             WatchEvent::ScreenDrawRecover => TestWatchEvent::ScreenDrawRecover,
             WatchEvent::ScreenDrawEmergency => TestWatchEvent::ScreenDrawEmergency,

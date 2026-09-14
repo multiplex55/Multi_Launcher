@@ -681,7 +681,7 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             "Radial menu configuration",
             File,
             Critical,
-            Ordinary,
+            Sensitive,
             Low,
             true,
             ProbeKind::Json(probe_radial),
@@ -690,7 +690,7 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             "Radial menu assets",
             Directory,
             Critical,
-            Ordinary,
+            UserContent,
             Low,
             false,
             ProbeKind::AssetsDirectory,
@@ -977,25 +977,16 @@ fn probe_json<T: DeserializeOwned>(_: &Path, bytes: &[u8]) -> ProbeResult {
 }
 
 fn probe_radial(_: &Path, bytes: &[u8]) -> ProbeResult {
-    let value: serde_json::Value = match serde_json::from_slice(bytes) {
-        Ok(value) => value,
-        Err(_) => return ProbeResult::Malformed,
-    };
-    let version = value
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    if version > crate::radial::model::CURRENT_SCHEMA_VERSION as u64 {
-        return ProbeResult::UnsupportedSchema(version.to_string());
-    }
-    let document: RadialDocument = match serde_json::from_value(value) {
-        Ok(document) => document,
-        Err(_) => return ProbeResult::Malformed,
-    };
-    if crate::radial::validation::validate(&document).is_ok() {
-        ProbeResult::Healthy
-    } else {
-        ProbeResult::Malformed
+    match crate::radial::migration::decode_document(bytes) {
+        Ok(_) => ProbeResult::Healthy,
+        Err(crate::radial::migration::DocumentDecodeError::UnsupportedNewerVersion {
+            found,
+            ..
+        }) => ProbeResult::UnsupportedSchema(found.to_string()),
+        Err(
+            crate::radial::migration::DocumentDecodeError::Malformed(_)
+            | crate::radial::migration::DocumentDecodeError::Validation(_),
+        ) => ProbeResult::Malformed,
     }
 }
 
@@ -1240,10 +1231,41 @@ mod tests {
             directory.path().join(crate::radial::model::RADIAL_FILE)
         );
         assert_eq!(document.backup_policy, BackupPolicy::Include);
+        assert_eq!(document.privacy, StorePrivacy::Sensitive);
         assert_eq!(assets.kind, StoreKind::Directory);
+        assert_eq!(assets.privacy, StorePrivacy::UserContent);
         crate::common::persistence::save_json_atomic(&document.path, &RadialDocument::starter())
             .unwrap();
         assert_eq!(document.probe(), StoreHealth::Healthy);
+        let mut legacy = serde_json::to_value(RadialDocument::starter()).unwrap();
+        legacy["schema_version"] = 1.into();
+        let legacy_document = legacy.as_object_mut().unwrap();
+        legacy_document.remove("user_style_defaults");
+        legacy_document.remove("media_search_roots");
+        legacy_document.remove("assets");
+        for menu in legacy_document["menus"].as_array_mut().unwrap() {
+            menu.as_object_mut().unwrap().remove("style");
+            for ring in menu["rings"].as_array_mut().unwrap() {
+                ring.as_object_mut().unwrap().remove("style");
+                for cell in ring["cells"].as_array_mut().unwrap() {
+                    let cell = cell.as_object_mut().unwrap();
+                    cell.remove("tooltip");
+                    cell.remove("style");
+                    cell.remove("shortcuts");
+                    cell.remove("hotstrings");
+                }
+            }
+        }
+        for skin in legacy["skins"].as_array_mut().unwrap() {
+            skin.as_object_mut().unwrap().remove("style");
+            skin["scale"] = 1.0.into();
+            skin["enable_glow"] = serde_json::json!({ "Value": true });
+            skin["center_image"] = serde_json::json!("Clear");
+        }
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&document.path, &legacy_bytes).unwrap();
+        assert_eq!(document.probe(), StoreHealth::Healthy);
+        assert_eq!(std::fs::read(&document.path).unwrap(), legacy_bytes);
         std::fs::write(&document.path, r#"{"schema_version":999}"#).unwrap();
         assert_eq!(
             document.probe(),

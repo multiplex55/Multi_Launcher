@@ -15,8 +15,10 @@ use multi_launcher::platform::{
 };
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::radial::controller::{ControllerEvent, RadialController};
+use multi_launcher::radial::item_input::compile_item_inputs;
 use multi_launcher::radial::model::{InteractionMode, RadialDocument};
-use multi_launcher::radial::store::RadialStore;
+use multi_launcher::radial::store::{ExternalReloadOutcome, RadialStore};
+use multi_launcher::radial::watch::RadialConfigWatcher;
 use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
@@ -227,8 +229,36 @@ fn rebuild_screen_draw_triggers(
     *emergency = screen_draw_emergency_trigger(settings);
 }
 
-fn refresh_macro_hotkey_reservations(settings: &Settings) {
-    let owned = reserved_launcher_hotkeys(settings);
+fn radial_global_hotkey_reservations(
+    settings: &Settings,
+    document: &RadialDocument,
+) -> Vec<(String, String)> {
+    let mut owned = Vec::new();
+    if settings.radial.global_item_inputs {
+        for menu in &document.menus {
+            for shortcut in menu
+                .rings
+                .iter()
+                .flat_map(|ring| &ring.cells)
+                .flat_map(|cell| &cell.shortcuts)
+                .filter(|shortcut| {
+                    shortcut.scope == multi_launcher::radial::model::TriggerScope::Global
+                        && parse_hotkey(&shortcut.chord).is_some()
+                })
+            {
+                owned.push((
+                    format!("radial item shortcut {}", shortcut.id.as_str()),
+                    shortcut.chord.clone(),
+                ));
+            }
+        }
+    }
+    owned
+}
+
+fn refresh_macro_hotkey_reservations(settings: &Settings, document: &RadialDocument) {
+    let mut owned = reserved_launcher_hotkeys(settings);
+    owned.extend(radial_global_hotkey_reservations(settings, document));
     let borrowed = owned
         .iter()
         .map(|(name, chord)| (name.as_str(), chord.as_str()))
@@ -237,6 +267,41 @@ fn refresh_macro_hotkey_reservations(settings: &Settings) {
         multi_launcher::mkmacro::runtime::refresh_shared_hotkey_reservations(&borrowed)
     {
         tracing::warn!(%error, "failed to refresh macro hotkey reservations");
+    }
+}
+
+fn radial_item_inputs(
+    settings: &Settings,
+    document: &RadialDocument,
+) -> Vec<multi_launcher::radial::item_input::ItemInputBinding> {
+    let reserved = reserved_launcher_hotkeys(settings)
+        .into_iter()
+        .filter_map(|(_, chord)| parse_hotkey(&chord))
+        .collect::<Vec<_>>();
+    compile_item_inputs(document, settings.radial.global_item_inputs, &reserved)
+}
+
+fn radial_invocation_config(
+    settings: &Settings,
+    document: &RadialDocument,
+    shared_invocation: bool,
+    generation: u64,
+) -> InvocationConfig {
+    InvocationConfig {
+        launcher_enabled: shared_invocation,
+        hotkey: settings.hotkey(),
+        threshold_ms: settings.radial.hold_threshold_ms,
+        generation,
+        // Each admitted invocation replaces this seed with its correlated ID.
+        context_token: 0,
+        menu_id: document.default_menu_id.clone(),
+        interaction: document
+            .menus
+            .iter()
+            .find(|menu| menu.id == document.default_menu_id)
+            .map_or(InteractionMode::StickyClick, |menu| menu.interaction),
+        accept_external_injected: true,
+        item_inputs: radial_item_inputs(settings, document),
     }
 }
 
@@ -302,6 +367,7 @@ fn reject_radial_opens_while_exclusive(
                 multi_launcher::radial::invocation::InvocationIntent::OpenRadial { .. }
                     | multi_launcher::radial::invocation::InvocationIntent::ToggleDirectMenu { .. }
                     | multi_launcher::radial::invocation::InvocationIntent::ToggleLegacyLauncher { .. }
+                    | multi_launcher::radial::invocation::InvocationIntent::ActivateItem { .. }
             )
         });
     }
@@ -414,6 +480,7 @@ fn spawn_gui(
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     screen_draw_recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
     event_tx: Sender<()>,
+    radial_hotkey_reservations: Vec<(String, String)>,
 ) -> (
     thread::JoinHandle<()>,
     Arc<AtomicBool>,
@@ -422,7 +489,8 @@ fn spawn_gui(
     Arc<Mutex<Option<egui::Context>>>,
 ) {
     let custom_len_for_window = custom_len;
-    let reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
+    let mut reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
+    reserved_launcher_hotkeys.extend(radial_hotkey_reservations);
     let reserved_launcher_hotkey_refs = reserved_launcher_hotkeys
         .iter()
         .map(|(name, hotkey)| (name.as_str(), hotkey.as_str()))
@@ -638,28 +706,28 @@ fn main() -> anyhow::Result<()> {
             radial_store.snapshot()
         })
         .map_err(anyhow::Error::msg)?;
+    let radial_watcher = match RadialConfigWatcher::start(app_data_root.path(), event_tx.clone()) {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            tracing::error!(%error, "radial config watch unavailable; external changes require settings reload");
+            None
+        }
+    };
     let mut radial_controller = RadialController::new(
         Arc::clone(&radial_document),
         settings.debug_logging,
         event_tx.clone(),
     );
+    radial_controller.configure_resources(app_data_root.path().to_path_buf());
     let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
     let mut invocation_service = if settings.radial.enabled {
         match LauncherInvocationService::start(
-            InvocationConfig {
-                launcher_enabled: shared_invocation,
-                hotkey: settings.hotkey(),
-                threshold_ms: settings.radial.hold_threshold_ms,
-                generation: settings_generation,
-                context_token: 0,
-                menu_id: radial_document.default_menu_id.clone(),
-                interaction: radial_document
-                    .menus
-                    .iter()
-                    .find(|m| m.id == radial_document.default_menu_id)
-                    .map_or(InteractionMode::StickyClick, |m| m.interaction),
-                accept_external_injected: true,
-            },
+            radial_invocation_config(
+                &settings,
+                &radial_document,
+                shared_invocation,
+                settings_generation,
+            ),
             related_launcher_bindings(&settings, &radial_document, shared_invocation),
             Arc::new(move || {
                 if owner_bridge.is_active() {
@@ -710,6 +778,7 @@ fn main() -> anyhow::Result<()> {
         settings.enabled_capabilities.clone(),
         Arc::clone(&screen_draw_recovery_bridge),
         event_tx.clone(),
+        radial_global_hotkey_reservations(&settings, &radial_document),
     );
     let mut queued_visibility: Option<bool> = None;
     let mut previous_exclusive = false;
@@ -735,6 +804,101 @@ fn main() -> anyhow::Result<()> {
             listener.stop();
             let _ = handle.join();
             break Ok(());
+        }
+
+        let radial_changes = radial_watcher
+            .as_ref()
+            .map(RadialConfigWatcher::take)
+            .unwrap_or_default();
+        let mut radial_generation_replaced = false;
+        if radial_changes.document {
+            let reload = radial_store.reload_external_with(|_| {
+                let _ = multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialInvalidate,
+                );
+                radial_controller.close(
+                    multi_launcher::radial::native::CloseReason::SettingsReload,
+                    None,
+                );
+            });
+            match reload {
+                Ok(ExternalReloadOutcome::Unchanged) => {
+                    tracing::debug!("ignored radial document self-save/unchanged echo");
+                }
+                Ok(ExternalReloadOutcome::Published(document)) => {
+                    radial_generation_replaced = true;
+                    radial_document = document;
+                    radial_controller.replace_document(Arc::clone(&radial_document));
+                    refresh_macro_hotkey_reservations(&settings, &radial_document);
+                    settings_generation = settings_generation.checked_add(1).unwrap_or(1);
+                    let config = radial_invocation_config(
+                        &settings,
+                        &radial_document,
+                        shared_invocation,
+                        settings_generation,
+                    );
+                    let related = if settings.radial.enabled {
+                        related_launcher_bindings(&settings, &radial_document, shared_invocation)
+                    } else {
+                        Vec::new()
+                    };
+                    if let Some(service) = invocation_service.as_ref() {
+                        match service.begin_route_handoff(config, related) {
+                            Ok(handoff) => {
+                                pending_launcher_route = Some(PendingLauncherRoute {
+                                    settings_generation,
+                                    handoff,
+                                    start_legacy: false,
+                                    stop_service: false,
+                                });
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "radial trigger reload failed closed");
+                                if let Some(mut service) = invocation_service.take() {
+                                    service.stop();
+                                }
+                            }
+                        }
+                    } else if settings.radial.enabled {
+                        let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
+                        match LauncherInvocationService::start(
+                            config,
+                            related,
+                            Arc::new(move || {
+                                if owner_bridge.is_active() {
+                                    PriorityOwner::ScreenDrawRecovery
+                                } else if exclusive_owners() != 0 {
+                                    PriorityOwner::ExclusiveTool
+                                } else {
+                                    PriorityOwner::Launcher
+                                }
+                            }),
+                            event_tx.clone(),
+                        ) {
+                            Ok(service) => invocation_service = Some(service),
+                            Err(error) => {
+                                tracing::error!(%error, "radial trigger service restart failed closed")
+                            }
+                        }
+                    }
+                    let _ = multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialConfigDiagnostic(None),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "retaining last valid radial document after external change");
+                    let _ = multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialConfigDiagnostic(Some(
+                            error.to_string(),
+                        )),
+                    );
+                }
+            }
+        }
+        if radial_changes.assets && !radial_generation_replaced {
+            let _ =
+                multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
+            radial_controller.invalidate_resources();
         }
 
         let handoff_result = pending_launcher_route
@@ -909,7 +1073,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     ControllerEvent::Error(error) => {
-                        tracing::error!(%error,"radial controller error")
+                        tracing::error!(%error,"radial controller error");
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
+                        );
                     }
                     ControllerEvent::InvocationFailed {
                         invocation_id,
@@ -960,7 +1127,12 @@ fn main() -> anyhow::Result<()> {
         }
         for event in radial_controller.poll() {
             match event {
-                ControllerEvent::Error(error) => tracing::error!(%error,"radial native host error"),
+                ControllerEvent::Error(error) => {
+                    tracing::error!(%error,"radial native host error");
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
+                    );
+                }
                 ControllerEvent::InvocationFailed {
                     invocation_id,
                     message,
@@ -1008,6 +1180,9 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        if let Some(service) = invocation_service.as_ref() {
+            let _ = service.set_active_menu(radial_controller.active_input_scope());
+        }
 
         if let Some(ht) = &help_trigger
             && ht.take()
@@ -1047,26 +1222,18 @@ fn main() -> anyhow::Result<()> {
                 &mut screen_draw_trigger,
                 &mut emergency_trigger,
             );
-            refresh_macro_hotkey_reservations(&settings);
+            refresh_macro_hotkey_reservations(&settings, &radial_document);
             shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
             if !settings.radial.enabled {
                 radial_controller.disable();
             }
             pending_launcher_route = None;
-            let config = InvocationConfig {
-                launcher_enabled: shared_invocation,
-                hotkey: settings.hotkey(),
-                threshold_ms: settings.radial.hold_threshold_ms,
-                generation: settings_generation,
-                context_token: 0,
-                menu_id: radial_document.default_menu_id.clone(),
-                interaction: radial_document
-                    .menus
-                    .iter()
-                    .find(|m| m.id == radial_document.default_menu_id)
-                    .map_or(InteractionMode::StickyClick, |m| m.interaction),
-                accept_external_injected: true,
-            };
+            let config = radial_invocation_config(
+                &settings,
+                &radial_document,
+                shared_invocation,
+                settings_generation,
+            );
             let related = if settings.radial.enabled {
                 related_launcher_bindings(&settings, &radial_document, shared_invocation)
             } else {
@@ -1481,6 +1648,26 @@ mod tests {
     }
 
     #[test]
+    fn global_item_shortcuts_require_opt_in_before_reserving_mkmacro_ownership() {
+        let mut settings = Settings::default();
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].shortcuts.push(
+            multi_launcher::radial::model::ItemShortcut {
+                id: multi_launcher::radial::model::ShortcutId::new("global-item"),
+                chord: "Ctrl+K".into(),
+                gesture: multi_launcher::radial::model::ClickGesture::Primary,
+                scope: multi_launcher::radial::model::TriggerScope::Global,
+            },
+        );
+        assert!(radial_global_hotkey_reservations(&settings, &document).is_empty());
+        settings.radial.global_item_inputs = true;
+        assert_eq!(
+            radial_global_hotkey_reservations(&settings, &document),
+            vec![("radial item shortcut global-item".into(), "Ctrl+K".into())]
+        );
+    }
+
+    #[test]
     fn queued_radial_opens_are_rejected_for_an_exclusive_cycle() {
         let mut notices = vec![multi_launcher::hotkey::launcher_invocation::ServiceNotice {
             recovery: false,
@@ -1501,6 +1688,15 @@ mod tests {
                 },
                 multi_launcher::radial::invocation::InvocationIntent::ToggleLegacyLauncher {
                     id: multi_launcher::radial::model::InvocationId(3),
+                },
+                multi_launcher::radial::invocation::InvocationIntent::ActivateItem {
+                    id: multi_launcher::radial::model::InvocationId(4),
+                    menu_id: multi_launcher::radial::model::MenuId::new("starter"),
+                    cell_id: multi_launcher::radial::model::CellId::new("starter-0"),
+                    gesture: multi_launcher::radial::model::ClickGesture::Primary,
+                    scope: multi_launcher::radial::model::TriggerScope::Global,
+                    source: multi_launcher::commands::ActivationSource::RadialShortcut,
+                    trigger_still_down: true,
                 },
                 multi_launcher::radial::invocation::InvocationIntent::CancelDeadline {
                     id: multi_launcher::radial::model::InvocationId(1),

@@ -16,6 +16,8 @@ pub enum ActivationSource {
     Gesture,
     Macro,
     RadialRelease,
+    RadialShortcut,
+    RadialHotstring,
 }
 
 impl ActivationSource {
@@ -27,6 +29,8 @@ impl ActivationSource {
             Self::Gesture => "gesture",
             Self::Macro => "macro",
             Self::RadialRelease => "radial_release",
+            Self::RadialShortcut => "radial_shortcut",
+            Self::RadialHotstring => "radial_hotstring",
         }
     }
 }

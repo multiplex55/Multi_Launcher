@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 pub const RADIAL_FILE: &str = "radial.json";
 pub const RADIAL_ASSETS_DIRECTORY: &str = "radial_assets";
 
@@ -17,6 +17,10 @@ pub mod limits {
     pub const MAX_SKINS: usize = 128;
     pub const MAX_CONTEXT_RULES: usize = 512;
     pub const MAX_CUSTOM_TRIGGERS: usize = 128;
+    pub const MAX_ASSETS: usize = 2_048;
+    pub const MAX_MEDIA_SEARCH_ROOTS: usize = 32;
+    pub const MAX_ITEM_SHORTCUTS_PER_CELL: usize = 16;
+    pub const MAX_ITEM_HOTSTRINGS_PER_CELL: usize = 16;
     pub const MAX_TEXTURE_DIMENSION: u32 = 8_192;
     pub const MAX_TEXTURE_BYTES: u64 = 128 * 1024 * 1024;
     pub const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
@@ -48,8 +52,11 @@ stable_id!(MenuId);
 stable_id!(RingId);
 stable_id!(CellId);
 stable_id!(SkinId);
+stable_id!(AssetId);
 stable_id!(ContextRuleId);
 stable_id!(TriggerId);
+stable_id!(ShortcutId);
+stable_id!(HotstringId);
 stable_id!(SessionId);
 
 #[derive(
@@ -67,6 +74,10 @@ pub struct RadialFeatureSettings {
     pub enabled: bool,
     pub shared_tap_hold: bool,
     pub hold_threshold_ms: u64,
+    /// Global item shortcuts/hotstrings are inert unless the user explicitly
+    /// opts into their process-wide ownership. Menu-local inputs do not need
+    /// this opt-in because they are admitted only for the current menu frame.
+    pub global_item_inputs: bool,
 }
 
 impl Default for RadialFeatureSettings {
@@ -75,6 +86,7 @@ impl Default for RadialFeatureSettings {
             enabled: true,
             shared_tap_hold: true,
             hold_threshold_ms: 350,
+            global_item_inputs: false,
         }
     }
 }
@@ -85,7 +97,7 @@ impl RadialFeatureSettings {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionMode {
     StickyClick,
@@ -140,6 +152,289 @@ pub enum Override<T> {
     Inherit,
     Value(T),
     Clear,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Sound,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MediaReference {
+    Managed { asset_id: AssetId },
+    ExternalFile { path: String },
+    SearchPath { file_name: String },
+    IconResource { path: String, index: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetRecord {
+    pub id: AssetId,
+    pub kind: MediaKind,
+    /// Portable path relative to the application-owned radial asset directory.
+    pub relative_path: String,
+    pub content_sha256: String,
+    pub byte_len: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MediaSearchRoots {
+    pub image_directories: Vec<String>,
+    pub sound_directories: Vec<String>,
+    pub search_windows_media_for_sounds: bool,
+}
+
+impl Default for MediaSearchRoots {
+    fn default() -> Self {
+        Self {
+            image_directories: Vec::new(),
+            sound_directories: Vec::new(),
+            search_windows_media_for_sounds: true,
+        }
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct ColorRgba {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Offset2D {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderingQuality {
+    Fast,
+    #[default]
+    Balanced,
+    HighQuality,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TooltipMode {
+    #[default]
+    Disabled,
+    Explicit,
+    Automatic,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImageStyleOverrides {
+    pub item_glow: Override<MediaReference>,
+    pub menu_outer_rim: Override<MediaReference>,
+    pub menu_background: Override<MediaReference>,
+    pub item_background: Override<MediaReference>,
+    pub item_foreground: Override<MediaReference>,
+    pub item_shadow: Override<MediaReference>,
+    pub menu_foreground: Override<MediaReference>,
+    pub center_background: Override<MediaReference>,
+    pub center_image: Override<MediaReference>,
+    pub submenu_indicator: Override<MediaReference>,
+    pub item_glow_opacity: Override<f32>,
+    pub menu_outer_rim_opacity: Override<f32>,
+    pub menu_background_opacity: Override<f32>,
+    pub item_background_opacity: Override<f32>,
+    pub item_foreground_opacity: Override<f32>,
+    pub item_shadow_opacity: Override<f32>,
+    pub menu_foreground_opacity: Override<f32>,
+    pub center_background_opacity: Override<f32>,
+    pub center_image_opacity: Override<f32>,
+    pub submenu_indicator_opacity: Override<f32>,
+    /// Opacity of the cell's own icon (`IconTrans` in RM4), distinct from
+    /// decorative item foreground media.
+    pub icon_opacity: Override<f32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GeometryStyleOverrides {
+    pub menu_scale: Override<f32>,
+    pub item_size: Override<f32>,
+    pub radius_scale: Override<f32>,
+    pub center_size: Override<f32>,
+    pub center_image_scale: Override<f32>,
+    pub item_image_scale: Override<f32>,
+    pub item_image_y_ratio: Override<f32>,
+    pub item_background_scale: Override<f32>,
+    pub item_foreground_scale: Override<f32>,
+    pub item_shadow_scale: Override<f32>,
+    pub menu_background_scale: Override<f32>,
+    pub menu_foreground_scale: Override<f32>,
+    pub center_background_scale: Override<f32>,
+    pub submenu_indicator_size: Override<f32>,
+    pub submenu_indicator_y_ratio: Override<f32>,
+    pub outer_ring_margin: Override<f32>,
+    pub outer_rim_width: Override<f32>,
+    pub item_background_on_center: Override<bool>,
+    pub item_background_on_items: Override<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TextStyleOverrides {
+    pub visible: Override<bool>,
+    pub submenu_indicator_text: Override<String>,
+    pub font_family: Override<String>,
+    pub font_size: Override<f32>,
+    pub color: Override<ColorRgba>,
+    pub bold: Override<bool>,
+    pub italic: Override<bool>,
+    pub underline: Override<bool>,
+    pub strikeout: Override<bool>,
+    pub shadow_enabled: Override<bool>,
+    pub shadow_color: Override<ColorRgba>,
+    pub shadow_offset: Override<Offset2D>,
+    pub text_box_scale: Override<f32>,
+    pub vertical_ratio: Override<f32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EffectStyleOverrides {
+    pub glow_enabled: Override<bool>,
+    pub tooltip_mode: Override<TooltipMode>,
+    pub menu_shadow_width: Override<f32>,
+    pub menu_shadow_inner_color: Override<ColorRgba>,
+    pub menu_shadow_outer_color: Override<ColorRgba>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QualityStyleOverrides {
+    pub text: Override<RenderingQuality>,
+    pub shape: Override<RenderingQuality>,
+    pub interpolation: Override<RenderingQuality>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SoundStyleOverrides {
+    pub on_show: Override<MediaReference>,
+    pub on_close: Override<MediaReference>,
+    pub on_select: Override<MediaReference>,
+    pub on_submenu_show: Override<MediaReference>,
+    pub on_submenu_close: Override<MediaReference>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WindowStyleOverrides {
+    pub always_on_top: Override<bool>,
+    pub activate_on_show: Override<bool>,
+    pub fill_center_hit_zone: Override<bool>,
+    pub fill_item_hit_zones: Override<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StyleOverrides {
+    pub images: ImageStyleOverrides,
+    pub geometry: GeometryStyleOverrides,
+    pub text: TextStyleOverrides,
+    pub effects: EffectStyleOverrides,
+    pub quality: QualityStyleOverrides,
+    pub sounds: SoundStyleOverrides,
+    pub window: WindowStyleOverrides,
+}
+
+macro_rules! style_layer {
+    ($name:ident) => {
+        #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+        #[serde(default, deny_unknown_fields)]
+        pub struct $name {
+            pub values: StyleOverrides,
+        }
+    };
+}
+
+style_layer!(ApplicationStyleLayer);
+style_layer!(UserDefaultStyleLayer);
+style_layer!(SelectedSkinStyleLayer);
+style_layer!(MenuStyleLayer);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StyleLayerKind {
+    ApplicationFallback,
+    UserDefaults,
+    SelectedSkin,
+    Menu,
+    Ring,
+    Cell,
+}
+
+pub const STYLE_PRECEDENCE: [StyleLayerKind; 6] = [
+    StyleLayerKind::ApplicationFallback,
+    StyleLayerKind::UserDefaults,
+    StyleLayerKind::SelectedSkin,
+    StyleLayerKind::Menu,
+    StyleLayerKind::Ring,
+    StyleLayerKind::Cell,
+];
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RingStyleLayer {
+    pub images: ItemImageStyleOverrides,
+    pub geometry: ItemGeometryStyleOverrides,
+    pub text: TextStyleOverrides,
+    pub quality: QualityStyleOverrides,
+    pub sounds: ItemSoundStyleOverrides,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CellStyleLayer {
+    pub images: ItemImageStyleOverrides,
+    pub geometry: ItemGeometryStyleOverrides,
+    pub text: TextStyleOverrides,
+    pub quality: QualityStyleOverrides,
+    pub sounds: ItemSoundStyleOverrides,
+}
+
+/// Only the Radify fields documented for both menu defaults and individual
+/// items are legal at ring/cell scope. Menu chrome cannot accidentally leak
+/// into a serialized cell override.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ItemImageStyleOverrides {
+    pub item_background: Override<MediaReference>,
+    pub submenu_indicator: Override<MediaReference>,
+    pub item_background_opacity: Override<f32>,
+    pub submenu_indicator_opacity: Override<f32>,
+    pub icon_opacity: Override<f32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ItemGeometryStyleOverrides {
+    pub item_image_scale: Override<f32>,
+    pub item_image_y_ratio: Override<f32>,
+    pub submenu_indicator_size: Override<f32>,
+    pub submenu_indicator_y_ratio: Override<f32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ItemSoundStyleOverrides {
+    pub on_select: Override<MediaReference>,
 }
 
 impl<T> Default for Override<T> {
@@ -227,7 +522,17 @@ pub struct ClickBinding {
     pub after_action: AfterActionPolicy,
 }
 
+/// A non-executable navigation/control intent bound to a particular pointer
+/// gesture. This is distinct from `ClickBinding`: legacy Close/Back/Drag
+/// literals must never be converted into callback-shaped actions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlClickBinding {
+    pub gesture: ClickGesture,
+    pub control: Control,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CellDefinition {
     pub id: CellId,
     pub label: String,
@@ -235,12 +540,25 @@ pub struct CellDefinition {
     #[serde(default)]
     pub alternate_clicks: Vec<ClickBinding>,
     #[serde(default)]
+    pub alternate_controls: Vec<ControlClickBinding>,
+    #[serde(default)]
     pub after_action: AfterActionPolicy,
     #[serde(default)]
-    pub icon: Override<String>,
+    pub secondary_after_action: AfterActionPolicy,
+    #[serde(default)]
+    pub icon: Override<MediaReference>,
+    #[serde(default)]
+    pub tooltip: Override<String>,
+    #[serde(default)]
+    pub style: CellStyleLayer,
+    #[serde(default)]
+    pub shortcuts: Vec<ItemShortcut>,
+    #[serde(default)]
+    pub hotstrings: Vec<ItemHotstring>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RingDefinition {
     pub id: RingId,
     pub radius: f32,
@@ -250,9 +568,12 @@ pub struct RingDefinition {
     #[serde(default)]
     pub gap: f32,
     pub cells: Vec<CellDefinition>,
+    #[serde(default)]
+    pub style: RingStyleLayer,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MenuDefinition {
     pub id: MenuId,
     pub name: String,
@@ -275,11 +596,17 @@ pub struct MenuDefinition {
     #[serde(default)]
     pub center_control: Option<Control>,
     #[serde(default)]
+    pub center_secondary_control: Option<Control>,
+    #[serde(default)]
     pub background_action: Option<ActionBinding>,
     #[serde(default)]
     pub background_primary_after_action: AfterActionPolicy,
     #[serde(default)]
     pub background_secondary_action: Option<ActionBinding>,
+    #[serde(default)]
+    pub background_control: Option<Control>,
+    #[serde(default)]
+    pub background_secondary_control: Option<Control>,
     #[serde(default)]
     pub background_secondary_after_action: AfterActionPolicy,
     #[serde(default)]
@@ -287,17 +614,39 @@ pub struct MenuDefinition {
     pub skin_id: SkinId,
     pub center_radius: f32,
     pub rings: Vec<RingDefinition>,
+    #[serde(default)]
+    pub style: MenuStyleLayer,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkinDefinition {
     pub id: SkinId,
     pub name: String,
-    pub scale: f32,
     #[serde(default)]
-    pub enable_glow: Override<bool>,
+    pub style: SelectedSkinStyleLayer,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemShortcut {
+    pub id: ShortcutId,
+    pub chord: String,
+    pub gesture: ClickGesture,
     #[serde(default)]
-    pub center_image: Override<String>,
+    pub scope: TriggerScope,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemHotstring {
+    pub id: HotstringId,
+    pub text: String,
+    pub gesture: ClickGesture,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub scope: TriggerScope,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,7 +657,9 @@ pub struct TriggerDefinition {
     pub scope: TriggerScope,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerScope {
     #[default]
@@ -330,6 +681,7 @@ pub struct ContextRule {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RadialDocument {
     pub schema_version: u32,
     pub revision: ConfigRevision,
@@ -338,6 +690,12 @@ pub struct RadialDocument {
     pub after_action: AfterActionPolicy,
     pub menus: Vec<MenuDefinition>,
     pub skins: Vec<SkinDefinition>,
+    #[serde(default)]
+    pub user_style_defaults: UserDefaultStyleLayer,
+    #[serde(default)]
+    pub media_search_roots: MediaSearchRoots,
+    #[serde(default)]
+    pub assets: Vec<AssetRecord>,
     #[serde(default)]
     pub context_rules: Vec<ContextRule>,
     #[serde(default)]
@@ -374,8 +732,14 @@ impl RadialDocument {
             label: label.into(),
             content: CellContent::Dynamic { source },
             alternate_clicks: Vec::new(),
+            alternate_controls: Vec::new(),
             after_action: AfterActionPolicy::Inherit,
+            secondary_after_action: AfterActionPolicy::Inherit,
             icon: Override::Inherit,
+            tooltip: Override::Inherit,
+            style: CellStyleLayer::default(),
+            shortcuts: Vec::new(),
+            hotstrings: Vec::new(),
         })
         .collect();
         Self {
@@ -396,9 +760,12 @@ impl RadialDocument {
                 center_secondary_action: None,
                 center_secondary_after_action: AfterActionPolicy::Inherit,
                 center_control: Some(Control::Drag),
+                center_secondary_control: None,
                 background_action: None,
                 background_primary_after_action: AfterActionPolicy::Inherit,
                 background_secondary_action: None,
+                background_control: None,
+                background_secondary_control: None,
                 background_secondary_after_action: AfterActionPolicy::Inherit,
                 mirror_primary_to_secondary: false,
                 skin_id: skin_id.clone(),
@@ -410,15 +777,34 @@ impl RadialDocument {
                     rotation_degrees: -90.0,
                     gap: 4.0,
                     cells,
+                    style: RingStyleLayer::default(),
                 }],
+                style: MenuStyleLayer::default(),
             }],
             skins: vec![SkinDefinition {
                 id: skin_id,
                 name: "Carbon".into(),
-                scale: 1.0,
-                enable_glow: Override::Value(true),
-                center_image: Override::Clear,
+                style: SelectedSkinStyleLayer {
+                    values: StyleOverrides {
+                        images: ImageStyleOverrides {
+                            center_image: Override::Clear,
+                            ..Default::default()
+                        },
+                        geometry: GeometryStyleOverrides {
+                            menu_scale: Override::Value(1.0),
+                            ..Default::default()
+                        },
+                        effects: EffectStyleOverrides {
+                            glow_enabled: Override::Value(true),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                },
             }],
+            user_style_defaults: UserDefaultStyleLayer::default(),
+            media_search_roots: MediaSearchRoots::default(),
+            assets: Vec::new(),
             context_rules: Vec::new(),
             custom_triggers: Vec::new(),
             metadata: BTreeMap::new(),
@@ -537,5 +923,31 @@ mod tests {
             decoded.background_secondary_after_action,
             AfterActionPolicy::CloseCurrentMenu
         );
+    }
+
+    #[test]
+    fn style_layers_and_media_preserve_inherit_clear_false_zero_and_empty() {
+        let mut document = RadialDocument::starter();
+        document
+            .user_style_defaults
+            .values
+            .geometry
+            .outer_ring_margin = Override::Value(0.0);
+        document.user_style_defaults.values.text.visible = Override::Value(false);
+        document.user_style_defaults.values.images.center_image = Override::Clear;
+        document.menus[0].style.values.images.item_glow =
+            Override::Value(MediaReference::SearchPath {
+                file_name: "glow.png".into(),
+            });
+        document.menus[0].rings[0].style.text.bold = Override::Value(false);
+        document.menus[0].rings[0].cells[0].tooltip = Override::Value(String::new());
+        document.menus[0].rings[0].cells[0]
+            .style
+            .geometry
+            .item_image_y_ratio = Override::Value(0.0);
+        crate::radial::validation::validate(&document).unwrap();
+        let decoded: RadialDocument =
+            serde_json::from_value(serde_json::to_value(&document).unwrap()).unwrap();
+        assert_eq!(decoded, document);
     }
 }

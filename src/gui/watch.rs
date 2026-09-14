@@ -45,6 +45,17 @@ impl LauncherApp {
                 WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
                 WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),
                 WatchEvent::RadialInvalidate => self.invalidate_radial_leases(),
+                WatchEvent::RadialConfigDiagnostic(diagnostic) => {
+                    if let Some(diagnostic) = diagnostic {
+                        self.report_error_message(
+                            "radial.reload",
+                            format!("Radial menu configuration was not reloaded: {diagnostic}"),
+                        );
+                    }
+                }
+                WatchEvent::RadialRuntimeDiagnostic(diagnostic) => {
+                    self.report_error_message("radial.runtime", diagnostic);
+                }
                 WatchEvent::Actions => {
                     let _transaction = crate::actions::transaction_guard();
                     let custom = match load_actions_typed(&self.actions_path) {
@@ -489,6 +500,24 @@ mod tests {
                 "bad".into()
             ))
         );
+    }
+
+    #[test]
+    fn radial_runtime_diagnostic_is_visible_without_mutating_launcher_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep query".into();
+        app.selected = Some(3);
+        app.show_inline_errors = true;
+        app.event_tx
+            .send(WatchEvent::RadialRuntimeDiagnostic(
+                "missing managed radial asset".into(),
+            ))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.query, "keep query");
+        assert_eq!(app.selected, Some(3));
+        assert_eq!(app.error.as_deref(), Some("missing managed radial asset"));
     }
 
     #[test]

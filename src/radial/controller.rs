@@ -1,12 +1,15 @@
+use super::assets::{AssetService, PrepareVariant, PreparedMedia, reference_identity};
+use super::audio::{PreparedRadialSounds, RadialAudioSession, RadialCue, SystemRadialAudioOutput};
 use super::bindings::{
     PreparationGeneration, PreparedCell, RadialPrepareEnvelope, RadialPrepareReply,
-    RadialPrepareRequest, project_menu_frame,
+    RadialPrepareRequest, project_menu_frame_with_style,
 };
 use super::context::{InvocationContext, WindowIdentity};
 use super::dynamic::{FrozenAvailability, FrozenBinding};
+use super::font_cache::{FontLayoutService, FontRequest};
 use super::geometry::{
     CellLayout, HitShape, LayoutSnapshot, LogicalPoint, PhysicalPoint, PhysicalRect, ScaleFactor,
-    layout_menu,
+    layout_document_menu, layout_menu,
 };
 use super::handoff::{
     DispatchEvent, DispatchIntent, InteractionRequirement, PendingRadialDispatch,
@@ -16,17 +19,36 @@ use super::invocation::InvocationIntent;
 use super::model::{
     ActionBinding, AfterActionPolicy, CellContent, ClickGesture, Control, InteractionMode,
     InvocationId, MenuId, Override, RadialDocument, RingId, SessionId, SubmenuPresentation,
+    TriggerScope,
 };
 use super::native::{CloseReason, NativeCommand, NativeEvent, NativeHost};
-use super::render::{InputOwner, build_scene};
+use super::render::{
+    InputOwner, PreparedSceneResources, build_scene, build_scene_prepared,
+    build_scene_prepared_selected,
+};
 use super::session::{
     CellRole, NavigationCommand, NavigationModifiers, PointerButton, SessionEvent, SessionIntent,
     SessionReducer,
 };
-use std::collections::BTreeMap;
+use super::skin::compile_menu_tree;
 use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
+
+fn scene_resource_fingerprint(layout: &LayoutSnapshot) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    // The layout/style snapshot is immutable and contains every resolved media
+    // and presentation input. Geometry generation is deliberately excluded so
+    // page, submenu, and reopen cycles reuse identical decoded resources.
+    format!("{:?}", layout.style).hash(&mut hasher);
+    for cell in &layout.cells {
+        format!("{:?}{:?}", cell.icon, cell.visual).hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DeadlineKey {
@@ -159,10 +181,14 @@ struct PendingSession {
     interaction: InteractionMode,
     layout: LayoutSnapshot,
     generation: u64,
+    application_always_on_top: bool,
     always_on_top: bool,
+    activate_on_show: bool,
     context: InvocationContext,
     trigger_still_down: bool,
     prepared: Option<RadialPrepareReply>,
+    resources: PreparedSceneResources,
+    sounds: PreparedRadialSounds,
 }
 struct ActiveSession {
     invocation_id: InvocationId,
@@ -171,12 +197,19 @@ struct ActiveSession {
     layout: LayoutSnapshot,
     reducer: SessionReducer,
     pointer: LogicalPoint,
+    application_always_on_top: bool,
     always_on_top: bool,
+    activate_on_show: bool,
     context: InvocationContext,
     trigger_still_down: bool,
+    owned_item_input: Option<InvocationId>,
     prepared: Option<RadialPrepareReply>,
     navigation_layouts: BTreeMap<MenuId, LayoutSnapshot>,
     navigation_frames: BTreeMap<MenuId, super::bindings::PreparedMenuFrame>,
+    resources: PreparedSceneResources,
+    audio: Option<RadialAudioSession<SystemRadialAudioOutput>>,
+    audio_generation: u64,
+    navigation_sounds: BTreeMap<MenuId, PreparedRadialSounds>,
 }
 
 struct WaitingOpen {
@@ -199,6 +232,16 @@ struct PreparationBridge {
     waiting: Option<WaitingOpen>,
 }
 
+#[derive(Clone, Debug)]
+struct QueuedItemActivation {
+    id: InvocationId,
+    menu_id: MenuId,
+    cell_id: super::model::CellId,
+    gesture: ClickGesture,
+    source: crate::commands::ActivationSource,
+    trigger_still_down: bool,
+}
+
 /// Session-correlated coordinator. The native thread is lazy and exists only
 /// after an accepted open request.
 pub struct RadialController {
@@ -215,6 +258,12 @@ pub struct RadialController {
     last_external: Option<WindowIdentity>,
     deadline_scheduler: Option<HandoffDeadlineScheduler>,
     deadline_wake: Option<mpsc::Sender<()>>,
+    queued_item_activation: Option<QueuedItemActivation>,
+    release_aliases: BTreeMap<InvocationId, InvocationId>,
+    release_waits: BTreeMap<InvocationId, BTreeSet<InvocationId>>,
+    asset_service: Option<AssetService>,
+    font_service: Option<FontLayoutService>,
+    visible_resource_diagnostics: BTreeSet<String>,
 }
 impl RadialController {
     pub fn new(document: Arc<RadialDocument>, diagnostics: bool, wake: mpsc::Sender<()>) -> Self {
@@ -257,16 +306,47 @@ impl RadialController {
             last_external: None,
             deadline_scheduler: None,
             deadline_wake: None,
+            queued_item_activation: None,
+            release_aliases: BTreeMap::new(),
+            asset_service: None,
+            font_service: None,
+            visible_resource_diagnostics: BTreeSet::new(),
+            release_waits: BTreeMap::new(),
         }
     }
     pub fn replace_document(&mut self, document: Arc<RadialDocument>) {
+        self.invalidate_resources();
+        if let Some(service) = &mut self.asset_service {
+            service.replace_search_roots(document.media_search_roots.clone());
+        }
+        self.document = document;
+    }
+
+    /// Installs the preparation-only resource services used by the production
+    /// controller. Tests with synthetic hosts can intentionally omit this.
+    pub fn configure_resources(&mut self, application_data: PathBuf) {
+        self.asset_service = Some(AssetService::new(
+            application_data,
+            self.document.media_search_roots.clone(),
+        ));
+        self.font_service = Some(FontLayoutService::discover());
+    }
+
+    /// Invalidate every prepared/layout resource owned by the active radial
+    /// generation. Asset/font/compositor caches are invocation-local today;
+    /// closing the tree is therefore the fail-closed cache invalidation boundary.
+    pub fn invalidate_resources(&mut self) {
+        self.visible_resource_diagnostics.clear();
         self.handoff = None;
         self.cancel_handoff_deadline();
         if let Some(bridge) = &mut self.preparation {
             bridge.waiting = None;
         }
         self.close(CloseReason::SettingsReload, None);
-        self.document = document;
+        self.queued_item_activation = None;
+        self.release_aliases.clear();
+        self.release_waits.clear();
+        self.layout_generation = self.layout_generation.checked_add(1).unwrap_or(1);
     }
 
     fn capture_context(&mut self, token: u64) -> InvocationContext {
@@ -292,6 +372,9 @@ impl RadialController {
         }
         self.pending = None;
         self.active = None;
+        self.queued_item_activation = None;
+        self.release_aliases.clear();
+        self.release_waits.clear();
     }
     pub fn handle_intents(
         &mut self,
@@ -370,12 +453,38 @@ impl RadialController {
                     self.close(CloseReason::Dismissed, session_id.as_ref())
                 }
                 InvocationIntent::TriggerReleased { id } => {
-                    if let Some(active) = self
-                        .active
+                    let release_invocation = self.release_aliases.remove(&id).unwrap_or(id);
+                    if let Some(waiting) = self
+                        .preparation
                         .as_mut()
-                        .filter(|active| active.invocation_id == id)
+                        .and_then(|bridge| bridge.waiting.as_mut())
+                        .filter(|waiting| waiting.invocation_id == id)
                     {
-                        active.trigger_still_down = false;
+                        waiting.trigger_still_down = false;
+                    }
+                    if let Some(pending) = self
+                        .pending
+                        .as_mut()
+                        .filter(|pending| pending.invocation_id == id)
+                    {
+                        pending.trigger_still_down = false;
+                    }
+                    if let Some(queued) = self
+                        .queued_item_activation
+                        .as_mut()
+                        .filter(|queued| queued.id == id)
+                    {
+                        queued.trigger_still_down = false;
+                    }
+                    if let Some(active) = self.active.as_mut().filter(|active| {
+                        active.invocation_id == id || active.owned_item_input == Some(id)
+                    }) {
+                        if active.invocation_id == id {
+                            active.trigger_still_down = false;
+                        }
+                        if active.owned_item_input == Some(id) {
+                            active.owned_item_input = None;
+                        }
                     }
                     if let Some(active) = self
                         .active
@@ -401,10 +510,23 @@ impl RadialController {
                         );
                     }
                     out.push(ControllerEvent::InvocationReleaseAcknowledged { invocation_id: id });
-                    self.reduce_handoff(
-                        DispatchEvent::InvocationReleased { invocation_id: id },
-                        &mut out,
-                    );
+                    let fully_released = self
+                        .release_waits
+                        .get_mut(&release_invocation)
+                        .map(|keys| {
+                            keys.remove(&id);
+                            keys.is_empty()
+                        })
+                        .unwrap_or(true);
+                    if fully_released {
+                        self.release_waits.remove(&release_invocation);
+                        self.reduce_handoff(
+                            DispatchEvent::InvocationReleased {
+                                invocation_id: release_invocation,
+                            },
+                            &mut out,
+                        );
+                    }
                 }
                 InvocationIntent::Navigate {
                     session_id,
@@ -412,6 +534,54 @@ impl RadialController {
                     modifiers,
                 } => {
                     self.navigate(&session_id, command, modifiers, &mut out);
+                }
+                InvocationIntent::ActivateItem {
+                    id,
+                    menu_id,
+                    cell_id,
+                    gesture,
+                    scope,
+                    source,
+                    trigger_still_down,
+                } => {
+                    let matches_active = self
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.menu_id == menu_id);
+                    if matches_active {
+                        if let Some(active) = self.active.as_mut() {
+                            if trigger_still_down {
+                                active.owned_item_input = Some(id);
+                            }
+                        }
+                        self.activate_item(&menu_id, &cell_id, gesture, source, &mut out);
+                    } else if scope == TriggerScope::Global {
+                        let interaction = self
+                            .document
+                            .menus
+                            .iter()
+                            .find(|menu| menu.id == menu_id)
+                            .map_or(InteractionMode::StickyClick, |menu| menu.interaction);
+                        self.queued_item_activation = Some(QueuedItemActivation {
+                            id,
+                            menu_id: menu_id.clone(),
+                            cell_id,
+                            gesture,
+                            source,
+                            trigger_still_down,
+                        });
+                        let context = self.capture_context(id.0);
+                        self.request_open(
+                            id,
+                            menu_id,
+                            interaction,
+                            always_on_top,
+                            context,
+                            trigger_still_down,
+                            false,
+                            &mut out,
+                        );
+                    }
                 }
                 InvocationIntent::ScheduleDeadline { .. }
                 | InvocationIntent::CancelDeadline { .. }
@@ -513,16 +683,20 @@ impl RadialController {
             return;
         };
         let (anchor, work, scale) = desktop_geometry();
-        let mut layout = match layout_menu(&menu, anchor, work, scale, 0.55) {
-            Ok(v) => v,
-            Err(e) => {
-                out.push(ControllerEvent::InvocationFailed {
-                    invocation_id,
-                    message: format!("radial layout failed: {e:?}"),
-                });
-                return;
-            }
-        };
+        let application_always_on_top = always_on_top;
+        let (always_on_top, activate_on_show) =
+            resolve_window_options(&self.document, &menu, application_always_on_top);
+        let mut layout =
+            match layout_document_menu(&self.document, &menu, anchor, work, scale, 0.55) {
+                Ok(v) => v,
+                Err(e) => {
+                    out.push(ControllerEvent::InvocationFailed {
+                        invocation_id,
+                        message: format!("radial layout failed: {e:?}"),
+                    });
+                    return;
+                }
+            };
         if let Some(reply) = prepared.as_ref() {
             augment_special_cells(&mut layout, &reply.frame.cells, &reply.frame.menu);
             apply_prepared_availability(&mut layout, &reply.frame);
@@ -544,7 +718,14 @@ impl RadialController {
         self.next_session = self.next_session.checked_add(1).unwrap_or(1);
         let generation = self.layout_generation;
         self.layout_generation = self.layout_generation.checked_add(1).unwrap_or(1);
-        let scene = build_scene(&layout, generation);
+        let (resources, sounds, resource_diagnostics) =
+            self.prepare_scene_resources(&menu, &layout, generation);
+        out.extend(resource_diagnostics.into_iter().map(ControllerEvent::Error));
+        let scene = if self.asset_service.is_some() || self.font_service.is_some() {
+            build_scene_prepared(&layout, generation, &resources)
+        } else {
+            build_scene(&layout, generation)
+        };
         self.record(
             Some(session_id.clone()),
             format!(
@@ -557,6 +738,7 @@ impl RadialController {
             scene,
             layout: layout.clone(),
             always_on_top,
+            activate_on_show,
         };
         match self.host.as_ref().expect("lazy host").send(command) {
             Ok(()) => {
@@ -571,10 +753,14 @@ impl RadialController {
                     },
                     layout,
                     generation,
+                    application_always_on_top,
                     always_on_top,
+                    activate_on_show,
                     context,
                     trigger_still_down,
                     prepared,
+                    resources,
+                    sounds,
                 })
             }
             Err(message) => {
@@ -585,6 +771,154 @@ impl RadialController {
                 })
             }
         }
+    }
+
+    fn prepare_scene_resources(
+        &mut self,
+        menu: &super::model::MenuDefinition,
+        layout: &LayoutSnapshot,
+        _generation: u64,
+    ) -> (PreparedSceneResources, PreparedRadialSounds, Vec<String>) {
+        let mut resources = PreparedSceneResources::default();
+        let variant = PrepareVariant {
+            effective_style: scene_resource_fingerprint(layout),
+            dpi_milli: (layout.scale_factor.get() * 1_000.0)
+                .round()
+                .clamp(1.0, u32::MAX as f64) as u32,
+            logical_width_milli: (layout.style.item_size.max(1.0) * 1_000.0) as u32,
+            logical_height_milli: (layout.style.item_size.max(1.0) * 1_000.0) as u32,
+            quality: layout.style.image_quality,
+        };
+        let mut diagnostics = Vec::new();
+        if let Some(service) = &mut self.asset_service {
+            let mut refs = vec![
+                layout.style.item_glow.clone(),
+                layout.style.menu_outer_rim.clone(),
+                layout.style.menu_background.clone(),
+                layout.style.menu_foreground.clone(),
+                layout.style.center_background.clone(),
+                layout.style.center_image.clone(),
+            ];
+            for cell in &layout.cells {
+                refs.extend([
+                    cell.icon.clone(),
+                    cell.visual.item_background.clone(),
+                    cell.visual.item_foreground.clone(),
+                    cell.visual.item_shadow.clone(),
+                    cell.visual.submenu_indicator.clone(),
+                ]);
+            }
+            for reference in refs {
+                if let Override::Value(reference) = reference {
+                    match service.prepare(
+                        &reference,
+                        super::model::MediaKind::Image,
+                        &self.document.assets,
+                        variant,
+                    ) {
+                        Ok(snapshot) => {
+                            resources
+                                .media
+                                .insert(reference_identity(&reference), snapshot);
+                        }
+                        Err(error) => diagnostics.push(format!(
+                            "radial image {} unavailable: {error}",
+                            reference_identity(&reference)
+                        )),
+                    }
+                }
+            }
+        }
+        if let Some(service) = &mut self.font_service {
+            for cell in &layout.cells {
+                let request = FontRequest {
+                    family: (!cell.visual.font_family.is_empty())
+                        .then(|| cell.visual.font_family.clone()),
+                    size_milli: (cell.visual.font_size.max(1.0) * 1_000.0) as u32,
+                    bold: cell.visual.bold,
+                    italic: cell.visual.italic,
+                    dpi_milli: variant.dpi_milli,
+                    max_width_milli: (layout.style.item_size.max(1.0)
+                        * cell.visual.text_box_scale
+                        * 1_000.0) as u32,
+                };
+                let prepared_label = service.prepare(&cell.label, request.clone());
+                diagnostics.extend(
+                    prepared_label.diagnostics.iter().map(|diagnostic| {
+                        format!("radial font for {}: {diagnostic:?}", cell.cell_id)
+                    }),
+                );
+                resources.text.insert(cell.cell_id.clone(), prepared_label);
+                if let Some(definition) = menu
+                    .rings
+                    .iter()
+                    .flat_map(|ring| &ring.cells)
+                    .find(|candidate| candidate.id == cell.cell_id)
+                {
+                    let explicit = match &definition.tooltip {
+                        Override::Value(value) if !value.is_empty() => Some(value.as_str()),
+                        _ => None,
+                    };
+                    let tooltip = match cell.visual.tooltip_mode {
+                        super::model::TooltipMode::Disabled => None,
+                        super::model::TooltipMode::Explicit => explicit,
+                        super::model::TooltipMode::Automatic => {
+                            explicit.or(Some(cell.label.as_str()))
+                        }
+                    };
+                    if let Some(tooltip) = tooltip {
+                        resources
+                            .tooltips
+                            .insert(cell.cell_id.clone(), service.prepare(tooltip, request));
+                    }
+                }
+            }
+        }
+        let mut sounds = PreparedRadialSounds::default();
+        if let (Some(service), Ok(style)) = (
+            &mut self.asset_service,
+            compile_menu_tree(&self.document, menu),
+        ) {
+            let refs = [
+                (&style.menu.values.sounds.on_show, &mut sounds.open),
+                (&style.menu.values.sounds.on_close, &mut sounds.close),
+                (&style.menu.values.sounds.on_select, &mut sounds.select),
+                (
+                    &style.menu.values.sounds.on_submenu_show,
+                    &mut sounds.submenu_show,
+                ),
+                (
+                    &style.menu.values.sounds.on_submenu_close,
+                    &mut sounds.submenu_close,
+                ),
+            ];
+            for (reference, destination) in refs {
+                if let Override::Value(reference) = reference {
+                    match service.prepare(
+                        reference,
+                        super::model::MediaKind::Sound,
+                        &self.document.assets,
+                        variant,
+                    ) {
+                        Ok(snapshot) => {
+                            if let PreparedMedia::Sound(sound) = &*snapshot.media {
+                                *destination = Some(Arc::clone(&sound.wav));
+                            }
+                        }
+                        Err(error) => diagnostics.push(format!(
+                            "radial sound {} unavailable: {error}",
+                            reference_identity(reference)
+                        )),
+                    }
+                }
+            }
+        }
+        diagnostics
+            .retain(|diagnostic| self.visible_resource_diagnostics.insert(diagnostic.clone()));
+        for diagnostic in &diagnostics {
+            self.record(None, diagnostic.clone());
+        }
+        (resources, sounds, diagnostics)
     }
     pub fn poll(&mut self) -> Vec<ControllerEvent> {
         let mut out = vec![];
@@ -730,25 +1064,62 @@ impl RadialController {
                     .prepared
                     .as_ref()
                     .map_or_else(BTreeMap::new, |reply| reply.frames.clone());
+                let root_sounds = p.sounds.clone();
+                let mut audio = RadialAudioSession::new(
+                    session_id.clone(),
+                    layout_generation,
+                    p.sounds,
+                    SystemRadialAudioOutput,
+                );
+                audio.cue(
+                    &session_id,
+                    layout_generation,
+                    RadialCue::Open,
+                    monotonic_ms(),
+                );
                 self.active = Some(ActiveSession {
                     invocation_id,
                     session_id: session_id.clone(),
-                    menu_id: p.menu_id,
+                    menu_id: p.menu_id.clone(),
                     layout: p.layout,
                     reducer,
                     pointer,
+                    application_always_on_top: p.application_always_on_top,
                     always_on_top: p.always_on_top,
+                    activate_on_show: p.activate_on_show,
                     context: p.context,
                     trigger_still_down: p.trigger_still_down,
+                    owned_item_input: self
+                        .queued_item_activation
+                        .as_ref()
+                        .filter(|queued| queued.id == p.invocation_id && queued.trigger_still_down)
+                        .map(|queued| queued.id),
                     prepared: p.prepared,
                     navigation_layouts,
                     navigation_frames,
+                    resources: p.resources,
+                    audio: Some(audio),
+                    audio_generation: layout_generation,
+                    navigation_sounds: BTreeMap::from([(p.menu_id.clone(), root_sounds)]),
                 });
                 self.record(Some(session_id.clone()), "native host ready".into());
                 out.push(ControllerEvent::Opened {
                     invocation_id,
                     session_id,
                 });
+                if let Some(queued) = self.queued_item_activation.take() {
+                    if queued.id == invocation_id {
+                        self.activate_item(
+                            &queued.menu_id,
+                            &queued.cell_id,
+                            queued.gesture,
+                            queued.source,
+                            out,
+                        );
+                    } else {
+                        self.queued_item_activation = Some(queued);
+                    }
+                }
             }
             NativeEvent::Closed { session_id, reason } => {
                 if let Some(p) = self.pending.take() {
@@ -765,12 +1136,26 @@ impl RadialController {
                         session_id,
                         reason,
                     });
+                    if self
+                        .queued_item_activation
+                        .as_ref()
+                        .is_some_and(|queued| queued.id == p.invocation_id)
+                    {
+                        self.queued_item_activation = None;
+                    }
                     return;
                 }
-                if let Some(a) = self.active.take() {
+                if let Some(mut a) = self.active.take() {
                     if a.session_id != session_id {
                         self.active = Some(a);
                         return;
+                    }
+                    if let Some(audio) = a.audio.take() {
+                        if !audio.finish_close(&session_id, a.audio_generation, monotonic_ms()) {
+                            out.push(ControllerEvent::Error(
+                                "radial close audio retirement queue is saturated".into(),
+                            ));
+                        }
                     }
                     self.record(Some(session_id.clone()), "native cleanup complete".into());
                     out.push(ControllerEvent::Closed {
@@ -797,7 +1182,14 @@ impl RadialController {
                     .map(|p| p.invocation_id)
                     .or_else(|| self.active.as_ref().map(|a| a.invocation_id));
                 self.pending = None;
-                self.active = None;
+                if let Some(mut active) = self.active.take()
+                    && let Some(audio) = active.audio.take()
+                    && !audio.stop(&active.session_id, active.audio_generation)
+                {
+                    out.push(ControllerEvent::Error(
+                        "radial audio stop retirement queue is saturated".into(),
+                    ));
+                }
                 self.retire_host();
                 self.record(session_id, message.clone());
                 if let Some(invocation_id) = invocation_id {
@@ -814,6 +1206,14 @@ impl RadialController {
                 owner,
                 point,
             } => {
+                if owner != super::render::InputOwner::Exterior {
+                    self.session_event(&session_id, SessionEvent::MenuInteraction, out);
+                }
+                let previous_selection = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| active.reducer.state.hovered.clone());
                 if let Some(active) = self
                     .active
                     .as_mut()
@@ -832,6 +1232,28 @@ impl RadialController {
                     },
                     out,
                 );
+                let current_selection = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| active.reducer.state.hovered.clone());
+                if current_selection != previous_selection {
+                    if let Some(cell) = current_selection.clone()
+                        && let Some(active) = self
+                            .active
+                            .as_mut()
+                            .filter(|active| active.session_id == session_id)
+                        && let Some(audio) = &mut active.audio
+                    {
+                        audio.cue(
+                            &session_id,
+                            active.audio_generation,
+                            RadialCue::Select(cell),
+                            monotonic_ms(),
+                        );
+                    }
+                    self.refresh_active_scene(&session_id, out);
+                }
                 if let Some(cell) = hovered
                     && let Some(dwell_ms) = self
                         .active
@@ -858,7 +1280,15 @@ impl RadialController {
                 }
             }
             NativeEvent::PointerLeft { session_id } => {
-                self.session_event(&session_id, SessionEvent::OutsideInteraction, out)
+                let had_hover = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .is_some_and(|active| active.reducer.state.hovered.is_some());
+                self.session_event(&session_id, SessionEvent::OutsideInteraction, out);
+                if had_hover {
+                    self.refresh_active_scene(&session_id, out);
+                }
             }
             NativeEvent::PointerDown {
                 session_id,
@@ -866,6 +1296,9 @@ impl RadialController {
                 point,
                 button,
             } => {
+                if owner != super::render::InputOwner::Exterior {
+                    self.session_event(&session_id, SessionEvent::MenuInteraction, out);
+                }
                 let generation = self.layout_generation_for(&session_id);
                 let role = self.role_for_button(&session_id, &owner, button);
                 self.session_event(
@@ -932,6 +1365,83 @@ impl RadialController {
             self.handle_session_intent(id, intent, out);
         }
     }
+
+    fn activate_item(
+        &mut self,
+        menu_id: &MenuId,
+        cell_id: &super::model::CellId,
+        gesture: ClickGesture,
+        source: crate::commands::ActivationSource,
+        out: &mut Vec<ControllerEvent>,
+    ) {
+        if self.handoff.is_some() {
+            return;
+        }
+        let Some(session_id) = self
+            .active
+            .as_ref()
+            .filter(|active| &active.menu_id == menu_id)
+            .map(|active| active.session_id.clone())
+        else {
+            return;
+        };
+        let generation = self.layout_generation_for(&session_id);
+        let role = self
+            .active
+            .as_ref()
+            .and_then(|active| {
+                let modifiers = NavigationModifiers {
+                    control: gesture == ClickGesture::CtrlPrimary,
+                    shift: gesture == ClickGesture::ShiftPrimary,
+                    alt: gesture == ClickGesture::AltPrimary,
+                    alt_gr: false,
+                };
+                let button = if gesture == ClickGesture::Secondary {
+                    PointerButton::Secondary
+                } else {
+                    PointerButton::Primary
+                };
+                if let Some(control) = cell_gesture_control(
+                    active.prepared.as_ref().map_or_else(
+                        || {
+                            self.document
+                                .menus
+                                .iter()
+                                .find(|menu| menu.id == active.menu_id)
+                        },
+                        |reply| Some(&reply.frame.menu),
+                    ),
+                    cell_id,
+                    button,
+                    modifiers,
+                ) {
+                    return Some(Err(control_role(control)));
+                }
+                self.prepared_action(active, cell_id, button, modifiers)
+                    .map(Ok)
+            })
+            .map_or(CellRole::Unavailable, |prepared| match prepared {
+                Err(role) => role,
+                Ok(prepared) => {
+                    if prepared.availability == FrozenAvailability::Available {
+                        CellRole::Action
+                    } else {
+                        CellRole::Unavailable
+                    }
+                }
+            });
+        self.session_event(
+            &session_id,
+            SessionEvent::ActivateItem {
+                cell: cell_id.clone(),
+                role,
+                gesture,
+                source,
+                geometry_generation: generation,
+            },
+            out,
+        );
+    }
     fn handle_session_intent(
         &mut self,
         id: &SessionId,
@@ -953,6 +1463,8 @@ impl RadialController {
                     preparation_generation,
                     context,
                     trigger_still_down,
+                    item_trigger_still_down,
+                    owned_item_input,
                     stack_len,
                     pointer,
                 )) = self
@@ -971,6 +1483,8 @@ impl RadialController {
                                         .map_or(PreparationGeneration(0), |reply| reply.generation),
                                     active.context.clone(),
                                     active.trigger_still_down,
+                                    active.owned_item_input.is_some(),
+                                    active.owned_item_input,
                                     active.reducer.state.stack.len(),
                                     active.pointer,
                                 )
@@ -1009,7 +1523,17 @@ impl RadialController {
                     after_action,
                     source,
                 };
-                let release_required = trigger_still_down;
+                let release_required = trigger_still_down || item_trigger_still_down;
+                if release_required {
+                    let waits = self.release_waits.entry(invocation_id).or_default();
+                    if trigger_still_down {
+                        waits.insert(invocation_id);
+                    }
+                    if let Some(item_id) = owned_item_input {
+                        waits.insert(item_id);
+                        self.release_aliases.insert(item_id, invocation_id);
+                    }
+                }
                 let close_required = after_action == AfterActionPolicy::CloseTree
                     || (after_action == AfterActionPolicy::CloseCurrentMenu && stack_len == 1)
                     || requirement != InteractionRequirement::None;
@@ -1078,6 +1602,37 @@ impl RadialController {
         else {
             return CellRole::Unavailable;
         };
+        if let Some(control) = special_surface_control(
+            active.prepared.as_ref().map_or_else(
+                || {
+                    self.document
+                        .menus
+                        .iter()
+                        .find(|menu| menu.id == active.menu_id)
+                },
+                |reply| Some(&reply.frame.menu),
+            ),
+            cell,
+            button,
+        ) {
+            return control_role(control);
+        }
+        if let Some(control) = cell_gesture_control(
+            active.prepared.as_ref().map_or_else(
+                || {
+                    self.document
+                        .menus
+                        .iter()
+                        .find(|menu| menu.id == active.menu_id)
+                },
+                |reply| Some(&reply.frame.menu),
+            ),
+            cell,
+            button,
+            active.reducer.state.modifiers,
+        ) {
+            return control_role(control);
+        }
         if let Some(prepared) =
             self.prepared_action(active, cell, button, active.reducer.state.modifiers)
         {
@@ -1103,6 +1658,19 @@ impl RadialController {
         else {
             return CellRole::Unavailable;
         };
+        let menu = active
+            .prepared
+            .as_ref()
+            .map(|reply| &reply.frame.menu)
+            .or_else(|| {
+                self.document
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == active.menu_id)
+            });
+        if let Some(control) = special_surface_control(menu, cell, PointerButton::Primary) {
+            return control_role(control);
+        }
         if let Some(prepared) = active
             .prepared
             .as_ref()
@@ -1202,7 +1770,16 @@ impl RadialController {
             .alternate_clicks
             .iter()
             .find(|alternate| alternate.gesture == gesture)
-            .map(|alternate| (alternate.action.clone(), alternate.after_action));
+            .map(|alternate| {
+                let policy = if gesture == ClickGesture::Secondary
+                    && alternate.after_action == AfterActionPolicy::Inherit
+                {
+                    cell.secondary_after_action
+                } else {
+                    alternate.after_action
+                };
+                (alternate.action.clone(), policy)
+            });
         let (binding, after_action) = alternate.or_else(|| {
             (gesture == ClickGesture::Primary).then(|| (binding.clone(), cell.after_action))
         })?;
@@ -1283,7 +1860,9 @@ impl RadialController {
                 .map(|layout| shape_center(&layout.shape, active.layout.origin, scale))
                 .unwrap_or(desktop_anchor),
         };
-        let Ok(mut layout) = layout_menu(&child, anchor, work, scale, 0.55) else {
+        let Ok(mut layout) =
+            layout_document_menu(&self.document, &child, anchor, work, scale, 0.55)
+        else {
             out.push(ControllerEvent::Error(
                 "radial submenu layout failed".into(),
             ));
@@ -1297,7 +1876,13 @@ impl RadialController {
             layout = cascade_layout(&active.layout, layout);
         }
         let pointer = active.pointer;
+        let application_always_on_top = active.application_always_on_top;
+        let (always_on_top, activate_on_show) =
+            resolve_window_options(&self.document, &child, application_always_on_top);
         let generation = self.next_layout_generation();
+        let (resources, sounds, diagnostics) =
+            self.prepare_scene_resources(&child, &layout, generation);
+        out.extend(diagnostics.into_iter().map(ControllerEvent::Error));
         if let Some(active) = self
             .active
             .as_mut()
@@ -1314,10 +1899,23 @@ impl RadialController {
                 current.page_count = prepared_child.as_ref().map_or(1, |frame| frame.page_count);
             }
             active.menu_id = menu_id.clone();
+            active.always_on_top = always_on_top;
+            active.activate_on_show = activate_on_show;
             active
                 .navigation_layouts
                 .insert(menu_id.clone(), layout.clone());
             active.layout = layout;
+            active.resources = resources;
+            if let Some(audio) = &mut active.audio {
+                audio.replace_sounds(sounds.clone());
+                audio.cue(
+                    id,
+                    active.audio_generation,
+                    RadialCue::SubmenuShow(menu_id.clone()),
+                    monotonic_ms(),
+                );
+            }
+            active.navigation_sounds.insert(menu_id.clone(), sounds);
             if let (Some(reply), Some(frame)) = (active.prepared.as_mut(), prepared_child) {
                 active
                     .navigation_frames
@@ -1328,6 +1926,7 @@ impl RadialController {
         self.refresh_active_scene(id, out);
     }
     fn refresh_active_scene(&mut self, id: &SessionId, out: &mut Vec<ControllerEvent>) {
+        let mut resources_changed = false;
         let page = self
             .active
             .as_ref()
@@ -1364,15 +1963,17 @@ impl RadialController {
             .as_mut()
             .filter(|active| &active.session_id == id)
             && let Some(prepared) = active.prepared.as_mut()
+            && prepared.frame.page != page
         {
             let base = prepared.frame.base_menu.clone();
             let alternates = prepared.frame.alternates.clone();
-            prepared.frame = project_menu_frame(
+            let effective_style = super::skin::compile_menu_tree(&self.document, &base).ok();
+            prepared.frame = project_menu_frame_with_style(
                 &base,
                 prepared.frame.static_cells.clone(),
                 &prepared.frame.dynamic,
                 page,
-                12,
+                effective_style.as_ref(),
             );
             if let Some(current) = active.reducer.state.stack.last_mut() {
                 current.page = prepared.frame.page;
@@ -1380,7 +1981,8 @@ impl RadialController {
             }
             prepared.frame.alternates = alternates;
             let (_, work, _) = desktop_geometry();
-            if let Ok(layout) = layout_menu(
+            if let Ok(layout) = layout_document_menu(
+                &self.document,
                 &prepared.frame.menu,
                 active.layout.requested_anchor,
                 work,
@@ -1400,8 +2002,14 @@ impl RadialController {
                 active
                     .navigation_layouts
                     .insert(active.menu_id.clone(), active.layout.clone());
+                resources_changed = true;
             }
         }
+        let previous_menu = self
+            .active
+            .as_ref()
+            .filter(|active| &active.session_id == id)
+            .map(|active| active.menu_id.clone());
         let Some(active) = self
             .active
             .as_ref()
@@ -1413,6 +2021,14 @@ impl RadialController {
         if let Some(frame) = frame
             && frame.menu_id != active.menu_id
         {
+            let restored_window_options = self
+                .document
+                .menus
+                .iter()
+                .find(|menu| menu.id == frame.menu_id)
+                .map(|menu| {
+                    resolve_window_options(&self.document, menu, active.application_always_on_top)
+                });
             if let Some(active) = self
                 .active
                 .as_mut()
@@ -1421,11 +2037,69 @@ impl RadialController {
                 if let Some(layout) = active.navigation_layouts.get(&frame.menu_id).cloned() {
                     active.menu_id = frame.menu_id.clone();
                     active.layout = layout;
+                    resources_changed = true;
+                }
+                if let Some((always_on_top, activate_on_show)) = restored_window_options {
+                    active.always_on_top = always_on_top;
+                    active.activate_on_show = activate_on_show;
                 }
                 if let Some(prepared) = active.prepared.as_mut()
                     && let Some(saved) = active.navigation_frames.get(&frame.menu_id).cloned()
                 {
                     prepared.frame = saved;
+                }
+                if let Some(audio) = &mut active.audio {
+                    if let Some(previous) = previous_menu.as_ref() {
+                        audio.cue(
+                            id,
+                            active.audio_generation,
+                            RadialCue::SubmenuClose(previous.clone()),
+                            monotonic_ms(),
+                        );
+                    }
+                    if let Some(sounds) = active.navigation_sounds.get(&frame.menu_id).cloned() {
+                        audio.replace_sounds(sounds);
+                    }
+                }
+            }
+        }
+        let resource_input = resources_changed
+            .then(|| {
+                self.active
+                    .as_ref()
+                    .filter(|active| &active.session_id == id)
+                    .and_then(|active| {
+                        self.document
+                            .menus
+                            .iter()
+                            .find(|menu| menu.id == active.menu_id)
+                            .cloned()
+                            .or_else(|| {
+                                active
+                                    .prepared
+                                    .as_ref()
+                                    .map(|reply| reply.frame.menu.clone())
+                            })
+                            .map(|menu| (menu, active.layout.clone()))
+                    })
+            })
+            .flatten();
+        if let Some((menu, layout)) = resource_input {
+            let generation = self.layout_generation_for(id);
+            let (resources, sounds, diagnostics) =
+                self.prepare_scene_resources(&menu, &layout, generation);
+            out.extend(diagnostics.into_iter().map(ControllerEvent::Error));
+            if let Some(active) = self
+                .active
+                .as_mut()
+                .filter(|active| &active.session_id == id)
+            {
+                active.resources = resources;
+                active
+                    .navigation_sounds
+                    .insert(menu.id.clone(), sounds.clone());
+                if let Some(audio) = &mut active.audio {
+                    audio.replace_sounds(sounds);
                 }
             }
         }
@@ -1436,11 +2110,22 @@ impl RadialController {
         else {
             return;
         };
-        let command = NativeCommand::Replace {
+        let command = NativeCommand::Present {
             session_id: id.clone(),
-            scene: build_scene(&active.layout, self.layout_generation_for(id)),
+            scene: build_scene_prepared_selected(
+                &active.layout,
+                self.layout_generation_for(id),
+                &active.resources,
+                active
+                    .reducer
+                    .state
+                    .hovered
+                    .as_ref()
+                    .or(active.reducer.state.selected.as_ref()),
+            ),
             layout: active.layout.clone(),
             always_on_top: active.always_on_top,
+            activate_on_show: active.activate_on_show,
         };
         if self
             .host
@@ -1553,11 +2238,15 @@ impl RadialController {
                     out.push(ControllerEvent::DispatchRequested(request));
                     self.handoff = None;
                     self.cancel_handoff_deadline();
+                    self.release_aliases.clear();
+                    self.release_waits.clear();
                 }
                 DispatchIntent::Cancelled { reason } => {
                     out.push(ControllerEvent::Error(format!("radial action {reason}")));
                     self.handoff = None;
                     self.cancel_handoff_deadline();
+                    self.release_aliases.clear();
+                    self.release_waits.clear();
                 }
             }
         }
@@ -1578,6 +2267,8 @@ impl RadialController {
         if reason != CloseReason::ActionHandoff {
             self.handoff = None;
             self.cancel_handoff_deadline();
+            self.release_aliases.clear();
+            self.release_waits.clear();
         }
         let target = self
             .pending
@@ -1601,6 +2292,18 @@ impl RadialController {
         }
     }
     fn retire_host(&mut self) {
+        let mut audio_retirement_failed = false;
+        if let Some(active) = &mut self.active
+            && let Some(audio) = active.audio.take()
+        {
+            audio_retirement_failed = !audio.stop(&active.session_id, active.audio_generation);
+        }
+        if audio_retirement_failed {
+            self.record(
+                None,
+                "radial audio stop retirement queue is saturated".into(),
+            );
+        }
         if let Some(mut host) = self.host.take() {
             host.shutdown()
         }
@@ -1609,6 +2312,13 @@ impl RadialController {
     }
     pub fn diagnostics(&self) -> impl Iterator<Item = &DiagnosticRecord> {
         self.diagnostics.iter().flat_map(|v| v.iter())
+    }
+    pub fn active_input_scope(&self) -> Option<(SessionId, MenuId)> {
+        self.active.as_ref().and_then(|active| {
+            (active.reducer.state.keyboard_ownership
+                != super::session::KeyboardOwnership::ExternalApplication)
+                .then(|| (active.session_id.clone(), active.menu_id.clone()))
+        })
     }
     fn record(&mut self, session_id: Option<SessionId>, message: String) {
         if let Some(log) = &mut self.diagnostics {
@@ -1677,15 +2387,40 @@ fn cascade_layout(parent: &LayoutSnapshot, mut child: LayoutSnapshot) -> LayoutS
     child
 }
 
+fn resolve_window_options(
+    document: &RadialDocument,
+    menu: &super::model::MenuDefinition,
+    application_always_on_top: bool,
+) -> (bool, bool) {
+    let Some(style) = super::skin::compile_menu_tree(document, menu).ok() else {
+        return (application_always_on_top, false);
+    };
+    let always_on_top = if style.menu.source(super::skin::StyleField::AlwaysOnTop)
+        == Some(&super::skin::StyleSource::ApplicationFallback)
+    {
+        application_always_on_top
+    } else {
+        super::skin::resolved_bool(&style.menu.values.window.always_on_top)
+    };
+    let activate_on_show = super::skin::resolved_bool(&style.menu.values.window.activate_on_show);
+    (always_on_top, activate_on_show)
+}
+
 fn augment_special_cells(
     layout: &mut LayoutSnapshot,
     prepared: &BTreeMap<super::model::CellId, PreparedCell>,
     menu: &super::model::MenuDefinition,
 ) {
+    let special_visual = layout
+        .cells
+        .first()
+        .map(|cell| cell.visual.clone())
+        .unwrap_or_default();
     let center_id = super::model::CellId::new("__center");
     if prepared.contains_key(&center_id)
         || menu.center_secondary_action.is_some()
         || menu.center_control.is_some()
+        || menu.center_secondary_control.is_some()
     {
         layout.cells.push(CellLayout {
             cell_id: center_id,
@@ -1693,15 +2428,21 @@ fn augment_special_cells(
             label: String::new(),
             icon: Override::Inherit,
             control: menu.center_control,
+            secondary_control: menu.center_secondary_control,
             shape: HitShape::Circle {
                 center: layout.center,
                 radius: layout.center_radius,
             },
             actionable: true,
+            visual: special_visual.clone(),
         });
     }
     let background_id = super::model::CellId::new("__background");
-    if prepared.contains_key(&background_id) || menu.background_secondary_action.is_some() {
+    if prepared.contains_key(&background_id)
+        || menu.background_secondary_action.is_some()
+        || menu.background_control.is_some()
+        || menu.background_secondary_control.is_some()
+    {
         let radius = (layout.input_extent.max.x - layout.input_extent.min.x)
             .max(layout.input_extent.max.y - layout.input_extent.min.y)
             * 0.5;
@@ -1710,13 +2451,40 @@ fn augment_special_cells(
             ring_id: RingId::new("__special"),
             label: String::new(),
             icon: Override::Inherit,
-            control: None,
+            control: menu.background_control,
+            secondary_control: menu.background_secondary_control,
             shape: HitShape::Circle {
                 center: layout.center,
                 radius,
             },
             actionable: true,
+            visual: special_visual,
         });
+    }
+}
+
+fn special_surface_control(
+    menu: Option<&super::model::MenuDefinition>,
+    cell: &super::model::CellId,
+    button: PointerButton,
+) -> Option<Control> {
+    let menu = menu?;
+    match (cell.as_str(), button) {
+        ("__center", PointerButton::Primary) => menu.center_control,
+        ("__center", PointerButton::Secondary) => menu.center_secondary_control,
+        ("__background", PointerButton::Primary) => menu.background_control,
+        ("__background", PointerButton::Secondary) => menu.background_secondary_control,
+        _ => None,
+    }
+}
+
+fn control_role(control: Control) -> CellRole {
+    match control {
+        Control::Back => CellRole::Back,
+        Control::Close => CellRole::Close,
+        Control::NextPage => CellRole::NextPage,
+        Control::PreviousPage => CellRole::PreviousPage,
+        Control::Drag => CellRole::Spacer,
     }
 }
 
@@ -1794,6 +2562,34 @@ fn cell_role_in_menu(menu: &super::model::MenuDefinition, cell: &super::model::C
         })
 }
 
+fn cell_gesture_control(
+    menu: Option<&super::model::MenuDefinition>,
+    cell_id: &super::model::CellId,
+    button: PointerButton,
+    modifiers: NavigationModifiers,
+) -> Option<Control> {
+    let gesture = if button == PointerButton::Secondary {
+        ClickGesture::Secondary
+    } else if modifiers.control {
+        ClickGesture::CtrlPrimary
+    } else if modifiers.shift {
+        ClickGesture::ShiftPrimary
+    } else if modifiers.alt || modifiers.alt_gr {
+        ClickGesture::AltPrimary
+    } else {
+        ClickGesture::Primary
+    };
+    menu?
+        .rings
+        .iter()
+        .flat_map(|ring| &ring.cells)
+        .find(|cell| &cell.id == cell_id)?
+        .alternate_controls
+        .iter()
+        .find(|binding| binding.gesture == gesture)
+        .map(|binding| binding.control)
+}
+
 fn desktop_geometry() -> (PhysicalPoint, PhysicalRect, ScaleFactor) {
     #[cfg(windows)]
     unsafe {
@@ -1865,6 +2661,8 @@ fn desktop_geometry() -> (PhysicalPoint, PhysicalRect, ScaleFactor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
     use std::sync::Mutex;
     struct Fake {
         sent: Arc<Mutex<Vec<NativeCommand>>>,
@@ -1931,6 +2729,338 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn outside_relinquish_removes_active_local_input_scope() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events.clone(), made);
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: pending.generation,
+        });
+        controller.poll();
+        assert!(controller.active_input_scope().is_some());
+        let mut output = Vec::new();
+        controller.session_event(&session_id, SessionEvent::OutsideInteraction, &mut output);
+        assert!(controller.active_input_scope().is_none());
+    }
+
+    #[test]
+    fn owned_pointer_reentry_restores_local_input_scope_but_exterior_does_not() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events.clone(), made);
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+        events.lock().unwrap().push_back(NativeEvent::PointerLeft {
+            session_id: session_id.clone(),
+        });
+        controller.poll();
+        assert!(controller.active_input_scope().is_none());
+        let point = controller.active.as_ref().unwrap().layout.center;
+        events.lock().unwrap().push_back(NativeEvent::PointerMoved {
+            session_id: session_id.clone(),
+            owner: InputOwner::Exterior,
+            point,
+        });
+        controller.poll();
+        assert!(controller.active_input_scope().is_none());
+        events.lock().unwrap().push_back(NativeEvent::PointerDown {
+            session_id,
+            owner: InputOwner::Protective,
+            point,
+            button: PointerButton::Primary,
+        });
+        controller.poll();
+        assert!(controller.active_input_scope().is_some());
+    }
+
+    #[test]
+    fn resource_failure_is_a_normal_controller_event_when_debug_logging_is_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut document = RadialDocument::starter();
+        document.skins[0].style.values.images.menu_background =
+            Override::Value(super::super::model::MediaReference::ExternalFile {
+                path: directory
+                    .path()
+                    .join("missing.png")
+                    .to_string_lossy()
+                    .into_owned(),
+            });
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            false,
+            Arc::new(|| {
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::new(Mutex::new(VecDeque::new())),
+                }))
+            }),
+        );
+        controller.configure_resources(directory.path().to_path_buf());
+        let output = controller.handle_intents(vec![open()], false);
+        assert!(output.iter().any(|event| matches!(event, ControllerEvent::Error(message) if message.contains("missing.png"))));
+        assert!(controller.diagnostics().next().is_none());
+    }
+
+    #[test]
+    fn resource_cache_fingerprint_ignores_generation_and_changes_with_effective_style() {
+        let document = RadialDocument::starter();
+        let menu = &document.menus[0];
+        let mut layout = layout_menu(
+            menu,
+            PhysicalPoint { x: 300.0, y: 300.0 },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 600.0, y: 600.0 },
+            },
+            ScaleFactor::new(1.0).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        let first = scene_resource_fingerprint(&layout);
+        assert_eq!(first, scene_resource_fingerprint(&layout));
+        layout.cells[0].visual.icon_opacity = 0.25;
+        assert_ne!(first, scene_resource_fingerprint(&layout));
+    }
+
+    #[test]
+    fn production_open_prepares_media_real_glyphs_tooltips_and_audio_before_native_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 2, Rgba([4, 8, 12, 255])))
+            .write_to(&mut png, ImageOutputFormat::Png)
+            .unwrap();
+        let image_path = directory.path().join("skin.png");
+        std::fs::write(&image_path, png.into_inner()).unwrap();
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x40\x1f\0\0\x01\0\x08\0data\x04\0\0\0\x80\x80\x80\x80");
+        let sound_path = directory.path().join("open.wav");
+        std::fs::write(&sound_path, wav).unwrap();
+        let mut document = RadialDocument::starter();
+        document.skins[0].style.values.images.menu_background =
+            Override::Value(super::super::model::MediaReference::ExternalFile {
+                path: image_path.to_string_lossy().into_owned(),
+            });
+        document.skins[0]
+            .style
+            .values
+            .images
+            .menu_background_opacity = Override::Value(0.25);
+        document.menus[0].rings[0].cells[0].icon =
+            Override::Value(super::super::model::MediaReference::ExternalFile {
+                path: image_path.to_string_lossy().into_owned(),
+            });
+        document.menus[0].rings[0].cells[0]
+            .style
+            .images
+            .icon_opacity = Override::Value(0.25);
+        document.skins[0].style.values.sounds.on_show =
+            Override::Value(super::super::model::MediaReference::ExternalFile {
+                path: sound_path.to_string_lossy().into_owned(),
+            });
+        document.menus[0].rings[0].cells[0].tooltip = Override::Value("Prepared tooltip".into());
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&sent);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::clone(&observed),
+                    events: Arc::new(Mutex::new(VecDeque::new())),
+                }))
+            }),
+        );
+        controller.configure_resources(directory.path().to_path_buf());
+        controller.handle_intents(vec![open()], false);
+        let commands = sent.lock().unwrap();
+        let NativeCommand::Open { scene, .. } = &commands[0] else {
+            panic!("expected open")
+        };
+        assert_eq!(
+            scene
+                .primitives
+                .iter()
+                .filter(|primitive| matches!(
+                    primitive,
+                    super::super::render::VectorPrimitive::Image { opacity: 64, .. }
+                ))
+                .count(),
+            2,
+            "menu background and cell icon opacity are independent prepared primitives"
+        );
+        assert!(scene.primitives.iter().any(|primitive| matches!(primitive, super::super::render::VectorPrimitive::Text { prepared, .. } if !prepared.glyphs.is_empty())));
+        assert!(
+            !controller
+                .pending
+                .as_ref()
+                .unwrap()
+                .resources
+                .tooltips
+                .is_empty()
+        );
+        assert!(controller.pending.as_ref().unwrap().sounds.open.is_some());
+    }
+    #[test]
+    fn resource_invalidation_closes_active_generation_and_clears_preparation() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(Arc::clone(&events), made);
+        controller.handle_intents(vec![open()], false);
+        let session_id = controller.pending.as_ref().unwrap().session_id.clone();
+        let generation = controller.layout_generation;
+
+        controller.invalidate_resources();
+
+        assert!(
+            controller.pending.is_some(),
+            "close remains correlated until native ack"
+        );
+        assert!(controller.active.is_none());
+        assert_ne!(controller.layout_generation, generation);
+        events.lock().unwrap().push_back(NativeEvent::Closed {
+            session_id,
+            reason: CloseReason::SettingsReload,
+        });
+        controller.poll();
+        assert!(controller.pending.is_none());
+    }
+    #[test]
+    fn menu_window_options_override_application_fallback_without_context_recapture() {
+        let mut document = RadialDocument::starter();
+        document.menus[0].style.values.window.always_on_top = Override::Value(false);
+        document.menus[0].style.values.window.activate_on_show = Override::Value(true);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&sent);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::clone(&observed),
+                    events: Arc::new(Mutex::new(VecDeque::new())),
+                }))
+            }),
+        );
+        controller.handle_intents(vec![open()], true);
+        assert!(matches!(
+            sent.lock().unwrap().as_slice(),
+            [NativeCommand::Open {
+                always_on_top: false,
+                activate_on_show: true,
+                ..
+            }]
+        ));
+        assert_eq!(controller.pending.as_ref().unwrap().context.token, 0);
+    }
+
+    #[test]
+    fn item_shortcut_uses_the_normal_close_ack_handoff_exactly_once() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::Contextual {
+                selector: super::super::model::TargetSelector::LastExternal,
+                action_id: crate::universal_actions::ActionId::new("window.activate"),
+            },
+        };
+        document.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                *made.lock().unwrap() += 1;
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(vec![])),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        let mut open = open();
+        if let InvocationIntent::OpenRadial {
+            trigger_still_down, ..
+        } = &mut open
+        {
+            *trigger_still_down = false;
+        }
+        controller.handle_intents(vec![open], false);
+        let session_id = controller.pending.as_ref().unwrap().session_id.clone();
+        let generation = controller.pending.as_ref().unwrap().generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+        let cell_id = controller.document.menus[0].rings[0].cells[0].id.clone();
+        let activate = InvocationIntent::ActivateItem {
+            id: InvocationId(88),
+            menu_id: MenuId::new("starter"),
+            cell_id,
+            gesture: ClickGesture::Primary,
+            scope: TriggerScope::MenuLocal,
+            source: crate::commands::ActivationSource::RadialShortcut,
+            trigger_still_down: true,
+        };
+        let activation_events = controller.handle_intents(vec![activate.clone(), activate], false);
+        assert!(
+            activation_events
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        events.lock().unwrap().push_back(NativeEvent::Closed {
+            session_id,
+            reason: CloseReason::ActionHandoff,
+        });
+        let closed = controller.poll();
+        assert!(
+            closed
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        let dispatched = controller.handle_intents(
+            vec![InvocationIntent::TriggerReleased {
+                id: InvocationId(88),
+            }],
+            false,
+        );
+        assert_eq!(
+            dispatched
+                .iter()
+                .filter(|event| matches!(event, ControllerEvent::DispatchRequested(_)))
+                .count(),
+            1
+        );
+        assert!(dispatched.iter().any(|event| matches!(
+            event,
+            ControllerEvent::DispatchRequested(request)
+                if request.source == crate::commands::ActivationSource::RadialShortcut
+        )));
+        assert!(
+            controller
+                .handle_intents(
+                    vec![InvocationIntent::TriggerReleased {
+                        id: InvocationId(88),
+                    }],
+                    false,
+                )
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
     }
     #[test]
     fn asynchronous_preparation_rejects_stale_reply_before_host_open() {
@@ -2228,6 +3358,53 @@ mod tests {
         assert_eq!(
             super::super::render::input_owner(&layout, gap, false),
             InputOwner::Actionable(crate::radial::model::CellId::new("__background"))
+        );
+    }
+
+    #[test]
+    fn imported_surface_controls_preserve_independent_primary_secondary_semantics() {
+        let mut menu = RadialDocument::starter().menus.remove(0);
+        menu.center_control = Some(Control::Close);
+        menu.center_secondary_control = Some(Control::Drag);
+        menu.background_control = Some(Control::Back);
+        menu.background_secondary_control = Some(Control::Close);
+        let mut layout = layout_menu(
+            &menu,
+            PhysicalPoint { x: 300.0, y: 300.0 },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 600.0, y: 600.0 },
+            },
+            ScaleFactor::new(1.0).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        augment_special_cells(&mut layout, &BTreeMap::new(), &menu);
+        let center = layout
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id.as_str() == "__center")
+            .unwrap();
+        let background = layout
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id.as_str() == "__background")
+            .unwrap();
+        assert_eq!(
+            (center.control, center.secondary_control),
+            (Some(Control::Close), Some(Control::Drag))
+        );
+        assert_eq!(
+            (background.control, background.secondary_control),
+            (Some(Control::Back), Some(Control::Close))
+        );
+        assert_eq!(
+            special_surface_control(Some(&menu), &center.cell_id, PointerButton::Primary),
+            Some(Control::Close)
+        );
+        assert_eq!(
+            special_surface_control(Some(&menu), &center.cell_id, PointerButton::Secondary),
+            Some(Control::Drag)
         );
     }
 

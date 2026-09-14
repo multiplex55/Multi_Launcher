@@ -80,7 +80,7 @@ trash = { version = "5.2", default-features = false, features = ["coinit_apartme
 sysinfo = "0.35"
 chrono = "0.4"
 screenshots = "0.8.10"
-image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp"] }
+image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp", "ico", "gif", "tiff"] }
 tempfile = "3"
 ipconfig = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
@@ -96,6 +96,7 @@ rodio = { version = "0.17", default-features = false, features = ["wav"] }
 ab_glyph = "0.2"
 time = ">=0.3.47, <0.4"
 bytes = ">=1.11.1, <2"
+sha2 = "0.10"
 
 [features]
 unstable_grab = ["rdev/unstable_grab"]

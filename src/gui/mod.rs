@@ -3325,6 +3325,8 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::RadialDispatch(_)
             | WatchEvent::RadialPrepare(_)
             | WatchEvent::RadialInvalidate
+            | WatchEvent::RadialConfigDiagnostic(_)
+            | WatchEvent::RadialRuntimeDiagnostic(_)
             | WatchEvent::ScreenDrawStart => {
                 continue;
             }

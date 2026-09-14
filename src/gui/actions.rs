@@ -1,6 +1,6 @@
 use super::*;
 use crate::gui::note_mutation::{NoteMutationOutcome, NoteMutationOutput, NoteMutationResult};
-use crate::persistence::{RecoveryGroupId, RecoveryTarget};
+use crate::persistence::RecoveryTarget;
 
 /// A compact, testable description of Launcher-owned UI that can be opened by
 /// an action.  Comparing snapshots keeps macro dispatch independent of action
@@ -29,9 +29,9 @@ impl LauncherApp {
     pub(crate) fn queue_data_recovery_confirmation(&mut self, intent: PendingRecoveryIntent) {
         let label = match &intent {
             PendingRecoveryIntent::Restore {
-                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
+                target: RecoveryTarget::Group(group),
                 ..
-            } => "MkMacro document + assets",
+            } => group.label(),
             PendingRecoveryIntent::Restore {
                 target: RecoveryTarget::Store(store_id),
                 ..

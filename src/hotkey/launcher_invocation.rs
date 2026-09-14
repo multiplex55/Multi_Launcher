@@ -6,7 +6,7 @@ use crate::radial::invocation::{
     ContextToken, InvocationEvent, InvocationIntent, InvocationReducer, SettingsGeneration,
     Timestamp,
 };
-use crate::radial::model::{InteractionMode, InvocationId, MenuId};
+use crate::radial::model::{InteractionMode, InvocationId, MenuId, SessionId};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const MULTI_LAUNCHER_INJECT_TAG: usize = 0x004D_4C49_4E4A; // "MLINJ"
@@ -128,6 +128,7 @@ pub struct InvocationConfig {
     pub menu_id: MenuId,
     pub interaction: InteractionMode,
     pub accept_external_injected: bool,
+    pub item_inputs: Vec<crate::radial::item_input::ItemInputBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -780,6 +781,7 @@ enum ServiceCommand {
         std::sync::mpsc::SyncSender<Result<(), String>>,
     ),
     Exclusive(bool),
+    ActiveMenu(Option<(SessionId, MenuId)>),
     Shutdown,
 }
 
@@ -836,6 +838,17 @@ impl LauncherInvocationService {
         #[cfg(all(windows, not(test)))]
         {
             return self.send_command(ServiceCommand::Exclusive(active));
+        }
+        #[cfg(any(not(windows), test))]
+        {
+            let _ = active;
+            Ok(())
+        }
+    }
+    pub fn set_active_menu(&self, active: Option<(SessionId, MenuId)>) -> Result<(), String> {
+        #[cfg(all(windows, not(test)))]
+        {
+            return self.send_command(ServiceCommand::ActiveMenu(active));
         }
         #[cfg(any(not(windows), test))]
         {
@@ -921,6 +934,12 @@ mod native_service {
         pending_handoffs: PendingRouteHandoffs,
         next_direct_id: u64,
         direct_owned: Option<DirectCycleOwnership>,
+        item_owned: Option<DirectCycleOwnership>,
+        item_primary_suppressed: bool,
+        item_inputs: Vec<crate::radial::item_input::ItemInputBinding>,
+        item_recognizer: crate::radial::item_input::ItemInputRecognizer,
+        active_frame: Option<(SessionId, MenuId)>,
+        session_epoch: u64,
     }
     static STATE: OnceLock<Mutex<Option<State>>> = OnceLock::new();
     fn publish(state: &State, out: AdapterOutcome) {
@@ -933,6 +952,12 @@ mod native_service {
             });
             let _ = state.wake.send(());
         }
+    }
+    fn has_owned_input(state: &State) -> bool {
+        state.adapter.has_owned_cycle()
+            || state.escape.owned_provenance.is_some()
+            || state.direct_owned.is_some()
+            || state.item_owned.is_some()
     }
     unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code < 0 {
@@ -968,6 +993,25 @@ mod native_service {
         let injected = data.flags.contains(LLKHF_INJECTED);
         let provenance = classify_provenance(injected, data.dwExtraInfo);
         let at = state.epoch.elapsed().as_millis() as u64;
+        if state.item_owned.is_some() {
+            state.item_recognizer.observe_owned_cycle_event(KeyEvent {
+                vk: data.vkCode,
+                transition,
+                at,
+                provenance,
+            });
+        }
+        if state.item_owned.is_some_and(|owned| {
+            owned.primary_key == data.vkCode
+                && owned.provenance == provenance
+                && transition != KeyTransition::Up
+        }) {
+            return if state.item_primary_suppressed {
+                LRESULT(1)
+            } else {
+                unsafe { CallNextHookEx(None, code, w, l) }
+            };
+        }
         if transition == KeyTransition::Up
             && state.direct_owned.is_some_and(|owned| {
                 owned.matches_release(KeyEvent {
@@ -991,6 +1035,35 @@ mod native_service {
             });
             let _ = state.wake.send(());
         }
+        if transition == KeyTransition::Up
+            && state.item_owned.is_some_and(|owned| {
+                owned.matches_release(KeyEvent {
+                    vk: data.vkCode,
+                    transition,
+                    at,
+                    provenance,
+                })
+            })
+        {
+            let id = state.item_owned.take().expect("matched item ownership").id;
+            let consume = std::mem::take(&mut state.item_primary_suppressed);
+            let _ = state.notices.send(ServiceNotice {
+                recovery: false,
+                intents: vec![InvocationIntent::TriggerReleased { id }],
+                error: None,
+                action: None,
+            });
+            let _ = state.wake.send(());
+            acknowledge_handoffs_if_drained(state);
+            if state.shutdown_requested && !has_owned_input(state) {
+                unsafe { PostQuitMessage(0) };
+            }
+            return if consume {
+                LRESULT(1)
+            } else {
+                unsafe { CallNextHookEx(None, code, w, l) }
+            };
+        }
         let navigation_modifiers = state.adapter.navigation_modifiers();
         if let Some(out) = state.escape.process(
             KeyEvent {
@@ -1007,6 +1080,7 @@ mod native_service {
             if consume {
                 return LRESULT(1);
             }
+            return unsafe { CallNextHookEx(None, code, w, l) };
         }
         if state.shutdown_requested {
             let out = state.adapter.process(
@@ -1021,7 +1095,7 @@ mod native_service {
             let consume = out.consume;
             publish(state, out);
             acknowledge_handoffs_if_drained(state);
-            if !state.adapter.has_owned_cycle() && state.escape.owned_provenance.is_none() {
+            if !has_owned_input(state) {
                 unsafe { PostQuitMessage(0) };
             }
             return if consume {
@@ -1092,6 +1166,64 @@ mod native_service {
         } else {
             current_owner
         };
+        state.item_recognizer.transition(
+            unsafe { GetForegroundWindow() }.0 as isize,
+            state.session_epoch,
+            owner != PriorityOwner::Launcher,
+        );
+        if !related_preempted
+            && owner == PriorityOwner::Launcher
+            && state.item_owned.is_none()
+            && let Some(matched) = state.item_recognizer.process(
+                &state.item_inputs,
+                state.active_frame.as_ref().map(|(_, menu)| menu),
+                KeyEvent {
+                    vk: data.vkCode,
+                    transition,
+                    at,
+                    provenance,
+                },
+            )
+        {
+            let id = InvocationId(state.next_direct_id);
+            state.next_direct_id = state.next_direct_id.checked_add(1).unwrap_or(1_000_000);
+            let trigger_still_down = matched.primary_key.is_some();
+            if let Some(primary_key) = matched.primary_key {
+                state.item_owned = Some(DirectCycleOwnership {
+                    id,
+                    primary_key,
+                    provenance: matched.provenance,
+                });
+                state.item_primary_suppressed = matched.consume_current;
+            }
+            let source = match matched.binding.trigger {
+                crate::radial::item_input::ItemInputTrigger::Shortcut(_) => {
+                    crate::commands::ActivationSource::RadialShortcut
+                }
+                crate::radial::item_input::ItemInputTrigger::Hotstring { .. } => {
+                    crate::commands::ActivationSource::RadialHotstring
+                }
+            };
+            let consume = matched.consume_current;
+            let _ = state.notices.send(ServiceNotice {
+                recovery: false,
+                intents: vec![InvocationIntent::ActivateItem {
+                    id,
+                    menu_id: matched.binding.menu_id,
+                    cell_id: matched.binding.cell_id,
+                    gesture: matched.binding.gesture,
+                    scope: matched.binding.scope,
+                    source,
+                    trigger_still_down,
+                }],
+                error: None,
+                action: None,
+            });
+            let _ = state.wake.send(());
+            if consume {
+                return LRESULT(1);
+            }
+        }
         let out = state.adapter.process(
             KeyEvent {
                 vk: data.vkCode,
@@ -1120,7 +1252,7 @@ mod native_service {
         let consume = out.consume;
         publish(state, out);
         acknowledge_handoffs_if_drained(state);
-        if state.shutdown_requested && !state.adapter.has_owned_cycle() {
+        if state.shutdown_requested && !has_owned_input(state) {
             unsafe { PostQuitMessage(0) };
         }
         if consume {
@@ -1165,12 +1297,12 @@ mod native_service {
         }
     }
     fn acknowledge_handoffs_if_drained(state: &mut State) {
-        if state.adapter.has_owned_cycle() {
+        if has_owned_input(state) {
             return;
         }
         if state
             .pending_handoffs
-            .acknowledge_if_drained(state.adapter.has_owned_cycle())
+            .acknowledge_if_drained(has_owned_input(state))
         {
             let _ = state.wake.send(());
         }
@@ -1220,6 +1352,7 @@ mod native_service {
                         let _ = setup_tx.send(Err("launcher hook already active".into()));
                         return;
                     }
+                    let item_inputs = config.item_inputs.clone();
                     let adapter = match LauncherInvocationAdapter::new(config) {
                         Ok(a) => a,
                         Err(e) => {
@@ -1244,6 +1377,12 @@ mod native_service {
                         pending_handoffs: PendingRouteHandoffs::default(),
                         next_direct_id: 1_000_000,
                         direct_owned: None,
+                        item_owned: None,
+                        item_primary_suppressed: false,
+                        item_inputs,
+                        item_recognizer: Default::default(),
+                        active_frame: None,
+                        session_epoch: 0,
                     });
                 }
                 if worker_startup.is_cancelled() {
@@ -1306,6 +1445,7 @@ mod native_service {
                                         let _ = state.wake.send(());
                                     }
                                     ServiceCommand::Reload(config, related, acknowledgement) => {
+                                        let item_inputs = config.item_inputs.clone();
                                         match state.adapter.reload(
                                             config,
                                             state.epoch.elapsed().as_millis() as u64,
@@ -1316,6 +1456,8 @@ mod native_service {
                                                     .map(|binding| (binding, false))
                                                     .collect();
                                                 state.down.clear();
+                                                state.item_inputs = item_inputs;
+                                                state.item_recognizer.clear();
                                                 let _ = update_timers(state, &intents);
                                                 let _ = state.notices.send(ServiceNotice {
                                                     recovery: false,
@@ -1325,7 +1467,7 @@ mod native_service {
                                                 });
                                                 let _ = state.wake.send(());
                                                 state.pending_handoffs.applied(
-                                                    state.adapter.has_owned_cycle(),
+                                                    has_owned_input(state),
                                                     acknowledgement,
                                                 );
                                             }
@@ -1342,6 +1484,9 @@ mod native_service {
                                         }
                                     }
                                     ServiceCommand::Exclusive(active) => {
+                                        if active {
+                                            state.item_recognizer.clear();
+                                        }
                                         let intents = state.adapter.set_exclusive(active);
                                         let _ = update_timers(state, &intents);
                                         let _ = state.notices.send(ServiceNotice {
@@ -1351,6 +1496,14 @@ mod native_service {
                                             action: None,
                                         });
                                         let _ = state.wake.send(());
+                                    }
+                                    ServiceCommand::ActiveMenu(active) => {
+                                        if state.active_frame != active {
+                                            state.active_frame = active;
+                                            state.session_epoch =
+                                                state.session_epoch.wrapping_add(1);
+                                            state.item_recognizer.clear();
+                                        }
                                     }
                                     ServiceCommand::Shutdown => {
                                         state.shutdown_requested = true;
@@ -1363,9 +1516,7 @@ mod native_service {
                                         for (_, timer) in state.timers.drain() {
                                             kill_timer(timer, true, "service shutdown");
                                         }
-                                        if !state.adapter.has_owned_cycle()
-                                            && state.escape.owned_provenance.is_none()
-                                        {
+                                        if !has_owned_input(state) {
                                             unsafe { PostQuitMessage(0) }
                                         }
                                     }
@@ -1462,6 +1613,7 @@ mod tests {
             menu_id: MenuId::new("starter"),
             interaction: InteractionMode::StickyClick,
             accept_external_injected: true,
+            item_inputs: Vec::new(),
         }
     }
     fn e(vk: u32, t: KeyTransition, at: u64) -> KeyEvent {

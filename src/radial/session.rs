@@ -1,6 +1,8 @@
 use super::dynamic::FrozenRadialEntry;
 use super::geometry::{LogicalPoint, PhysicalPoint};
-use super::model::{CellId, ConfigRevision, InteractionMode, InvocationId, MenuId, SessionId};
+use super::model::{
+    CellId, ClickGesture, ConfigRevision, InteractionMode, InvocationId, MenuId, SessionId,
+};
 use std::collections::BTreeMap;
 
 const ARMING_DISTANCE_SQUARED: f32 = 16.0;
@@ -172,6 +174,13 @@ pub enum SessionEvent {
         role: CellRole,
         at: u64,
         point: LogicalPoint,
+        geometry_generation: u64,
+    },
+    ActivateItem {
+        cell: CellId,
+        role: CellRole,
+        gesture: super::model::ClickGesture,
+        source: crate::commands::ActivationSource,
         geometry_generation: u64,
     },
     FreezeDynamic {
@@ -384,6 +393,39 @@ impl SessionReducer {
                     crate::commands::ActivationSource::RadialRelease,
                 )
             }
+            SessionEvent::ActivateItem {
+                cell,
+                role,
+                gesture,
+                source,
+                geometry_generation,
+            } => {
+                if self.current_geometry() != geometry_generation || role != CellRole::Action {
+                    return vec![];
+                }
+                self.state.armed = true;
+                let previous_modifiers = self.state.modifiers;
+                self.state.modifiers = NavigationModifiers {
+                    control: gesture == super::model::ClickGesture::CtrlPrimary,
+                    shift: gesture == super::model::ClickGesture::ShiftPrimary,
+                    alt: gesture == super::model::ClickGesture::AltPrimary,
+                    alt_gr: false,
+                };
+                let intents = self.activate(
+                    cell,
+                    role,
+                    self.state.arming_baseline.point,
+                    geometry_generation,
+                    if gesture == super::model::ClickGesture::Secondary {
+                        PointerButton::Secondary
+                    } else {
+                        PointerButton::Primary
+                    },
+                    source,
+                );
+                self.state.modifiers = previous_modifiers;
+                intents
+            }
             SessionEvent::OpenChild {
                 menu_id,
                 origin,
@@ -481,6 +523,7 @@ impl SessionReducer {
                 self.state.keyboard_ownership = KeyboardOwnership::ExternalApplication;
                 self.state.pending_press = None;
                 self.state.dwell_candidate = None;
+                self.state.hovered = None;
                 vec![]
             }
             SessionEvent::MenuInteraction => {
@@ -1164,5 +1207,59 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn typed_item_activation_uses_one_dispatch_token_and_exact_gesture() {
+        for (gesture, expected_button, expected_modifiers) in [
+            (
+                ClickGesture::Primary,
+                PointerButton::Primary,
+                NavigationModifiers::default(),
+            ),
+            (
+                ClickGesture::Secondary,
+                PointerButton::Secondary,
+                NavigationModifiers::default(),
+            ),
+            (
+                ClickGesture::CtrlPrimary,
+                PointerButton::Primary,
+                NavigationModifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                ClickGesture::ShiftPrimary,
+                PointerButton::Primary,
+                NavigationModifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                ClickGesture::AltPrimary,
+                PointerButton::Primary,
+                NavigationModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let mut reducer = reducer(InteractionMode::StickyClick);
+            let intents = reducer.reduce(SessionEvent::ActivateItem {
+                cell: CellId::new("a"),
+                role: CellRole::Action,
+                gesture,
+                source: crate::commands::ActivationSource::RadialShortcut,
+                geometry_generation: 10,
+            });
+            assert!(matches!(
+                intents.as_slice(),
+                [SessionIntent::Dispatch { button, modifiers, source: crate::commands::ActivationSource::RadialShortcut, .. }]
+                    if *button == expected_button && *modifiers == expected_modifiers
+            ));
+        }
     }
 }

@@ -727,6 +727,7 @@ mod tests {
         assert!(!parsed.radial.enabled);
         assert!(!parsed.radial.shared_tap_hold);
         assert_eq!(parsed.radial.hold_threshold_ms, 0);
+        assert!(!parsed.radial.global_item_inputs);
         let restored: Settings =
             serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
         assert!(!restored.radial.enabled);

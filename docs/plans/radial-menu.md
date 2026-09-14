@@ -1,6 +1,6 @@
 # Native radial menu implementation ledger
 
-Status: approved, M0-M3 complete
+Status: approved, M0-M4 complete
 
 Canonical requirements: `docs/multi_launcher_radial_codex_plan.md`
 Historical navigation notes: `docs/multi_launcher_radial_source_notes.md`
@@ -145,6 +145,12 @@ process-priority, cursor warp, power scripts, and arbitrary executable definitio
 are incompatible or not applicable and are never evaluated. Known `Close`,
 `CloseMenu`, and `Drag` controls translate to native intents.
 
+Package checksums, content-addressed managed assets, atomic radial recovery grouping,
+and live generation identities are native runtime/persistence metadata rather than
+legacy fields. They are never inferred from or written into Radify/RM4 sources; import
+preview remains side-effect-free and recovery always operates on the validated native
+document plus managed-asset group.
+
 Supported user-selected image data targets PNG/JPEG/BMP and, after codec review,
 ICO/GIF/TIFF with explicit static/animated semantics. Raw `hIcon`, `hBitmap`, and
 `pBitmap` are incompatible. EXE/DLL/CPL icon resources may be parsed only as data,
@@ -158,7 +164,7 @@ never by executing or initializing imported code.
 | M1 model/store/reducer/session/geometry | complete | reviewer remediation passed a source-identical focused core/unit Nextest batch |
 | M2 native input and host | complete | recovery ownership provenance remediation passed the source-identical focused gate; interactive native probe remains explicitly unverified |
 | M3 actions/context/submenus/handoffs | complete | decision-review remediation passed the combined focused M3 Nextest gate; native interactive evidence remains unverified |
-| M4 skins/assets/import/export/recovery | pending | focused store/skin/import/resource batch |
+| M4 skins/assets/import/export/recovery | complete | closure remediation and source-identical combined focused gate passed; native interactive evidence remains explicitly unverified |
 | M5 complete editors/settings/commands/starters | pending | focused editor/command/serialization batch |
 | M6 hardening/performance/full verification/review | pending | format/check/diff, full Nextest, native evidence, serialized baseline/candidate measurements, independent review |
 
@@ -170,7 +176,8 @@ use this checkout/target at a time.
 
 Read-only tooling inspection: `cargo-nextest 0.9.135`; `cargo nextest run --help`
 confirmed expression filters, target selection, captured output, status levels, and
-no-capture serialization. No build or test job has yet run. Before every gate, record
+no-capture serialization. At initial plan approval no build or test job had run.
+Before every gate, record
 command, cwd, source revision/diff identity, profile/environment, start time,
 session/PID, log path, and eventual true exit code. Reattach to quiet jobs using the
 required 60/120/180/up-to-300-second observation cadence.
@@ -598,7 +605,467 @@ M3 decision-review remediation replacement gate (launch record):
 | second replacement session/PIDs | exec session `98218`; cargo-nextest PID `58164`, Cargo PIDs `50500`/`32692`, compiler children observed |
 | result | exit `0`; compile `14m 22s`; Nextest run `5dca8537-fdff-45a0-9284-f2a540315da6`; 270 passed, 0 failed, 3,869 skipped; test execution `8.418s`; interactive native evidence remains unverified |
 
+M4 substeps 1-5 static verification: direct `rustfmt --edition 2024` over the
+touched Rust sources and `git diff --check` exited 0. Substep 2 adds a pure
+six-layer effective-style compiler with per-field provenance plus styled
+layout/pagination/scene inputs. Substep 3 extends the retained synchronous keyboard
+service with bounded, provenance-filtered menu-local/global item shortcuts and
+hotstrings, routes all five gestures through the prepared action handoff, and applies
+per-menu topmost/explicit activation while retaining no-activate as the safe default.
+Substep 4 adds preparation-only asset and font/layout services: managed paths are
+canonicalized beneath `radial_assets`; configured filename search roots are explicit;
+external/search/resource paths are marked nonportable; and Windows Media fallback is
+WAV-only and opt-in. PNG/JPEG/BMP/ICO/TIFF decode as bounded static images (the
+reviewed image 0.24 ICO codec selects its best directory entry), while GIF animation
+is bounded by source bytes, dimensions, decoded bytes, frames, and total duration.
+EXE/DLL/CPL icon access uses `LOAD_LIBRARY_AS_DATAFILE |
+LOAD_LIBRARY_AS_IMAGE_RESOURCE`, converts persisted one-based indices to the native
+zero-based index, and owns module/icon/GDI cleanup. Deterministic caches include
+asset identity/version, effective-style fingerprint, DPI, logical size, and quality;
+unavailable results are negatively cached. Font discovery is performed once outside
+paint and bounded text-layout snapshots preserve Unicode graphemes with script-aware
+fallback and truncation diagnostics. Paint/hit-test inputs are immutable prepared
+snapshots and perform no filesystem access or decoding.
+
+The existing `image = 0.24` dependency remains pinned with default features off;
+only its narrowly reviewed built-in `ico`, `gif`, and `tiff` codec features were
+enabled alongside PNG/JPEG/BMP. Their already-locked transitive crates remain under
+the existing permissive Rust ecosystem licenses; no decoder executes imported code.
+The data-only Windows resource path is platform-gated and no reference asset was
+copied or redistributed. Per the substep boundary, no Cargo, Nextest, native
+interactive probe, import/package work, or M5 editor work was run.
+
+Substep 5 adds the shared straight-alpha software compositor used by both native
+presentation and the future preview boundary. Ordered scenes accept immutable
+prepared background/rim/item/glow/icon/indicator/text/shadow/tooltip inputs; custom
+media omission or failure retains the plain native fallback, and unsafe frame bounds
+fail closed. The premultiplied-BGRA conversion used by Screen Draw was moved to the
+shared platform pixel boundary and is now also used by radial
+`UpdateLayeredWindow(ULW_ALPHA)` presentation. Navigation and hover use an in-place
+`Present` command that retains the HWND, capture/suppression ownership, session, and
+Closed semantics while atomically replacing the scene, dimensions, and shaped input
+region. Animated prepared GIF frames use one window-owned one-shot timer correlated
+to the current state and are cancelled on replacement/destruction.
+
+The application sound API now feeds one lazy retained output worker through a
+bounded queue instead of spawning one stream/thread per sound. Radial audio contracts
+carry session/generation tags, exact-once lifecycle cues, selection debounce, bounded
+stale-generation tombstones, and prepared WAV bytes; queue saturation drops work
+rather than allocating without bound. Static layer/frame cache keys include scene
+generation/content, DPI, and animation time, so hover performs no media decode or
+filesystem probing. Direct formatting and diff checks covered this substep source
+boundary; M4 remained `in_progress` there pending the later focused milestone gate.
+
+Substep 6 adds a side-effect-free legacy import preview boundary. `ImportPreview` owns
+deterministic planned menu/skin IDs, discovered-file roles, source/evidence and
+line-level provenance, typed mappings, collision/missing-asset/portability warnings,
+and a complete compatibility-registry coverage snapshot. Preview accepts caller-owned
+bytes and paths. Review remediation additionally compiles that immutable preview into
+a typed `RadialDocument` and content-addressed `ImportPlan`; the callable
+`RadialStore::apply_legacy_import` boundary performs all writes through the same
+revision-checked package transaction and explicit create-new/replace-backup policy.
+Radify JSON keeps
+default and per-skin objects independently and retains JSON `false`, numeric zero,
+empty string, and null rather than defaulting them away. The supplied Radify archive
+contains no generated `Preferences.json`, `Settings.json`, or sound data, so tests of
+those shapes are explicitly tagged `SyntheticFixture`; preview of supplied evidence
+also reports those absences rather than implying real samples.
+
+The RM4 parser recognizes only registered assignment fields, literal text/finite
+numbers/booleans/clear, and the narrow `fac+N`, `fac-N`, `add+N`, and `add-N` forms.
+`Close`, `CloseMenu`, and `Drag` become typed controls. Unknown fields, unsupported
+expressions, matrices/ARGB transforms, callbacks, and non-assignment script content
+receive exact file/line/field diagnostics and are never evaluated. Familiar skin
+media discovery is ASCII-case-insensitive for `ItemBack.png`, `ItemGlow.png`,
+`MenuBack.png`, `MenuOuterRim.png`, `CenterImage.png`, and
+`SubmenuIndicator.png`. `ItemBack.png` is required only for a named imported legacy
+skin, never for a native vector skin.
+
+Read-only archive inspection covered all five supplied RM4 definitions:
+`Anectra's target` (869 bytes), `Cell` (834), `Merlock's device` (826),
+`Metal plate` (913), and `Orb` (1,304). Representative media inspected in place were
+`Anectra's target/ItemBack.png` (5,454 bytes, 76×76),
+`Cell/MenuOuterRim.png` (12,266, 600×600), `Merlock's device/MenuBack.png`
+(116,365, 305×306), `Metal plate/ItemGlow.png` (14,636, 122×122), and
+`Orb/MenuFore.png` (11,965, 543×543); each had a valid PNG signature/IHDR. No
+archive member was executed, extracted, copied,
+or added to product resources. Every compatibility registry field is either mapped
+through its registered native/translated policy or represented by an explicit
+incompatible/not-applicable diagnostic policy.
+
+Substep 7 adds versioned portable `.mlradial` packages and an equivalent plain-folder
+entry model. A manifest covers the complete requested menu/submenu closure, referenced
+skins and managed media, root IDs, notices, byte lengths, and SHA-256 checksums.
+Export/import planning is side-effect-free and strips local media search roots and
+free-form metadata rather than packaging paths or potential secrets; runtime sessions,
+dynamic snapshots, pointer/drag state, HWNDs, clipboard values, and mutable provider
+indices are not document/package fields. External/search-path/icon-resource media is
+rejected as nonportable instead of being silently embedded.
+
+The archive codec intentionally emits and admits only deterministic UTF-8, unencrypted
+ZIP stored entries. It does not enable a general compression or encryption surface.
+Admission cross-checks local and central headers and rejects unsupported compression,
+encryption, links/reparse metadata, malformed/truncated records, CRC/checksum mismatch,
+absolute/UNC/drive/device/ADS/traversal paths, backslashes, Windows-illegal characters,
+trailing dots/spaces, DOS device names, excessive depth/path/file/entry/total compressed
+or expanded sizes, and case-insensitive collisions. Expansion is copied through a
+per-entry bounded reader. Packaged images and WAV files pass the same bounded decoder
+used by runtime preparation, including decoded dimensions/bytes/GIF frames/duration.
+Plain-folder adapters require caller-provided no-follow entry metadata and reject
+symlink/reparse entries before forming the immutable byte map.
+
+Import deterministically remaps colliding menu, skin, ring, cell, asset, shortcut,
+hotstring, context-rule, and trigger IDs, then rewrites submenu, skin, trigger/rule,
+and managed-asset references before revalidation. `RadialStore` owns the only apply
+transaction: under its mutation lock it rechecks revision, expected radial bytes, and
+previewed asset digests; replacement additionally requires a distinct existing backup
+whose bytes and receipt digest match the current source. Managed assets are written
+first under content-addressed immutable names using create-new semantics. Reused files
+must match and are never transaction-owned. Atomic `radial.json` publication is last;
+pre-commit failure/cancellation removes only files created by that transaction and
+never shared assets. Typed menu/skin/asset usage queries prevent dependency deletion.
+
+The existing `hex` dependency remains the encoding boundary and direct `sha2 = 0.10`
+was added for its RustCrypto SHA-256 implementation (MIT/Apache-2.0, no native code or
+default executable surface). No general ZIP dependency was added: the required stored
+format is implemented as a deliberately narrow codec so unsupported methods fail
+closed rather than compiling unused compression/encryption backends. No Cargo or
+Nextest command was run in this substep, so lockfile resolution and executable tests
+remained for the later serialized M4 gate. Direct rustfmt and diff checks were the
+substep's static boundary; M4 remained `in_progress` there.
+
+Substep 8 makes radial recovery an explicit atomic group: `RadialDocument` and
+`RadialAssets` are selected, fingerprinted, materialized, installed, and rolled back
+together. Current and legacy single-member restore descriptors are rejected. The
+generic recovery confirmation names the complete group, while canonical document
+reset installs `RadialDocument::starter()` and deliberately leaves the asset tree
+untouched; asset deletion remains an explicit reference-aware operation. Catalog
+privacy is `Sensitive` for the document and `UserContent` for managed assets. Existing
+MkMacro grouping semantics and serialized identity remain unchanged.
+
+The process main loop remains the sole live radial persistence owner. One recursive
+`notify` watcher rooted at the existing application-data directory filters only
+`radial.json` and `radial_assets`, coalesces callback bursts, and wakes the existing
+event loop. External document bytes are decoded through the shared version migration
+and validator before any publication. A real change closes the active radial tree,
+invalidates GUI leases/prepared resource generations, publishes one monotonic store
+revision, refreshes MkMacro/global shortcut reservations, and transfers invocation
+configuration through the acknowledged launcher route. Asset changes invalidate the
+same invocation-local style/media/font/static presentation boundary. Malformed,
+empty, missing, or newer-schema candidates leave both the last-valid snapshot and
+original bytes untouched and surface a GUI recovery diagnostic. Atomic self-save
+echoes and semantically identical external rewrites are ignored by content identity.
+
+Focused regressions cover radial group serialization and membership, catalog privacy,
+dialog/data-service routing, incomplete-group rejection, second-member rollback,
+starter reset with retained assets, valid external publication exactly once,
+malformed/newer retention, self-save suppression, watch filtering/coalescing, and
+controller resource-generation invalidation. Static review found no additional
+persistence owner or polling daemon. No Cargo or Nextest command was run during the
+substep itself; the combined M4 gate subsequently passed as recorded below.
+
+M4 combined focused gate and root-only replacements:
+
+| Attempt | Start/session/source | Result |
+|---|---|---|
+| 1 | UUID `7a82728b-1f07-440d-bb04-e1c717e90c2b`; `2026-09-14T01:05:55.0737603-04:00`; tracked diff `c5f52461d74b49440aea0706671856f0656c4c5f` | exit `1` after about 27.5s before compilation: crates.io Schannel `SEC_E_NO_CREDENTIALS` resolving `ab_glyph`; no tests |
+| 2 | escalated network replacement; exec session `22115`; same source | exit `101` after dependency resolution and about 100s compilation: five first-party compile errors in new M4 sources/tests (missing test import, `Arc<str>` conversion, generic clone bound, redundant mutable reborrow, missing fixture argument) |
+| 3 | UUID `63650dfd-704c-435b-964f-c513c0287d30`; `2026-09-14T01:10:12.6793331-04:00`; session `22779`; tracked diff `5a1ff165453460cadbe2f7f51c781b85267ac04c` | exit `100` after compile `11m 13s`; PTY did not retain the failing-test summary |
+| 4 | UUID `7973e83b-e1b7-46a4-a6c1-0b3823ba80d4`; `2026-09-14T01:23:09.5906102-04:00`; session `52999`; same source; Nextest `4bc1d8d3-a085-46d0-863e-7395a7ea3287` | exit `100`; compile `15m 52s`; 174 run, 172 passed, 2 fixture failures, 3,816 skipped |
+| 5 | UUID `d4f0accd-3b9e-4f9d-b1e7-580bb0504351`; `2026-09-14T01:41:19.9861472-04:00`; session `33573`; tracked diff `3baea4091c03ebcd13b578406b1a8073d588e2b7`; Nextest `100e082e-daf8-4a0b-a27e-02ee3c03e99e` | exit `100`; compile `16m 28s`; 163 run, 162 passed, one legacy-v1 fixture failure, 3,816 skipped |
+| 6 | UUID `e9a64c88-f94e-4ec9-9fc3-23b0378e2664`; `2026-09-14T02:00:12.2748294-04:00`; session `6897`; tracked diff `3baea4091c03ebcd13b578406b1a8073d588e2b7`; Nextest `bd0a2c2e-69bd-42a3-abb4-3891283e1871` | exit `100`; compile `16m 08s`; 239 run, 237 passed, 2 controller fixture/lifecycle failures, 3,816 skipped |
+| 7 | UUID `5704adfe-cc84-4dfd-8444-c488e5e8939c`; `2026-09-14T02:19:18.0001245-04:00`; session `89804`; tracked diff `b01a0b190981021f9e35c7501b5531967c98dbc1`; Nextest `3fc0fb1d-2e1f-423b-9611-1edb1679ea8f` | exit `100`; compile `16m 48s`; 238 run, 237 passed, one shortcut-handoff assertion failure, 3,816 skipped |
+| 8 | UUID `7fafe7d8-cdf3-4bdb-bc89-8fc56f12b8d1`; `2026-09-14T02:39:47.1579815-04:00`; session `17348`; tracked diff `953c3a9204a29a12c5c501191777db7154ea0348`; Nextest `fa8fabc2-390e-4ec2-b085-16d30183ba88` | exit `100`; compile `17m 30s`; 239 run, 238 passed, one shortcut-handoff release failure, 3,816 skipped |
+| 9 | UUID `867520f6-e59e-43ed-870a-cf6e34cc02ee`; `2026-09-14T02:59:17.5254245-04:00`; session `17780`; tracked diff `2689fe9fa480c9aa6713624d8e85221446edd033`; Nextest `cd56dc29-4d74-40c7-b43a-2f540dd89982` | exit `100`; compile `15m 53s`; 240 run, 239 passed, one incompatible fixture-policy failure, 3,816 skipped |
+| 10 | UUID `be067d2a-6882-4285-a149-0a37e1256d3f`; `2026-09-14T03:18:56.0749693-04:00`; session `76524`; tracked diff `751eef6493d1b369ecfa7e5ed354b0e2179e229a`; Nextest `57ffd46c-d28d-4f0c-8632-389b4a3bc517` | exit `100`; compile `17m 26s`; 312 run, 311 passed, one invalid package remapping fixture, 3,816 skipped |
+| 11 | UUID `29c235e8-356f-49de-87ce-1226fadd1435`; `2026-09-14T03:38:52.4878510-04:00`; session `95606`; tracked diff `751eef6493d1b369ecfa7e5ed354b0e2179e229a`; Nextest `0924dc45-741f-4e2a-9f79-7821cc7837d0` | exit `0`; compile `17m 03s`; 408 passed, 0 failed, 3,816 skipped; test execution `8.347s` |
+
+Every Cargo/Nextest tree fully exited before the next root-only correction and
+replacement. The successful command was exactly
+`cargo nextest run -E 'test(/radial/) | test(/launcher_invocation/) |
+test(/persistence::(catalog|recovery|data_service|backup)/) |
+test(/gui::(radial_actions|watch|data_recovery_dialog|actions)/) |
+test(/settings::/) | test(/sound::/) | test(/platform::pixels/)'` from
+`G:\Repos\rust\Multi_Launcher`, using the default Nextest profile and the existing
+incremental target. Output was retained in the unified exec transcript rather than a
+separate log file; exec session identifiers are recorded above, while OS process PIDs
+were not separately sampled. The successful gate retained the production fix that keeps an
+item shortcut's owned release separate from the original menu-opening chord; the
+remaining corrections were compile mechanics or invalid test fixtures. No native
+interactive probe was run, so the evidence gap below remains. Because several new M4
+modules were not yet tracked, the post-gate full `src` plus `Cargo.toml`/`Cargo.lock`
+content identity was also recorded as
+`b5b75d1d1314c7b06d8a83971d69643536d19100` across 545 files; no Rust or Cargo source
+changed between the successful gate and that identity capture.
+
+M4 independent-review remediation is now `in_progress`. The remediation connects
+the previously pure style/media/font/audio contracts to the production controller:
+every open prepares immutable media, real glyph coverage, tooltip layouts, and WAV
+cues before the native Open command; retained navigation/hover presentation consumes
+those resources without paint-time filesystem or decode work. Serialized opacity,
+scaling/alignment, image glow, item-background visibility, text shadow/quality,
+tooltip, menu shadow, and hit-zone settings now alter scene/layout/input behavior.
+The rectangular layered visual surface retains the complete visual extent while
+WM_NCHITTEST independently returns transparent outside owned input geometry.
+
+Security remediation hashes managed bytes against their declared SHA-256 before
+cache lookup (including same-length changes), parses RIFF/WAVE chunks and bounds
+format/channel/rate/data/duration, rejects pre-existing radial asset roots that are
+files/symlinks/junctions/reparse points, and requires stored ZIP local and central
+CRC/sizes/names/offset ranges to agree without gaps, aliases, overlaps, optional
+records, or unreferenced bytes. Recovery treats an absent `radial_assets` member in
+an otherwise complete fresh-install snapshot as a typed empty directory while still
+installing/rolling back the radial group atomically. Local hotstring history is
+discarded when navigation relinquishes ownership and ordinary external typing is not
+retained when no eligible local/global binding exists. The replacement combined gate
+has not yet run; M4 remains `in_progress` pending that source-identical result.
+
+M4 independent-review replacement gate launch record: UUID
+`e6077b01-9f5e-42f9-b7cb-5a78d65f7d21`, requested start
+`2026-09-14T04:48:21.0446356-04:00`, cwd
+`G:\Repos\rust\Multi_Launcher`, pre-ledger tracked-diff identity
+`2c4e83d4fc9ec3e03c742d0bd947598af742c547`. The preflight direct rustfmt and
+`git diff --check` exited 0, and `Get-Process cargo,cargo-nextest,rustc` returned
+no process. Source SHA-256 values: controller `E76414DE...`, assets `72EC3BA8...`,
+package `8032EE1F...`, import `CD399783...`, font cache `9AA57AA6...`, native
+`5DF71A41...`, recovery `B6CCFEC3...`. The unified exec transcript is the retained
+log; session/PIDs/result are recorded after process exit.
+
+The first remediation replacement used exec session `44121` and exited `1`
+after about 151 seconds (`cargo test --no-run` exit `101`) with two root compile
+errors: an unqualified `BTreeMap::new()` in the new legacy store adapter and the
+Windows `ScreenToClient` symbol absent from the native import namespace. No tests
+ran. The permitted replacement changes only those two compile roots.
+
+The source-changed replacement launch UUID is
+`45d57822-39f6-41d4-992d-7a65efe5ee80`, requested start
+`2026-09-14T04:52:34.8446071-04:00`, pre-ledger tracked-diff identity
+`24aa6f23afc4dc2a2f8a0f38762d71733619bb9f`; store SHA-256
+`BC53DB64...`, native SHA-256 `F26C2524...`. Direct rustfmt/diff checks pass and
+the process preflight again found no Cargo tree.
+
+That replacement compiled successfully in `16m 47s` but exited `1`; its PTY
+lost the test identity. A read-only direct invocation of the already-built unit-test
+binary isolated the sole failure to
+`persistence::recovery::tests::radial_group_restore_accepts_snapshot_with_missing_assets_as_empty_member`:
+the virtual-empty fingerprint included a framed empty byte segment while a real empty
+directory fingerprint correctly contains only the directory discriminator. Assets,
+controller, and the other recovery tests passed in the same diagnostic binary. The
+root correction centralizes the exact empty-directory fingerprint for virtual group
+members and canonical empty-directory reset candidates.
+
+The second root-only replacement UUID is
+`0590a6ee-bed8-4f0f-8e1a-e20cdbffdd9b`, requested start
+`2026-09-14T05:12:37.2070342-04:00`, pre-ledger tracked-diff identity
+`89a93a32196378cd52cde2169dee1df8d273cb13`, recovery SHA-256
+`D48B2B30...`; formatting/diff checks pass and no Cargo tree is active.
+
+The second root-only replacement ran in exec session `93989` and exited `0`
+after `14m 52s` compilation/execution using the exact combined focused expression
+recorded above. The PTY retained Cargo's successful exit but not Nextest's per-test
+count/run identifier, so neither is invented here; process exit is the authoritative
+gate result. Post-gate `cargo fmt --all -- --check` and `git diff --check` exited 0,
+the Cargo/Nextest/Rustc process audit was empty, and the only generated repository
+artifact (`clipboard_modifiers.json`, created by an existing test) was removed.
+The post-gate accepted-field audit found one remaining semantic gap: shape quality was
+present in the immutable layout contract but was not consumed by rasterization. M4
+returned to `in_progress`; the compositor now uses deterministic 1x1/2x2/4x4 edge
+coverage for Fast/Balanced/HighQuality circles and wedges, with a focused pixel-edge
+regression. This is the only source change after that successful gate and requires a
+source-identical replacement. The existing native cross-process/interactive evidence
+gap remains explicitly unverified.
+
+Final accepted-field replacement launch: UUID
+`834ddbeb-41c3-4eb0-ac1c-b16af3ea258b`, requested start
+`2026-09-14T05:33:20.3158599-04:00`, pre-ledger tracked-diff identity
+`fd9a0a27d0cf8fc093ea0859534c49b72e45eedc`, render SHA-256 `3A6E4743...`,
+compositor SHA-256 `87B9C61E...`; direct rustfmt/diff and no-process preflight pass.
+
+The final accepted-field replacement ran as the sole Cargo tree in exec session
+`15086` and exited `0` after `18m 31s` with the exact combined focused expression.
+As with the prior PTY run, Nextest's per-test count/run identifier was not retained,
+so the ledger records no invented values. Post-gate `cargo fmt --all -- --check` and
+`git diff --check` exited 0; the process audit was empty and the existing test-created
+`clipboard_modifiers.json` artifact was removed again. Product source is unchanged
+after that successful source-identical gate. M4 is complete.
+
+M4 closure remediation then addressed the final integration findings. Legacy Radify
+and RM4 mappings now mutate the typed candidate document and transactional apply plan
+(including explicit false/zero, selected-skin precedence, scalar/style/geometry/media,
+quality, and independently typed primary/secondary center/background controls). RM4
+`IconTrans` compiles into a dedicated icon-opacity field which participates in style
+precedence, validation, immutable layout, and render alpha. Font preparation now
+discovers bounded system-font paths once, caches loaded `FontArc` values, selects real
+requested families, performs per-glyph CJK/emoji fallback, and diagnoses missing glyphs
+instead of drawing tofu. Radial audio replaces the complete child effective sound set,
+emits submenu-close, and atomically retires stale scoped cues while preserving one
+terminal close cue. Native owned-region re-entry restores local item inputs; exterior
+movement does not. Resource cache variants use a stable effective-style/media
+fingerprint rather than layout generation. Missing/corrupt preparation diagnostics flow
+through the normal GUI error/toast-log path even with debug logging disabled and preserve
+launcher query/selection. The recovery UI accepts the backend's virtual-empty radial
+asset member for a fresh-install snapshot without weakening grouped atomicity.
+
+Closure combined-gate attempts used the exact command/expression and cwd recorded above,
+with the unified exec transcript as the retained log. Preflight direct rustfmt,
+`git diff --check`, and `Get-Process cargo,cargo-nextest,rustc` were clean before each
+attempt; no Cargo trees overlapped.
+
+| Closure attempt | Session / source | Result |
+|---|---|---|
+| 1 | exec `60555`; requested around `2026-09-14T06:30-04:00`; non-ledger tracked diff `8b2ba907ead28c580e134219212d426d5baf6d77` | exit `1` after the compile tree fully exited: four new-test type errors (`ValidationErrors.0` and optional GUI selection) plus one unused generation parameter; no tests ran |
+| 2 | exec `83077`; requested `2026-09-14T06:35:59-04:00`; tracked diff `c01ad1510aa27379c1f3a3e25ee37e1b6fc7cb11`; Nextest `ec0542d5-9f6e-4558-8d97-a77c6c117105` | exit `1`; compile `16m 02s`; 259 run, 258 passed, one stale synthetic-font expectation failed, 176 cancelled, 3,816 skipped |
+| 3 | exec `58257`; requested `2026-09-14T06:53:20-04:00`; same production source, test-only correction; Nextest `7cfeedc5-ba91-4114-a967-14e9d577bcbd` | exit `0`; compile `15m 19s`; 435 passed, 0 failed, 3,816 skipped; tests `11.461s` |
+
+Final closure source SHA-256 identities include import
+`3E2CFEDEFBDEB8565CE3269BFCBA8813318D23B4FE5826241232EFE50604BBB8`, font cache
+`BF0E85698056BC862C1BBE2303171A3187871DE9357BB8EFEA66752A0F2F6EAD`, audio
+`E4A53FC6B74A9F4A0BF7A636EFF383270F838EC841FE339E155B478C1249A5DF`, controller
+`B045779C1BA88F234CF597DC344C17D9808446F02C1EF63EF76247DDFCF51723`, model
+`80A09404CCADC3F190F5C834E469F7FDE29F49A360BBD9D0808093F8539A2F20`, and sound
+`6BA622A3955092EC5EBB0202A3CBB0C94A402E83436CC344845D36C9A7638E6A`.
+The only generated repository artifact, `clipboard_modifiers.json`, was removed after
+the gate. Post-gate `cargo fmt --all -- --check` and `git diff --check` exited 0,
+and the Cargo/Nextest/Rustc process audit was empty. No native interactive probe was
+run, so the documented live evidence gap remains.
+
 ## Known evidence gaps
+
+Terminal-token/input-override replacement UUID
+`0d272b43-92dc-4c7d-a2f2-83aafebddec0`, requested start
+`2026-09-14T10:30:38.9216998-04:00`, pre-ledger diff identity
+`89de08f47091226046c7bf71c44fdb1ccfc74221`, import SHA-256
+`95E5E62EFBC9A325AB48686CC744511C858490D5150F268985D23C7F1556DDD2`, sound
+SHA-256 `52C8E0196E530FCB1501AB25C6AFA32A0CAAF704B02DFB98891A6A97916971DC`.
+Terminal reservations are now per-scope reference counts shared across queued Finish
+commands and active terminal sinks. Imported shortcuts/hotstrings upsert stable gesture
+slots so selected-skin mappings override defaults. Submenu graph diagnostics have one
+typed owner and are emitted exactly once per field.
+The source-identical combined M4 gate ran as the sole Cargo tree in exec session
+`56619` and exited `0` after `18m 42s` using the required expression. The PTY retained
+the Cargo completion and exit status but not a Nextest run identifier or test count, so
+neither is invented. Post-gate `cargo fmt --all -- --check` and `git diff --check`
+exited `0`; the Cargo/Nextest/Rustc process audit was empty and the sole generated
+`clipboard_modifiers.json` artifact was removed. Import and sound hashes remained
+source-identical to the recorded gate inputs. M4 is complete; native interactive
+evidence remains explicitly unverified.
+
+Transactional-validation/audio-reservation replacement UUID
+`ad5b767d-bdd3-425c-bf66-d3d6f0b8b7df`, requested start
+`2026-09-14T09:44:26.5537242-04:00`, pre-ledger tracked-diff identity
+`bae9acbc4732e5b20da493265951d76399e70e09`, import SHA-256
+`9D2687BCF18B845334A1169C361D61A8512C1CF04798100A9F5AD8168BBD9D8D`, sound
+SHA-256 `251287596DD9B6A98C5DBDE33BD423E23A06B5F982CCC72F2A33BBDD10DBB5C3`.
+Each legacy mapping now mutates a cloned candidate and commits only after the complete
+runtime document validator accepts it. Import provenance carries an explicit dialect
+for Radify selected-skin versus RM4 definition-sibling media precedence. Audio finish
+reservations are shared mailbox/worker state covering queued and active terminal
+scopes, with release on completion, stop, decode/output failure, and backend absence.
+The first attempt exited `1` in exec session `50013` before tests: the registry test's
+collision-preserving media fixture needed an explicit
+`BTreeMap<String, Vec<MediaReference>>` annotation. No production compiler error was
+reported. Root-only replacement UUID `3ccc473c-7b97-41fd-ba37-dd03244d37f3`, requested
+start `2026-09-14T09:49:15.3399137-04:00`, pre-ledger diff identity
+`162989f5fc4ca4c1f1d9779d1f82870b3df0e42b`, import SHA-256
+`C446BF887EB275D38E6A78F2E4AB789159CE867F794AC1B9D8230D259506817B`.
+That replacement ran in exec session `76745` and exited `1` after `15m 56s`.
+Direct compiled-binary runs passed all 7 sound tests and 21/22 import tests; the only
+failure exposed the existing validator's contradiction with the compatibility promise
+to preserve explicit `ItemSize = 0`. The root correction changes that style bound from
+`1.0..=2048.0` to `0.0..=2048.0`; negative/out-of-range values remain rejected.
+Replacement UUID `6fb419b9-19bb-4a41-98fa-0fcd993b4bf9`, requested start
+`2026-09-14T10:07:23.1004978-04:00`, pre-ledger diff identity
+`ae57d2a5f7992eabc99264752114b9a42b612667`, validation SHA-256
+`B6E70959CEEE7F9B4D1E03CF0FDEE0BED0349F9DA652D586A4CE7C8DB83DD007`.
+The final replacement ran as the sole Cargo tree in exec session `76861` and exited
+`0` after `14m 43s` compilation with the exact combined M4 expression. The PTY did
+not retain Nextest's count/run identifier, so neither is invented. Post-gate
+`cargo fmt --all -- --check` and `git diff --check` exited 0, the process audit was
+empty, and the generated `clipboard_modifiers.json` was removed. Import, sound, and
+validation hashes remained source-identical to the successful gate. M4 is complete;
+native interactive evidence remains unverified.
+
+Final-invariant replacement UUID `080bcdde-21aa-42b7-9e6a-353a084a2192`, requested
+start `2026-09-14T08:34:06.4163274-04:00`, pre-ledger tracked-diff identity
+`04e978978044b05e4d9af291d73cd7b278b9c1c1`, import SHA-256
+`F1727390DA3CCE0A1BA302901DA66656C954608116089B8605866597ADE3F05A`, sound
+SHA-256 `76AE0E1798E84B8CCD6792A13842C78AF4C37A7F6CFD777B86CD52D77CBE1459`,
+controller SHA-256 `F1072AF0D3D63E8C58F5C398679840063609F947F9FA93F09BA236209D13D4E2`.
+The audio mailbox has separate strict nonterminal, terminal-scope, and absolute bounds;
+accepted terminal work is never evicted and close cues have a bounded sink reserve.
+Import application now records typed Changed/AlreadyEqual/Invalid/MissingAsset/
+ExplicitlyDiagnosed outcomes. Normalized path storage is a collision-preserving
+multimap and source skins match the immediate media parent, not arbitrary components.
+That attempt ran in exec session `61415` and exited `1` after `18m 52s`: compilation
+succeeded and one new registry semantic test treated a valid idempotent false value as
+having no outcome. Direct execution of the completed test binary identified
+`every_accepted_field_has_a_semantic_valid_value_outcome`; the mailbox-bound and
+case-fold collision regressions passed directly. The root-only test correction now
+asserts the typed `AlreadyEqual` outcome explicitly instead of requiring mutation.
+Replacement UUID `cea11807-c056-4f58-8d0d-3a01c4cbadf7`, requested start
+`2026-09-14T08:55:24.6494090-04:00`, pre-ledger diff identity
+`b715121c46840bd6c1ebc0eb6cfcaebc8b6afed0`, import SHA-256
+`14BD4F08627077BB7CBF52C505226C21A8307C8E35F380D60548E29962AF845E`.
+That replacement ran in exec session `79281` and exited `1` after `18m 23s`.
+Direct execution of the compiled `sound::tests` suite passed all 6 tests and
+`radial::import::tests` passed 19/20; the isolated failure showed that an explicit
+source skin structurally rejected another skin but then fell through to a globally
+unique basename. The root-only correction makes explicit source selection
+authoritative. Final replacement UUID `835faa9b-9752-4bff-b58a-f90ce92ff6d6`,
+requested start `2026-09-14T09:15:45.7809781-04:00`, pre-ledger diff identity
+`dddd2db7c2746a18d41946e41c9d9de5c5dcd641`, import SHA-256
+`AFE10B6C407374A0E883CFCBD0E375862C296664D61BFAB55E0DB1F16910CFCE`.
+The final replacement ran as the sole Cargo tree in exec session `31081` and exited
+`0` after `16m 54s` compilation with the exact combined M4 expression. The PTY did
+not retain Nextest's count/run identifier, so neither is invented. Post-gate
+`cargo fmt --all -- --check` and `git diff --check` exited 0, the process audit was
+empty, and the generated `clipboard_modifiers.json` was removed. The import hash is
+source-identical to the successful gate. M4 is complete; native interactive evidence
+remains unverified.
+
+Semantic-closure replacement UUID `def6c321-ef5e-4f06-b8b0-054e7beaf424`,
+requested start `2026-09-14T08:06:07.6925566-04:00`, pre-ledger tracked-diff
+identity `d9e786db1279ff49841c12baf0ac70db61e5f7de`, import SHA-256
+`73AABE032CAC8EA94DEBE45AB98FBCCB90831B8F3A77E166A52CEE05E5A3B7D9`, sound
+SHA-256 `F56FD5B0AEFB95658D879119EC885835AA8F84895623B2F838AC0A12FCEDA9A2`,
+validation SHA-256 `3976AF8FE572DE190CC0CB93CBA99687F82F2AF78A68645F193DE9F83496FBA5`.
+The bounded audio mailbox now reserves `MAX_ACTIVE_SINKS` terminal slots beyond
+ordinary play capacity, coalesces terminals only for the same scope, never evicts an
+accepted terminal, and reports impossible reserve exhaustion. Import application
+records a field-local outcome for each selected accepted value, recursively normalizes
+archive provenance/source-skin components, refuses ambiguous basename fallback, and
+uses validated full-digest media-kind-qualified imported asset IDs.
+The replacement ran as the sole Cargo tree in exec session `65783` and exited `0`
+after `16m 33s` compilation with the exact combined M4 expression. The PTY did not
+retain Nextest's per-test count/run identifier, so neither is invented. Post-gate
+`cargo fmt --all -- --check` and `git diff --check` exited 0, the Cargo/Nextest/Rustc
+process audit was empty, and the known generated `clipboard_modifiers.json` was
+removed. Import, sound, and validation hashes remained source-identical to the
+successful gate. M4 is complete; native interactive evidence remains unverified.
+
+Final bounded import/audio remediation is source-complete pending the combined gate.
+Accepted legacy fields now have an explicit apply-or-diagnose policy; typed alternate
+controls and all local shortcut/hotstring gesture variants are retained, explicit
+false tooltip/right-close values survive, and submenu graph settings produce a visible
+field diagnostic rather than a dangling ID. Radify selection carries a source skin
+identity independently of the renamed destination, and media lookup uses definition/
+skin path provenance before basename fallback. Managed bytes deduplicate by full
+SHA-256 plus media type. Audio terminal finish commands evict/coalesce nonterminal
+work and cannot be rejected by a saturated play queue.
+
+Planned replacement UUID `e18f7bad-a9e8-4ed6-a811-7bff6b90f63a`, requested start
+`2026-09-14T07:29:11.7887520-04:00`, pre-ledger tracked-diff identity
+`2c32b16c1c748d1d3e2fa1496776396143ff01c9`, import SHA-256
+`82D1889D46F62D88C16F595C6763B4E86C9A119F7EB8E221AEA9D7762C9B55E1`, sound
+SHA-256 `7DBD3BDA3CF8DB8492039FF59EEF62A82B24E52BF15D13FBB5703E7F1912D442`.
+The sole replacement ran in exec session `34509` and exited `0` after `19m 03s`
+of compilation using the exact combined M4 expression recorded above. The PTY did
+not retain Nextest's per-test count/run identifier, so neither is invented; the
+successful process exit is the authoritative result. Post-gate
+`cargo fmt --all -- --check` and `git diff --check` exited 0, the process audit was
+empty, and the known test-generated `clipboard_modifiers.json` artifact was removed.
+The import and sound source hashes above are source-identical to the successful gate.
+M4 is complete; native interactive evidence remains unverified.
 
 - No `Preferences.json`, Radify sounds, or Radify `Settings.json` is supplied;
   source-defined defaults and generated shape are evidence, and fixtures must be

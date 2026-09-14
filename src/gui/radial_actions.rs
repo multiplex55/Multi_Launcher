@@ -1,7 +1,7 @@
 use crate::radial::bindings::RadialBindingResolver;
 use crate::radial::bindings::{
     BindingUnavailable, PreparedBinding, PreparedCell, RadialPrepareEnvelope, RadialPrepareReply,
-    project_menu_frame,
+    project_menu_frame_with_style,
 };
 use crate::radial::context::{CompiledContextRules, InvocationContext};
 use crate::radial::dynamic::{
@@ -404,7 +404,14 @@ impl LauncherApp {
             .cloned()
             .unwrap_or_else(|| request.document.menus[0].clone());
         prepare_dynamic_bindings(&mut dynamic, &binding_resolver, &request.context);
-        let mut frame = project_menu_frame(&menu, static_cells.clone(), &dynamic, 0, 12);
+        let effective_style = crate::radial::skin::compile_menu_tree(&request.document, &menu).ok();
+        let mut frame = project_menu_frame_with_style(
+            &menu,
+            static_cells.clone(),
+            &dynamic,
+            0,
+            effective_style.as_ref(),
+        );
         for (id, binding) in [
             ("__center", menu.center_secondary_action.as_ref()),
             ("__background", menu.background_secondary_action.as_ref()),
@@ -442,7 +449,18 @@ impl LauncherApp {
                     prepared_cell(
                         &alternate.action,
                         resolved,
-                        effective_after_action(&request.document, &menu, alternate.after_action),
+                        effective_after_action(
+                            &request.document,
+                            &menu,
+                            if alternate.gesture == crate::radial::model::ClickGesture::Secondary
+                                && alternate.after_action
+                                    == crate::radial::model::AfterActionPolicy::Inherit
+                            {
+                                cell.secondary_after_action
+                            } else {
+                                alternate.after_action
+                            },
+                        ),
                         &request.invocation_query,
                     ),
                 );
@@ -551,7 +569,15 @@ impl LauncherApp {
                 }
             }
             prepare_dynamic_bindings(&mut child_dynamic, &binding_resolver, &request.context);
-            let mut child_frame = project_menu_frame(child, child_static, &child_dynamic, 0, 12);
+            let effective_style =
+                crate::radial::skin::compile_menu_tree(&request.document, child).ok();
+            let mut child_frame = project_menu_frame_with_style(
+                child,
+                child_static,
+                &child_dynamic,
+                0,
+                effective_style.as_ref(),
+            );
             for (id, binding) in [
                 ("__center", child.center_secondary_action.as_ref()),
                 ("__background", child.background_secondary_action.as_ref()),
@@ -593,7 +619,15 @@ impl LauncherApp {
                             effective_after_action(
                                 &request.document,
                                 child,
-                                alternate.after_action,
+                                if alternate.gesture
+                                    == crate::radial::model::ClickGesture::Secondary
+                                    && alternate.after_action
+                                        == crate::radial::model::AfterActionPolicy::Inherit
+                                {
+                                    cell.secondary_after_action
+                                } else {
+                                    alternate.after_action
+                                },
                             ),
                             &request.invocation_query,
                         ),

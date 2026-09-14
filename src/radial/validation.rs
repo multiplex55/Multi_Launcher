@@ -57,6 +57,69 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
         limits::MAX_CUSTOM_TRIGGERS,
         &mut errors,
     );
+    bounded(
+        "assets",
+        document.assets.len(),
+        limits::MAX_ASSETS,
+        &mut errors,
+    );
+    let mut asset_kinds = BTreeMap::new();
+    for (index, asset) in document.assets.iter().enumerate() {
+        let path = format!("assets[{index}]");
+        if asset.id.as_str().trim().is_empty()
+            || asset_kinds.insert(asset.id.clone(), asset.kind).is_some()
+        {
+            errors.push(issue(
+                format!("{path}.id"),
+                "asset ID is empty or duplicated",
+            ));
+        }
+        validate_managed_path(
+            &asset.relative_path,
+            &format!("{path}.relative_path"),
+            &mut errors,
+        );
+        if asset.content_sha256.len() != 64
+            || !asset
+                .content_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            errors.push(issue(
+                format!("{path}.content_sha256"),
+                "asset digest must contain exactly 64 hexadecimal characters",
+            ));
+        }
+        if asset.id.as_str().starts_with("import-") {
+            let kind = match asset.kind {
+                MediaKind::Image => "image",
+                MediaKind::Sound => "sound",
+            };
+            let expected = format!(
+                "import-{kind}-{}",
+                asset.content_sha256.to_ascii_lowercase()
+            );
+            if asset.id.as_str() != expected {
+                errors.push(issue(
+                    format!("{path}.id"),
+                    "imported asset ID must contain its complete media-kind-qualified SHA-256 digest",
+                ));
+            }
+        }
+        if asset.byte_len > limits::MAX_TEXTURE_BYTES {
+            errors.push(issue(
+                format!("{path}.byte_len"),
+                "asset exceeds the configured media byte limit",
+            ));
+        }
+    }
+    validate_search_roots(&document.media_search_roots, &mut errors);
+    validate_full_style(
+        &document.user_style_defaults.values,
+        "user_style_defaults",
+        &asset_kinds,
+        &mut errors,
+    );
 
     let menu_ids = unique_ids(
         document.menus.iter().map(|v| (&v.id, v.id.as_str())),
@@ -110,6 +173,13 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 format!("missing skin {}", menu.skin_id),
             ));
         }
+        validate_full_style(
+            &menu.style.values,
+            &format!("{path}.style"),
+            &asset_kinds,
+            &mut errors,
+        );
+        let effective_style = crate::radial::skin::compile_menu_tree(document, menu).ok();
         if let Some(binding) = &menu.center_action {
             validate_binding(binding, &format!("{path}.center_action"), &mut errors);
             validate_keep_open(
@@ -121,10 +191,10 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 &mut errors,
             );
         }
-        if menu.center_control == Some(Control::Drag) && menu.center_action.is_some() {
+        if menu.center_control.is_some() && menu.center_action.is_some() {
             errors.push(issue(
                 format!("{path}.center_action"),
-                "primary center action is unreachable while the center control is Drag",
+                "primary center action is unreachable while a primary center control is configured",
             ));
         }
         if let Some(binding) = &menu.center_secondary_action {
@@ -141,6 +211,12 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 &format!("{path}.center_secondary_action"),
                 &mut errors,
             );
+        }
+        if menu.center_secondary_control.is_some() && menu.center_secondary_action.is_some() {
+            errors.push(issue(
+                format!("{path}.center_secondary_action"),
+                "secondary center action is unreachable while a secondary center control is configured",
+            ));
         }
         if let Some(binding) = &menu.background_action {
             validate_binding(binding, &format!("{path}.background_action"), &mut errors);
@@ -167,6 +243,19 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 &format!("{path}.background_secondary_action"),
                 &mut errors,
             );
+        }
+        if menu.background_control.is_some() && menu.background_action.is_some() {
+            errors.push(issue(
+                format!("{path}.background_action"),
+                "primary background action is unreachable while a primary background control is configured",
+            ));
+        }
+        if menu.background_secondary_control.is_some() && menu.background_secondary_action.is_some()
+        {
+            errors.push(issue(
+                format!("{path}.background_secondary_action"),
+                "secondary background action is unreachable while a secondary background control is configured",
+            ));
         }
         finite_range(
             format!("{path}.center_radius"),
@@ -206,9 +295,44 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 }
             }
         }
+        if let Some(style) = effective_style.as_ref() {
+            let menu_scale =
+                crate::radial::skin::resolved_f32(&style.menu.values.geometry.menu_scale);
+            let radius_scale =
+                crate::radial::skin::resolved_f32(&style.menu.values.geometry.radius_scale);
+            let styled_item_radius = (style.menu.source(crate::radial::skin::StyleField::ItemSize)
+                != Some(&crate::radial::skin::StyleSource::ApplicationFallback))
+            .then(|| {
+                crate::radial::skin::resolved_f32(&style.menu.values.geometry.item_size)
+                    * menu_scale
+                    * 0.5
+            });
+            for (left_index, left) in menu.rings.iter().enumerate() {
+                for (right_index, right) in menu.rings.iter().enumerate().skip(left_index + 1) {
+                    let separation = (left.radius - right.radius).abs() * radius_scale * menu_scale;
+                    let required = styled_item_radius.unwrap_or(left.cell_radius * menu_scale)
+                        + styled_item_radius.unwrap_or(right.cell_radius * menu_scale)
+                        + left.gap.max(right.gap) * menu_scale;
+                    if separation + 0.001 < required {
+                        errors.push(issue(
+                            format!("{path}.rings[{right_index}].style"),
+                            format!(
+                                "effective style overlaps rings[{left_index}]; radial separation must be at least {required}"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         let mut cell_ids = BTreeSet::new();
         for (ri, ring) in menu.rings.iter().enumerate() {
             let rp = format!("{path}.rings[{ri}]");
+            validate_ring_style(
+                &ring.style,
+                &format!("{rp}.style"),
+                &asset_kinds,
+                &mut errors,
+            );
             finite_range(
                 format!("{rp}.radius"),
                 ring.radius,
@@ -242,13 +366,40 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 .iter()
                 .filter(|cell| !matches!(cell.content, CellContent::Dynamic { .. }))
                 .count();
+            let effective_capacity = effective_style
+                .as_ref()
+                .and_then(|style| style.rings.get(&ring.id))
+                .map_or_else(
+                    || crate::radial::bindings::ring_accessible_capacity(ring),
+                    |style| {
+                        let menu_scale =
+                            crate::radial::skin::resolved_f32(&style.values.geometry.menu_scale);
+                        let item_radius = if effective_style.as_ref().is_some_and(|tree| {
+                            tree.menu.source(crate::radial::skin::StyleField::ItemSize)
+                                != Some(&crate::radial::skin::StyleSource::ApplicationFallback)
+                        }) {
+                            crate::radial::skin::resolved_f32(&style.values.geometry.item_size)
+                                * menu_scale
+                                * 0.5
+                        } else {
+                            ring.cell_radius * menu_scale
+                        };
+                        crate::radial::bindings::ring_accessible_capacity_for(
+                            ring.radius
+                                * crate::radial::skin::resolved_f32(
+                                    &style.values.geometry.radius_scale,
+                                )
+                                * menu_scale,
+                            item_radius,
+                            ring.gap * menu_scale,
+                        )
+                    },
+                );
             if ring
                 .cells
                 .iter()
                 .any(|cell| matches!(cell.content, CellContent::Dynamic { .. }))
-                && crate::radial::bindings::ring_accessible_capacity(ring)
-                    .saturating_sub(static_cells)
-                    < 3
+                && effective_capacity.saturating_sub(static_cells) < 3
             {
                 errors.push(issue(
                     format!("{rp}.cells"),
@@ -263,6 +414,52 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                 ));
             }
             let n = ring.cells.len();
+            if let Some(style) = effective_style
+                .as_ref()
+                .and_then(|style| style.rings.get(&ring.id))
+            {
+                let menu_scale =
+                    crate::radial::skin::resolved_f32(&style.values.geometry.menu_scale);
+                let radius = ring.radius
+                    * crate::radial::skin::resolved_f32(&style.values.geometry.radius_scale)
+                    * menu_scale;
+                let item_radius = if effective_style.as_ref().is_some_and(|tree| {
+                    tree.menu.source(crate::radial::skin::StyleField::ItemSize)
+                        != Some(&crate::radial::skin::StyleSource::ApplicationFallback)
+                }) {
+                    crate::radial::skin::resolved_f32(&style.values.geometry.item_size)
+                        * menu_scale
+                        * 0.5
+                } else {
+                    ring.cell_radius * menu_scale
+                };
+                let center_radius = if effective_style.as_ref().is_some_and(|tree| {
+                    tree.menu
+                        .source(crate::radial::skin::StyleField::CenterSize)
+                        != Some(&crate::radial::skin::StyleSource::ApplicationFallback)
+                }) {
+                    crate::radial::skin::resolved_f32(&style.values.geometry.center_size)
+                        * menu_scale
+                        * 0.5
+                } else {
+                    menu.center_radius * menu_scale
+                };
+                if radius <= center_radius + item_radius {
+                    errors.push(issue(
+                        format!("{rp}.style"),
+                        "effective style causes the ring to overlap the center control",
+                    ));
+                }
+                if menu.layout == LayoutKind::CircularCells && n >= 2 {
+                    let spacing = 2.0 * radius * (std::f32::consts::PI / n as f32).sin();
+                    if spacing + 0.001 < 2.0 * item_radius + ring.gap * menu_scale {
+                        errors.push(issue(
+                            format!("{rp}.style"),
+                            "effective style causes adjacent circular cells to overlap",
+                        ));
+                    }
+                }
+            }
             if menu.layout == LayoutKind::CircularCells && n >= 2 {
                 let spacing = 2.0 * ring.radius * (std::f32::consts::PI / n as f32).sin();
                 if spacing + 0.001 < 2.0 * ring.cell_radius + ring.gap {
@@ -274,6 +471,25 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
             }
             for (ci, cell) in ring.cells.iter().enumerate() {
                 let cp = format!("{rp}.cells[{ci}]");
+                validate_media_override(
+                    &cell.icon,
+                    MediaKind::Image,
+                    &format!("{cp}.icon"),
+                    &asset_kinds,
+                    &mut errors,
+                );
+                validate_cell_style(
+                    &cell.style,
+                    &format!("{cp}.style"),
+                    &asset_kinds,
+                    &mut errors,
+                );
+                if let Override::Value(tooltip) = &cell.tooltip
+                    && tooltip.len() > 4096
+                {
+                    errors.push(issue(format!("{cp}.tooltip"), "tooltip is too long"));
+                }
+                validate_item_inputs(cell, &cp, &mut errors);
                 if cell.id.as_str().trim().is_empty() || !cell_ids.insert(cell.id.clone()) {
                     errors.push(issue(
                         format!("{cp}.id"),
@@ -340,6 +556,14 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                         &mut errors,
                     );
                 }
+                for (bi, binding) in cell.alternate_controls.iter().enumerate() {
+                    if !gestures.insert(binding.gesture) {
+                        errors.push(issue(
+                            format!("{cp}.alternate_controls[{bi}].gesture"),
+                            "duplicate click gesture",
+                        ));
+                    }
+                }
             }
         }
     }
@@ -350,11 +574,10 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
         &mut errors,
     );
     for (si, skin) in document.skins.iter().enumerate() {
-        finite_range(
-            format!("skins[{si}].scale"),
-            skin.scale,
-            0.25,
-            4.0,
+        validate_full_style(
+            &skin.style.values,
+            &format!("skins[{si}].style"),
+            &asset_kinds,
             &mut errors,
         );
     }
@@ -385,10 +608,7 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
     for (ti, trigger) in document.custom_triggers.iter().enumerate() {
         match crate::hotkey::parse_hotkey(&trigger.chord) {
             Some(parsed) => {
-                let canonical = format!(
-                    "{:?}:{}:{}:{}:{}:{}",
-                    parsed.key, parsed.ctrl, parsed.shift, parsed.alt, parsed.alt_gr, parsed.win
-                );
+                let canonical = canonical_hotkey(&parsed);
                 if let Some(previous) = chords.insert(canonical, ti) {
                     errors.push(issue(
                         format!("custom_triggers[{ti}].chord"),
@@ -408,12 +628,654 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
             ));
         }
     }
+    validate_item_input_conflicts(document, &mut errors);
     validate_graph(document, &graph, &mut errors);
     if errors.is_empty() {
         Ok(())
     } else {
         Err(ValidationErrors(errors))
     }
+}
+
+fn validate_search_roots(roots: &MediaSearchRoots, errors: &mut Vec<ValidationIssue>) {
+    for (kind, values) in [
+        ("image_directories", &roots.image_directories),
+        ("sound_directories", &roots.sound_directories),
+    ] {
+        if values.len() > limits::MAX_MEDIA_SEARCH_ROOTS {
+            errors.push(issue(kind, "too many configured media search roots"));
+        }
+        let mut seen = BTreeSet::new();
+        for (index, value) in values.iter().enumerate() {
+            if value.trim().is_empty() || value.len() > 4096 {
+                errors.push(issue(
+                    format!("{kind}[{index}]"),
+                    "search root is empty or too long",
+                ));
+            }
+            let canonical = value.to_lowercase();
+            if !seen.insert(canonical) {
+                errors.push(issue(
+                    format!("{kind}[{index}]"),
+                    "duplicate media search root",
+                ));
+            }
+        }
+    }
+}
+
+fn validate_managed_path(path: &str, field: &str, errors: &mut Vec<ValidationIssue>) {
+    use std::path::{Component, Path};
+    if path.trim().is_empty()
+        || path.len() > 4096
+        || path.contains(':')
+        || Path::new(path).is_absolute()
+        || Path::new(path)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        errors.push(issue(
+            field,
+            "managed asset path must be a safe relative path",
+        ));
+    }
+}
+
+fn validate_full_style(
+    style: &StyleOverrides,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    validate_images(&style.images, &format!("{path}.images"), assets, errors);
+    validate_geometry(&style.geometry, &format!("{path}.geometry"), errors);
+    validate_text(&style.text, &format!("{path}.text"), errors);
+    validate_effects(&style.effects, &format!("{path}.effects"), errors);
+    validate_sounds(&style.sounds, &format!("{path}.sounds"), assets, errors);
+}
+
+fn validate_ring_style(
+    style: &RingStyleLayer,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    validate_item_images(&style.images, &format!("{path}.images"), assets, errors);
+    validate_item_geometry(&style.geometry, &format!("{path}.geometry"), errors);
+    validate_text(&style.text, &format!("{path}.text"), errors);
+    validate_item_sounds(&style.sounds, &format!("{path}.sounds"), assets, errors);
+}
+
+fn validate_cell_style(
+    style: &CellStyleLayer,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    validate_item_images(&style.images, &format!("{path}.images"), assets, errors);
+    validate_item_geometry(&style.geometry, &format!("{path}.geometry"), errors);
+    validate_text(&style.text, &format!("{path}.text"), errors);
+    validate_item_sounds(&style.sounds, &format!("{path}.sounds"), assets, errors);
+}
+
+fn validate_effects(style: &EffectStyleOverrides, path: &str, errors: &mut Vec<ValidationIssue>) {
+    if let Override::Value(width) = &style.menu_shadow_width {
+        finite_range(
+            format!("{path}.menu_shadow_width"),
+            *width,
+            0.0,
+            2048.0,
+            errors,
+        );
+    }
+}
+
+fn validate_images(
+    style: &ImageStyleOverrides,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    for (field, value) in [
+        ("item_glow", &style.item_glow),
+        ("menu_outer_rim", &style.menu_outer_rim),
+        ("menu_background", &style.menu_background),
+        ("item_background", &style.item_background),
+        ("item_foreground", &style.item_foreground),
+        ("item_shadow", &style.item_shadow),
+        ("menu_foreground", &style.menu_foreground),
+        ("center_background", &style.center_background),
+        ("center_image", &style.center_image),
+        ("submenu_indicator", &style.submenu_indicator),
+    ] {
+        validate_media_override(
+            value,
+            MediaKind::Image,
+            &format!("{path}.{field}"),
+            assets,
+            errors,
+        );
+    }
+    for (field, value) in [
+        ("item_glow_opacity", &style.item_glow_opacity),
+        ("menu_outer_rim_opacity", &style.menu_outer_rim_opacity),
+        ("menu_background_opacity", &style.menu_background_opacity),
+        ("item_background_opacity", &style.item_background_opacity),
+        ("item_foreground_opacity", &style.item_foreground_opacity),
+        ("item_shadow_opacity", &style.item_shadow_opacity),
+        ("menu_foreground_opacity", &style.menu_foreground_opacity),
+        (
+            "center_background_opacity",
+            &style.center_background_opacity,
+        ),
+        ("center_image_opacity", &style.center_image_opacity),
+        (
+            "submenu_indicator_opacity",
+            &style.submenu_indicator_opacity,
+        ),
+        ("icon_opacity", &style.icon_opacity),
+    ] {
+        if let Override::Value(value) = value {
+            finite_range(format!("{path}.{field}"), *value, 0.0, 1.0, errors);
+        }
+    }
+}
+
+fn validate_sounds(
+    style: &SoundStyleOverrides,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    for (field, value) in [
+        ("on_show", &style.on_show),
+        ("on_close", &style.on_close),
+        ("on_select", &style.on_select),
+        ("on_submenu_show", &style.on_submenu_show),
+        ("on_submenu_close", &style.on_submenu_close),
+    ] {
+        validate_media_override(
+            value,
+            MediaKind::Sound,
+            &format!("{path}.{field}"),
+            assets,
+            errors,
+        );
+    }
+}
+
+fn validate_item_images(
+    style: &ItemImageStyleOverrides,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    for (field, value) in [
+        ("item_background", &style.item_background),
+        ("submenu_indicator", &style.submenu_indicator),
+    ] {
+        validate_media_override(
+            value,
+            MediaKind::Image,
+            &format!("{path}.{field}"),
+            assets,
+            errors,
+        );
+    }
+    for (field, value) in [
+        ("item_background_opacity", &style.item_background_opacity),
+        (
+            "submenu_indicator_opacity",
+            &style.submenu_indicator_opacity,
+        ),
+        ("icon_opacity", &style.icon_opacity),
+    ] {
+        if let Override::Value(value) = value {
+            finite_range(format!("{path}.{field}"), *value, 0.0, 1.0, errors);
+        }
+    }
+}
+
+fn validate_item_sounds(
+    style: &ItemSoundStyleOverrides,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    validate_media_override(
+        &style.on_select,
+        MediaKind::Sound,
+        &format!("{path}.on_select"),
+        assets,
+        errors,
+    );
+}
+
+fn validate_media_override(
+    value: &Override<MediaReference>,
+    expected: MediaKind,
+    path: &str,
+    assets: &BTreeMap<AssetId, MediaKind>,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    let Override::Value(reference) = value else {
+        return;
+    };
+    match reference {
+        MediaReference::Managed { asset_id } => match assets.get(asset_id) {
+            Some(actual) if *actual == expected => {}
+            Some(_) => errors.push(issue(path, "managed asset has the wrong media kind")),
+            None => errors.push(issue(path, format!("missing managed asset {asset_id}"))),
+        },
+        MediaReference::ExternalFile { path: value } => {
+            if invalid_media_text(value) {
+                errors.push(issue(
+                    path,
+                    "external media path is empty, too long, or a raw process handle",
+                ));
+            }
+        }
+        MediaReference::SearchPath { file_name } => {
+            if invalid_media_text(file_name)
+                || file_name
+                    .chars()
+                    .any(|character| matches!(character, '/' | '\\' | ':'))
+            {
+                errors.push(issue(
+                    path,
+                    "search-path media must contain one safe file name",
+                ));
+            }
+        }
+        MediaReference::IconResource { path: value, index } => {
+            let extension = std::path::Path::new(value)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if expected != MediaKind::Image
+                || invalid_media_text(value)
+                || !matches!(extension.as_str(), "exe" | "dll" | "cpl")
+                || *index == 0
+            {
+                errors.push(issue(path, "invalid image resource reference"));
+            }
+        }
+    }
+}
+
+fn invalid_media_text(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized.len() > 4096
+        || ["hicon", "hbitmap", "pbitmap"].iter().any(|prefix| {
+            normalized == *prefix
+                || normalized.strip_prefix(*prefix).is_some_and(|suffix| {
+                    suffix.chars().next().is_some_and(|value| {
+                        matches!(value, ':' | '=')
+                            || value.is_whitespace()
+                            || value.is_ascii_digit()
+                    })
+                })
+        })
+}
+
+fn validate_geometry(
+    style: &GeometryStyleOverrides,
+    path: &str,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    for (field, value, min, max) in [
+        ("menu_scale", &style.menu_scale, 0.25, 4.0),
+        ("item_size", &style.item_size, 0.0, 2048.0),
+        ("radius_scale", &style.radius_scale, 0.0, 16.0),
+        ("center_size", &style.center_size, 0.0, 2048.0),
+        ("center_image_scale", &style.center_image_scale, 0.0, 16.0),
+        ("item_image_scale", &style.item_image_scale, 0.0, 16.0),
+        ("item_image_y_ratio", &style.item_image_y_ratio, -4.0, 4.0),
+        (
+            "item_background_scale",
+            &style.item_background_scale,
+            0.0,
+            16.0,
+        ),
+        (
+            "item_foreground_scale",
+            &style.item_foreground_scale,
+            0.0,
+            16.0,
+        ),
+        ("item_shadow_scale", &style.item_shadow_scale, 0.0, 16.0),
+        (
+            "menu_background_scale",
+            &style.menu_background_scale,
+            0.0,
+            16.0,
+        ),
+        (
+            "menu_foreground_scale",
+            &style.menu_foreground_scale,
+            0.0,
+            16.0,
+        ),
+        (
+            "center_background_scale",
+            &style.center_background_scale,
+            0.0,
+            16.0,
+        ),
+        (
+            "submenu_indicator_size",
+            &style.submenu_indicator_size,
+            0.0,
+            2048.0,
+        ),
+        (
+            "submenu_indicator_y_ratio",
+            &style.submenu_indicator_y_ratio,
+            -4.0,
+            4.0,
+        ),
+        ("outer_ring_margin", &style.outer_ring_margin, 0.0, 2048.0),
+        ("outer_rim_width", &style.outer_rim_width, 0.0, 2048.0),
+    ] {
+        if let Override::Value(value) = value {
+            finite_range(format!("{path}.{field}"), *value, min, max, errors);
+        }
+    }
+}
+
+fn validate_item_geometry(
+    style: &ItemGeometryStyleOverrides,
+    path: &str,
+    errors: &mut Vec<ValidationIssue>,
+) {
+    for (field, value, min, max) in [
+        ("item_image_scale", &style.item_image_scale, 0.0, 16.0),
+        ("item_image_y_ratio", &style.item_image_y_ratio, -4.0, 4.0),
+        (
+            "submenu_indicator_size",
+            &style.submenu_indicator_size,
+            0.0,
+            2048.0,
+        ),
+        (
+            "submenu_indicator_y_ratio",
+            &style.submenu_indicator_y_ratio,
+            -4.0,
+            4.0,
+        ),
+    ] {
+        if let Override::Value(value) = value {
+            finite_range(format!("{path}.{field}"), *value, min, max, errors);
+        }
+    }
+}
+
+fn validate_text(style: &TextStyleOverrides, path: &str, errors: &mut Vec<ValidationIssue>) {
+    if let Override::Value(marker) = &style.submenu_indicator_text
+        && (marker.is_empty() || marker.chars().count() > 8)
+    {
+        errors.push(issue(
+            format!("{path}.submenu_indicator_text"),
+            "submenu indicator text must contain between one and eight characters",
+        ));
+    }
+    if let Override::Value(family) = &style.font_family
+        && (family.trim().is_empty() || family.len() > 256)
+    {
+        errors.push(issue(
+            format!("{path}.font_family"),
+            "font family is empty or too long",
+        ));
+    }
+    for (field, value, min, max) in [
+        ("font_size", &style.font_size, 1.0, 512.0),
+        ("text_box_scale", &style.text_box_scale, 0.0, 16.0),
+        ("vertical_ratio", &style.vertical_ratio, -4.0, 4.0),
+    ] {
+        if let Override::Value(value) = value {
+            finite_range(format!("{path}.{field}"), *value, min, max, errors);
+        }
+    }
+    if let Override::Value(offset) = &style.shadow_offset
+        && (!offset.x.is_finite()
+            || !offset.y.is_finite()
+            || offset.x.abs() > 512.0
+            || offset.y.abs() > 512.0)
+    {
+        errors.push(issue(
+            format!("{path}.shadow_offset"),
+            "invalid text shadow offset",
+        ));
+    }
+}
+
+fn validate_item_inputs(cell: &CellDefinition, path: &str, errors: &mut Vec<ValidationIssue>) {
+    bounded(
+        format!("{path}.shortcuts"),
+        cell.shortcuts.len(),
+        limits::MAX_ITEM_SHORTCUTS_PER_CELL,
+        errors,
+    );
+    bounded(
+        format!("{path}.hotstrings"),
+        cell.hotstrings.len(),
+        limits::MAX_ITEM_HOTSTRINGS_PER_CELL,
+        errors,
+    );
+    let mut shortcut_ids = BTreeSet::new();
+    let mut shortcut_chords = BTreeSet::new();
+    for (index, shortcut) in cell.shortcuts.iter().enumerate() {
+        let field = format!("{path}.shortcuts[{index}]");
+        if shortcut.id.as_str().trim().is_empty() || !shortcut_ids.insert(shortcut.id.clone()) {
+            errors.push(issue(
+                format!("{field}.id"),
+                "shortcut ID is empty or duplicated",
+            ));
+        }
+        match crate::hotkey::parse_hotkey(&shortcut.chord) {
+            Some(parsed) => {
+                let identity = canonical_hotkey(&parsed);
+                if !shortcut_chords.insert(identity) {
+                    errors.push(issue(format!("{field}.chord"), "duplicate shortcut chord"));
+                }
+            }
+            None => errors.push(issue(format!("{field}.chord"), "invalid shortcut chord")),
+        }
+        if !cell_has_gesture_binding(cell, shortcut.gesture) {
+            errors.push(issue(
+                format!("{field}.gesture"),
+                "shortcut gesture has no prepared action binding on this cell",
+            ));
+        }
+    }
+    let mut hotstring_ids = BTreeSet::new();
+    let mut hotstrings = BTreeSet::new();
+    for (index, hotstring) in cell.hotstrings.iter().enumerate() {
+        let field = format!("{path}.hotstrings[{index}]");
+        if hotstring.id.as_str().trim().is_empty() || !hotstring_ids.insert(hotstring.id.clone()) {
+            errors.push(issue(
+                format!("{field}.id"),
+                "hotstring ID is empty or duplicated",
+            ));
+        }
+        if hotstring.text.is_empty() || hotstring.text.len() > 128 {
+            errors.push(issue(
+                format!("{field}.text"),
+                "hotstring is empty or too long",
+            ));
+        }
+        if !hotstring
+            .text
+            .chars()
+            .all(|character| character.is_ascii() && !character.is_ascii_control())
+        {
+            errors.push(issue(
+                format!("{field}.text"),
+                "hotstring must use printable ASCII characters supported by the synchronous listener",
+            ));
+        }
+        let identity = if hotstring.case_sensitive {
+            hotstring.text.clone()
+        } else {
+            hotstring.text.to_lowercase()
+        };
+        if !hotstrings.insert((hotstring.scope, identity)) {
+            errors.push(issue(format!("{field}.text"), "duplicate hotstring"));
+        }
+        if !cell_has_gesture_binding(cell, hotstring.gesture) {
+            errors.push(issue(
+                format!("{field}.gesture"),
+                "hotstring gesture has no prepared action binding on this cell",
+            ));
+        }
+    }
+}
+
+fn cell_has_gesture_binding(cell: &CellDefinition, gesture: ClickGesture) -> bool {
+    (gesture == ClickGesture::Primary
+        && matches!(
+            &cell.content,
+            CellContent::Action { .. }
+                | CellContent::Dynamic { .. }
+                | CellContent::Submenu { .. }
+                | CellContent::Control { .. }
+        ))
+        || cell
+            .alternate_clicks
+            .iter()
+            .any(|binding| binding.gesture == gesture)
+        || cell
+            .alternate_controls
+            .iter()
+            .any(|binding| binding.gesture == gesture)
+}
+
+fn validate_item_input_conflicts(document: &RadialDocument, errors: &mut Vec<ValidationIssue>) {
+    let mut shortcut_ids = BTreeMap::<ShortcutId, String>::new();
+    let mut global_shortcuts = BTreeMap::<String, String>::new();
+    let mut local_shortcuts = BTreeMap::<(MenuId, String), String>::new();
+    let mut any_local_shortcuts = BTreeMap::<String, String>::new();
+    let mut hotstring_ids = BTreeMap::<HotstringId, String>::new();
+    let mut global_hotstrings = BTreeMap::<String, String>::new();
+    let mut local_hotstrings = BTreeMap::<(MenuId, String), String>::new();
+    let mut any_local_hotstrings = BTreeMap::<String, String>::new();
+
+    for (index, trigger) in document.custom_triggers.iter().enumerate() {
+        let Some(parsed) = crate::hotkey::parse_hotkey(&trigger.chord) else {
+            continue;
+        };
+        let identity = canonical_hotkey(&parsed);
+        let path = format!("custom_triggers[{index}].chord");
+        match trigger.scope {
+            TriggerScope::Global => {
+                global_shortcuts.entry(identity).or_insert(path);
+            }
+            TriggerScope::MenuLocal => {
+                any_local_shortcuts
+                    .entry(identity.clone())
+                    .or_insert_with(|| path.clone());
+                local_shortcuts
+                    .entry((trigger.menu_id.clone(), identity))
+                    .or_insert(path);
+            }
+        }
+    }
+
+    for (menu_index, menu) in document.menus.iter().enumerate() {
+        for (ring_index, ring) in menu.rings.iter().enumerate() {
+            for (cell_index, cell) in ring.cells.iter().enumerate() {
+                let cell_path =
+                    format!("menus[{menu_index}].rings[{ring_index}].cells[{cell_index}]");
+                for (index, shortcut) in cell.shortcuts.iter().enumerate() {
+                    let path = format!("{cell_path}.shortcuts[{index}]");
+                    if let Some(previous) = shortcut_ids.insert(shortcut.id.clone(), path.clone()) {
+                        errors.push(issue(
+                            format!("{path}.id"),
+                            format!("shortcut ID conflicts with {previous}"),
+                        ));
+                    }
+                    let Some(parsed) = crate::hotkey::parse_hotkey(&shortcut.chord) else {
+                        continue;
+                    };
+                    let identity = canonical_hotkey(&parsed);
+                    let conflict = match shortcut.scope {
+                        TriggerScope::Global => global_shortcuts
+                            .get(&identity)
+                            .or_else(|| any_local_shortcuts.get(&identity)),
+                        TriggerScope::MenuLocal => global_shortcuts
+                            .get(&identity)
+                            .or_else(|| local_shortcuts.get(&(menu.id.clone(), identity.clone()))),
+                    };
+                    if let Some(previous) = conflict {
+                        errors.push(issue(
+                            format!("{path}.chord"),
+                            format!("shortcut chord conflicts with {previous}"),
+                        ));
+                    }
+                    match shortcut.scope {
+                        TriggerScope::Global => {
+                            global_shortcuts.entry(identity).or_insert(path);
+                        }
+                        TriggerScope::MenuLocal => {
+                            any_local_shortcuts
+                                .entry(identity.clone())
+                                .or_insert_with(|| path.clone());
+                            local_shortcuts
+                                .entry((menu.id.clone(), identity))
+                                .or_insert(path);
+                        }
+                    }
+                }
+                for (index, hotstring) in cell.hotstrings.iter().enumerate() {
+                    let path = format!("{cell_path}.hotstrings[{index}]");
+                    if let Some(previous) = hotstring_ids.insert(hotstring.id.clone(), path.clone())
+                    {
+                        errors.push(issue(
+                            format!("{path}.id"),
+                            format!("hotstring ID conflicts with {previous}"),
+                        ));
+                    }
+                    let identity = hotstring.text.to_lowercase();
+                    let conflict = match hotstring.scope {
+                        TriggerScope::Global => global_hotstrings
+                            .get(&identity)
+                            .or_else(|| any_local_hotstrings.get(&identity)),
+                        TriggerScope::MenuLocal => global_hotstrings
+                            .get(&identity)
+                            .or_else(|| local_hotstrings.get(&(menu.id.clone(), identity.clone()))),
+                    };
+                    if let Some(previous) = conflict {
+                        errors.push(issue(
+                            format!("{path}.text"),
+                            format!("hotstring conflicts with {previous}"),
+                        ));
+                    }
+                    match hotstring.scope {
+                        TriggerScope::Global => {
+                            global_hotstrings.entry(identity).or_insert(path);
+                        }
+                        TriggerScope::MenuLocal => {
+                            any_local_hotstrings
+                                .entry(identity.clone())
+                                .or_insert_with(|| path.clone());
+                            local_hotstrings
+                                .entry((menu.id.clone(), identity))
+                                .or_insert(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn canonical_hotkey(parsed: &crate::hotkey::Hotkey) -> String {
+    format!(
+        "{:?}:{}:{}:{}:{}:{}",
+        parsed.key, parsed.ctrl, parsed.shift, parsed.alt, parsed.alt_gr, parsed.win
+    )
 }
 
 fn validate_keep_open(
@@ -661,6 +1523,212 @@ mod tests {
         document.menus[0].center_action = None;
         validate(&document).unwrap();
     }
+
+    #[test]
+    fn managed_media_requires_stable_existing_kind_and_safe_record() {
+        let mut document = valid();
+        document.assets.push(AssetRecord {
+            id: AssetId::new("glow"),
+            kind: MediaKind::Image,
+            relative_path: "images/glow.png".into(),
+            content_sha256: "a".repeat(64),
+            byte_len: 123,
+        });
+        document.menus[0].style.values.images.item_glow =
+            Override::Value(MediaReference::Managed {
+                asset_id: AssetId::new("glow"),
+            });
+        validate(&document).unwrap();
+        document.menus[0].style.values.sounds.on_show = Override::Value(MediaReference::Managed {
+            asset_id: AssetId::new("glow"),
+        });
+        assert!(validate(&document).unwrap_err().0.iter().any(|issue| {
+            issue.path.contains("sounds.on_show") && issue.message.contains("wrong media kind")
+        }));
+        document.assets[0].relative_path = "../escape.png".into();
+        assert!(validate(&document).unwrap_err().0.iter().any(|issue| {
+            issue.path.contains("relative_path") && issue.message.contains("safe relative")
+        }));
+    }
+
+    #[test]
+    fn effective_style_geometry_is_validated_before_layout_or_paging() {
+        let mut document = valid();
+        document.menus[0].style.values.geometry.item_size = Override::Value(180.0);
+        document.menus[0].style.values.geometry.center_size = Override::Value(120.0);
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.contains("rings[0]")
+                && (issue.message.contains("effective style")
+                    || issue.message.contains("paging controls"))
+        }));
+    }
+
+    #[test]
+    fn icon_opacity_is_validated_at_skin_and_cell_scopes() {
+        let mut document = RadialDocument::starter();
+        document.skins[0].style.values.images.icon_opacity = Override::Value(1.1);
+        document.menus[0].rings[0].cells[0]
+            .style
+            .images
+            .icon_opacity = Override::Value(-0.1);
+        let errors = validate(&document).unwrap_err();
+        assert!(
+            errors
+                .0
+                .iter()
+                .any(|issue| issue.path.ends_with("images.icon_opacity"))
+        );
+        assert!(
+            errors
+                .0
+                .iter()
+                .filter(|issue| issue.path.ends_with("images.icon_opacity"))
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn raw_process_media_handles_are_rejected_in_every_typed_external_slot() {
+        for raw in ["hIcon:123", "hBitmap 99", "pBitmap=42"] {
+            let mut document = valid();
+            document.menus[0].rings[0].cells[0].icon =
+                Override::Value(MediaReference::ExternalFile { path: raw.into() });
+            assert!(validate(&document).unwrap_err().0.iter().any(|issue| {
+                issue.path.ends_with(".icon") && issue.message.contains("raw process handle")
+            }));
+        }
+        let mut document = valid();
+        document.menus[0].rings[0].cells[0].icon = Override::Value(MediaReference::SearchPath {
+            file_name: "hIcon.png".into(),
+        });
+        validate(&document).unwrap();
+    }
+
+    #[test]
+    fn item_shortcuts_and_hotstrings_have_typed_scopes_and_conflict_checks() {
+        let mut document = valid();
+        let cell = &mut document.menus[0].rings[0].cells[0];
+        cell.shortcuts = vec![
+            ItemShortcut {
+                id: ShortcutId::new("one"),
+                chord: "Ctrl+Shift+F2".into(),
+                gesture: ClickGesture::Primary,
+                scope: TriggerScope::MenuLocal,
+            },
+            ItemShortcut {
+                id: ShortcutId::new("two"),
+                chord: "shift + ctrl + f2".into(),
+                gesture: ClickGesture::Secondary,
+                scope: TriggerScope::MenuLocal,
+            },
+        ];
+        cell.hotstrings = vec![
+            ItemHotstring {
+                id: HotstringId::new("one"),
+                text: "Open".into(),
+                gesture: ClickGesture::Primary,
+                case_sensitive: false,
+                scope: TriggerScope::MenuLocal,
+            },
+            ItemHotstring {
+                id: HotstringId::new("two"),
+                text: "open".into(),
+                gesture: ClickGesture::Secondary,
+                case_sensitive: false,
+                scope: TriggerScope::MenuLocal,
+            },
+        ];
+        let errors = validate(&document).unwrap_err();
+        assert!(
+            errors
+                .0
+                .iter()
+                .any(|issue| issue.message.contains("duplicate shortcut"))
+        );
+        assert!(
+            errors
+                .0
+                .iter()
+                .any(|issue| issue.message.contains("duplicate hotstring"))
+        );
+    }
+
+    #[test]
+    fn item_input_gesture_must_resolve_to_a_prepared_cell_binding() {
+        let mut document = valid();
+        let cell = &mut document.menus[0].rings[0].cells[0];
+        cell.shortcuts.push(ItemShortcut {
+            id: ShortcutId::new("missing-secondary"),
+            chord: "Ctrl+K".into(),
+            gesture: ClickGesture::Secondary,
+            scope: TriggerScope::MenuLocal,
+        });
+        assert!(validate(&document).unwrap_err().0.iter().any(|issue| {
+            issue.path.ends_with("gesture") && issue.message.contains("prepared action")
+        }));
+    }
+
+    #[test]
+    fn global_item_inputs_conflict_across_cells_and_use_canonical_hotkeys() {
+        let mut document = valid();
+        document.menus[0].rings[0].cells[0].shortcuts = vec![ItemShortcut {
+            id: ShortcutId::new("global-shortcut"),
+            chord: "Win+Alt+F3".into(),
+            gesture: ClickGesture::Primary,
+            scope: TriggerScope::Global,
+        }];
+        document.menus[0].rings[0].cells[1].shortcuts = vec![ItemShortcut {
+            id: ShortcutId::new("local-shortcut"),
+            chord: "alt + super + f3".into(),
+            gesture: ClickGesture::Secondary,
+            scope: TriggerScope::MenuLocal,
+        }];
+        document.menus[0].rings[0].cells[0].hotstrings = vec![ItemHotstring {
+            id: HotstringId::new("global-hotstring"),
+            text: "Launch".into(),
+            gesture: ClickGesture::Primary,
+            case_sensitive: false,
+            scope: TriggerScope::Global,
+        }];
+        document.menus[0].rings[0].cells[1].hotstrings = vec![ItemHotstring {
+            id: HotstringId::new("local-hotstring"),
+            text: "launch".into(),
+            gesture: ClickGesture::Secondary,
+            case_sensitive: true,
+            scope: TriggerScope::MenuLocal,
+        }];
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.contains("shortcuts") && issue.message.contains("conflicts with")
+        }));
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.contains("hotstrings") && issue.message.contains("conflicts with")
+        }));
+    }
+
+    #[test]
+    fn item_shortcuts_share_conflict_ownership_with_menu_triggers() {
+        let mut document = valid();
+        document.custom_triggers.push(TriggerDefinition {
+            id: TriggerId::new("direct"),
+            chord: "Ctrl+F4".into(),
+            menu_id: document.default_menu_id.clone(),
+            scope: TriggerScope::Global,
+        });
+        document.menus[0].rings[0].cells[0].shortcuts = vec![ItemShortcut {
+            id: ShortcutId::new("item"),
+            chord: "control + f4".into(),
+            gesture: ClickGesture::Primary,
+            scope: TriggerScope::MenuLocal,
+        }];
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.contains("shortcuts") && issue.message.contains("custom_triggers[0]")
+        }));
+    }
+
     #[test]
     fn rejects_duplicates_missing_refs_and_bad_numbers() {
         let mut d = valid();
