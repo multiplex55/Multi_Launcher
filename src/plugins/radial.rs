@@ -3,6 +3,11 @@ use crate::plugin::Plugin;
 
 pub struct RadialPlugin;
 
+#[cfg(test)]
+thread_local! {
+    static INVENTORY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl RadialPlugin {
     fn action(
         label: impl Into<String>,
@@ -29,6 +34,8 @@ impl RadialPlugin {
     }
 
     fn menu_inventory() -> Vec<Action> {
+        #[cfg(test)]
+        INVENTORY_CALLS.with(|calls| calls.set(calls.get() + 1));
         crate::gui::radial_published_document()
             .menus
             .iter()
@@ -126,5 +133,15 @@ mod tests {
         assert!(plugin.search("radials").is_empty());
         assert!(!plugin.search("radial show").is_empty());
         assert!(plugin.search("radial show definitely-missing").is_empty());
+    }
+
+    #[test]
+    fn ordinary_query_rejection_does_not_touch_radial_inventory() {
+        INVENTORY_CALLS.with(|calls| calls.set(0));
+        let plugin = RadialPlugin;
+        for query in ["", "notes", "radials", "radially show starter"] {
+            assert!(plugin.search(query).is_empty());
+        }
+        INVENTORY_CALLS.with(|calls| assert_eq!(calls.get(), 0));
     }
 }

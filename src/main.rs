@@ -15,13 +15,14 @@ use multi_launcher::platform::{
 };
 use multi_launcher::plugin::PluginManager;
 use multi_launcher::radial::authoring::{
-    AuthoringReply, AuthoringRequest, authoring_control_service_with_wake,
+    AuthoringReply, AuthoringRequest, AuthoringResourceDemand, AuthoringSessionId,
+    authoring_control_service_with_wake,
 };
 use multi_launcher::radial::control::{
     RadialControlMainEndpoint, RadialControlRequest, radial_control_service_with_wake, resolve_menu,
 };
 use multi_launcher::radial::controller::{ControllerEvent, RadialController};
-use multi_launcher::radial::invocation::InvocationIntent;
+use multi_launcher::radial::invocation::{InvocationIntent, LifecycleCancellation};
 use multi_launcher::radial::item_input::compile_item_inputs;
 use multi_launcher::radial::model::{InteractionMode, InvocationId, RadialDocument};
 use multi_launcher::radial::store::{ExternalReloadOutcome, RadialStore};
@@ -41,6 +42,10 @@ use std::sync::{
     mpsc::{Sender, channel},
 };
 use std::thread;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::ViewportBuilder {
     let (w, h) = settings.window_size.unwrap_or((400, 220));
@@ -416,6 +421,173 @@ struct RadialRoutePlan {
     stop_service: bool,
 }
 
+/// Main-owned boundary for every resource that exists only while radial
+/// runtime or authoring work is demanded. The document/control mailboxes stay
+/// lightweight and available while disabled; native workers and caches do not.
+struct RadialRuntimeResources {
+    runtime_enabled: bool,
+    authoring_sessions: BTreeSet<AuthoringSessionId>,
+    active: bool,
+    watcher: Option<RadialConfigWatcher>,
+    auditions: BTreeMap<AuthoringSessionId, Vec<(String, u64)>>,
+    application_data: PathBuf,
+    wake: Sender<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RadialResourceTransition {
+    None,
+    Acquire,
+    Release,
+}
+
+impl RadialRuntimeResources {
+    fn new(application_data: PathBuf, wake: Sender<()>, runtime_enabled: bool) -> Self {
+        Self {
+            runtime_enabled,
+            authoring_sessions: BTreeSet::new(),
+            active: false,
+            watcher: None,
+            auditions: BTreeMap::new(),
+            application_data,
+            wake,
+        }
+    }
+
+    fn set_runtime_enabled(&mut self, enabled: bool) {
+        self.runtime_enabled = enabled;
+    }
+
+    fn set_authoring_demand(&mut self, demand: AuthoringResourceDemand) {
+        match demand {
+            AuthoringResourceDemand::Acquire(session) => {
+                self.authoring_sessions.insert(session);
+            }
+            AuthoringResourceDemand::Release(session) => {
+                self.authoring_sessions.remove(&session);
+            }
+        }
+    }
+
+    fn demanded(&self) -> bool {
+        self.runtime_enabled || !self.authoring_sessions.is_empty()
+    }
+
+    fn take_transition(&mut self) -> RadialResourceTransition {
+        match (self.active, self.demanded()) {
+            (false, true) => {
+                self.active = true;
+                RadialResourceTransition::Acquire
+            }
+            (true, false) => {
+                self.active = false;
+                RadialResourceTransition::Release
+            }
+            _ => RadialResourceTransition::None,
+        }
+    }
+
+    fn reconcile(&mut self, controller: &mut RadialController) {
+        match self.take_transition() {
+            RadialResourceTransition::Acquire => {
+                controller.configure_resources(self.application_data.clone());
+                self.watcher = match RadialConfigWatcher::start(
+                    &self.application_data,
+                    self.wake.clone(),
+                ) {
+                    Ok(watcher) => Some(watcher),
+                    Err(error) => {
+                        tracing::error!(%error, "radial config watch unavailable; external changes require settings reload");
+                        None
+                    }
+                };
+            }
+            RadialResourceTransition::Release => {
+                self.watcher = None;
+                controller.release_resources();
+            }
+            RadialResourceTransition::None => {}
+        }
+    }
+
+    fn refresh_watcher(&mut self) {
+        if !self.active {
+            return;
+        }
+        let asset_tree = self
+            .application_data
+            .join(multi_launcher::radial::model::RADIAL_ASSETS_DIRECTORY);
+        if !asset_tree.is_dir()
+            || self
+                .watcher
+                .as_ref()
+                .is_some_and(RadialConfigWatcher::watches_asset_tree)
+        {
+            return;
+        }
+        self.watcher = None;
+        self.watcher = match RadialConfigWatcher::start(&self.application_data, self.wake.clone()) {
+            Ok(watcher) => Some(watcher),
+            Err(error) => {
+                tracing::error!(%error, "radial config watch refresh failed");
+                None
+            }
+        };
+    }
+
+    fn take_changes(&self) -> multi_launcher::radial::watch::RadialWatchChanges {
+        self.watcher
+            .as_ref()
+            .map(RadialConfigWatcher::take)
+            .unwrap_or_default()
+    }
+
+    fn track_audition(
+        &mut self,
+        editor_session: AuthoringSessionId,
+        session: &multi_launcher::radial::model::SessionId,
+        generation: u64,
+    ) {
+        self.auditions
+            .entry(editor_session)
+            .or_default()
+            .push((session.as_str().to_owned(), generation));
+    }
+
+    fn stop_editor_auditions(&mut self, editor_session: AuthoringSessionId) {
+        for (session, generation) in self.auditions.remove(&editor_session).unwrap_or_default() {
+            let _ = multi_launcher::sound::stop(multi_launcher::sound::PlaybackScope::Radial {
+                session,
+                generation,
+            });
+        }
+    }
+
+    fn shutdown(&mut self, controller: &mut RadialController) {
+        self.runtime_enabled = false;
+        self.authoring_sessions.clear();
+        for editor_session in self.auditions.keys().copied().collect::<Vec<_>>() {
+            self.stop_editor_auditions(editor_session);
+        }
+        if self.active {
+            self.watcher = None;
+            controller.release_resources();
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for RadialRuntimeResources {
+    fn drop(&mut self) {
+        self.watcher = None;
+        for editor_session in self.auditions.keys().copied().collect::<Vec<_>>() {
+            self.stop_editor_auditions(editor_session);
+        }
+        self.authoring_sessions.clear();
+        self.active = false;
+    }
+}
+
 fn radial_route_plan(
     settings: &Settings,
     document: &RadialDocument,
@@ -451,6 +623,9 @@ fn fail_closed_radial_route(
 ) {
     settings.radial.enabled = false;
     control.set_enabled(false);
+    if let Some(active) = service.as_ref() {
+        let _ = active.cancel_lifecycle(LifecycleCancellation::FeatureDisabled);
+    }
     controller.disable();
     if let Some(mut active) = service.take() {
         active.stop();
@@ -804,6 +979,7 @@ fn main() -> anyhow::Result<()> {
     let mut native_preview =
         multi_launcher::radial::authoring::native_preview::NativePreviewCoordinator::new(
             event_tx.clone(),
+            app_data_root.path().to_path_buf(),
         );
     multi_launcher::gui::install_radial_authoring_client(authoring_client);
     let control_wake = event_tx.clone();
@@ -819,19 +995,17 @@ fn main() -> anyhow::Result<()> {
     let mut radial_command_invocation_id = 1u64 << 63;
     let mut authoring_preview_document: Option<Arc<RadialDocument>> = None;
     let mut authoring_editor_session = None;
-    let radial_watcher = match RadialConfigWatcher::start(app_data_root.path(), event_tx.clone()) {
-        Ok(watcher) => Some(watcher),
-        Err(error) => {
-            tracing::error!(%error, "radial config watch unavailable; external changes require settings reload");
-            None
-        }
-    };
     let mut radial_controller = RadialController::new(
         Arc::clone(&radial_document),
         settings.debug_logging,
         event_tx.clone(),
     );
-    radial_controller.configure_resources(app_data_root.path().to_path_buf());
+    let mut radial_resources = RadialRuntimeResources::new(
+        app_data_root.path().to_path_buf(),
+        event_tx.clone(),
+        settings.radial.enabled,
+    );
+    radial_resources.reconcile(&mut radial_controller);
     let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
     let mut invocation_service = None;
     if settings.radial.enabled {
@@ -870,6 +1044,8 @@ fn main() -> anyhow::Result<()> {
                     emergency_trigger.as_ref(),
                     &event_tx,
                 );
+                radial_resources.set_runtime_enabled(false);
+                radial_resources.reconcile(&mut radial_controller);
             }
         }
     }
@@ -896,7 +1072,12 @@ fn main() -> anyhow::Result<()> {
     loop {
         if let Err(err) = event_rx.recv() {
             tracing::error!(?err, "event channel closed; shutting down launcher loop");
-            radial_controller.disable();
+            if let Some(service) = invocation_service.as_ref() {
+                let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
+            }
+            radial_controller.shutdown();
+            native_preview.cancel_all();
+            radial_resources.shutdown(&mut radial_controller);
             if let Some(service) = invocation_service.as_mut() {
                 service.stop();
             }
@@ -906,7 +1087,12 @@ fn main() -> anyhow::Result<()> {
         }
 
         if handle.is_finished() {
-            radial_controller.disable();
+            if let Some(service) = invocation_service.as_ref() {
+                let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
+            }
+            radial_controller.shutdown();
+            native_preview.cancel_all();
+            radial_resources.shutdown(&mut radial_controller);
             if let Some(service) = invocation_service.as_mut() {
                 service.stop();
             }
@@ -915,10 +1101,7 @@ fn main() -> anyhow::Result<()> {
             break Ok(());
         }
 
-        let radial_changes = radial_watcher
-            .as_ref()
-            .map(RadialConfigWatcher::take)
-            .unwrap_or_default();
+        let radial_changes = radial_resources.take_changes();
         let mut radial_generation_replaced = false;
         if radial_changes.document {
             let reload = radial_store.reload_external_with(|_| {
@@ -975,7 +1158,11 @@ fn main() -> anyhow::Result<()> {
                     let route_plan =
                         radial_route_plan(&settings, &radial_document, settings_generation);
                     if let Some(service) = invocation_service.as_ref() {
-                        match service.begin_route_handoff(route_plan.config, route_plan.related) {
+                        match service.begin_route_handoff(
+                            route_plan.config,
+                            route_plan.related,
+                            LifecycleCancellation::SettingsReload,
+                        ) {
                             Ok(handoff) => {
                                 pending_launcher_route = Some(PendingLauncherRoute {
                                     settings_generation,
@@ -1064,10 +1251,41 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        if radial_changes.assets && !radial_generation_replaced {
-            let _ =
-                multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
-            radial_controller.invalidate_resources();
+        if radial_changes.assets {
+            if !radial_generation_replaced {
+                let _ = multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialInvalidate,
+                );
+                radial_controller.invalidate_resources();
+            }
+            // If the asset tree was created after watcher acquisition, rebuild
+            // the narrow watch set so subsequent descendants are observed.
+            radial_resources.refresh_watcher();
+        }
+
+        while let Ok(demand) = authoring_endpoint.resource_rx.try_recv() {
+            let released = match demand {
+                AuthoringResourceDemand::Acquire(editor_session) => {
+                    authoring_editor_session = Some(editor_session);
+                    false
+                }
+                AuthoringResourceDemand::Release(editor_session) => {
+                    if authoring_editor_session == Some(editor_session) {
+                        authoring_editor_session = None;
+                    }
+                    native_preview.cancel_all();
+                    radial_resources.stop_editor_auditions(editor_session);
+                    if authoring_preview_document.take().is_some() {
+                        radial_controller.replace_document(Arc::clone(&radial_document));
+                    }
+                    true
+                }
+            };
+            radial_resources.set_authoring_demand(demand);
+            if released && !settings.radial.enabled {
+                radial_controller.disable();
+            }
+            radial_resources.reconcile(&mut radial_controller);
         }
 
         while let Ok(request) = authoring_endpoint.request_rx.try_recv() {
@@ -1129,14 +1347,15 @@ fn main() -> anyhow::Result<()> {
                         message: error.to_string(),
                     }),
                 AuthoringRequest::AuditionManagedAsset { asset_id, .. } => {
-                    let mut assets = multi_launcher::radial::assets::AssetService::new(
-                        app_data_root.path().to_path_buf(),
-                        radial_document.media_search_roots.clone(),
-                    );
+                    radial_resources.stop_editor_auditions(editor_session);
                     let reference =
                         multi_launcher::radial::model::MediaReference::Managed { asset_id };
-                    let result = assets
-                        .prepare(
+                    let audition_session = multi_launcher::radial::model::SessionId::new(format!(
+                        "radial-editor-audition-{}",
+                        request_id.0
+                    ));
+                    let result = radial_controller
+                        .prepare_authoring_asset(
                             &reference,
                             multi_launcher::radial::model::MediaKind::Sound,
                             &radial_document.assets,
@@ -1151,10 +1370,7 @@ fn main() -> anyhow::Result<()> {
                         .and_then(|prepared| match &*prepared.media {
                             multi_launcher::radial::assets::PreparedMedia::Sound(sound) => {
                                 multi_launcher::radial::audio::audition_wav(
-                                    multi_launcher::radial::model::SessionId::new(format!(
-                                        "radial-editor-audition-{}",
-                                        request_id.0
-                                    )),
+                                    audition_session.clone(),
                                     request_generation.0,
                                     std::sync::Arc::clone(&sound.wav),
                                 )
@@ -1165,6 +1381,13 @@ fn main() -> anyhow::Result<()> {
                                 multi_launcher::radial::assets::AssetDiagnostic::UnsupportedFormat,
                             ),
                         });
+                    if result.is_ok() {
+                        radial_resources.track_audition(
+                            editor_session,
+                            &audition_session,
+                            request_generation.0,
+                        );
+                    }
                     match result {
                         Ok(()) => AuthoringReply::AssetAuditioned {
                             id: request_id,
@@ -1185,6 +1408,40 @@ fn main() -> anyhow::Result<()> {
                     editor_session,
                     families: radial_controller.font_families().into(),
                 },
+                AuthoringRequest::PrepareEmbeddedPreview {
+                    candidate,
+                    menu_id,
+                    selected,
+                    anchor,
+                    work_area,
+                    scale,
+                    token,
+                    projection,
+                    ..
+                } => native_preview
+                    .prepare_frame(
+                        &candidate,
+                        &menu_id,
+                        anchor,
+                        work_area,
+                        scale,
+                        request_generation.0,
+                        selected.as_ref(),
+                        &projection,
+                    )
+                    .map(|input| AuthoringReply::EmbeddedPreviewPrepared {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        token,
+                        input: Arc::new(input),
+                    })
+                    .unwrap_or_else(|message| AuthoringReply::Failed {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        message,
+                    }),
                 AuthoringRequest::ReplacePackage {
                     expected_revision,
                     expected_disk_sha256,
@@ -1234,9 +1491,11 @@ fn main() -> anyhow::Result<()> {
                             let route_plan =
                                 radial_route_plan(&settings, &radial_document, settings_generation);
                             if let Some(service) = invocation_service.as_ref() {
-                                match service
-                                    .begin_route_handoff(route_plan.config, route_plan.related)
-                                {
+                                match service.begin_route_handoff(
+                                    route_plan.config,
+                                    route_plan.related,
+                                    LifecycleCancellation::SettingsReload,
+                                ) {
                                     Ok(handoff) => {
                                         pending_launcher_route = Some(PendingLauncherRoute {
                                             settings_generation,
@@ -1371,9 +1630,11 @@ fn main() -> anyhow::Result<()> {
                             let route_plan =
                                 radial_route_plan(&settings, &radial_document, settings_generation);
                             if let Some(service) = invocation_service.as_ref() {
-                                match service
-                                    .begin_route_handoff(route_plan.config, route_plan.related)
-                                {
+                                match service.begin_route_handoff(
+                                    route_plan.config,
+                                    route_plan.related,
+                                    LifecycleCancellation::SettingsReload,
+                                ) {
                                     Ok(handoff) => {
                                         pending_launcher_route = Some(PendingLauncherRoute {
                                             settings_generation,
@@ -1430,6 +1691,7 @@ fn main() -> anyhow::Result<()> {
                     candidate,
                     menu_id,
                     sample_external_context,
+                    projection,
                     ..
                 } => {
                     radial_controller.close(
@@ -1445,13 +1707,14 @@ fn main() -> anyhow::Result<()> {
                             {
                                 return Err("native preview draft baseline is stale".into());
                             }
-                            native_preview.start(
+                            native_preview.start_with_projection(
                                 editor_session,
                                 request_generation,
                                 request_id,
                                 candidate,
                                 menu_id,
                                 sample_external_context,
+                                projection,
                             )
                         })
                         .map(|result| AuthoringReply::NativePreviewStarted {
@@ -1460,6 +1723,7 @@ fn main() -> anyhow::Result<()> {
                             editor_session,
                             lease: result.lease,
                             sampled_context: result.sampled_context,
+                            diagnostics: result.diagnostics,
                         })
                         .unwrap_or_else(|message| AuthoringReply::Failed {
                             id: request_id,
@@ -1475,6 +1739,7 @@ fn main() -> anyhow::Result<()> {
                     candidate,
                     menu_id,
                     sample_external_context,
+                    projection,
                     ..
                 } => radial_store
                     .authoring_snapshot()
@@ -1485,13 +1750,14 @@ fn main() -> anyhow::Result<()> {
                         {
                             return Err("native preview draft baseline is stale".into());
                         }
-                        native_preview.update(
+                        native_preview.update_with_projection(
                             &previous,
                             candidate,
                             menu_id,
                             request_generation,
                             request_id,
                             sample_external_context,
+                            projection,
                         )
                     })
                     .map(|result| AuthoringReply::NativePreviewUpdated {
@@ -1500,6 +1766,7 @@ fn main() -> anyhow::Result<()> {
                         editor_session,
                         lease: result.lease,
                         sampled_context: result.sampled_context,
+                        diagnostics: result.diagnostics,
                     })
                     .unwrap_or_else(|message| AuthoringReply::Failed {
                         id: request_id,
@@ -1518,19 +1785,31 @@ fn main() -> anyhow::Result<()> {
             };
             let _ = authoring_endpoint.reply_tx.send(reply);
         }
-        for (lease, error) in native_preview.poll() {
-            let reply = if let Some(message) = error {
-                AuthoringReply::NativePreviewFailed {
+        for notice in native_preview.poll() {
+            let reply = match notice {
+                multi_launcher::radial::authoring::native_preview::NativePreviewNotice::Diagnostics {
+                    lease,
+                    diagnostics,
+                } => AuthoringReply::NativePreviewDiagnostics {
+                    editor_session: lease.editor_session,
+                    lease,
+                    diagnostics,
+                },
+                multi_launcher::radial::authoring::native_preview::NativePreviewNotice::Failed {
+                    lease,
+                    message,
+                } => AuthoringReply::NativePreviewFailed {
                     editor_session: lease.editor_session,
                     lease,
                     message,
-                }
-            } else {
-                AuthoringReply::NativePreviewStopped {
+                },
+                multi_launcher::radial::authoring::native_preview::NativePreviewNotice::Stopped(
+                    lease,
+                ) => AuthoringReply::NativePreviewStopped {
                     id: lease.request_id,
                     generation: lease.generation,
                     editor_session: lease.editor_session,
-                }
+                },
             };
             let _ = authoring_endpoint.reply_tx.send(reply);
         }
@@ -1600,6 +1879,7 @@ fn main() -> anyhow::Result<()> {
                     intents: vec![InvocationIntent::CloseRadial { session_id: None }],
                     error: None,
                     action: None,
+                    cancellation: None,
                 }),
                 RadialControlRequest::Show(selector) => {
                     if !settings.radial.enabled {
@@ -1643,6 +1923,7 @@ fn main() -> anyhow::Result<()> {
                                 }],
                                 error: None,
                                 action: None,
+                                cancellation: None,
                             });
                         }
                         Err(error) => {
@@ -1751,7 +2032,12 @@ fn main() -> anyhow::Result<()> {
         if let Some(qt) = &quit_trigger
             && qt.take()
         {
-            radial_controller.disable();
+            if let Some(service) = invocation_service.as_ref() {
+                let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
+            }
+            radial_controller.shutdown();
+            native_preview.cancel_all();
+            radial_resources.shutdown(&mut radial_controller);
             if let Some(service) = invocation_service.as_mut() {
                 service.stop();
             }
@@ -1777,7 +2063,12 @@ fn main() -> anyhow::Result<()> {
         if exclusive {
             reject_radial_opens_while_exclusive(&mut radial_notices);
         }
+        let mut invocation_route_failed = false;
         for notice in radial_notices {
+            if let Some(cancellation) = notice.cancellation {
+                tracing::debug!(?cancellation, "radial invocation lifecycle cancelled");
+                invocation_route_failed |= cancellation == LifecycleCancellation::HookFailure;
+            }
             if let Some(error) = notice.error {
                 tracing::error!(%error, "launcher invocation service failed closed");
             }
@@ -1795,12 +2086,12 @@ fn main() -> anyhow::Result<()> {
                         );
                     }
                     ControllerEvent::InvocationFailed {
-                        invocation_id,
+                        invocation_id: _,
                         message,
                     } => {
                         tracing::error!(%message,"radial invocation failed");
                         if let Some(service) = invocation_service.as_ref() {
-                            let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id});
+                            let _ = service.cancel_lifecycle(LifecycleCancellation::HostFailure);
                         }
                     }
                     ControllerEvent::Opened {
@@ -1841,6 +2132,30 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        if invocation_route_failed {
+            pending_launcher_route = None;
+            tracing::error!(
+                "launcher invocation lifecycle failed; disabling radial runtime and restoring legacy launcher route"
+            );
+            multi_launcher::gui::send_event(
+                multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(
+                    "The radial launcher input hook stopped unexpectedly. Radial menus were disabled and the legacy launcher hotkey was restored.".into(),
+                ),
+            );
+            fail_closed_radial_route(
+                &mut settings,
+                &radial_control_endpoint,
+                &mut radial_controller,
+                &mut invocation_service,
+                &mut listener,
+                &trigger,
+                quit_trigger.as_ref(),
+                help_trigger.as_ref(),
+                screen_draw_trigger.as_ref(),
+                emergency_trigger.as_ref(),
+                &event_tx,
+            );
+        }
         for event in radial_controller.poll() {
             match event {
                 ControllerEvent::Error(error) => {
@@ -1850,12 +2165,12 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
                 ControllerEvent::InvocationFailed {
-                    invocation_id,
+                    invocation_id: _,
                     message,
                 } => {
                     tracing::error!(%message,"radial native host failed");
                     if let Some(service) = invocation_service.as_ref() {
-                        let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id});
+                        let _ = service.cancel_lifecycle(LifecycleCancellation::HostFailure);
                     }
                 }
                 ControllerEvent::Opened {
@@ -1963,9 +2278,20 @@ fn main() -> anyhow::Result<()> {
             if !settings.radial.enabled {
                 radial_controller.disable();
             }
+            radial_resources.set_runtime_enabled(settings.radial.enabled);
+            radial_resources.reconcile(&mut radial_controller);
             pending_launcher_route = None;
             if let Some(service) = invocation_service.as_ref() {
-                match service.begin_route_handoff(route_plan.config, route_plan.related) {
+                let cancellation = if route_plan.stop_service {
+                    LifecycleCancellation::FeatureDisabled
+                } else {
+                    LifecycleCancellation::SettingsReload
+                };
+                match service.begin_route_handoff(
+                    route_plan.config,
+                    route_plan.related,
+                    cancellation,
+                ) {
                     Ok(handoff) => {
                         pending_launcher_route = Some(PendingLauncherRoute {
                             settings_generation,
@@ -2062,6 +2388,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Consolidate every fail-closed path through the same demand owner.
+        // This is idempotent, so repeated disable/error notifications cannot
+        // construct or retire a resource set more than once.
+        radial_resources.set_runtime_enabled(settings.radial.enabled);
+        radial_resources.reconcile(&mut radial_controller);
+
         let visibility_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             handle_visibility_trigger(
                 trigger.as_ref(),
@@ -2099,6 +2431,69 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn disabled_radial_resources() -> RadialRuntimeResources {
+        let (wake, _rx) = channel();
+        RadialRuntimeResources::new(PathBuf::from("unused-test-root"), wake, false)
+    }
+
+    #[test]
+    fn disabled_startup_has_no_runtime_resource_transition() {
+        let (wake, wake_rx) = channel();
+        let mut resources =
+            RadialRuntimeResources::new(PathBuf::from("unused-test-root"), wake, false);
+        let (controller_wake, _controller_wake_rx) = channel();
+        let controller =
+            RadialController::new(Arc::new(RadialDocument::starter()), false, controller_wake);
+        assert_eq!(resources.take_transition(), RadialResourceTransition::None);
+        assert!(!resources.active);
+        assert!(resources.watcher.is_none());
+        assert!(resources.authoring_sessions.is_empty());
+        assert!(resources.auditions.is_empty());
+        assert!(!controller.resources_configured());
+        assert!(wake_rx.try_recv().is_err(), "disabled startup repainted");
+    }
+
+    #[test]
+    fn editor_demand_acquires_and_releases_without_enabling_runtime() {
+        let mut resources = disabled_radial_resources();
+        let editor = AuthoringSessionId(7);
+        resources.set_authoring_demand(AuthoringResourceDemand::Acquire(editor));
+        assert_eq!(
+            resources.take_transition(),
+            RadialResourceTransition::Acquire
+        );
+        assert!(!resources.runtime_enabled);
+        assert_eq!(resources.take_transition(), RadialResourceTransition::None);
+        resources.set_authoring_demand(AuthoringResourceDemand::Release(editor));
+        assert_eq!(
+            resources.take_transition(),
+            RadialResourceTransition::Release
+        );
+        assert_eq!(resources.take_transition(), RadialResourceTransition::None);
+    }
+
+    #[test]
+    fn repeated_enable_disable_transitions_construct_and_retire_once() {
+        let mut resources = disabled_radial_resources();
+        let mut transitions = Vec::new();
+        for enabled in [true, true, false, false, true, true, false, false] {
+            resources.set_runtime_enabled(enabled);
+            let transition = resources.take_transition();
+            if transition != RadialResourceTransition::None {
+                transitions.push(transition);
+            }
+        }
+        assert_eq!(
+            transitions,
+            vec![
+                RadialResourceTransition::Acquire,
+                RadialResourceTransition::Release,
+                RadialResourceTransition::Acquire,
+                RadialResourceTransition::Release,
+            ]
+        );
+    }
 
     #[test]
     fn build_viewport_with_invalid_icon_bytes_does_not_panic() {
@@ -2523,6 +2918,7 @@ mod tests {
             ],
             error: None,
             action: None,
+            cancellation: None,
         }];
         reject_radial_opens_while_exclusive(&mut notices);
         assert!(matches!(

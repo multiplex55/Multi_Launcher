@@ -989,4 +989,99 @@ mod tests {
             Err(BindingUnavailable::ContextActionMissing { .. })
         ));
     }
+
+    #[test]
+    fn ephemeral_clipboard_list_browser_and_window_targets_revalidate_exactly() {
+        let cases = [
+            (
+                ActionTarget::ClipboardEntry { index: 3 },
+                ActionTarget::ClipboardEntry { index: 4 },
+                action_ids::CLIPBOARD_EDIT,
+            ),
+            (
+                ActionTarget::Todo { index: 5 },
+                ActionTarget::Todo { index: 6 },
+                action_ids::TODO_EDIT,
+            ),
+            (
+                ActionTarget::BrowserTab {
+                    runtime_id: vec![7, 8],
+                    url: Some("https://example.test/a".into()),
+                },
+                ActionTarget::BrowserTab {
+                    runtime_id: vec![7, 9],
+                    url: Some("https://example.test/a".into()),
+                },
+                action_ids::BROWSER_TAB_ACTIVATE,
+            ),
+            (
+                ActionTarget::Window { hwnd: 10 },
+                ActionTarget::Window { hwnd: 11 },
+                action_ids::WINDOW_ACTIVATE,
+            ),
+        ];
+        let registry = UniversalActionRegistry;
+
+        for (target, churned_target, action_id) in cases {
+            assert_eq!(target.persistent_ref(), None, "ephemeral identity leaked");
+            let selected_action = Action {
+                label: "Captured target".into(),
+                desc: "Runtime".into(),
+                action: "runtime:captured".into(),
+                args: None,
+            };
+            let binding = FrozenBinding::Runtime {
+                target: target.clone(),
+                selected_action: selected_action.clone(),
+                action_id: action_id.clone(),
+                identity: None,
+            };
+            let exact = PersistedActionCatalog::new(vec![ResolvedActionTarget {
+                target: target.clone(),
+                selected_action: selected_action.clone(),
+                custom_action_index: None,
+            }]);
+            assert!(
+                RadialBindingResolver {
+                    catalog: &exact,
+                    registry: &registry,
+                }
+                .resolve_frozen(&binding, &context(), "captured query")
+                .is_ok(),
+                "exact target should remain resolvable: {target:?}"
+            );
+
+            let churned = PersistedActionCatalog::new(vec![ResolvedActionTarget {
+                target: churned_target,
+                selected_action: selected_action.clone(),
+                custom_action_index: None,
+            }]);
+            assert!(matches!(
+                RadialBindingResolver {
+                    catalog: &churned,
+                    registry: &registry,
+                }
+                .resolve_frozen(&binding, &context(), "captured query"),
+                Err(BindingUnavailable::ContextActionMissing { action_id: missing })
+                    if missing == action_id
+            ));
+
+            let changed_content = PersistedActionCatalog::new(vec![ResolvedActionTarget {
+                target,
+                selected_action: Action {
+                    label: "Replacement target".into(),
+                    ..selected_action
+                },
+                custom_action_index: None,
+            }]);
+            assert!(matches!(
+                RadialBindingResolver {
+                    catalog: &changed_content,
+                    registry: &registry,
+                }
+                .resolve_frozen(&binding, &context(), "captured query"),
+                Err(BindingUnavailable::ContextActionMissing { .. })
+            ));
+        }
+    }
 }

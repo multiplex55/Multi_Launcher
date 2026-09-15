@@ -63,7 +63,7 @@ pub struct VectorScene {
     pub primitives: Vec<VectorPrimitive>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PreparedSceneResources {
     /// Keys are stable `reference_identity` values, never mutable indices.
     pub media: BTreeMap<String, PreparedAssetSnapshot>,
@@ -519,6 +519,7 @@ pub fn input_owner(layout: &LayoutSnapshot, point: LogicalPoint, ancestor: bool)
     if let Some(cell) = layout
         .cells
         .iter()
+        .rev()
         .find(|cell| shape_contains(&cell.shape, point))
     {
         return if cell.actionable {
@@ -674,6 +675,25 @@ mod tests {
             panic!()
         };
         assert_eq!(input_owner(&l, center, true), InputOwner::Protective);
+    }
+
+    #[test]
+    fn overlapping_cells_share_the_layouts_topmost_winner() {
+        let mut layout = layout();
+        let point = match layout.cells[0].shape {
+            HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => center,
+        };
+        let mut top = layout.cells[0].clone();
+        top.cell_id = crate::radial::model::CellId::new("topmost-overlap");
+        layout.cells.push(top.clone());
+        assert_eq!(
+            layout.hit_test(point).map(|cell| &cell.cell_id),
+            Some(&top.cell_id)
+        );
+        assert_eq!(
+            input_owner(&layout, point, false),
+            InputOwner::Actionable(top.cell_id)
+        );
     }
 
     #[test]

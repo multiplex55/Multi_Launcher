@@ -33,6 +33,49 @@ enum EditorCommand {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResourceNoticeSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResourceNotice {
+    severity: ResourceNoticeSeverity,
+    message: String,
+}
+
+impl ResourceNotice {
+    fn info(message: impl Into<String>) -> Self {
+        Self {
+            severity: ResourceNoticeSeverity::Info,
+            message: message.into(),
+        }
+    }
+    fn warning(message: impl Into<String>) -> Self {
+        Self {
+            severity: ResourceNoticeSeverity::Warning,
+            message: message.into(),
+        }
+    }
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            severity: ResourceNoticeSeverity::Error,
+            message: message.into(),
+        }
+    }
+}
+
+fn show_resource_notice(ui: &mut egui::Ui, notice: &ResourceNotice) {
+    let (color, prefix) = match notice.severity {
+        ResourceNoticeSeverity::Info => (ui.visuals().text_color(), "Info"),
+        ResourceNoticeSeverity::Warning => (ui.visuals().warn_fg_color, "Warning"),
+        ResourceNoticeSeverity::Error => (ui.visuals().error_fg_color, "Error"),
+    };
+    ui.colored_label(color, format!("{prefix}: {}", notice.message));
+}
+
 pub(crate) struct RadialEditorState {
     pub(crate) open: bool,
     session: Option<RadialAuthoringSession>,
@@ -52,10 +95,11 @@ pub(crate) struct RadialEditorState {
     export_destination: Option<std::path::PathBuf>,
     replace_backup_path: Option<std::path::PathBuf>,
     replace_confirmed: bool,
-    resource_error: Option<String>,
+    resource_notice: Option<ResourceNotice>,
     show_resources: bool,
     style_text_inputs: std::collections::BTreeMap<String, String>,
     ring_resize_drafts: std::collections::BTreeMap<(MenuId, RingId), usize>,
+    focus_restore: Option<StableSelection>,
 }
 
 impl Default for RadialEditorState {
@@ -79,10 +123,11 @@ impl Default for RadialEditorState {
             export_destination: None,
             replace_backup_path: None,
             replace_confirmed: false,
-            resource_error: None,
+            resource_notice: None,
             show_resources: false,
             style_text_inputs: Default::default(),
             ring_resize_drafts: Default::default(),
+            focus_restore: None,
         }
     }
 }
@@ -96,6 +141,7 @@ impl RadialEditorState {
         self.close_prompt = false;
         self.drag_source = None;
         self.post_render.clear();
+        self.focus_restore = None;
         let document = RadialDocument::starter();
         let mut session = RadialAuthoringSession::new(AuthoringSnapshot {
             revision: document.revision,
@@ -104,6 +150,7 @@ impl RadialEditorState {
         });
         self.client = super::radial_authoring_client();
         if let Some(client) = &self.client {
+            client.acquire_resources(session.editor_session());
             if let Ok(request) = session.request_snapshot() {
                 let _ = client.send(request);
             }
@@ -170,6 +217,7 @@ impl RadialEditorState {
         match session.close_decision() {
             CloseDecision::CloseClean => {
                 self.stop_native_preview();
+                self.release_authoring_resources();
                 self.open = false;
             }
             CloseDecision::PromptDirty => self.close_prompt = true,
@@ -179,9 +227,11 @@ impl RadialEditorState {
 
     pub(crate) fn force_close(&mut self) {
         self.stop_native_preview();
+        self.release_authoring_resources();
         self.open = false;
         self.session = None;
         self.close_prompt = false;
+        self.focus_restore = None;
     }
 
     fn send_commit(&mut self, disposition: CommitDisposition) {
@@ -224,14 +274,25 @@ impl RadialEditorState {
         ) {
             match crate::common::atomic_file::save_atomic(&path, &bytes) {
                 Ok(()) => {
-                    self.resource_error = Some(format!("Exported package to {}", path.display()))
+                    self.resource_notice = Some(ResourceNotice::info(format!(
+                        "Exported package to {}",
+                        path.display()
+                    )))
                 }
-                Err(error) => self.resource_error = Some(error.to_string()),
+                Err(error) => self.resource_notice = Some(ResourceNotice::error(error.to_string())),
             }
         }
         if session.is_closed() {
+            self.release_authoring_resources();
             self.open = false;
         }
+    }
+
+    fn release_authoring_resources(&mut self) {
+        if let (Some(client), Some(session)) = (&self.client, &self.session) {
+            client.release_resources(session.editor_session());
+        }
+        self.client = None;
     }
 
     fn send_native_preview(&mut self, update: bool) {
@@ -240,10 +301,18 @@ impl RadialEditorState {
         };
         let menu_id =
             selected_menu_id(session).unwrap_or_else(|| session.draft.default_menu_id.clone());
+        let selected_skin = match session.selection.as_ref() {
+            Some(StableSelection::Skin(id)) => Some(id.clone()),
+            _ => None,
+        };
         let request = if update {
-            session.request_update_native_preview(menu_id, self.sample_native_context)
+            session.request_update_native_preview(
+                menu_id,
+                self.sample_native_context,
+                selected_skin,
+            )
         } else {
-            session.request_start_native_preview(menu_id, self.sample_native_context)
+            session.request_start_native_preview(menu_id, self.sample_native_context, selected_skin)
         };
         match (request, &self.client) {
             (Ok(request), Some(client)) => {
@@ -296,6 +365,10 @@ impl RadialEditorState {
         if !self.open {
             return;
         }
+        let selection_before = self
+            .session
+            .as_ref()
+            .and_then(|session| session.selection.clone());
         let mut window_open = true;
         egui::Window::new("Radial Menu Editor")
             .id(egui::Id::new("radial-menu-editor"))
@@ -314,7 +387,10 @@ impl RadialEditorState {
                     .map(|conflict| conflict.reason.clone())
                 {
                     ui.group(|ui| {
-                        ui.colored_label(egui::Color32::YELLOW, conflict_reason);
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!("Conflict: {conflict_reason}"),
+                        );
                         ui.horizontal(|ui| {
                             for (label, resolution) in [
                                 ("Reload", ConflictResolution::Reload),
@@ -328,9 +404,16 @@ impl RadialEditorState {
                         });
                     });
                 }
+                let preview_selection = session.selection.clone();
+                self.preview.sync_preparation(
+                    session,
+                    self.client.as_ref(),
+                    self.preview_preset,
+                    preview_selection.as_ref(),
+                );
+                let prepared_preview = self.preview.prepared_frame(session);
                 let draft = session.draft.clone();
                 let generation = session.generation.0;
-                let preview_selection = session.selection.clone();
                 let initial_snapshot_pending = session.is_initial_snapshot_pending();
                 let feature_defaults = app.radial_feature_settings.clone();
                 if initial_snapshot_pending {
@@ -350,6 +433,7 @@ impl RadialEditorState {
                             self.preview_zoom,
                             self.preview_preset,
                             preview_selection.as_ref(),
+                            prepared_preview.as_deref(),
                         );
                         self.inspector(&mut columns[2], app);
                     });
@@ -370,6 +454,14 @@ impl RadialEditorState {
             self.request_close();
         }
         self.prompts(ctx);
+        self.keyboard_shortcuts(ctx);
+        let selection_after = self
+            .session
+            .as_ref()
+            .and_then(|session| session.selection.clone());
+        if selection_after != selection_before {
+            self.focus_restore = selection_after;
+        }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -380,6 +472,7 @@ impl RadialEditorState {
                 .is_some_and(|session| session.pending_request.is_some());
             if ui
                 .add_enabled(!pending, egui::Button::new("Undo"))
+                .on_hover_text("Undo (Ctrl+Z)")
                 .clicked()
             {
                 let _ = self
@@ -389,6 +482,7 @@ impl RadialEditorState {
             }
             if ui
                 .add_enabled(!pending, egui::Button::new("Redo"))
+                .on_hover_text("Redo (Ctrl+Shift+Z)")
                 .clicked()
             {
                 let _ = self
@@ -412,6 +506,7 @@ impl RadialEditorState {
             if ui
                 .add_enabled(!pending && valid, egui::Button::new("Save"))
                 .on_disabled_hover_text("Resolve the inline validation diagnostics before Save")
+                .on_hover_text("Save and close (Ctrl+S)")
                 .clicked()
             {
                 self.send_commit(CommitDisposition::Save);
@@ -426,7 +521,7 @@ impl RadialEditorState {
                     "Saved"
                 });
                 if let Some(error) = &session.last_error {
-                    ui.colored_label(egui::Color32::RED, error);
+                    ui.colored_label(ui.visuals().error_fg_color, format!("Error: {error}"));
                 }
             }
         });
@@ -440,12 +535,55 @@ impl RadialEditorState {
                 |ui| {
                     for issue in errors.0 {
                         ui.colored_label(
-                            egui::Color32::RED,
-                            format!("{}: {}", issue.path, issue.message),
+                            ui.visuals().error_fg_color,
+                            format!("Error at {}: {}", issue.path, issue.message),
                         );
                     }
                 },
             );
+        }
+    }
+
+    /// Consume editor shortcuts after widgets have had a chance to consume
+    /// text-editing keys. This preserves native text undo while still making
+    /// the authoring operations keyboard-only accessible.
+    fn keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let pending = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.pending_request.is_some());
+        let modal_open = self.close_prompt
+            || self.delete_message.is_some()
+            || self.delete_ring_prompt.is_some()
+            || self.resize_prompt.is_some();
+        if pending || modal_open {
+            return;
+        }
+        let (redo, undo, save) = ctx.input_mut(|input| {
+            let redo =
+                input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Z);
+            let undo = !redo && input.consume_key(egui::Modifiers::CTRL, egui::Key::Z);
+            let save = input.consume_key(egui::Modifiers::CTRL, egui::Key::S);
+            (redo, undo, save)
+        });
+        if undo {
+            let _ = self
+                .session
+                .as_mut()
+                .is_some_and(RadialAuthoringSession::undo);
+        } else if redo {
+            let _ = self
+                .session
+                .as_mut()
+                .is_some_and(RadialAuthoringSession::redo);
+        }
+        if save
+            && self
+                .session
+                .as_ref()
+                .is_some_and(|session| crate::radial::validation::validate(&session.draft).is_ok())
+        {
+            self.send_commit(CommitDisposition::Save);
         }
     }
 
@@ -512,6 +650,12 @@ impl RadialEditorState {
                         .map(|window| format!("Context: {}", window.title))
                         .unwrap_or_else(|| "Context: synthetic".into());
                     ui.small(context_label);
+                }
+                for diagnostic in &session.native_preview_diagnostics {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("Desktop preview warning: {diagnostic}"),
+                    );
                 }
             }
         });
@@ -641,6 +785,7 @@ impl RadialEditorState {
                                                 &row.inherited,
                                                 text_input,
                                                 &session.font_families,
+                                                &format!("{}.{}", row.section, row.field),
                                             ) && let Err(error) = skin_editor::set_override_edit(
                                                 session,
                                                 &scope,
@@ -649,7 +794,7 @@ impl RadialEditorState {
                                                 value,
                                                 phase,
                                             ) {
-                                                self.resource_error = Some(error);
+                                                self.resource_notice = Some(ResourceNotice::error(error));
                                             }
                                             if skin_editor::is_media_field(&row.section, &row.field) {
                                                 let media_kind = if row.section == "sounds" {
@@ -675,9 +820,15 @@ impl RadialEditorState {
                                                             });
                                                         match selected {
                                                             Ok(choice) => {
-                                                                self.resource_error = Some(
-                                                                    choice.portability_diagnostic().into(),
-                                                                );
+                                                                self.resource_notice = Some(if managed {
+                                                                    ResourceNotice::info(
+                                                                        choice.portability_diagnostic(),
+                                                                    )
+                                                                } else {
+                                                                    ResourceNotice::warning(
+                                                                        choice.portability_diagnostic(),
+                                                                    )
+                                                                });
                                                                 if let Err(error) = skin_editor::set_media_override(
                                                                     session,
                                                                     &scope,
@@ -685,10 +836,10 @@ impl RadialEditorState {
                                                                     &row.field,
                                                                     &choice,
                                                                 ) {
-                                                                    self.resource_error = Some(error);
+                                                                    self.resource_notice = Some(ResourceNotice::error(error));
                                                                 }
                                                             }
-                                                            Err(error) => self.resource_error = Some(error),
+                                                            Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
                                                         }
                                                     }
                                                 }
@@ -736,7 +887,7 @@ impl RadialEditorState {
                         });
                 }
                 Err(error) => {
-                    ui.colored_label(egui::Color32::RED, error);
+                    ui.colored_label(ui.visuals().error_fg_color, format!("Error: {error}"));
                 }
             }
         }
@@ -771,9 +922,10 @@ impl RadialEditorState {
                             asset_picker::add_resource(session, &choice).map(|_| choice)
                         }) {
                         Ok(choice) => {
-                            self.resource_error = Some(choice.portability_diagnostic().into())
+                            self.resource_notice =
+                                Some(ResourceNotice::info(choice.portability_diagnostic()))
                         }
-                        Err(error) => self.resource_error = Some(error),
+                        Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
                     }
                 }
             }
@@ -821,8 +973,8 @@ impl RadialEditorState {
             ui.label(format!("Verified replacement backup: {}", path.display()));
         }
         self.package_controls(ui);
-        if let Some(error) = &self.resource_error {
-            ui.colored_label(egui::Color32::RED, error);
+        if let Some(notice) = &self.resource_notice {
+            show_resource_notice(ui, notice);
         }
     }
 
@@ -844,12 +996,12 @@ impl RadialEditorState {
                     Ok(bytes) => match PendingImport::package(&bytes, session) {
                         Ok(preview) => Some(preview),
                         Err(error) => {
-                            self.resource_error = Some(error.to_string());
+                            self.resource_notice = Some(ResourceNotice::error(error.to_string()));
                             None
                         }
                     },
                     Err(error) => {
-                        self.resource_error = Some(error.to_string());
+                        self.resource_notice = Some(ResourceNotice::error(error.to_string()));
                         None
                     }
                 };
@@ -857,10 +1009,9 @@ impl RadialEditorState {
             if ui.button("Export selected menu").clicked() {
                 if let Some(menu_id) = selected_menu_id(session) {
                     if session.is_dirty() {
-                        self.resource_error = Some(
-                            "Save or apply the draft before exporting persisted package bytes"
-                                .into(),
-                        );
+                        self.resource_notice = Some(ResourceNotice::warning(
+                            "Save or apply the draft before exporting persisted package bytes",
+                        ));
                     } else if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Multi Launcher radial", &["mlradial"])
                         .set_file_name("menu.mlradial")
@@ -896,7 +1047,7 @@ impl RadialEditorState {
                     "all-radial-menus.mlradial",
                 ) {
                     Ok(path) => self.export_destination = path,
-                    Err(error) => self.resource_error = Some(error),
+                    Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
                 }
             }
             if ui.button("Export selected skin").clicked()
@@ -904,7 +1055,7 @@ impl RadialEditorState {
             {
                 match begin_skin_export(self.client.as_ref(), session, skin_id, "skin.mlradial") {
                     Ok(path) => self.export_destination = path,
-                    Err(error) => self.resource_error = Some(error),
+                    Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
                 }
             }
             for (label, source) in [
@@ -922,7 +1073,7 @@ impl RadialEditorState {
                 {
                     match preview_legacy_files(&paths, source, session) {
                         Ok(preview) => self.pending_import = Some(preview),
-                        Err(error) => self.resource_error = Some(error),
+                        Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
                     }
                 }
             }
@@ -935,7 +1086,10 @@ impl RadialEditorState {
                     ui.label(mapping);
                 }
                 for warning in preview.warnings() {
-                    ui.colored_label(egui::Color32::YELLOW, warning);
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("Warning: {warning}"),
+                    );
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Create new (default)").clicked() {
@@ -943,7 +1097,7 @@ impl RadialEditorState {
                         self.replace_confirmed = false;
                         self.replace_backup_path = None;
                         if let Err(error) = preview.clone().accept_create_new(session) {
-                            self.resource_error = Some(format!("{error:?}"));
+                            self.resource_notice = Some(ResourceNotice::error(format!("{error:?}")));
                         }
                     }
                     if ui.button("Cancel preview").clicked() {
@@ -1015,6 +1169,7 @@ impl RadialEditorState {
         ui.heading("Menus and rings");
         let drag_source = &mut self.drag_source;
         let post_render = &mut self.post_render;
+        let focus_restore = &mut self.focus_restore;
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -1032,7 +1187,7 @@ impl RadialEditorState {
                                 menu_id: menu.id.clone(),
                                 ring_id: ring.id.clone(),
                             };
-                            if ui
+                            let ring_response = ui
                                 .push_id(
                                     menu::widget_key(
                                         "ring",
@@ -1046,9 +1201,12 @@ impl RadialEditorState {
                                         )
                                     },
                                 )
-                                .inner
-                                .clicked()
-                            {
+                                .inner;
+                            if focus_restore.as_ref() == Some(&ring_selection) {
+                                ring_response.request_focus();
+                                *focus_restore = None;
+                            }
+                            if ring_response.clicked() {
                                 session.select(Some(ring_selection));
                             }
                             ui.indent(
@@ -1072,14 +1230,27 @@ impl RadialEditorState {
                                                     "tree",
                                                 ),
                                                 |ui| {
-                                                    ui.selectable_label(
-                                                        session.selection.as_ref()
-                                                            == Some(&selection),
-                                                        &cell.label,
-                                                    )
+                                                    let selected = session.selection.as_ref()
+                                                        == Some(&selection);
+                                                    let accessible_name =
+                                                        cell_tree_accessible_name(cell, index);
+                                                    let response =
+                                                        ui.selectable_label(selected, &cell.label);
+                                                    response.widget_info(|| {
+                                                        egui::WidgetInfo::selected(
+                                                            egui::WidgetType::SelectableLabel,
+                                                            selected,
+                                                            accessible_name.clone(),
+                                                        )
+                                                    });
+                                                    response
                                                 },
                                             )
                                             .inner;
+                                        if focus_restore.as_ref() == Some(&selection) {
+                                            response.request_focus();
+                                            *focus_restore = None;
+                                        }
                                         if response.clicked() {
                                             session.select(Some(selection));
                                         }
@@ -1111,6 +1282,10 @@ impl RadialEditorState {
                             );
                         }
                     });
+                if focus_restore.as_ref() == Some(&StableSelection::Menu(menu.id.clone())) {
+                    header.header_response.request_focus();
+                    *focus_restore = None;
+                }
                 if header.header_response.clicked() || menu_selected && session.selection.is_none()
                 {
                     session.select(Some(StableSelection::Menu(menu.id.clone())));
@@ -1256,10 +1431,14 @@ impl RadialEditorState {
                 .add_enabled(menu_index > 0, egui::Button::new("Move up"))
                 .clicked()
             {
-                let _ = menu::move_menu(session, &menu_id, menu_index.saturating_sub(1));
+                if menu::move_menu(session, &menu_id, menu_index.saturating_sub(1)).is_ok() {
+                    self.focus_restore = session.selection.clone();
+                }
             }
             if ui.button("Move down").clicked() {
-                let _ = menu::move_menu(session, &menu_id, menu_index + 1);
+                if menu::move_menu(session, &menu_id, menu_index + 1).is_ok() {
+                    self.focus_restore = session.selection.clone();
+                }
             }
         });
         if ui.button("Duplicate (link submenus)").clicked() {
@@ -1363,10 +1542,16 @@ impl RadialEditorState {
                 .add_enabled(ring_index > 0, egui::Button::new("Move inward"))
                 .clicked()
             {
-                let _ = menu::move_ring(session, &menu_id, &ring_id, ring_index.saturating_sub(1));
+                if menu::move_ring(session, &menu_id, &ring_id, ring_index.saturating_sub(1))
+                    .is_ok()
+                {
+                    self.focus_restore = session.selection.clone();
+                }
             }
             if ui.button("Move outward").clicked() {
-                let _ = menu::move_ring(session, &menu_id, &ring_id, ring_index + 1);
+                if menu::move_ring(session, &menu_id, &ring_id, ring_index + 1).is_ok() {
+                    self.focus_restore = session.selection.clone();
+                }
             }
         });
         if ui.button("Add spacer").clicked() {
@@ -1637,7 +1822,10 @@ impl RadialEditorState {
                                     );
                                 }
                                 if row.destructive {
-                                    ui.colored_label(egui::Color32::YELLOW, "Destructive");
+                                    ui.colored_label(
+                                        ui.visuals().warn_fg_color,
+                                        "Destructive action",
+                                    );
                                 }
                                 ui.vertical(|ui| {
                                     ui.small(format!("Command: {}", row.target_command));
@@ -1676,11 +1864,15 @@ impl RadialEditorState {
                     destination_ring,
                     index,
                 } => {
-                    let _ = menu::move_cell(
+                    if menu::move_cell(
                         session,
                         (&source_menu, &source_ring, &cell),
                         (&destination_menu, &destination_ring, index),
-                    );
+                    )
+                    .is_ok()
+                    {
+                        self.focus_restore = session.selection.clone();
+                    }
                 }
             }
         }
@@ -1868,6 +2060,34 @@ impl RadialEditorState {
     }
 }
 
+fn cell_tree_accessible_name(cell: &crate::radial::model::CellDefinition, index: usize) -> String {
+    if !cell.label.trim().is_empty() {
+        return cell.label.trim().to_owned();
+    }
+    if let crate::radial::model::Override::Value(tooltip) = &cell.tooltip
+        && !tooltip.trim().is_empty()
+    {
+        return tooltip.trim().to_owned();
+    }
+    if matches!(cell.icon, crate::radial::model::Override::Value(_)) {
+        let role = match &cell.content {
+            CellContent::Action { .. } => "Action",
+            CellContent::Dynamic { .. } => "Dynamic item",
+            CellContent::Submenu { .. } => "Submenu",
+            CellContent::Control { control } => match control {
+                Control::Back => "Back",
+                Control::Close => "Close",
+                Control::NextPage => "Next page",
+                Control::PreviousPage => "Previous page",
+                Control::Drag => "Drag",
+            },
+            CellContent::Spacer => "Spacer",
+        };
+        return format!("{role} icon");
+    }
+    format!("Cell {} ({})", index + 1, cell.id)
+}
+
 fn selected_menu_id(session: &RadialAuthoringSession) -> Option<MenuId> {
     match session.selection.as_ref()? {
         StableSelection::Menu(id)
@@ -1960,6 +2180,7 @@ fn style_value_widget(
     inherited: &serde_json::Value,
     text_input: &mut String,
     font_families: &[String],
+    accessible_name: &str,
 ) -> Option<(serde_json::Value, EditPhase)> {
     use skin_editor::StyleControlKind;
     let payload = skin_editor::override_payload(current)
@@ -1969,6 +2190,9 @@ fn style_value_widget(
         StyleControlKind::Toggle => {
             let mut value = payload.as_bool().unwrap_or(false);
             let response = ui.checkbox(&mut value, "");
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Checkbox, value, accessible_name)
+            });
             (response.changed() || response.lost_focus())
                 .then(|| (serde_json::json!(value), widget_edit_phase(&response)))
         }
@@ -1979,6 +2203,13 @@ fn style_value_widget(
             } else {
                 ui.add(egui::DragValue::new(&mut value).speed(0.05))
             };
+            response.widget_info(|| {
+                if kind == StyleControlKind::Opacity {
+                    egui::WidgetInfo::slider(f64::from(value), accessible_name)
+                } else {
+                    egui::WidgetInfo::labeled(egui::WidgetType::DragValue, accessible_name)
+                }
+            });
             (response.changed() || response.drag_stopped() || response.lost_focus())
                 .then(|| (serde_json::json!(value), widget_edit_phase(&response)))
         }
@@ -1989,17 +2220,37 @@ fn style_value_widget(
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(fallback) as u8
             };
-            let mut color = egui::Color32::from_rgba_unmultiplied(
+            let original = [
                 component("red", 255),
                 component("green", 255),
                 component("blue", 255),
                 component("alpha", 255),
+            ];
+            let mut color = egui::Color32::from_rgba_unmultiplied(
+                original[0],
+                original[1],
+                original[2],
+                original[3],
             );
             let response = ui.color_edit_button_srgba(&mut color);
+            let [red, green, blue, alpha] = if response.changed() {
+                color.to_srgba_unmultiplied()
+            } else {
+                original
+            };
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::ColorButton,
+                    format!(
+                        "{accessible_name}: rgba({}, {}, {}, {})",
+                        red, green, blue, alpha
+                    ),
+                )
+            });
             (response.changed() || response.drag_stopped() || response.lost_focus()).then(|| {
                 (
                     serde_json::json!({
-                        "red": color.r(), "green": color.g(), "blue": color.b(), "alpha": color.a()
+                        "red": red, "green": green, "blue": blue, "alpha": alpha
                     }),
                     widget_edit_phase(&response),
                 )
@@ -2016,6 +2267,18 @@ fn style_value_widget(
                 .unwrap_or(0.0) as f32;
             let x_response = ui.add(egui::DragValue::new(&mut x).prefix("x "));
             let y_response = ui.add(egui::DragValue::new(&mut y).prefix("y "));
+            x_response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::DragValue,
+                    format!("{accessible_name} x"),
+                )
+            });
+            y_response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::DragValue,
+                    format!("{accessible_name} y"),
+                )
+            });
             let response = if x_response.changed() || x_response.drag_stopped() {
                 x_response
             } else {
@@ -2044,7 +2307,7 @@ fn style_value_widget(
             };
             let mut value = payload.as_str().unwrap_or(choices[0].1).to_owned();
             let before = value.clone();
-            egui::ComboBox::from_id_source(ui.next_auto_id())
+            let combo = egui::ComboBox::from_id_source(ui.next_auto_id())
                 .selected_text(
                     choices
                         .iter()
@@ -2056,6 +2319,9 @@ fn style_value_widget(
                         ui.selectable_value(&mut value, (*wire).to_owned(), *label);
                     }
                 });
+            combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, accessible_name)
+            });
             (value != before).then(|| (serde_json::json!(value), EditPhase::Atomic))
         }
         StyleControlKind::Font => {
@@ -2063,7 +2329,7 @@ fn style_value_widget(
                 *text_input = payload.as_str().unwrap_or_default().to_owned();
             }
             let before = text_input.clone();
-            egui::ComboBox::from_id_source(ui.next_auto_id())
+            let combo = egui::ComboBox::from_id_source(ui.next_auto_id())
                 .selected_text(if text_input.is_empty() {
                     "System fallback"
                 } else {
@@ -2075,8 +2341,16 @@ fn style_value_widget(
                         ui.selectable_value(text_input, family.clone(), family);
                     }
                 });
+            combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, accessible_name)
+            });
             let combo_changed = *text_input != before;
             let response = ui.text_edit_singleline(text_input);
+            response.widget_info(|| {
+                let mut info = egui::WidgetInfo::text_edit("", text_input.as_str());
+                info.label = Some(accessible_name.into());
+                info
+            });
             if response.changed() || response.lost_focus() {
                 Some((
                     serde_json::json!(text_input.clone()),
@@ -2093,6 +2367,11 @@ fn style_value_widget(
                 *text_input = payload.as_str().unwrap_or_default().to_owned();
             }
             let response = ui.text_edit_singleline(text_input);
+            response.widget_info(|| {
+                let mut info = egui::WidgetInfo::text_edit("", text_input.as_str());
+                info.label = Some(accessible_name.into());
+                info
+            });
             (response.changed() || response.lost_focus()).then(|| {
                 (
                     serde_json::json!(text_input.clone()),
@@ -2112,6 +2391,11 @@ fn style_value_widget(
             let path_response = ui
                 .text_edit_singleline(text_input)
                 .on_hover_text("Search-path file name or icon resource path");
+            path_response.widget_info(|| {
+                let mut info = egui::WidgetInfo::text_edit("", text_input.as_str());
+                info.label = Some(accessible_name.into());
+                info
+            });
             let mut resource = payload.clone();
             if let Some(object) = resource.as_object_mut() {
                 if object.contains_key("path") {
@@ -2126,6 +2410,12 @@ fn style_value_widget(
                 let mut index = i32::try_from(index).unwrap_or(1).max(1);
                 let index_response =
                     ui.add(egui::DragValue::new(&mut index).prefix("Resource index "));
+                index_response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::DragValue,
+                        format!("{accessible_name} resource index"),
+                    )
+                });
                 if let Some(object) = resource.as_object_mut() {
                     object.insert("index".into(), serde_json::json!(index));
                 }
@@ -3235,6 +3525,9 @@ mod tests {
         assert!(
             matches!(editor.session.as_ref().unwrap().selection.as_ref(), Some(StableSelection::Cell { cell_id: selected, .. }) if selected == &cell_id)
         );
+        assert!(
+            matches!(editor.focus_restore.as_ref(), Some(StableSelection::Cell { cell_id: focused, .. }) if focused == &cell_id)
+        );
     }
 
     #[test]
@@ -3406,5 +3699,214 @@ mod tests {
         assert!(menu.center_action.is_some() && menu.center_secondary_action.is_some());
         assert!(menu.background_action.is_some() && menu.background_secondary_action.is_some());
         assert_eq!(menu.rings[0].cells[0].alternate_clicks.len(), 1);
+    }
+
+    #[test]
+    fn accessibility_contract_names_blank_controls_and_restores_stable_focus() {
+        let source = include_str!("mod.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(production.contains("WidgetInfo::selected(egui::WidgetType::Checkbox"));
+        assert!(production.contains("egui::WidgetType::ColorButton"));
+        assert!(production.contains("egui::WidgetType::ComboBox"));
+        assert!(production.contains("info.label = Some(accessible_name.into())"));
+        assert!(production.contains("focus_restore.as_ref() == Some(&ring_selection)"));
+        assert!(production.contains("focus_restore.as_ref() == Some(&selection)"));
+        assert!(production.contains("response.request_focus()"));
+        assert!(production.contains("self.focus_restore = session.selection.clone()"));
+        assert!(production.contains("ui.visuals().error_fg_color"));
+        assert!(production.contains("ui.visuals().warn_fg_color"));
+        assert!(!production.contains("Color32::RED"));
+        assert!(!production.contains("Color32::YELLOW"));
+
+        // These visible words are intentional redundant state channels: unavailable,
+        // error, selected, and destructive operations are not communicated by color
+        // or icon alone.
+        for semantic_text in [
+            "Availability:",
+            "Delete blocked:",
+            "Loading the authoritative radial configuration",
+            "Remove alternate action",
+            "Move inward",
+            "Move outward",
+        ] {
+            assert!(
+                production.contains(semantic_text),
+                "missing {semantic_text}"
+            );
+        }
+    }
+
+    #[test]
+    fn headless_accesskit_tree_exposes_style_control_roles_names_and_state() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut scratch = String::new();
+                let inherited_color = skin_editor::with_payload(serde_json::json!({
+                    "red": 12,
+                    "green": 34,
+                    "blue": 56,
+                    "alpha": 78
+                }));
+                let inherited_toggle = skin_editor::with_payload(serde_json::json!(false));
+                let _ = style_value_widget(
+                    ui,
+                    skin_editor::StyleControlKind::Color,
+                    &serde_json::Value::Null,
+                    &inherited_color,
+                    &mut scratch,
+                    &[],
+                    "text.color",
+                );
+                let _ = style_value_widget(
+                    ui,
+                    skin_editor::StyleControlKind::Toggle,
+                    &serde_json::Value::Null,
+                    &inherited_toggle,
+                    &mut scratch,
+                    &[],
+                    "text.visible",
+                );
+            });
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit tree update");
+        assert!(update.nodes.iter().any(|(_, node)| {
+            node.role() == egui::accesskit::Role::ColorWell
+                && node
+                    .name()
+                    .is_some_and(|name| name.contains("text.color: rgba(12, 34, 56, 78)"))
+        }));
+        assert!(update.nodes.iter().any(|(_, node)| {
+            node.role() == egui::accesskit::Role::CheckBox
+                && node.name() == Some("text.visible")
+                && node.checked() == Some(egui::accesskit::Checked::False)
+        }));
+    }
+
+    #[test]
+    fn headless_accesskit_tree_names_a_completely_blank_cell_by_stable_id() {
+        let mut document = RadialDocument::starter();
+        let cell = &mut document.menus[0].rings[0].cells[0];
+        cell.label.clear();
+        cell.tooltip = crate::radial::model::Override::Inherit;
+        cell.icon = crate::radial::model::Override::Inherit;
+        let expected = format!("Cell 1 ({})", cell.id);
+        let mut editor = RadialEditorState::default();
+        editor.session = Some(RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::new(document),
+            "test",
+        )));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                editor.tree(ui, &crate::radial::model::RadialFeatureSettings::default());
+            });
+        });
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit tree update");
+        assert!(update.nodes.iter().any(|(_, node)| {
+            node.role() == egui::accesskit::Role::ToggleButton
+                && node.name() == Some(expected.as_str())
+        }));
+    }
+
+    #[test]
+    fn resource_notice_severity_keeps_success_and_portability_non_error_in_accesskit() {
+        let notices = [
+            ResourceNotice::info("Exported package"),
+            ResourceNotice::info("Managed and portable"),
+            ResourceNotice::warning("External path; excluded from portable packages"),
+            ResourceNotice::error("Decode failed"),
+        ];
+        assert_eq!(notices[0].severity, ResourceNoticeSeverity::Info);
+        assert_eq!(notices[1].severity, ResourceNoticeSeverity::Info);
+        assert_eq!(notices[2].severity, ResourceNoticeSeverity::Warning);
+        assert_eq!(notices[3].severity, ResourceNoticeSeverity::Error);
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        ctx.begin_frame(egui::RawInput::default());
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            for notice in &notices {
+                show_resource_notice(ui, notice);
+            }
+        });
+        let output = ctx.end_frame();
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit tree update");
+        let names = update
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.name())
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| *name == "Info: Exported package"));
+        assert!(
+            names
+                .iter()
+                .any(|name| *name == "Info: Managed and portable")
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name.starts_with("Warning: External path"))
+        );
+        assert!(names.iter().any(|name| *name == "Error: Decode failed"));
+    }
+
+    #[test]
+    fn keyboard_only_undo_redo_routes_unconsumed_editor_shortcuts() {
+        let document = RadialDocument::starter();
+        let original = document.menus[0].name.clone();
+        let menu_id = document.menus[0].id.clone();
+        let snapshot = AuthoringSnapshot::new(std::sync::Arc::new(document), "test");
+        let mut editor = RadialEditorState::default();
+        editor.session = Some(RadialAuthoringSession::new(snapshot));
+        menu::rename_menu(
+            editor.session.as_mut().unwrap(),
+            menu_id,
+            "Keyboard edit".into(),
+            EditPhase::Atomic,
+        )
+        .unwrap();
+
+        let key = |modifiers| egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let ctx = egui::Context::default();
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key(egui::Modifiers::CTRL)],
+            ..Default::default()
+        });
+        editor.keyboard_shortcuts(&ctx);
+        assert_eq!(
+            editor.session.as_ref().unwrap().draft.menus[0].name,
+            original
+        );
+        assert!(!ctx.input(|input| input.key_pressed(egui::Key::Z)));
+        let _ = ctx.end_frame();
+
+        ctx.begin_frame(egui::RawInput {
+            events: vec![key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT)],
+            ..Default::default()
+        });
+        editor.keyboard_shortcuts(&ctx);
+        assert_eq!(
+            editor.session.as_ref().unwrap().draft.menus[0].name,
+            "Keyboard edit"
+        );
+        let _ = ctx.end_frame();
     }
 }

@@ -166,11 +166,530 @@ never by executing or initializing imported code.
 | M3 actions/context/submenus/handoffs | complete | decision-review remediation passed the combined focused M3 Nextest gate; native interactive evidence remains unverified |
 | M4 skins/assets/import/export/recovery | complete | closure remediation and source-identical combined focused gate passed; native interactive evidence remains explicitly unverified |
 | M5 complete editors/settings/commands/starters | complete | contextual bindings carry captured identity across every surface; exact replacement gate and warning-free check passed |
-| M6 hardening/performance/full verification/review | pending | format/check/diff, full Nextest, native evidence, serialized baseline/candidate measurements, independent review |
+| M6 hardening/performance/full verification/review | in_progress | M6.1 lifecycle through M6.6 bounded performance/observability source implemented pending focused gate; full Nextest, native evidence, serialized baseline/candidate measurements, independent review remain |
 
 Each milestone is implemented and committed sequentially by one writer. Tests are
 written with each coherent batch and run only at gates. One Cargo/build/test job may
 use this checkout/target at a time.
+
+### M6.1 invocation and lifecycle hardening (source complete; gate pending)
+
+`LifecycleCancellation` now preserves reload, disable, host/hook failure, shutdown,
+suspend, session-lock, input-desktop loss, replacement, and priority-preemption
+identity across the pure invocation reducer, the retained hook service, main-loop
+notices, and native controller close reasons. Reload/disable retain a claimed key
+until its matching release before route acknowledgement. Shutdown and operating-system
+transitions that invalidate input continuity abandon stale key/modifier ownership
+without synthesizing releases or replaying a launcher tap. The native hook thread owns
+a hidden session/power notification window and an `EVENT_SYSTEM_DESKTOPSWITCH` hook;
+all registrations are released with the hook lifecycle. A terminal hook/timer failure
+restores the legacy launcher route fail-closed. Gesture suppression is acquired before
+surface creation and its guard is released on every failed or successful session path.
+
+Automated invocation rows 1–16 are covered by the existing reducer/adapter/main/session
+tests plus the new boundary, lifecycle-reason, modifier-side/AltGr, provenance,
+dismissal, post-action-release, native-message, correlated-controller-close, and
+suppression-count matrices. These tests use synthetic timestamps/events and injected
+factories only; no `SendInput`, desktop mutation, or timing sleeps were added. Source
+format and diff checks pass. Cargo/Nextest and native acceptance have not yet run for
+this substep.
+
+### M6.2 drag, geometry, and native input ownership (source complete; gate pending)
+
+Center/background/cell `Drag` controls now enter the `SessionReducer` as a typed
+`CellRole::Drag`. The reducer owns the squared-distance threshold, emits one
+generation-correlated `BeginNativeDrag` intent only after that threshold, and clears
+pending drag state on capture loss, outside interaction, relayout, release, and close.
+The controller validates the current layout generation before forwarding
+`BeginSystemDrag`; the native window procedure no longer starts a system move from a
+raw button-down.
+
+The Windows host now owns two coordinated surfaces. A full layered visual HWND is
+always nonactivating and click-through and is never clipped to input geometry. A
+separate transparent input-proxy HWND receives an OS-owned `SetWindowRgn` assembled
+deterministically from the immutable `LayoutSnapshot`: circles use elliptic regions,
+wedges use bounded winding polygons, protective wheel gaps remain owned, optional
+center holes are subtracted, and true exterior is absent. Region construction is
+completed before publication; ownership transfers explicitly to the system only on a
+successful `SetWindowRgn`. Create, present, relayout, animation, and system-drag moves
+keep both surfaces aligned while preserving the visual overflow and the drag offset.
+
+Synthetic coverage adds exact drag-threshold/stale-generation/exact-once/capture-loss
+cases, controller command correlation, generated ring/count/one-cell/spacer/rotation/
+overlap cases, four-corner fractional-DPI work-area clamping, deterministic wedge
+polygon conversion, protected-gap/center-hole/exterior region membership, and
+separate visual/input surface assertions in the opt-in live probe. Existing reducer,
+geometry, render, cascade, dwell, release, paging, context-freeze, and navigation tests
+continue to cover rows 17–30. Default tests use no `SendInput` or sleeps. Direct source
+format and diff checks pass; Cargo/Nextest and interactive cross-process acceptance
+have not yet run for this substep.
+
+### M6.3 auditable native construction and teardown (source complete; gate pending)
+
+Native construction now gives temporary window, region, memory-DC, bitmap, and GDI
+selection resources explicit RAII ownership. Window and region ownership transfer only
+after successful publication to their Win32 owner; every earlier return restores or
+destroys the resources already acquired. Lifecycle window, session notification,
+desktop notification, and keyboard-hook registrations likewise have independent
+guards, so partially completed registration and unwind paths clean up in reverse
+dependency order. Surface teardown cancels animation ownership and capture before
+retiring the input and visual HWNDs, whose `GWLP_USERDATA` retirement continues to
+make subsequently delivered messages inert.
+
+Both retained native services now expose an explicit `Running` to `Stopping` to
+`Stopped` lifecycle. Their stopped acknowledgement is published only after the worker
+has left its resource-owning loop, repeated close/stop is idempotent, and public sends
+are rejected once stopping begins. Timed-out worker handles are submitted to one
+process-wide bounded join owner with backpressure instead of spawning one deferred
+join thread per failure.
+
+Synthetic construction coverage enumerates class registration, both HWNDs, region
+create/combine/apply, DC, DIB, select/restore, layered update, capture, timer, hook,
+lifecycle window, session/desktop notification, and suppression stages. Every injected
+stage failure withholds Ready and returns all counters to zero; 100 synthetic
+construction cycles and 100 real fake-surface host cycles exercise zero-resource and
+zero-worker teardown, repeated close/stop, suppression release, and harmless late
+commands without desktop input or sleeps. Direct format and diff checks pass;
+Cargo/Nextest and live Win32 fault injection remain deferred to the milestone gate.
+
+### M6.4 demand-driven runtime resources (source complete; gate pending)
+
+`main` now has one `RadialRuntimeResources` lifecycle boundary whose demand is the
+union of runtime enablement and explicit authoring-session leases. The retained store,
+published document, and control/authoring mailboxes remain lightweight while disabled.
+Controller asset/font caches and the radial watcher are constructed on the first
+runtime/editor demand transition and retired on the final release; repeated enable or
+disable signals are transition-idempotent. Native surfaces remain lazy per accepted
+open, native authoring preview remains separately leased, invocation hooks exist only
+for enabled runtime routes, audio exists only for an active cue/audition, and deadline
+schedulers are dropped at disable/shutdown rather than remaining after their first use.
+Opening `radial edit` acquires an authoring lease without changing trigger enablement;
+clean close, forced close, successful Save, failure shutdown, and process exit release
+or clear the lease and cancel preview ownership.
+
+The watcher callback no longer sleeps. It records a bounded dirty bitset and wakes the
+main owner once until drained. The watch set is the app-data parent nonrecursively
+(events are accepted only for `radial.json` or the asset-root entry) plus the existing
+`radial_assets` tree recursively; creation of that tree refreshes the narrow watch set.
+Document identity continues to suppress self-save echoes. Authoring sound preparation
+now reuses the demand-owned `AssetService` cache rather than constructing an unrelated
+service for each audition.
+
+Synthetic instrumentation covers disabled startup with no acquisition transition,
+editor-only acquire/release without enabling triggers, and two repeated enable/disable
+cycles with one acquire/release per edge. Watcher tests cover coalescing and exact watch
+paths. Radial-plugin prefix rejection has a thread-local inventory probe proving
+ordinary/non-prefix queries do not read the published radial inventory. Direct format
+and diff checks pass; Cargo/Nextest and live worker/handle measurements remain deferred
+to the milestone gate.
+
+### M6.5 action, security, editor, and accessibility closure (source complete; gate pending)
+
+Requirements 39–64 are now tied to direct module evidence rather than a single broad
+integration assertion. Stable persisted references are resolved by semantic identity;
+an added table drives clipboard-entry, indexed-list, browser-runtime, and HWND churn
+through the frozen-binding revalidation boundary and proves that the old object cannot
+retarget to the replacement. Those runtime identities have no serializable binding
+form. Availability rejection occurs before confirmation or execution, and a cancelled
+confirmation consumes its pending value so a delayed/repeated response cannot run it.
+Existing controller/handoff tests retain the frozen surface/source/history/context,
+cleanup/key-release, stale-generation, dynamic revisit, pagination, and exact-once
+coverage.
+
+Every one of the 71 serialized full-scope style fields is enumerated in an exhaustive
+typed audit and assigned to its first concrete runtime consumer: geometry, scene,
+compositor, audio, input shaping, or native-window policy. Adding a field without
+classifying it now requires an explicit source change. Existing geometry/render/
+compositor/audio/native effect tests remain the behavioral evidence for those groups;
+preview and runtime continue to share the same immutable frame builder and straight-
+alpha compositor. Asset/import/package/store tests cover corrupt and oversized media,
+alpha, missing font/icon fallback, named real-versus-synthetic legacy evidence,
+archive/path/collision/link limits, dependency/ID remapping, atomic staging/publication,
+and preservation of malformed/newer or revision-conflicted state.
+
+The editor now publishes AccessKit widget names/roles for otherwise blank toggle,
+scalar, color, offset, quality, font, text, and media controls. Color wells include an
+RGBA value in the name; stable entity/field IDs remain independent of labels and list
+positions. Selection changes schedule focus restoration to the stable menu/ring/cell
+widget on the next frame, and deleting a selected menu chooses a surviving stable menu
+instead of retaining a dangling selection. Textual availability/error/selection cues
+remain present in addition to semantic color. Standard focused egui controls retain
+Space/Enter navigation, with non-text-edit Ctrl+Z, Ctrl+Shift+Z, and Ctrl+S affordances.
+The manual smoke checklist now has explicit Narrator/AccessKit, keyboard-only, 200%
+scale, high-contrast, target-churn, input-shape, lifecycle, and native cleanup rows.
+
+Direct tests cover the added identity matrix, unavailable/cancel exact-once boundary,
+style-consumer completeness/uniqueness, deletion focus fallback, and editor semantic
+contract. No live accessibility or native evidence is claimed. Direct rustfmt/diff
+checks pass for this substep; Cargo/Nextest remains deferred to the M6 gate.
+
+### M6.6 bounded performance and resource observability (source complete; gate pending)
+
+The compositor now enforces one configurable aggregate raster budget across reusable
+static layers and completed frames. The production default is a hard 128 MiB ceiling;
+admission uses exact RGBA byte counts, deterministic touched-order/key eviction, and
+does not evict useful entries merely to attempt admission of a frame larger than the
+whole budget. An over-budget frame can still be presented from its caller-owned return
+value but is not retained. Animated scenes replace the prior timestamp variant for the
+same generation/DPI, so animation cannot fill the former twelve-frame cache with full
+bitmaps. Generation invalidation decrements exact byte ownership for both cache kinds.
+
+`CompositorCache` owns its optional counters and nanosecond timings. They are activated
+only when the existing `MULTI_LAUNCHER_PERF` switch is enabled (or explicitly injected
+by a test), are emitted only as composition work occurs, and create no timer or polling
+loop. Snapshots include hit/miss/eviction/rejected-admission counts, completed/static
+resource counts and bytes, the latest generation, and aggregate/maximum composition
+time. The controller similarly exposes an on-demand census of its native host,
+pending/active session, preparation bridge, deadline scheduler, asset, and font
+ownership only through the existing debug-diagnostics switch; there is no global
+mutable resource registry.
+
+One Criterion target, `radial_runtime`, covers pure layout, hit ownership, scene build,
+selection projection, static rasterization, warmed composition, and first/last-page
+dynamic projection for 8, 32, 128, and 512 cells. It constructs only in-memory
+fixtures. Unit coverage exercises deterministic byte eviction, oversized admission,
+static/completed aggregate accounting, single animated timestamp retention, exact
+generation invalidation, opt-in metrics, lazy resource census, warm repeated
+composition, and 100 synthetic open/close-style generation cycles returning retained
+bytes/resources to zero. Cargo and the benchmark have not been built or run in this
+substep.
+
+Proposed acceptance thresholds, pending same-host observation and noise calibration:
+
+- compositor retained raster bytes never exceed 128 MiB in production or the injected
+  budget in tests;
+- one full-frame animation variant per generation/DPI and at most twelve completed
+  frames overall;
+- warm hover performs zero filesystem reads and zero provider inventory calls by the
+  immutable scene/compositor capability boundary;
+- 100 synthetic generation cycles return completed/static cache resources and bytes to
+  zero after invalidation;
+- candidate medians for comparable pure radial workloads should not regress more than
+  15% from the first measured stable candidate series without investigation; no
+  baseline timing claim is possible for the new radial-only benchmark because the
+  pinned baseline contains no radial implementation.
+
+The M6 gate should run measurements serially, never from the user's live data folders.
+Create an isolated detached worktree at pinned baseline
+`0d0acaf471a52f49a7ebdff61879416eefa9fc9b`, set `CARGO_TARGET_DIR` and
+`LOCALAPPDATA` to dedicated temporary directories, build its release binary, and
+capture startup/idle/search baselines with `MULTI_LAUNCHER_PERF=1`. Stop that process
+and Cargo job before repeating the identical profile/environment against the candidate
+checkout. For the candidate-only radial microbench, run three serialized
+`cargo bench --bench radial_runtime` samples and retain Criterion output outside the
+application-data sandbox. Record exact revisions, Rust/Cargo versions, power state,
+display/DPI, cold/warm classification, and all raw samples; do not compare the new
+radial target to an invented baseline or historical numbers.
+
+M6 focused candidate gate attempt 1 used inventory UUID
+`5ed514d4-c5a7-4c8a-ba93-8069f9e9f91e` at HEAD
+`5e4f20c829a365afe9b7e50af9d35451b6fcf2c5` with the exact requested filter. It
+exited `101` after `128.456s` before producing a selection: compilation found missing
+local `ShowWindow`/show-command imports in native relayout, an ambiguous test-only
+`sum`, and the embedded preview's missing arm for the new typed native-drag intent.
+No tests ran and no count is claimed. The root-only corrections preserve runtime
+behavior; the identical inventory expression is required for the replacement.
+
+Replacement inventory UUID `1c32de87-d2c7-4927-89af-9384ae5bed14` exited `0`
+after `663.048s` (Cargo compile/link `10m52s`) and printed a nonempty filtered
+inventory. It also identified two `unused_must_use` warnings for `ShowWindow`; the
+calls already intentionally ignore the Win32 visibility-status return and now bind it
+explicitly before the warning-free gate. The exact selection count is recorded from a
+post-compile count-only inventory query before test execution.
+
+The source-current count query UUID `c472b77b-4232-4519-859e-d9dd2baacee1`
+exited `0` after `1125.498s` (Cargo `18m35s`) with 2,129 selected tests. Focused
+candidate attempt 1 used wrapper UUID `00ed9318-b770-4ff1-a5e0-84df2f7786eb`
+and Nextest run `cb738061-b103-4647-baf1-8b449c7698e1`; it exited `100` after
+`47.679s`: 2,129 run, 2,126 passed, 3 failed, and 2,289 skipped. A three-test
+uncaptured diagnostic (UUID `21ba3d86-8f1c-4648-b7cc-999c4e06f868`, Nextest
+`2553d951-057b-43db-ae58-8b20edeaff0c`) confirmed the failures after a
+`19m10s` timestamp-triggered rebuild: color semantics used premultiplied bytes,
+menu deletion chose a positional rather than stable default-menu survivor, and a
+duplicate sticky release emitted a second acknowledgement. Root corrections use
+unmultiplied sRGBA, the surviving default menu ID, and the reducer's typed
+`trigger_still_down` guard. The full identical filter must pass on replacement.
+
+The first root-correction diagnostic used wrapper UUID
+`935da1fd-8cff-4583-832d-2a0db0c588e0` and Nextest run
+`c55ebf64-02ee-4f79-858a-321705d89154`; after a `20m17s` rebuild it ran three
+tests in `2.798s`, with the menu-survivor and duplicate-release tests passing.
+The color semantic test still failed because even an unmultiplied conversion rounds
+channels after egui's low-alpha premultiplication. The final root correction retains
+the exact serialized RGBA while untouched and adopts converted widget bytes only after
+an actual change. The next replacement is the full identical focused filter.
+
+The full identical replacement used wrapper UUID
+`b968e06f-d02e-4a1b-8e96-0c63d080ca16`. After a `20m45s` rebuild it ran all
+2,129 selected tests; its Nextest run UUID scrolled out of the retained output,
+and the wrapper exited `100` after `1297.742s`: 2,128 passed, one failed, and
+2,289 were skipped. The only failure was the pre-existing wall-clock assertion in
+`sound::play_sound_returns_quickly_and_no_panic`: the no-op invalid-name call
+has no I/O or audio-service acquisition, but the test process was descheduled
+long enough to exceed its `<100ms` assertion on this slow-machine gate. No
+production or test source is changed for that environmental result; the exact
+full filter is repeated warm and must pass before the candidate gate advances.
+
+The exact warm replacement passed under wrapper UUID
+`57ea352f-f2a0-4807-a60c-040b71ee2d1a` and Nextest run
+`aa23f957-f96f-4146-b410-89bca522986e`. Cargo compiled in `19m47s`; the test
+run completed in `31.175s` with all 2,129 selected tests passing and 2,289
+skipped. The wrapper exited `0` after `1230.578s`. This is the focused/static
+candidate test result; M6 remains `in_progress` pending the remaining static,
+benchmark-compile, full-suite, native, performance, and independent-review gates.
+The subsequent warning-free `cargo check` used wrapper UUID
+`d810d4c0-ac22-46d4-8770-3e6de729a8d8` and exited `0` after `76.487s`
+(`1m16s` Cargo time), with no compiler warnings.
+The bench compile-only gate `cargo check --bench radial_runtime` used wrapper
+UUID `2bba2a1d-f5a2-4e0e-88d3-3d5191bae519` and exited `0` after `37.754s`
+(`37.67s` Cargo time), without executing a benchmark or emitting warnings.
+`cargo fmt --all -- --check` (gate UUID
+`f65e7117-a404-465e-9776-3b49195bf57a`) exited `0` after `6.541s`, and
+`git diff --check` (gate UUID `a210fef3-ef74-4999-bab9-fef95ab12850`)
+exited `0` after `0.401s`; the latter printed only Git's expected LF/CRLF
+working-tree advisories. The post-gate Rust/Cargo/bench diff identity is
+`3e48daff91ab5e4fa7322c1b748284dbe9a58c04` (`git hash-object --stdin`).
+No Cargo, rustc, or Nextest process remained. The focused run created a root
+`clipboard_modifiers.json`, which was removed as a test artifact. The ignored
+`toast.log` predates this gate and was preserved. No non-target temporary or
+backup artifact remained. Stale-ownership inspection confirmed that the only
+invocation-local `thread::spawn` is a joined test helper, production timed-out
+joins use the one bounded `thread_reaper`, `WM_NCLBUTTONDOWN` is reachable only
+from the generation-correlated `begin_system_drag` command, and recursive
+watching is limited to the optional `radial_assets` tree.
+
+### M6 independent-review remediation
+
+The six review findings are under source remediation while M6 remains
+`in_progress`. Runtime and authoring preview now share the real visual resource
+preparation boundary (effective layout/style, lazy asset and font services,
+prepared glyphs/tooltips, special center/background cells, and prepared scene),
+and embedded frames travel through the typed main-owned authoring endpoint with
+generation/token correlation. Both previews reduce page and drag intent without
+executing dispatch. Native-preview failure/stopped events retire the active
+identity and host before a later start. Faulted worker joins use pre-reserved
+bounded capacity and a completion-notified supervisor that blocks without
+polling and joins only finished handles. Input ownership follows reverse/topmost layout order, with
+background special ownership explicitly placed below concrete cells. Blank
+editor cells publish real AccessKit selectable semantics with label, tooltip,
+icon-role, then stable ID fallback. Menu and skin package import require exact
+canonical asset dependency closure and discard already-owned skin asset bytes.
+
+The first remediation-specific Nextest attempt used wrapper UUID
+`241c4e56-62ac-47e6-a777-adb387fdb288` and Nextest run
+`4c7a17ae-8bd8-4f86-af80-742f69b1390f`. After a `23m53s` build it ran 12
+tests in `0.273s`: 10 passed and two fixture assertions failed. The embedded
+drag fixture had not explicitly assigned the center Drag control, and the
+runtime/preview parity fixture incorrectly rejected the identical expected
+`LabelTruncated` diagnostics. Those test fixtures now state those expectations
+directly; no production behavior changed for these two failures. The exact full
+M6 focused expression was then used for every full replacement.
+
+The first full remediation replacement used wrapper UUID
+`06c6d6e7-f7f4-4758-ab4e-d1b57076438b` and Nextest run
+`47ae6146-4fec-4a80-9661-6d66de7b2d3e`. It compiled in `21m06s` and exited
+`100` after `1340.090s`: 2,139 tests ran, 2,137 passed, two failed, and 2,289
+were skipped. The failures exposed two integration-fixture assumptions from the
+new topmost/preview paths: the controller test still treated cell index zero as
+ordinary after the background cell moved below it, and embedded page controls
+were incorrectly simulated with the action-only reducer event. The focused
+diagnostic Nextest run `5c8fd47b-4de9-4c50-a9b1-adf89e7a3450` compiled in
+`20m55s` and reproduced exactly those two assertions. The correction locates the
+ordinary cell by stable non-special identity and routes preview controls through
+the production pointer-down/pointer-up reducer sequence.
+
+The identical full replacement then passed under wrapper UUID
+`9b7d4b3c-fb1d-44d2-910d-07412a6679e2` and Nextest run
+`e46f0025-5488-42e9-a4b2-a1192c09320c`: Cargo compiled in `21m08s`, all
+2,139 selected tests passed in `29.496s`, 2,289 were skipped, and wrapper wall
+time was `1337.750s`. Static self-review subsequently strengthened the two
+package-closure fixtures so their unreferenced archive entries use valid
+content-addressed `assets/<sha>.png` names; rejection can therefore only be
+attributed to dependency closure rather than malformed path shape. The final
+source-current identical gate passed under wrapper UUID
+`e2838ee3-e05d-4c2b-a803-375624b6c65e` and Nextest run
+`e41d289b-93d6-437b-bd84-950f4d8a8fb9`: Cargo compiled in `21m13s`, all
+2,139 selected tests passed in `27.736s`, 2,289 were skipped, and wrapper wall
+time was `1338.952s`.
+
+The final warning-free `cargo check` used wrapper UUID
+`b79bdd0b-1331-4487-93ac-f08adf31ac26` and exited `0` in `35.606s`
+(`35.44s` Cargo time). The compile-only benchmark gate
+`cargo check --bench radial_runtime` used wrapper UUID
+`3afbd611-28bc-43fe-969c-c261bf23827b` and exited `0` in `18.390s`
+(`18.24s` Cargo time); no benchmark was executed. M6 remains `in_progress`
+pending independent review plus the full/native/performance evidence gates.
+Final `cargo fmt --all -- --check` and `git diff --check` exited `0`; the
+latter emitted only the expected LF/CRLF working-tree advisories. The final
+Rust/Cargo/bench diff identity is `2d2e0572a9b7352eb108ee13ce965e77734fc6a0`
+(`git hash-object --stdin`). No Cargo, rustc, or Nextest process, Git index
+lock, generated clipboard fixture, or non-target temporary/backup artifact
+remained. The ignored pre-existing `toast.log` was preserved. No native or
+performance execution evidence is claimed by this remediation gate.
+
+The final closure pass resolves six further review blockers while retaining M6 as
+`in_progress`. `PreviewFramePreparer` now invokes the same production
+`project_menu_frame_with_style` dynamic projection, page-count, effective-style, and
+control-placement path used at runtime. Authoring requests carry the immutable page,
+frozen synthetic dynamic entries, selected-skin override, and a validated managed-asset
+overlay. Embedded and native previews consequently render disjoint real projected
+pages and unsaved image/GIF/font/sound references without writing the persisted asset
+root; hash, kind, per-item, and aggregate budget failures become visible preview
+diagnostics. The embedded frame token includes page and selected skin, and native page
+navigation rebuilds and presents the changed projected scene. Explicit unreferenced
+skin selection is applied before preparation.
+
+The timed-out-join owner is now event-driven: a completion guard notifies one shared
+condition variable, the single bounded supervisor joins only `is_finished` handles,
+and a hung worker retains one bounded permit without polling, blocking callers, or
+allowing unbounded worker creation. Synchronous native-preview Open, Present, and
+BeginSystemDrag send failures all close the active identity, take and shut down the
+host, and permit a fresh later host. Editor resource notices use typed Info, Warning,
+and Error severity so successful export/portable choices cannot publish error
+semantics; the same severity is present in visible text and the rendered AccessKit
+tree.
+
+The first exact closure gate used wrapper UUID
+`3f2507f6-5b35-4bfb-bb7c-cfd2852e793d` and Nextest run
+`c4af002f-6298-44f6-bc98-bf1dcac3f1c3`. It ran all 2,146 selected tests in
+`26.402s`: 2,145 passed and one new native-preview fixture failed validation because
+it had replaced a root submenu link and thereby left the child menu unreachable. An
+isolated diagnostic run (`fc108f4f-71e3-43e8-8a66-c2b959e653e0`) reproduced that
+single failure. The root-only correction exercises the existing Applications dynamic
+submenu instead; the production document remains valid and the embedded, shared
+preparer, and native paging tests all use that real greater-than-capacity projection.
+
+The exact full replacement passed under wrapper UUID
+`abe95ace-9046-4a79-afa6-d7ee6cee460b` and Nextest run
+`a8412cf9-e4e2-4f09-8824-f5dcfbffe561`: Cargo compiled in `22m32s`, all
+2,146 selected tests passed in `25.754s`, and 2,289 were skipped. Warning-free
+`cargo check` passed under UUID `c4b16dec-ea68-4958-b91e-7522b0fef89d` in
+`38.58s`. Compile-only `cargo check --bench radial_runtime` passed under UUID
+`ea1a59b9-3020-44fd-bc7d-579a2308a124` in `7.28s`; no benchmark executed.
+No native interactive or serialized performance evidence is claimed. M6 remains
+`in_progress` pending final independent review, complete-suite verification, and the
+documented native/performance gates.
+
+Final self-review removed the last inert `Thread::unpark` submission call and stale
+“polling supervisor” comment; completion guards and the shared condition variable are
+now the supervisor's only wakeup path. The source-current exact replacement passed
+under wrapper UUID `72c6126a-463c-474d-9e3b-d4c86eda2cab` and Nextest run
+`c020d10f-4b3a-49c8-8255-da101f785a69`: Cargo compiled in `19m48s`, all
+2,146 selected tests passed in `28.068s`, and 2,289 were skipped. The source-current
+warning-free `cargo check` passed under UUID
+`b39a6bd2-d83c-4f19-9a20-cc4f9bc9e782` in `34.64s`; compile-only benchmark check
+passed under UUID `f972260d-1aea-4d33-a948-c81ac6dd9f23` in `21.91s` without
+executing the benchmark. The final Rust/Cargo/bench diff identity is
+`257a948bbd4764bffb3a55f38cd3f5eb52d3fe39` (`git hash-object --stdin`).
+Formatting and diff checks passed; no Cargo/Nextest/rustc process, Git index lock,
+generated clipboard fixture, or non-target temporary/backup artifact remained.
+
+The amended transport closure adds three final safeguards. Embedded preparation now
+turns overlay-construction and disconnected-service failures into typed visible Error
+notices. Its failure fingerprint includes draft generation, selection, page, selected
+skin, preset, and content-addressed overlay metadata, so a failed overlay is not
+rehashed or resent every frame; changed inputs or the explicit Retry control rearm it.
+A synchronous send failure clears only its exactly correlated pending request and
+cannot strand the editor in AwaitingRequest. Faulted-join supervisor creation is now a
+fallible injected boundary with no panic and no registry lock held across thread
+creation. Failure safely detaches the bounded handles while their worker completion
+guards retain and eventually release permits; callers receive or log the typed
+degradation. Completion state and counters transition under the same registry lock,
+preventing a detach/notification race. Native submenu and page presentation emits a
+typed lease-correlated diagnostic update, including an empty list when warnings clear;
+the authoring session ignores stale lease or generation updates.
+
+The four new focused regressions passed under Nextest run
+`6bd27d72-0bfc-45bb-aaf6-e010a32a738e` after a `25m35s` link. The first exact M6
+replacement used wrapper UUID `fec0033d-af6b-4525-8b7d-ad18da8e78e8` and Nextest
+run `a4b3fd59-b45c-4143-b7d6-e3591a5c308b`; 2,148 of 2,149 tests passed and one
+existing native paging fixture retained the obsolete expectation that no notice was
+emitted. Diagnostic run `21c08e6c-15bb-4bd0-afbe-9c0c03d946b3` confirmed that
+the emitted value was the intended diagnostic update. The fixture now requires every
+notice to be diagnostic-only and correlated to the active lease.
+
+The exact source-current replacement passed under wrapper UUID
+`258ca9cc-fbf4-43eb-8aa6-9d4bacce8b07` and Nextest run
+`f251cd02-d87b-4b4d-b6a6-348cd376c5fd`: Cargo compiled in `22m01s`, all
+2,149 selected tests passed in `22.585s`, and 2,290 were skipped. Warning-free
+`cargo check` passed under UUID `05e4ae31-af71-454d-8ff1-5c1acf1e598a` in
+`53.19s`; compile-only `cargo check --bench radial_runtime` passed under UUID
+`9a564813-b8da-4d99-8d25-b0483b89d030` in `21.88s` without executing the
+benchmark. Final Rust/Cargo/bench diff identity is
+`0ad39d8e51e7c416c8ffd26f8da02e79a03e69c8` (`git hash-object --stdin`).
+Formatting/diff, process, index-lock, and generated-artifact scans passed. M6 remains
+`in_progress`; no native interactive, complete-suite, or
+serialized performance evidence is claimed by this focused remediation gate.
+
+The lost-before-handoff reaper closure latches completion independently of whether a
+timed-out join has been armed. Registration inserts the handle under the registry lock
+before its running-unarmed-to-armed compare/exchange; an already-completed notifier
+increments the supervisor counter after insertion, while an armed notifier increments
+and wakes directly. The completion guard therefore proves user work returned even in
+the short OS thread epilogue where `JoinHandle::is_finished` is still false, allowing
+the event-driven supervisor to join without polling. Deterministic channel/barrier
+fixtures cover notifier drop before reap, during registration, and after arming; the
+hung-handle and supervisor-spawn-failure capacity guarantees remain covered.
+
+The source-current exact M6 expression passed under wrapper UUID
+`14bb453c-d580-4e48-816e-7c3086fdf903` and Nextest run
+`684b9e84-b31b-4cc8-ba87-6c6f125b9611`: Cargo compiled in `23m38s`, all
+2,149 selected tests passed in `26.111s`, 2,293 were skipped, and wrapper wall time was
+`24m49.673s`. Because that mandated expression does not select tests named solely for
+`thread_reaper`, a direct source-current `test(/thread_reaper/)` run passed all five
+tests under wrapper UUID `906e5168-d30d-4ba2-b3ef-f9c6fab4f836` and Nextest run
+`95cdfba5-40d1-4b3e-89ee-53596d7192cd` (`20m35s` compile, `0.640s` test time).
+Warning-free `cargo check` passed under UUID
+`f9d04154-1a2a-4704-bce9-4571eb729faa` in `38.98s`; compile-only
+`cargo check --bench radial_runtime` passed under UUID
+`e47d488b-1227-4189-883d-69a8c7dfd849` in `29.35s` without executing the benchmark.
+Formatting/diff, process, index-lock, temporary-artifact, and generated-fixture scans
+passed. The tracked Rust/Cargo/bench diff identity remains
+`0ad39d8e51e7c416c8ffd26f8da02e79a03e69c8`; the untracked new reaper source blob is
+`4bfd373f319b2445e7cc223f4710f28f1996e8e8`. M6 remains `in_progress`; no native
+interactive, complete-suite, or serialized performance evidence is claimed.
+
+| Requirement | Direct source/test evidence (execution pending M6 gate) |
+|---:|---|
+| 39 | `universal_actions::persisted_resolver::custom_identity_survives_reorder_but_never_retargets_a_deleted_slot`; menu stable-ID edits |
+| 40 | `bindings::ephemeral_clipboard_list_browser_and_window_targets_revalidate_exactly`; `target::ephemeral_targets_do_not_claim_persistent_identity` |
+| 41 | `universal_action_executor::unavailable_radial_action_is_rejected_before_confirmation_or_execution`; controller button-specific availability |
+| 42 | universal executor destructive-confirmation tests, including consumed cancel and confirmation-time resolver path |
+| 43 | radial invocation context/root-state tests and native-preview no-history boundary |
+| 44 | `ordinary_radial_execution_preserves_root_launcher_state`; explicit command executor tests |
+| 45 | context own-process exclusion and native-preview owned/editor-window sanitization tests |
+| 46 | `context::priority_then_configured_order_is_deterministic`; captured controller menu/context tests |
+| 47 | dynamic removed-entry/revisit tests and bindings/controller stable pagination tests |
+| 48 | handoff close/release ordering and controller release-alias/wait matrices |
+| 49 | existing command/executor runtime-failure diagnostics plus handoff fail-closed tests; UIPI remains live-only |
+| 50 | handoff/controller stale-session, stale-generation, replacement, and exact-once tests |
+| 51 | skin precedence/clear/provenance tests and full-scope editor round-trip test |
+| 52 | exhaustive 71-field consumer audit plus geometry/render/compositor/audio/native behavior tests |
+| 53 | asset decode/budget/cache/fallback tests, font fallback tests, straight-alpha compositor tests |
+| 54 | import accepted-field registry and typed apply-or-diagnose outcome tests |
+| 55 | read-only supplied-archive tests and explicit synthetic-evidence diagnostics in `radial::import` |
+| 56 | package canonical round-trip, collision remap, dependency closure, and asset-reference tests |
+| 57 | package hostile-path, ZIP-limit/header, link/reparse-point, and case-collision tests |
+| 58 | store invalid-save/package-failure rollback and malformed/newer-retention tests |
+| 59 | store revision/SHA conflict tests and authoring captured-baseline conflict tests |
+| 60 | authoring/menu clone/link/copy/move/delete/reference-remap tests |
+| 61 | authoring coalescing/undo bounds/Apply/Save/Cancel/dirty-close and staged-resize tests |
+| 62 | native-preview lease/non-dispatch tests and separate authoring Test-action revalidation path |
+| 63 | radial settings cofire/conflict tests and main fail-closed route replacement tests |
+| 64 | model starter/settings-default tests and store missing/empty/malformed distinction tests |
+
+The field audit is exhaustive over the serialized full-scope schema. “First consumer”
+names the boundary at which changing the value becomes observable; later consumers may
+also retain the value in an immutable snapshot.
+
+| First consumer | Serialized style fields |
+|---|---|
+| Geometry | `menu_scale`, `item_size`, `radius_scale`, `center_size`, `outer_ring_margin`, `outer_rim_width` |
+| Scene | `item_glow`, `menu_outer_rim`, `menu_background`, `item_background`, `item_foreground`, `item_shadow`, `menu_foreground`, `center_background`, `center_image`, `submenu_indicator`; all eleven corresponding opacity fields including `icon_opacity`; `center_image_scale`, `item_image_scale`, `item_image_y_ratio`, `item_background_scale`, `item_foreground_scale`, `item_shadow_scale`, `menu_background_scale`, `menu_foreground_scale`, `center_background_scale`, `submenu_indicator_size`, `submenu_indicator_y_ratio`, `item_background_on_center`, `item_background_on_items`; every text field (`visible`, indicator text, family, size, color, bold, italic, underline, strikeout, shadow enable/color/offset, box scale, vertical ratio); `glow_enabled`, `tooltip_mode`, and all three menu-shadow fields |
+| Compositor | `text` quality, `shape` quality, `interpolation` quality |
+| Audio | `on_show`, `on_close`, `on_select`, `on_submenu_show`, `on_submenu_close` |
+| Input shaping | `fill_center_hit_zone`, `fill_item_hit_zones` |
+| Native window | `always_on_top`, `activate_on_show` |
 
 ### M5 substep 1 — authoring coordinator foundation
 

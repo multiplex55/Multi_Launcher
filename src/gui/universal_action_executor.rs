@@ -894,6 +894,10 @@ mod tests {
 
         app.resolve_pending_confirmation(true);
         assert!(app.pending_universal_confirm.is_none());
+        assert!(
+            !app.resolve_pending_universal_action_confirmation(true),
+            "a confirmed invocation must not be reusable"
+        );
         assert_eq!(app.query, "window query");
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.test_recorded_history_queries.is_empty());
@@ -931,6 +935,11 @@ mod tests {
             UniversalActionExecution::ConfirmationRequired
         );
         app.resolve_pending_confirmation(false);
+        assert!(app.pending_universal_confirm.is_none());
+        assert!(
+            !app.resolve_pending_universal_action_confirmation(true),
+            "a cancelled confirmation must not be reusable"
+        );
         assert_eq!(
             app.execute_universal_action(
                 destructive(),
@@ -939,6 +948,41 @@ mod tests {
             ),
             UniversalActionExecution::Executed
         );
+    }
+
+    #[test]
+    fn unavailable_radial_action_is_rejected_before_confirmation_or_execution() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.require_confirm_destructive = true;
+        let primary = Action {
+            label: "Stale target".into(),
+            desc: "Runtime".into(),
+            action: "help:show".into(),
+            args: None,
+        };
+        let mut unavailable = universal(
+            action_ids::RESULT_EXECUTE,
+            ActionTarget::Generic {
+                action: primary.clone(),
+            },
+            ActionSafety::Destructive,
+            UniversalActionOperation::InvokePrimary(primary),
+        );
+        unavailable.availability = ActionAvailability::Disabled {
+            reason: "Captured target no longer exists".into(),
+        };
+
+        assert_eq!(
+            app.execute_universal_action(
+                unavailable,
+                ActionSurface::RadialMenu,
+                ActivationSource::Click,
+            ),
+            UniversalActionExecution::Unavailable
+        );
+        assert!(app.pending_universal_confirm.is_none());
+        assert!(app.test_activation_trace.is_empty());
     }
 
     #[test]

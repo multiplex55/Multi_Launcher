@@ -929,6 +929,121 @@ mod tests {
         .unwrap();
         assert_eq!(l.cells.len(), 1);
     }
+
+    #[test]
+    fn generated_ring_counts_rotation_spacers_and_overlap_are_deterministic() {
+        for (ring_count, counts) in [(1, vec![1]), (2, vec![3, 5]), (4, vec![1, 2, 7, 9])] {
+            let mut definition = menu(LayoutKind::CircularCells);
+            let template = definition.rings[0].cells[0].clone();
+            definition.rings.clear();
+            for (ring_index, count) in counts.into_iter().enumerate().take(ring_count) {
+                let mut cells = Vec::new();
+                for cell_index in 0..count {
+                    let mut cell = template.clone();
+                    cell.id = CellId::new(format!("r{ring_index}-c{cell_index}"));
+                    if cell_index == 1 {
+                        cell.content = CellContent::Spacer;
+                    }
+                    cells.push(cell);
+                }
+                definition.rings.push(RingDefinition {
+                    id: RingId::new(format!("ring-{ring_index}")),
+                    radius: 70.0 + ring_index as f32 * 55.0,
+                    cell_radius: 22.0,
+                    rotation_degrees: -33.0 + ring_index as f32 * 17.5,
+                    gap: 3.0,
+                    cells,
+                    style: Default::default(),
+                });
+            }
+            let layout = layout_menu(
+                &definition,
+                PhysicalPoint {
+                    x: -900.0,
+                    y: 300.0,
+                },
+                work(),
+                ScaleFactor::new(1.25).unwrap(),
+                0.5,
+            )
+            .unwrap();
+            assert_eq!(
+                layout.cells.len(),
+                definition
+                    .rings
+                    .iter()
+                    .map(|ring| ring.cells.len())
+                    .sum::<usize>()
+            );
+            for cell in &layout.cells {
+                let point = match cell.shape {
+                    HitShape::Circle { center, .. } => center,
+                    _ => unreachable!(),
+                };
+                assert_eq!(layout.hit_test(point).is_some(), cell.actionable);
+            }
+        }
+
+        let mut definition = menu(LayoutKind::CircularCells);
+        definition.rings.push(definition.rings[0].clone());
+        definition.rings[1].id = RingId::new("overlap-top");
+        definition.rings[1].cells[0].id = CellId::new("overlap-top-cell");
+        let layout = layout_menu(
+            &definition,
+            PhysicalPoint {
+                x: -900.0,
+                y: 300.0,
+            },
+            work(),
+            ScaleFactor::new(1.0).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        let point = match layout.cells.last().unwrap().shape {
+            HitShape::Circle { center, .. } => center,
+            _ => unreachable!(),
+        };
+        assert_eq!(layout.hit_test(point), layout.cells.last());
+    }
+
+    #[test]
+    fn clamping_respects_every_work_area_edge_at_fractional_dpi() {
+        let work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: -2048.0,
+                y: -120.0,
+            },
+            max: PhysicalPoint {
+                x: -128.0,
+                y: 920.0,
+            },
+        };
+        for anchor in [
+            work_area.min,
+            PhysicalPoint {
+                x: work_area.max.x,
+                y: work_area.min.y,
+            },
+            PhysicalPoint {
+                x: work_area.min.x,
+                y: work_area.max.y,
+            },
+            work_area.max,
+        ] {
+            let layout = layout_menu(
+                &menu(LayoutKind::Wedges),
+                anchor,
+                work_area,
+                ScaleFactor::new(1.25).unwrap(),
+                0.5,
+            )
+            .unwrap();
+            assert!(layout.visual_extent.min.x >= work_area.min.x as f32 / 1.25 - 0.001);
+            assert!(layout.visual_extent.min.y >= work_area.min.y as f32 / 1.25 - 0.001);
+            assert!(layout.visual_extent.max.x <= work_area.max.x as f32 / 1.25 + 0.001);
+            assert!(layout.visual_extent.max.y <= work_area.max.y as f32 / 1.25 + 0.001);
+        }
+    }
     #[test]
     fn refuses_wheel_below_usable_minimum() {
         let tiny = PhysicalRect {

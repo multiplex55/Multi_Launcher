@@ -8,11 +8,9 @@ use super::model::{RADIAL_ASSETS_DIRECTORY, RADIAL_FILE};
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc::Sender};
-use std::time::Duration;
 
 const DOCUMENT_DIRTY: u8 = 1;
 const ASSETS_DIRTY: u8 = 2;
-const DEBOUNCE: Duration = Duration::from_millis(75);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RadialWatchChanges {
@@ -75,6 +73,7 @@ impl PendingChanges {
 pub struct RadialConfigWatcher {
     _watcher: RecommendedWatcher,
     pending: Arc<PendingChanges>,
+    watches_asset_tree: bool,
 }
 
 impl RadialConfigWatcher {
@@ -83,6 +82,8 @@ impl RadialConfigWatcher {
         let asset_root = root.join(RADIAL_ASSETS_DIRECTORY);
         let pending = Arc::new(PendingChanges::default());
         let callback_pending = Arc::clone(&pending);
+        let callback_radial_file = radial_file.clone();
+        let callback_asset_root = asset_root.clone();
         let mut watcher = RecommendedWatcher::new(
             move |result: notify::Result<notify::Event>| match result {
                 Ok(event)
@@ -91,11 +92,12 @@ impl RadialConfigWatcher {
                         EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
                     ) =>
                 {
-                    let changes = classify_paths(&event.paths, &radial_file, &asset_root);
+                    let changes =
+                        classify_paths(&event.paths, &callback_radial_file, &callback_asset_root);
                     if callback_pending.record(changes) {
-                        // Coalesce editor temp-file/rename storms on notify's existing
-                        // callback worker, then wake the main owner exactly once.
-                        std::thread::sleep(DEBOUNCE);
+                        // The callback only records and signals. Coalescing is
+                        // owned by PendingChanges and drained by the main loop;
+                        // notify's callback worker is never slept or blocked.
                         let _ = wake.send(());
                     }
                 }
@@ -104,16 +106,39 @@ impl RadialConfigWatcher {
             },
             Config::default(),
         )?;
-        watcher.watch(root, RecursiveMode::Recursive)?;
+        let watches_asset_tree = asset_root.is_dir();
+        for (path, recursive) in configured_watch_paths(root, watches_asset_tree) {
+            watcher.watch(
+                &path,
+                if recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                },
+            )?;
+        }
         Ok(Self {
             _watcher: watcher,
             pending,
+            watches_asset_tree,
         })
     }
 
     pub fn take(&self) -> RadialWatchChanges {
         self.pending.take()
     }
+
+    pub fn watches_asset_tree(&self) -> bool {
+        self.watches_asset_tree
+    }
+}
+
+fn configured_watch_paths(root: &Path, asset_tree_exists: bool) -> Vec<(PathBuf, bool)> {
+    let mut paths = vec![(root.to_path_buf(), false)];
+    if asset_tree_exists {
+        paths.push((root.join(RADIAL_ASSETS_DIRECTORY), true));
+    }
+    paths
 }
 
 fn classify_paths(paths: &[PathBuf], radial_file: &Path, asset_root: &Path) -> RadialWatchChanges {
@@ -169,5 +194,21 @@ mod tests {
             document: true,
             assets: false
         }));
+    }
+
+    #[test]
+    fn watch_scope_is_nonrecursive_parent_plus_optional_asset_tree() {
+        let root = Path::new(r"C:\profile");
+        assert_eq!(
+            configured_watch_paths(root, false),
+            vec![(root.to_path_buf(), false)]
+        );
+        assert_eq!(
+            configured_watch_paths(root, true),
+            vec![
+                (root.to_path_buf(), false),
+                (root.join(RADIAL_ASSETS_DIRECTORY), true)
+            ]
+        );
     }
 }

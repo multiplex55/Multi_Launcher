@@ -3,8 +3,8 @@
 use super::{Hotkey, Key};
 pub use crate::radial::invocation::InputProvenance;
 use crate::radial::invocation::{
-    ContextToken, InvocationEvent, InvocationIntent, InvocationReducer, SettingsGeneration,
-    Timestamp,
+    ContextToken, InvocationEvent, InvocationIntent, InvocationReducer, LifecycleCancellation,
+    SettingsGeneration, Timestamp,
 };
 use crate::radial::model::{InteractionMode, InvocationId, MenuId, SessionId};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -214,12 +214,17 @@ struct RecoveryOwnership {
     down_suppressed: bool,
 }
 impl LauncherInvocationAdapter {
-    pub fn new(config: InvocationConfig) -> Result<Self, String> {
+    fn validate_config(config: &InvocationConfig) -> Result<(), String> {
         if config.launcher_enabled {
             vk_from_key(config.hotkey.key).ok_or_else(|| {
                 "configured launcher primary key is unsupported by native adapter".to_string()
             })?;
         }
+        Ok(())
+    }
+
+    pub fn new(config: InvocationConfig) -> Result<Self, String> {
+        Self::validate_config(&config)?;
         Ok(Self {
             config,
             reducer: InvocationReducer::default(),
@@ -250,18 +255,11 @@ impl LauncherInvocationAdapter {
     pub fn reload(
         &mut self,
         config: InvocationConfig,
-        at: Timestamp,
+        reason: LifecycleCancellation,
     ) -> Result<Vec<InvocationIntent>, String> {
-        if config.launcher_enabled {
-            vk_from_key(config.hotkey.key).ok_or_else(|| {
-                "configured launcher primary key is unsupported by native adapter".to_string()
-            })?;
-        }
-        let intents = self.reducer.reduce(InvocationEvent::CancelLifecycle {
-            primary_still_down: self.owned.is_some(),
-        });
+        Self::validate_config(&config)?;
+        let intents = self.cancel_lifecycle(reason);
         self.config = config;
-        let _ = at;
         Ok(intents)
     }
     pub fn set_exclusive(&mut self, active: bool) -> Vec<InvocationIntent> {
@@ -269,12 +267,29 @@ impl LauncherInvocationAdapter {
         self.reducer
             .reduce(InvocationEvent::ExclusiveToolChanged { active })
     }
+    pub fn cancel_lifecycle(&mut self, reason: LifecycleCancellation) -> Vec<InvocationIntent> {
+        self.candidate_primary_down = None;
+        let drain_release = reason.preserves_input_continuity() && self.owned.is_some();
+        let intents = self.reducer.reduce(InvocationEvent::CancelLifecycle {
+            reason,
+            primary_still_down: drain_release,
+        });
+        if !reason.preserves_input_continuity() {
+            self.owned = None;
+            self.owned_primary = None;
+            self.owned_primary_down_suppressed = false;
+            self.recovery_primary = None;
+            self.modifiers = Modifiers::default();
+        }
+        intents
+    }
     pub fn dismiss_active(&mut self) -> Vec<InvocationIntent> {
         if matches!(
             self.reducer.state(),
             crate::radial::invocation::InvocationState::RadialActive { .. }
         ) {
             self.reducer.reduce(InvocationEvent::CancelLifecycle {
+                reason: LifecycleCancellation::SessionReplaced,
                 primary_still_down: self.owned.is_some(),
             })
         } else {
@@ -283,6 +298,7 @@ impl LauncherInvocationAdapter {
     }
     fn preempt(&mut self) -> Vec<InvocationIntent> {
         self.reducer.reduce(InvocationEvent::CancelLifecycle {
+            reason: LifecycleCancellation::PriorityPreempted,
             primary_still_down: self.owned.is_some(),
         })
     }
@@ -578,6 +594,22 @@ fn command_generation_is_valid(sequence: u64, invalid_through: u64) -> bool {
     sequence > invalid_through
 }
 
+const POWER_BROADCAST_MESSAGE: u32 = 0x0218;
+const SESSION_CHANGE_MESSAGE: u32 = 0x02B1;
+const POWER_SUSPEND_EVENT: usize = 4;
+const SESSION_LOCK_EVENT: usize = 7;
+
+fn lifecycle_cancellation_for_message(
+    message: u32,
+    parameter: usize,
+) -> Option<LifecycleCancellation> {
+    match (message, parameter) {
+        (POWER_BROADCAST_MESSAGE, POWER_SUSPEND_EVENT) => Some(LifecycleCancellation::Suspend),
+        (SESSION_CHANGE_MESSAGE, SESSION_LOCK_EVENT) => Some(LifecycleCancellation::SessionLock),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct EscapeOwnership {
     active_session: Option<(InvocationId, crate::radial::model::SessionId)>,
@@ -586,6 +618,21 @@ struct EscapeOwnership {
 }
 
 impl EscapeOwnership {
+    fn active_invocation(&self) -> Option<InvocationId> {
+        self.active_session.as_ref().map(|(id, _)| *id)
+    }
+
+    fn cancel_session(&mut self) {
+        // Retain an already claimed navigation/Escape key until its matching
+        // release, but stop accepting any new session-scoped input.
+        self.active_session = None;
+    }
+
+    fn abandon_owned_cycle(&mut self) {
+        self.owned_provenance = None;
+        self.owned_vk = None;
+    }
+
     fn feedback(&mut self, event: &InvocationEvent) {
         match event {
             InvocationEvent::RadialSessionOpened { id, session_id } => {
@@ -670,6 +717,7 @@ pub struct ServiceNotice {
     pub intents: Vec<InvocationIntent>,
     pub error: Option<String>,
     pub action: Option<RelatedAction>,
+    pub cancellation: Option<LifecycleCancellation>,
 }
 
 /// Completion of an input-route transition. Success is published only after
@@ -765,11 +813,35 @@ pub struct LauncherInvocationService {
     #[cfg(all(windows, not(test)))]
     join: Option<std::thread::JoinHandle<()>>,
     #[cfg(all(windows, not(test)))]
+    reap_permit: Option<crate::thread_reaper::ReapPermit>,
+    #[cfg(all(windows, not(test)))]
     stopped: std::sync::mpsc::Receiver<()>,
     #[cfg(all(windows, not(test)))]
     command_sequence: std::sync::atomic::AtomicU64,
     #[cfg(all(windows, not(test)))]
     invalid_commands: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(all(windows, not(test)))]
+    lifecycle: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+#[cfg(all(windows, not(test)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum ServiceLifecycle {
+    Running = 0,
+    Stopping = 1,
+    Stopped = 2,
+}
+
+#[cfg(all(windows, not(test)))]
+impl ServiceLifecycle {
+    fn load(value: &std::sync::atomic::AtomicU8) -> Self {
+        match value.load(std::sync::atomic::Ordering::Acquire) {
+            0 => Self::Running,
+            1 => Self::Stopping,
+            _ => Self::Stopped,
+        }
+    }
 }
 
 #[cfg(all(windows, not(test)))]
@@ -778,8 +850,10 @@ enum ServiceCommand {
     Reload(
         InvocationConfig,
         Vec<RelatedBinding>,
+        LifecycleCancellation,
         std::sync::mpsc::SyncSender<Result<(), String>>,
     ),
+    Cancel(LifecycleCancellation),
     Exclusive(bool),
     ActiveMenu(Option<(SessionId, MenuId)>),
     Shutdown,
@@ -820,18 +894,30 @@ impl LauncherInvocationService {
         &self,
         config: InvocationConfig,
         related: Vec<RelatedBinding>,
+        reason: LifecycleCancellation,
     ) -> Result<RouteHandoff, String> {
         let (acknowledge, completion) = std::sync::mpsc::sync_channel(1);
         #[cfg(all(windows, not(test)))]
         {
-            self.send_command(ServiceCommand::Reload(config, related, acknowledge))?;
+            self.send_command(ServiceCommand::Reload(config, related, reason, acknowledge))?;
             return Ok(RouteHandoff { completion });
         }
         #[cfg(any(not(windows), test))]
         {
-            let _ = (config, related);
+            let _ = (config, related, reason);
             let _ = acknowledge.send(Ok(()));
             Ok(RouteHandoff { completion })
+        }
+    }
+    pub fn cancel_lifecycle(&self, reason: LifecycleCancellation) -> Result<(), String> {
+        #[cfg(all(windows, not(test)))]
+        {
+            return self.send_command(ServiceCommand::Cancel(reason));
+        }
+        #[cfg(any(not(windows), test))]
+        {
+            let _ = reason;
+            Ok(())
         }
     }
     pub fn set_exclusive(&self, active: bool) -> Result<(), String> {
@@ -858,6 +944,13 @@ impl LauncherInvocationService {
     }
     #[cfg(all(windows, not(test)))]
     fn send_command(&self, command: ServiceCommand) -> Result<(), String> {
+        if ServiceLifecycle::load(&self.lifecycle) != ServiceLifecycle::Running {
+            return Err("launcher invocation service is stopping".into());
+        }
+        self.send_command_internal(command)
+    }
+    #[cfg(all(windows, not(test)))]
+    fn send_command_internal(&self, command: ServiceCommand) -> Result<(), String> {
         let generation = self
             .command_sequence
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
@@ -883,19 +976,33 @@ impl LauncherInvocationService {
     pub fn stop(&mut self) {
         #[cfg(all(windows, not(test)))]
         {
-            let _ = self.send_command(ServiceCommand::Shutdown);
-            let _ = self
+            if self.join.is_none() {
+                return;
+            }
+            if ServiceLifecycle::load(&self.lifecycle) == ServiceLifecycle::Running {
+                self.lifecycle.store(
+                    ServiceLifecycle::Stopping as u8,
+                    std::sync::atomic::Ordering::Release,
+                );
+                let _ = self.send_command_internal(ServiceCommand::Shutdown);
+            }
+            let stopped = self
                 .stopped
-                .recv_timeout(std::time::Duration::from_millis(1500));
+                .recv_timeout(std::time::Duration::from_millis(1500))
+                .is_ok();
             if let Some(j) = self.join.take() {
-                if j.is_finished() {
+                if stopped || j.is_finished() {
                     let _ = j.join();
+                    self.reap_permit.take();
                 } else {
-                    let _ = std::thread::Builder::new()
-                        .name("launcher-invocation-deferred-join".into())
-                        .spawn(move || {
-                            let _ = j.join();
-                        });
+                    if let Err(error) = self
+                        .reap_permit
+                        .take()
+                        .expect("live invocation service owns a reaper permit")
+                        .reap(j)
+                    {
+                        eprintln!("launcher invocation cleanup degraded: {error}");
+                    }
                 }
             }
         }
@@ -913,10 +1020,175 @@ mod native_service {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock, mpsc};
     use std::time::Instant;
-    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::RemoteDesktop::{
+        NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+    };
     use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
     use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::{PCWSTR, w};
     pub(super) const WM_SERVICE_COMMAND: u32 = WM_APP + 0x53;
+    const LIFECYCLE_WINDOW_CLASS: PCWSTR = w!("MultiLauncherInvocationLifecycle");
+
+    unsafe extern "system" fn lifecycle_window_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if let Some(reason) = lifecycle_cancellation_for_message(message, wparam.0) {
+            publish_lifecycle_cancellation(reason);
+            return LRESULT(1);
+        }
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    unsafe extern "system" fn desktop_switch_callback(
+        _: HWINEVENTHOOK,
+        _: u32,
+        _: HWND,
+        _: i32,
+        _: i32,
+        _: u32,
+        _: u32,
+    ) {
+        publish_lifecycle_cancellation(LifecycleCancellation::DesktopUnavailable);
+    }
+
+    struct LifecycleWindow(HWND);
+
+    impl Drop for LifecycleWindow {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    struct SessionNotification(HWND);
+
+    impl Drop for SessionNotification {
+        fn drop(&mut self) {
+            let _ = unsafe { WTSUnRegisterSessionNotification(self.0) };
+        }
+    }
+
+    struct DesktopNotification(HWINEVENTHOOK);
+
+    impl Drop for DesktopNotification {
+        fn drop(&mut self) {
+            let _ = unsafe { UnhookWinEvent(self.0) };
+        }
+    }
+
+    struct KeyboardHook(windows::Win32::UI::WindowsAndMessaging::HHOOK);
+
+    impl Drop for KeyboardHook {
+        fn drop(&mut self) {
+            let _ = unsafe { UnhookWindowsHookEx(self.0) };
+        }
+    }
+
+    struct LifecycleSignals {
+        // Field order is teardown order: stop callbacks, unregister the session
+        // subscription, then retire the window that receives lifecycle messages.
+        _desktop: DesktopNotification,
+        _session: SessionNotification,
+        _window: LifecycleWindow,
+    }
+
+    struct ServiceTimer(usize);
+
+    impl ServiceTimer {
+        fn cancel(mut self, expected_live: bool, context: &'static str) {
+            kill_timer(self.0, expected_live, context);
+            self.0 = 0;
+        }
+    }
+
+    impl Drop for ServiceTimer {
+        fn drop(&mut self) {
+            if self.0 != 0 {
+                kill_timer(self.0, true, "service timer guard drop");
+                self.0 = 0;
+            }
+        }
+    }
+
+    impl LifecycleSignals {
+        fn install() -> Result<Self, String> {
+            static CLASS_REGISTERED: OnceLock<Result<(), String>> = OnceLock::new();
+            let module =
+                unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
+                    .map_err(|error| format!("lifecycle module handle unavailable: {error}"))?;
+            let instance: HINSTANCE = module.into();
+            CLASS_REGISTERED
+                .get_or_init(|| {
+                    let class = WNDCLASSW {
+                        hInstance: instance,
+                        lpszClassName: LIFECYCLE_WINDOW_CLASS,
+                        lpfnWndProc: Some(lifecycle_window_proc),
+                        ..Default::default()
+                    };
+                    if unsafe { RegisterClassW(&class) } == 0 {
+                        Err(format!(
+                            "failed to register invocation lifecycle window: {}",
+                            windows::core::Error::from_win32()
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .clone()?;
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    LIFECYCLE_WINDOW_CLASS,
+                    w!(""),
+                    WINDOW_STYLE::default(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    instance,
+                    None,
+                )
+            }
+            .map_err(|error| format!("failed to create invocation lifecycle window: {error}"))?;
+            let window = LifecycleWindow(hwnd);
+            if let Err(error) =
+                unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) }
+            {
+                return Err(format!(
+                    "failed to register invocation session notifications: {error}"
+                ));
+            }
+            let session = SessionNotification(hwnd);
+            let desktop_hook = unsafe {
+                SetWinEventHook(
+                    EVENT_SYSTEM_DESKTOPSWITCH,
+                    EVENT_SYSTEM_DESKTOPSWITCH,
+                    None,
+                    Some(desktop_switch_callback),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                )
+            };
+            if desktop_hook.0.is_null() {
+                return Err(format!(
+                    "failed to register invocation desktop notifications: {}",
+                    windows::core::Error::from_win32()
+                ));
+            }
+            Ok(Self {
+                _desktop: DesktopNotification(desktop_hook),
+                _session: session,
+                _window: window,
+            })
+        }
+    }
     struct State {
         adapter: LauncherInvocationAdapter,
         owner: Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
@@ -924,7 +1196,7 @@ mod native_service {
         wake: mpsc::Sender<()>,
         epoch: Instant,
         primary_down: bool,
-        timers: HashMap<InvocationId, usize>,
+        timers: HashMap<InvocationId, ServiceTimer>,
         related: Vec<(RelatedBinding, bool)>,
         down: std::collections::HashSet<u32>,
         commands: mpsc::Receiver<(u64, ServiceCommand)>,
@@ -942,6 +1214,21 @@ mod native_service {
         session_epoch: u64,
     }
     static STATE: OnceLock<Mutex<Option<State>>> = OnceLock::new();
+    fn publish_lifecycle_cancellation(reason: LifecycleCancellation) {
+        let Some(lock) = STATE.get() else { return };
+        let Ok(mut guard) = lock.lock() else { return };
+        let Some(state) = guard.as_mut() else { return };
+        let intents = cancel_lifecycle(state, reason);
+        let _ = state.notices.send(ServiceNotice {
+            recovery: false,
+            intents,
+            error: None,
+            action: None,
+            cancellation: Some(reason),
+        });
+        acknowledge_handoffs_if_drained(state);
+        let _ = state.wake.send(());
+    }
     fn publish(state: &State, out: AdapterOutcome) {
         if out.recovery || !out.intents.is_empty() {
             let _ = state.notices.send(ServiceNotice {
@@ -949,6 +1236,7 @@ mod native_service {
                 intents: out.intents,
                 error: None,
                 action: None,
+                cancellation: None,
             });
             let _ = state.wake.send(());
         }
@@ -958,6 +1246,45 @@ mod native_service {
             || state.escape.owned_provenance.is_some()
             || state.direct_owned.is_some()
             || state.item_owned.is_some()
+    }
+    fn cancel_lifecycle(state: &mut State, reason: LifecycleCancellation) -> Vec<InvocationIntent> {
+        let mut intents = state.adapter.cancel_lifecycle(reason);
+        for id in [
+            state.escape.active_invocation(),
+            state.direct_owned.map(|owned| owned.id),
+            state.item_owned.map(|owned| owned.id),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !intents.iter().any(|intent| {
+                matches!(intent, InvocationIntent::CancelRadialLifecycle { id: current, .. } if *current == id)
+            }) {
+                intents.push(InvocationIntent::CancelRadialLifecycle { id, reason });
+            }
+        }
+        state.escape.cancel_session();
+        if !reason.preserves_input_continuity() {
+            state.escape.abandon_owned_cycle();
+            state.direct_owned = None;
+            state.item_owned = None;
+            state.item_primary_suppressed = false;
+            state.primary_down = false;
+        }
+        state.active_frame = None;
+        state.session_epoch = state.session_epoch.wrapping_add(1);
+        state.item_recognizer.clear();
+        state.down.clear();
+        for (_, latched) in &mut state.related {
+            *latched = false;
+        }
+        let _ = update_timers(state, &intents);
+        // A reducer owns at most one deadline, but drain defensively so an old
+        // generation can never survive a lifecycle boundary.
+        for (_, timer) in state.timers.drain() {
+            timer.cancel(true, "lifecycle cancellation");
+        }
+        intents
     }
     unsafe extern "system" fn hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if code < 0 {
@@ -1032,6 +1359,7 @@ mod native_service {
                 intents: vec![InvocationIntent::TriggerReleased { id }],
                 error: None,
                 action: None,
+                cancellation: None,
             });
             let _ = state.wake.send(());
         }
@@ -1052,6 +1380,7 @@ mod native_service {
                 intents: vec![InvocationIntent::TriggerReleased { id }],
                 error: None,
                 action: None,
+                cancellation: None,
             });
             let _ = state.wake.send(());
             acknowledge_handoffs_if_drained(state);
@@ -1156,6 +1485,7 @@ mod native_service {
                     intents,
                     error: None,
                     action: published_action,
+                    cancellation: None,
                 });
                 let _ = state.wake.send(());
                 related_preempted = true;
@@ -1218,6 +1548,7 @@ mod native_service {
                 }],
                 error: None,
                 action: None,
+                cancellation: None,
             });
             let _ = state.wake.send(());
             if consume {
@@ -1235,19 +1566,17 @@ mod native_service {
         );
         let timer_error = update_timers(state, &out.intents);
         if let Some(error) = timer_error {
-            let cancel = state
-                .adapter
-                .reducer
-                .reduce(InvocationEvent::CancelLifecycle {
-                    primary_still_down: state.adapter.owned.is_some(),
-                });
+            state.shutdown_requested = true;
+            let cancel = cancel_lifecycle(state, LifecycleCancellation::HookFailure);
             let _ = state.notices.send(ServiceNotice {
                 recovery: false,
                 intents: cancel,
                 error: Some(error),
                 action: None,
+                cancellation: Some(LifecycleCancellation::HookFailure),
             });
             let _ = state.wake.send(());
+            unsafe { PostQuitMessage(0) };
         }
         let consume = out.consume;
         publish(state, out);
@@ -1266,7 +1595,7 @@ mod native_service {
             match *intent {
                 InvocationIntent::ScheduleDeadline { id, at, .. } => {
                     if let Some(timer) = state.timers.remove(&id) {
-                        kill_timer(timer, true, "deadline replacement");
+                        timer.cancel(true, "deadline replacement");
                     }
                     let delay = at
                         .saturating_sub(state.epoch.elapsed().as_millis() as u64)
@@ -1275,11 +1604,11 @@ mod native_service {
                     if timer == 0 {
                         return Some(format!("failed to schedule radial deadline for {}", id.0));
                     }
-                    state.timers.insert(id, timer);
+                    state.timers.insert(id, ServiceTimer(timer));
                 }
                 InvocationIntent::CancelDeadline { id } => {
                     if let Some(timer) = state.timers.remove(&id) {
-                        kill_timer(timer, true, "deadline cancellation");
+                        timer.cancel(true, "deadline cancellation");
                     }
                 }
                 _ => {}
@@ -1319,20 +1648,38 @@ mod native_service {
         let worker_invalid_commands = Arc::clone(&invalid_commands);
         let (setup_tx, setup_rx) = mpsc::sync_channel(1);
         let (stopped_tx, stopped) = mpsc::sync_channel(1);
+        let lifecycle = Arc::new(std::sync::atomic::AtomicU8::new(
+            ServiceLifecycle::Running as u8,
+        ));
+        let worker_lifecycle = Arc::clone(&lifecycle);
         let startup = Arc::new(StartupCancellation::default());
         let worker_startup = Arc::clone(&startup);
+        let reap_permit = crate::thread_reaper::reserve()
+            .map_err(|error| format!("failed to reserve invocation worker: {error}"))?;
+        let completion_notifier = reap_permit.completion_notifier();
         let join = std::thread::Builder::new()
             .name("launcher-invocation-hook".into())
             .spawn(move || {
-                struct StoppedOnDrop(Option<mpsc::SyncSender<()>>);
+                let _completion_notifier = completion_notifier;
+                struct StoppedOnDrop {
+                    stopped: Option<mpsc::SyncSender<()>>,
+                    lifecycle: Arc<std::sync::atomic::AtomicU8>,
+                }
                 impl Drop for StoppedOnDrop {
                     fn drop(&mut self) {
-                        if let Some(stopped) = self.0.take() {
+                        self.lifecycle.store(
+                            ServiceLifecycle::Stopped as u8,
+                            std::sync::atomic::Ordering::Release,
+                        );
+                        if let Some(stopped) = self.stopped.take() {
                             let _ = stopped.send(());
                         }
                     }
                 }
-                let _stopped = StoppedOnDrop(Some(stopped_tx));
+                let _stopped = StoppedOnDrop {
+                    stopped: Some(stopped_tx),
+                    lifecycle: worker_lifecycle,
+                };
                 let id = unsafe { GetCurrentThreadId() };
                 worker_startup
                     .worker_thread_id
@@ -1391,6 +1738,16 @@ mod native_service {
                     }
                     return;
                 }
+                let lifecycle_signals = match LifecycleSignals::install() {
+                    Ok(signals) => signals,
+                    Err(error) => {
+                        if let Ok(mut slot) = lock.lock() {
+                            *slot = None;
+                        }
+                        let _ = setup_tx.send(Err(error));
+                        return;
+                    }
+                };
                 let hook = match cancellable_startup_install(
                     &worker_startup,
                     || unsafe {
@@ -1415,6 +1772,7 @@ mod native_service {
                         return;
                     }
                 };
+                let _hook = KeyboardHook(hook);
                 let _ = setup_tx.send(Ok(id));
                 let mut msg = MSG::default();
                 while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
@@ -1441,16 +1799,21 @@ mod native_service {
                                             intents,
                                             error: None,
                                             action: None,
+                                            cancellation: None,
                                         });
                                         let _ = state.wake.send(());
                                     }
-                                    ServiceCommand::Reload(config, related, acknowledgement) => {
+                                    ServiceCommand::Reload(
+                                        config,
+                                        related,
+                                        reason,
+                                        acknowledgement,
+                                    ) => {
                                         let item_inputs = config.item_inputs.clone();
-                                        match state.adapter.reload(
-                                            config,
-                                            state.epoch.elapsed().as_millis() as u64,
-                                        ) {
-                                            Ok(intents) => {
+                                        match LauncherInvocationAdapter::validate_config(&config) {
+                                            Ok(()) => {
+                                                let intents = cancel_lifecycle(state, reason);
+                                                state.adapter.config = config;
                                                 state.related = related
                                                     .into_iter()
                                                     .map(|binding| (binding, false))
@@ -1464,6 +1827,7 @@ mod native_service {
                                                     intents,
                                                     error: None,
                                                     action: None,
+                                                    cancellation: Some(reason),
                                                 });
                                                 let _ = state.wake.send(());
                                                 state.pending_handoffs.applied(
@@ -1478,10 +1842,23 @@ mod native_service {
                                                     intents: vec![],
                                                     error: Some(error),
                                                     action: None,
+                                                    cancellation: None,
                                                 });
                                                 let _ = state.wake.send(());
                                             }
                                         }
+                                    }
+                                    ServiceCommand::Cancel(reason) => {
+                                        let intents = cancel_lifecycle(state, reason);
+                                        let _ = state.notices.send(ServiceNotice {
+                                            recovery: false,
+                                            intents,
+                                            error: None,
+                                            action: None,
+                                            cancellation: Some(reason),
+                                        });
+                                        let _ = state.wake.send(());
+                                        acknowledge_handoffs_if_drained(state);
                                     }
                                     ServiceCommand::Exclusive(active) => {
                                         if active {
@@ -1494,6 +1871,7 @@ mod native_service {
                                             intents,
                                             error: None,
                                             action: None,
+                                            cancellation: None,
                                         });
                                         let _ = state.wake.send(());
                                     }
@@ -1507,15 +1885,18 @@ mod native_service {
                                     }
                                     ServiceCommand::Shutdown => {
                                         state.shutdown_requested = true;
-                                        let intents = state.adapter.reducer.reduce(
-                                            InvocationEvent::CancelLifecycle {
-                                                primary_still_down: state.adapter.owned.is_some(),
-                                            },
+                                        let intents = cancel_lifecycle(
+                                            state,
+                                            LifecycleCancellation::Shutdown,
                                         );
-                                        let _ = update_timers(state, &intents);
-                                        for (_, timer) in state.timers.drain() {
-                                            kill_timer(timer, true, "service shutdown");
-                                        }
+                                        let _ = state.notices.send(ServiceNotice {
+                                            recovery: false,
+                                            intents,
+                                            error: None,
+                                            action: None,
+                                            cancellation: Some(LifecycleCancellation::Shutdown),
+                                        });
+                                        let _ = state.wake.send(());
                                         if !has_owned_input(state) {
                                             unsafe { PostQuitMessage(0) }
                                         }
@@ -1530,10 +1911,11 @@ mod native_service {
                                 if let Some(id) = state
                                     .timers
                                     .iter()
-                                    .find_map(|(id, actual)| (*actual == timer).then_some(*id))
+                                    .find_map(|(id, actual)| (actual.0 == timer).then_some(*id))
                                 {
-                                    state.timers.remove(&id);
-                                    kill_timer(timer, false, "one-shot timer fire");
+                                    if let Some(timer) = state.timers.remove(&id) {
+                                        timer.cancel(false, "one-shot timer fire");
+                                    }
                                     let at = state.epoch.elapsed().as_millis() as u64;
                                     let generation = state.adapter.config().generation;
                                     let intents = state.adapter.deadline(id, at, generation);
@@ -1542,18 +1924,35 @@ mod native_service {
                                         intents,
                                         error: None,
                                         action: None,
+                                        cancellation: None,
                                     });
                                     let _ = state.wake.send(());
                                 }
                             }
                         }
+                    } else if let Some(reason) =
+                        lifecycle_cancellation_for_message(msg.message, msg.wParam.0)
+                    {
+                        publish_lifecycle_cancellation(reason);
+                    } else {
+                        let _ = unsafe { TranslateMessage(&msg) };
+                        unsafe { DispatchMessageW(&msg) };
                     }
                 }
-                let _ = unsafe { UnhookWindowsHookEx(hook) };
+                let unexpected_exit = lock
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|state| !state.shutdown_requested))
+                    .unwrap_or(false);
+                if unexpected_exit {
+                    publish_lifecycle_cancellation(LifecycleCancellation::HookFailure);
+                }
+                drop(_hook);
+                drop(lifecycle_signals);
                 if let Ok(mut s) = lock.lock() {
                     if let Some(state) = s.as_mut() {
                         for (_, timer) in state.timers.drain() {
-                            kill_timer(timer, true, "service teardown");
+                            timer.cancel(true, "service teardown");
                         }
                     }
                     *s = None
@@ -1566,9 +1965,11 @@ mod native_service {
                 commands,
                 thread_id,
                 join: Some(join),
+                reap_permit: Some(reap_permit),
                 stopped,
                 command_sequence: std::sync::atomic::AtomicU64::new(0),
                 invalid_commands,
+                lifecycle,
             }),
             Ok(Err(e)) => {
                 let _ = join.join();
@@ -1585,16 +1986,13 @@ mod native_service {
                 let cleaned = stopped
                     .recv_timeout(std::time::Duration::from_millis(1500))
                     .is_ok();
-                let _ = std::thread::Builder::new()
-                    .name("launcher-hook-startup-deferred-join".into())
-                    .spawn(move || {
-                        let _ = join.join();
-                    });
-                if cleaned {
-                    Err("launcher hook readiness timed out and was cancelled".into())
+                let reaper_error = reap_permit.reap(join).err();
+                let message = if cleaned {
+                    "launcher hook readiness timed out and was cancelled".to_string()
                 } else {
-                    Err("launcher hook readiness timed out; cancellation is still draining".into())
-                }
+                    "launcher hook readiness timed out; cancellation is still draining".to_string()
+                };
+                Err(reaper_error.map_or(message.clone(), |error| format!("{message}; {error}")))
             }
         }
     }
@@ -1729,8 +2127,13 @@ mod tests {
         let mut c = cfg();
         c.generation = 5;
         assert!(matches!(
-            a.reload(c, 2).unwrap().as_slice(),
-            [InvocationIntent::CancelDeadline { .. }]
+            a.reload(c, LifecycleCancellation::SettingsReload)
+                .unwrap()
+                .as_slice(),
+            [
+                InvocationIntent::CancelDeadline { .. },
+                InvocationIntent::CancelRadialLifecycle { .. }
+            ]
         ));
         assert!(a.deadline(id, 351, 4).is_empty());
         assert!(
@@ -1752,7 +2155,9 @@ mod tests {
         let mut disabled = cfg();
         disabled.launcher_enabled = false;
         disabled.generation += 1;
-        adapter.reload(disabled, 2).unwrap();
+        adapter
+            .reload(disabled, LifecycleCancellation::FeatureDisabled)
+            .unwrap();
         assert!(
             adapter
                 .process(e(0x23, KeyTransition::Up, 3), PriorityOwner::Launcher)
@@ -1900,7 +2305,9 @@ mod tests {
         );
         let mut direct_only = cfg();
         direct_only.launcher_enabled = false;
-        adapter.reload(direct_only, 2).unwrap();
+        adapter
+            .reload(direct_only, LifecycleCancellation::SettingsReload)
+            .unwrap();
         assert!(
             adapter.has_owned_cycle(),
             "legacy route must still be deferred"
@@ -1921,7 +2328,9 @@ mod tests {
             "a fresh chord belongs only to the newly admitted legacy route"
         );
 
-        adapter.reload(cfg(), 5).unwrap();
+        adapter
+            .reload(cfg(), LifecycleCancellation::SettingsReload)
+            .unwrap();
         assert!(!adapter.has_owned_cycle());
         assert!(
             adapter
@@ -2073,6 +2482,22 @@ mod tests {
         assert!(command_generation_is_valid(9, 8));
     }
     #[test]
+    fn native_lifecycle_messages_map_without_touching_the_desktop() {
+        assert_eq!(
+            lifecycle_cancellation_for_message(POWER_BROADCAST_MESSAGE, POWER_SUSPEND_EVENT),
+            Some(LifecycleCancellation::Suspend)
+        );
+        assert_eq!(
+            lifecycle_cancellation_for_message(SESSION_CHANGE_MESSAGE, SESSION_LOCK_EVENT),
+            Some(LifecycleCancellation::SessionLock)
+        );
+        assert_eq!(
+            lifecycle_cancellation_for_message(POWER_BROADCAST_MESSAGE, 7),
+            None
+        );
+        assert_eq!(lifecycle_cancellation_for_message(0, 0), None);
+    }
+    #[test]
     fn exclusive_owner_events_preserve_independent_lifecycles() {
         let owners = exclusive_owner_transition(0, ExclusiveOwner::MacroPlayback, true);
         let owners = exclusive_owner_transition(owners, ExclusiveOwner::VisualSelection, true);
@@ -2088,7 +2513,10 @@ mod tests {
         adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
         assert!(matches!(
             adapter.preempt().as_slice(),
-            [InvocationIntent::CancelDeadline { .. }]
+            [
+                InvocationIntent::CancelDeadline { .. },
+                InvocationIntent::CancelRadialLifecycle { .. }
+            ]
         ));
         assert!(
             adapter
@@ -2116,7 +2544,7 @@ mod tests {
         adapter.deadline(id, 351, 4);
         assert!(matches!(
             adapter.dismiss_active().as_slice(),
-            [InvocationIntent::CloseRadial { .. }]
+            [InvocationIntent::CancelRadialLifecycle { .. }]
         ));
     }
     #[test]
@@ -2250,5 +2678,230 @@ mod tests {
         assert!(!owned.matches_release(event(0x54, InputProvenance::ExternalInjected)));
         assert!(!owned.matches_release(event(0x55, InputProvenance::Physical)));
         assert!(owned.matches_release(event(0x54, InputProvenance::Physical)));
+    }
+
+    #[test]
+    fn left_and_right_modifier_matrix_and_altgr_are_tracked_independently() {
+        for modifiers in [
+            [0xA0, 0xA4, 0x5B],
+            [0xA1, 0xA4, 0x5C],
+            [0xA0, 0xA5, 0x5C],
+            [0xA1, 0xA5, 0x5B],
+        ] {
+            let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+            for vk in modifiers {
+                let outcome =
+                    adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+                assert!(
+                    !outcome.consume,
+                    "external modifier down must remain unclaimed"
+                );
+            }
+            let down = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+            assert!(down.consume);
+            for vk in modifiers {
+                assert!(
+                    !adapter
+                        .process(e(vk, KeyTransition::Up, 2), PriorityOwner::Launcher)
+                        .consume,
+                    "delivered modifier cycles cannot be stranded"
+                );
+            }
+            assert!(
+                adapter
+                    .process(e(0x23, KeyTransition::Up, 3), PriorityOwner::Launcher)
+                    .consume
+            );
+        }
+
+        let mut altgr_config = cfg();
+        altgr_config.hotkey = super::super::parse_hotkey("AltGr+End").unwrap();
+        for (alt, accepted) in [(0xA4, false), (0xA5, true)] {
+            let mut adapter = LauncherInvocationAdapter::new(altgr_config.clone()).unwrap();
+            adapter.process(e(alt, KeyTransition::Down, 0), PriorityOwner::Launcher);
+            assert_eq!(
+                adapter
+                    .process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher)
+                    .consume,
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn invocation_chord_modifiers_never_become_action_modifier_intents() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            assert!(
+                adapter
+                    .process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher)
+                    .intents
+                    .is_empty()
+            );
+        }
+        let pressed = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        let id = match pressed.intents[0] {
+            InvocationIntent::ScheduleDeadline { id, .. } => id,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            adapter.deadline(id, 351, 4).as_slice(),
+            [InvocationIntent::OpenRadial { .. }]
+        ));
+        for vk in [0xA0, 0xA4, 0x5B] {
+            let released = adapter.process(e(vk, KeyTransition::Up, 352), PriorityOwner::Launcher);
+            assert!(!released.consume && released.intents.is_empty());
+        }
+    }
+
+    #[test]
+    fn dismiss_press_and_release_are_one_drained_cycle_without_legacy_toggle() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let opened = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        let open_id = match opened.intents[0] {
+            InvocationIntent::ScheduleDeadline { id, .. } => id,
+            _ => unreachable!(),
+        };
+        adapter.deadline(open_id, 351, 4);
+        adapter.process(e(0x23, KeyTransition::Up, 352), PriorityOwner::Launcher);
+
+        let dismiss = adapter.process(e(0x23, KeyTransition::Down, 400), PriorityOwner::Launcher);
+        assert!(dismiss.consume);
+        assert!(matches!(
+            dismiss.intents.as_slice(),
+            [InvocationIntent::CloseRadial { .. }]
+        ));
+        let release = adapter.process(e(0x23, KeyTransition::Up, 401), PriorityOwner::Launcher);
+        assert!(release.consume);
+        assert!(release.intents.is_empty());
+        assert!(!adapter.has_owned_cycle());
+        assert!(
+            !adapter
+                .process(e(0x23, KeyTransition::Up, 402), PriorityOwner::Launcher)
+                .consume
+        );
+    }
+
+    #[test]
+    fn post_action_trigger_release_acknowledges_once_and_never_reopens() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let pressed = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        let id = match pressed.intents[0] {
+            InvocationIntent::ScheduleDeadline { id, .. } => id,
+            _ => unreachable!(),
+        };
+        adapter.deadline(id, 351, 4);
+        adapter
+            .reducer
+            .reduce(InvocationEvent::RadialClosedForAction { id });
+        let released = adapter.process(e(0x23, KeyTransition::Up, 352), PriorityOwner::Launcher);
+        assert!(released.consume);
+        assert!(matches!(
+            released.intents.as_slice(),
+            [InvocationIntent::TriggerReleased { id: actual }] if *actual == id
+        ));
+        let duplicate = adapter.process(e(0x23, KeyTransition::Up, 353), PriorityOwner::Launcher);
+        assert!(!duplicate.consume && duplicate.intents.is_empty());
+    }
+
+    #[test]
+    fn supported_external_injection_invokes_but_owned_injection_never_recurses() {
+        let mut external = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            external.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let mut external_down = e(0x23, KeyTransition::Down, 1);
+        external_down.provenance = InputProvenance::ExternalInjected;
+        let accepted = external.process(external_down, PriorityOwner::Launcher);
+        assert!(accepted.consume);
+        assert!(matches!(
+            accepted.intents.as_slice(),
+            [InvocationIntent::ScheduleDeadline { .. }]
+        ));
+
+        let mut owned = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            owned.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let mut owned_down = e(0x23, KeyTransition::Down, 1);
+        owned_down.provenance = InputProvenance::SelfInjected;
+        let rejected = owned.process(owned_down, PriorityOwner::Launcher);
+        assert!(!rejected.consume && rejected.intents.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_matrix_cancels_pending_and_active_without_legacy_fallback() {
+        let reasons = [
+            LifecycleCancellation::SettingsReload,
+            LifecycleCancellation::FeatureDisabled,
+            LifecycleCancellation::HostFailure,
+            LifecycleCancellation::HookFailure,
+            LifecycleCancellation::Shutdown,
+            LifecycleCancellation::Suspend,
+            LifecycleCancellation::SessionLock,
+            LifecycleCancellation::DesktopUnavailable,
+        ];
+        for reason in reasons {
+            let mut pending = LauncherInvocationAdapter::new(cfg()).unwrap();
+            for vk in [0xA0, 0xA4, 0x5B] {
+                pending.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+            }
+            let start = pending.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+            let id = match start.intents[0] {
+                InvocationIntent::ScheduleDeadline { id, .. } => id,
+                _ => unreachable!(),
+            };
+            let cancellation = pending.cancel_lifecycle(reason);
+            assert!(cancellation.iter().any(|intent| matches!(
+                intent,
+                InvocationIntent::CancelRadialLifecycle { reason: actual, .. } if *actual == reason
+            )));
+            assert!(
+                !cancellation
+                    .iter()
+                    .any(|intent| matches!(intent, InvocationIntent::ToggleLegacyLauncher { .. }))
+            );
+            assert!(pending.deadline(id, 351, 4).is_empty());
+            assert_eq!(
+                pending
+                    .process(e(0x23, KeyTransition::Up, 352), PriorityOwner::Launcher)
+                    .consume,
+                reason.preserves_input_continuity()
+            );
+            assert!(!pending.has_owned_cycle());
+            if !reason.preserves_input_continuity() {
+                assert!(
+                    !pending
+                        .process(e(0x23, KeyTransition::Down, 353), PriorityOwner::Launcher)
+                        .consume,
+                    "lost input continuity must not retain phantom modifiers"
+                );
+            }
+
+            let mut active = LauncherInvocationAdapter::new(cfg()).unwrap();
+            for vk in [0xA0, 0xA4, 0x5B] {
+                active.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+            }
+            let start = active.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+            let active_id = match start.intents[0] {
+                InvocationIntent::ScheduleDeadline { id, .. } => id,
+                _ => unreachable!(),
+            };
+            active.deadline(active_id, 351, 4);
+            assert!(active.cancel_lifecycle(reason).iter().any(|intent| matches!(
+                intent,
+                InvocationIntent::CancelRadialLifecycle { reason: actual, .. } if *actual == reason
+            )));
+            let release = active.process(e(0x23, KeyTransition::Up, 352), PriorityOwner::Launcher);
+            assert_eq!(release.consume, reason.preserves_input_continuity());
+            assert!(release.intents.is_empty());
+            assert!(!active.has_owned_cycle());
+        }
     }
 }

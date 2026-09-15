@@ -14,6 +14,40 @@ pub enum InputProvenance {
     SelfInjected,
 }
 
+/// Why the invocation route must retire its current logical lifecycle.
+///
+/// Keeping this typed at the reducer boundary prevents reload, operating-system
+/// transitions, and failures from being collapsed into an ordinary dismissal.
+/// The reason is carried to the controller so native ownership can be released
+/// through the same close path as the corresponding lifecycle transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LifecycleCancellation {
+    SettingsReload,
+    FeatureDisabled,
+    HostFailure,
+    HookFailure,
+    Shutdown,
+    Suspend,
+    SessionLock,
+    DesktopUnavailable,
+    SessionReplaced,
+    PriorityPreempted,
+}
+
+impl LifecycleCancellation {
+    /// Whether the hook can still be trusted to observe the matching release.
+    pub fn preserves_input_continuity(self) -> bool {
+        !matches!(
+            self,
+            Self::HookFailure
+                | Self::Shutdown
+                | Self::Suspend
+                | Self::SessionLock
+                | Self::DesktopUnavailable
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvocationEvent {
     ChordPressed {
@@ -58,6 +92,7 @@ pub enum InvocationEvent {
         provenance: InputProvenance,
     },
     CancelLifecycle {
+        reason: LifecycleCancellation,
         primary_still_down: bool,
     },
     ExclusiveToolChanged {
@@ -111,6 +146,10 @@ pub enum InvocationIntent {
     },
     HoldCancelledBeforePresentation {
         id: InvocationId,
+    },
+    CancelRadialLifecycle {
+        id: InvocationId,
+        reason: LifecycleCancellation,
     },
     CancelDeadline {
         id: InvocationId,
@@ -200,7 +239,10 @@ impl InvocationReducer {
                 });
                 vec![]
             }
-            E::CancelLifecycle { primary_still_down } => self.cancel_current(primary_still_down),
+            E::CancelLifecycle {
+                reason,
+                primary_still_down,
+            } => self.cancel_current(reason, primary_still_down),
             E::DirectToggle {
                 id,
                 menu_id,
@@ -407,6 +449,7 @@ impl InvocationReducer {
                 id: active,
                 interaction,
                 session_id,
+                trigger_still_down: true,
                 ..
             } if *active == id => {
                 let interaction = *interaction;
@@ -456,10 +499,18 @@ impl InvocationReducer {
         }
     }
 
-    fn cancel_current(&mut self, primary_still_down: bool) -> Vec<InvocationIntent> {
-        let (id, deadline, close) = match &self.state {
-            InvocationState::Pending { id, .. } => (Some(*id), true, false),
+    fn cancel_current(
+        &mut self,
+        reason: LifecycleCancellation,
+        primary_still_down: bool,
+    ) -> Vec<InvocationIntent> {
+        let (id, deadline, radial_lifecycle) = match &self.state {
+            InvocationState::Pending { id, .. } => (Some(*id), true, true),
             InvocationState::RadialActive { id, .. } => (Some(*id), false, true),
+            InvocationState::AwaitingOwnedRelease { id, .. } => (Some(*id), false, false),
+            InvocationState::SuppressedByExclusiveTool {
+                owned_release: Some(id),
+            } => (Some(*id), false, false),
             _ => (None, false, false),
         };
         let mut intents = Vec::new();
@@ -467,8 +518,8 @@ impl InvocationReducer {
             if deadline {
                 intents.push(InvocationIntent::CancelDeadline { id });
             }
-            if close {
-                intents.push(InvocationIntent::CloseRadial { session_id: None });
+            if radial_lifecycle {
+                intents.push(InvocationIntent::CancelRadialLifecycle { id, reason });
             }
             self.state = if primary_still_down {
                 InvocationState::AwaitingOwnedRelease {
@@ -635,10 +686,14 @@ mod tests {
         r.reduce(press(1, 0, InteractionMode::StickyClick));
         assert!(matches!(
             r.reduce(InvocationEvent::CancelLifecycle {
+                reason: LifecycleCancellation::SettingsReload,
                 primary_still_down: true
             })
             .as_slice(),
-            [InvocationIntent::CancelDeadline { .. }]
+            [
+                InvocationIntent::CancelDeadline { .. },
+                InvocationIntent::CancelRadialLifecycle { .. }
+            ]
         ));
         assert!(
             r.reduce(InvocationEvent::PrimaryReleased {
@@ -782,5 +837,195 @@ mod tests {
                 id: InvocationId(20)
             }]
         ));
+    }
+
+    #[test]
+    fn threshold_boundary_matrix_uses_physical_release_time() {
+        for (elapsed, expected_tap) in [
+            (0, true),
+            (100, true),
+            (349, true),
+            (350, false),
+            (351, false),
+        ] {
+            let mut reducer = InvocationReducer::default();
+            reducer.reduce(press(30, 1_000, InteractionMode::StickyClick));
+            let intents = reducer.reduce(InvocationEvent::PrimaryReleased {
+                id: InvocationId(30),
+                at: 1_000 + elapsed,
+            });
+            assert_eq!(
+                intents
+                    .iter()
+                    .filter(|intent| matches!(
+                        intent,
+                        InvocationIntent::ToggleLegacyLauncher { .. }
+                    ))
+                    .count(),
+                usize::from(expected_tap),
+                "elapsed={elapsed}"
+            );
+            assert_eq!(
+                intents
+                    .iter()
+                    .filter(|intent| matches!(intent, InvocationIntent::OpenRadial { .. }))
+                    .count(),
+                usize::from(!expected_tap),
+                "elapsed={elapsed}"
+            );
+        }
+    }
+
+    #[test]
+    fn deadline_repeat_duplicate_and_delayed_delivery_are_exact_once() {
+        let mut reducer = InvocationReducer::default();
+        reducer.reduce(press(31, 10, InteractionMode::StickyClick));
+        let mut repeat = press(31, 20, InteractionMode::StickyClick);
+        if let InvocationEvent::ChordPressed { repeat, .. } = &mut repeat {
+            *repeat = true;
+        }
+        assert!(reducer.reduce(repeat).is_empty());
+        assert!(
+            reducer
+                .reduce(InvocationEvent::Deadline {
+                    id: InvocationId(31),
+                    at: 359,
+                    generation: 7,
+                })
+                .is_empty()
+        );
+        assert!(matches!(
+            reducer
+                .reduce(InvocationEvent::Deadline {
+                    id: InvocationId(31),
+                    at: 360,
+                    generation: 7,
+                })
+                .as_slice(),
+            [InvocationIntent::OpenRadial { .. }]
+        ));
+        assert!(
+            reducer
+                .reduce(InvocationEvent::Deadline {
+                    id: InvocationId(31),
+                    at: 900,
+                    generation: 7,
+                })
+                .is_empty(),
+            "a duplicate delayed deadline cannot open twice"
+        );
+        assert!(matches!(
+            reducer
+                .reduce(InvocationEvent::PrimaryReleased {
+                    id: InvocationId(31),
+                    at: 370,
+                })
+                .as_slice(),
+            [InvocationIntent::TriggerReleased { .. }]
+        ));
+        assert!(
+            reducer
+                .reduce(InvocationEvent::PrimaryReleased {
+                    id: InvocationId(31),
+                    at: 371,
+                })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_lifecycle_cancellation_is_typed_stale_safe_and_drains_once() {
+        let reasons = [
+            LifecycleCancellation::SettingsReload,
+            LifecycleCancellation::FeatureDisabled,
+            LifecycleCancellation::HostFailure,
+            LifecycleCancellation::HookFailure,
+            LifecycleCancellation::Shutdown,
+            LifecycleCancellation::Suspend,
+            LifecycleCancellation::SessionLock,
+            LifecycleCancellation::DesktopUnavailable,
+            LifecycleCancellation::SessionReplaced,
+            LifecycleCancellation::PriorityPreempted,
+        ];
+        for (index, reason) in reasons.into_iter().enumerate() {
+            let id = InvocationId(100 + index as u64);
+            let mut reducer = InvocationReducer::default();
+            let mut event = press(id.0, 0, InteractionMode::StickyClick);
+            if let InvocationEvent::ChordPressed {
+                generation,
+                context_token,
+                ..
+            } = &mut event
+            {
+                *generation = index as u64 + 1;
+                *context_token = id.0;
+            }
+            reducer.reduce(event);
+            let intents = reducer.reduce(InvocationEvent::CancelLifecycle {
+                reason,
+                primary_still_down: true,
+            });
+            assert!(matches!(
+                intents.as_slice(),
+                [
+                    InvocationIntent::CancelDeadline { id: cancelled },
+                    InvocationIntent::CancelRadialLifecycle {
+                        id: closed,
+                        reason: actual,
+                    }
+                ] if *cancelled == id && *closed == id && *actual == reason
+            ));
+            assert!(
+                reducer
+                    .reduce(InvocationEvent::Deadline {
+                        id,
+                        at: 10_000,
+                        generation: index as u64 + 1,
+                    })
+                    .is_empty()
+            );
+            assert!(
+                reducer
+                    .reduce(InvocationEvent::PrimaryReleased { id, at: 10_001 })
+                    .is_empty()
+            );
+            assert!(matches!(reducer.state(), InvocationState::Idle));
+            assert!(
+                reducer
+                    .reduce(InvocationEvent::PrimaryReleased { id, at: 10_002 })
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn rapid_completed_invocations_discard_each_others_stale_events() {
+        let mut reducer = InvocationReducer::default();
+        for (id, start) in [(200, 0), (201, 200)] {
+            reducer.reduce(press(id, start, InteractionMode::StickyClick));
+            let intents = reducer.reduce(InvocationEvent::PrimaryReleased {
+                id: InvocationId(id),
+                at: start + 100,
+            });
+            assert_eq!(
+                intents
+                    .iter()
+                    .filter(|intent| matches!(
+                        intent,
+                        InvocationIntent::ToggleLegacyLauncher { .. }
+                    ))
+                    .count(),
+                1
+            );
+        }
+        assert!(
+            reducer
+                .reduce(InvocationEvent::Deadline {
+                    id: InvocationId(200),
+                    at: 10_000,
+                    generation: 7,
+                })
+                .is_empty()
+        );
     }
 }

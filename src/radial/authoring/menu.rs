@@ -244,6 +244,11 @@ pub fn delete_menu(session: &mut RadialAuthoringSession, id: &MenuId) -> Result<
         return Err(MenuEditError::Referenced(impact));
     }
     let mut document = (*session.draft).clone();
+    document
+        .menus
+        .iter()
+        .position(|menu| &menu.id == id)
+        .ok_or(MenuEditError::MissingEntity)?;
     let before = document.menus.len();
     document.menus.retain(|menu| &menu.id != id);
     if document.menus.len() == before {
@@ -251,7 +256,10 @@ pub fn delete_menu(session: &mut RadialAuthoringSession, id: &MenuId) -> Result<
     }
     session
         .replace_document_atomic(document)
-        .map_err(|_| MenuEditError::MissingEntity)
+        .map_err(|_| MenuEditError::MissingEntity)?;
+    let fallback = session.draft.default_menu_id.clone();
+    session.select(Some(StableSelection::Menu(fallback)));
+    Ok(())
 }
 
 pub fn move_menu(
@@ -988,6 +996,21 @@ mod tests {
             widget_key("menu", root.as_str(), "name"),
             widget_key("menu", root.as_str(), "layout")
         );
+    }
+
+    #[test]
+    fn deleting_selected_entity_restores_selection_to_a_stable_survivor() {
+        let mut session = session();
+        let root = session.draft.menus[0].id.clone();
+        let child = create_menu(&mut session, "child", "Child").unwrap();
+        assert_eq!(
+            session.selection,
+            Some(StableSelection::Menu(child.clone()))
+        );
+
+        delete_menu(&mut session, &child).unwrap();
+
+        assert_eq!(session.selection, Some(StableSelection::Menu(root)));
     }
 
     #[test]

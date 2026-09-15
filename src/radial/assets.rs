@@ -27,6 +27,51 @@ pub const MAX_WAVE_DURATION_MS: u64 = 30_000;
 pub const MAX_WAVE_SAMPLE_RATE: u32 = 192_000;
 pub const MAX_WAVE_CHANNELS: u16 = 8;
 pub const DEFAULT_CACHE_ENTRIES: usize = 256;
+pub const MAX_PREVIEW_OVERLAY_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ManagedAssetOverlay {
+    entries: Arc<[(AssetRecord, Arc<[u8]>)]>,
+}
+
+impl ManagedAssetOverlay {
+    pub fn validated(
+        entries: impl IntoIterator<Item = (AssetRecord, Arc<[u8]>)>,
+    ) -> Result<Self, AssetDiagnostic> {
+        let entries = entries.into_iter().collect::<Vec<_>>();
+        let total = entries.iter().try_fold(0usize, |total, (record, bytes)| {
+            if bytes.len() as u64 != record.byte_len
+                || bytes.len() as u64 > MAX_SOURCE_BYTES
+                || hex::encode(Sha256::digest(bytes)) != record.content_sha256
+            {
+                return Err(AssetDiagnostic::ManagedRecordMismatch);
+            }
+            total
+                .checked_add(bytes.len())
+                .filter(|total| *total <= MAX_PREVIEW_OVERLAY_BYTES)
+                .ok_or(AssetDiagnostic::SourceBudgetExceeded)
+        })?;
+        let _ = total;
+        let mut ids = std::collections::BTreeSet::new();
+        if entries
+            .iter()
+            .any(|(record, _)| !ids.insert(record.id.clone()))
+        {
+            return Err(AssetDiagnostic::ManagedRecordMismatch);
+        }
+        Ok(Self {
+            entries: entries.into(),
+        })
+    }
+
+    fn get(&self, id: &super::model::AssetId) -> Option<&(AssetRecord, Arc<[u8]>)> {
+        self.entries.iter().find(|(record, _)| &record.id == id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
 
 /// Package admission uses the same bounded decoder as runtime preparation so
 /// compressed files cannot defer a decoded image/frame bomb until first use.
@@ -162,13 +207,41 @@ impl<E: IconResourceExtractor> AssetService<E> {
         records: &[AssetRecord],
         variant: PrepareVariant,
     ) -> Result<PreparedAssetSnapshot, AssetDiagnostic> {
-        let unresolved_key = cache_key(reference_identity(reference), "unresolved".into(), variant);
+        self.prepare_with_overlay(
+            reference,
+            expected,
+            records,
+            variant,
+            &ManagedAssetOverlay::default(),
+        )
+    }
+
+    pub fn prepare_with_overlay(
+        &mut self,
+        reference: &MediaReference,
+        expected: MediaKind,
+        records: &[AssetRecord],
+        variant: PrepareVariant,
+        overlay: &ManagedAssetOverlay,
+    ) -> Result<PreparedAssetSnapshot, AssetDiagnostic> {
+        let overlay_version = match reference {
+            MediaReference::Managed { asset_id } => overlay
+                .get(asset_id)
+                .map(|(record, _)| record.content_sha256.as_str())
+                .unwrap_or("persisted"),
+            _ => "external",
+        };
+        let unresolved_key = cache_key(
+            reference_identity(reference),
+            format!("unresolved:{overlay_version}"),
+            variant,
+        );
         if let Some(CachedAsset::Ready(value)) = self.cache.get(&unresolved_key) {
             if let PreparedOutcome::Unavailable(diagnostic) = &*value {
                 return Err(diagnostic.clone());
             }
         }
-        let resolved = match self.resolve(reference, expected, records) {
+        let resolved = match self.resolve(reference, expected, records, overlay) {
             Ok(resolved) => resolved,
             Err(error) => {
                 self.cache.insert_ready(
@@ -252,6 +325,7 @@ impl<E: IconResourceExtractor> AssetService<E> {
         reference: &MediaReference,
         expected: MediaKind,
         records: &[AssetRecord],
+        overlay: &ManagedAssetOverlay,
     ) -> Result<ResolvedSource, AssetDiagnostic> {
         match reference {
             MediaReference::Managed { asset_id } => {
@@ -261,6 +335,22 @@ impl<E: IconResourceExtractor> AssetService<E> {
                     .ok_or(AssetDiagnostic::ManagedRecordMismatch)?;
                 if record.kind != expected || !safe_relative(Path::new(&record.relative_path)) {
                     return Err(AssetDiagnostic::ManagedRecordMismatch);
+                }
+                if let Some((overlay_record, bytes)) = overlay.get(asset_id) {
+                    if overlay_record != record
+                        || bytes.len() as u64 != record.byte_len
+                        || hex::encode(Sha256::digest(bytes)) != record.content_sha256
+                    {
+                        return Err(AssetDiagnostic::ManagedRecordMismatch);
+                    }
+                    return Ok(ResolvedSource {
+                        identity: format!("managed:{asset_id}"),
+                        version: format!("pending:{}:{}", record.content_sha256, record.byte_len),
+                        path: PathBuf::from(format!("pending-managed:{asset_id}")),
+                        portability: AssetPortability::ManagedPortable,
+                        icon_index: None,
+                        verified_bytes: Some(bytes.to_vec()),
+                    });
                 }
                 let root = self.application_data.join(RADIAL_ASSETS_DIRECTORY);
                 let path = root.join(&record.relative_path);
@@ -906,6 +996,77 @@ mod tests {
             decode_image(&animated_gif(2, 20_000)),
             Err(AssetDiagnostic::DurationBudgetExceeded)
         ));
+    }
+
+    #[test]
+    fn pending_overlay_precedes_disk_without_writes_and_validates_image_gif_and_sound() {
+        let directory = tempfile::tempdir().unwrap();
+        let png = encoded(ImageOutputFormat::Png);
+        let gif = animated_gif(2, 10);
+        let wav = pcm_wav(1, 8_000, 8, &[0; 16]);
+        let entries = [
+            ("pending-png", MediaKind::Image, "pending.png", png),
+            ("pending-gif", MediaKind::Image, "pending.gif", gif),
+            ("pending-wav", MediaKind::Sound, "pending.wav", wav),
+        ]
+        .into_iter()
+        .map(|(id, kind, relative_path, bytes)| {
+            let record = AssetRecord {
+                id: super::super::model::AssetId::new(id),
+                kind,
+                relative_path: relative_path.into(),
+                content_sha256: hex::encode(Sha256::digest(&bytes)),
+                byte_len: bytes.len() as u64,
+            };
+            (record, Arc::<[u8]>::from(bytes))
+        })
+        .collect::<Vec<_>>();
+        let records = entries
+            .iter()
+            .map(|(record, _)| record.clone())
+            .collect::<Vec<_>>();
+        let overlay = ManagedAssetOverlay::validated(entries).unwrap();
+        let mut service = AssetService::new(directory.path().to_path_buf(), Default::default());
+        let variant = PrepareVariant {
+            effective_style: 1,
+            dpi_milli: 1_000,
+            logical_width_milli: 32_000,
+            logical_height_milli: 32_000,
+            quality: RenderingQuality::Balanced,
+        };
+        for record in &records {
+            let snapshot = service
+                .prepare_with_overlay(
+                    &MediaReference::Managed {
+                        asset_id: record.id.clone(),
+                    },
+                    record.kind,
+                    &records,
+                    variant,
+                    &overlay,
+                )
+                .unwrap();
+            assert!(
+                snapshot
+                    .source
+                    .to_string_lossy()
+                    .starts_with("pending-managed:")
+            );
+        }
+        assert!(!directory.path().join(RADIAL_ASSETS_DIRECTORY).exists());
+
+        let bad = AssetRecord {
+            id: super::super::model::AssetId::new("corrupt"),
+            kind: MediaKind::Image,
+            relative_path: "corrupt.png".into(),
+            content_sha256: "0".repeat(64),
+            byte_len: 3,
+        };
+        assert_eq!(
+            ManagedAssetOverlay::validated([(bad, Arc::<[u8]>::from([1, 2, 3]))]),
+            Err(AssetDiagnostic::ManagedRecordMismatch)
+        );
+        assert!(!directory.path().join(RADIAL_ASSETS_DIRECTORY).exists());
     }
 
     #[derive(Clone)]

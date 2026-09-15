@@ -44,6 +44,7 @@ pub enum CellRole {
     Close,
     NextPage,
     PreviousPage,
+    Drag,
     Spacer,
     Unavailable,
 }
@@ -72,6 +73,7 @@ pub struct PendingPress {
     pub geometry_generation: u64,
     pub origin: LogicalPoint,
     pub dragged: bool,
+    pub native_drag: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -208,6 +210,9 @@ pub enum SessionIntent {
     PageChanged {
         page: usize,
     },
+    BeginNativeDrag {
+        geometry_generation: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -295,12 +300,20 @@ impl SessionReducer {
                 {
                     self.state.dwell_candidate = None;
                 }
+                let mut begin_native_drag = false;
                 if let Some(press) = self.state.pending_press.as_mut() {
                     if press.geometry_generation == geometry_generation
-                        && distance2(point, press.origin) > DRAG_DISTANCE_SQUARED
+                        && distance2(point, press.origin) >= DRAG_DISTANCE_SQUARED
                     {
                         press.dragged = true;
+                        begin_native_drag = press.native_drag;
                     }
+                }
+                if begin_native_drag {
+                    self.state.pending_press = None;
+                    return vec![SessionIntent::BeginNativeDrag {
+                        geometry_generation,
+                    }];
                 }
                 if self.state.arming_baseline.geometry_generation == geometry_generation
                     && distance2(point, self.state.arming_baseline.point) >= ARMING_DISTANCE_SQUARED
@@ -315,7 +328,7 @@ impl SessionReducer {
                 role,
                 button,
                 geometry_generation,
-            } if actionable(role) && self.current_geometry() == geometry_generation => {
+            } if pressable(role) && self.current_geometry() == geometry_generation => {
                 self.state.dwell_candidate = None;
                 self.state.armed = true;
                 self.state.pending_press = Some(PendingPress {
@@ -325,6 +338,7 @@ impl SessionReducer {
                     geometry_generation,
                     origin: point,
                     dragged: false,
+                    native_drag: role == CellRole::Drag,
                 });
                 vec![]
             }
@@ -343,7 +357,7 @@ impl SessionReducer {
                 let Some(mut press) = self.state.pending_press.take() else {
                     return vec![];
                 };
-                if distance2(point, press.origin) > DRAG_DISTANCE_SQUARED {
+                if distance2(point, press.origin) >= DRAG_DISTANCE_SQUARED {
                     press.dragged = true;
                 }
                 if press.dragged
@@ -810,6 +824,9 @@ fn actionable(role: CellRole) -> bool {
             | CellRole::PreviousPage
     )
 }
+fn pressable(role: CellRole) -> bool {
+    actionable(role) || role == CellRole::Drag
+}
 fn distance2(a: LogicalPoint, b: LogicalPoint) -> f32 {
     let x = a.x - b.x;
     let y = a.y - b.y;
@@ -962,6 +979,95 @@ mod tests {
             })
             .is_empty()
         );
+    }
+    #[test]
+    fn center_drag_emits_once_only_after_current_generation_threshold() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.reduce(SessionEvent::PointerDown {
+            point: p(10.0, 10.0),
+            cell: Some(CellId::new("__center")),
+            role: CellRole::Drag,
+            button: PointerButton::Secondary,
+            geometry_generation: 10,
+        });
+        assert!(
+            reducer
+                .reduce(SessionEvent::PointerMoved {
+                    point: p(17.9, 10.0),
+                    hovered: Some(CellId::new("__center")),
+                    geometry_generation: 10,
+                })
+                .is_empty()
+        );
+        assert!(
+            reducer
+                .reduce(SessionEvent::PointerMoved {
+                    point: p(30.0, 10.0),
+                    hovered: Some(CellId::new("__center")),
+                    geometry_generation: 9,
+                })
+                .is_empty()
+        );
+        assert_eq!(
+            reducer.reduce(SessionEvent::PointerMoved {
+                point: p(18.0, 10.0),
+                hovered: Some(CellId::new("__center")),
+                geometry_generation: 10,
+            }),
+            vec![SessionIntent::BeginNativeDrag {
+                geometry_generation: 10
+            }]
+        );
+        assert!(
+            reducer
+                .reduce(SessionEvent::PointerMoved {
+                    point: p(25.0, 10.0),
+                    hovered: None,
+                    geometry_generation: 10,
+                })
+                .is_empty()
+        );
+        assert!(
+            reducer
+                .reduce(SessionEvent::PointerUp {
+                    point: p(25.0, 10.0),
+                    cell: Some(CellId::new("__center")),
+                    role: CellRole::Drag,
+                    button: PointerButton::Secondary,
+                    geometry_generation: 10,
+                })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn drag_capture_loss_and_relayout_cancel_pending_native_intent() {
+        for cancellation in [
+            SessionEvent::OutsideInteraction,
+            SessionEvent::DisplayRelayout {
+                geometry_generation: 11,
+                pointer_baseline: p(0.0, 0.0),
+            },
+        ] {
+            let mut reducer = reducer(InteractionMode::StickyClick);
+            reducer.reduce(SessionEvent::PointerDown {
+                point: p(0.0, 0.0),
+                cell: Some(CellId::new("__center")),
+                role: CellRole::Drag,
+                button: PointerButton::Primary,
+                geometry_generation: 10,
+            });
+            reducer.reduce(cancellation);
+            assert!(
+                reducer
+                    .reduce(SessionEvent::PointerMoved {
+                        point: p(20.0, 0.0),
+                        hovered: Some(CellId::new("__center")),
+                        geometry_generation: 10,
+                    })
+                    .is_empty()
+            );
+        }
     }
     #[test]
     fn click_requires_same_cell_button_and_generation() {

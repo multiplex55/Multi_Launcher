@@ -6,9 +6,12 @@ use super::render::{Rgba, VectorPrimitive, VectorScene};
 use image::{Rgba as ImageRgba, RgbaImage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub const MAX_COMPOSITOR_PIXELS: usize = 32 * 1024 * 1024;
 pub const MAX_FRAME_CACHE_ENTRIES: usize = 12;
+/// Aggregate retained raster budget across completed and reusable static frames.
+pub const MAX_COMPOSITOR_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RasterFrame {
@@ -58,12 +61,42 @@ struct FrameKey {
     animation_tick_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompositorMetricsSnapshot {
+    pub compositions: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub static_layer_hits: u64,
+    pub static_layer_misses: u64,
+    pub evictions: u64,
+    pub rejected_admissions: u64,
+    pub generation_invalidations: u64,
+    pub completed_frames: usize,
+    pub static_layers: usize,
+    pub completed_bytes: usize,
+    pub static_bytes: usize,
+    pub total_bytes: usize,
+    pub budget_bytes: usize,
+    pub last_generation: u64,
+    pub total_compose_ns: u128,
+    pub max_compose_ns: u128,
+}
+
+#[derive(Default)]
+struct CompositorMetrics {
+    snapshot: CompositorMetricsSnapshot,
+}
+
 /// A small deterministic completed-frame cache. Prepared media and font data
 /// are already immutable; neither cache hits nor misses perform filesystem IO.
 pub struct CompositorCache {
     frames: BTreeMap<FrameKey, (VectorScene, u64, Arc<RasterFrame>)>,
     static_layer: Option<(LogicalRect, ScaleFactor, Vec<VectorPrimitive>, RgbaImage)>,
     clock: u64,
+    frame_bytes: usize,
+    static_bytes: usize,
+    max_bytes: usize,
+    metrics: Option<CompositorMetrics>,
 }
 
 impl Default for CompositorCache {
@@ -72,17 +105,55 @@ impl Default for CompositorCache {
             frames: BTreeMap::new(),
             static_layer: None,
             clock: 0,
+            frame_bytes: 0,
+            static_bytes: 0,
+            max_bytes: MAX_COMPOSITOR_CACHE_BYTES,
+            metrics: crate::performance::enabled().then(CompositorMetrics::default),
         }
     }
 }
 
 impl CompositorCache {
+    pub fn with_budget(max_bytes: usize) -> Self {
+        Self::with_budget_and_observability(max_bytes, crate::performance::enabled())
+    }
+
+    pub fn with_budget_and_observability(max_bytes: usize, observable: bool) -> Self {
+        Self {
+            frames: BTreeMap::new(),
+            static_layer: None,
+            clock: 0,
+            frame_bytes: 0,
+            static_bytes: 0,
+            max_bytes: max_bytes.max(1),
+            metrics: observable.then(CompositorMetrics::default),
+        }
+    }
+
+    pub fn metrics(&self) -> Option<CompositorMetricsSnapshot> {
+        self.metrics.as_ref().map(|metrics| {
+            let mut snapshot = metrics.snapshot;
+            snapshot.completed_frames = self.frames.len();
+            snapshot.static_layers = usize::from(self.static_layer.is_some());
+            snapshot.completed_bytes = self.frame_bytes;
+            snapshot.static_bytes = self.static_bytes;
+            snapshot.total_bytes = self.retained_bytes();
+            snapshot.budget_bytes = self.max_bytes;
+            snapshot
+        })
+    }
+
+    pub fn retained_bytes(&self) -> usize {
+        self.frame_bytes.saturating_add(self.static_bytes)
+    }
+
     pub fn compose(
         &mut self,
         scene: &VectorScene,
         scale: ScaleFactor,
         animation_time_ms: u64,
     ) -> Result<Arc<RasterFrame>, CompositorError> {
+        let started = self.metrics.is_some().then(Instant::now);
         let key = FrameKey {
             generation: scene.generation,
             dpi_milli: (scale.get() * 1_000.0).round().max(1.0) as u32,
@@ -93,7 +164,12 @@ impl CompositorCache {
             && cached_scene == scene
         {
             *touched = self.clock;
-            return Ok(Arc::clone(frame));
+            let frame = Arc::clone(frame);
+            self.finish_observation(scene.generation, true, started);
+            return Ok(frame);
+        }
+        if let Some(metrics) = &mut self.metrics {
+            metrics.snapshot.cache_misses = metrics.snapshot.cache_misses.saturating_add(1);
         }
         let composed = if let Some(boundary) = scene
             .primitives
@@ -106,28 +182,39 @@ impl CompositorCache {
             })
         {
             let prefix = &scene.primitives[..boundary];
-            let base = match &self.static_layer {
+            let cached_base = match &self.static_layer {
                 Some((bounds, cached_scale, cached, image))
                     if *bounds == scene.bounds && *cached_scale == scale && cached == prefix =>
                 {
-                    image.clone()
+                    Some(image.clone())
                 }
-                _ => {
-                    let static_scene = VectorScene {
-                        bounds: scene.bounds,
-                        generation: scene.generation,
-                        shape_quality: scene.shape_quality,
-                        primitives: prefix.to_vec(),
-                    };
-                    let image = rasterize(&static_scene, scale, 0)?.image;
-                    self.static_layer = Some((
-                        scene.bounds,
-                        scale,
-                        prefix.to_vec(),
-                        image.clone(),
-                    ));
-                    image
+                _ => None,
+            };
+            let base = if let Some(image) = cached_base {
+                if let Some(metrics) = &mut self.metrics {
+                    metrics.snapshot.static_layer_hits =
+                        metrics.snapshot.static_layer_hits.saturating_add(1);
                 }
+                image
+            } else {
+                if let Some(metrics) = &mut self.metrics {
+                    metrics.snapshot.static_layer_misses =
+                        metrics.snapshot.static_layer_misses.saturating_add(1);
+                }
+                let static_scene = VectorScene {
+                    bounds: scene.bounds,
+                    generation: scene.generation,
+                    shape_quality: scene.shape_quality,
+                    primitives: prefix.to_vec(),
+                };
+                let image = rasterize(&static_scene, scale, 0)?.image;
+                self.replace_static_layer(Some((
+                    scene.bounds,
+                    scale,
+                    prefix.to_vec(),
+                    image.clone(),
+                )));
+                image
             };
             let mut image = base;
             let deadline = rasterize_primitives(
@@ -148,24 +235,191 @@ impl CompositorCache {
             rasterize_or_fallback(scene, scale, animation_time_ms)?
         };
         let frame = Arc::new(composed);
-        self.frames
-            .insert(key, (scene.clone(), self.clock, Arc::clone(&frame)));
-        while self.frames.len() > MAX_FRAME_CACHE_ENTRIES {
-            let key = self
-                .frames
-                .iter()
-                .min_by_key(|(key, (_, touched, _))| (*touched, *key))
-                .map(|(key, _)| *key)
-                .expect("frame cache is non-empty");
-            self.frames.remove(&key);
-        }
+        self.admit_frame(key, scene, &frame);
+        self.finish_observation(scene.generation, false, started);
         Ok(frame)
     }
 
     pub fn invalidate_generation(&mut self, generation: u64) {
-        self.frames.retain(|key, _| key.generation != generation);
-        self.static_layer = None;
+        let keys = self
+            .frames
+            .keys()
+            .filter(|key| key.generation == generation)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.remove_frame(&key, false);
+        }
+        self.replace_static_layer(None);
+        if let Some(metrics) = &mut self.metrics {
+            metrics.snapshot.generation_invalidations =
+                metrics.snapshot.generation_invalidations.saturating_add(1);
+        }
     }
+
+    fn admit_frame(&mut self, key: FrameKey, scene: &VectorScene, frame: &Arc<RasterFrame>) {
+        let bytes = image_bytes(&frame.image);
+        if bytes > self.max_bytes {
+            self.record_rejected_admission();
+            return;
+        }
+        if let Some(previous) = self.frames.remove(&key) {
+            self.frame_bytes = self
+                .frame_bytes
+                .saturating_sub(image_bytes(&previous.2.image));
+        }
+        if scene_has_animation(scene) {
+            let stale_ticks = self
+                .frames
+                .keys()
+                .filter(|candidate| {
+                    candidate.generation == key.generation
+                        && candidate.dpi_milli == key.dpi_milli
+                        && candidate.animation_tick_ms != key.animation_tick_ms
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            for stale in stale_ticks {
+                self.remove_frame(&stale, true);
+            }
+        }
+        self.make_room(bytes);
+        if self.retained_bytes().saturating_add(bytes) > self.max_bytes {
+            self.record_rejected_admission();
+            return;
+        }
+        self.frame_bytes = self.frame_bytes.saturating_add(bytes);
+        self.frames
+            .insert(key, (scene.clone(), self.clock, Arc::clone(frame)));
+        while self.frames.len() > MAX_FRAME_CACHE_ENTRIES {
+            if !self.evict_oldest_frame() {
+                break;
+            }
+        }
+    }
+
+    fn replace_static_layer(
+        &mut self,
+        layer: Option<(LogicalRect, ScaleFactor, Vec<VectorPrimitive>, RgbaImage)>,
+    ) {
+        self.static_layer = None;
+        self.static_bytes = 0;
+        let Some(layer) = layer else {
+            return;
+        };
+        let bytes = image_bytes(&layer.3);
+        if bytes > self.max_bytes {
+            self.record_rejected_admission();
+            return;
+        }
+        self.make_room(bytes);
+        if self.retained_bytes().saturating_add(bytes) <= self.max_bytes {
+            self.static_bytes = bytes;
+            self.static_layer = Some(layer);
+        } else {
+            self.record_rejected_admission();
+        }
+    }
+
+    fn make_room(&mut self, incoming: usize) {
+        while self.retained_bytes().saturating_add(incoming) > self.max_bytes {
+            if self.evict_oldest_frame() {
+                continue;
+            }
+            if self.static_layer.take().is_some() {
+                self.static_bytes = 0;
+                self.record_eviction();
+                continue;
+            }
+            break;
+        }
+    }
+
+    fn evict_oldest_frame(&mut self) -> bool {
+        let Some(key) = self
+            .frames
+            .iter()
+            .min_by_key(|(key, (_, touched, _))| (*touched, *key))
+            .map(|(key, _)| *key)
+        else {
+            return false;
+        };
+        self.remove_frame(&key, true);
+        true
+    }
+
+    fn remove_frame(&mut self, key: &FrameKey, eviction: bool) {
+        if let Some((_, _, frame)) = self.frames.remove(key) {
+            self.frame_bytes = self.frame_bytes.saturating_sub(image_bytes(&frame.image));
+            if eviction {
+                self.record_eviction();
+            }
+        }
+    }
+
+    fn record_eviction(&mut self) {
+        if let Some(metrics) = &mut self.metrics {
+            metrics.snapshot.evictions = metrics.snapshot.evictions.saturating_add(1);
+        }
+    }
+
+    fn record_rejected_admission(&mut self) {
+        if let Some(metrics) = &mut self.metrics {
+            metrics.snapshot.rejected_admissions =
+                metrics.snapshot.rejected_admissions.saturating_add(1);
+        }
+    }
+
+    fn finish_observation(&mut self, generation: u64, hit: bool, started: Option<Instant>) {
+        let elapsed_ns = started.map(|started| started.elapsed().as_nanos());
+        let Some(metrics) = &mut self.metrics else {
+            return;
+        };
+        metrics.snapshot.compositions = metrics.snapshot.compositions.saturating_add(1);
+        metrics.snapshot.last_generation = generation;
+        if hit {
+            metrics.snapshot.cache_hits = metrics.snapshot.cache_hits.saturating_add(1);
+        }
+        if let Some(elapsed) = elapsed_ns {
+            metrics.snapshot.total_compose_ns =
+                metrics.snapshot.total_compose_ns.saturating_add(elapsed);
+            metrics.snapshot.max_compose_ns = metrics.snapshot.max_compose_ns.max(elapsed);
+        }
+        let snapshot = metrics.snapshot;
+        let total_bytes = self.frame_bytes.saturating_add(self.static_bytes);
+        let compose_ns = elapsed_ns.unwrap_or(0).min(u64::MAX as u128) as u64;
+        tracing::info!(
+            target: "multi_launcher::performance",
+            phase = "radial.compositor",
+            generation,
+            compositions = snapshot.compositions,
+            cache_hits = snapshot.cache_hits,
+            cache_misses = snapshot.cache_misses,
+            static_layer_hits = snapshot.static_layer_hits,
+            static_layer_misses = snapshot.static_layer_misses,
+            evictions = snapshot.evictions,
+            rejected_admissions = snapshot.rejected_admissions,
+            generation_invalidations = snapshot.generation_invalidations,
+            completed_frames = self.frames.len(),
+            static_layers = usize::from(self.static_layer.is_some()),
+            completed_bytes = self.frame_bytes,
+            static_bytes = self.static_bytes,
+            total_bytes,
+            budget_bytes = self.max_bytes,
+            compose_ns,
+            "perf"
+        );
+    }
+}
+
+fn image_bytes(image: &RgbaImage) -> usize {
+    image.as_raw().len()
+}
+
+fn scene_has_animation(scene: &VectorScene) -> bool {
+    scene.primitives.iter().any(
+        |primitive| matches!(primitive, VectorPrimitive::Image { image, .. } if image.frames.len() > 1),
+    )
 }
 
 pub fn rasterize_or_fallback(
@@ -903,7 +1157,8 @@ mod tests {
             ],
         };
         let scale = ScaleFactor::new(1.0).unwrap();
-        let mut cache = CompositorCache::default();
+        let mut cache =
+            CompositorCache::with_budget_and_observability(MAX_COMPOSITOR_CACHE_BYTES, true);
         let first = cache.compose(&scene, scale, 0).unwrap();
         let static_before = cache.static_layer.as_ref().unwrap().3.clone();
         if let VectorPrimitive::FilledCircle { color, .. } = &mut scene.primitives[2] {
@@ -912,5 +1167,185 @@ mod tests {
         let second = cache.compose(&scene, scale, 0).unwrap();
         assert_eq!(cache.static_layer.as_ref().unwrap().3, static_before);
         assert_ne!(first.image, second.image);
+        let metrics = cache.metrics().unwrap();
+        assert_eq!(metrics.static_layer_misses, 1);
+        assert_eq!(metrics.static_layer_hits, 1);
+    }
+
+    fn solid_scene(generation: u64, side: f32) -> VectorScene {
+        VectorScene {
+            bounds: LogicalRect {
+                min: LogicalPoint { x: 0.0, y: 0.0 },
+                max: LogicalPoint { x: side, y: side },
+            },
+            generation,
+            shape_quality: super::super::model::RenderingQuality::Fast,
+            primitives: vec![VectorPrimitive::FilledCircle {
+                center: LogicalPoint {
+                    x: side * 0.5,
+                    y: side * 0.5,
+                },
+                radius: side * 0.4,
+                color: Rgba(20, 40, 60, 255),
+            }],
+        }
+    }
+
+    #[test]
+    fn aggregate_byte_budget_evicts_deterministically_and_invalidation_is_exact() {
+        let scale = ScaleFactor::new(1.0).unwrap();
+        let frame_bytes = 8 * 8 * 4;
+        let mut cache = CompositorCache::with_budget_and_observability(frame_bytes * 2, true);
+        for generation in [1, 2] {
+            cache
+                .compose(&solid_scene(generation, 8.0), scale, 0)
+                .unwrap();
+        }
+        // Refresh generation 1, making generation 2 the deterministic LRU victim.
+        cache.compose(&solid_scene(1, 8.0), scale, 0).unwrap();
+        cache.compose(&solid_scene(3, 8.0), scale, 0).unwrap();
+
+        assert!(cache.frames.keys().any(|key| key.generation == 1));
+        assert!(!cache.frames.keys().any(|key| key.generation == 2));
+        assert!(cache.frames.keys().any(|key| key.generation == 3));
+        assert_eq!(cache.retained_bytes(), frame_bytes * 2);
+        assert_eq!(cache.metrics().unwrap().evictions, 1);
+
+        cache.invalidate_generation(1);
+        assert_eq!(cache.retained_bytes(), frame_bytes);
+        cache.invalidate_generation(3);
+        assert_eq!(cache.retained_bytes(), 0);
+        assert!(cache.frames.is_empty());
+    }
+
+    #[test]
+    fn oversized_completed_frame_is_returned_without_cache_admission() {
+        let mut cache = CompositorCache::with_budget_and_observability(64, true);
+        let frame = cache
+            .compose(&solid_scene(4, 8.0), ScaleFactor::new(1.0).unwrap(), 0)
+            .unwrap();
+        assert_eq!(image_bytes(&frame.image), 8 * 8 * 4);
+        assert!(cache.frames.is_empty());
+        assert_eq!(cache.retained_bytes(), 0);
+        assert_eq!(cache.metrics().unwrap().rejected_admissions, 1);
+    }
+
+    #[test]
+    fn animation_timestamps_replace_the_prior_full_frame_variant() {
+        let prepared = Arc::new(PreparedImage {
+            frames: vec![
+                PreparedImageFrame {
+                    width: 1,
+                    height: 1,
+                    duration_ms: 10,
+                    rgba: Arc::from(&[255, 0, 0, 255][..]),
+                },
+                PreparedImageFrame {
+                    width: 1,
+                    height: 1,
+                    duration_ms: 10,
+                    rgba: Arc::from(&[0, 255, 0, 255][..]),
+                },
+            ],
+            animated: true,
+        });
+        let mut scene = solid_scene(5, 8.0);
+        scene.primitives = vec![VectorPrimitive::Image {
+            bounds: scene.bounds,
+            image: prepared,
+            opacity: 255,
+            quality: super::super::model::RenderingQuality::Fast,
+        }];
+        let mut cache = CompositorCache::with_budget(8 * 8 * 4 * MAX_FRAME_CACHE_ENTRIES);
+        let scale = ScaleFactor::new(1.0).unwrap();
+        for timestamp in 0..24 {
+            cache.compose(&scene, scale, timestamp).unwrap();
+        }
+        assert_eq!(cache.frames.len(), 1);
+        assert_eq!(cache.retained_bytes(), 8 * 8 * 4);
+        assert_eq!(cache.frames.keys().next().unwrap().animation_tick_ms, 23);
+    }
+
+    #[test]
+    fn completed_and_static_layers_share_one_budget() {
+        let bounds = LogicalRect {
+            min: LogicalPoint { x: 0.0, y: 0.0 },
+            max: LogicalPoint { x: 8.0, y: 8.0 },
+        };
+        let scene = VectorScene {
+            bounds,
+            generation: 6,
+            shape_quality: super::super::model::RenderingQuality::Fast,
+            primitives: vec![
+                VectorPrimitive::FilledCircle {
+                    center: LogicalPoint { x: 4.0, y: 4.0 },
+                    radius: 3.0,
+                    color: Rgba(10, 20, 30, 255),
+                },
+                VectorPrimitive::StaticBoundary,
+                VectorPrimitive::FilledCircle {
+                    center: LogicalPoint { x: 4.0, y: 4.0 },
+                    radius: 1.0,
+                    color: Rgba(200, 210, 220, 255),
+                },
+            ],
+        };
+        let frame_bytes = 8 * 8 * 4;
+        let mut cache = CompositorCache::with_budget(frame_bytes);
+        cache
+            .compose(&scene, ScaleFactor::new(1.0).unwrap(), 0)
+            .unwrap();
+        assert_eq!(cache.frames.len(), 1);
+        assert!(cache.static_layer.is_none());
+        assert_eq!(cache.retained_bytes(), frame_bytes);
+    }
+
+    #[test]
+    fn observability_is_owned_and_has_no_state_when_disabled() {
+        let scale = ScaleFactor::new(1.0).unwrap();
+        let scene = solid_scene(19, 4.0);
+        let mut disabled = CompositorCache::with_budget_and_observability(1_024, false);
+        disabled.compose(&scene, scale, 0).unwrap();
+        assert_eq!(disabled.metrics(), None);
+
+        let mut enabled = CompositorCache::with_budget_and_observability(1_024, true);
+        enabled.compose(&scene, scale, 0).unwrap();
+        enabled.compose(&scene, scale, 0).unwrap();
+        let metrics = enabled.metrics().unwrap();
+        assert_eq!(metrics.compositions, 2);
+        assert_eq!(metrics.cache_hits, 1);
+        assert_eq!(metrics.cache_misses, 1);
+        assert_eq!(metrics.last_generation, 19);
+        assert_eq!(metrics.completed_frames, 1);
+        assert_eq!(metrics.total_bytes, 4 * 4 * 4);
+    }
+
+    #[test]
+    fn warm_hover_and_one_hundred_open_close_cycles_remain_bounded() {
+        let scale = ScaleFactor::new(1.0).unwrap();
+        let budget = 8 * 8 * 4 * 2;
+        let mut cache = CompositorCache::with_budget_and_observability(budget, true);
+        for generation in 0..100 {
+            let mut scene = solid_scene(generation, 8.0);
+            scene.primitives.push(VectorPrimitive::StaticBoundary);
+            scene.primitives.push(VectorPrimitive::FilledCircle {
+                center: LogicalPoint { x: 4.0, y: 4.0 },
+                radius: if generation % 2 == 0 { 1.0 } else { 2.0 },
+                color: Rgba(220, 120, 20, 255),
+            });
+            cache.compose(&scene, scale, 0).unwrap();
+            cache.compose(&scene, scale, 0).unwrap();
+            assert!(cache.retained_bytes() <= budget);
+            cache.invalidate_generation(generation);
+            assert_eq!(cache.retained_bytes(), 0);
+        }
+        let metrics = cache.metrics().unwrap();
+        assert_eq!(metrics.compositions, 200);
+        assert_eq!(metrics.cache_hits, 100);
+        assert_eq!(metrics.completed_frames, 0);
+        assert_eq!(metrics.static_layers, 0);
+        assert_eq!(metrics.generation_invalidations, 100);
+        // The warm path accepts only immutable scene snapshots and has no file
+        // or provider capability; these compositions therefore cannot perform IO.
     }
 }

@@ -21,6 +21,7 @@ pub mod migration;
 pub mod model;
 pub mod native;
 pub mod package;
+pub mod preparation;
 pub mod render;
 pub mod session;
 pub mod settings;

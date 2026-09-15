@@ -279,6 +279,55 @@ or open native windows.
 
 **Release-blocking failures:** invisible or black overlays, wrong z-order, DPI-offset bounds, incorrect numbering, captured mouse clicks, stale overlay windows, overlays left after Escape, or a duration materially different from `PASSIVE_OVERLAY_DURATION` block release.
 
+## Radial menu Windows accessibility and native acceptance checklist
+
+Record the Windows build, Multi Launcher commit, monitor geometry/DPI, input method,
+assistive technology (if used), tester, and date. These checks require a real interactive
+desktop; unit tests do not establish cross-process click-through, UI Automation output, or
+visual contrast.
+
+- [ ] **Shared chord and cleanup:** exercise tap at 0/100/349 ms and hold at 350/351 ms,
+  including left/right modifiers, AltGr, repeated key notifications, dismissal while held,
+  suspend/session-lock, secure-desktop loss, disable/reload, and app shutdown. **Expected:**
+  tap opens only the launcher, hold opens only the radial, every claimed input pair drains
+  exactly once, and no hook, timer, suppression owner, capture, or radial HWND remains.
+- [ ] **Cross-process input shape:** place disposable Notepad controls beneath the visual rim,
+  glow, labels, true exterior, protected internal gaps, and actionable cells. Click each area
+  from a second-process context. **Expected:** visual-only pixels and true exterior reach
+  Notepad, actionable cells activate the radial, and protected internal gaps are consumed
+  without activating a cell. No test should rely on same-thread `HTTRANSPARENT` behavior.
+- [ ] **Pointer and drag isolation:** open at every monitor edge/corner, over a taskbar, on a
+  negative-origin monitor, and at mixed/fractional DPI. Keep the pointer stationary during
+  clamp, DPI change, page change, cascade/same-center navigation, and child replacement; then
+  click, double-click, and center-drag. **Expected:** no implicit selection, click-through leak,
+  duplicate action, or immediate native drag on pointer-down; drag starts only after threshold.
+- [ ] **Keyboard-only editor:** open `radial edit` and complete menu/ring/cell selection,
+  reorder, duplicate, copy/move, delete confirmation, style editing, preview navigation,
+  Apply, Save, Cancel, undo, and redo using Tab/Shift+Tab, arrows where supported, Space/Enter,
+  Ctrl+Z, Ctrl+Shift+Z, and Ctrl+S. **Expected:** focus remains visible and returns to the same
+  stable entity after reorder, to a stable surviving entity after delete, and to the invoking
+  control after a modal closes. Preview navigation never executes an action.
+- [ ] **Screen reader semantics:** inspect the editor with Narrator or another AccessKit client.
+  **Expected:** menu/ring/cell selection state is announced; color wells announce the style
+  field and RGBA value; blank toggle, scalar, font, media/resource, and quality controls have
+  field-specific names and correct roles; move/reorder/delete/audition/test controls have
+  unambiguous names; unavailable and error state is spoken as text, not conveyed only by color.
+- [ ] **200% scale and high contrast:** set Windows scaling to 200% and enable a system high-
+  contrast theme. Exercise the runtime menu and all editor panels with long labels, missing
+  media, selected/unavailable cells, tooltips, and destructive confirmation. **Expected:** no
+  clipped controls or unreachable editor regions; focus, selection, unavailable, warning, and
+  error states retain textual/symbolic cues and use the active egui semantic theme colors.
+- [ ] **Action revalidation and handoff:** freeze clipboard/list/browser/window targets, mutate
+  or remove each target before click and again while destructive confirmation is open. Exercise
+  Screen Draw/MkMacro/clipboard capture handoff and an elevated disposable target. **Expected:**
+  no index/handle retargeting, confirmation revalidates once, cancellation runs zero actions,
+  handoff waits for teardown and key release without a fixed sleep, and UIPI/foreground denial
+  is visible while all owned input is released.
+- [ ] **Lifecycle/resource repetition:** run 100 open/close cycles plus two enable/disable and
+  editor-only acquire/release cycles while observing process handles/threads. **Expected:**
+  disabled startup and ordinary search create no radial host/hook/font/watcher/audio worker;
+  final counts return to baseline and repeated close remains harmless and bounded.
+
 ### Completion and release gate
 
 - [ ] Restore/compare `macros.json`, remove disposable `mkmacros.json` entries/assets, close targets, verify no hooks/hotkeys remain registered, restart, and confirm ordinary keyboard/mouse and the legacy macro plugin still work.

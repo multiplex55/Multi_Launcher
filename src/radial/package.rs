@@ -380,6 +380,7 @@ pub fn plan_skin_import(
             "skin asset records must exactly match its managed dependency closure".into(),
         ));
     }
+    validate_exact_asset_files(&files, &bundle.assets)?;
     let mut remap = IdRemap::default();
     let mut skin_ids = target
         .skins
@@ -457,6 +458,11 @@ pub fn plan_skin_import(
     rewrite_managed_ids(&mut skin_value, &remap.assets);
     bundle.skin = serde_json::from_value(skin_value)
         .map_err(|error| PackageError::Malformed(error.to_string()))?;
+    let retained_assets = bundle
+        .assets
+        .iter()
+        .map(|asset| (asset.content_sha256.clone(), asset.byte_len))
+        .collect::<BTreeSet<_>>();
     let mut candidate = target.clone();
     candidate.skins.push(bundle.skin.clone());
     candidate.assets.extend(bundle.assets.clone());
@@ -467,7 +473,10 @@ pub fn plan_skin_import(
         asset_records: bundle.assets,
         assets: files
             .into_iter()
-            .filter(|(path, _)| path.starts_with("assets/"))
+            .filter(|(path, bytes)| {
+                path.starts_with("assets/")
+                    && retained_assets.contains(&(sha256_hex(bytes), bytes.len() as u64))
+            })
             .collect(),
         remap,
     })
@@ -517,6 +526,18 @@ pub fn plan_import(
         .map_err(|error| PackageError::Malformed(error.to_string()))?;
     validate(&document).map_err(PackageError::Validation)?;
     ensure_portable_media(&document)?;
+    let referenced = managed_asset_ids(&document)?;
+    if referenced.len() != document.assets.len()
+        || document
+            .assets
+            .iter()
+            .any(|asset| !referenced.contains(asset.id.as_str()))
+    {
+        return Err(PackageError::Malformed(
+            "menu asset records must exactly match its managed dependency closure".into(),
+        ));
+    }
+    validate_exact_asset_files(&files, &document.assets)?;
     for root in &manifest.root_menu_ids {
         if !document.menus.iter().any(|menu| menu.id == *root) {
             return Err(PackageError::MissingRoot(root.clone()));
@@ -550,6 +571,45 @@ pub fn plan_import(
         assets,
         remap,
     })
+}
+
+fn packaged_asset_path(asset: &AssetRecord) -> String {
+    let extension = Path::new(&asset.relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    format!("assets/{}{}", asset.content_sha256, extension)
+}
+
+fn validate_exact_asset_files(
+    files: &BTreeMap<String, Vec<u8>>,
+    records: &[AssetRecord],
+) -> Result<(), PackageError> {
+    let expected = records
+        .iter()
+        .map(packaged_asset_path)
+        .collect::<BTreeSet<_>>();
+    let actual = files
+        .keys()
+        .filter(|path| path.starts_with("assets/"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(PackageError::Malformed(
+            "asset files must exactly match the declared dependency closure".into(),
+        ));
+    }
+    for asset in records {
+        let path = packaged_asset_path(asset);
+        let bytes = files
+            .get(&path)
+            .ok_or_else(|| PackageError::MissingAsset(asset.id.clone()))?;
+        if sha256_hex(bytes) != asset.content_sha256 || bytes.len() as u64 != asset.byte_len {
+            return Err(PackageError::ChecksumMismatch(path));
+        }
+    }
+    Ok(())
 }
 
 /// Plain-folder adapters provide already-read entries plus link metadata. The
@@ -1222,6 +1282,19 @@ mod tests {
         document
     }
 
+    fn append_manifested_file(plan: &mut ExportPlan, path: &str, bytes: Vec<u8>) {
+        plan.manifest.files.push(PackageFileRecord {
+            path: path.into(),
+            sha256: sha256_hex(&bytes),
+            byte_len: bytes.len() as u64,
+        });
+        plan.files.insert(path.into(), bytes);
+        plan.files.insert(
+            MANIFEST_FILE.into(),
+            serde_json::to_vec_pretty(&plan.manifest).unwrap(),
+        );
+    }
+
     #[test]
     fn sha256_and_stored_zip_round_trip_are_canonical() {
         assert_eq!(
@@ -1298,7 +1371,10 @@ mod tests {
         let imported = plan_skin_import(decode_mlradial(&first).unwrap(), &source).unwrap();
         assert_ne!(imported.skin.id, source.skins[0].id);
         assert!(imported.asset_records.is_empty());
-        assert_eq!(imported.assets.len(), 1);
+        assert!(
+            imported.assets.is_empty(),
+            "content already owned by the target must not be retained in the import plan"
+        );
         assert!(matches!(
             imported.skin.style.values.images.center_image,
             super::super::model::Override::Value(MediaReference::Managed { ref asset_id })
@@ -1373,6 +1449,37 @@ mod tests {
         assert!(matches!(
             plan_skin_export(&source, &source.skins[0].id, &BTreeMap::new(), Vec::new()),
             Err(PackageError::NonPortableReference(_))
+        ));
+    }
+
+    #[test]
+    fn menu_and_skin_import_reject_valid_but_unreferenced_asset_entries() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        let extra_path = format!("assets/{}.png", sha256_hex(&bytes));
+        let source = isolated_package_fixture();
+        let mut menu = plan_export(
+            &source,
+            &[source.default_menu_id.clone()],
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        append_manifested_file(&mut menu, &extra_path, bytes.clone());
+        assert!(matches!(
+            plan_import(menu.files, &RadialDocument::starter()),
+            Err(PackageError::Malformed(message))
+                if message.contains("exactly match the declared dependency closure")
+        ));
+
+        let mut skin =
+            plan_skin_export(&source, &source.skins[0].id, &BTreeMap::new(), Vec::new()).unwrap();
+        append_manifested_file(&mut skin, &extra_path, bytes);
+        assert!(matches!(
+            plan_skin_import(skin.files, &RadialDocument::starter()),
+            Err(PackageError::Malformed(message))
+                if message.contains("exactly match the declared dependency closure")
         ));
     }
 

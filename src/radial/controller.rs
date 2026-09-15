@@ -6,9 +6,7 @@ use super::bindings::{
 };
 use super::context::{InvocationContext, WindowIdentity};
 use super::dynamic::{FrozenAvailability, FrozenBinding};
-use super::font_cache::{
-    FontLayoutService, FontRequest, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog,
-};
+use super::font_cache::{FontLayoutService, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog};
 use super::geometry::{
     CellLayout, HitShape, LayoutSnapshot, LogicalPoint, PhysicalPoint, PhysicalRect, ScaleFactor,
     layout_document_menu, layout_menu,
@@ -17,13 +15,14 @@ use super::handoff::{
     DispatchEvent, DispatchIntent, InteractionRequirement, PendingRadialDispatch,
     RadialDispatchIdentity, RadialDispatchRequest,
 };
-use super::invocation::InvocationIntent;
+use super::invocation::{InvocationIntent, LifecycleCancellation};
 use super::model::{
     ActionBinding, AfterActionPolicy, CellContent, ClickGesture, Control, InteractionMode,
     InvocationId, MenuId, Override, RadialDocument, RingId, SessionId, SubmenuPresentation,
     TriggerScope,
 };
 use super::native::{CloseReason, NativeCommand, NativeEvent, NativeHost};
+use super::preparation::{prepare_visual_resources, scene_resource_fingerprint};
 use super::render::{
     InputOwner, PreparedSceneResources, build_scene, build_scene_prepared,
     build_scene_prepared_selected,
@@ -35,22 +34,9 @@ use super::session::{
 use super::skin::compile_menu_tree;
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
-
-fn scene_resource_fingerprint(layout: &LayoutSnapshot) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    // The layout/style snapshot is immutable and contains every resolved media
-    // and presentation input. Geometry generation is deliberately excluded so
-    // page, submenu, and reopen cycles reuse identical decoded resources.
-    format!("{:?}", layout.style).hash(&mut hasher);
-    for cell in &layout.cells {
-        format!("{:?}{:?}", cell.icon, cell.visual).hash(&mut hasher);
-    }
-    hasher.finish()
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DeadlineKey {
@@ -156,6 +142,22 @@ pub enum ControllerEvent {
 pub struct DiagnosticRecord {
     pub session_id: Option<SessionId>,
     pub message: String,
+}
+
+/// On-demand resource census for the existing debug-logging path. Keeping the
+/// snapshot controller-owned avoids global counters and performs no work until
+/// a caller explicitly asks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RadialResourceSnapshot {
+    pub layout_generation: u64,
+    pub native_hosts: usize,
+    pub pending_sessions: usize,
+    pub active_sessions: usize,
+    pub preparation_bridges: usize,
+    pub deadline_schedulers: usize,
+    pub asset_services: usize,
+    pub font_services: usize,
+    pub font_catalogs: usize,
 }
 
 trait HostPort: Send {
@@ -329,6 +331,9 @@ impl RadialController {
     /// Installs the preparation-only resource services used by the production
     /// controller. Tests with synthetic hosts can intentionally omit this.
     pub fn configure_resources(&mut self, application_data: PathBuf) {
+        if self.asset_service.is_some() {
+            return;
+        }
         self.asset_service = Some(AssetService::new(
             application_data,
             self.document.media_search_roots.clone(),
@@ -339,6 +344,49 @@ impl RadialController {
             MAX_LAYOUT_CACHE_ENTRIES,
         ));
         self.font_catalog = Some(catalog);
+    }
+
+    /// Retires demand-driven caches and scheduler ownership. The caller first
+    /// closes active runtime/preview sessions, so no frame can retain these
+    /// services after the final runtime/editor lease is released.
+    pub fn release_resources(&mut self) {
+        self.cancel_handoff_deadline();
+        self.deadline_scheduler = None;
+        self.asset_service = None;
+        self.font_service = None;
+        self.font_catalog = None;
+        self.visible_resource_diagnostics.clear();
+    }
+
+    pub fn resources_configured(&self) -> bool {
+        self.asset_service.is_some()
+    }
+
+    pub fn resource_snapshot(&self) -> Option<RadialResourceSnapshot> {
+        self.diagnostics.as_ref().map(|_| RadialResourceSnapshot {
+            layout_generation: self.layout_generation,
+            native_hosts: usize::from(self.host.is_some()),
+            pending_sessions: usize::from(self.pending.is_some()),
+            active_sessions: usize::from(self.active.is_some()),
+            preparation_bridges: usize::from(self.preparation.is_some()),
+            deadline_schedulers: usize::from(self.deadline_scheduler.is_some()),
+            asset_services: usize::from(self.asset_service.is_some()),
+            font_services: usize::from(self.font_service.is_some()),
+            font_catalogs: usize::from(self.font_catalog.is_some()),
+        })
+    }
+
+    pub fn prepare_authoring_asset(
+        &mut self,
+        reference: &super::model::MediaReference,
+        expected: super::model::MediaKind,
+        records: &[super::model::AssetRecord],
+        variant: PrepareVariant,
+    ) -> Result<super::assets::PreparedAssetSnapshot, super::assets::AssetDiagnostic> {
+        self.asset_service
+            .as_mut()
+            .ok_or(super::assets::AssetDiagnostic::SearchRootsUnavailable)?
+            .prepare(reference, expected, records, variant)
     }
 
     pub fn font_families(&self) -> Vec<String> {
@@ -377,12 +425,18 @@ impl RadialController {
         context
     }
     pub fn disable(&mut self) {
+        self.stop_for_lifecycle(CloseReason::FeatureDisabled);
+    }
+    pub fn shutdown(&mut self) {
+        self.stop_for_lifecycle(CloseReason::Shutdown);
+    }
+    fn stop_for_lifecycle(&mut self, reason: CloseReason) {
         self.handoff = None;
         self.cancel_handoff_deadline();
         if let Some(bridge) = &mut self.preparation {
             bridge.waiting = None;
         }
-        self.close(CloseReason::SettingsReload, None);
+        self.close(reason, None);
         if let Some(mut host) = self.host.take() {
             host.shutdown();
         }
@@ -391,6 +445,7 @@ impl RadialController {
         self.queued_item_activation = None;
         self.release_aliases.clear();
         self.release_waits.clear();
+        self.deadline_scheduler = None;
     }
     pub fn handle_intents(
         &mut self,
@@ -467,6 +522,34 @@ impl RadialController {
                 }
                 InvocationIntent::CloseRadial { session_id } => {
                     self.close(CloseReason::Dismissed, session_id.as_ref())
+                }
+                InvocationIntent::CancelRadialLifecycle { id, reason } => {
+                    let waiting_matches = self
+                        .preparation
+                        .as_ref()
+                        .and_then(|bridge| bridge.waiting.as_ref())
+                        .is_some_and(|waiting| waiting.invocation_id == id);
+                    let matches = waiting_matches
+                        || self
+                            .pending
+                            .as_ref()
+                            .is_some_and(|pending| pending.invocation_id == id)
+                        || self.active.as_ref().is_some_and(|active| {
+                            active.invocation_id == id || active.owned_item_input == Some(id)
+                        });
+                    if matches {
+                        if waiting_matches && let Some(bridge) = &mut self.preparation {
+                            bridge.waiting = None;
+                        }
+                        if self
+                            .queued_item_activation
+                            .as_ref()
+                            .is_some_and(|queued| queued.id == id)
+                        {
+                            self.queued_item_activation = None;
+                        }
+                        self.close(close_reason_for_lifecycle(reason), None);
+                    }
                 }
                 InvocationIntent::TriggerReleased { id } => {
                     let release_invocation = self.release_aliases.remove(&id).unwrap_or(id);
@@ -795,7 +878,14 @@ impl RadialController {
         layout: &LayoutSnapshot,
         _generation: u64,
     ) -> (PreparedSceneResources, PreparedRadialSounds, Vec<String>) {
-        let mut resources = PreparedSceneResources::default();
+        let (resources, mut diagnostics) = prepare_visual_resources(
+            &self.document,
+            menu,
+            layout,
+            self.asset_service.as_mut(),
+            self.font_service.as_mut(),
+            &super::assets::ManagedAssetOverlay::default(),
+        );
         let variant = PrepareVariant {
             effective_style: scene_resource_fingerprint(layout),
             dpi_milli: (layout.scale_factor.get() * 1_000.0)
@@ -805,91 +895,6 @@ impl RadialController {
             logical_height_milli: (layout.style.item_size.max(1.0) * 1_000.0) as u32,
             quality: layout.style.image_quality,
         };
-        let mut diagnostics = Vec::new();
-        if let Some(service) = &mut self.asset_service {
-            let mut refs = vec![
-                layout.style.item_glow.clone(),
-                layout.style.menu_outer_rim.clone(),
-                layout.style.menu_background.clone(),
-                layout.style.menu_foreground.clone(),
-                layout.style.center_background.clone(),
-                layout.style.center_image.clone(),
-            ];
-            for cell in &layout.cells {
-                refs.extend([
-                    cell.icon.clone(),
-                    cell.visual.item_background.clone(),
-                    cell.visual.item_foreground.clone(),
-                    cell.visual.item_shadow.clone(),
-                    cell.visual.submenu_indicator.clone(),
-                ]);
-            }
-            for reference in refs {
-                if let Override::Value(reference) = reference {
-                    match service.prepare(
-                        &reference,
-                        super::model::MediaKind::Image,
-                        &self.document.assets,
-                        variant,
-                    ) {
-                        Ok(snapshot) => {
-                            resources
-                                .media
-                                .insert(reference_identity(&reference), snapshot);
-                        }
-                        Err(error) => diagnostics.push(format!(
-                            "radial image {} unavailable: {error}",
-                            reference_identity(&reference)
-                        )),
-                    }
-                }
-            }
-        }
-        if let Some(service) = &mut self.font_service {
-            for cell in &layout.cells {
-                let request = FontRequest {
-                    family: (!cell.visual.font_family.is_empty())
-                        .then(|| cell.visual.font_family.clone()),
-                    size_milli: (cell.visual.font_size.max(1.0) * 1_000.0) as u32,
-                    bold: cell.visual.bold,
-                    italic: cell.visual.italic,
-                    dpi_milli: variant.dpi_milli,
-                    max_width_milli: (layout.style.item_size.max(1.0)
-                        * cell.visual.text_box_scale
-                        * 1_000.0) as u32,
-                };
-                let prepared_label = service.prepare(&cell.label, request.clone());
-                diagnostics.extend(
-                    prepared_label.diagnostics.iter().map(|diagnostic| {
-                        format!("radial font for {}: {diagnostic:?}", cell.cell_id)
-                    }),
-                );
-                resources.text.insert(cell.cell_id.clone(), prepared_label);
-                if let Some(definition) = menu
-                    .rings
-                    .iter()
-                    .flat_map(|ring| &ring.cells)
-                    .find(|candidate| candidate.id == cell.cell_id)
-                {
-                    let explicit = match &definition.tooltip {
-                        Override::Value(value) if !value.is_empty() => Some(value.as_str()),
-                        _ => None,
-                    };
-                    let tooltip = match cell.visual.tooltip_mode {
-                        super::model::TooltipMode::Disabled => None,
-                        super::model::TooltipMode::Explicit => explicit,
-                        super::model::TooltipMode::Automatic => {
-                            explicit.or(Some(cell.label.as_str()))
-                        }
-                    };
-                    if let Some(tooltip) = tooltip {
-                        resources
-                            .tooltips
-                            .insert(cell.cell_id.clone(), service.prepare(tooltip, request));
-                    }
-                }
-            }
-        }
         let mut sounds = PreparedRadialSounds::default();
         if let (Some(service), Ok(style)) = (
             &mut self.asset_service,
@@ -1219,9 +1224,13 @@ impl RadialController {
             }
             NativeEvent::PointerMoved {
                 session_id,
+                layout_generation,
                 owner,
                 point,
             } => {
+                if self.layout_generation_for(&session_id) != layout_generation {
+                    return;
+                }
                 if owner != super::render::InputOwner::Exterior {
                     self.session_event(&session_id, SessionEvent::MenuInteraction, out);
                 }
@@ -1237,14 +1246,13 @@ impl RadialController {
                 {
                     active.pointer = point;
                 }
-                let generation = self.layout_generation_for(&session_id);
                 let hovered = owner_cell(owner);
                 self.session_event(
                     &session_id,
                     SessionEvent::PointerMoved {
                         point,
                         hovered: hovered.clone(),
-                        geometry_generation: generation,
+                        geometry_generation: layout_generation,
                     },
                     out,
                 );
@@ -1295,7 +1303,13 @@ impl RadialController {
                     );
                 }
             }
-            NativeEvent::PointerLeft { session_id } => {
+            NativeEvent::PointerLeft {
+                session_id,
+                layout_generation,
+            } => {
+                if self.layout_generation_for(&session_id) != layout_generation {
+                    return;
+                }
                 let had_hover = self
                     .active
                     .as_ref()
@@ -1308,14 +1322,17 @@ impl RadialController {
             }
             NativeEvent::PointerDown {
                 session_id,
+                layout_generation,
                 owner,
                 point,
                 button,
             } => {
+                if self.layout_generation_for(&session_id) != layout_generation {
+                    return;
+                }
                 if owner != super::render::InputOwner::Exterior {
                     self.session_event(&session_id, SessionEvent::MenuInteraction, out);
                 }
-                let generation = self.layout_generation_for(&session_id);
                 let role = self.role_for_button(&session_id, &owner, button);
                 self.session_event(
                     &session_id,
@@ -1324,18 +1341,21 @@ impl RadialController {
                         cell: owner_cell(owner),
                         role,
                         button,
-                        geometry_generation: generation,
+                        geometry_generation: layout_generation,
                     },
                     out,
                 )
             }
             NativeEvent::PointerUp {
                 session_id,
+                layout_generation,
                 owner,
                 point,
                 button,
             } => {
-                let generation = self.layout_generation_for(&session_id);
+                if self.layout_generation_for(&session_id) != layout_generation {
+                    return;
+                }
                 let role = self.role_for_button(&session_id, &owner, button);
                 self.session_event(
                     &session_id,
@@ -1344,12 +1364,18 @@ impl RadialController {
                         cell: owner_cell(owner),
                         role,
                         button,
-                        geometry_generation: generation,
+                        geometry_generation: layout_generation,
                     },
                     out,
                 )
             }
-            NativeEvent::CaptureLost { session_id } => {
+            NativeEvent::CaptureLost {
+                session_id,
+                layout_generation,
+            } => {
+                if self.layout_generation_for(&session_id) != layout_generation {
+                    return;
+                }
                 self.session_event(&session_id, SessionEvent::OutsideInteraction, out)
             }
             NativeEvent::Escape { session_id } => {
@@ -1581,6 +1607,19 @@ impl RadialController {
                 }
             }
             SessionIntent::OpenSubmenu { cell_id } => self.open_submenu(id, &cell_id, out),
+            SessionIntent::BeginNativeDrag {
+                geometry_generation,
+            } => {
+                if self.layout_generation_for(id) == geometry_generation
+                    && let Some(host) = self.host.as_ref()
+                    && let Err(message) = host.send(NativeCommand::BeginSystemDrag {
+                        session_id: id.clone(),
+                        layout_generation: geometry_generation,
+                    })
+                {
+                    out.push(ControllerEvent::Error(message));
+                }
+            }
             SessionIntent::Back | SessionIntent::PageChanged { .. } => {
                 self.refresh_active_scene(id, out)
             }
@@ -2353,6 +2392,22 @@ impl RadialController {
         }
     }
 }
+
+fn close_reason_for_lifecycle(reason: LifecycleCancellation) -> CloseReason {
+    match reason {
+        LifecycleCancellation::SettingsReload | LifecycleCancellation::SessionReplaced => {
+            CloseReason::SettingsReload
+        }
+        LifecycleCancellation::FeatureDisabled => CloseReason::FeatureDisabled,
+        LifecycleCancellation::HostFailure => CloseReason::HostFailure,
+        LifecycleCancellation::HookFailure => CloseReason::HookFailure,
+        LifecycleCancellation::Shutdown => CloseReason::Shutdown,
+        LifecycleCancellation::Suspend => CloseReason::Suspend,
+        LifecycleCancellation::SessionLock => CloseReason::SessionLock,
+        LifecycleCancellation::DesktopUnavailable => CloseReason::DesktopUnavailable,
+        LifecycleCancellation::PriorityPreempted => CloseReason::ExclusiveTool,
+    }
+}
 fn owner_cell(owner: InputOwner) -> Option<super::model::CellId> {
     match owner {
         InputOwner::Actionable(id) => Some(id),
@@ -2467,20 +2522,23 @@ fn augment_special_cells(
         let radius = (layout.input_extent.max.x - layout.input_extent.min.x)
             .max(layout.input_extent.max.y - layout.input_extent.min.y)
             * 0.5;
-        layout.cells.push(CellLayout {
-            cell_id: background_id,
-            ring_id: RingId::new("__special"),
-            label: String::new(),
-            icon: Override::Inherit,
-            control: menu.background_control,
-            secondary_control: menu.background_secondary_control,
-            shape: HitShape::Circle {
-                center: layout.center,
-                radius,
+        layout.cells.insert(
+            0,
+            CellLayout {
+                cell_id: background_id,
+                ring_id: RingId::new("__special"),
+                label: String::new(),
+                icon: Override::Inherit,
+                control: menu.background_control,
+                secondary_control: menu.background_secondary_control,
+                shape: HitShape::Circle {
+                    center: layout.center,
+                    radius,
+                },
+                actionable: true,
+                visual: special_visual,
             },
-            actionable: true,
-            visual: special_visual,
-        });
+        );
     }
 }
 
@@ -2505,7 +2563,7 @@ fn control_role(control: Control) -> CellRole {
         Control::Close => CellRole::Close,
         Control::NextPage => CellRole::NextPage,
         Control::PreviousPage => CellRole::PreviousPage,
-        Control::Drag => CellRole::Spacer,
+        Control::Drag => CellRole::Drag,
     }
 }
 
@@ -2573,7 +2631,7 @@ fn cell_role_in_menu(menu: &super::model::MenuDefinition, cell: &super::model::C
                     Control::Close => CellRole::Close,
                     Control::NextPage => CellRole::NextPage,
                     Control::PreviousPage => CellRole::PreviousPage,
-                    Control::Drag => CellRole::Spacer,
+                    Control::Drag => CellRole::Drag,
                 },
             }
         })
@@ -2678,6 +2736,54 @@ pub(crate) fn desktop_geometry() -> (PhysicalPoint, PhysicalRect, ScaleFactor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radial::model::CellId;
+
+    #[test]
+    fn lifecycle_cancellation_reasons_retain_native_close_identity() {
+        for (cancellation, close) in [
+            (
+                LifecycleCancellation::SettingsReload,
+                CloseReason::SettingsReload,
+            ),
+            (
+                LifecycleCancellation::FeatureDisabled,
+                CloseReason::FeatureDisabled,
+            ),
+            (LifecycleCancellation::HostFailure, CloseReason::HostFailure),
+            (LifecycleCancellation::HookFailure, CloseReason::HookFailure),
+            (LifecycleCancellation::Shutdown, CloseReason::Shutdown),
+            (LifecycleCancellation::Suspend, CloseReason::Suspend),
+            (LifecycleCancellation::SessionLock, CloseReason::SessionLock),
+            (
+                LifecycleCancellation::DesktopUnavailable,
+                CloseReason::DesktopUnavailable,
+            ),
+            (
+                LifecycleCancellation::SessionReplaced,
+                CloseReason::SettingsReload,
+            ),
+            (
+                LifecycleCancellation::PriorityPreempted,
+                CloseReason::ExclusiveTool,
+            ),
+        ] {
+            assert_eq!(close_reason_for_lifecycle(cancellation), close);
+        }
+    }
+
+    #[test]
+    fn disable_retires_demand_driven_deadline_worker() {
+        let mut controller = RadialController::with_factory(
+            Arc::new(RadialDocument::starter()),
+            false,
+            Arc::new(|| Err("host must remain lazy".into())),
+        );
+        let (wake, _wake_rx) = mpsc::channel();
+        controller.deadline_scheduler = Some(HandoffDeadlineScheduler::spawn(wake).unwrap());
+        controller.disable();
+        assert!(controller.deadline_scheduler.is_none());
+        assert!(controller.host.is_none());
+    }
     use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
     use std::io::Cursor;
     use std::sync::Mutex;
@@ -2749,6 +2855,72 @@ mod tests {
     }
 
     #[test]
+    fn debug_resource_census_is_opt_in_and_tracks_lazy_session_ownership() {
+        let silent = RadialController::with_factory(
+            Arc::new(RadialDocument::starter()),
+            false,
+            Arc::new(|| Err("unused".into())),
+        );
+        assert_eq!(silent.resource_snapshot(), None);
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut observed = controller(events, made);
+        let idle = observed.resource_snapshot().unwrap();
+        assert_eq!(idle.native_hosts, 0);
+        assert_eq!(idle.pending_sessions, 0);
+        assert_eq!(idle.active_sessions, 0);
+
+        observed.handle_intents(vec![open()], false);
+        let opening = observed.resource_snapshot().unwrap();
+        assert_eq!(opening.native_hosts, 1);
+        assert_eq!(opening.pending_sessions, 1);
+        assert_eq!(opening.active_sessions, 0);
+    }
+
+    #[test]
+    fn typed_lifecycle_intent_closes_only_the_correlated_invocation() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sent_by_factory = Arc::clone(&sent);
+        let mut controller = RadialController::with_factory(
+            Arc::new(RadialDocument::starter()),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::clone(&sent_by_factory),
+                    events: Arc::new(Mutex::new(VecDeque::new())),
+                }))
+            }),
+        );
+        controller.handle_intents(vec![open()], false);
+        controller.handle_intents(
+            vec![InvocationIntent::CancelRadialLifecycle {
+                id: InvocationId(99),
+                reason: LifecycleCancellation::Suspend,
+            }],
+            false,
+        );
+        assert_eq!(sent.lock().unwrap().len(), 1, "stale id must be ignored");
+        controller.handle_intents(
+            vec![InvocationIntent::CancelRadialLifecycle {
+                id: InvocationId(4),
+                reason: LifecycleCancellation::Suspend,
+            }],
+            false,
+        );
+        assert!(matches!(
+            sent.lock().unwrap().as_slice(),
+            [
+                NativeCommand::Open { .. },
+                NativeCommand::Close {
+                    reason: CloseReason::Suspend,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
     fn outside_relinquish_removes_active_local_input_scope() {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let made = Arc::new(Mutex::new(0));
@@ -2768,6 +2940,88 @@ mod tests {
     }
 
     #[test]
+    fn drag_intent_is_forwarded_once_with_current_layout_generation() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let sent_by_factory = Arc::clone(&sent);
+        let events_by_factory = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(RadialDocument::starter()),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::clone(&sent_by_factory),
+                    events: Arc::clone(&events_by_factory),
+                }))
+            }),
+        );
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        let center = pending.layout.center;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+        for event in [
+            NativeEvent::PointerDown {
+                session_id: session_id.clone(),
+                layout_generation: generation,
+                owner: InputOwner::Actionable(CellId::new("__center")),
+                point: center,
+                button: PointerButton::Primary,
+            },
+            NativeEvent::PointerMoved {
+                session_id: session_id.clone(),
+                layout_generation: generation.saturating_sub(1),
+                owner: InputOwner::Actionable(CellId::new("__center")),
+                point: LogicalPoint {
+                    x: center.x + 20.0,
+                    y: center.y,
+                },
+            },
+            NativeEvent::PointerMoved {
+                session_id: session_id.clone(),
+                layout_generation: generation,
+                owner: InputOwner::Actionable(CellId::new("__center")),
+                point: LogicalPoint {
+                    x: center.x + 8.0,
+                    y: center.y,
+                },
+            },
+            NativeEvent::PointerMoved {
+                session_id: session_id.clone(),
+                layout_generation: generation,
+                owner: InputOwner::Actionable(CellId::new("__center")),
+                point: LogicalPoint {
+                    x: center.x + 20.0,
+                    y: center.y,
+                },
+            },
+        ] {
+            events.lock().unwrap().push_back(event);
+            controller.poll();
+        }
+        let commands = sent.lock().unwrap();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(command, NativeCommand::BeginSystemDrag { .. }))
+                .count(),
+            1
+        );
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            NativeCommand::BeginSystemDrag {
+                session_id: id,
+                layout_generation,
+            } if id == &session_id && *layout_generation == generation
+        )));
+    }
+
+    #[test]
     fn owned_pointer_reentry_restores_local_input_scope_but_exterior_does_not() {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let made = Arc::new(Mutex::new(0));
@@ -2783,12 +3037,14 @@ mod tests {
         controller.poll();
         events.lock().unwrap().push_back(NativeEvent::PointerLeft {
             session_id: session_id.clone(),
+            layout_generation: generation,
         });
         controller.poll();
         assert!(controller.active_input_scope().is_none());
         let point = controller.active.as_ref().unwrap().layout.center;
         events.lock().unwrap().push_back(NativeEvent::PointerMoved {
             session_id: session_id.clone(),
+            layout_generation: generation,
             owner: InputOwner::Exterior,
             point,
         });
@@ -2796,6 +3052,7 @@ mod tests {
         assert!(controller.active_input_scope().is_none());
         events.lock().unwrap().push_back(NativeEvent::PointerDown {
             session_id,
+            layout_generation: generation,
             owner: InputOwner::Protective,
             point,
             button: PointerButton::Primary,
@@ -2930,6 +3187,74 @@ mod tests {
                 .is_empty()
         );
         assert!(controller.pending.as_ref().unwrap().sounds.open.is_some());
+    }
+
+    #[test]
+    fn runtime_and_authoring_preview_prepare_identical_resources_and_scene() {
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("preview.png");
+        std::fs::write(
+            &image_path,
+            base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut document = RadialDocument::starter();
+        document.menus[0].center_control = Some(Control::Close);
+        document.menus[0].background_control = Some(Control::Back);
+        document.menus[0].rings[0].cells[0].icon =
+            Override::Value(super::super::model::MediaReference::ExternalFile {
+                path: image_path.to_string_lossy().into_owned(),
+            });
+        document.menus[0].rings[0].cells[0].tooltip = Override::Value("Prepared tooltip".into());
+        let document = Arc::new(document);
+        let menu = document.menus[0].clone();
+        let anchor = PhysicalPoint { x: 300.0, y: 300.0 };
+        let work = PhysicalRect {
+            min: PhysicalPoint { x: 0.0, y: 0.0 },
+            max: PhysicalPoint { x: 600.0, y: 600.0 },
+        };
+        let scale = ScaleFactor::new(1.0).unwrap();
+        let mut layout = layout_document_menu(&document, &menu, anchor, work, scale, 0.55).unwrap();
+        augment_special_cells(&mut layout, &BTreeMap::new(), &menu);
+        let mut controller = RadialController::with_factory(
+            Arc::clone(&document),
+            false,
+            Arc::new(|| Err("unused host".into())),
+        );
+        controller.configure_resources(directory.path().to_path_buf());
+        let (runtime_resources, _, runtime_diagnostics) =
+            controller.prepare_scene_resources(&menu, &layout, 44);
+        assert!(
+            runtime_diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.contains("LabelTruncated"))
+        );
+        let runtime_scene = build_scene_prepared_selected(&layout, 44, &runtime_resources, None);
+
+        let mut preview =
+            super::super::preparation::PreviewFramePreparer::new(directory.path().to_path_buf());
+        let prepared = preview
+            .prepare(
+                &document,
+                &menu.id,
+                anchor,
+                work,
+                scale,
+                44,
+                None,
+                &super::super::preparation::PreviewProjection::default(),
+            )
+            .unwrap();
+        assert_eq!(prepared.diagnostics, runtime_diagnostics);
+        assert_eq!(prepared.layout, layout);
+        assert_eq!(prepared.resources, runtime_resources);
+        assert_eq!(prepared.scene, runtime_scene);
+        assert!(prepared.resources.media.len() == 1);
+        assert!(prepared.resources.tooltips.len() == 1);
     }
     #[test]
     fn resource_invalidation_closes_active_generation_and_clears_preparation() {
@@ -3362,7 +3687,11 @@ mod tests {
             super::super::render::input_owner(&layout, layout.center, false),
             InputOwner::Actionable(crate::radial::model::CellId::new("__center"))
         );
-        let ordinary = &layout.cells[0];
+        let ordinary = layout
+            .cells
+            .iter()
+            .find(|cell| !cell.cell_id.as_str().starts_with("__"))
+            .expect("starter menu has an ordinary cell");
         let HitShape::Circle { center, .. } = ordinary.shape else {
             panic!("starter layout must use circular cells")
         };

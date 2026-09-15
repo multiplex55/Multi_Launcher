@@ -93,6 +93,168 @@ pub enum StyleField {
     FillItemHitZones,
 }
 
+/// The concrete runtime boundary that first gives an exposed style field its
+/// behavior. Keeping this match exhaustive makes adding a serialized style
+/// property without a consumer a compile-time-visible change instead of a
+/// silently ignored editor option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StyleConsumer {
+    Geometry,
+    Scene,
+    Compositor,
+    Audio,
+    Input,
+    NativeWindow,
+}
+
+pub const ALL_STYLE_FIELDS: &[StyleField] = &[
+    StyleField::ItemGlow,
+    StyleField::MenuOuterRim,
+    StyleField::MenuBackground,
+    StyleField::ItemBackground,
+    StyleField::ItemForeground,
+    StyleField::ItemShadow,
+    StyleField::MenuForeground,
+    StyleField::CenterBackground,
+    StyleField::CenterImage,
+    StyleField::SubmenuIndicator,
+    StyleField::ItemGlowOpacity,
+    StyleField::MenuOuterRimOpacity,
+    StyleField::MenuBackgroundOpacity,
+    StyleField::ItemBackgroundOpacity,
+    StyleField::ItemForegroundOpacity,
+    StyleField::ItemShadowOpacity,
+    StyleField::MenuForegroundOpacity,
+    StyleField::CenterBackgroundOpacity,
+    StyleField::CenterImageOpacity,
+    StyleField::SubmenuIndicatorOpacity,
+    StyleField::IconOpacity,
+    StyleField::MenuScale,
+    StyleField::ItemSize,
+    StyleField::RadiusScale,
+    StyleField::CenterSize,
+    StyleField::CenterImageScale,
+    StyleField::ItemImageScale,
+    StyleField::ItemImageYRatio,
+    StyleField::ItemBackgroundScale,
+    StyleField::ItemForegroundScale,
+    StyleField::ItemShadowScale,
+    StyleField::MenuBackgroundScale,
+    StyleField::MenuForegroundScale,
+    StyleField::CenterBackgroundScale,
+    StyleField::SubmenuIndicatorSize,
+    StyleField::SubmenuIndicatorYRatio,
+    StyleField::OuterRingMargin,
+    StyleField::OuterRimWidth,
+    StyleField::ItemBackgroundOnCenter,
+    StyleField::ItemBackgroundOnItems,
+    StyleField::TextVisible,
+    StyleField::SubmenuIndicatorText,
+    StyleField::FontFamily,
+    StyleField::FontSize,
+    StyleField::TextColor,
+    StyleField::Bold,
+    StyleField::Italic,
+    StyleField::Underline,
+    StyleField::Strikeout,
+    StyleField::TextShadowEnabled,
+    StyleField::TextShadowColor,
+    StyleField::TextShadowOffset,
+    StyleField::TextBoxScale,
+    StyleField::TextVerticalRatio,
+    StyleField::GlowEnabled,
+    StyleField::TooltipMode,
+    StyleField::MenuShadowWidth,
+    StyleField::MenuShadowInnerColor,
+    StyleField::MenuShadowOuterColor,
+    StyleField::TextQuality,
+    StyleField::ShapeQuality,
+    StyleField::InterpolationQuality,
+    StyleField::SoundOnShow,
+    StyleField::SoundOnClose,
+    StyleField::SoundOnSelect,
+    StyleField::SoundOnSubmenuShow,
+    StyleField::SoundOnSubmenuClose,
+    StyleField::AlwaysOnTop,
+    StyleField::ActivateOnShow,
+    StyleField::FillCenterHitZone,
+    StyleField::FillItemHitZones,
+];
+
+pub fn style_consumer(field: StyleField) -> StyleConsumer {
+    match field {
+        StyleField::MenuScale
+        | StyleField::ItemSize
+        | StyleField::RadiusScale
+        | StyleField::CenterSize
+        | StyleField::OuterRingMargin
+        | StyleField::OuterRimWidth => StyleConsumer::Geometry,
+        StyleField::TextQuality | StyleField::ShapeQuality | StyleField::InterpolationQuality => {
+            StyleConsumer::Compositor
+        }
+        StyleField::SoundOnShow
+        | StyleField::SoundOnClose
+        | StyleField::SoundOnSelect
+        | StyleField::SoundOnSubmenuShow
+        | StyleField::SoundOnSubmenuClose => StyleConsumer::Audio,
+        StyleField::FillCenterHitZone | StyleField::FillItemHitZones => StyleConsumer::Input,
+        StyleField::AlwaysOnTop | StyleField::ActivateOnShow => StyleConsumer::NativeWindow,
+        StyleField::ItemGlow
+        | StyleField::MenuOuterRim
+        | StyleField::MenuBackground
+        | StyleField::ItemBackground
+        | StyleField::ItemForeground
+        | StyleField::ItemShadow
+        | StyleField::MenuForeground
+        | StyleField::CenterBackground
+        | StyleField::CenterImage
+        | StyleField::SubmenuIndicator
+        | StyleField::ItemGlowOpacity
+        | StyleField::MenuOuterRimOpacity
+        | StyleField::MenuBackgroundOpacity
+        | StyleField::ItemBackgroundOpacity
+        | StyleField::ItemForegroundOpacity
+        | StyleField::ItemShadowOpacity
+        | StyleField::MenuForegroundOpacity
+        | StyleField::CenterBackgroundOpacity
+        | StyleField::CenterImageOpacity
+        | StyleField::SubmenuIndicatorOpacity
+        | StyleField::IconOpacity
+        | StyleField::CenterImageScale
+        | StyleField::ItemImageScale
+        | StyleField::ItemImageYRatio
+        | StyleField::ItemBackgroundScale
+        | StyleField::ItemForegroundScale
+        | StyleField::ItemShadowScale
+        | StyleField::MenuBackgroundScale
+        | StyleField::MenuForegroundScale
+        | StyleField::CenterBackgroundScale
+        | StyleField::SubmenuIndicatorSize
+        | StyleField::SubmenuIndicatorYRatio
+        | StyleField::ItemBackgroundOnCenter
+        | StyleField::ItemBackgroundOnItems
+        | StyleField::TextVisible
+        | StyleField::SubmenuIndicatorText
+        | StyleField::FontFamily
+        | StyleField::FontSize
+        | StyleField::TextColor
+        | StyleField::Bold
+        | StyleField::Italic
+        | StyleField::Underline
+        | StyleField::Strikeout
+        | StyleField::TextShadowEnabled
+        | StyleField::TextShadowColor
+        | StyleField::TextShadowOffset
+        | StyleField::TextBoxScale
+        | StyleField::TextVerticalRatio
+        | StyleField::GlowEnabled
+        | StyleField::TooltipMode
+        | StyleField::MenuShadowWidth
+        | StyleField::MenuShadowInnerColor
+        | StyleField::MenuShadowOuterColor => StyleConsumer::Scene,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClearSemantic {
     RemoveMedia,
@@ -862,5 +1024,56 @@ mod tests {
             cell.source(StyleField::IconOpacity),
             Some(StyleSource::Cell { .. })
         ));
+    }
+
+    #[test]
+    fn every_public_style_field_has_one_named_runtime_consumer() {
+        let unique = ALL_STYLE_FIELDS
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ALL_STYLE_FIELDS.len(), 71);
+        assert_eq!(unique.len(), ALL_STYLE_FIELDS.len());
+
+        let consumers = ALL_STYLE_FIELDS
+            .iter()
+            .copied()
+            .map(style_consumer)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            consumers,
+            [
+                StyleConsumer::Geometry,
+                StyleConsumer::Scene,
+                StyleConsumer::Compositor,
+                StyleConsumer::Audio,
+                StyleConsumer::Input,
+                StyleConsumer::NativeWindow,
+            ]
+            .into_iter()
+            .collect()
+        );
+
+        assert_eq!(
+            style_consumer(StyleField::ItemSize),
+            StyleConsumer::Geometry
+        );
+        assert_eq!(style_consumer(StyleField::TextColor), StyleConsumer::Scene);
+        assert_eq!(
+            style_consumer(StyleField::ShapeQuality),
+            StyleConsumer::Compositor
+        );
+        assert_eq!(
+            style_consumer(StyleField::SoundOnClose),
+            StyleConsumer::Audio
+        );
+        assert_eq!(
+            style_consumer(StyleField::FillItemHitZones),
+            StyleConsumer::Input
+        );
+        assert_eq!(
+            style_consumer(StyleField::ActivateOnShow),
+            StyleConsumer::NativeWindow
+        );
     }
 }

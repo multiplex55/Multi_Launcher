@@ -6,12 +6,15 @@
 //! the optional [`native_preview::NativePreviewCoordinator`], and is the only
 //! component allowed to execute persistence requests or create preview surfaces.
 
+use super::geometry::{PhysicalPoint, PhysicalRect, ScaleFactor};
 use super::model::{
     AssetId, AssetRecord, CellDefinition, CellId, ConfigRevision, ContextRuleId, HotstringId,
     MenuId, RadialDocument, RingId, ShortcutId, SkinId, TriggerId,
 };
 use super::package::ImportPlan;
-use std::collections::{BTreeSet, VecDeque};
+use super::preparation::{PreparedFrameInput, PreviewProjection, synthetic_preview_dynamic};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
@@ -216,6 +219,25 @@ impl AssetMutations {
 
     pub fn is_empty(&self) -> bool {
         self.additions.is_empty() && self.deletions.is_empty()
+    }
+
+    /// Stable metadata identity for preview retry/cache correlation. Managed
+    /// bytes are already content-addressed, so hashing them again per frame is
+    /// both redundant and unnecessarily expensive.
+    pub fn preview_identity(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for addition in &self.additions {
+            addition.record.id.as_str().hash(&mut hasher);
+            format!("{:?}", addition.record.kind).hash(&mut hasher);
+            addition.record.relative_path.hash(&mut hasher);
+            addition.record.content_sha256.hash(&mut hasher);
+            addition.record.byte_len.hash(&mut hasher);
+            addition.bytes.len().hash(&mut hasher);
+        }
+        for deletion in &self.deletions {
+            deletion.as_str().hash(&mut hasher);
+        }
+        hasher.finish()
     }
 }
 
@@ -434,6 +456,19 @@ pub enum AuthoringRequest {
         generation: DraftGeneration,
         editor_session: AuthoringSessionId,
     },
+    PrepareEmbeddedPreview {
+        id: AuthoringRequestId,
+        generation: DraftGeneration,
+        editor_session: AuthoringSessionId,
+        candidate: Arc<RadialDocument>,
+        menu_id: MenuId,
+        selected: Option<CellId>,
+        anchor: PhysicalPoint,
+        work_area: PhysicalRect,
+        scale: ScaleFactor,
+        token: String,
+        projection: PreviewProjection,
+    },
     ReplacePackage {
         id: AuthoringRequestId,
         generation: DraftGeneration,
@@ -453,6 +488,7 @@ pub enum AuthoringRequest {
         candidate: Arc<RadialDocument>,
         menu_id: MenuId,
         sample_external_context: bool,
+        projection: PreviewProjection,
     },
     UpdateNativePreview {
         id: AuthoringRequestId,
@@ -464,6 +500,7 @@ pub enum AuthoringRequest {
         candidate: Arc<RadialDocument>,
         menu_id: MenuId,
         sample_external_context: bool,
+        projection: PreviewProjection,
     },
     StopNativePreview {
         id: AuthoringRequestId,
@@ -484,6 +521,7 @@ impl AuthoringRequest {
             | Self::ExportSkin { id, .. }
             | Self::AuditionManagedAsset { id, .. }
             | Self::FontCatalog { id, .. }
+            | Self::PrepareEmbeddedPreview { id, .. }
             | Self::ReplacePackage { id, .. }
             | Self::StartNativePreview { id, .. }
             | Self::UpdateNativePreview { id, .. }
@@ -501,6 +539,7 @@ impl AuthoringRequest {
             | Self::ExportSkin { generation, .. }
             | Self::AuditionManagedAsset { generation, .. }
             | Self::FontCatalog { generation, .. }
+            | Self::PrepareEmbeddedPreview { generation, .. }
             | Self::ReplacePackage { generation, .. }
             | Self::StartNativePreview { generation, .. }
             | Self::UpdateNativePreview { generation, .. }
@@ -518,6 +557,7 @@ impl AuthoringRequest {
             | Self::ExportSkin { editor_session, .. }
             | Self::AuditionManagedAsset { editor_session, .. }
             | Self::FontCatalog { editor_session, .. }
+            | Self::PrepareEmbeddedPreview { editor_session, .. }
             | Self::ReplacePackage { editor_session, .. }
             | Self::StartNativePreview { editor_session, .. }
             | Self::UpdateNativePreview { editor_session, .. }
@@ -573,6 +613,13 @@ pub enum AuthoringReply {
         editor_session: AuthoringSessionId,
         families: Arc<[String]>,
     },
+    EmbeddedPreviewPrepared {
+        id: AuthoringRequestId,
+        generation: DraftGeneration,
+        editor_session: AuthoringSessionId,
+        token: String,
+        input: Arc<PreparedFrameInput>,
+    },
     PackageReplaced {
         id: AuthoringRequestId,
         generation: DraftGeneration,
@@ -586,6 +633,7 @@ pub enum AuthoringReply {
         editor_session: AuthoringSessionId,
         lease: NativePreviewLease,
         sampled_context: super::context::InvocationContext,
+        diagnostics: Vec<String>,
     },
     NativePreviewUpdated {
         id: AuthoringRequestId,
@@ -593,6 +641,12 @@ pub enum AuthoringReply {
         editor_session: AuthoringSessionId,
         lease: NativePreviewLease,
         sampled_context: super::context::InvocationContext,
+        diagnostics: Vec<String>,
+    },
+    NativePreviewDiagnostics {
+        editor_session: AuthoringSessionId,
+        lease: NativePreviewLease,
+        diagnostics: Vec<String>,
     },
     NativePreviewStopped {
         id: AuthoringRequestId,
@@ -623,12 +677,14 @@ impl AuthoringReply {
             | Self::PackageExported { id, .. }
             | Self::AssetAuditioned { id, .. }
             | Self::FontCatalog { id, .. }
+            | Self::EmbeddedPreviewPrepared { id, .. }
             | Self::PackageReplaced { id, .. }
             | Self::NativePreviewStarted { id, .. }
             | Self::NativePreviewUpdated { id, .. }
             | Self::NativePreviewStopped { id, .. }
             | Self::Failed { id, .. } => *id,
-            Self::NativePreviewFailed { lease, .. } => lease.request_id,
+            Self::NativePreviewFailed { lease, .. }
+            | Self::NativePreviewDiagnostics { lease, .. } => lease.request_id,
         }
     }
 
@@ -642,12 +698,14 @@ impl AuthoringReply {
             | Self::PackageExported { generation, .. }
             | Self::AssetAuditioned { generation, .. }
             | Self::FontCatalog { generation, .. }
+            | Self::EmbeddedPreviewPrepared { generation, .. }
             | Self::PackageReplaced { generation, .. }
             | Self::NativePreviewStarted { generation, .. }
             | Self::NativePreviewUpdated { generation, .. }
             | Self::NativePreviewStopped { generation, .. }
             | Self::Failed { generation, .. } => *generation,
-            Self::NativePreviewFailed { lease, .. } => lease.generation,
+            Self::NativePreviewFailed { lease, .. }
+            | Self::NativePreviewDiagnostics { lease, .. } => lease.generation,
         }
     }
 
@@ -661,10 +719,12 @@ impl AuthoringReply {
             | Self::PackageExported { editor_session, .. }
             | Self::AssetAuditioned { editor_session, .. }
             | Self::FontCatalog { editor_session, .. }
+            | Self::EmbeddedPreviewPrepared { editor_session, .. }
             | Self::PackageReplaced { editor_session, .. }
             | Self::NativePreviewStarted { editor_session, .. }
             | Self::NativePreviewUpdated { editor_session, .. }
             | Self::NativePreviewStopped { editor_session, .. }
+            | Self::NativePreviewDiagnostics { editor_session, .. }
             | Self::NativePreviewFailed { editor_session, .. }
             | Self::Failed { editor_session, .. } => *editor_session,
         }
@@ -676,11 +736,19 @@ pub struct AuthoringClient {
     request_tx: mpsc::Sender<AuthoringRequest>,
     reply_rx: Arc<std::sync::Mutex<mpsc::Receiver<AuthoringReply>>>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    resource_tx: mpsc::Sender<AuthoringResourceDemand>,
 }
 
 pub struct AuthoringMainEndpoint {
     pub request_rx: mpsc::Receiver<AuthoringRequest>,
     pub reply_tx: mpsc::Sender<AuthoringReply>,
+    pub resource_rx: mpsc::Receiver<AuthoringResourceDemand>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthoringResourceDemand {
+    Acquire(AuthoringSessionId),
+    Release(AuthoringSessionId),
 }
 
 pub fn authoring_control_service() -> (AuthoringClient, AuthoringMainEndpoint) {
@@ -692,20 +760,41 @@ pub fn authoring_control_service_with_wake(
 ) -> (AuthoringClient, AuthoringMainEndpoint) {
     let (request_tx, request_rx) = mpsc::channel();
     let (reply_tx, reply_rx) = mpsc::channel();
+    let (resource_tx, resource_rx) = mpsc::channel();
     (
         AuthoringClient {
             request_tx,
             reply_rx: Arc::new(std::sync::Mutex::new(reply_rx)),
             wake,
+            resource_tx,
         },
         AuthoringMainEndpoint {
             request_rx,
             reply_tx,
+            resource_rx,
         },
     )
 }
 
 impl AuthoringClient {
+    pub fn acquire_resources(&self, editor_session: AuthoringSessionId) {
+        let _ = self
+            .resource_tx
+            .send(AuthoringResourceDemand::Acquire(editor_session));
+        if let Some(wake) = &self.wake {
+            wake();
+        }
+    }
+
+    pub fn release_resources(&self, editor_session: AuthoringSessionId) {
+        let _ = self
+            .resource_tx
+            .send(AuthoringResourceDemand::Release(editor_session));
+        if let Some(wake) = &self.wake {
+            wake();
+        }
+    }
+
     pub fn send(&self, request: AuthoringRequest) -> Result<(), AuthoringError> {
         self.request_tx
             .send(request)
@@ -758,6 +847,7 @@ pub enum PendingRequestKind {
     ExportSkin,
     AuditionManagedAsset,
     FontCatalog,
+    PrepareEmbeddedPreview,
     ReplacePackage,
     StartNativePreview,
     UpdateNativePreview,
@@ -773,6 +863,10 @@ fn reply_matches_pending_kind(reply: &AuthoringReply, kind: PendingRequestKind) 
         | (PendingRequestKind::ExportSkin, AuthoringReply::PackageExported { .. })
         | (PendingRequestKind::AuditionManagedAsset, AuthoringReply::AssetAuditioned { .. })
         | (PendingRequestKind::FontCatalog, AuthoringReply::FontCatalog { .. })
+        | (
+            PendingRequestKind::PrepareEmbeddedPreview,
+            AuthoringReply::EmbeddedPreviewPrepared { .. },
+        )
         | (PendingRequestKind::ReplacePackage, AuthoringReply::PackageReplaced { .. })
         | (PendingRequestKind::StartNativePreview, AuthoringReply::NativePreviewStarted { .. })
         | (PendingRequestKind::UpdateNativePreview, AuthoringReply::NativePreviewUpdated { .. })
@@ -804,6 +898,7 @@ pub enum AuthoringError {
     ServiceClosed,
     ConfirmationRequired,
     StalePreview,
+    AssetOverlayInvalid(String),
 }
 
 #[derive(Clone, Debug)]
@@ -824,6 +919,8 @@ pub struct RadialAuthoringSession {
     pub sampled_preview_context: Option<super::context::InvocationContext>,
     pub font_families: Arc<[String]>,
     pub font_catalog_loaded: bool,
+    pub embedded_preview: Option<(String, Arc<PreparedFrameInput>)>,
+    pub native_preview_diagnostics: Vec<String>,
     pub pending_native_preview: Option<PendingAuthoringRequest>,
     pub native_preview_may_be_open: bool,
     pending_native_context_sample: bool,
@@ -861,6 +958,8 @@ impl RadialAuthoringSession {
             sampled_preview_context: None,
             font_families: Arc::from([]),
             font_catalog_loaded: false,
+            embedded_preview: None,
+            native_preview_diagnostics: Vec::new(),
             pending_native_preview: None,
             native_preview_may_be_open: false,
             pending_native_context_sample: false,
@@ -908,6 +1007,10 @@ impl RadialAuthoringSession {
 
     pub fn is_dirty(&self) -> bool {
         self.draft != self.clean_checkpoint || !self.pending_assets.is_empty()
+    }
+
+    pub fn editor_session(&self) -> AuthoringSessionId {
+        self.editor_session
     }
 
     pub fn is_closed(&self) -> bool {
@@ -1340,6 +1443,62 @@ impl RadialAuthoringSession {
         })
     }
 
+    pub fn request_embedded_preview(
+        &mut self,
+        candidate: Arc<RadialDocument>,
+        menu_id: MenuId,
+        selected: Option<CellId>,
+        anchor: PhysicalPoint,
+        work_area: PhysicalRect,
+        scale: ScaleFactor,
+        token: String,
+        page: usize,
+        selected_skin: Option<SkinId>,
+    ) -> Result<AuthoringRequest, AuthoringError> {
+        if self.pending_request.is_some() {
+            return Err(AuthoringError::RequestPending);
+        }
+        let id = self.next_id();
+        let projection = self.preview_projection(&candidate, &menu_id, page, selected_skin)?;
+        self.pending_request = Some(PendingAuthoringRequest {
+            id,
+            generation: self.generation,
+            editor_session: self.editor_session,
+            kind: PendingRequestKind::PrepareEmbeddedPreview,
+        });
+        Ok(AuthoringRequest::PrepareEmbeddedPreview {
+            id,
+            generation: self.generation,
+            editor_session: self.editor_session,
+            candidate,
+            menu_id,
+            selected,
+            anchor,
+            work_area,
+            scale,
+            token,
+            projection,
+        })
+    }
+
+    pub fn cancel_pending_request(
+        &mut self,
+        id: AuthoringRequestId,
+        generation: DraftGeneration,
+        editor_session: AuthoringSessionId,
+    ) -> bool {
+        if self.pending_request.is_some_and(|pending| {
+            pending.id == id
+                && pending.generation == generation
+                && pending.editor_session == editor_session
+        }) {
+            self.pending_request = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn request_replace_package(
         &mut self,
         plan: ImportPlan,
@@ -1387,6 +1546,7 @@ impl RadialAuthoringSession {
         &mut self,
         menu_id: MenuId,
         sample_external_context: bool,
+        selected_skin: Option<SkinId>,
     ) -> Result<AuthoringRequest, AuthoringError> {
         if self.pending_native_preview.is_some() || self.pending_request.is_some() {
             return Err(AuthoringError::RequestPending);
@@ -1395,6 +1555,7 @@ impl RadialAuthoringSession {
             return Err(AuthoringError::RebaseConflict);
         }
         let id = self.next_id();
+        let projection = self.preview_projection(&self.draft, &menu_id, 0, selected_skin)?;
         self.pending_native_preview = Some(PendingAuthoringRequest {
             id,
             generation: self.generation,
@@ -1412,6 +1573,7 @@ impl RadialAuthoringSession {
             candidate: Arc::clone(&self.draft),
             menu_id,
             sample_external_context,
+            projection,
         })
     }
 
@@ -1419,6 +1581,7 @@ impl RadialAuthoringSession {
         &mut self,
         menu_id: MenuId,
         sample_external_context: bool,
+        selected_skin: Option<SkinId>,
     ) -> Result<AuthoringRequest, AuthoringError> {
         if self.pending_native_preview.is_some() || self.pending_request.is_some() {
             return Err(AuthoringError::RequestPending);
@@ -1431,6 +1594,7 @@ impl RadialAuthoringSession {
             .clone()
             .ok_or(AuthoringError::NoPendingRequest)?;
         let id = self.next_id();
+        let projection = self.preview_projection(&self.draft, &menu_id, 0, selected_skin)?;
         self.pending_native_preview = Some(PendingAuthoringRequest {
             id,
             generation: self.generation,
@@ -1449,6 +1613,34 @@ impl RadialAuthoringSession {
             candidate: Arc::clone(&self.draft),
             menu_id,
             sample_external_context,
+            projection,
+        })
+    }
+
+    fn preview_projection(
+        &self,
+        candidate: &RadialDocument,
+        menu_id: &MenuId,
+        page: usize,
+        selected_skin: Option<SkinId>,
+    ) -> Result<PreviewProjection, AuthoringError> {
+        let menu = candidate
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .ok_or(AuthoringError::MissingEntity)?;
+        let assets = super::assets::ManagedAssetOverlay::validated(
+            self.pending_assets
+                .additions
+                .iter()
+                .map(|addition| (addition.record.clone(), Arc::clone(&addition.bytes))),
+        )
+        .map_err(|error| AuthoringError::AssetOverlayInvalid(error.to_string()))?;
+        Ok(PreviewProjection {
+            page,
+            dynamic: synthetic_preview_dynamic(menu),
+            selected_skin,
+            assets,
         })
     }
 
@@ -1499,6 +1691,11 @@ impl RadialAuthoringSession {
                 lease,
                 ..
             } => lease.editor_session != *editor_session,
+            AuthoringReply::NativePreviewDiagnostics {
+                editor_session,
+                lease,
+                ..
+            } => lease.editor_session != *editor_session,
             _ => false,
         } {
             return false;
@@ -1525,6 +1722,18 @@ impl RadialAuthoringSession {
             self.pending_native_context_sample = false;
             self.native_preview_may_be_open = false;
             self.last_error = Some(message.clone());
+            return true;
+        }
+        if let AuthoringReply::NativePreviewDiagnostics {
+            lease, diagnostics, ..
+        } = &reply
+        {
+            if self.native_preview_lease.as_ref() != Some(lease)
+                || lease.generation != self.generation
+            {
+                return false;
+            }
+            self.native_preview_diagnostics = diagnostics.clone();
             return true;
         }
         if let AuthoringReply::NativePreviewStopped {
@@ -1555,11 +1764,13 @@ impl RadialAuthoringSession {
                 AuthoringReply::NativePreviewStarted {
                     lease,
                     sampled_context,
+                    diagnostics,
                     ..
                 }
                 | AuthoringReply::NativePreviewUpdated {
                     lease,
                     sampled_context,
+                    diagnostics,
                     ..
                 } => {
                     self.native_preview_lease = Some(lease);
@@ -1568,6 +1779,7 @@ impl RadialAuthoringSession {
                         self.sampled_preview_context = Some(sampled_context);
                     }
                     self.pending_native_context_sample = false;
+                    self.native_preview_diagnostics = diagnostics;
                 }
                 AuthoringReply::NativePreviewStopped { editor_session, .. } => {
                     if editor_session == self.editor_session {
@@ -1583,6 +1795,7 @@ impl RadialAuthoringSession {
                     self.last_error = Some(message);
                 }
                 AuthoringReply::NativePreviewFailed { .. } => return false,
+                AuthoringReply::NativePreviewDiagnostics { .. } => return false,
                 _ => return false,
             }
             return true;
@@ -1638,6 +1851,9 @@ impl RadialAuthoringSession {
                 self.font_families = families;
                 self.font_catalog_loaded = true;
             }
+            AuthoringReply::EmbeddedPreviewPrepared { token, input, .. } => {
+                self.embedded_preview = Some((token, input));
+            }
             AuthoringReply::PackageReplaced {
                 snapshot,
                 backup_path,
@@ -1660,6 +1876,7 @@ impl RadialAuthoringSession {
             AuthoringReply::NativePreviewStarted { .. }
             | AuthoringReply::NativePreviewUpdated { .. }
             | AuthoringReply::NativePreviewStopped { .. }
+            | AuthoringReply::NativePreviewDiagnostics { .. }
             | AuthoringReply::NativePreviewFailed { .. } => return false,
             AuthoringReply::Failed { message, .. } => {
                 if matches!(
@@ -1903,6 +2120,70 @@ mod tests {
     }
 
     #[test]
+    fn embedded_preview_frame_reply_is_generation_and_token_correlated() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let document = Arc::clone(&session.draft);
+        let menu_id = document.default_menu_id.clone();
+        let anchor = PhysicalPoint { x: 200.0, y: 200.0 };
+        let work_area = PhysicalRect {
+            min: PhysicalPoint { x: 0.0, y: 0.0 },
+            max: PhysicalPoint { x: 400.0, y: 400.0 },
+        };
+        let scale = ScaleFactor::new(1.0).unwrap();
+        let request = session
+            .request_embedded_preview(
+                Arc::clone(&document),
+                menu_id.clone(),
+                None,
+                anchor,
+                work_area,
+                scale,
+                "frame-token".into(),
+                0,
+                None,
+            )
+            .unwrap();
+        let mut preparer = crate::radial::preparation::PreviewFramePreparer::new(PathBuf::new());
+        let input = Arc::new(
+            preparer
+                .prepare(
+                    &document,
+                    &menu_id,
+                    anchor,
+                    work_area,
+                    scale,
+                    request.generation().0,
+                    None,
+                    &PreviewProjection::default(),
+                )
+                .unwrap(),
+        );
+        assert!(
+            !session.accept_reply(AuthoringReply::EmbeddedPreviewPrepared {
+                id: AuthoringRequestId(request.id().0 + 1),
+                generation: request.generation(),
+                editor_session: request.editor_session(),
+                token: "stale".into(),
+                input: Arc::clone(&input),
+            })
+        );
+        assert!(session.embedded_preview.is_none());
+        assert!(
+            session.accept_reply(AuthoringReply::EmbeddedPreviewPrepared {
+                id: request.id(),
+                generation: request.generation(),
+                editor_session: request.editor_session(),
+                token: "frame-token".into(),
+                input: Arc::clone(&input),
+            })
+        );
+        assert_eq!(
+            session.embedded_preview.as_ref(),
+            Some(&("frame-token".into(), input))
+        );
+    }
+
+    #[test]
     fn ring_resize_is_atomic_and_does_not_partially_discard() {
         let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
         let menu = session.draft.menus[0].clone();
@@ -2111,7 +2392,7 @@ mod tests {
         let mut session = RadialAuthoringSession::new(snapshot("A", 1));
         let menu = session.draft.default_menu_id.clone();
         let start = session
-            .request_start_native_preview(menu.clone(), false)
+            .request_start_native_preview(menu.clone(), false, None)
             .unwrap();
         let stale_lease = NativePreviewLease {
             editor_session: session.editor_session,
@@ -2133,13 +2414,16 @@ mod tests {
             editor_session: session.editor_session,
             lease: stale_lease,
             sampled_context: super::super::context::InvocationContext::empty(1),
+            diagnostics: Vec::new(),
         }));
         assert!(session.native_preview_lease.is_none());
         // The test advanced generation by direct field access, bypassing the
         // production mutation boundary that invalidates pending preview work.
         session.pending_native_preview = None;
 
-        let start = session.request_start_native_preview(menu, false).unwrap();
+        let start = session
+            .request_start_native_preview(menu, false, None)
+            .unwrap();
         let lease = NativePreviewLease {
             editor_session: session.editor_session,
             generation: start.generation(),
@@ -2151,8 +2435,29 @@ mod tests {
             editor_session: session.editor_session,
             lease: lease.clone(),
             sampled_context: super::super::context::InvocationContext::empty(2),
+            diagnostics: vec!["draft image fallback".into()],
         }));
         assert_eq!(session.native_preview_lease, Some(lease));
+        assert_eq!(session.native_preview_diagnostics, ["draft image fallback"]);
+        let active_lease = session.native_preview_lease.clone().unwrap();
+        assert!(
+            session.accept_reply(AuthoringReply::NativePreviewDiagnostics {
+                editor_session: session.editor_session,
+                lease: active_lease.clone(),
+                diagnostics: vec!["child image missing".into()],
+            })
+        );
+        assert_eq!(session.native_preview_diagnostics, ["child image missing"]);
+        let mut stale = active_lease;
+        stale.generation.0 += 1;
+        assert!(
+            !session.accept_reply(AuthoringReply::NativePreviewDiagnostics {
+                editor_session: session.editor_session,
+                lease: stale,
+                diagnostics: Vec::new(),
+            })
+        );
+        assert_eq!(session.native_preview_diagnostics, ["child image missing"]);
         let menu_id = session.draft.default_menu_id.clone();
         session
             .mutate(
@@ -2170,7 +2475,7 @@ mod tests {
 
         let mut session = RadialAuthoringSession::new(snapshot("A", 1));
         let start = session
-            .request_start_native_preview(session.draft.default_menu_id.clone(), false)
+            .request_start_native_preview(session.draft.default_menu_id.clone(), false, None)
             .unwrap();
         let lease = NativePreviewLease {
             editor_session: session.editor_session,
@@ -2183,6 +2488,7 @@ mod tests {
             editor_session: session.editor_session,
             lease,
             sampled_context: super::super::context::InvocationContext::empty(3),
+            diagnostics: Vec::new(),
         }));
         let save = session.request_commit(CommitDisposition::Save).unwrap();
         assert!(session.accept_reply(AuthoringReply::Published {
@@ -2201,7 +2507,7 @@ mod tests {
         let mut session = RadialAuthoringSession::new(snapshot("A", 1));
         let menu = session.draft.default_menu_id.clone();
         let start = session
-            .request_start_native_preview(menu.clone(), true)
+            .request_start_native_preview(menu.clone(), true, None)
             .unwrap();
         let first = super::super::context::InvocationContext::empty(11);
         let lease = NativePreviewLease {
@@ -2215,11 +2521,12 @@ mod tests {
             editor_session: session.editor_session,
             lease: lease.clone(),
             sampled_context: first.clone(),
+            diagnostics: Vec::new(),
         }));
         assert_eq!(session.sampled_preview_context.as_ref(), Some(&first));
 
         let update = session
-            .request_update_native_preview(menu.clone(), false)
+            .request_update_native_preview(menu.clone(), false, None)
             .unwrap();
         let unsampled_lease = NativePreviewLease {
             editor_session: session.editor_session,
@@ -2232,10 +2539,13 @@ mod tests {
             editor_session: session.editor_session,
             lease: unsampled_lease,
             sampled_context: super::super::context::InvocationContext::empty(12),
+            diagnostics: Vec::new(),
         }));
         assert_eq!(session.sampled_preview_context.as_ref(), Some(&first));
 
-        let update = session.request_update_native_preview(menu, true).unwrap();
+        let update = session
+            .request_update_native_preview(menu, true, None)
+            .unwrap();
         let latest = super::super::context::InvocationContext::empty(13);
         assert!(session.accept_reply(AuthoringReply::NativePreviewUpdated {
             id: update.id(),
@@ -2247,6 +2557,7 @@ mod tests {
                 request_id: update.id(),
             },
             sampled_context: latest.clone(),
+            diagnostics: Vec::new(),
         }));
         assert_eq!(session.sampled_preview_context.as_ref(), Some(&latest));
     }
@@ -2272,6 +2583,44 @@ mod tests {
         assert!(session.pending_assets.is_empty());
         assert!(session.redo());
         assert_eq!(session.pending_assets.additions[0].record, record);
+    }
+
+    #[test]
+    fn preview_request_rejects_corrupt_pending_overlay_before_main_or_disk_access() {
+        let mut session = RadialAuthoringSession::new(snapshot("A", 1));
+        let record = AssetRecord {
+            id: AssetId::new("corrupt-preview"),
+            kind: super::super::model::MediaKind::Image,
+            relative_path: "corrupt.png".into(),
+            content_sha256: "0".repeat(64),
+            byte_len: 3,
+        };
+        session
+            .stage_asset_addition(ManagedAssetAddition {
+                record,
+                bytes: Arc::from([1_u8, 2, 3]),
+            })
+            .unwrap();
+        let menu = session.draft.default_menu_id.clone();
+        let result = session.request_embedded_preview(
+            Arc::clone(&session.draft),
+            menu,
+            None,
+            PhysicalPoint { x: 100.0, y: 100.0 },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 200.0, y: 200.0 },
+            },
+            ScaleFactor::new(1.0).unwrap(),
+            "corrupt-overlay".into(),
+            0,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(AuthoringError::AssetOverlayInvalid(_))
+        ));
+        assert!(session.pending_request.is_none());
     }
 
     #[test]
@@ -2540,6 +2889,16 @@ mod tests {
         };
         client.send(request.clone()).unwrap();
         assert_eq!(endpoint.request_rx.try_recv().unwrap(), request);
+        client.acquire_resources(AuthoringSessionId(11));
+        client.release_resources(AuthoringSessionId(11));
+        assert_eq!(
+            endpoint.resource_rx.try_recv().unwrap(),
+            AuthoringResourceDemand::Acquire(AuthoringSessionId(11))
+        );
+        assert_eq!(
+            endpoint.resource_rx.try_recv().unwrap(),
+            AuthoringResourceDemand::Release(AuthoringSessionId(11))
+        );
         endpoint
             .reply_tx
             .send(AuthoringReply::PreviewCancelled {
