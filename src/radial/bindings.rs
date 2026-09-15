@@ -167,9 +167,10 @@ pub fn project_menu_frame_with_style(
                     source_index,
                     entry.id.0
                 ));
-                let Some(binding) = entry.binding.clone() else {
-                    continue;
-                };
+                let binding = entry
+                    .binding
+                    .clone()
+                    .unwrap_or(FrozenBinding::Informational);
                 cells.insert(
                     id.clone(),
                     PreparedCell {
@@ -288,6 +289,7 @@ pub enum BindingUnavailable {
     ContextActionMissing {
         action_id: crate::universal_actions::ActionId,
     },
+    Informational,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -311,10 +313,24 @@ impl RadialBindingResolver<'_> {
     ) -> Result<PreparedBinding, BindingUnavailable> {
         match binding {
             FrozenBinding::Stable(binding) => self.resolve(binding, invocation, query),
+            FrozenBinding::Contextual {
+                selector,
+                action_id,
+                ..
+            } => self.resolve(
+                &ActionBinding::Contextual {
+                    selector: selector.clone(),
+                    action_id: action_id.clone(),
+                },
+                invocation,
+                query,
+            ),
+            FrozenBinding::Informational => Err(BindingUnavailable::Informational),
             FrozenBinding::Runtime {
                 target,
                 selected_action,
                 action_id,
+                ..
             } => {
                 let resolved = self
                     .catalog
@@ -434,6 +450,8 @@ mod tests {
                 hwnd: 44,
                 pid: 55,
                 process_name: Some("editor.exe".into()),
+                process_path: None,
+                class_name: None,
                 title: "Editor".into(),
             }),
             under_pointer: None,
@@ -472,7 +490,10 @@ mod tests {
 
     #[test]
     fn frozen_dynamic_entries_project_to_stable_selectable_geometry_cells() {
-        let menu = RadialDocument::starter().menus.remove(0);
+        let mut menu = RadialDocument::starter().menus.remove(0);
+        menu.rings[0].cells[0].content = CellContent::Dynamic {
+            source: super::super::model::DynamicSource::Favorites,
+        };
         let source = menu.rings[0].cells[0].id.clone();
         let binding = FrozenBinding::Stable(ActionBinding::Contextual {
             selector: TargetSelector::CapturedForeground,
@@ -489,6 +510,7 @@ mod tests {
                 entries: vec![FrozenRadialEntry {
                     id: FrozenEntryId("favorite:editor".into()),
                     label: "Editor".into(),
+                    kind: super::super::dynamic::FrozenEntryKind::Action,
                     binding: Some(binding.clone()),
                     availability: FrozenAvailability::Available,
                     history_query: "fav".into(),
@@ -506,7 +528,11 @@ mod tests {
             .flat_map(|ring| &ring.cells)
             .find(|cell| cell.label == "Editor")
             .unwrap();
-        assert!(cell.id.as_str().starts_with("dyn:favorites:0:"));
+        assert!(
+            cell.id
+                .as_str()
+                .starts_with(&format!("dyn:{}:0:", source.as_str()))
+        );
         assert_eq!(projected.cells.get(&cell.id).unwrap().binding, binding);
         let layout = crate::radial::geometry::layout_menu(
             &projected.menu,
@@ -528,6 +554,51 @@ mod tests {
     }
 
     #[test]
+    fn frozen_status_entry_is_visible_but_never_dispatchable() {
+        let mut menu = RadialDocument::starter().menus.remove(0);
+        menu.rings[0].cells.truncate(1);
+        menu.rings[0].cells[0].content = CellContent::Dynamic {
+            source: super::super::model::DynamicSource::Applications,
+        };
+        let source = menu.rings[0].cells[0].id.clone();
+        let dynamic = [(
+            source,
+            FrozenDynamicFrame {
+                fingerprint: super::super::dynamic::SourceFingerprint {
+                    generation: 1,
+                    source: "applications".into(),
+                    query: None,
+                },
+                entries: vec![FrozenRadialEntry {
+                    id: FrozenEntryId("status:empty".into()),
+                    label: "No applications available".into(),
+                    kind: super::super::dynamic::FrozenEntryKind::Empty,
+                    binding: None,
+                    availability: FrozenAvailability::Empty {
+                        reason: "No applications available".into(),
+                    },
+                    history_query: String::new(),
+                    requirement: InteractionRequirement::None,
+                }],
+            },
+        )]
+        .into_iter()
+        .collect();
+        let projected = project_menu_frame(&menu, BTreeMap::new(), &dynamic, 0, 12);
+        let cell = projected.menu.rings[0]
+            .cells
+            .iter()
+            .find(|cell| cell.label == "No applications available")
+            .unwrap();
+        let prepared = projected.cells.get(&cell.id).unwrap();
+        assert_eq!(prepared.binding, FrozenBinding::Informational);
+        assert!(matches!(
+            prepared.availability,
+            FrozenAvailability::Empty { .. }
+        ));
+    }
+
+    #[test]
     fn projected_pages_keep_distinct_stable_cells_and_bindings() {
         let mut menu = RadialDocument::starter().menus.remove(0);
         menu.rings[0].cells.truncate(1);
@@ -539,6 +610,7 @@ mod tests {
             .map(|index| FrozenRadialEntry {
                 id: FrozenEntryId(format!("window:{index}")),
                 label: format!("Window {index}"),
+                kind: super::super::dynamic::FrozenEntryKind::Action,
                 binding: Some(FrozenBinding::Runtime {
                     target: ActionTarget::Window { hwnd: index },
                     selected_action: Action {
@@ -548,6 +620,7 @@ mod tests {
                         args: None,
                     },
                     action_id: action_ids::WINDOW_ACTIVATE,
+                    identity: None,
                 }),
                 availability: FrozenAvailability::Available,
                 history_query: String::new(),
@@ -574,11 +647,11 @@ mod tests {
         assert_eq!(second.menu.rings[0].cells.len(), 4);
         assert_eq!(
             first.menu.rings[0].cells.last().unwrap().id.as_str(),
-            "__radial_page_next:main"
+            format!("__radial_page_next:{}", menu.rings[0].id.as_str())
         );
         assert_eq!(
             second.menu.rings[0].cells.last().unwrap().id.as_str(),
-            "__radial_page_previous:main"
+            format!("__radial_page_previous:{}", menu.rings[0].id.as_str())
         );
         assert_ne!(
             first.menu.rings[0].cells[0].id,
@@ -617,6 +690,12 @@ mod tests {
     fn multiple_dynamic_sources_share_one_bounded_page_capacity() {
         let mut menu = RadialDocument::starter().menus.remove(0);
         menu.rings[0].cells.truncate(2);
+        menu.rings[0].cells[0].content = CellContent::Dynamic {
+            source: super::super::model::DynamicSource::Favorites,
+        };
+        menu.rings[0].cells[1].content = CellContent::Dynamic {
+            source: super::super::model::DynamicSource::Applications,
+        };
         let dynamic: BTreeMap<_, _> = menu.rings[0]
             .cells
             .iter()
@@ -626,6 +705,7 @@ mod tests {
                     .map(|index| FrozenRadialEntry {
                         id: FrozenEntryId(format!("{source_index}:{index}")),
                         label: format!("{source_index}:{index}"),
+                        kind: super::super::dynamic::FrozenEntryKind::Action,
                         binding: Some(FrozenBinding::Stable(ActionBinding::Contextual {
                             selector: TargetSelector::CapturedForeground,
                             action_id: action_ids::WINDOW_ACTIVATE,
@@ -681,11 +761,17 @@ mod tests {
     fn multiple_dynamic_rings_page_with_ring_local_geometry_safe_controls() {
         let mut menu = RadialDocument::starter().menus.remove(0);
         menu.rings[0].cells.truncate(1);
+        menu.rings[0].cells[0].content = CellContent::Dynamic {
+            source: super::super::model::DynamicSource::Favorites,
+        };
         let mut outer = menu.rings[0].clone();
         outer.id = super::super::model::RingId::new("outer");
         outer.radius = 170.0;
         outer.cell_radius = 24.0;
         outer.cells[0].id = CellId::new("outer-source");
+        outer.cells[0].content = CellContent::Dynamic {
+            source: super::super::model::DynamicSource::Applications,
+        };
         menu.rings.push(outer);
         let dynamic: BTreeMap<_, _> = menu
             .rings
@@ -696,6 +782,7 @@ mod tests {
                     .map(|index| FrozenRadialEntry {
                         id: FrozenEntryId(format!("{}:{index}", ring.id.as_str())),
                         label: format!("{}:{index}", ring.id.as_str()),
+                        kind: super::super::dynamic::FrozenEntryKind::Action,
                         binding: Some(FrozenBinding::Stable(ActionBinding::Contextual {
                             selector: TargetSelector::CapturedForeground,
                             action_id: action_ids::WINDOW_ACTIVATE,
@@ -797,6 +884,9 @@ mod tests {
     fn effective_item_size_and_radius_scale_bound_dynamic_pagination() {
         let mut document = RadialDocument::starter();
         document.menus[0].rings[0].cells.truncate(1);
+        document.menus[0].rings[0].cells[0].content = CellContent::Dynamic {
+            source: super::super::model::DynamicSource::Favorites,
+        };
         document.menus[0].style.values.geometry.item_size =
             super::super::model::Override::Value(88.0);
         let menu = &document.menus[0];
@@ -805,6 +895,7 @@ mod tests {
             .map(|index| FrozenRadialEntry {
                 id: FrozenEntryId(format!("styled:{index}")),
                 label: format!("Styled {index}"),
+                kind: super::super::dynamic::FrozenEntryKind::Action,
                 binding: Some(FrozenBinding::Stable(ActionBinding::Contextual {
                     selector: TargetSelector::CapturedForeground,
                     action_id: action_ids::WINDOW_ACTIVATE,
@@ -856,6 +947,7 @@ mod tests {
             target: ActionTarget::Window { hwnd: 44 },
             selected_action: selected.clone(),
             action_id: action_ids::WINDOW_ACTIVATE,
+            identity: None,
         };
         let catalog = PersistedActionCatalog::new(vec![ResolvedActionTarget {
             target: ActionTarget::Window { hwnd: 44 },

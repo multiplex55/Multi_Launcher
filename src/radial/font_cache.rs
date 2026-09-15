@@ -107,6 +107,10 @@ impl SystemFontCatalog {
         }
         Self { families, files }
     }
+
+    pub fn family_names(&self) -> Vec<String> {
+        self.families.iter().cloned().collect()
+    }
 }
 
 impl FontCatalog for SystemFontCatalog {

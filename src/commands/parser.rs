@@ -63,8 +63,70 @@ mod screen_draw_parser_tests {
     }
 }
 
+#[cfg(test)]
+mod radial_parser_tests {
+    use super::*;
+
+    fn action(raw: &str) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn radial_commands_parse_display_and_serde_round_trip() {
+        let cases = [
+            ("radial", RadialCommand::ShowDefault),
+            (
+                "radial show Work Menu",
+                RadialCommand::Show("Work Menu".into()),
+            ),
+            ("radial close", RadialCommand::Close),
+            ("radial edit", RadialCommand::Edit),
+            ("radial skins", RadialCommand::Skins),
+        ];
+        for (wire, expected) in cases {
+            assert_eq!(
+                parse_action(&action(wire)).unwrap(),
+                Command::Radial(expected.clone())
+            );
+            assert_eq!(expected.to_string(), wire);
+            let encoded = serde_json::to_string(&expected).unwrap();
+            assert_eq!(
+                serde_json::from_str::<RadialCommand>(&encoded).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_radial_commands_report_clear_typed_errors() {
+        for raw in ["radial show", "radial show   "] {
+            let error = parse_action(&action(raw)).unwrap_err();
+            assert_eq!(error.domain, "radial");
+            assert!(error.message.contains("requires a menu ID or name"));
+        }
+        assert!(
+            parse_action(&action("radial future"))
+                .unwrap_err()
+                .message
+                .contains("unknown radial command")
+        );
+    }
+}
+
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
+
+    if s == "radial" {
+        return Ok(Command::Radial(RadialCommand::ShowDefault));
+    }
+    if let Some(rest) = s.strip_prefix("radial ") {
+        return parse_radial(rest).map(Command::Radial);
+    }
 
     if s.starts_with("vd:") {
         return Ok(Command::VirtualDesktop(parse_virtual_desktop(action)));
@@ -166,6 +228,34 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         _ => return parse_prefixed(action),
     };
     Ok(command)
+}
+
+fn parse_radial(input: &str) -> Result<RadialCommand, CommandError> {
+    let input = input.trim();
+    match input {
+        "close" => Ok(RadialCommand::Close),
+        "edit" => Ok(RadialCommand::Edit),
+        "skins" => Ok(RadialCommand::Skins),
+        "show" => Err(CommandError::new(
+            "radial",
+            "`radial show` requires a menu ID or name",
+        )),
+        _ if input.starts_with("show ") => {
+            let target = input[5..].trim();
+            if target.is_empty() {
+                Err(CommandError::new(
+                    "radial",
+                    "`radial show` requires a menu ID or name",
+                ))
+            } else {
+                Ok(RadialCommand::Show(target.to_owned()))
+            }
+        }
+        _ => Err(CommandError::new(
+            "radial",
+            format!("unknown radial command `{input}`"),
+        )),
+    }
 }
 
 fn parse_screen_draw(action: &str) -> Option<ScreenDrawCommand> {

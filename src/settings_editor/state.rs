@@ -15,6 +15,15 @@ pub struct SettingsEditor {
     pub(crate) help_hotkey: String,
     pub(crate) help_hotkey_valid: bool,
     pub(crate) last_valid_help_hotkey: String,
+    pub(crate) radial_enabled: bool,
+    pub(crate) radial_shared_tap_hold: bool,
+    pub(crate) radial_hold_threshold_ms: u64,
+    pub(crate) radial_default_menu_id: String,
+    pub(crate) radial_default_interaction: crate::radial::model::InteractionMode,
+    pub(crate) radial_default_submenu_presentation: crate::radial::model::SubmenuPresentation,
+    pub(crate) radial_safety_policy: crate::radial::model::RadialSafetyPolicy,
+    pub(crate) radial_default_item_input_scope: crate::radial::model::TriggerScope,
+    pub(crate) radial_global_item_inputs: bool,
     pub(crate) debug_logging: bool,
     pub(crate) show_toasts: bool,
     pub(crate) show_inline_errors: bool,
@@ -155,6 +164,21 @@ impl SettingsEditor {
             self.help_hotkey_valid = true;
             return Err("Failed to save settings: help hotkey is invalid");
         }
+        if self.radial_enabled
+            && !(crate::radial::settings::MIN_HOLD_THRESHOLD_MS
+                ..=crate::radial::settings::MAX_HOLD_THRESHOLD_MS)
+                .contains(&self.radial_hold_threshold_ms)
+        {
+            return Err("Failed to save settings: radial hold threshold is outside 100-2000 ms");
+        }
+        if self.radial_enabled
+            && self.radial_default_item_input_scope == crate::radial::model::TriggerScope::Global
+            && !self.radial_global_item_inputs
+        {
+            return Err(
+                "Failed to save settings: global radial item scope requires global item inputs",
+            );
+        }
 
         self.last_valid_hotkey = self.hotkey.clone();
         if self.quit_hotkey_enabled {
@@ -164,5 +188,95 @@ impl SettingsEditor {
             self.last_valid_help_hotkey = self.help_hotkey.clone();
         }
         Ok(())
+    }
+
+    pub(crate) fn radial_settings(&self) -> crate::radial::model::RadialFeatureSettings {
+        crate::radial::model::RadialFeatureSettings {
+            enabled: self.radial_enabled,
+            shared_tap_hold: self.radial_shared_tap_hold,
+            hold_threshold_ms: self.radial_hold_threshold_ms,
+            default_menu_id: (!self.radial_default_menu_id.trim().is_empty())
+                .then(|| crate::radial::model::MenuId::new(self.radial_default_menu_id.trim())),
+            default_interaction: self.radial_default_interaction,
+            default_submenu_presentation: self.radial_default_submenu_presentation,
+            safety_policy: self.radial_safety_policy,
+            default_item_input_scope: self.radial_default_item_input_scope,
+            global_item_inputs: self.radial_global_item_inputs,
+        }
+    }
+
+    pub(crate) fn radial_reserved_hotkeys(&self) -> Vec<(String, String)> {
+        let mut reserved = vec![("launcher toggle".into(), self.hotkey.clone())];
+        if self.quit_hotkey_enabled {
+            reserved.push(("quit launcher".into(), self.quit_hotkey.clone()));
+        }
+        if self.help_hotkey_enabled {
+            reserved.push(("help launcher".into(), self.help_hotkey.clone()));
+        }
+        let screen_draw = self
+            .plugin_settings
+            .get("screen_draw")
+            .cloned()
+            .map(serde_json::from_value::<crate::screen_draw::ScreenDrawSettings>)
+            .transpose()
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if let Some(chord) = screen_draw.launch_hotkey {
+            reserved.push(("Screen Draw launch".into(), chord.as_str().into()));
+        }
+        reserved.push((
+            "Screen Draw emergency".into(),
+            screen_draw.emergency_hotkey.as_str().into(),
+        ));
+        reserved
+    }
+
+    pub(crate) fn radial_validation_issues(
+        &self,
+        document: &crate::radial::model::RadialDocument,
+    ) -> Vec<crate::radial::settings::RadialSettingsIssue> {
+        crate::radial::settings::validate(
+            &self.radial_settings(),
+            document,
+            &self.radial_reserved_hotkeys(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn radial_threshold_and_scope_validation_explain_the_invalid_field() {
+        let mut editor = SettingsEditor::new(&Settings::default());
+        editor.radial_hold_threshold_ms = crate::radial::settings::MIN_HOLD_THRESHOLD_MS - 1;
+        assert!(
+            editor
+                .validate_before_save()
+                .unwrap_err()
+                .contains("100-2000")
+        );
+
+        editor.radial_hold_threshold_ms = 350;
+        editor.radial_default_item_input_scope = crate::radial::model::TriggerScope::Global;
+        editor.radial_global_item_inputs = false;
+        assert!(
+            editor
+                .validate_before_save()
+                .unwrap_err()
+                .contains("requires global item inputs")
+        );
+    }
+
+    #[test]
+    fn disabling_radial_allows_legacy_values_to_be_saved_for_later_repair() {
+        let mut editor = SettingsEditor::new(&Settings::default());
+        editor.radial_enabled = false;
+        editor.radial_hold_threshold_ms = 0;
+        editor.radial_default_item_input_scope = crate::radial::model::TriggerScope::Global;
+        editor.radial_global_item_inputs = false;
+        assert!(editor.validate_before_save().is_ok());
     }
 }

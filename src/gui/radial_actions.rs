@@ -5,7 +5,8 @@ use crate::radial::bindings::{
 };
 use crate::radial::context::{CompiledContextRules, InvocationContext};
 use crate::radial::dynamic::{
-    DynamicCandidate, DynamicSnapshots, FrozenAvailability, FrozenBinding,
+    DynamicCandidate, DynamicSnapshots, DynamicSourceState, FrozenAvailability, FrozenBinding,
+    FrozenEntryKind,
 };
 use crate::radial::handoff::{
     InteractionRequirement, RadialDispatchRequest, interaction_requirement,
@@ -16,6 +17,7 @@ use crate::universal_actions::{
     RootLauncherPolicy, UniversalActionInvocationContext, UniversalActionRegistry,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::{ActivationSource, LauncherApp};
 
@@ -79,114 +81,10 @@ impl LauncherApp {
             &self.bookmark_aliases,
             &self.actions[..custom_len],
         );
-        let mut entries: Vec<_> = self
-            .actions
-            .iter()
-            .chain(self.results.iter())
-            .map(|action| resolver.resolve(action, &resolver_context))
-            .collect();
-        let dashboard = self.dashboard_data_cache.snapshot();
-        entries.extend(
-            dashboard
-                .clipboard_history
-                .iter()
-                .enumerate()
-                .map(
-                    |(index, text)| crate::universal_actions::ResolvedActionTarget {
-                        target: crate::universal_actions::ActionTarget::ClipboardEntry { index },
-                        selected_action: crate::actions::Action {
-                            label: text.clone(),
-                            desc: "Clipboard".into(),
-                            action: format!("clipboard:copy:{index}"),
-                            args: None,
-                        },
-                        custom_action_index: None,
-                    },
-                ),
-        );
-        entries.extend(dashboard.snippets.iter().map(|snippet| {
-            crate::universal_actions::ResolvedActionTarget {
-                target: crate::universal_actions::ActionTarget::Snippet {
-                    alias: snippet.alias.clone(),
-                },
-                selected_action: crate::actions::Action {
-                    label: snippet.alias.clone(),
-                    desc: "Snippet".into(),
-                    action: format!("clipboard:{}", snippet.text),
-                    args: None,
-                },
-                custom_action_index: None,
-            }
-        }));
-        entries.extend(dashboard.notes.iter().map(|note| {
-            crate::universal_actions::ResolvedActionTarget {
-                target: crate::universal_actions::ActionTarget::Note {
-                    slug: note.slug.clone(),
-                },
-                selected_action: crate::actions::Action {
-                    label: note.title.clone(),
-                    desc: "Note".into(),
-                    action: format!("note:open:{}", note.slug),
-                    args: None,
-                },
-                custom_action_index: None,
-            }
-        }));
-        let macro_snapshot = self.plugins.internal_services().mkmacro_store.snapshot();
-        entries.extend(
-            macro_snapshot
-                .macros
-                .iter()
-                .filter(|value| value.id != 0)
-                .map(|value| crate::universal_actions::ResolvedActionTarget {
-                    target: crate::universal_actions::ActionTarget::MkMacro { id: value.id },
-                    selected_action: crate::actions::Action {
-                        label: value.name.clone(),
-                        desc: if value.description.is_empty() {
-                            "Mouse/keyboard macro".into()
-                        } else {
-                            value.description.clone()
-                        },
-                        action: format!("mkmacro:run:{}", value.id),
-                        args: None,
-                    },
-                    custom_action_index: None,
-                }),
-        );
-        entries.extend(
-            self.plugins
-                .internal_services()
-                .window_catalog
-                .snapshot()
-                .iter()
-                .map(|window| crate::universal_actions::ResolvedActionTarget {
-                    target: crate::universal_actions::ActionTarget::Window {
-                        hwnd: window.hwnd as isize,
-                    },
-                    selected_action: crate::actions::Action {
-                        label: window.title.clone(),
-                        desc: "Windows".into(),
-                        action: format!("window:switch:{}", window.hwnd),
-                        args: None,
-                    },
-                    custom_action_index: None,
-                }),
-        );
-        let recent_entries: Vec<_> = crate::history::with_history(|history| {
-            history
-                .iter()
-                .rev()
-                .take(32)
-                .map(|entry| {
-                    (
-                        resolver.resolve(&entry.action, &resolver_context),
-                        entry.query.clone(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-        entries.extend(recent_entries.iter().map(|(entry, _)| entry.clone()));
+        let mut action_snapshot = self.universal_action_catalog_snapshot();
+        let window_catalog = Arc::clone(&self.plugins.internal_services().window_catalog);
+        let dashboard = action_snapshot.dashboard.clone();
+        let recent_entries = action_snapshot.recent_entries.clone();
         let configured_queries: BTreeSet<_> = request
             .document
             .menus
@@ -207,14 +105,23 @@ impl LauncherApp {
                 .iter()
                 .map(|action| resolver.resolve(action, &resolver_context))
                 .collect();
-            entries.extend(resolved.iter().cloned());
+            action_snapshot.extend(resolved.iter().cloned());
             query_entries.insert(query.clone(), resolved);
         }
         let captured_result_entries: Vec<_> = captured_results
             .iter()
             .map(|action| resolver.resolve(action, &resolver_context))
             .collect();
-        entries.extend(captured_result_entries.iter().cloned());
+        // `actions` is the full stable launcher/application catalog. `custom_len`
+        // only identifies which prefix the resolver should type as CustomAction;
+        // it must never truncate the Applications dynamic source.
+        let application_entries: Vec<_> = self
+            .actions
+            .iter()
+            .map(|action| resolver.resolve(action, &resolver_context))
+            .collect();
+        action_snapshot.extend(captured_result_entries.iter().cloned());
+        let entries = action_snapshot.entries;
         let catalog = PersistedActionCatalog::new(entries.clone());
         let registry = UniversalActionRegistry;
         let binding_resolver = RadialBindingResolver {
@@ -237,12 +144,14 @@ impl LauncherApp {
             snapshots.favorites = dashboard
                 .favorites
                 .iter()
-                .filter_map(|favorite| {
-                    self.actions.iter().find(|action| {
-                        action.action == favorite.action && action.args == favorite.args
-                    })
+                .map(|favorite| crate::actions::Action {
+                    label: favorite.label.clone(),
+                    desc: "Fav".into(),
+                    action: favorite.action.clone(),
+                    args: favorite.args.clone(),
                 })
-                .map(|action| dynamic_candidate(&resolver.resolve(action, &resolver_context)))
+                .map(|action| resolver.resolve(&action, &resolver_context))
+                .map(|entry| dynamic_candidate_with_window_identity(&entry, &window_catalog))
                 .collect();
             snapshots.clipboard = dashboard
                 .clipboard_history
@@ -262,20 +171,133 @@ impl LauncherApp {
                         },
                         crate::universal_actions::action_ids::RESULT_EXECUTE,
                     )),
+                    runtime_identity: None,
                     unavailable_reason: None,
                     history_query: None,
+                    kind: FrozenEntryKind::Action,
                 })
                 .collect();
             snapshots.recent = recent_entries
                 .iter()
                 .map(|(entry, query)| {
-                    let mut candidate = dynamic_candidate(entry);
+                    let mut candidate =
+                        dynamic_candidate_with_window_identity(entry, &window_catalog);
                     candidate.history_query = Some(query.clone());
                     candidate
                 })
                 .collect();
+            snapshots.applications = application_entries
+                .iter()
+                .map(|entry| dynamic_candidate_with_window_identity(entry, &window_catalog))
+                .collect();
+            snapshots.dashboard = entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.target,
+                        crate::universal_actions::ActionTarget::Note { .. }
+                            | crate::universal_actions::ActionTarget::Snippet { .. }
+                    )
+                })
+                .map(|entry| dynamic_candidate_with_window_identity(entry, &window_catalog))
+                .collect();
+            snapshots
+                .dashboard
+                .extend(snapshots.favorites.iter().cloned().map(|mut candidate| {
+                    candidate.stable_id = format!("dashboard:favorite:{}", candidate.stable_id);
+                    candidate
+                }));
+            snapshots
+                .dashboard
+                .extend(snapshots.clipboard.iter().cloned().map(|mut candidate| {
+                    candidate.stable_id = format!("dashboard:{}", candidate.stable_id);
+                    candidate
+                }));
+            snapshots
+                .dashboard
+                .extend(dashboard.todos.iter().map(|todo| {
+                    dashboard_status_candidate(
+                        format!("dashboard:todo:{}", todo.id),
+                        format!("Todo: {}", todo.text),
+                        "Open Dashboard or Todo View to edit this stable todo",
+                    )
+                }));
+            snapshots
+                .dashboard
+                .extend(
+                    dashboard
+                        .calendar
+                        .event_titles
+                        .iter()
+                        .map(|(event_id, title)| {
+                            dashboard_status_candidate(
+                                format!("dashboard:calendar:{event_id}"),
+                                format!("Calendar: {title}"),
+                                "Open Dashboard or Calendar to act on this event",
+                            )
+                        }),
+                );
+            snapshots
+                .dashboard
+                .extend(dashboard.gestures.db.gestures.iter().map(|gesture| {
+                    dashboard_status_candidate(
+                        format!("dashboard:gesture:{}", gesture.tokens),
+                        format!("Gesture: {}", gesture.label),
+                        "Open Mouse Gesture Settings to edit this gesture",
+                    )
+                }));
+            if let Some(status) = dashboard.system_status.as_ref() {
+                snapshots.dashboard.push(dashboard_status_candidate(
+                    "dashboard:system-status".into(),
+                    format!(
+                        "System: CPU {:.0}% · memory {:.0}% · disk {:.0}%",
+                        status.cpu_percent, status.mem_percent, status.disk_percent
+                    ),
+                    "System status is informational",
+                ));
+            } else {
+                snapshots.dashboard.push(dashboard_status_candidate(
+                    "dashboard:system-status-unavailable".into(),
+                    "System status unavailable".into(),
+                    "Dashboard system status has not loaded",
+                ));
+            }
+            if let Some(recycle) = dashboard.recycle_bin.as_ref() {
+                snapshots.dashboard.push(dashboard_status_candidate(
+                    "dashboard:recycle-bin".into(),
+                    format!("Recycle Bin: {} item(s)", recycle.items),
+                    "Open Dashboard or Recycle Bin commands to manage these items",
+                ));
+            } else {
+                snapshots.dashboard.push(dashboard_status_candidate(
+                    "dashboard:recycle-bin-unavailable".into(),
+                    "Recycle Bin status unavailable".into(),
+                    "Dashboard recycle-bin status has not loaded",
+                ));
+            }
+            snapshots.dashboard.extend(
+                dashboard
+                    .processes
+                    .iter()
+                    .map(|action| resolver.resolve(action, &resolver_context))
+                    .map(|entry| dynamic_candidate_with_window_identity(&entry, &window_catalog)),
+            );
+            if let Some(action) = self
+                .command_cache
+                .iter()
+                .find(|action| action.action == "dashboard:settings")
+            {
+                let mut candidate = dynamic_candidate(&resolver.resolve(action, &resolver_context));
+                candidate.kind = FrozenEntryKind::Manage;
+                snapshots.dashboard.push(candidate);
+            }
+            if !self.dashboard_enabled {
+                snapshots.dashboard_state = DynamicSourceState::Unavailable {
+                    reason: "Dashboard is disabled; use Dashboard Settings to enable it".into(),
+                };
+            }
             for entry in &entries {
-                let candidate = dynamic_candidate(entry);
+                let candidate = dynamic_candidate_with_window_identity(entry, &window_catalog);
                 match &entry.target {
                     crate::universal_actions::ActionTarget::Snippet { .. } => {
                         snapshots.snippets.push(candidate)
@@ -292,60 +314,56 @@ impl LauncherApp {
                     _ => {}
                 }
             }
+            for (command, target) in [
+                ("fav:dialog:", &mut snapshots.favorites),
+                ("mkmacro:dialog", &mut snapshots.macros),
+                ("note:dialog", &mut snapshots.notes),
+                ("snippet:dialog", &mut snapshots.snippets),
+                ("clipboard:dialog", &mut snapshots.clipboard),
+            ] {
+                if let Some(entry) = entries
+                    .iter()
+                    .find(|entry| entry.selected_action.action == command)
+                {
+                    let mut candidate = dynamic_candidate(entry);
+                    candidate.kind = FrozenEntryKind::Manage;
+                    target.push(candidate);
+                }
+            }
             for (query, resolved) in &query_entries {
                 snapshots.launcher_queries.insert(
                     query.clone(),
-                    resolved.iter().map(dynamic_candidate).collect(),
+                    resolved
+                        .iter()
+                        .map(|entry| dynamic_candidate_with_window_identity(entry, &window_catalog))
+                        .collect(),
                 );
             }
             snapshots.launcher_results = captured_result_entries
                 .iter()
-                .map(dynamic_candidate)
+                .map(|entry| dynamic_candidate_with_window_identity(entry, &window_catalog))
                 .collect();
             for cell in menu.rings.iter().flat_map(|ring| &ring.cells) {
                 match &cell.content {
                     CellContent::Action { binding } => {
-                        match binding_resolver.resolve(
+                        let resolved = binding_resolver.resolve(
                             binding,
                             &request.context,
                             &request.invocation_query,
-                        ) {
-                            Ok(prepared) => {
-                                static_cells.insert(
-                                    cell.id.clone(),
-                                    PreparedCell {
-                                        binding: FrozenBinding::Stable(binding.clone()),
-                                        availability: FrozenAvailability::Available,
-                                        requirement: prepared.requirement,
-                                        after_action: effective_after_action(
-                                            &request.document,
-                                            menu,
-                                            cell.after_action,
-                                        ),
-                                        history_query: request.invocation_query.clone(),
-                                    },
-                                );
-                            }
-                            Err(reason) => {
-                                unavailable.insert(cell.id.clone(), reason.clone());
-                                static_cells.insert(
-                                    cell.id.clone(),
-                                    PreparedCell {
-                                        binding: FrozenBinding::Stable(binding.clone()),
-                                        availability: FrozenAvailability::Unavailable {
-                                            reason: format!("{reason:?}"),
-                                        },
-                                        requirement: InteractionRequirement::None,
-                                        after_action: effective_after_action(
-                                            &request.document,
-                                            menu,
-                                            cell.after_action,
-                                        ),
-                                        history_query: request.invocation_query.clone(),
-                                    },
-                                );
-                            }
+                        );
+                        if let Err(reason) = &resolved {
+                            unavailable.insert(cell.id.clone(), reason.clone());
                         }
+                        static_cells.insert(
+                            cell.id.clone(),
+                            prepared_cell(
+                                binding,
+                                resolved,
+                                &request.context,
+                                effective_after_action(&request.document, menu, cell.after_action),
+                                &request.invocation_query,
+                            ),
+                        );
                     }
                     CellContent::Dynamic { source } => {
                         dynamic.insert(
@@ -368,20 +386,11 @@ impl LauncherApp {
                     );
                     static_cells.insert(
                         crate::radial::model::CellId::new(id),
-                        PreparedCell {
-                            binding: FrozenBinding::Stable(binding.clone()),
-                            availability: resolved.as_ref().map_or_else(
-                                |reason| FrozenAvailability::Unavailable {
-                                    reason: format!("{reason:?}"),
-                                },
-                                |_| FrozenAvailability::Available,
-                            ),
-                            requirement: resolved
-                                .as_ref()
-                                .map_or(InteractionRequirement::None, |prepared| {
-                                    prepared.requirement
-                                }),
-                            after_action: effective_after_action(
+                        prepared_cell(
+                            binding,
+                            resolved,
+                            &request.context,
+                            effective_after_action(
                                 &request.document,
                                 menu,
                                 if id == "__center" {
@@ -390,8 +399,8 @@ impl LauncherApp {
                                     menu.background_primary_after_action
                                 },
                             ),
-                            history_query: request.invocation_query.clone(),
-                        },
+                            &request.invocation_query,
+                        ),
                     );
                 }
             }
@@ -431,6 +440,7 @@ impl LauncherApp {
                     prepared_cell(
                         binding,
                         resolved,
+                        &request.context,
                         effective_after_action(&request.document, &menu, policy),
                         &captured_query,
                     ),
@@ -449,6 +459,7 @@ impl LauncherApp {
                     prepared_cell(
                         &alternate.action,
                         resolved,
+                        &request.context,
                         effective_after_action(
                             &request.document,
                             &menu,
@@ -511,26 +522,13 @@ impl LauncherApp {
                         );
                         child_static.insert(
                             cell.id.clone(),
-                            PreparedCell {
-                                binding: FrozenBinding::Stable(binding.clone()),
-                                availability: resolved.as_ref().map_or_else(
-                                    |reason| FrozenAvailability::Unavailable {
-                                        reason: format!("{reason:?}"),
-                                    },
-                                    |_| FrozenAvailability::Available,
-                                ),
-                                requirement: resolved
-                                    .as_ref()
-                                    .map_or(InteractionRequirement::None, |prepared| {
-                                        prepared.requirement
-                                    }),
-                                after_action: effective_after_action(
-                                    &request.document,
-                                    child,
-                                    cell.after_action,
-                                ),
-                                history_query: request.invocation_query.clone(),
-                            },
+                            prepared_cell(
+                                binding,
+                                resolved,
+                                &request.context,
+                                effective_after_action(&request.document, child, cell.after_action),
+                                &request.invocation_query,
+                            ),
                         );
                     }
                     CellContent::Dynamic { source } => {
@@ -562,6 +560,7 @@ impl LauncherApp {
                         prepared_cell(
                             binding,
                             resolved,
+                            &request.context,
                             effective_after_action(&request.document, child, policy),
                             &request.invocation_query,
                         ),
@@ -598,6 +597,7 @@ impl LauncherApp {
                         prepared_cell(
                             binding,
                             resolved,
+                            &request.context,
                             effective_after_action(&request.document, child, policy),
                             &captured_query,
                         ),
@@ -616,6 +616,7 @@ impl LauncherApp {
                         prepared_cell(
                             &alternate.action,
                             resolved,
+                            &request.context,
                             effective_after_action(
                                 &request.document,
                                 child,
@@ -747,124 +748,69 @@ impl LauncherApp {
         &self,
         request: &RadialDispatchRequest,
     ) -> Result<PreparedBinding, BindingUnavailable> {
-        let resolver = ActionTargetResolver;
-        let custom_len = self.custom_len.min(self.actions.len());
-        let context = ActionTargetResolverContext::new(
-            &self.folder_aliases,
-            &self.bookmark_aliases,
-            &self.actions[..custom_len],
-        );
-        let mut entries: Vec<_> = self
-            .actions
-            .iter()
-            .chain(self.results.iter())
-            .map(|action| resolver.resolve(action, &context))
-            .collect();
-        let dashboard = self.dashboard_data_cache.snapshot();
-        entries.extend(
-            dashboard
-                .clipboard_history
-                .iter()
-                .enumerate()
-                .map(
-                    |(index, text)| crate::universal_actions::ResolvedActionTarget {
-                        target: crate::universal_actions::ActionTarget::ClipboardEntry { index },
-                        selected_action: crate::actions::Action {
-                            label: text.clone(),
-                            desc: "Clipboard".into(),
-                            action: format!("clipboard:copy:{index}"),
-                            args: None,
-                        },
-                        custom_action_index: None,
-                    },
-                ),
-        );
-        entries.extend(dashboard.snippets.iter().map(|snippet| {
-            crate::universal_actions::ResolvedActionTarget {
-                target: crate::universal_actions::ActionTarget::Snippet {
-                    alias: snippet.alias.clone(),
-                },
-                selected_action: crate::actions::Action {
-                    label: snippet.alias.clone(),
-                    desc: "Snippet".into(),
-                    action: format!("clipboard:{}", snippet.text),
-                    args: None,
-                },
-                custom_action_index: None,
+        if let Some(action_id) = frozen_window_action_id(&request.binding) {
+            let window_catalog = &self.plugins.internal_services().window_catalog;
+            if !frozen_window_identity_is_current(&request.binding, window_catalog) {
+                return Err(BindingUnavailable::ContextActionMissing {
+                    action_id: action_id.clone(),
+                });
             }
-        }));
-        entries.extend(dashboard.notes.iter().map(|note| {
-            crate::universal_actions::ResolvedActionTarget {
-                target: crate::universal_actions::ActionTarget::Note {
-                    slug: note.slug.clone(),
-                },
-                selected_action: crate::actions::Action {
-                    label: note.title.clone(),
-                    desc: "Note".into(),
-                    action: format!("note:open:{}", note.slug),
-                    args: None,
-                },
-                custom_action_index: None,
-            }
-        }));
-        let macro_snapshot = self.plugins.internal_services().mkmacro_store.snapshot();
-        entries.extend(
-            macro_snapshot
-                .macros
-                .iter()
-                .filter(|value| value.id != 0)
-                .map(|value| crate::universal_actions::ResolvedActionTarget {
-                    target: crate::universal_actions::ActionTarget::MkMacro { id: value.id },
-                    selected_action: crate::actions::Action {
-                        label: value.name.clone(),
-                        desc: if value.description.is_empty() {
-                            "Mouse/keyboard macro".into()
-                        } else {
-                            value.description.clone()
-                        },
-                        action: format!("mkmacro:run:{}", value.id),
-                        args: None,
-                    },
-                    custom_action_index: None,
-                }),
-        );
-        entries.extend(
-            self.plugins
-                .internal_services()
-                .window_catalog
-                .snapshot()
-                .iter()
-                .map(|window| crate::universal_actions::ResolvedActionTarget {
-                    target: crate::universal_actions::ActionTarget::Window {
-                        hwnd: window.hwnd as isize,
-                    },
-                    selected_action: crate::actions::Action {
-                        label: window.title.clone(),
-                        desc: "Windows".into(),
-                        action: format!("window:switch:{}", window.hwnd),
-                        args: None,
-                    },
-                    custom_action_index: None,
-                }),
-        );
-        entries.extend(
-            crate::history::with_history(|history| {
-                history
-                    .iter()
-                    .rev()
-                    .take(32)
-                    .map(|entry| resolver.resolve(&entry.action, &context))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-        );
-        let catalog = PersistedActionCatalog::new(entries);
+        }
+        let catalog = self.universal_action_catalog_snapshot().persisted_catalog();
         let registry = UniversalActionRegistry;
         RadialBindingResolver {
             catalog: &catalog,
             registry: &registry,
         }
         .resolve_frozen(&request.binding, &request.context, &request.history_query)
+    }
+}
+
+fn frozen_window_action_id(binding: &FrozenBinding) -> Option<&crate::universal_actions::ActionId> {
+    match binding {
+        FrozenBinding::Contextual { action_id, .. }
+        | FrozenBinding::Stable(crate::radial::model::ActionBinding::Contextual {
+            action_id,
+            ..
+        })
+        | FrozenBinding::Runtime {
+            target: crate::universal_actions::ActionTarget::Window { .. },
+            action_id,
+            ..
+        } => Some(action_id),
+        _ => None,
+    }
+}
+
+fn frozen_window_identity_is_current(
+    binding: &FrozenBinding,
+    window_catalog: &crate::window_catalog::WindowCatalog,
+) -> bool {
+    match binding {
+        FrozenBinding::Contextual { identity, .. } => window_catalog
+            .describe_current(identity.hwnd)
+            .is_some_and(|window| identity.matches(&window)),
+        FrozenBinding::Stable(crate::radial::model::ActionBinding::Contextual { .. }) => false,
+        FrozenBinding::Runtime {
+            target: crate::universal_actions::ActionTarget::Window { hwnd },
+            identity: Some(crate::radial::dynamic::RuntimeTargetIdentity::Window { target, .. }),
+            ..
+        } => usize::try_from(*hwnd).is_ok_and(|hwnd| {
+            hwnd == target.hwnd
+                && window_catalog
+                    .describe_current(hwnd)
+                    .is_some_and(|window| target.matches(&window))
+        }),
+        FrozenBinding::Runtime {
+            target: crate::universal_actions::ActionTarget::Window { .. },
+            identity: None,
+            ..
+        } => false,
+        FrozenBinding::Runtime {
+            identity: Some(crate::radial::dynamic::RuntimeTargetIdentity::Window { .. }),
+            ..
+        } => false,
+        _ => true,
     }
 }
 
@@ -896,24 +842,74 @@ fn prepare_dynamic_bindings(
 fn prepared_cell(
     binding: &crate::radial::model::ActionBinding,
     resolved: Result<PreparedBinding, BindingUnavailable>,
+    invocation: &InvocationContext,
     after_action: crate::radial::model::AfterActionPolicy,
     history_query: &str,
 ) -> PreparedCell {
+    let frozen = freeze_action_binding(binding, invocation);
+    let unavailable = resolved
+        .as_ref()
+        .err()
+        .map(|reason| format!("{reason:?}"))
+        .or_else(|| frozen.as_ref().err().map(|reason| format!("{reason:?}")));
+    let is_available = unavailable.is_none();
     PreparedCell {
-        binding: FrozenBinding::Stable(binding.clone()),
-        availability: resolved.as_ref().map_or_else(
-            |reason| FrozenAvailability::Unavailable {
-                reason: format!("{reason:?}"),
-            },
-            |_| FrozenAvailability::Available,
-        ),
-        requirement: resolved
-            .as_ref()
-            .map_or(InteractionRequirement::None, |prepared| {
-                prepared.requirement
-            }),
+        binding: frozen.unwrap_or(FrozenBinding::Informational),
+        availability: unavailable.map_or(FrozenAvailability::Available, |reason| {
+            FrozenAvailability::Unavailable { reason }
+        }),
+        requirement: if is_available {
+            resolved
+                .as_ref()
+                .map_or(InteractionRequirement::None, |prepared| {
+                    prepared.requirement
+                })
+        } else {
+            InteractionRequirement::None
+        },
         after_action,
         history_query: history_query.to_owned(),
+    }
+}
+
+fn freeze_action_binding(
+    binding: &crate::radial::model::ActionBinding,
+    invocation: &InvocationContext,
+) -> Result<FrozenBinding, BindingUnavailable> {
+    match binding {
+        crate::radial::model::ActionBinding::Persisted { .. } => {
+            Ok(FrozenBinding::Stable(binding.clone()))
+        }
+        crate::radial::model::ActionBinding::Contextual {
+            selector,
+            action_id,
+        } => {
+            let window = match selector {
+                crate::radial::model::TargetSelector::CapturedForeground => {
+                    invocation.foreground.as_ref()
+                }
+                crate::radial::model::TargetSelector::UnderPointer => {
+                    invocation.under_pointer.as_ref()
+                }
+                crate::radial::model::TargetSelector::LastExternal => {
+                    invocation.last_external.as_ref()
+                }
+            }
+            .ok_or_else(|| BindingUnavailable::ContextTargetMissing {
+                selector: selector.clone(),
+            })?;
+            Ok(FrozenBinding::Contextual {
+                selector: selector.clone(),
+                action_id: action_id.clone(),
+                identity: crate::window_catalog::WindowTargetIdentity {
+                    hwnd: window.hwnd,
+                    pid: window.pid,
+                    executable: window.process_name.clone(),
+                    process_path: window.process_path.clone(),
+                    class_name: window.class_name.clone(),
+                },
+            })
+        }
     }
 }
 
@@ -996,8 +992,53 @@ fn dynamic_candidate(entry: &crate::universal_actions::ResolvedActionTarget) -> 
                 action_id,
             )
         }),
+        runtime_identity: None,
         unavailable_reason: None,
         history_query: None,
+        kind: FrozenEntryKind::Action,
+    }
+}
+
+fn dynamic_candidate_with_window_identity(
+    entry: &crate::universal_actions::ResolvedActionTarget,
+    window_catalog: &crate::window_catalog::WindowCatalog,
+) -> DynamicCandidate {
+    let mut candidate = dynamic_candidate(entry);
+    if candidate.runtime_action.is_some()
+        && let crate::universal_actions::ActionTarget::Window { hwnd } = &entry.target
+    {
+        if let Ok(hwnd) = usize::try_from(*hwnd)
+            && let Some(window) = window_catalog.describe_current(hwnd)
+        {
+            candidate.runtime_identity =
+                Some(crate::radial::dynamic::RuntimeTargetIdentity::Window {
+                    target: crate::window_catalog::WindowTargetIdentity::from_descriptor(&window),
+                    catalog_generation: window_catalog.generation(),
+                });
+        } else {
+            candidate.unavailable_reason = Some(
+                "Window identity could not be captured; refresh the menu before using this item"
+                    .into(),
+            );
+        }
+    }
+    candidate
+}
+
+fn dashboard_status_candidate(
+    stable_id: String,
+    label: String,
+    reason: impl Into<String>,
+) -> DynamicCandidate {
+    DynamicCandidate {
+        stable_id,
+        label,
+        action: None,
+        runtime_action: None,
+        runtime_identity: None,
+        unavailable_reason: Some(reason.into()),
+        history_query: None,
+        kind: FrozenEntryKind::Manage,
     }
 }
 
@@ -1049,6 +1090,7 @@ mod tests {
                     args: None,
                 },
                 action_id: crate::universal_actions::action_ids::WINDOW_ACTIVATE,
+                identity: None,
             },
             availability: FrozenAvailability::Available,
             requirement: InteractionRequirement::ExternalInput,
@@ -1060,6 +1102,82 @@ mod tests {
             prepared.availability,
             FrozenAvailability::Unavailable { ref reason }
                 if reason.contains("ExternalInput") && reason.contains("KeepOpen")
+        ));
+    }
+
+    #[test]
+    fn ephemeral_window_favorite_requires_fresh_exact_identity() {
+        let entry = crate::universal_actions::ResolvedActionTarget {
+            target: crate::universal_actions::ActionTarget::Window { hwnd: 44 },
+            selected_action: crate::actions::Action {
+                label: "Favorite window".into(),
+                desc: "Fav".into(),
+                action: "window:switch:44".into(),
+                args: None,
+            },
+            custom_action_index: None,
+        };
+        let descriptor = crate::window_catalog::WindowDescriptor {
+            title: "Favorite window".into(),
+            hwnd: 44,
+            pid: 7,
+            executable: Some("editor.exe".into()),
+            process_path: Some("C:\\Apps\\editor.exe".into()),
+            class_name: Some("EditorWindow".into()),
+        };
+        let live = Arc::new(std::sync::Mutex::new(Some(descriptor.clone())));
+        let live_provider = Arc::clone(&live);
+        let catalog = crate::window_catalog::WindowCatalog::from_snapshot_with_descriptor(
+            vec![descriptor.clone()],
+            move |hwnd| {
+                live_provider
+                    .lock()
+                    .ok()
+                    .and_then(|window| window.clone())
+                    .filter(|window| window.hwnd == hwnd)
+            },
+        );
+        let candidate = dynamic_candidate_with_window_identity(&entry, &catalog);
+        let frame = DynamicSnapshots {
+            favorites: vec![candidate],
+            ..Default::default()
+        }
+        .freeze(&crate::radial::model::DynamicSource::Favorites, None);
+        let binding = frame.entries[0].binding.as_ref().unwrap();
+        assert!(matches!(
+            binding,
+            FrozenBinding::Runtime {
+                identity: Some(_),
+                ..
+            }
+        ));
+        assert!(frozen_window_identity_is_current(binding, &catalog));
+
+        // The published snapshot still contains PID 7, but dispatch must query
+        // the current single-HWND descriptor and reject reuse by PID 99.
+        *live.lock().unwrap() = Some(crate::window_catalog::WindowDescriptor {
+            pid: 99,
+            ..descriptor.clone()
+        });
+        assert!(!frozen_window_identity_is_current(binding, &catalog));
+        *live.lock().unwrap() = None;
+        assert!(!frozen_window_identity_is_current(binding, &catalog));
+
+        let missing = dynamic_candidate_with_window_identity(&entry, &catalog);
+        assert!(missing.runtime_identity.is_none());
+        assert!(missing.unavailable_reason.is_some());
+        let missing_frame = DynamicSnapshots {
+            favorites: vec![missing],
+            ..Default::default()
+        }
+        .freeze(&crate::radial::model::DynamicSource::Favorites, None);
+        assert!(matches!(
+            missing_frame.entries[0].availability,
+            FrozenAvailability::Unavailable { .. }
+        ));
+        assert!(!frozen_window_identity_is_current(
+            missing_frame.entries[0].binding.as_ref().unwrap(),
+            &catalog
         ));
     }
 
@@ -1081,6 +1199,87 @@ mod tests {
                 selector: TargetSelector::UnderPointer
             })
         ));
+    }
+
+    #[test]
+    fn contextual_cells_alternates_and_special_surfaces_freeze_exact_identity() {
+        let invocation = InvocationContext {
+            foreground: Some(crate::radial::context::WindowIdentity {
+                hwnd: 44,
+                pid: 7,
+                process_name: Some("editor.exe".into()),
+                process_path: Some("C:\\Apps\\editor.exe".into()),
+                class_name: Some("EditorWindow".into()),
+                title: "Editor".into(),
+            }),
+            ..InvocationContext::empty(1)
+        };
+        let binding = ActionBinding::Contextual {
+            selector: TargetSelector::CapturedForeground,
+            action_id: crate::universal_actions::action_ids::WINDOW_ACTIVATE,
+        };
+        let selected_action = crate::actions::Action {
+            label: "Editor".into(),
+            desc: "Windows".into(),
+            action: "window:switch:44".into(),
+            args: None,
+        };
+        let action_catalog = crate::universal_actions::PersistedActionCatalog::new(vec![
+            crate::universal_actions::ResolvedActionTarget {
+                target: crate::universal_actions::ActionTarget::Window { hwnd: 44 },
+                selected_action,
+                custom_action_index: None,
+            },
+        ]);
+        let registry = crate::universal_actions::UniversalActionRegistry;
+        let resolver = RadialBindingResolver {
+            catalog: &action_catalog,
+            registry: &registry,
+        };
+        let descriptor = crate::window_catalog::WindowDescriptor {
+            title: "Editor".into(),
+            hwnd: 44,
+            pid: 7,
+            executable: Some("editor.exe".into()),
+            process_path: Some("C:\\Apps\\editor.exe".into()),
+            class_name: Some("EditorWindow".into()),
+        };
+        let live = Arc::new(std::sync::Mutex::new(Some(descriptor.clone())));
+        let provider = Arc::clone(&live);
+        let window_catalog = crate::window_catalog::WindowCatalog::from_snapshot_with_descriptor(
+            vec![descriptor.clone()],
+            move |hwnd| {
+                provider
+                    .lock()
+                    .ok()
+                    .and_then(|window| window.clone())
+                    .filter(|window| window.hwnd == hwnd)
+            },
+        );
+        for surface in ["cell", "alternate", "center", "background"] {
+            let prepared = prepared_cell(
+                &binding,
+                resolver.resolve(&binding, &invocation, surface),
+                &invocation,
+                crate::radial::model::AfterActionPolicy::CloseTree,
+                surface,
+            );
+            assert!(matches!(
+                &prepared.binding,
+                FrozenBinding::Contextual { identity, .. }
+                    if identity.hwnd == 44 && identity.pid == 7
+            ));
+            assert!(frozen_window_identity_is_current(
+                &prepared.binding,
+                &window_catalog
+            ));
+        }
+        *live.lock().unwrap() = Some(crate::window_catalog::WindowDescriptor {
+            pid: 99,
+            ..descriptor
+        });
+        let frozen = freeze_action_binding(&binding, &invocation).unwrap();
+        assert!(!frozen_window_identity_is_current(&frozen, &window_catalog));
     }
 
     #[test]
@@ -1148,5 +1347,142 @@ mod tests {
             ),
         );
         assert_eq!(app.radial_preparations.len(), 1);
+    }
+
+    #[test]
+    fn production_prepare_uses_full_application_catalog_beyond_custom_prefix() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.actions = std::sync::Arc::new(vec![
+            crate::actions::Action {
+                label: "Custom".into(),
+                desc: "Custom".into(),
+                action: "custom:first".into(),
+                args: None,
+            },
+            crate::actions::Action {
+                label: "Installed app".into(),
+                desc: "Application".into(),
+                action: "C:\\Apps\\installed.exe".into(),
+                args: None,
+            },
+        ]);
+        app.custom_len = 1;
+        let document = std::sync::Arc::new(crate::radial::model::RadialDocument::starter());
+        let (applications_menu, applications) = document
+            .menus
+            .iter()
+            .find_map(|menu| {
+                menu.rings
+                    .iter()
+                    .flat_map(|ring| &ring.cells)
+                    .find_map(|cell| {
+                        matches!(
+                            cell.content,
+                            crate::radial::model::CellContent::Dynamic {
+                                source: crate::radial::model::DynamicSource::Applications
+                            }
+                        )
+                        .then(|| (menu.id.clone(), cell.id.clone()))
+                    })
+            })
+            .unwrap();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let (wake_tx, _wake_rx) = std::sync::mpsc::channel();
+        app.prepare_radial(crate::radial::bindings::RadialPrepareEnvelope {
+            request: crate::radial::bindings::RadialPrepareRequest {
+                generation: crate::radial::bindings::PreparationGeneration(1),
+                invocation_id: crate::radial::model::InvocationId(1),
+                requested_menu_id: applications_menu,
+                document,
+                context: InvocationContext::empty(1),
+                invocation_query: String::new(),
+                allow_context_rules: false,
+            },
+            reply: reply_tx,
+            wake: wake_tx,
+        });
+        let reply = reply_rx.recv().unwrap();
+        let frame = reply.dynamic.get(&applications).unwrap();
+        assert!(
+            frame
+                .entries
+                .iter()
+                .any(|entry| entry.label == "Installed app")
+        );
+    }
+
+    #[test]
+    fn production_prepare_materializes_favorites_and_complete_dashboard_status_families() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.dashboard_data_cache
+            .set_snapshot_for_test(crate::dashboard::DashboardDataSnapshot {
+                favorites: std::sync::Arc::new(vec![crate::plugins::fav::FavEntry {
+                    label: "Favorite window".into(),
+                    action: "window:switch:44".into(),
+                    args: None,
+                }]),
+                clipboard_history: std::sync::Arc::new(vec!["Clipboard sample".into()]),
+                system_status: Some(crate::dashboard::data_cache::SystemStatusSnapshot::default()),
+                recycle_bin: Some(crate::dashboard::data_cache::RecycleBinSnapshot {
+                    size_bytes: 10,
+                    items: 1,
+                }),
+                ..Default::default()
+            });
+        let document = std::sync::Arc::new(crate::radial::model::RadialDocument::starter());
+        for (source, expected) in [
+            (
+                crate::radial::model::DynamicSource::Favorites,
+                vec!["Favorite window"],
+            ),
+            (
+                crate::radial::model::DynamicSource::Dashboard,
+                vec![
+                    "Favorite window",
+                    "Clipboard sample",
+                    "System",
+                    "Recycle Bin",
+                ],
+            ),
+        ] {
+            let (menu_id, cell_id) = document
+                .menus
+                .iter()
+                .find_map(|menu| {
+                    menu.rings.iter().flat_map(|ring| &ring.cells).find_map(|cell| {
+                        matches!(&cell.content, CellContent::Dynamic { source: candidate } if candidate == &source)
+                            .then(|| (menu.id.clone(), cell.id.clone()))
+                    })
+                })
+                .unwrap();
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            let (wake_tx, _wake_rx) = std::sync::mpsc::channel();
+            app.prepare_radial(crate::radial::bindings::RadialPrepareEnvelope {
+                request: crate::radial::bindings::RadialPrepareRequest {
+                    generation: crate::radial::bindings::PreparationGeneration(1),
+                    invocation_id: crate::radial::model::InvocationId(77),
+                    requested_menu_id: menu_id,
+                    document: document.clone(),
+                    context: InvocationContext::empty(77),
+                    invocation_query: String::new(),
+                    allow_context_rules: false,
+                },
+                reply: reply_tx,
+                wake: wake_tx,
+            });
+            let frame = reply_rx.recv().unwrap().dynamic.remove(&cell_id).unwrap();
+            let labels = frame
+                .entries
+                .iter()
+                .map(|entry| entry.label.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                expected.iter().all(|needle| labels.contains(needle)),
+                "{source:?} lacked a truthful production row: {labels}"
+            );
+        }
     }
 }

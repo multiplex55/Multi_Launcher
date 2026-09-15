@@ -728,6 +728,23 @@ mod tests {
         assert!(!parsed.radial.shared_tap_hold);
         assert_eq!(parsed.radial.hold_threshold_ms, 0);
         assert!(!parsed.radial.global_item_inputs);
+        assert_eq!(parsed.radial.default_menu_id, None);
+        assert_eq!(
+            parsed.radial.default_interaction,
+            crate::radial::model::InteractionMode::StickyClick
+        );
+        assert_eq!(
+            parsed.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        assert_eq!(
+            parsed.radial.safety_policy,
+            crate::radial::model::RadialSafetyPolicy::InheritLauncher
+        );
+        assert_eq!(
+            parsed.radial.default_item_input_scope,
+            crate::radial::model::TriggerScope::MenuLocal
+        );
         let restored: Settings =
             serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
         assert!(!restored.radial.enabled);

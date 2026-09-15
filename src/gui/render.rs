@@ -737,6 +737,9 @@ impl eframe::App for LauncherApp {
                         if ui.button("Edit Plugins").clicked() {
                             self.show_plugins = !self.show_plugins;
                         }
+                        if ui.button("Edit Radial Menus").clicked() {
+                            self.focus_panel(crate::gui::Panel::RadialEditor);
+                        }
                     });
                     if ui.button("Close Application").clicked() {
                         // eframe's `on_exit` is the single shutdown boundary. It
@@ -1203,6 +1206,11 @@ impl eframe::App for LauncherApp {
             let mut ed = std::mem::take(&mut self.plugin_editor);
             ed.ui(ctx, self);
             self.plugin_editor = ed;
+        }
+        if self.radial_editor.open {
+            let mut editor = std::mem::take(&mut self.radial_editor);
+            editor.ui(ctx, self);
+            self.radial_editor = editor;
         }
         if self.show_dashboard_editor && !self.dashboard_editor.open {
             let registry = self.dashboard.registry().clone();

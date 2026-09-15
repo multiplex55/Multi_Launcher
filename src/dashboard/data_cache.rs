@@ -240,6 +240,11 @@ impl DashboardDataCache {
             completed = self.shared.completion.wait(completed).unwrap();
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_snapshot_for_test(&self, snapshot: DashboardDataSnapshot) {
+        *self.shared.snapshot.lock().unwrap() = Arc::new(snapshot);
+    }
 }
 
 impl Default for DashboardDataCache {

@@ -67,6 +67,9 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::Screenshot(_)
         | Command::MouseGesture(_) => InteractionRequirement::ExclusiveCapture,
         Command::Launcher(_)
+        | Command::Radial(
+            crate::commands::RadialCommand::Edit | crate::commands::RadialCommand::Skins,
+        )
         | Command::Query(_)
         | Command::Dialog(_)
         | Command::FileSearch(_)

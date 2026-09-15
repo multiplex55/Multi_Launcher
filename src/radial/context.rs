@@ -7,6 +7,8 @@ pub struct WindowIdentity {
     pub hwnd: usize,
     pub pid: u32,
     pub process_name: Option<String>,
+    pub process_path: Option<String>,
+    pub class_name: Option<String>,
     pub title: String,
 }
 
@@ -170,6 +172,8 @@ pub fn capture_current(token: u64, last_external: Option<WindowIdentity>) -> Inv
                 hwnd: descriptor.hwnd,
                 pid: descriptor.pid,
                 process_name: descriptor.executable,
+                process_path: descriptor.process_path,
+                class_name: descriptor.class_name,
                 title: descriptor.title,
             })
         }
@@ -217,6 +221,8 @@ mod tests {
                 hwnd: 11,
                 pid: 22,
                 process_name: Some(process.into()),
+                process_path: None,
+                class_name: None,
                 title: title.into(),
             }),
             under_pointer: None,
@@ -260,6 +266,8 @@ mod tests {
             hwnd: 3,
             pid: 4,
             process_name: Some("editor.exe".into()),
+            process_path: None,
+            class_name: None,
             title: "Draft".into(),
         };
         let mut value = context("ignored.exe", "Ignored", "monitor:1");

@@ -7,8 +7,9 @@ use crate::commands::{
 };
 use crate::history::{self, HISTORY_PINS_FILE, HistoryPin};
 use crate::universal_actions::{
-    ActionSafety, ActionSurface, NoteExternalEditor, RootLauncherPolicy, UniversalAction,
-    UniversalActionInvocationContext, UniversalActionOperation, UniversalUiIntent, action_ids,
+    ActionResolutionContext, ActionSafety, ActionSurface, NoteExternalEditor, RootLauncherPolicy,
+    UniversalAction, UniversalActionInvocationContext, UniversalActionOperation,
+    UniversalActionRegistry, UniversalUiIntent, action_ids,
 };
 
 use super::{
@@ -51,7 +52,12 @@ impl LauncherApp {
         }
 
         let before = self.launcher_interaction_snapshot();
-        if self.require_confirm_destructive && action.safety == ActionSafety::Destructive {
+        let radial_requires_confirmation = context.surface == ActionSurface::RadialMenu
+            && self.radial_feature_settings.safety_policy
+                == crate::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
+        if (self.require_confirm_destructive || radial_requires_confirmation)
+            && action.safety == ActionSafety::Destructive
+        {
             let Some(kind) = DestructiveAction::from_universal_action(&action) else {
                 self.report_error_message(
                     "universal_action",
@@ -63,6 +69,7 @@ impl LauncherApp {
                 action,
                 context: context.clone(),
                 radial_request,
+                authoring_revalidation: None,
             });
             self.confirm_modal
                 .open_for_source(kind, Some(context.source));
@@ -102,6 +109,73 @@ impl LauncherApp {
                         self.report_error_message(
                             "radial_action",
                             format!("Radial action changed before confirmation: {reason:?}"),
+                        );
+                        return true;
+                    }
+                }
+            } else if let Some(revalidation) = pending.authoring_revalidation.as_ref() {
+                if let Some(captured) = revalidation.captured_identity.as_ref() {
+                    let window_catalog = &self.plugins.internal_services().window_catalog;
+                    if !window_identity_is_current(captured, window_catalog) {
+                        self.report_error_message(
+                            "radial_authoring.test_action",
+                            format!(
+                                "Contextual window identity changed after catalog generation {}",
+                                revalidation.window_catalog_generation
+                            ),
+                        );
+                        return true;
+                    }
+                }
+                let catalog = self.universal_action_catalog_snapshot().persisted_catalog();
+                let registry = UniversalActionRegistry;
+                match (crate::radial::bindings::RadialBindingResolver {
+                    catalog: &catalog,
+                    registry: &registry,
+                })
+                .resolve(
+                    &revalidation.binding,
+                    &revalidation.invocation,
+                    &pending.context.history_query,
+                ) {
+                    Ok(prepared)
+                        if prepared.action == pending.action
+                            && catalog
+                                .entries()
+                                .iter()
+                                .any(|entry| entry.target == prepared.action.target) =>
+                    {
+                        prepared.action
+                    }
+                    Ok(_) => {
+                        self.report_error_message(
+                            "radial_authoring.test_action",
+                            "Contextual action target changed before confirmation",
+                        );
+                        return true;
+                    }
+                    Err(reason) => {
+                        self.report_error_message(
+                            "radial_authoring.test_action",
+                            format!(
+                                "Contextual action disappeared before confirmation: {reason:?}"
+                            ),
+                        );
+                        return true;
+                    }
+                }
+            } else if let Some(request) = pending.context.stable_request.as_ref() {
+                let catalog = self.universal_action_catalog_snapshot().persisted_catalog();
+                let resolution_context = ActionResolutionContext::new(
+                    pending.context.surface,
+                    &pending.context.history_query,
+                );
+                match catalog.resolve(request, &UniversalActionRegistry, &resolution_context) {
+                    Ok(resolved) => resolved.action,
+                    Err(reason) => {
+                        self.report_error_message(
+                            "radial_authoring.test_action",
+                            format!("Action changed or disappeared before confirmation: {reason}"),
                         );
                         return true;
                     }
@@ -351,6 +425,15 @@ impl LauncherApp {
             }
         }
     }
+}
+
+fn window_identity_is_current(
+    captured: &crate::window_catalog::WindowTargetIdentity,
+    window_catalog: &crate::window_catalog::WindowCatalog,
+) -> bool {
+    window_catalog
+        .describe_current(captured.hwnd)
+        .is_some_and(|window| captured.matches(&window))
 }
 
 #[derive(Clone)]
@@ -817,6 +900,48 @@ mod tests {
     }
 
     #[test]
+    fn radial_always_confirm_policy_is_scoped_to_radial_surface() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.require_confirm_destructive = false;
+        app.radial_feature_settings.safety_policy =
+            crate::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
+        let destructive = || {
+            universal(
+                action_ids::WINDOW_CLOSE,
+                ActionTarget::Window { hwnd: 0 },
+                ActionSafety::Destructive,
+                UniversalActionOperation::Command {
+                    command: Command::System(SystemCommand::WindowClose(0)),
+                    original_action: Action {
+                        label: "Window".into(),
+                        desc: "Window".into(),
+                        action: "window:close:0".into(),
+                        args: None,
+                    },
+                },
+            )
+        };
+        assert_eq!(
+            app.execute_universal_action(
+                destructive(),
+                ActionSurface::RadialMenu,
+                ActivationSource::Click,
+            ),
+            UniversalActionExecution::ConfirmationRequired
+        );
+        app.resolve_pending_confirmation(false);
+        assert_eq!(
+            app.execute_universal_action(
+                destructive(),
+                ActionSurface::ContextMenu,
+                ActivationSource::Click,
+            ),
+            UniversalActionExecution::Executed
+        );
+    }
+
+    #[test]
     fn stale_stopwatch_copy_reports_benign_no_op() {
         let ctx = eframe::egui::Context::default();
         let mut app = crate::gui::actions::tests::new_app(&ctx);
@@ -843,6 +968,45 @@ mod tests {
                 "Stopwatch {stale} is no longer available; nothing was copied"
             ))
         );
+    }
+
+    #[test]
+    fn contextual_window_identity_uses_fresh_single_hwnd_descriptor() {
+        let captured = crate::window_catalog::WindowTargetIdentity {
+            hwnd: 44,
+            pid: 7,
+            executable: Some("editor.exe".into()),
+            process_path: Some("C:\\Apps\\editor.exe".into()),
+            class_name: Some("EditorWindow".into()),
+        };
+        let exact = crate::window_catalog::WindowDescriptor {
+            title: "Renamed draft".into(),
+            hwnd: 44,
+            pid: 7,
+            executable: Some("editor.exe".into()),
+            process_path: Some("C:\\Apps\\editor.exe".into()),
+            class_name: Some("EditorWindow".into()),
+        };
+        let live = std::sync::Arc::new(std::sync::Mutex::new(Some(exact.clone())));
+        let live_provider = std::sync::Arc::clone(&live);
+        let catalog = crate::window_catalog::WindowCatalog::from_snapshot_with_descriptor(
+            vec![exact.clone()],
+            move |hwnd| {
+                live_provider
+                    .lock()
+                    .ok()
+                    .and_then(|window| window.clone())
+                    .filter(|window| window.hwnd == hwnd)
+            },
+        );
+        assert!(window_identity_is_current(&captured, &catalog));
+
+        // The cached catalog remains unchanged, while the live descriptor proves
+        // this HWND now belongs to a different process.
+        *live.lock().unwrap() = Some(crate::window_catalog::WindowDescriptor { pid: 99, ..exact });
+        assert!(!window_identity_is_current(&captured, &catalog));
+        *live.lock().unwrap() = None;
+        assert!(!window_identity_is_current(&captured, &catalog));
     }
 
     #[test]

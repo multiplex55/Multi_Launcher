@@ -94,10 +94,19 @@ pub(crate) struct PendingConfirmCommand {
 }
 
 #[derive(Clone)]
+pub(crate) struct AuthoringActionRevalidation {
+    pub(crate) binding: crate::radial::model::ActionBinding,
+    pub(crate) invocation: crate::radial::context::InvocationContext,
+    pub(crate) captured_identity: Option<crate::window_catalog::WindowTargetIdentity>,
+    pub(crate) window_catalog_generation: u64,
+}
+
+#[derive(Clone)]
 pub(crate) struct PendingUniversalActionInvocation {
     pub(crate) action: crate::universal_actions::UniversalAction,
     pub(crate) context: crate::universal_actions::UniversalActionInvocationContext,
     pub(crate) radial_request: Option<crate::radial::handoff::RadialDispatchRequest>,
+    pub(crate) authoring_revalidation: Option<AuthoringActionRevalidation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

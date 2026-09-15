@@ -6,9 +6,9 @@ use crate::commands::{
     CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
     FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
     LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenDrawCommandHost, ScreenshotCommandHost,
-    ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy,
-    TodoCommandHost, VisibilityPolicy,
+    PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
+    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup,
+    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
@@ -16,6 +16,30 @@ use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
 impl LauncherCommandHost for LauncherApp {
     fn launcher_is_visible(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst)
+    }
+}
+
+impl RadialCommandHost for LauncherApp {
+    fn radial_is_enabled(&self) -> bool {
+        super::radial_control_client().is_some_and(|client| client.is_enabled())
+    }
+
+    fn request_radial_control(
+        &mut self,
+        request: crate::radial::control::RadialControlRequest,
+    ) -> Result<(), String> {
+        super::radial_control_client()
+            .ok_or_else(|| "radial runtime service is unavailable".to_owned())?
+            .send(request)
+            .map_err(|error| error.to_string())
+    }
+
+    fn open_radial_editor(&mut self, skins: bool) {
+        self.focus_panel(super::Panel::RadialEditor);
+        if skins {
+            self.radial_editor.open_skins();
+        }
+        self.panel_states.radial_editor = true;
     }
 }
 
@@ -691,7 +715,10 @@ impl HeadlessCommandHost for LauncherApp {
 fn command_accepts_query_override(command: &Command) -> bool {
     !matches!(
         command,
-        Command::ClipboardModify(_) | Command::FileSearch(_) | Command::Diff(_)
+        Command::Radial(_)
+            | Command::ClipboardModify(_)
+            | Command::FileSearch(_)
+            | Command::Diff(_)
     )
 }
 
@@ -874,6 +901,67 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
+    }
+
+    fn action(raw: &str) -> crate::actions::Action {
+        crate::actions::Action {
+            label: raw.into(),
+            desc: "Radial menu".into(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn radial_show_preserves_launcher_root_and_enqueues_once_with_one_history_record() {
+        let (client, endpoint) =
+            crate::radial::control::radial_control_service_with_wake(true, None);
+        super::super::install_radial_control_client(client);
+        let mut app = test_app();
+        app.query = "keep query".into();
+        app.results = vec![action("help:show")];
+        app.selected = Some(0);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.focus_query = false;
+        app.activate_action(
+            action("radial show Work Menu"),
+            None,
+            crate::commands::ActivationSource::Enter,
+        );
+        assert_eq!(app.query, "keep query");
+        assert_eq!(app.results[0].action, "help:show");
+        assert_eq!(app.selected, Some(0));
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.focus_query);
+        assert_eq!(app.test_recorded_history_queries, ["keep query"]);
+        assert_eq!(
+            endpoint.request_rx.try_recv().unwrap(),
+            crate::radial::control::RadialControlRequest::Show(
+                crate::radial::control::RadialMenuSelector::IdOrName("Work Menu".into())
+            )
+        );
+        assert!(endpoint.request_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn radial_editor_commands_open_the_stable_panel_and_skins_section() {
+        let mut app = test_app();
+        app.activate_action(
+            action("radial edit"),
+            None,
+            crate::commands::ActivationSource::Click,
+        );
+        assert!(app.radial_editor.open);
+        assert!(!app.radial_editor.is_showing_resources());
+        assert!(!app.radial_editor.is_dirty());
+        app.activate_action(
+            action("radial skins"),
+            None,
+            crate::commands::ActivationSource::Click,
+        );
+        assert!(app.radial_editor.open);
+        assert!(app.radial_editor.is_showing_resources());
+        assert!(!app.radial_editor.is_dirty());
     }
 
     #[test]
@@ -1129,6 +1217,13 @@ mod tests {
             crate::commands::ClipboardModifyCommand::Open {
                 section: crate::clipboard_modify::actions::ClipboardModifySectionPayload::Modify,
             },
+        )));
+    }
+
+    #[test]
+    fn radial_commands_reject_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::Radial(
+            crate::commands::RadialCommand::ShowDefault,
         )));
     }
 

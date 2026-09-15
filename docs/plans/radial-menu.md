@@ -1,6 +1,6 @@
 # Native radial menu implementation ledger
 
-Status: approved, M0-M4 complete
+Status: approved; M0-M5 complete
 
 Canonical requirements: `docs/multi_launcher_radial_codex_plan.md`
 Historical navigation notes: `docs/multi_launcher_radial_source_notes.md`
@@ -165,12 +165,576 @@ never by executing or initializing imported code.
 | M2 native input and host | complete | recovery ownership provenance remediation passed the source-identical focused gate; interactive native probe remains explicitly unverified |
 | M3 actions/context/submenus/handoffs | complete | decision-review remediation passed the combined focused M3 Nextest gate; native interactive evidence remains unverified |
 | M4 skins/assets/import/export/recovery | complete | closure remediation and source-identical combined focused gate passed; native interactive evidence remains explicitly unverified |
-| M5 complete editors/settings/commands/starters | pending | focused editor/command/serialization batch |
+| M5 complete editors/settings/commands/starters | complete | contextual bindings carry captured identity across every surface; exact replacement gate and warning-free check passed |
 | M6 hardening/performance/full verification/review | pending | format/check/diff, full Nextest, native evidence, serialized baseline/candidate measurements, independent review |
 
 Each milestone is implemented and committed sequentially by one writer. Tests are
 written with each coherent batch and run only at gates. One Cargo/build/test job may
 use this checkout/target at a time.
+
+### M5 substep 1 — authoring coordinator foundation
+
+`radial::authoring` owns the pure revisioned draft/session model and typed GUI-to-main
+protocol. A session retains an `Arc<RadialDocument>` baseline with revision and exact
+disk SHA-256, a generation-tagged draft and clean checkpoint, stable-ID selection,
+pending managed-asset additions/deletions, one pending request, explicit external
+conflict state, and count/byte-bounded undo/redo. Field, slider, and drag edits coalesce
+by stable entity and field until end; complete ring resize, duplication, and
+import-shaped document replacements are one atomic undo entry. Apply resets the clean
+baseline while remaining open, Save closes, and Cancel-after-Apply sends a checked
+inverse commit for the last successful Apply. Dirty close is an explicit prompt
+decision. Clean external publication refreshes automatically; dirty state retains all
+three documents for compare/reload/discard/rebase, with conservative three-way merge
+and no force-overwrite path. Request ID/generation checks reject stale replies.
+
+The GUI receives only an `AuthoringClient`; `main` owns the endpoint, validates live
+preview without persisting or rebinding hotkeys, and is the sole caller of the store
+commit. Successful commits close/reconfigure the controller, invalidate resources and
+GUI leases, refresh macro/global trigger reservations, and begin the existing
+generation-safe invocation route handoff before replying with the published revision.
+`RadialStore::commit_authoring` checks revision and exact disk bytes, validates the
+candidate plus supplied asset hashes/media, guards live references and shared managed
+paths, stages deletions, publishes assets plus JSON transactionally, rolls back only
+transaction-created/staged files on failure, and returns the inverse asset mutation
+needed by Cancel-after-Apply. Malformed/newer or semantically changed disk bytes cannot
+be paired with the retained runtime snapshot for editing.
+
+Focused source tests cover stable-ID rename selection, atomic duplication/ring resize,
+coalescing, undo count/byte bounds, asset undo/redo, clean-versus-dirty external
+publication, non-overlapping/conflicting rebase, stale replies, Apply/Save/Cancel and
+dirty-close semantics, typed service routing, revision/SHA no-partial-file rejection,
+asset+document publish/inverse rollback, malformed snapshot rejection, and asset
+reference guards. Per the assigned substep, no Cargo/Nextest gate was run. Direct
+`rustfmt --edition 2024` on the touched Rust files and `git diff --check` passed. M5
+remains `in_progress`; editor rendering, settings, commands, and starter expansion are
+later M5 substeps.
+
+### M5 substep 2 — Universal Action authoring catalog and Test Action boundary
+
+`gui::universal_action_catalog` now owns one immutable, already-loaded target snapshot
+shared by radial preparation, dispatch-time revalidation, and editor action discovery.
+It combines launcher and command catalogs with current dashboard Notes, Snippets,
+Favorites and clipboard entries, MkMacro definitions, live windows, recent history,
+and Crop's read-only provider results. Screen Draw and dashboard commands enter through
+the existing command-provider inventory. All operations continue to resolve through
+`UniversalActionRegistry`; the catalog introduces no execution implementation.
+
+Picker rows expose the exact target command and semantic action ID, effective radial
+presentation and availability reason, safety, interaction/handoff requirement, and
+after-action compatibility. Assignment returns only a durable
+`PersistedUniversalActionRef` or typed contextual window selector. Runtime window
+handles, clipboard/list indexes, browser IDs, and other ephemeral targets remain
+visible as explicitly nonpersistable rows. Contextual selectors remain assignable even
+when their current preview target is unavailable and resolve against a fresh invocation
+context at use time.
+
+Preview catalog construction is side-effect free. The separate Test Action facade
+re-resolves the selected binding and invokes the existing Universal Action executor
+with `ActionSurface::RadialMenu`, normal confirmation/safety/history behavior, no
+radial dispatch lease, and no session-close path. Source tests cover stable/contextual
+serialization, ephemeral rejection, HWND churn, provider presentation/policy parity,
+non-executing preview browsing, explicit executor routing, destructive confirmation
+exactly once with one history record, and cancellation with no execution/history.
+Per the assigned substep, no Cargo/Nextest gate was run.
+
+### M5 substep 3 — menu editor and embedded preview
+
+The launcher now registers a normal `RadialEditor` panel with the existing focus,
+pinning, stack, close, and forced-close lifecycle. Its three coordinated areas are a
+stable-ID menu/ring/cell tree, an embedded compositor-backed preview, and a selected
+entity inspector. Widget identity is derived only from entity kind, persisted entity
+ID, and field; labels and list indexes never participate. Drag/drop records an ID-only
+command during rendering and applies it afterward. The inspector exposes menu/ring/
+cell CRUD, spacers, duplication, bounded undo/redo, guarded deletion, explicit ring
+shrink resolution, and the shared Universal Action authoring picker.
+
+Pure graph changes live in `radial::authoring::menu`. Submenu duplication distinguishes
+linking existing descendants from cloning the complete closure with deterministic fresh
+IDs and rewritten internal references, rejects cyclic graphs, and reports reference
+impact before deletion. Ring shrink first returns a `ResizePlan` listing every removed
+populated cell; it cannot apply until the caller chooses relocation, an overflow ring,
+or explicit destructive discard. Each complete operation remains one atomic entry in
+the substep-1 bounded history.
+
+The preview uses the production layout, scene builder, M4 compositor, and navigation
+`SessionReducer` with synthetic preview state. Submenu and Back navigation therefore
+follow runtime transitions. Any `Dispatch` intent is intercepted inside the preview;
+it has no Universal Action executor, history, confirmation, audio, or native-window
+lease. Apply, Save, Cancel-after-Apply, dirty close, and external conflict choices route
+through the typed authoring service. Source tests cover clone/link/cycle behavior,
+shrink without implicit loss, reference guards, undo, selection/widget identity across
+rename/reorder, and preview navigation/back/non-dispatch. Per the assigned substep, no
+Cargo/Nextest gate was run; direct Rust formatting/check and diff checks were used.
+
+### M5 substep 4 — skin, asset, import/package, and audio authoring
+
+The shared editor now exposes every full M4 style override and every legal restricted
+ring/cell override through the serialized typed schema, with explicit Inherit, Set,
+Clear, and typed-value controls. Effective values retain visible `StyleSource`
+provenance from the production skin compiler. Controls cover media, geometry/scaling
+and alignment, opacity, text/system-font and RGBA color data, rim/background/center/
+glow/tooltip, rendering quality, sound, window behavior, skin CRUD, per-menu selected
+skin, and user-default scope. No font or reference asset is copied or bundled.
+
+Managed/external/search-path/icon resource choices retain their M4 portability
+semantics and diagnostics. Selected image/WAV data passes the same bounded M4 decoder;
+managed bytes are staged in the authoring session while external resources remain
+explicitly nonportable. Asset and skin deletion first queries the production reference
+walker and displays every blocking path. Sound audition is an explicit button routed
+through a uniquely scoped `RadialAudioSession` and the bounded audio mailbox; ordinary
+editor rendering, hover, and all preview presets have no audio path.
+
+Package and legacy controls construct immutable M4 `ImportPlan`/`ImportPreview`
+reviews before changing the draft. The review displays deterministic mappings,
+warnings, and destination. Acceptance rechecks revision, disk identity, draft
+generation, and conflict state, then merges the graph and managed bytes through one
+bounded undo entry. Malformed, hostile, over-budget, and unsupported packages remain
+rejected by the M4 decoder/planner. Export is a generation-correlated request to the
+main-owned `RadialStore`; it resolves persisted managed bytes below the private store
+root, rejects missing/tampered/link content, and returns a dependency-complete M4
+package for an atomic write to the explicitly selected destination. The GUI neither
+owns the store nor assembles packages from partial draft bytes. Create New remains the
+default import action. Replace requires a separate destructive confirmation and
+user-selected backup destination; main atomically creates and verifies the exact disk
+backup before entering the revision/SHA-guarded transactional replacement path.
+Stale/conflicting replies cannot mutate editor state, and replacement success reports
+the verified backup path. Representative preview presets cover current/one-ring/multi-ring/submenu/long
+labels/high-DPI; zoom and preset are UI-only state and never alter the draft.
+
+Focused source tests cover all 71 full-scope fields across Inherit/Set/Clear plus
+round-trip and provenance, zoom/preset non-dirty behavior, skin/asset reference guards,
+portable/nonportable resource diagnostics, side-effect-free import preview, atomic
+accept/undo and stale-draft conflict rejection, malformed/unsupported package
+rejection, exactly-once explicit audition, persisted-asset export round-trip with
+missing/tamper diagnostics, GUI ownership boundaries, confirmation/backup enforcement,
+replacement success/rollback, and stale replacement/export replies. Per the assigned
+substep, no Cargo/Nextest gate was run.
+
+### M5 substep 5 — cancellable native desktop preview lease
+
+The editor can explicitly start, update, or stop a native desktop preview through a
+session/request/generation-correlated authoring lease. `main` alone owns the dedicated
+preview coordinator and lazy native host. It validates the draft against the current
+store revision/disk identity, uses the production desktop geometry, layout, shared
+preview frame builder, vector scene, compositor input, native host, and `SessionReducer`,
+and never installs a global or item trigger route. The coordinator has no Universal
+Action executor, history sink, audio session, or reservation owner; click/key navigation
+may select, enter submenus, page, or go Back, while every `Dispatch` intent is counted
+and discarded.
+
+Only one native surface is active, with per-editor monotonic generation/request
+tombstones preventing stale starts or replies from resurrecting it. A newer draft
+generation replaces the lease; close, Apply, Save, external publication/conflict, and
+package replacement stop it fail-closed. A stop request supersedes an in-flight start,
+so closing the editor cannot strand a late native surface. Context is synthetic unless
+the user explicitly enables sampling. Sampled foreground/pointer identities exclude
+the launcher/editor/preview process and explicit preview HWNDs, while preserving the
+last external foreground fallback. The GUI reports pending/active/stopped state,
+sampled context, and correlated errors.
+
+Focused source tests cover exclusive/stale leases, stop superseding an in-flight start,
+generation/save/conflict cancellation, dispatch interception, the absence of audio,
+history, executor, and hotkey ownership, HWND/context sanitization, and identical native
+and embedded `PreviewFrameInput` construction. M5 remains `in_progress`; settings,
+commands, and starter expansion are later substeps. Per assignment, no Cargo/Nextest
+gate was run.
+
+### M5 substep 6 — typed radial commands and launcher integration
+
+The command domain now owns `RadialCommand` and parses/displays the stable `radial`,
+`radial show <id-or-name>`, `radial close`, `radial edit`, and `radial skins` wire
+forms. The command bus uses a dedicated host facade: Show and Close enqueue exactly
+one typed request to the main-owned radial control endpoint, while Edit and Skins
+focus the existing stable editor panel (with Skins selecting its shared resource
+area). Outcomes keep launcher query, results, selection, visibility, and focus intact
+and record the user activation once; opening an editor remains the one explicit panel
+transition. Disabled runtime presentation fails before enqueue, and Close remains
+idempotent.
+
+`main` resolves an exact menu ID before attempting a unique case-insensitive name,
+reports missing and ambiguous matches with actionable IDs, and routes accepted
+requests through the existing controller `OpenRadial`/`CloseRadial` intent and
+preparation path. No simulated key input or parallel execution path was added. A
+registered Radial plugin supplies launcher search, command/help discovery, and dynamic
+Show actions. The Universal Action authoring catalog also includes stable Generic
+targets for the four static radial controls, so radial bindings use the normal
+Universal Action resolver/executor.
+
+Focused source tests cover parse/display/serde round trips, malformed input,
+ID-before-name resolution, missing/ambiguous diagnostics, disabled Show and idempotent
+Close, exactly-once control enqueue, editor/skins panel routing, launcher-root
+preservation with one history record, and plugin search/help inventory. M5 remains
+`in_progress`; settings and starter expansion are later substeps. Per assignment, no
+Cargo/Nextest gate was run.
+
+### M5 substep 7 — radial settings and reconfiguration
+
+`RadialFeatureSettings` now preserves legacy behavior while adding typed defaults for
+the selected menu, new-menu interaction and submenu presentation, destructive-action
+safety, and new item-input scope. The settings editor maps every radial field
+explicitly in both directions. Its Radial menus section explains tap-on-release versus
+hold-threshold crossing, shows the current trigger and conflicts, validates threshold,
+default-menu existence, and process-wide input co-fire, and opens the existing menu or
+skin editor without changing the published document or dirtying its draft.
+
+The main-owned immutable document view supplies menu choices and diagnostics without
+giving the GUI store ownership. Settings Save still uses the established atomic
+settings update and hotkey restart. Main validates startup and reload settings,
+disables invalid radial runtime configuration fail-closed, advances one coherent
+generation, and uses one route plan for service handoff, legacy-listener restoration,
+and service stop/start decisions. The configured default menu feeds both shared
+tap/hold invocation and the typed `radial` command. New menus consume the configured
+interaction/submenu defaults; radial-only forced destructive confirmation remains
+scoped to `ActionSurface::RadialMenu`.
+
+Focused source tests cover legacy deserialization, all-field settings/editor
+round-trips, validation language and conflicts/co-fire, default-menu invocation,
+enable/disable route plans, new-menu defaults, scoped safety confirmation, and clean
+editor opening. M5 remains `in_progress`; starter expansion is the remaining substep.
+Per assignment, no Cargo/Nextest gate was run.
+
+### M5 substep 8 — starter content and capability-aware empty states
+
+`RadialDocument::starter` now provides an editable root and child menus for Favorites,
+Apps, Windows, Macros, Notes, Snippets plus Clipboard, Screen Tools, and Dashboard.
+Every child retains explicit Back and Close controls even when its collection has no
+items. User collections remain typed dynamic sources; Applications and Dashboard join
+the existing invocation-frozen snapshot boundary and never serialize process handles,
+clipboard indexes, result indexes, or live provider state. Screen Draw, screenshot,
+and Crop seeds are exact stable Universal Action references and use `CloseTree` before
+their established capture/handoff executor runs. Text and collection selections use
+the same safe close policy.
+
+Frozen dynamic entries distinguish action, manage, empty, loading, and unavailable
+presentation. Empty and unavailable sources remain visible and non-dispatchable.
+Only manage commands proven by the current provider catalog are appended (Favorites,
+MkMacro, Notes, Snippets, Clipboard, and Dashboard Settings); disabled Dashboard state
+explains how to enable it. All candidates are captured once with the preparation
+generation, so later provider or foreground changes cannot alter an open invocation.
+
+Authoring Save/Apply and Create New/Replace package publication now reject a candidate
+that would remove the settings-selected default menu, including while radial runtime
+is disabled. The check occurs before store mutation or replacement backup application.
+Successful publication reconfigures through the shared `RadialRoutePlan`; a handoff
+start failure disables the radial endpoint/controller, stops the service, and restores
+the legacy listener fail-closed. Source tests cover starter graph IDs/references,
+Back/Close and capture bindings, typed frozen states/manage entries, per-invocation
+freezing, and the settings-selected publication invariant.
+
+M5 implementation is complete but remains `in_progress` until the combined focused
+gate and independent review succeed. Per assignment, no Cargo/Nextest command was run
+during this substep. Direct `rustfmt --edition 2024` on the touched Rust modules and
+`git diff --check` passed. The workspace-wide rust-analyzer diagnostic scan completed
+nonzero because the cumulative tree still reports broad type-inference diagnostics;
+two concrete M5 annotations in editor columns and submenu clone mapping were corrected,
+while the focused Cargo gate remains the authoritative compile/test check.
+
+### M5 focused gate and root-correction record
+
+The required gate was run from `G:\Repos\rust\Multi_Launcher` with the default
+Nextest profile and the exact command
+`cargo nextest run -E 'test(/radial/) | test(/settings_editor/) | test(/command/) | test(/universal_action/) | test(/plugin/)'`.
+Only one Cargo tree was active at a time. Each failed tree fully exited before its
+root correction and replacement. The gate attempts were:
+
+| UUID / requested start | Result | Root correction |
+|---|---|---|
+| `4bdedf7e-72de-4f64-9c8e-534dc6dd3fe0`, `2026-09-14T20:39:56.4784761-04:00` | exit `1` after about `1m 06s`; PTY retained no run ID or test count | Repeated non-interactively to obtain an authoritative failure. |
+| `338d6b0e-75ec-4d90-81b9-1f67b26e1d68`, `2026-09-14T20:41:34.4689615-04:00` | Nextest `e17a2f92-3c9e-4978-bde2-bca85c55d59c`; compile `0.95s`; 537 run, 536 passed, 1 failed, 366 cancelled, 3,438 skipped | Corrected the control test fixture so a shared display name no longer lowercases to an exact menu ID. |
+| `0d54138d-4a92-4de3-9917-aac69c27e04a`, `2026-09-14T20:42:42.2952481-04:00` | Nextest `b76eafb1-248c-48cb-ba60-0676a2766113`; compile `20m 22s`; 583 run, 578 passed, 5 failed, 3,438 skipped | Added a private, single-menu legacy import template instead of treating the expanded nine-menu starter graph as the legacy compatibility candidate. |
+| `2fff9642-6b3d-4abc-b50b-218ea60b0757`, `2026-09-14T21:06:42.2491958-04:00` | Nextest `1ecf3fa7-3f63-49ff-b506-e0b4a47d993a`; compile `17m 54s`; 650 run, 647 passed, 3 failed, 3,438 skipped | Isolated package closure fixtures from the expanded starter and updated the starter render expectation from `Recent` to `Apps`. |
+| `2b7d4e3c-0a90-473b-9793-19cf94e5ac3a`, `2026-09-14T21:26:31.0720371-04:00` | Nextest `01be5387-71db-4730-b268-9221c9f821a6`; compile `18m 22s`; 684 run, 682 passed, 2 failed, 3,438 skipped | Updated deletion-impact coverage for all nine starter skins and isolated the imported-plan fixture. |
+| `49fcdd0b-e9aa-4700-bb4d-63c13d82f9db`, `2026-09-14T21:46:34-04:00` | preflight only; formatting failed and no gate launched | Applied `cargo fmt --all`. |
+| `ce007f3b-682d-4d3a-a285-26b2a6ef3c64`, `2026-09-14T21:47:10.3096546-04:00` | Nextest `264d7354-94c9-4982-be86-25c1a586bd3f`; compile `18m 29s`; 715 run, 713 passed, 2 failed, 3,438 skipped | Made paging and shared-DAG validation fixtures explicit rather than inheriting starter submenu edges. |
+| `f43f643a-f4a2-40bd-95b8-95100de3c155`, `2026-09-14T22:06:57.1034975-04:00` | Nextest `2974c8ad-6f16-44e4-89a3-135305caebb8`; compile `18m 06s`; 903 passed, 0 failed, 3,438 skipped; tests `27.932s` | Focused gate passed. |
+
+The first post-gate `cargo check` used UUID
+`28264fd6-d9fb-45f8-9932-3c2bdf6e87df`, started
+`2026-09-14T22:26:16.8686439-04:00`, and exited 0 in `1m 14s`, but reported
+nine unused-assignment warnings. The compiler-proven dead `shared_invocation`
+assignments were removed without changing route behavior. A replacement exact gate
+was launched as `a56ee143-3fef-430c-8ca7-9befeed513fa` at
+`2026-09-14T22:29:10.0561629-04:00`, source identity
+`3abb262e3ba1c60d441c7663c45f875345dc3d88`; it compiled in `16m 21s` and
+reported Nextest run `260eec82-b241-4d03-9978-cf09e4dbf3e9`, but its expired
+session handle did not retain an authoritative terminal summary. No process remained,
+so the same source was rerun rather than treating that attempt as evidence.
+
+The authoritative source-identical replacement used UUID
+`343521ea-0eac-4ea9-ae5a-a775c34d4104`, started
+`2026-09-14T22:47:45.2381153-04:00`, source identity
+`3abb262e3ba1c60d441c7663c45f875345dc3d88`, and passed as Nextest run
+`b5d4ede8-4e33-45e4-831f-28a437c0cac2`: compile `1.19s`; 903 passed,
+0 failed, 3,438 skipped; tests `6.795s`. The final `cargo check` used UUID
+`765e9aca-5b5c-4247-968b-edad2db2e0bc`, started
+`2026-09-14T22:48:18.5729634-04:00` against the same source identity, and
+exited 0 warning-free in `29.43s`.
+
+Every generated root `clipboard_modifiers.json` fixture was removed after its run.
+No native interactive probe was run, so desktop preview focus/click-through,
+cross-process handoff, capture, and mixed-DPI behavior remain explicitly unverified.
+M5 remains `in_progress` until its independent review succeeds.
+
+### M5 independent-review remediation pass 1 — correctness/lifecycle
+
+Status: `complete`. This pass is limited to review findings 1, 2, 3, 6, 7, 8,
+and 11. The authoring coordinator now invalidates Apply rollback state after accepted
+external Reload/Rebase/Discard and package replacement, preventing Cancel from
+publishing over newer external or imported state. Every authoring request and reply
+now carries `AuthoringSessionId`; reply acceptance proves session, request ID, draft
+generation, and expected reply variant before consuming pending state. Late replies
+from a closed editor session and mismatched variants remain inert.
+
+Unpinning the radial editor now uses its ordinary dirty-close decision and explicit
+save/discard/keep-editing prompt. New menus are built from an explicit clean typed
+definition plus configured interaction/submenu defaults; no center/background action,
+control, style, shortcut, hotstring, or cell metadata is cloned from another menu.
+Destructive Test Action confirmation re-resolves its stable request against a fresh
+catalog and the retained invocation context, so target deletion/churn fails without
+execution or history. A shared fail-closed radial-route helper now owns startup and
+reload service-start failure handling: settings/control/controller/service are
+disabled and the legacy listener is restored, causing Show requests to be rejected.
+
+While the initial authoritative Snapshot request is pending, authoring mutations,
+selection, asset staging, undo/redo, post-render edits, and the editor draft/tree/
+preview/inspectors/resources are disabled. Focused source tests cover external
+Reload/Rebase then Cancel, package replacement then Cancel, reused request IDs across
+sessions, late replies, reply-variant mismatch, pending-Snapshot mutation blocking,
+dirty unpin, clean-menu construction, destructive confirmation target deletion, and
+fail-closed Show rejection. Per assignment, no Cargo build or test gate has run in
+this pass. Direct `rustfmt --edition 2024 --check` over all seven touched Rust files
+and `git diff --check` exited 0; no Cargo/Nextest/rustc process, Git index lock, or
+generated `clipboard_modifiers.json` artifact remained at handoff.
+
+### M5 independent-review remediation pass 2 — complete authoring surfaces
+
+Status: `complete`. This source pass addresses review findings 4, 5, 9, 10,
+and 12. The normal editor now exposes typed menu layout, geometry, interaction,
+dwell, submenu, after-action, center/background left/right action and control,
+cell alternate gesture/control, dynamic-source, shortcut/hotstring/scope, context
+rule, custom trigger, media search-root, copy/move, submenu link/clone, ring
+relocation, and confirmed destructive ring-removal controls. Action-picker rows show
+their exact command, semantic action ID, persistence, availability, safety,
+interaction requirement, and supported close policies.
+
+The style editor no longer presents serialized JSON. Every one of the 71 full-scope
+style fields has an explicit ergonomic control classification (toggle, scalar,
+opacity, color, font/text, offset/alignment, enum, rendering quality, or resource),
+with scope reset, skin duplicate/gallery selection, provenance, managed/external/
+search-path/icon-resource media selection, full-package and selected-skin export
+entry points, and persisted managed-sound audition routed through the main-owned
+authoring service. The v1 package format remains menu-rooted; an unreferenced skin is
+truthfully rejected by the UI until assigned to a menu rather than silently emitting
+an incomplete package.
+
+Published menu IDs/names now generate stable `radial show <id>` plugin and Universal
+Action candidates dynamically, including an empty `radial show` discovery query;
+arbitrary typed names are no longer synthesized. Embedded preview resets by stable
+menu/skin/preset selection token, follows the selected menu without a draft edit, and
+can apply an unreferenced selected skin to its transient document. Applications use
+the full launcher/application catalog (with `custom_len` only typing its prefix),
+Favorites resolve every stable persisted provider favorite directly, and Dashboard
+includes stable note/snippet/process actions plus its truthful manage/unavailable
+state. Focused tests cover all 71 explicit style controls, stable selected-menu/skin
+previewing, dynamic named-menu discovery, full production Applications population
+beyond the custom prefix, populated-ring relocation, and every left/right action
+assignment slot. Per assignment no Cargo command ran in this pass. Direct
+`rustfmt --edition 2024` and its `--check` form over the nine touched Rust files,
+plus `git diff --check`, exited 0. The Cargo/Nextest/rustc process audit was empty;
+no Git index lock or generated `clipboard_modifiers.json` artifact was present.
+
+### M5 independent-review remediation replacement gate
+
+Status: `complete`. All jobs used the exact focused command
+`cargo nextest run -E 'test(/radial/) | test(/settings_editor/) | test(/command/) | test(/universal_action/) | test(/plugin/)'`
+from `G:\Repos\rust\Multi_Launcher`, with one Cargo tree active at a time against
+`HEAD a1366b6c877138a05b2301108e7dd182bc3f4f14` plus the shared uncommitted worktree.
+The final pre-ledger tracked-diff identity was
+`999614bfde722d249974cd4bbe8cbf91ff3455b2`. Failed or unrecorded jobs fully exited
+before source correction or replacement:
+
+| Attempt | Result and correction |
+|---|---|
+| `904cba61-42b1-4026-acfd-f195e12c56fb` | Compile failed before tests: corrected a shadowed style-control kind and normalized `CellContent` match arms to unit. |
+| `4c1427f9-e5ce-4376-b3af-f599d73712ba` | Exited 1 after `18m 14s`; the PTY did not retain a diagnostic summary, so it was repeated non-interactively. |
+| `e884c582-2666-4117-8468-389a404a7307` / Nextest `e8803de4-38f0-49f1-adc7-e0a277432d54` | Compile `0.96s`; 168 run, 167 passed, 1 failed, 747 cancelled, 3,439 skipped. Corrected the Applications production fixture to prepare the menu that owns the discovered cell. |
+| `ed4605c8-7929-4530-bc65-67d94c784e62` / Nextest `851e02fd-96ac-4488-92ca-e2718a3a9269` | Compile `18m 49s`; 517 run, 515 passed, 2 failed, 398 cancelled, 3,439 skipped. Corrected native-preview and package-reply fixtures to model production pending-request invalidation explicitly. |
+| `ebf4e0a0-4c27-4b4d-a17c-f943d58886b5` | Process fully exited, but its retained output overflowed and no authoritative terminal result survived; it was not counted as evidence. |
+| Nextest `6259d064-99ea-4d0f-9b20-680e3f95320d`, started after preflight at `2026-09-15T00:50:27.2445147-04:00` | Authoritative source-identical replacement passed: compile `1.00s`; 915 run, 915 passed, 0 failed, 3,439 skipped; tests `7.251s`, invocation wall `10.86s`. |
+
+The single post-gate `cargo check` (exec session `85375`) exited 0 warning-free:
+compiler-reported time `57.45s` and observed wall `55.52s` across the retained
+session. Every generated root `clipboard_modifiers.json` fixture was removed via a
+targeted patch after its run. Final `cargo fmt --all -- --check` and
+`git diff --check` exited 0; no Cargo/Nextest/rustc process, Git index lock, or
+clipboard fixture remained. The authoring raw-JSON regression scan found no
+`Typed JSON`, `serde_json::from_str(encoded`, `style_inputs`, or
+`take(custom_len)` path. The two retained `radial show Work Menu` strings are
+intentional parser/host test fixtures for space-preserving typed command handling,
+not named-menu catalog synthesis.
+
+No native interactive probe was run. Desktop preview focus/click-through, persisted
+managed-audio playback on a real device, cross-process handoff, capture, and
+mixed-DPI behavior remain manual/native evidence gaps and roll into M6.
+
+### M5 closure remediation — identity, authoring completeness, and portable skins
+
+Status: `complete`. The authoring domain now owns a session-lifetime deterministic
+allocator for menu, ring, cell, shortcut, hotstring, context-rule, and custom-trigger
+IDs. Deleted IDs stay reserved, and menu/cell duplication remaps every nested input
+identity. Mapping controls now clear conflicting action/control choices, remove
+alternates, expose every after-action policy, report ring resize/delete errors, and
+show path-addressed `validate` diagnostics before enabling Save or Apply.
+
+Real egui text, drag, slider, color, and style-field responses now enter the stable
+entity/field coalescing boundary with explicit update/end phases. A typed SkinBundle
+package payload exports an unreferenced selected skin plus its exact managed-asset
+closure and imports it collision-safely as one undo unit while retaining legacy menu
+package compatibility and the hostile path/checksum checks. The action picker uses a
+captured editor invocation context; destructive contextual confirmation must still
+resolve the exact captured target in the current catalog. Dashboard preparation now
+materializes favorite, clipboard, todo, calendar, gesture, system, recycle-bin,
+note, snippet, process, and settings families with actionable frozen bindings where
+available and truthful status/manage rows otherwise. Font-family selection comes
+from the main-correlated cached `SystemFontCatalog`, and icon-resource style controls
+preserve and edit a validated nonzero resource index.
+
+Focused tests cover nested input remapping and deleted-ID holes, widget dispatch
+coalescing with older undo history, selected-skin canonical/dependency/collision/
+security behavior and menu-package compatibility, unreferenced-skin merge/undo,
+production Favorites/Dashboard materialization, font request correlation, and icon
+resource index round-trip. `cargo fmt --all` and `git diff --check` passed before the
+replacement gate; no Cargo/Nextest/rustc process was active.
+
+Closure gate attempts all used the exact focused expression from the preceding M5
+gate, one Cargo tree at a time, against
+`HEAD a1366b6c877138a05b2301108e7dd182bc3f4f14`. Every failed or unrecorded job fully
+exited before a root-only correction or replacement:
+
+| Attempt | Result and correction |
+|---|---|
+| exec `6890`, preflight `2026-09-15T01:24:33.7215746-04:00`, tracked diff `e1f4c9fcd83aabab6cba19b8c34e85ab227c8e7a` | Compile failed before tests: corrected the font-catalog fixture constructor, supplied the required capture process ID, and removed one unused binding. |
+| exec `32428`, requested `2026-09-15T01:27:48.2345782-04:00`; Nextest `477499f3-e82c-4399-af85-ac3027828eea` | Compile `17m 35s`; 172/923 run, 171 passed, one failed, 751 cancelled, 3,439 skipped; corrected the unreferenced-skin fixture to add a skin instead of renaming a skin still referenced by menus. |
+| exec `46270`, requested `2026-09-15T01:46:26.7019028-04:00`, same tracked diff | Process fully exited and produced the known clipboard fixture, but its session expired before the final output could be retained; no result is claimed and it was repeated. |
+| exec at `2026-09-15T02:06:39.2435709-04:00`; Nextest `3e19f532-000d-48d8-9187-eebbf7ce8f0a` | Compile `0.99s`; 668/923 run, 667 passed, one failed, 255 cancelled, 3,439 skipped; the real legacy-menu compatibility path exposed invalid synthetic image bytes. |
+| focused diagnostic exec `79442` | `cargo test` compiled in `17m 56s` and confirmed `InvalidMedia { asset: skin-image, reason: UnsupportedFormat }`; the fixture now uses a valid PNG, and skin-bundle imports validate packaged media bytes through the same boundary as menu imports. |
+| exec `89841`, preflight `2026-09-15T02:26:51.1558722-04:00`, tracked diff `d06d5adbe98fc229503a8a823de584d00559ad49`; Nextest `9e3cbd3e-e93e-4a23-a7ed-d355be0bede3` | Authoritative replacement exited 0: compile `19m 58s`; 923 passed, 0 failed, 3,439 skipped; tests `64.410s`. |
+
+The required single post-gate `cargo check` (exec `31495`) exited 0 warning-free in
+`3m 18s`. Every generated root `clipboard_modifiers.json` was removed by a targeted
+patch after its producing run. Final formatting, diff, process, artifact, index-lock,
+stale-owner, and raw-JSON audits passed. No native interactive probe ran; preview
+focus/click-through, real-device managed-audio audition, cross-process handoff/capture,
+and mixed-DPI behavior remain manual/native evidence gaps for M6.
+
+### M5 final closure remediation — sampled identity, asset reuse, and continuous edits
+
+Status: `complete`. The action picker and Test path now consume only the latest
+explicitly requested, sanitized native-preview context; opening the editor no longer
+captures an implicit context, and an unsampled preview update cannot erase the last
+explicit sample. Captured window identity includes HWND, PID, executable, full process
+path, and class. Destructive confirmation compares that identity with the fresh window
+catalog, so deletion and same-HWND process reuse fail closed without execution/history.
+
+SkinBundle import now reuses an existing asset with identical media kind, full digest,
+and byte length. A conflicting generic asset ID is remapped to a validation-safe
+`asset-{kind}-{fullsha}` identity and all skin references are rewritten; packaged bytes
+still pass the same media decoder boundary as menu packages. Favorites and Dashboard no
+longer discard ephemeral resolved targets. Window favorites freeze the catalog's PID,
+executable/path/class identity and dispatch revalidation disables the original slot on
+deletion or HWND churn instead of retargeting it.
+
+Continuous menu dwell/center, ring geometry, cell dynamic/query/media/icon-resource,
+shortcut/hotstring, context-rule priority/pattern, custom-trigger, font/text/resource,
+style numeric/color/offset, and media-search-path controls now use stable entity/field
+edit keys. Discrete checkboxes/combos remain atomic. Ring cell counts are staged outside
+the document during the gesture and create/apply a loss-safe `ResizePlan` only at edit
+end. Focused tests cover explicit-sample retention and availability, exact window
+identity deletion/PID churn, canonical asset reuse plus mismatched collision remap,
+ephemeral favorite freezing/churn, and representative continuous-control wiring/history.
+The first exact-gate attempt (exec session `86223`, requested
+`2026-09-15T03:34:20.6299881-04:00`, HEAD
+`a1366b6c877138a05b2301108e7dd182bc3f4f14`, tracked-diff identity
+`a4743fe1823ec00b197b7fa49013a942a3aec0db`) fully exited `1` during compilation,
+before tests ran. It exposed an incorrect module path in the new SkinBundle code and
+move-after-use errors in the new multi-widget continuous-edit accumulator. The source
+fix was limited to the correct model path and a first-event accumulator helper; the
+failed tree fully exited before formatting and the replacement run.
+
+The authoritative replacement used the exact command
+`cargo nextest run -E 'test(/radial/) | test(/settings_editor/) | test(/command/) | test(/universal_action/) | test(/plugin/)'`
+as the sole Cargo tree in exec session `98760`. Preflight found no Cargo/rustc/Nextest
+process and no test artifact; `cargo fmt --all -- --check` and `git diff --check`
+exited 0. Nextest run `6805bfad-598e-47e0-8bf6-afc0cb2ceb8d` exited 0 after an
+`18m 45s` compile: 928 run, 928 passed, 0 failed, 3,439 skipped; test execution was
+`34.472s`. The generated `clipboard_modifiers.json` test artifact was removed via the
+approved patch path. A single subsequent `cargo check` exited 0 warning-free in
+`59.31s`.
+
+### M5 live single-HWND safety remediation
+
+Status: `complete`. `WindowCatalog` now owns a bounded `describe_current(hwnd)`
+boundary backed in production by the existing `IsWindow`-validated single-handle
+descriptor query, without scheduling or enumerating the window catalog. Tests can
+inject this provider independently from a deliberately stale published snapshot.
+Destructive authoring confirmation and frozen radial runtime-window dispatch both
+query this live boundary and compare the captured HWND/PID/executable/process
+path/class `WindowTargetIdentity`; deletion and same-HWND process reuse fail closed.
+Runtime window candidates capture the live descriptor while materializing, and a
+failed capture leaves the visible slot unavailable and non-dispatchable rather than
+creating an identity-less fail-open binding.
+
+The authoritative exact replacement started after a clean preflight at
+`2026-09-15T04:13:12.6262628-04:00` from HEAD
+`a1366b6c877138a05b2301108e7dd182bc3f4f14` and ran as the sole Cargo tree in exec
+session `82037`. Nextest UUID `47146892-2b1c-442e-92f5-d6735b6132dd` exited 0 after
+a `17m 47s` compile: 928 run, 928 passed, 0 failed, 3,439 skipped; tests took
+`22.561s`. No generated clipboard artifact remained. The single subsequent
+`cargo check` exited 0 warning-free in `50.74s`.
+
+Final review required the freeze layer itself, rather than only current producers, to
+mark every identity-less runtime window unavailable. That source-only invariant and a
+direct regression test were added after the recorded passing run, so the prior run is
+retained as evidence but is not the final source-identical acceptance gate.
+
+The final source-identical replacement started after clean format/diff/process/artifact
+preflight at `2026-09-15T04:34:57.0401793-04:00` as the sole Cargo tree in exec
+session `96623`. Nextest UUID `45172f01-6847-46fd-82ff-35d059e002f7` exited 0 after
+a `34m 31s` compile: 929 run, 929 passed, 0 failed, 3,439 skipped; tests took
+`109.376s`. The added test is the direct identity-less runtime-window freeze
+regression. The subsequent `cargo check` exited 0 warning-free in `2m 35s`.
+
+### M5 contextual dispatch closure
+
+Status: `complete`. Invocation-frozen contextual bindings now have a dedicated
+typed representation carrying selector, action ID, and captured
+`WindowTargetIdentity`; persisted bindings cannot accidentally manufacture that
+state. Normal cells, alternate clicks, and center/background primary and secondary
+mappings all use the same freezing helper. Every contextual dispatch performs a fresh
+single-HWND descriptor comparison before resolution, and the controller refuses to
+reconstruct contextual bindings from an unprepared fallback. Authoring Test Action
+performs the same live check before immediate execution regardless of safety or
+confirmation preference, then retains and rechecks the exact identity if confirmation
+is required. Tests cover all radial surface categories, stale HWND reuse, immediate
+non-destructive rejection, confirmation-disabled destructive rejection, and
+confirmation-time churn.
+
+The first retained replacement result, Nextest
+`89833420-9988-4c3b-b019-bb1ffb687f66`, compiled in `1.05s` and exited 1 after
+572/932 tests: 571 passed, one failed, 360 cancelled, and 3,439 skipped. The failure
+was a controller handoff test that still used an unprepared contextual binding; its
+fixture was corrected to use the persisted action appropriate to the handoff behavior
+under test. No production fallback was restored. An earlier compile-complete session
+expired without an authoritative terminal result and is not claimed as evidence.
+
+After clean format/diff/process/artifact preflight, the authoritative exact command
+`cargo nextest run -E 'test(/radial/) | test(/settings_editor/) | test(/command/) | test(/universal_action/) | test(/plugin/)'`
+ran as the sole Cargo tree from HEAD
+`a1366b6c877138a05b2301108e7dd182bc3f4f14`. Nextest
+`a9eebc6c-d54c-4adf-ae8e-4e01418cbffe` exited 0: compile `16m 30s`; 932 run,
+932 passed, 0 failed, 3,439 skipped; tests `24.182s`. The required subsequent
+`cargo check` exited 0 warning-free in `40.39s`. Generated
+`clipboard_modifiers.json` fixtures were removed by targeted patches after each run.
 
 ## Verification and job records
 

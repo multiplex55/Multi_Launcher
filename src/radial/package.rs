@@ -4,8 +4,8 @@
 //! Only [`RadialStore`](super::store::RadialStore) may apply a plan to disk.
 
 use super::model::{
-    AssetId, CellContent, ContextRuleId, HotstringId, MediaReference, MenuId, RadialDocument,
-    ShortcutId, SkinId, TriggerId, limits,
+    AssetId, AssetRecord, CellContent, ContextRuleId, HotstringId, MediaReference, MenuId,
+    RadialDocument, ShortcutId, SkinDefinition, SkinId, TriggerId, limits,
 };
 use super::validation::{ValidationErrors, validate};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use std::path::Path;
 pub const PACKAGE_VERSION: u32 = 1;
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DOCUMENT_FILE: &str = "radial.json";
+pub const SKIN_FILE: &str = "skin.json";
 pub const MAX_PACKAGE_FILES: usize = 4_096;
 pub const MAX_PACKAGE_PATH_BYTES: usize = 512;
 pub const MAX_PACKAGE_DEPTH: usize = 24;
@@ -30,8 +31,34 @@ pub struct PackageManifest {
     pub package_version: u32,
     pub document_path: String,
     pub root_menu_ids: Vec<MenuId>,
+    #[serde(default)]
+    pub payload: PackagePayloadKind,
     pub files: Vec<PackageFileRecord>,
     pub notices: Vec<PackageNotice>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackagePayloadKind {
+    #[default]
+    MenuGraph,
+    SkinBundle,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkinBundle {
+    pub skin: SkinDefinition,
+    pub assets: Vec<AssetRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkinImportPlan {
+    pub manifest: PackageManifest,
+    pub skin: SkinDefinition,
+    pub asset_records: Vec<AssetRecord>,
+    pub assets: BTreeMap<String, Vec<u8>>,
+    pub remap: IdRemap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +232,7 @@ pub fn plan_export(
         package_version: PACKAGE_VERSION,
         document_path: DOCUMENT_FILE.into(),
         root_menu_ids: roots.to_vec(),
+        payload: PackagePayloadKind::MenuGraph,
         files: records,
         notices,
     };
@@ -213,6 +241,236 @@ pub fn plan_export(
     files.insert(MANIFEST_FILE.into(), manifest_bytes);
     validate_file_map(&files)?;
     Ok(ExportPlan { manifest, files })
+}
+
+pub fn plan_skin_export(
+    document: &RadialDocument,
+    skin_id: &SkinId,
+    managed_asset_bytes: &BTreeMap<AssetId, Vec<u8>>,
+    notices: Vec<PackageNotice>,
+) -> Result<ExportPlan, PackageError> {
+    validate(document).map_err(PackageError::Validation)?;
+    let skin = document
+        .skins
+        .iter()
+        .find(|skin| &skin.id == skin_id)
+        .cloned()
+        .ok_or_else(|| PackageError::Malformed(format!("skin {skin_id} is missing")))?;
+    let skin_value =
+        serde_json::to_value(&skin).map_err(|error| PackageError::Serialize(error.to_string()))?;
+    reject_nonportable_media(&skin_value)?;
+    let mut referenced = BTreeSet::new();
+    collect_managed_ids(&skin_value, &mut referenced);
+    let records = document
+        .assets
+        .iter()
+        .filter(|asset| referenced.contains(asset.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    for id in &referenced {
+        if !records.iter().any(|record| record.id.as_str() == id) {
+            return Err(PackageError::MissingAsset(AssetId::new(id)));
+        }
+    }
+    let bundle = SkinBundle {
+        skin,
+        assets: records.clone(),
+    };
+    let mut files = BTreeMap::from([(
+        SKIN_FILE.to_owned(),
+        serde_json::to_vec_pretty(&bundle)
+            .map_err(|error| PackageError::Serialize(error.to_string()))?,
+    )]);
+    for asset in &records {
+        let bytes = managed_asset_bytes
+            .get(&asset.id)
+            .ok_or_else(|| PackageError::MissingAsset(asset.id.clone()))?;
+        if sha256_hex(bytes) != asset.content_sha256 || bytes.len() as u64 != asset.byte_len {
+            return Err(PackageError::ChecksumMismatch(asset.relative_path.clone()));
+        }
+        let extension = Path::new(&asset.relative_path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+        files.insert(
+            format!("assets/{}{}", asset.content_sha256, extension),
+            bytes.clone(),
+        );
+    }
+    validate_file_map(&files)?;
+    let manifest = PackageManifest {
+        package_version: PACKAGE_VERSION,
+        document_path: SKIN_FILE.into(),
+        root_menu_ids: Vec::new(),
+        payload: PackagePayloadKind::SkinBundle,
+        files: files
+            .iter()
+            .map(|(path, bytes)| PackageFileRecord {
+                path: path.clone(),
+                sha256: sha256_hex(bytes),
+                byte_len: bytes.len() as u64,
+            })
+            .collect(),
+        notices,
+    };
+    files.insert(
+        MANIFEST_FILE.into(),
+        serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| PackageError::Serialize(error.to_string()))?,
+    );
+    validate_file_map(&files)?;
+    Ok(ExportPlan { manifest, files })
+}
+
+pub fn plan_skin_import(
+    mut files: BTreeMap<String, Vec<u8>>,
+    target: &RadialDocument,
+) -> Result<SkinImportPlan, PackageError> {
+    validate_file_map(&files)?;
+    let manifest_bytes = files
+        .remove(MANIFEST_FILE)
+        .ok_or_else(|| PackageError::MissingFile(MANIFEST_FILE.into()))?;
+    let manifest: PackageManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| PackageError::Malformed(error.to_string()))?;
+    if manifest.package_version != PACKAGE_VERSION {
+        return Err(PackageError::UnsupportedVersion(manifest.package_version));
+    }
+    if manifest.payload != PackagePayloadKind::SkinBundle || !manifest.root_menu_ids.is_empty() {
+        return Err(PackageError::Malformed(
+            "package is not a skin bundle".into(),
+        ));
+    }
+    validate_package_path(&manifest.document_path)?;
+    let expected = manifest
+        .files
+        .iter()
+        .map(|record| (record.path.as_str(), record))
+        .collect::<BTreeMap<_, _>>();
+    if expected.len() != manifest.files.len() || expected.len() != files.len() {
+        return Err(PackageError::Malformed(
+            "manifest file list must exactly match package entries".into(),
+        ));
+    }
+    for (path, bytes) in &files {
+        let record = expected
+            .get(path.as_str())
+            .ok_or_else(|| PackageError::MissingFile(path.clone()))?;
+        if record.byte_len != bytes.len() as u64 || record.sha256 != sha256_hex(bytes) {
+            return Err(PackageError::ChecksumMismatch(path.clone()));
+        }
+    }
+    let bundle_bytes = files
+        .get(&manifest.document_path)
+        .ok_or_else(|| PackageError::MissingFile(manifest.document_path.clone()))?;
+    let mut bundle: SkinBundle = serde_json::from_slice(bundle_bytes)
+        .map_err(|error| PackageError::Malformed(error.to_string()))?;
+    let value = serde_json::to_value(&bundle.skin)
+        .map_err(|error| PackageError::Serialize(error.to_string()))?;
+    reject_nonportable_media(&value)?;
+    let mut referenced = BTreeSet::new();
+    collect_managed_ids(&value, &mut referenced);
+    if referenced.len() != bundle.assets.len()
+        || bundle
+            .assets
+            .iter()
+            .any(|asset| !referenced.contains(asset.id.as_str()))
+    {
+        return Err(PackageError::Malformed(
+            "skin asset records must exactly match its managed dependency closure".into(),
+        ));
+    }
+    let mut remap = IdRemap::default();
+    let mut skin_ids = target
+        .skins
+        .iter()
+        .map(|skin| skin.id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    insert_remap(&mut remap.skins, bundle.skin.id.as_str(), &mut skin_ids);
+    let mut asset_ids = target
+        .assets
+        .iter()
+        .map(|asset| asset.id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut reused_assets = BTreeSet::new();
+    for asset in &bundle.assets {
+        let packaged = files
+            .iter()
+            .find(|(path, bytes)| {
+                path.starts_with("assets/")
+                    && sha256_hex(bytes) == asset.content_sha256
+                    && bytes.len() as u64 == asset.byte_len
+            })
+            .map(|(_, bytes)| bytes)
+            .ok_or_else(|| PackageError::MissingAsset(asset.id.clone()))?;
+        super::assets::validate_packaged_media(packaged, asset.kind).map_err(|reason| {
+            PackageError::InvalidMedia {
+                asset: asset.id.clone(),
+                reason: reason.to_string(),
+            }
+        })?;
+        if let Some(existing) = target.assets.iter().find(|existing| {
+            existing.kind == asset.kind
+                && existing
+                    .content_sha256
+                    .eq_ignore_ascii_case(&asset.content_sha256)
+                && existing.byte_len == asset.byte_len
+        }) {
+            remap.assets.insert(
+                asset.id.as_str().to_owned(),
+                existing.id.as_str().to_owned(),
+            );
+            reused_assets.insert(asset.id.clone());
+        } else if asset_ids.contains(asset.id.as_str()) {
+            let kind = match asset.kind {
+                super::model::MediaKind::Image => "image",
+                super::model::MediaKind::Sound => "sound",
+            };
+            let generic = unique_id(
+                &format!("asset-{kind}-{}", asset.content_sha256.to_ascii_lowercase()),
+                &asset_ids,
+            );
+            asset_ids.insert(generic.clone());
+            remap.assets.insert(asset.id.as_str().to_owned(), generic);
+        } else {
+            insert_remap(&mut remap.assets, asset.id.as_str(), &mut asset_ids);
+        }
+    }
+    bundle.skin.id = SkinId::new(mapped(&remap.skins, bundle.skin.id.as_str()));
+    bundle
+        .assets
+        .retain(|asset| !reused_assets.contains(&asset.id));
+    for asset in &mut bundle.assets {
+        let original = asset.id.clone();
+        asset.id = AssetId::new(mapped(&remap.assets, asset.id.as_str()));
+        if asset.id != original {
+            let extension = Path::new(&asset.relative_path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| format!(".{value}"))
+                .unwrap_or_default();
+            asset.relative_path = format!("{}{}", asset.id, extension);
+        }
+    }
+    let mut skin_value = serde_json::to_value(&bundle.skin)
+        .map_err(|error| PackageError::Serialize(error.to_string()))?;
+    rewrite_managed_ids(&mut skin_value, &remap.assets);
+    bundle.skin = serde_json::from_value(skin_value)
+        .map_err(|error| PackageError::Malformed(error.to_string()))?;
+    let mut candidate = target.clone();
+    candidate.skins.push(bundle.skin.clone());
+    candidate.assets.extend(bundle.assets.clone());
+    validate(&candidate).map_err(PackageError::Validation)?;
+    Ok(SkinImportPlan {
+        manifest,
+        skin: bundle.skin,
+        asset_records: bundle.assets,
+        assets: files
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("assets/"))
+            .collect(),
+        remap,
+    })
 }
 
 pub fn plan_import(
@@ -227,6 +485,11 @@ pub fn plan_import(
         .map_err(|error| PackageError::Malformed(error.to_string()))?;
     if manifest.package_version != PACKAGE_VERSION {
         return Err(PackageError::UnsupportedVersion(manifest.package_version));
+    }
+    if manifest.payload != PackagePayloadKind::MenuGraph {
+        return Err(PackageError::Malformed(
+            "package is not a menu graph".into(),
+        ));
     }
     validate_package_path(&manifest.document_path)?;
     let expected = manifest
@@ -949,6 +1212,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+
+    fn isolated_package_fixture() -> RadialDocument {
+        let mut document = RadialDocument::starter();
+        document.menus.truncate(1);
+        document.menus[0].rings[0].cells.truncate(1);
+        document.menus[0].rings[0].cells[0].content = CellContent::Spacer;
+        document
+    }
 
     #[test]
     fn sha256_and_stored_zip_round_trip_are_canonical() {
@@ -961,6 +1233,7 @@ mod tests {
                 package_version: 1,
                 document_path: DOCUMENT_FILE.into(),
                 root_menu_ids: vec![],
+                payload: PackagePayloadKind::MenuGraph,
                 files: vec![],
                 notices: vec![],
             },
@@ -995,12 +1268,122 @@ mod tests {
     }
 
     #[test]
+    fn skin_bundle_round_trip_is_canonical_dependency_complete_and_collision_safe() {
+        let mut source = isolated_package_fixture();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        let digest = sha256_hex(&bytes);
+        let asset_id = AssetId::new(format!("import-image-{digest}"));
+        source.assets.push(AssetRecord {
+            id: asset_id.clone(),
+            kind: super::super::model::MediaKind::Image,
+            relative_path: "skin-image.png".into(),
+            content_sha256: digest,
+            byte_len: bytes.len() as u64,
+        });
+        source.skins[0].style.values.images.center_image =
+            super::super::model::Override::Value(MediaReference::Managed {
+                asset_id: asset_id.clone(),
+            });
+        let plan = plan_skin_export(
+            &source,
+            &source.skins[0].id,
+            &BTreeMap::from([(asset_id, bytes.clone())]),
+            Vec::new(),
+        )
+        .unwrap();
+        let first = encode_mlradial(&plan).unwrap();
+        assert_eq!(first, encode_mlradial(&plan).unwrap());
+        let imported = plan_skin_import(decode_mlradial(&first).unwrap(), &source).unwrap();
+        assert_ne!(imported.skin.id, source.skins[0].id);
+        assert!(imported.asset_records.is_empty());
+        assert_eq!(imported.assets.len(), 1);
+        assert!(matches!(
+            imported.skin.style.values.images.center_image,
+            super::super::model::Override::Value(MediaReference::Managed { ref asset_id })
+                if asset_id == &source.assets[0].id
+        ));
+        assert_eq!(
+            imported.remap.assets.get(source.assets[0].id.as_str()),
+            Some(&source.assets[0].id.as_str().to_owned())
+        );
+
+        let mut collision_source = isolated_package_fixture();
+        collision_source.assets.push(AssetRecord {
+            id: AssetId::new("skin-image"),
+            kind: super::super::model::MediaKind::Image,
+            relative_path: "skin-image.png".into(),
+            content_sha256: sha256_hex(&bytes),
+            byte_len: bytes.len() as u64,
+        });
+        collision_source.skins[0].style.values.images.center_image =
+            super::super::model::Override::Value(MediaReference::Managed {
+                asset_id: AssetId::new("skin-image"),
+            });
+        let collision_package = plan_skin_export(
+            &collision_source,
+            &collision_source.skins[0].id,
+            &BTreeMap::from([(AssetId::new("skin-image"), bytes.clone())]),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut mismatched_target = RadialDocument::starter();
+        mismatched_target.assets.push(AssetRecord {
+            id: AssetId::new("skin-image"),
+            kind: super::super::model::MediaKind::Image,
+            relative_path: "different.png".into(),
+            content_sha256: "a".repeat(64),
+            byte_len: 1,
+        });
+        let remapped = plan_skin_import(collision_package.files, &mismatched_target).unwrap();
+        assert_eq!(remapped.asset_records.len(), 1);
+        assert!(
+            remapped.asset_records[0]
+                .id
+                .as_str()
+                .starts_with("asset-image-")
+        );
+        assert!(!remapped.asset_records[0].id.as_str().starts_with("import-"));
+        assert!(matches!(
+            remapped.skin.style.values.images.center_image,
+            super::super::model::Override::Value(MediaReference::Managed { ref asset_id })
+                if asset_id == &remapped.asset_records[0].id
+        ));
+
+        let legacy = plan_export(
+            &source,
+            &[source.default_menu_id.clone()],
+            &BTreeMap::from([(source.assets[0].id.clone(), bytes)]),
+            Vec::new(),
+        )
+        .unwrap();
+        let legacy_import = plan_import(legacy.files, &RadialDocument::starter());
+        assert!(legacy_import.is_ok(), "{legacy_import:?}");
+    }
+
+    #[test]
+    fn skin_bundle_rejects_nonportable_media_and_tampered_dependencies() {
+        let mut source = isolated_package_fixture();
+        source.skins[0].style.values.images.center_image =
+            super::super::model::Override::Value(MediaReference::IconResource {
+                path: "shell32.dll".into(),
+                index: 4,
+            });
+        assert!(matches!(
+            plan_skin_export(&source, &source.skins[0].id, &BTreeMap::new(), Vec::new()),
+            Err(PackageError::NonPortableReference(_))
+        ));
+    }
+
+    #[test]
     fn zip_flags_encryption_compression_links_and_checksum_are_rejected() {
         let plan = ExportPlan {
             manifest: PackageManifest {
                 package_version: 1,
                 document_path: DOCUMENT_FILE.into(),
                 root_menu_ids: vec![],
+                payload: PackagePayloadKind::MenuGraph,
                 files: vec![],
                 notices: vec![],
             },
@@ -1065,6 +1448,7 @@ mod tests {
                 package_version: 1,
                 document_path: DOCUMENT_FILE.into(),
                 root_menu_ids: vec![],
+                payload: PackagePayloadKind::MenuGraph,
                 files: vec![],
                 notices: vec![],
             },
@@ -1215,7 +1599,7 @@ mod tests {
 
     #[test]
     fn canonical_export_import_export_and_full_submenu_dependency_closure() {
-        let mut source = RadialDocument::starter();
+        let mut source = isolated_package_fixture();
         let mut child = source.menus[0].clone();
         child.id = MenuId::new("child");
         child.name = "Child".into();
@@ -1240,7 +1624,7 @@ mod tests {
         let packed = encode_mlradial(&first).unwrap();
         let files = decode_mlradial(&packed).unwrap();
 
-        let mut target = RadialDocument::starter();
+        let mut target = isolated_package_fixture();
         target.default_menu_id = MenuId::new("target");
         target.menus[0].id = target.default_menu_id.clone();
         target.menus[0].skin_id = SkinId::new("target-skin");
@@ -1263,7 +1647,7 @@ mod tests {
 
     #[test]
     fn submenu_closure_and_broken_roots_are_explicit() {
-        let mut document = RadialDocument::starter();
+        let mut document = isolated_package_fixture();
         let child = document.menus[0].clone();
         let child_id = MenuId::new("child");
         let mut child = child;

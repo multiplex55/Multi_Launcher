@@ -8,9 +8,10 @@ use super::compatibility::{
     CompatibilityClassification, CompatibilitySource, FIELD_REGISTRY, compatibility_for,
 };
 use super::model::{
-    AssetId, AssetRecord, CellId, ClickGesture, ColorRgba, Control, ControlClickBinding,
-    HotstringId, ItemHotstring, ItemShortcut, MediaKind, MediaReference, MenuId, Override,
-    RadialDocument, RenderingQuality, RingId, ShortcutId, SkinId, TooltipMode, TriggerScope,
+    AfterActionPolicy, AssetId, AssetRecord, CellContent, CellDefinition, CellId, CellStyleLayer,
+    ClickGesture, ColorRgba, Control, ControlClickBinding, DynamicSource, HotstringId,
+    ItemHotstring, ItemShortcut, MediaKind, MediaReference, MenuId, Override, RadialDocument,
+    RenderingQuality, RingId, ShortcutId, SkinId, TooltipMode, TriggerScope,
 };
 use super::package::{
     DOCUMENT_FILE, IdRemap, ImportPlan, PACKAGE_VERSION, PackageFileRecord, PackageManifest,
@@ -233,6 +234,7 @@ impl ImportPreview {
                 package_version: PACKAGE_VERSION,
                 document_path: DOCUMENT_FILE.into(),
                 root_menu_ids: vec![self.definition.default_menu_id.clone()],
+                payload: crate::radial::package::PackagePayloadKind::MenuGraph,
                 files,
                 notices: Vec::new(),
             },
@@ -454,7 +456,7 @@ fn build_import_definition(
     BTreeMap<String, Vec<u8>>,
     Vec<ImportWarning>,
 ) {
-    let mut document = RadialDocument::starter();
+    let mut document = legacy_import_template();
     document.default_menu_id = destination.menu_id.clone();
     document.menus[0].id = destination.menu_id.clone();
     document.menus[0].name = destination.display_name.clone();
@@ -576,6 +578,44 @@ fn build_import_definition(
     }
     let warnings = apply_import_mappings(&mut document, source_skin, mappings, &imported_media);
     (document, asset_bytes, warnings)
+}
+
+/// Legacy skin imports need a small, self-contained menu canvas. They must not
+/// inherit the evolving user-facing starter graph: doing so would couple
+/// compatibility validation and package contents to unrelated starter menus.
+fn legacy_import_template() -> RadialDocument {
+    let mut document = RadialDocument::starter();
+    document.menus.truncate(1);
+    document.metadata.remove("starter_content");
+    document.menus[0].rings[0].cells = [
+        ("favorites", "Favorites", DynamicSource::Favorites),
+        ("recent", "Recent", DynamicSource::RecentItems),
+        (
+            "results",
+            "Launcher results",
+            DynamicSource::LauncherQuery {
+                query: String::new(),
+                max_items: 12,
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label, source)| CellDefinition {
+        id: CellId::new(id),
+        label: label.into(),
+        content: CellContent::Dynamic { source },
+        alternate_clicks: Vec::new(),
+        alternate_controls: Vec::new(),
+        after_action: AfterActionPolicy::Inherit,
+        secondary_after_action: AfterActionPolicy::Inherit,
+        icon: Override::Inherit,
+        tooltip: Override::Inherit,
+        style: CellStyleLayer::default(),
+        shortcuts: Vec::new(),
+        hotstrings: Vec::new(),
+    })
+    .collect();
+    document
 }
 
 fn imported_asset_id(kind: MediaKind, full_sha256: &str) -> AssetId {
@@ -2616,7 +2656,7 @@ mod tests {
                 ) {
                     continue;
                 }
-                let mut document = RadialDocument::starter();
+                let mut document = legacy_import_template();
                 let mapping = ImportMapping {
                     destination_field: field.to_string(),
                     value: ImportedValue::Structured(Value::Array(vec![Value::Bool(true)])),
@@ -2692,7 +2732,7 @@ mod tests {
                         evidence: ImportEvidence::SyntheticFixture,
                     },
                 };
-                let mut document = RadialDocument::starter();
+                let mut document = legacy_import_template();
                 if (field.starts_with("Hotkey") || field.starts_with("Hotstring"))
                     && gesture_for_legacy_field(field) != ClickGesture::Primary
                 {
@@ -2769,7 +2809,7 @@ mod tests {
             classify_unchanged_mapping("EnableGlow", &equal, &no_assets),
             ApplyOutcome::AlreadyEqual
         );
-        let mut equal_document = RadialDocument::starter();
+        let mut equal_document = legacy_import_template();
         let mirror_equal = ImportMapping {
             destination_field: "MirrorClickToRightClick".into(),
             value: ImportedValue::Bool(false),
@@ -2813,7 +2853,7 @@ mod tests {
             ApplyOutcome::ExplicitlyDiagnosed(_)
         ));
 
-        let mut document = RadialDocument::starter();
+        let mut document = legacy_import_template();
         let changed = ImportMapping {
             destination_field: "ItemSize".into(),
             value: ImportedValue::Number(99.0),
@@ -2835,7 +2875,7 @@ mod tests {
             ("HotkeyClick", ImportedValue::Text("Ctrl+".into())),
             ("ItemSize", ImportedValue::Number(-500.0)),
         ] {
-            let mut document = RadialDocument::starter();
+            let mut document = legacy_import_template();
             let before = document.clone();
             let mapping = ImportMapping {
                 destination_field: field.into(),

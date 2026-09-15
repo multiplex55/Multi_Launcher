@@ -7,6 +7,7 @@ use crate::diff::query::DiffOpenPayload;
 use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use crate::persistence::{PersistentStoreId, RecoveryTarget};
+use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationSource {
@@ -55,6 +56,7 @@ impl CommandInvocation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Launcher(LauncherCommand),
+    Radial(RadialCommand),
     Query(QueryCommand),
     Dialog(DialogCommand),
     Calendar(CalendarCommand),
@@ -88,6 +90,7 @@ impl Command {
     pub fn domain(&self) -> &'static str {
         match self {
             Self::Launcher(_) => "launcher",
+            Self::Radial(_) => "radial",
             Self::Query(_) => "query",
             Self::Dialog(_) => "dialog",
             Self::Calendar(_) => "calendar",
@@ -120,6 +123,7 @@ impl Command {
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::Launcher(v) => v.kind_name(),
+            Self::Radial(v) => v.kind_name(),
             Self::Query(v) => v.kind_name(),
             Self::Dialog(v) => v.kind_name(),
             Self::Calendar(v) => v.kind_name(),
@@ -288,6 +292,33 @@ pub enum LauncherCommand {
     Restore,
 }
 kinds!(LauncherCommand, Self::Toggle => "toggle", Self::Show { .. } => "show", Self::Hide => "hide", Self::Focus => "focus", Self::Restore => "restore");
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "command", content = "target", rename_all = "snake_case")]
+pub enum RadialCommand {
+    ShowDefault,
+    Show(String),
+    Close,
+    Edit,
+    Skins,
+}
+
+kinds!(RadialCommand,
+    Self::ShowDefault => "show_default", Self::Show(_) => "show",
+    Self::Close => "close", Self::Edit => "edit", Self::Skins => "skins"
+);
+
+impl fmt::Display for RadialCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ShowDefault => formatter.write_str("radial"),
+            Self::Show(target) => write!(formatter, "radial show {target}"),
+            Self::Close => formatter.write_str("radial close"),
+            Self::Edit => formatter.write_str("radial edit"),
+            Self::Skins => formatter.write_str("radial skins"),
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryCommand {
     Set {

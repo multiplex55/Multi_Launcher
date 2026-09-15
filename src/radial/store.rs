@@ -1,9 +1,12 @@
+use super::authoring::{AssetMutations, AuthoringSnapshot, DiskSha256, ManagedAssetAddition};
 use super::migration::{DocumentDecodeError, decode_document};
 use super::model::{
     AssetId, CURRENT_SCHEMA_VERSION, ConfigRevision, MediaReference, MenuId,
     RADIAL_ASSETS_DIRECTORY, RADIAL_FILE, RadialDocument, SkinId,
 };
-use super::package::{ImportPlan, PackageError, sha256_hex};
+use super::package::{
+    ImportPlan, PackageError, encode_mlradial, plan_export, plan_skin_export, sha256_hex,
+};
 use super::validation::{ValidationErrors, validate};
 use crate::common::persistence::{LoadState, PersistenceError, read_bytes, save_json_atomic};
 use crate::platform::app_data::AppDataRoot;
@@ -49,6 +52,14 @@ pub enum StoreError {
         source: std::io::Error,
     },
     ApplyCancelled(ApplyStep),
+    AssetReferenced {
+        asset: AssetId,
+        paths: Vec<String>,
+    },
+    AssetMutationMismatch {
+        asset: AssetId,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -87,6 +98,14 @@ impl std::fmt::Display for StoreError {
                 write!(f, "package apply failed at {}: {source}", path.display())
             }
             Self::ApplyCancelled(step) => write!(f, "package apply cancelled at {step:?}"),
+            Self::AssetReferenced { asset, paths } => write!(
+                f,
+                "managed asset {asset} is still referenced by {}",
+                paths.join(", ")
+            ),
+            Self::AssetMutationMismatch { asset, reason } => {
+                write!(f, "managed asset mutation for {asset} is invalid: {reason}")
+            }
         }
     }
 }
@@ -156,6 +175,14 @@ pub struct RadialStore {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct AuthoringCommitResult {
+    pub snapshot: AuthoringSnapshot,
+    /// Inverse managed-asset transaction retained by the editor so Cancel can
+    /// revert its last successful Apply through the same checked store path.
+    pub rollback_assets: AssetMutations,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ExternalReloadOutcome {
     Unchanged,
     Published(Arc<RadialDocument>),
@@ -182,6 +209,293 @@ impl RadialStore {
             .read()
             .map(|v| Arc::clone(&v))
             .map_err(|_| StoreError::LockPoisoned)
+    }
+
+    pub fn authoring_snapshot(&self) -> Result<AuthoringSnapshot, StoreError> {
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let document = self
+            .published
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .clone();
+        let bytes = match read_bytes(&self.path)? {
+            LoadState::Loaded(bytes) => bytes,
+            LoadState::Missing | LoadState::Empty => Vec::new(),
+        };
+        if !bytes.is_empty() {
+            let decoded = decode_document(&bytes).map_err(|error| match error {
+                DocumentDecodeError::Malformed(source) => StoreError::Malformed {
+                    path: self.path.clone(),
+                    source,
+                },
+                DocumentDecodeError::UnsupportedNewerVersion { found, supported } => {
+                    StoreError::UnsupportedNewerVersion { found, supported }
+                }
+                DocumentDecodeError::Validation(error) => StoreError::Validation(error),
+            })?;
+            let mut comparable = decoded.document;
+            comparable.schema_version = document.schema_version;
+            comparable.revision = document.revision;
+            if comparable != *document {
+                return Err(StoreError::DiskChanged);
+            }
+        }
+        Ok(AuthoringSnapshot::new(document, sha256_hex(&bytes)))
+    }
+
+    /// Main-owner transaction used by authoring Apply/Save/Cancel. Managed
+    /// assets and the validated document publish atomically from the runtime's
+    /// perspective. New files are removed and staged deletions restored if the
+    /// JSON commit fails.
+    pub fn commit_authoring(
+        &self,
+        expected_revision: ConfigRevision,
+        expected_disk_sha256: &DiskSha256,
+        mut candidate: RadialDocument,
+        assets: AssetMutations,
+    ) -> Result<AuthoringCommitResult, StoreError> {
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let current = self
+            .published
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .clone();
+        if current.revision != expected_revision {
+            return Err(StoreError::RevisionConflict {
+                expected: expected_revision,
+                actual: current.revision,
+            });
+        }
+        let disk_bytes = match read_bytes(&self.path)? {
+            LoadState::Loaded(bytes) => bytes,
+            LoadState::Missing | LoadState::Empty => Vec::new(),
+        };
+        if sha256_hex(&disk_bytes) != expected_disk_sha256.0 {
+            return Err(StoreError::DiskChanged);
+        }
+
+        candidate.schema_version = CURRENT_SCHEMA_VERSION;
+        candidate.revision = ConfigRevision(current.revision.0.checked_add(1).ok_or(
+            StoreError::RevisionOverflow {
+                revision: current.revision,
+            },
+        )?);
+
+        let mut seen_additions = BTreeSet::new();
+        for addition in &assets.additions {
+            let id = addition.record.id.clone();
+            if !seen_additions.insert(id.clone()) {
+                return Err(StoreError::AssetMutationMismatch {
+                    asset: id,
+                    reason: "duplicate addition".into(),
+                });
+            }
+            let candidate_record = candidate
+                .assets
+                .iter()
+                .find(|asset| asset.id == id)
+                .ok_or_else(|| StoreError::AssetMutationMismatch {
+                    asset: id.clone(),
+                    reason: "candidate does not contain the added record".into(),
+                })?;
+            if candidate_record != &addition.record
+                || addition.record.byte_len != addition.bytes.len() as u64
+                || addition.record.content_sha256 != sha256_hex(&addition.bytes)
+            {
+                return Err(StoreError::AssetMutationMismatch {
+                    asset: id,
+                    reason: "record, byte length, or SHA-256 does not match supplied bytes".into(),
+                });
+            }
+            if current
+                .assets
+                .iter()
+                .find(|asset| asset.id == id)
+                .is_some_and(|asset| asset != &addition.record)
+            {
+                return Err(StoreError::AssetMutationMismatch {
+                    asset: id,
+                    reason: "an existing stable asset ID cannot be rebound to different content"
+                        .into(),
+                });
+            }
+            super::assets::validate_packaged_media(&addition.bytes, addition.record.kind).map_err(
+                |reason| StoreError::AssetMutationMismatch {
+                    asset: addition.record.id.clone(),
+                    reason: reason.to_string(),
+                },
+            )?;
+        }
+
+        let mut seen_deletions = BTreeSet::new();
+        for id in &assets.deletions {
+            if !seen_deletions.insert(id.clone()) {
+                return Err(StoreError::AssetMutationMismatch {
+                    asset: id.clone(),
+                    reason: "duplicate deletion".into(),
+                });
+            }
+            let impact = references_to_asset(&candidate, id);
+            if !impact.paths.is_empty() || candidate.assets.iter().any(|asset| &asset.id == id) {
+                return Err(StoreError::AssetReferenced {
+                    asset: id.clone(),
+                    paths: impact.paths,
+                });
+            }
+            if let Some(record) = current.assets.iter().find(|asset| &asset.id == id)
+                && candidate
+                    .assets
+                    .iter()
+                    .any(|asset| asset.relative_path == record.relative_path)
+            {
+                return Err(StoreError::AssetReferenced {
+                    asset: id.clone(),
+                    paths: vec![format!(
+                        "managed path {} remains owned by another asset record",
+                        record.relative_path
+                    )],
+                });
+            }
+        }
+        validate(&candidate)?;
+
+        // Acquire every fallible publication lock before touching disk. Once
+        // JSON commits, publishing the matching in-memory snapshot and identity
+        // is therefore infallible under these retained guards.
+        let mut published_guard = self
+            .published
+            .write()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let mut disk_identity_guard = self
+            .disk_identity
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+
+        let asset_root = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(RADIAL_ASSETS_DIRECTORY);
+        reject_reparse_asset_root(&asset_root)?;
+        let asset_root_existed = asset_root.exists();
+        if !assets.additions.is_empty() {
+            std::fs::create_dir_all(&asset_root).map_err(|source| StoreError::ApplyIo {
+                path: asset_root.clone(),
+                source,
+            })?;
+        }
+
+        let mut rollback_assets = AssetMutations::default();
+        let mut created = Vec::new();
+        let mut staged_deletes: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let result = (|| {
+            for addition in &assets.additions {
+                let path = asset_root.join(&addition.record.relative_path);
+                if path.exists() {
+                    let existing = std::fs::read(&path).map_err(|source| StoreError::ApplyIo {
+                        path: path.clone(),
+                        source,
+                    })?;
+                    if sha256_hex(&existing) != addition.record.content_sha256 {
+                        return Err(StoreError::DiskChanged);
+                    }
+                } else {
+                    let mut file = OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map_err(|source| StoreError::ApplyIo {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    if let Err(source) = file
+                        .write_all(&addition.bytes)
+                        .and_then(|_| file.sync_all())
+                    {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(StoreError::ApplyIo { path, source });
+                    }
+                    created.push(path);
+                }
+                if !current
+                    .assets
+                    .iter()
+                    .any(|asset| asset.id == addition.record.id)
+                {
+                    rollback_assets.deletions.push(addition.record.id.clone());
+                }
+            }
+
+            for (delete_index, id) in assets.deletions.iter().enumerate() {
+                let Some(record) = current.assets.iter().find(|asset| &asset.id == id) else {
+                    continue;
+                };
+                let path = asset_root.join(&record.relative_path);
+                if !path.exists() {
+                    continue;
+                }
+                let bytes = std::fs::read(&path).map_err(|source| StoreError::ApplyIo {
+                    path: path.clone(),
+                    source,
+                })?;
+                if sha256_hex(&bytes) != record.content_sha256 {
+                    return Err(StoreError::DiskChanged);
+                }
+                rollback_assets.additions.push(ManagedAssetAddition {
+                    record: record.clone(),
+                    bytes: Arc::from(bytes),
+                });
+                let staged = path.with_extension(format!(
+                    "authoring-delete-{}-{}",
+                    candidate.revision.0, delete_index
+                ));
+                std::fs::rename(&path, &staged).map_err(|source| StoreError::ApplyIo {
+                    path: path.clone(),
+                    source,
+                })?;
+                staged_deletes.push((path, staged));
+            }
+
+            save_json_atomic(&self.path, &candidate)?;
+            Ok::<(), StoreError>(())
+        })();
+
+        if let Err(error) = result {
+            for path in created.iter().rev() {
+                let _ = std::fs::remove_file(path);
+            }
+            for (path, staged) in staged_deletes.iter().rev() {
+                let _ = std::fs::rename(staged, path);
+            }
+            if !asset_root_existed {
+                let _ = std::fs::remove_dir(&asset_root);
+            }
+            return Err(error);
+        }
+        for (_, staged) in &staged_deletes {
+            let _ = std::fs::remove_file(staged);
+        }
+
+        let saved_bytes = serde_json::to_vec_pretty(&candidate).map_err(|source| {
+            PersistenceError::SerializeJson {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
+        let disk_sha = sha256_hex(&saved_bytes);
+        let candidate = Arc::new(candidate);
+        *published_guard = Arc::clone(&candidate);
+        *disk_identity_guard = Some(disk_sha.clone());
+        Ok(AuthoringCommitResult {
+            snapshot: AuthoringSnapshot::new(candidate, disk_sha),
+            rollback_assets,
+        })
     }
 
     /// Load and publish only a fully parsed and validated candidate.
@@ -341,6 +655,267 @@ impl RadialStore {
         self.apply_package_with_hook(request, &mut ())
     }
 
+    /// Build a dependency-complete portable package from persisted, verified
+    /// managed bytes. GUI code never receives or derives the store root.
+    pub fn export_package(
+        &self,
+        roots: &[MenuId],
+        expected_revision: ConfigRevision,
+        expected_disk_sha256: &str,
+    ) -> Result<Vec<u8>, StoreError> {
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let document = self
+            .published
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .clone();
+        if document.revision != expected_revision {
+            return Err(StoreError::RevisionConflict {
+                expected: expected_revision,
+                actual: document.revision,
+            });
+        }
+        let disk = match read_bytes(&self.path)? {
+            LoadState::Loaded(bytes) => bytes,
+            LoadState::Missing | LoadState::Empty => Vec::new(),
+        };
+        if sha256_hex(&disk) != expected_disk_sha256 {
+            return Err(StoreError::DiskChanged);
+        }
+        let asset_root = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(RADIAL_ASSETS_DIRECTORY);
+        reject_reparse_asset_root(&asset_root)?;
+        let canonical_asset_root = std::fs::canonicalize(&asset_root).ok();
+        let mut bytes = std::collections::BTreeMap::new();
+        loop {
+            let asset_id = match plan_export(&document, roots, &bytes, Vec::new()) {
+                Ok(plan) => return encode_mlradial(&plan).map_err(Into::into),
+                Err(PackageError::MissingAsset(asset_id)) => asset_id,
+                Err(error) => return Err(error.into()),
+            };
+            let asset = document
+                .assets
+                .iter()
+                .find(|asset| asset.id == asset_id)
+                .ok_or_else(|| StoreError::Package(PackageError::MissingAsset(asset_id)))?;
+            let path = asset_root.join(&asset.relative_path);
+            let metadata =
+                std::fs::symlink_metadata(&path).map_err(|source| StoreError::ApplyIo {
+                    path: path.clone(),
+                    source,
+                })?;
+            #[cfg(windows)]
+            use std::os::windows::fs::MetadataExt;
+            #[cfg(windows)]
+            let reparse = metadata.file_attributes() & 0x400 != 0;
+            #[cfg(not(windows))]
+            let reparse = false;
+            let escapes_root = canonical_asset_root.as_ref().is_some_and(|root| {
+                std::fs::canonicalize(&path)
+                    .map(|candidate| !candidate.starts_with(root))
+                    .unwrap_or(true)
+            });
+            if reparse || metadata.file_type().is_symlink() || !metadata.is_file() || escapes_root {
+                return Err(StoreError::ApplyIo {
+                    path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "managed export asset must be a regular non-link file",
+                    ),
+                });
+            }
+            let content = std::fs::read(&path).map_err(|source| StoreError::ApplyIo {
+                path: path.clone(),
+                source,
+            })?;
+            if content.len() as u64 != asset.byte_len
+                || sha256_hex(&content) != asset.content_sha256
+            {
+                return Err(StoreError::Package(PackageError::ChecksumMismatch(
+                    asset.relative_path.clone(),
+                )));
+            }
+            bytes.insert(asset.id.clone(), content);
+        }
+    }
+
+    pub fn export_skin_bundle(
+        &self,
+        skin_id: &super::model::SkinId,
+        expected_revision: ConfigRevision,
+        expected_disk_sha256: &str,
+    ) -> Result<Vec<u8>, StoreError> {
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let document = self
+            .published
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .clone();
+        if document.revision != expected_revision {
+            return Err(StoreError::RevisionConflict {
+                expected: expected_revision,
+                actual: document.revision,
+            });
+        }
+        let disk = match read_bytes(&self.path)? {
+            LoadState::Loaded(bytes) => bytes,
+            LoadState::Missing | LoadState::Empty => Vec::new(),
+        };
+        if sha256_hex(&disk) != expected_disk_sha256 {
+            return Err(StoreError::DiskChanged);
+        }
+        let asset_root = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(RADIAL_ASSETS_DIRECTORY);
+        reject_reparse_asset_root(&asset_root)?;
+        let canonical_asset_root = std::fs::canonicalize(&asset_root).ok();
+        let mut bytes = std::collections::BTreeMap::new();
+        loop {
+            let asset_id = match plan_skin_export(&document, skin_id, &bytes, Vec::new()) {
+                Ok(plan) => return encode_mlradial(&plan).map_err(Into::into),
+                Err(PackageError::MissingAsset(asset_id)) => asset_id,
+                Err(error) => return Err(error.into()),
+            };
+            let asset = document
+                .assets
+                .iter()
+                .find(|asset| asset.id == asset_id)
+                .ok_or_else(|| StoreError::Package(PackageError::MissingAsset(asset_id)))?;
+            let path = asset_root.join(&asset.relative_path);
+            let metadata =
+                std::fs::symlink_metadata(&path).map_err(|source| StoreError::ApplyIo {
+                    path: path.clone(),
+                    source,
+                })?;
+            #[cfg(windows)]
+            use std::os::windows::fs::MetadataExt;
+            #[cfg(windows)]
+            let reparse = metadata.file_attributes() & 0x400 != 0;
+            #[cfg(not(windows))]
+            let reparse = false;
+            let escapes_root = canonical_asset_root.as_ref().is_some_and(|root| {
+                std::fs::canonicalize(&path)
+                    .map(|candidate| !candidate.starts_with(root))
+                    .unwrap_or(true)
+            });
+            if reparse || metadata.file_type().is_symlink() || !metadata.is_file() || escapes_root {
+                return Err(StoreError::ApplyIo {
+                    path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "managed export asset must be a regular non-link file",
+                    ),
+                });
+            }
+            let content = std::fs::read(&path).map_err(|source| StoreError::ApplyIo {
+                path: path.clone(),
+                source,
+            })?;
+            if content.len() as u64 != asset.byte_len
+                || sha256_hex(&content) != asset.content_sha256
+            {
+                return Err(StoreError::Package(PackageError::ChecksumMismatch(
+                    asset.relative_path.clone(),
+                )));
+            }
+            bytes.insert(asset.id.clone(), content);
+        }
+    }
+
+    /// Create an exact atomic backup owned by main, verify its receipt, then
+    /// enter the existing transactional replacement boundary.
+    pub fn replace_package_with_backup(
+        &self,
+        plan: ImportPlan,
+        expected_revision: ConfigRevision,
+        expected_disk_sha256: String,
+        backup_path: PathBuf,
+    ) -> Result<Arc<RadialDocument>, StoreError> {
+        let _transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| StoreError::LockPoisoned)?;
+        let actual_revision = self
+            .published
+            .read()
+            .map_err(|_| StoreError::LockPoisoned)?
+            .revision;
+        if actual_revision != expected_revision {
+            return Err(StoreError::RevisionConflict {
+                expected: expected_revision,
+                actual: actual_revision,
+            });
+        }
+        let source_parent =
+            std::fs::canonicalize(self.path.parent().unwrap_or_else(|| Path::new("."))).ok();
+        let backup_parent =
+            std::fs::canonicalize(backup_path.parent().unwrap_or_else(|| Path::new("."))).ok();
+        let asset_root = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(RADIAL_ASSETS_DIRECTORY);
+        let backup_overwrites_source = source_parent
+            .clone()
+            .zip(backup_parent.clone())
+            .is_some_and(|(source, backup)| {
+                source == backup && self.path.file_name() == backup_path.file_name()
+            });
+        let backup_enters_asset_store = std::fs::canonicalize(asset_root)
+            .ok()
+            .zip(backup_parent)
+            .is_some_and(|(assets, backup)| backup.starts_with(assets));
+        if backup_overwrites_source || backup_enters_asset_store {
+            return Err(StoreError::InvalidBackup);
+        }
+        let disk = match read_bytes(&self.path)? {
+            LoadState::Loaded(bytes) => bytes,
+            LoadState::Missing | LoadState::Empty => Vec::new(),
+        };
+        if sha256_hex(&disk) != expected_disk_sha256 {
+            return Err(StoreError::DiskChanged);
+        }
+        crate::common::atomic_file::save_atomic(&backup_path, &disk).map_err(|source| {
+            StoreError::ApplyIo {
+                path: backup_path.clone(),
+                source: std::io::Error::other(source.to_string()),
+            }
+        })?;
+        let backup_bytes = std::fs::read(&backup_path).map_err(|source| StoreError::ApplyIo {
+            path: backup_path.clone(),
+            source,
+        })?;
+        if sha256_hex(&backup_bytes) != expected_disk_sha256 {
+            return Err(StoreError::InvalidBackup);
+        }
+        self.apply_package_locked(
+            PackageApplyRequest {
+                expected_revision,
+                expected_disk_sha256: Some(expected_disk_sha256.clone()),
+                expected_asset_sha256: Default::default(),
+                decision: PackageApplyDecision::Replace {
+                    backup: BackupReceipt {
+                        path: backup_path,
+                        source_sha256: expected_disk_sha256,
+                    },
+                },
+                plan,
+            },
+            &mut (),
+        )
+    }
+
     /// Production service boundary for a reviewed legacy preview. The same
     /// package transaction, revision checks, backup policy, and media validation
     /// are used as portable imports; preview parsing itself remains read-only.
@@ -373,6 +948,14 @@ impl RadialStore {
             .transaction
             .lock()
             .map_err(|_| StoreError::LockPoisoned)?;
+        self.apply_package_locked(request, hook)
+    }
+
+    fn apply_package_locked(
+        &self,
+        request: PackageApplyRequest,
+        hook: &mut impl PackageApplyHook,
+    ) -> Result<Arc<RadialDocument>, StoreError> {
         let current = self
             .published
             .read()
@@ -839,7 +1422,9 @@ mod tests {
         );
         assert_eq!(
             references_to_skin(&d, &d.skins[0].id).paths,
-            vec!["menus[0].skin_id"]
+            (0..d.menus.len())
+                .map(|index| format!("menus[{index}].skin_id"))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -960,6 +1545,11 @@ mod tests {
 
     fn imported_plan_with_asset(target: &RadialDocument) -> ImportPlan {
         let mut document = RadialDocument::starter();
+        // This fixture represents a self-contained one-menu package, not the
+        // evolving user-facing starter graph.
+        document.menus.truncate(1);
+        document.menus[0].rings[0].cells.truncate(1);
+        document.menus[0].rings[0].cells[0].content = super::super::model::CellContent::Spacer;
         document.default_menu_id = MenuId::new("imported-menu");
         document.menus[0].id = document.default_menu_id.clone();
         document.menus[0].skin_id = SkinId::new("imported-skin");
@@ -995,6 +1585,7 @@ mod tests {
                 package_version: 1,
                 document_path: "radial.json".into(),
                 root_menu_ids: vec![document.default_menu_id.clone()],
+                payload: super::super::package::PackagePayloadKind::MenuGraph,
                 files: vec![],
                 notices: vec![],
             },
@@ -1069,6 +1660,122 @@ mod tests {
         assert!(!asset_can_be_deleted(&saved, &asset.id));
         assert!(!references_to_asset(&saved, &asset.id).paths.is_empty());
         assert_eq!(store.reload().unwrap().revision, saved.revision);
+    }
+
+    #[test]
+    fn persisted_asset_export_roundtrips_and_reports_missing_or_tampered_bytes() {
+        let (directory, store) = fixture();
+        let before = store.snapshot().unwrap();
+        let saved = store
+            .apply_package(PackageApplyRequest {
+                expected_revision: before.revision,
+                expected_disk_sha256: Some(sha256_hex(&[])),
+                expected_asset_sha256: Default::default(),
+                decision: PackageApplyDecision::CreateNew,
+                plan: imported_plan_with_asset(&before),
+            })
+            .unwrap();
+        let root = MenuId::new("imported-menu");
+        let export_snapshot = store.authoring_snapshot().unwrap();
+        let package = store
+            .export_package(
+                std::slice::from_ref(&root),
+                export_snapshot.revision,
+                &export_snapshot.disk_sha256.0,
+            )
+            .unwrap();
+        let files = super::super::package::decode_mlradial(&package).unwrap();
+        let imported =
+            super::super::package::plan_import(files, &RadialDocument::starter()).unwrap();
+        assert_eq!(imported.document.assets.len(), 1);
+        assert_eq!(imported.assets.len(), 1);
+        assert!(matches!(
+            store.export_package(
+                std::slice::from_ref(&root),
+                ConfigRevision(export_snapshot.revision.0 + 1),
+                &export_snapshot.disk_sha256.0,
+            ),
+            Err(StoreError::RevisionConflict { .. })
+        ));
+
+        let asset_path = directory.path().join(RADIAL_ASSETS_DIRECTORY).join(
+            &saved
+                .assets
+                .iter()
+                .find(|asset| asset.id.as_str() == "imported-asset")
+                .unwrap()
+                .relative_path,
+        );
+        std::fs::write(&asset_path, b"tampered").unwrap();
+        assert!(matches!(
+            store.export_package(
+                std::slice::from_ref(&root),
+                export_snapshot.revision,
+                &export_snapshot.disk_sha256.0,
+            ),
+            Err(StoreError::Package(PackageError::ChecksumMismatch(_)))
+        ));
+        std::fs::remove_file(&asset_path).unwrap();
+        assert!(matches!(
+            store.export_package(
+                &[root],
+                export_snapshot.revision,
+                &export_snapshot.disk_sha256.0,
+            ),
+            Err(StoreError::ApplyIo { .. })
+        ));
+    }
+
+    #[test]
+    fn replace_service_requires_current_revision_and_verified_backup_and_rolls_back_failure() {
+        let (directory, store) = fixture();
+        let initial = store.snapshot().unwrap();
+        store.save(initial.revision, (*initial).clone()).unwrap();
+        let before = store.authoring_snapshot().unwrap();
+        let stale_backup = directory.path().join("stale-backup.json");
+        assert!(matches!(
+            store.replace_package_with_backup(
+                imported_plan_with_asset(&before.document),
+                ConfigRevision(before.revision.0.saturating_sub(1)),
+                before.disk_sha256.0.clone(),
+                stale_backup.clone(),
+            ),
+            Err(StoreError::RevisionConflict { .. })
+        ));
+        assert!(!stale_backup.exists());
+
+        let old_disk = std::fs::read(directory.path().join(RADIAL_FILE)).unwrap();
+        let mut invalid = imported_plan_with_asset(&before.document);
+        invalid.document.default_menu_id = MenuId::new("missing-default");
+        let rollback_backup = directory.path().join("rollback-backup.json");
+        assert!(
+            store
+                .replace_package_with_backup(
+                    invalid,
+                    before.revision,
+                    before.disk_sha256.0.clone(),
+                    rollback_backup.clone(),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(RADIAL_FILE)).unwrap(),
+            old_disk
+        );
+        assert_eq!(store.snapshot().unwrap().revision, before.revision);
+        assert_eq!(std::fs::read(rollback_backup).unwrap(), old_disk);
+
+        let backup = directory.path().join("verified-backup.json");
+        let replaced = store
+            .replace_package_with_backup(
+                imported_plan_with_asset(&before.document),
+                before.revision,
+                before.disk_sha256.0,
+                backup.clone(),
+            )
+            .unwrap();
+        assert_eq!(replaced.default_menu_id.as_str(), "imported-menu");
+        assert_eq!(std::fs::read(backup).unwrap(), old_disk);
     }
 
     #[test]
@@ -1158,5 +1865,144 @@ mod tests {
         let replaced = store.apply_package(request).unwrap();
         assert_eq!(replaced.default_menu_id.as_str(), "imported-menu");
         assert_eq!(replaced.revision.0, before.revision.0 + 1);
+    }
+
+    fn authoring_png_addition(id: &str) -> ManagedAssetAddition {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        let digest = sha256_hex(&bytes);
+        ManagedAssetAddition {
+            record: AssetRecord {
+                id: AssetId::new(id),
+                kind: MediaKind::Image,
+                relative_path: format!("{digest}.png"),
+                content_sha256: digest,
+                byte_len: bytes.len() as u64,
+            },
+            bytes: Arc::from(bytes),
+        }
+    }
+
+    #[test]
+    fn authoring_revision_or_sha_conflict_creates_no_partial_asset() {
+        let (directory, store) = fixture();
+        let snapshot = store.authoring_snapshot().unwrap();
+        let addition = authoring_png_addition("editor-asset");
+        let path = directory
+            .path()
+            .join(RADIAL_ASSETS_DIRECTORY)
+            .join(&addition.record.relative_path);
+        let mut candidate = (*snapshot.document).clone();
+        candidate.assets.push(addition.record.clone());
+        assert!(matches!(
+            store.commit_authoring(
+                ConfigRevision(snapshot.revision.0 + 1),
+                &snapshot.disk_sha256,
+                candidate.clone(),
+                AssetMutations {
+                    additions: vec![addition.clone()],
+                    deletions: vec![]
+                },
+            ),
+            Err(StoreError::RevisionConflict { .. })
+        ));
+        assert!(!path.exists());
+        assert!(matches!(
+            store.commit_authoring(
+                snapshot.revision,
+                &DiskSha256("wrong".into()),
+                candidate,
+                AssetMutations {
+                    additions: vec![addition],
+                    deletions: vec![]
+                },
+            ),
+            Err(StoreError::DiskChanged)
+        ));
+        assert!(!path.exists());
+        assert!(!directory.path().join(RADIAL_FILE).exists());
+    }
+
+    #[test]
+    fn authoring_snapshot_never_pairs_retained_runtime_state_with_malformed_disk_bytes() {
+        let (directory, store) = fixture();
+        std::fs::write(directory.path().join(RADIAL_FILE), b"{").unwrap();
+        assert!(matches!(
+            store.authoring_snapshot(),
+            Err(StoreError::Malformed { .. })
+        ));
+        assert_eq!(store.snapshot().unwrap().revision, ConfigRevision(1));
+    }
+
+    #[test]
+    fn authoring_asset_and_document_publish_together_and_return_inverse() {
+        let (directory, store) = fixture();
+        let snapshot = store.authoring_snapshot().unwrap();
+        let addition = authoring_png_addition("editor-asset");
+        let path = directory
+            .path()
+            .join(RADIAL_ASSETS_DIRECTORY)
+            .join(&addition.record.relative_path);
+        let mut candidate = (*snapshot.document).clone();
+        candidate.menus[0].name = "Authored".into();
+        candidate.assets.push(addition.record.clone());
+        let published = store
+            .commit_authoring(
+                snapshot.revision,
+                &snapshot.disk_sha256,
+                candidate,
+                AssetMutations {
+                    additions: vec![addition.clone()],
+                    deletions: vec![],
+                },
+            )
+            .unwrap();
+        assert_eq!(published.snapshot.document.menus[0].name, "Authored");
+        assert!(path.exists());
+        assert_eq!(
+            published.rollback_assets.deletions,
+            vec![addition.record.id.clone()]
+        );
+
+        let mut reverted = (*published.snapshot.document).clone();
+        reverted
+            .assets
+            .retain(|asset| asset.id != addition.record.id);
+        let reverted = store
+            .commit_authoring(
+                published.snapshot.revision,
+                &published.snapshot.disk_sha256,
+                reverted,
+                published.rollback_assets,
+            )
+            .unwrap();
+        assert!(!path.exists());
+        assert!(reverted.snapshot.document.assets.is_empty());
+        assert_eq!(store.reload().unwrap().revision, reverted.snapshot.revision);
+    }
+
+    #[test]
+    fn authoring_delete_is_guarded_by_candidate_references() {
+        let (_directory, store) = fixture();
+        let snapshot = store.authoring_snapshot().unwrap();
+        let addition = authoring_png_addition("editor-asset");
+        let mut candidate = (*snapshot.document).clone();
+        candidate.skins[0].style.values.images.center_image =
+            Override::Value(MediaReference::Managed {
+                asset_id: addition.record.id.clone(),
+            });
+        assert!(matches!(
+            store.commit_authoring(
+                snapshot.revision,
+                &snapshot.disk_sha256,
+                candidate,
+                AssetMutations {
+                    additions: vec![],
+                    deletions: vec![addition.record.id]
+                },
+            ),
+            Err(StoreError::AssetReferenced { .. })
+        ));
     }
 }

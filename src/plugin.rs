@@ -36,6 +36,7 @@ use crate::plugins::network::NetworkPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::processes::ProcessesPlugin;
+use crate::plugins::radial::RadialPlugin;
 use crate::plugins::random::RandomPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::reddit::RedditPlugin;
@@ -419,6 +420,11 @@ impl PluginManager {
         &self.services
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_window_catalog_for_test(&mut self, catalog: Arc<WindowCatalog>) {
+        self.services.window_catalog = catalog;
+    }
+
     pub fn search_generation(&self) -> u64 {
         self.services.search_updates.generation()
     }
@@ -619,6 +625,7 @@ impl PluginManager {
             plugin_settings,
         );
         self.register_with_settings(RandomPlugin::default(), plugin_settings);
+        self.register_with_settings(RadialPlugin, plugin_settings);
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);

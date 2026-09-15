@@ -76,6 +76,21 @@ pub struct RadialAudioSession<O> {
     output: O,
 }
 
+/// Explicit one-shot audition used by the main-owned authoring service. The
+/// caller must supply already validated WAV bytes; previews never call this.
+pub fn audition_wav(session: SessionId, generation: u64, wav: Arc<[u8]>) -> bool {
+    let mut audio = RadialAudioSession::new(
+        session.clone(),
+        generation,
+        PreparedRadialSounds {
+            open: Some(wav),
+            ..Default::default()
+        },
+        SystemRadialAudioOutput,
+    );
+    audio.cue(&session, generation, RadialCue::Open, 0)
+}
+
 impl<O: RadialAudioOutput> RadialAudioSession<O> {
     pub fn new(
         session: SessionId,

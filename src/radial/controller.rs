@@ -6,7 +6,9 @@ use super::bindings::{
 };
 use super::context::{InvocationContext, WindowIdentity};
 use super::dynamic::{FrozenAvailability, FrozenBinding};
-use super::font_cache::{FontLayoutService, FontRequest};
+use super::font_cache::{
+    FontLayoutService, FontRequest, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog,
+};
 use super::geometry::{
     CellLayout, HitShape, LayoutSnapshot, LogicalPoint, PhysicalPoint, PhysicalRect, ScaleFactor,
     layout_document_menu, layout_menu,
@@ -263,6 +265,7 @@ pub struct RadialController {
     release_waits: BTreeMap<InvocationId, BTreeSet<InvocationId>>,
     asset_service: Option<AssetService>,
     font_service: Option<FontLayoutService>,
+    font_catalog: Option<SystemFontCatalog>,
     visible_resource_diagnostics: BTreeSet<String>,
 }
 impl RadialController {
@@ -310,6 +313,7 @@ impl RadialController {
             release_aliases: BTreeMap::new(),
             asset_service: None,
             font_service: None,
+            font_catalog: None,
             visible_resource_diagnostics: BTreeSet::new(),
             release_waits: BTreeMap::new(),
         }
@@ -329,7 +333,19 @@ impl RadialController {
             application_data,
             self.document.media_search_roots.clone(),
         ));
-        self.font_service = Some(FontLayoutService::discover());
+        let catalog = SystemFontCatalog::discover();
+        self.font_service = Some(FontLayoutService::with_catalog(
+            catalog.clone(),
+            MAX_LAYOUT_CACHE_ENTRIES,
+        ));
+        self.font_catalog = Some(catalog);
+    }
+
+    pub fn font_families(&self) -> Vec<String> {
+        self.font_catalog
+            .as_ref()
+            .map(SystemFontCatalog::family_names)
+            .unwrap_or_default()
     }
 
     /// Invalidate every prepared/layout resource owned by the active radial
@@ -1783,6 +1799,11 @@ impl RadialController {
         let (binding, after_action) = alternate.or_else(|| {
             (gesture == ClickGesture::Primary).then(|| (binding.clone(), cell.after_action))
         })?;
+        if matches!(binding, ActionBinding::Contextual { .. }) {
+            // Contextual actions are safe only when supplied by the correlated
+            // preparation reply with its captured WindowTargetIdentity.
+            return None;
+        }
         Some(PreparedCell {
             binding: FrozenBinding::Stable(binding),
             availability: FrozenAvailability::Available,
@@ -2507,15 +2528,11 @@ fn apply_prepared_availability(
                     .iter()
                     .any(|(_, prepared)| prepared.availability == FrozenAvailability::Available);
             let mut diagnostics = Vec::new();
-            if let Some(PreparedCell {
-                availability: FrozenAvailability::Unavailable { reason },
-                ..
-            }) = primary
-            {
+            if let Some(reason) = primary.and_then(|prepared| prepared.availability.reason()) {
                 diagnostics.push(format!("Left: {reason}"));
             }
             for (gesture, prepared) in alternates {
-                if let FrozenAvailability::Unavailable { reason } = &prepared.availability {
+                if let Some(reason) = prepared.availability.reason() {
                     diagnostics.push(format!("{}: {reason}", gesture_label(gesture)));
                 }
             }
@@ -2590,7 +2607,7 @@ fn cell_gesture_control(
         .map(|binding| binding.control)
 }
 
-fn desktop_geometry() -> (PhysicalPoint, PhysicalRect, ScaleFactor) {
+pub(crate) fn desktop_geometry() -> (PhysicalPoint, PhysicalRect, ScaleFactor) {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::Foundation::{POINT, RECT};
@@ -2973,9 +2990,11 @@ mod tests {
         let made = Arc::new(Mutex::new(0));
         let mut document = RadialDocument::starter();
         document.menus[0].rings[0].cells[0].content = CellContent::Action {
-            binding: ActionBinding::Contextual {
-                selector: super::super::model::TargetSelector::LastExternal,
-                action_id: crate::universal_actions::ActionId::new("window.activate"),
+            binding: ActionBinding::Persisted {
+                action: crate::universal_actions::PersistedUniversalActionRef {
+                    target: None,
+                    action_id: crate::universal_actions::ActionId::new("test"),
+                },
             },
         };
         document.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;

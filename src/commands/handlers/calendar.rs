@@ -250,6 +250,18 @@ mod tests {
             self.refocus
         }
     }
+    impl crate::commands::host::RadialCommandHost for Host {
+        fn radial_is_enabled(&self) -> bool {
+            false
+        }
+        fn request_radial_control(
+            &mut self,
+            _: crate::radial::control::RadialControlRequest,
+        ) -> Result<(), String> {
+            Err("radial commands are outside this fixture".into())
+        }
+        fn open_radial_editor(&mut self, _: bool) {}
+    }
     impl CalendarCommandHost for Host {
         fn calendar_dashboard_enabled(&self) -> bool {
             self.dashboard

@@ -4,6 +4,9 @@ use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::settings::NoteViewMode;
 use eframe::egui;
 
+const RADIAL_TAP_HOLD_EXPLANATION: &str = "Release before the threshold to toggle the launcher. Crossing the threshold opens the radial menu; releasing afterward never also toggles the launcher.";
+const RADIAL_LEGACY_TIMING_EXPLANATION: &str = "Legacy timing: the launcher hotkey toggles immediately; named radial commands and configured direct triggers remain available.";
+
 impl SettingsEditor {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_settings;
@@ -18,6 +21,7 @@ impl SettingsEditor {
                     .max_height(settings_content_height)
                     .show(ui, |ui| {
                         self.render_hotkey_section(ui);
+                        self.render_radial_section(ui, app);
                         self.render_general_section(ui, app);
                         self.render_layout_section(ui, app);
                         self.render_dashboard_section(ui, app);
@@ -49,6 +53,175 @@ impl SettingsEditor {
         });
         self.render_optional_hotkey(ui, "Enable quit hotkey", "Quit hotkey", HotkeyKind::Quit);
         self.render_optional_hotkey(ui, "Enable help hotkey", "Help hotkey", HotkeyKind::Help);
+    }
+
+    fn render_radial_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+        use crate::commands::RadialCommandHost;
+        use crate::radial::model::{
+            InteractionMode, RadialSafetyPolicy, SubmenuPresentation, TriggerScope,
+        };
+
+        ui.separator();
+        ui.heading("Radial menus");
+        ui.checkbox(&mut self.radial_enabled, "Enable radial menus");
+        ui.add_enabled_ui(self.radial_enabled, |ui| {
+            ui.checkbox(
+                &mut self.radial_shared_tap_hold,
+                "Share the launcher hotkey between tap and hold",
+            );
+            if self.radial_shared_tap_hold {
+                ui.small(RADIAL_TAP_HOLD_EXPLANATION);
+            } else {
+                ui.small(RADIAL_LEGACY_TIMING_EXPLANATION);
+            }
+            ui.horizontal(|ui| {
+                ui.label("Hold threshold (ms)");
+                ui.add(
+                    egui::DragValue::new(&mut self.radial_hold_threshold_ms)
+                        .clamp_range(
+                            crate::radial::settings::MIN_HOLD_THRESHOLD_MS
+                                ..=crate::radial::settings::MAX_HOLD_THRESHOLD_MS,
+                        )
+                        .speed(10),
+                );
+            });
+
+            let document = crate::gui::radial_published_document();
+            let effective_default = if self.radial_default_menu_id.trim().is_empty() {
+                document.default_menu_id.as_str().to_owned()
+            } else {
+                self.radial_default_menu_id.trim().to_owned()
+            };
+            egui::ComboBox::from_label("Default menu")
+                .selected_text(effective_default)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.radial_default_menu_id,
+                        String::new(),
+                        format!("Document default ({})", document.default_menu_id),
+                    );
+                    for menu in &document.menus {
+                        ui.selectable_value(
+                            &mut self.radial_default_menu_id,
+                            menu.id.as_str().to_owned(),
+                            format!("{} ({})", menu.name, menu.id),
+                        );
+                    }
+                });
+            egui::ComboBox::from_label("New menu interaction")
+                .selected_text(match self.radial_default_interaction {
+                    InteractionMode::StickyClick => "Sticky click",
+                    InteractionMode::ReleaseToSelect => "Release to select",
+                    InteractionMode::HoldAndClick => "Hold and click",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.radial_default_interaction,
+                        InteractionMode::StickyClick,
+                        "Sticky click",
+                    );
+                    ui.selectable_value(
+                        &mut self.radial_default_interaction,
+                        InteractionMode::ReleaseToSelect,
+                        "Release to select",
+                    );
+                    ui.selectable_value(
+                        &mut self.radial_default_interaction,
+                        InteractionMode::HoldAndClick,
+                        "Hold and click",
+                    );
+                });
+            ui.small(
+                "Sticky click keeps the tree available for repeated choices; release-to-select activates on release, and hold-and-click requires an explicit click.",
+            );
+            egui::ComboBox::from_label("New menu submenu behavior")
+                .selected_text(match self.radial_default_submenu_presentation {
+                    SubmenuPresentation::Cascade => "Cascade",
+                    SubmenuPresentation::SameCenter => "Same center",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.radial_default_submenu_presentation,
+                        SubmenuPresentation::Cascade,
+                        "Cascade",
+                    );
+                    ui.selectable_value(
+                        &mut self.radial_default_submenu_presentation,
+                        SubmenuPresentation::SameCenter,
+                        "Same center",
+                    );
+                });
+            egui::ComboBox::from_label("Destructive action safety")
+                .selected_text(match self.radial_safety_policy {
+                    RadialSafetyPolicy::InheritLauncher => "Use launcher setting",
+                    RadialSafetyPolicy::AlwaysConfirmDestructive => "Always confirm",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.radial_safety_policy,
+                        RadialSafetyPolicy::InheritLauncher,
+                        "Use launcher setting",
+                    );
+                    ui.selectable_value(
+                        &mut self.radial_safety_policy,
+                        RadialSafetyPolicy::AlwaysConfirmDestructive,
+                        "Always confirm destructive radial actions",
+                    );
+                });
+            let global_inputs = ui.checkbox(
+                &mut self.radial_global_item_inputs,
+                "Allow process-wide radial item shortcuts and hotstrings",
+            );
+            if global_inputs.changed() && !self.radial_global_item_inputs {
+                self.radial_default_item_input_scope = TriggerScope::MenuLocal;
+            }
+            egui::ComboBox::from_label("New item input scope")
+                .selected_text(match self.radial_default_item_input_scope {
+                    TriggerScope::MenuLocal => "Current menu only",
+                    TriggerScope::Global => "Process-wide",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.radial_default_item_input_scope,
+                        TriggerScope::MenuLocal,
+                        "Current menu only",
+                    );
+                    ui.add_enabled_ui(self.radial_global_item_inputs, |ui| {
+                        ui.selectable_value(
+                            &mut self.radial_default_item_input_scope,
+                            TriggerScope::Global,
+                            "Process-wide",
+                        );
+                    });
+                });
+
+            ui.small(format!(
+                "Current shared trigger: {} ({})",
+                self.hotkey,
+                if self.radial_shared_tap_hold {
+                    "tap launcher / hold radial"
+                } else {
+                    "legacy launcher timing"
+                }
+            ));
+            let issues = self.radial_validation_issues(&document);
+            if issues.is_empty() {
+                ui.small("No conflicts with launcher, quit, help, Screen Draw, or global radial inputs.");
+            } else {
+                for issue in issues {
+                    ui.colored_label(egui::Color32::YELLOW, issue.message);
+                }
+            }
+            ui.small("Back returns from a submenu; Esc or `radial close` closes the radial tree.");
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Edit menus...").clicked() {
+                RadialCommandHost::open_radial_editor(app, false);
+            }
+            if ui.button("Edit skins...").clicked() {
+                RadialCommandHost::open_radial_editor(app, true);
+            }
+        });
     }
 
     fn render_optional_hotkey(
@@ -573,6 +746,19 @@ impl SettingsEditor {
                     serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
                 );
             });
+    }
+}
+
+#[cfg(test)]
+mod radial_language_tests {
+    use super::*;
+
+    #[test]
+    fn tap_hold_language_states_release_crossing_and_legacy_semantics() {
+        assert!(RADIAL_TAP_HOLD_EXPLANATION.contains("Release before the threshold"));
+        assert!(RADIAL_TAP_HOLD_EXPLANATION.contains("Crossing the threshold"));
+        assert!(RADIAL_TAP_HOLD_EXPLANATION.contains("never also toggles"));
+        assert!(RADIAL_LEGACY_TIMING_EXPLANATION.contains("toggles immediately"));
     }
 }
 

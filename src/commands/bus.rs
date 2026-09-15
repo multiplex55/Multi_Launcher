@@ -2,8 +2,8 @@ use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcom
 use crate::commands::handlers::{
     handle_calendar, handle_clipboard_modify, handle_crop, handle_data, handle_diff,
     handle_file_search, handle_headless_gui, handle_launcher, handle_link, handle_mouse_gesture,
-    handle_multi_manager, handle_note, handle_query, handle_screen_draw, handle_screenshot,
-    handle_simple_dialog, handle_todo,
+    handle_multi_manager, handle_note, handle_query, handle_radial, handle_screen_draw,
+    handle_screenshot, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -26,6 +26,7 @@ impl CommandBus {
         }
         match &invocation.command {
             Command::Launcher(command) => Ok(handle_launcher(host, command)),
+            Command::Radial(command) => handle_radial(host, command),
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::Calendar(command) => Ok(handle_calendar(host, command)),
@@ -69,8 +70,9 @@ mod tests {
     use crate::actions::Action;
     use crate::commands::{
         ActivationSource, CalendarCommandHost, CropCommandHost, DialogCommandHost,
-        HeadlessCommandHost, LauncherCommand, LauncherCommandHost, MultiManagerCommandHost,
-        NoteCommandHost, QueryCommand, QueryPolicy, TodoCommandHost, VisibilityPolicy,
+        HeadlessCommandHost, HistoryPolicy, LauncherCommand, LauncherCommandHost,
+        MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy, RadialCommandHost,
+        TodoCommandHost, VisibilityPolicy,
     };
 
     #[derive(Default)]
@@ -87,12 +89,27 @@ mod tests {
         screen_draw_calls: Vec<crate::commands::ScreenDrawCommand>,
         clipboard_modify_calls: usize,
         data_calls: Vec<&'static str>,
+        radial_calls: usize,
     }
 
     impl LauncherCommandHost for FakeHost {
         fn launcher_is_visible(&self) -> bool {
             self.visible
         }
+    }
+
+    impl RadialCommandHost for FakeHost {
+        fn radial_is_enabled(&self) -> bool {
+            true
+        }
+        fn request_radial_control(
+            &mut self,
+            _: crate::radial::control::RadialControlRequest,
+        ) -> Result<(), String> {
+            self.radial_calls += 1;
+            Ok(())
+        }
+        fn open_radial_editor(&mut self, _: bool) {}
     }
 
     impl DialogCommandHost for FakeHost {
@@ -396,6 +413,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(query.query, QueryPolicy::Set("abc".into()));
+
+        let radial = CommandBus
+            .dispatch(
+                &invocation(Command::Radial(crate::commands::RadialCommand::ShowDefault)),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            radial,
+            CommandOutcome {
+                history: HistoryPolicy::Record,
+                ..CommandOutcome::default()
+            }
+        );
+        assert_eq!(host.radial_calls, 1);
 
         CommandBus
             .dispatch(

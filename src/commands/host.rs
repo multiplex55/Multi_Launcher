@@ -18,6 +18,15 @@ pub trait LauncherCommandHost {
     fn launcher_is_visible(&self) -> bool;
 }
 
+pub trait RadialCommandHost {
+    fn radial_is_enabled(&self) -> bool;
+    fn request_radial_control(
+        &mut self,
+        request: crate::radial::control::RadialControlRequest,
+    ) -> Result<(), String>;
+    fn open_radial_editor(&mut self, skins: bool);
+}
+
 pub trait DialogCommandHost {
     fn open_help_dialog(&mut self);
     fn open_timer_dialog(&mut self);
@@ -167,6 +176,7 @@ pub trait HeadlessCommandHost {
 
 pub trait CommandHost:
     LauncherCommandHost
+    + RadialCommandHost
     + DialogCommandHost
     + CropCommandHost
     + CalendarCommandHost
@@ -186,6 +196,7 @@ pub trait CommandHost:
 
 impl<T> CommandHost for T where
     T: LauncherCommandHost
+        + RadialCommandHost
         + DialogCommandHost
         + CropCommandHost
         + CalendarCommandHost

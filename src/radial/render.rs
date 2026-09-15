@@ -703,7 +703,7 @@ mod tests {
             matches!(primitive, VectorPrimitive::Text { text, .. } if text == "Favorites")
         }));
         assert!(scene.primitives.iter().any(|primitive| {
-            matches!(primitive, VectorPrimitive::Text { text, size, .. } if text == "Recent" && *size == 22.0)
+            matches!(primitive, VectorPrimitive::Text { text, size, .. } if text == "Apps" && *size == 22.0)
         }));
     }
 

@@ -75,6 +75,7 @@ fn execute_with_external(
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
+        Command::Radial(_) => anyhow::bail!("radial commands require the launcher interface"),
         Command::ScreenDraw(_) => {
             anyhow::bail!("screen draw commands require the launcher interface")
         }

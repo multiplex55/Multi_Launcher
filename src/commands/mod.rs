@@ -16,7 +16,8 @@ pub use host::{
     CalendarCommandHost, ClipboardModifyCommandHost, CommandHost, CropCommandHost, DataCommandHost,
     DialogCommandHost, DiffCommandHost, FileSearchCommandHost, HeadlessCommandHost,
     LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, TodoCommandHost,
+    RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult,
+    TodoCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

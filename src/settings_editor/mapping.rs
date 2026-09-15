@@ -56,6 +56,20 @@ impl SettingsEditor {
             help_hotkey,
             help_hotkey_valid,
             last_valid_help_hotkey,
+            radial_enabled: settings.radial.enabled,
+            radial_shared_tap_hold: settings.radial.shared_tap_hold,
+            radial_hold_threshold_ms: settings.radial.hold_threshold_ms,
+            radial_default_menu_id: settings
+                .radial
+                .default_menu_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_default(),
+            radial_default_interaction: settings.radial.default_interaction,
+            radial_default_submenu_presentation: settings.radial.default_submenu_presentation,
+            radial_safety_policy: settings.radial.safety_policy,
+            radial_default_item_input_scope: settings.radial.default_item_input_scope,
+            radial_global_item_inputs: settings.radial.global_item_inputs,
             debug_logging: settings.debug_logging,
             show_toasts: settings.enable_toasts,
             show_inline_errors: settings.show_inline_errors,
@@ -326,7 +340,7 @@ impl SettingsEditor {
             },
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
-            radial: current.radial.clone(),
+            radial: self.radial_settings(),
         }
     }
 }
@@ -363,6 +377,26 @@ mod tests {
         let editor = SettingsEditor::new(&initial);
         let saved = editor.to_settings(&initial);
         assert_eq!(saved.query_results_layout, initial.query_results_layout);
+    }
+
+    #[test]
+    fn every_radial_setting_round_trips_through_explicit_editor_fields() {
+        let mut initial = Settings::default();
+        initial.radial.enabled = false;
+        initial.radial.shared_tap_hold = false;
+        initial.radial.hold_threshold_ms = 725;
+        initial.radial.default_menu_id = Some(crate::radial::model::MenuId::new("work"));
+        initial.radial.default_interaction = crate::radial::model::InteractionMode::ReleaseToSelect;
+        initial.radial.default_submenu_presentation =
+            crate::radial::model::SubmenuPresentation::SameCenter;
+        initial.radial.safety_policy =
+            crate::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
+        initial.radial.default_item_input_scope = crate::radial::model::TriggerScope::Global;
+        initial.radial.global_item_inputs = true;
+
+        let editor = SettingsEditor::from_settings(&initial);
+        let restored = editor.to_settings(&Settings::default());
+        assert_eq!(restored.radial, initial.radial);
     }
 
     #[test]

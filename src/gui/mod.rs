@@ -36,6 +36,7 @@ mod notes_dialog;
 mod numpad_navigation;
 mod query_history;
 mod radial_actions;
+mod radial_editor;
 mod render;
 mod screen_draw_toolbar;
 mod screenshot_editor;
@@ -50,6 +51,7 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod volume_data;
@@ -181,8 +183,12 @@ use url::Url;
 use watch::watch_file;
 
 pub use crate::commands::ActivationSource;
+pub use crate::radial::authoring::RadialAuthoringSession;
+pub(crate) use state::{
+    AuthoringActionRevalidation, PendingConfirmCommand, PendingUniversalActionInvocation,
+    UiErrorEvent,
+};
 pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, VirtualDesktopGuiCompletion, WatchEvent};
-pub(crate) use state::{PendingConfirmCommand, PendingUniversalActionInvocation, UiErrorEvent};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
@@ -226,6 +232,50 @@ fn normalize_static_window_config(
 }
 
 static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static RADIAL_AUTHORING_CLIENT: Lazy<Mutex<Option<crate::radial::authoring::AuthoringClient>>> =
+    Lazy::new(|| Mutex::new(None));
+static RADIAL_CONTROL_CLIENT: Lazy<Mutex<Option<crate::radial::control::RadialControlClient>>> =
+    Lazy::new(|| Mutex::new(None));
+static RADIAL_PUBLISHED_DOCUMENT: Lazy<Mutex<Arc<crate::radial::model::RadialDocument>>> =
+    Lazy::new(|| Mutex::new(Arc::new(crate::radial::model::RadialDocument::starter())));
+
+/// Installs the GUI side of the main-owned radial authoring service. Editors
+/// clone this narrow client; they never construct or write a `RadialStore`.
+pub fn install_radial_authoring_client(client: crate::radial::authoring::AuthoringClient) {
+    if let Ok(mut slot) = RADIAL_AUTHORING_CLIENT.lock() {
+        *slot = Some(client);
+    }
+}
+
+pub fn radial_authoring_client() -> Option<crate::radial::authoring::AuthoringClient> {
+    RADIAL_AUTHORING_CLIENT.lock().ok()?.clone()
+}
+
+/// Installs the GUI side of the main-owned radial runtime control service.
+pub fn install_radial_control_client(client: crate::radial::control::RadialControlClient) {
+    if let Ok(mut slot) = RADIAL_CONTROL_CLIENT.lock() {
+        *slot = Some(client);
+    }
+}
+
+fn radial_control_client() -> Option<crate::radial::control::RadialControlClient> {
+    RADIAL_CONTROL_CLIENT.lock().ok()?.clone()
+}
+
+/// Publishes the immutable settings/diagnostic view; process main remains the
+/// sole store and runtime owner.
+pub fn install_radial_published_document(document: Arc<crate::radial::model::RadialDocument>) {
+    if let Ok(mut slot) = RADIAL_PUBLISHED_DOCUMENT.lock() {
+        *slot = document;
+    }
+}
+
+pub(crate) fn radial_published_document() -> Arc<crate::radial::model::RadialDocument> {
+    RADIAL_PUBLISHED_DOCUMENT
+        .lock()
+        .map(|document| Arc::clone(&document))
+        .unwrap_or_else(|_| Arc::new(crate::radial::model::RadialDocument::starter()))
+}
 
 pub fn register_event_sender(tx: Sender<WatchEvent>) {
     if let Ok(mut guard) = APP_EVENT_TXS.lock() {
@@ -377,6 +427,7 @@ pub enum Panel {
     Plugins,
     MultiManagerDialog,
     MultiManagerSettingsDialog,
+    RadialEditor,
 }
 
 #[derive(Default)]
@@ -424,6 +475,7 @@ struct PanelStates {
     plugins: bool,
     multi_manager_dialog: bool,
     multi_manager_settings_dialog: bool,
+    radial_editor: bool,
 }
 
 /// Primary GUI state for Multi Launcher.
@@ -505,6 +557,7 @@ pub struct LauncherApp {
     pub launcher_hwnd: Option<usize>,
     pub multi_manager_dialog: MultiManagerDialog,
     pub multi_manager_settings_dialog: MultiManagerSettingsDialog,
+    radial_editor: radial_editor::RadialEditorState,
     /// Hold watchers so the `RecommendedWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
@@ -654,6 +707,7 @@ pub struct LauncherApp {
     pub preserve_command: bool,
     pub clear_query_after_run: bool,
     pub require_confirm_destructive: bool,
+    pub(crate) radial_feature_settings: crate::radial::model::RadialFeatureSettings,
     pub query_autocomplete: bool,
     pub net_refresh: f32,
     pub net_unit: crate::settings::NetUnit,
@@ -1644,6 +1698,7 @@ impl LauncherApp {
             launcher_hwnd: None,
             multi_manager_dialog: MultiManagerDialog::default(),
             multi_manager_settings_dialog: MultiManagerSettingsDialog::default(),
+            radial_editor: radial_editor::RadialEditorState::default(),
             watchers,
             dashboard,
             dashboard_runtime,
@@ -1801,6 +1856,7 @@ impl LauncherApp {
             preserve_command: settings.preserve_command,
             clear_query_after_run: settings.clear_query_after_run,
             require_confirm_destructive: settings.require_confirm_destructive,
+            radial_feature_settings: settings.radial.clone(),
             query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
@@ -2312,7 +2368,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 43] = [
+    const TRACKED_PANELS: [Panel; 44] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2356,6 +2412,7 @@ impl LauncherApp {
         Panel::Plugins,
         Panel::MultiManagerDialog,
         Panel::MultiManagerSettingsDialog,
+        Panel::RadialEditor,
     ];
 
     fn is_panel_open(&self, panel: Panel) -> bool {
@@ -2403,6 +2460,7 @@ impl LauncherApp {
             Panel::Plugins => self.show_plugins,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open,
+            Panel::RadialEditor => self.radial_editor.open,
         }
     }
 
@@ -2641,6 +2699,13 @@ impl LauncherApp {
                 self.multi_manager_settings_dialog.open = false;
                 self.panel_states.multi_manager_settings_dialog = false;
             }
+            Panel::RadialEditor => {
+                self.radial_editor.request_close();
+                self.panel_states.radial_editor = self.radial_editor.open;
+                if self.radial_editor.open {
+                    self.panel_stack.push(Panel::RadialEditor);
+                }
+            }
         }
         true
     }
@@ -2830,6 +2895,10 @@ impl LauncherApp {
                 self.multi_manager_settings_dialog.open = false;
                 self.panel_states.multi_manager_settings_dialog = false;
             }
+            Panel::RadialEditor => {
+                self.radial_editor.force_close();
+                self.panel_states.radial_editor = false;
+            }
         }
         self.panel_stack.retain(|p| *p != panel);
     }
@@ -2885,6 +2954,7 @@ impl LauncherApp {
             Panel::Plugins => self.show_plugins = true,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open = true,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open = true,
+            Panel::RadialEditor => self.radial_editor.open(),
         }
         if !self.panel_stack.contains(&panel) {
             self.panel_stack.push(panel);
@@ -2907,7 +2977,18 @@ impl LauncherApp {
     fn toggle_pin(&mut self, panel: Panel) {
         if self.pinned_panels.contains(&panel) {
             self.pinned_panels.retain(|p| *p != panel);
-            self.force_close_panel(panel);
+            if panel == Panel::RadialEditor {
+                // Unpinning is a user close request, not authority to discard
+                // an authoring draft. Dirty state must pass through the
+                // editor's explicit save/discard/keep-editing prompt.
+                self.radial_editor.request_close();
+                self.panel_states.radial_editor = self.radial_editor.open;
+                if self.radial_editor.open && !self.panel_stack.contains(&panel) {
+                    self.panel_stack.push(panel);
+                }
+            } else {
+                self.force_close_panel(panel);
+            }
         } else {
             self.pinned_panels.push(panel);
             self.focus_panel(panel);
@@ -2989,6 +3070,7 @@ impl LauncherApp {
             multi_manager_settings_dialog,
             Panel::MultiManagerSettingsDialog
         );
+        check!(radial_editor, Panel::RadialEditor);
     }
 }
 
@@ -4652,6 +4734,24 @@ mod tests {
         app.update_panel_stack();
         assert!(app.close_front_dialog());
         assert!(!app.clipboard_dialog.open);
+    }
+
+    #[test]
+    fn unpinning_dirty_radial_editor_requires_explicit_close_confirmation() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.radial_editor.open_test_snapshot();
+        app.radial_editor.make_dirty_for_test();
+        app.pinned_panels.push(Panel::RadialEditor);
+        app.panel_stack.push(Panel::RadialEditor);
+
+        app.toggle_pin(Panel::RadialEditor);
+
+        assert!(!app.pinned_panels.contains(&Panel::RadialEditor));
+        assert!(app.radial_editor.open);
+        assert!(app.radial_editor.is_dirty());
+        assert!(app.radial_editor.has_close_prompt());
+        assert!(app.panel_stack.contains(&Panel::RadialEditor));
     }
 
     #[test]

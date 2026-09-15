@@ -839,6 +839,7 @@ mod tests {
         FrozenRadialEntry {
             id: FrozenEntryId(id.into()),
             label: id.into(),
+            kind: super::super::dynamic::FrozenEntryKind::Action,
             binding: None,
             availability: FrozenAvailability::Available,
             history_query: String::new(),

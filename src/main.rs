@@ -6,18 +6,26 @@ use multi_launcher::common::persistence::PersistenceError;
 use multi_launcher::gui::LauncherApp;
 use multi_launcher::hotkey::launcher_invocation::{
     InvocationConfig, LauncherInvocationService, PriorityOwner, RelatedAction, RelatedBinding,
-    RouteHandoff, exclusive_owners, install_exclusive_wake,
+    RouteHandoff, ServiceNotice, exclusive_owners, install_exclusive_wake,
 };
-use multi_launcher::hotkey::{HotkeyTrigger, parse_hotkey};
+use multi_launcher::hotkey::{HotkeyListener, HotkeyTrigger, parse_hotkey};
 use multi_launcher::platform::{
     app_data::AppDataRoot,
     single_instance::{SingleInstanceAcquire, SingleInstanceGuard},
 };
 use multi_launcher::plugin::PluginManager;
+use multi_launcher::radial::authoring::{
+    AuthoringReply, AuthoringRequest, authoring_control_service_with_wake,
+};
+use multi_launcher::radial::control::{
+    RadialControlMainEndpoint, RadialControlRequest, radial_control_service_with_wake, resolve_menu,
+};
 use multi_launcher::radial::controller::{ControllerEvent, RadialController};
+use multi_launcher::radial::invocation::InvocationIntent;
 use multi_launcher::radial::item_input::compile_item_inputs;
-use multi_launcher::radial::model::{InteractionMode, RadialDocument};
+use multi_launcher::radial::model::{InteractionMode, InvocationId, RadialDocument};
 use multi_launcher::radial::store::{ExternalReloadOutcome, RadialStore};
+use multi_launcher::radial::validation::validate as validate_radial_document;
 use multi_launcher::radial::watch::RadialConfigWatcher;
 use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
 use multi_launcher::settings::Settings;
@@ -287,6 +295,7 @@ fn radial_invocation_config(
     shared_invocation: bool,
     generation: u64,
 ) -> InvocationConfig {
+    let default_menu_id = settings.radial.effective_default_menu_id(document);
     InvocationConfig {
         launcher_enabled: shared_invocation,
         hotkey: settings.hotkey(),
@@ -294,12 +303,12 @@ fn radial_invocation_config(
         generation,
         // Each admitted invocation replaces this seed with its correlated ID.
         context_token: 0,
-        menu_id: document.default_menu_id.clone(),
+        menu_id: default_menu_id.clone(),
         interaction: document
             .menus
             .iter()
-            .find(|menu| menu.id == document.default_menu_id)
-            .map_or(InteractionMode::StickyClick, |menu| menu.interaction),
+            .find(|menu| menu.id == default_menu_id)
+            .map_or(settings.radial.default_interaction, |menu| menu.interaction),
         accept_external_injected: true,
         item_inputs: radial_item_inputs(settings, document),
     }
@@ -397,6 +406,61 @@ struct PendingLauncherRoute {
     handoff: RouteHandoff,
     start_legacy: bool,
     stop_service: bool,
+}
+
+struct RadialRoutePlan {
+    shared_invocation: bool,
+    config: InvocationConfig,
+    related: Vec<RelatedBinding>,
+    start_legacy: bool,
+    stop_service: bool,
+}
+
+fn radial_route_plan(
+    settings: &Settings,
+    document: &RadialDocument,
+    generation: u64,
+) -> RadialRoutePlan {
+    let shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
+    RadialRoutePlan {
+        shared_invocation,
+        config: radial_invocation_config(settings, document, shared_invocation, generation),
+        related: if settings.radial.enabled {
+            related_launcher_bindings(settings, document, shared_invocation)
+        } else {
+            Vec::new()
+        },
+        start_legacy: !shared_invocation,
+        stop_service: !settings.radial.enabled,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fail_closed_radial_route(
+    settings: &mut Settings,
+    control: &RadialControlMainEndpoint,
+    controller: &mut RadialController,
+    service: &mut Option<LauncherInvocationService>,
+    listener: &mut HotkeyListener,
+    launcher: &Arc<HotkeyTrigger>,
+    quit: Option<&Arc<HotkeyTrigger>>,
+    help: Option<&Arc<HotkeyTrigger>>,
+    screen_draw: Option<&Arc<HotkeyTrigger>>,
+    emergency: Option<&Arc<HotkeyTrigger>>,
+    event_tx: &Sender<()>,
+) {
+    settings.radial.enabled = false;
+    control.set_enabled(false);
+    controller.disable();
+    if let Some(mut active) = service.take() {
+        active.stop();
+    }
+    listener.stop();
+    *listener = HotkeyTrigger::start_listener(
+        legacy_listener_triggers(false, launcher, quit, help, screen_draw, emergency),
+        "main",
+        event_tx.clone(),
+    );
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -706,6 +770,55 @@ fn main() -> anyhow::Result<()> {
             radial_store.snapshot()
         })
         .map_err(anyhow::Error::msg)?;
+    let startup_radial_issues = multi_launcher::radial::settings::validate(
+        &settings.radial,
+        &radial_document,
+        &reserved_launcher_hotkeys(&settings),
+    );
+    if !startup_radial_issues.is_empty() {
+        settings.radial.enabled = false;
+        shared_invocation = false;
+        listener.stop();
+        listener = HotkeyTrigger::start_listener(
+            legacy_listener_triggers(
+                false,
+                &trigger,
+                quit_trigger.as_ref(),
+                help_trigger.as_ref(),
+                screen_draw_trigger.as_ref(),
+                emergency_trigger.as_ref(),
+            ),
+            "main",
+            event_tx.clone(),
+        );
+        for issue in startup_radial_issues {
+            tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings at startup; radial runtime disabled fail-closed");
+        }
+    }
+    multi_launcher::gui::install_radial_published_document(Arc::clone(&radial_document));
+    let authoring_wake = event_tx.clone();
+    let (authoring_client, authoring_endpoint) =
+        authoring_control_service_with_wake(Some(Arc::new(move || {
+            let _ = authoring_wake.send(());
+        })));
+    let mut native_preview =
+        multi_launcher::radial::authoring::native_preview::NativePreviewCoordinator::new(
+            event_tx.clone(),
+        );
+    multi_launcher::gui::install_radial_authoring_client(authoring_client);
+    let control_wake = event_tx.clone();
+    let (radial_control_client, radial_control_endpoint) = radial_control_service_with_wake(
+        settings.radial.enabled,
+        Some(Arc::new(move || {
+            let _ = control_wake.send(());
+        })),
+    );
+    multi_launcher::gui::install_radial_control_client(radial_control_client);
+    // Keep command-originated controller correlation disjoint from IDs owned
+    // by the native invocation service.
+    let mut radial_command_invocation_id = 1u64 << 63;
+    let mut authoring_preview_document: Option<Arc<RadialDocument>> = None;
+    let mut authoring_editor_session = None;
     let radial_watcher = match RadialConfigWatcher::start(app_data_root.path(), event_tx.clone()) {
         Ok(watcher) => Some(watcher),
         Err(error) => {
@@ -720,7 +833,8 @@ fn main() -> anyhow::Result<()> {
     );
     radial_controller.configure_resources(app_data_root.path().to_path_buf());
     let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
-    let mut invocation_service = if settings.radial.enabled {
+    let mut invocation_service = None;
+    if settings.radial.enabled {
         match LauncherInvocationService::start(
             radial_invocation_config(
                 &settings,
@@ -740,30 +854,25 @@ fn main() -> anyhow::Result<()> {
             }),
             event_tx.clone(),
         ) {
-            Ok(service) => Some(service),
+            Ok(service) => invocation_service = Some(service),
             Err(error) => {
-                tracing::error!(%error, "shared radial invocation unavailable; retaining legacy launcher hotkey");
-                listener.stop();
-                let mut fallback = vec![trigger.clone()];
-                if let Some(v) = &quit_trigger {
-                    fallback.push(v.clone())
-                }
-                if let Some(v) = &help_trigger {
-                    fallback.push(v.clone())
-                }
-                if let Some(v) = &screen_draw_trigger {
-                    fallback.push(v.clone())
-                }
-                if let Some(v) = &emergency_trigger {
-                    fallback.push(v.clone())
-                }
-                listener = HotkeyTrigger::start_listener(fallback, "main", event_tx.clone());
-                None
+                tracing::error!(%error, "shared radial invocation unavailable; disabling radial runtime and restoring legacy launcher hotkey");
+                fail_closed_radial_route(
+                    &mut settings,
+                    &radial_control_endpoint,
+                    &mut radial_controller,
+                    &mut invocation_service,
+                    &mut listener,
+                    &trigger,
+                    quit_trigger.as_ref(),
+                    help_trigger.as_ref(),
+                    screen_draw_trigger.as_ref(),
+                    emergency_trigger.as_ref(),
+                    &event_tx,
+                );
             }
         }
-    } else {
-        None
-    };
+    }
 
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
@@ -826,44 +935,77 @@ fn main() -> anyhow::Result<()> {
                     tracing::debug!("ignored radial document self-save/unchanged echo");
                 }
                 Ok(ExternalReloadOutcome::Published(document)) => {
+                    native_preview.cancel_all();
                     radial_generation_replaced = true;
                     radial_document = document;
+                    multi_launcher::gui::install_radial_published_document(Arc::clone(
+                        &radial_document,
+                    ));
+                    if let (Some(editor_session), Ok(snapshot)) =
+                        (authoring_editor_session, radial_store.authoring_snapshot())
+                    {
+                        let _ =
+                            authoring_endpoint
+                                .reply_tx
+                                .send(AuthoringReply::ExternalPublished {
+                                    editor_session,
+                                    snapshot,
+                                });
+                    }
                     radial_controller.replace_document(Arc::clone(&radial_document));
                     refresh_macro_hotkey_reservations(&settings, &radial_document);
                     settings_generation = settings_generation.checked_add(1).unwrap_or(1);
-                    let config = radial_invocation_config(
-                        &settings,
+                    let issues = multi_launcher::radial::settings::validate(
+                        &settings.radial,
                         &radial_document,
-                        shared_invocation,
-                        settings_generation,
+                        &reserved_launcher_hotkeys(&settings),
                     );
-                    let related = if settings.radial.enabled {
-                        related_launcher_bindings(&settings, &radial_document, shared_invocation)
-                    } else {
-                        Vec::new()
-                    };
+                    if !issues.is_empty() {
+                        settings.radial.enabled = false;
+                        radial_control_endpoint.set_enabled(false);
+                        radial_controller.disable();
+                        for issue in issues {
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(
+                                    issue.message,
+                                ),
+                            );
+                        }
+                    }
+                    let route_plan =
+                        radial_route_plan(&settings, &radial_document, settings_generation);
                     if let Some(service) = invocation_service.as_ref() {
-                        match service.begin_route_handoff(config, related) {
+                        match service.begin_route_handoff(route_plan.config, route_plan.related) {
                             Ok(handoff) => {
                                 pending_launcher_route = Some(PendingLauncherRoute {
                                     settings_generation,
                                     handoff,
-                                    start_legacy: false,
-                                    stop_service: false,
+                                    start_legacy: route_plan.start_legacy,
+                                    stop_service: route_plan.stop_service,
                                 });
                             }
                             Err(error) => {
                                 tracing::error!(%error, "radial trigger reload failed closed");
-                                if let Some(mut service) = invocation_service.take() {
-                                    service.stop();
-                                }
+                                fail_closed_radial_route(
+                                    &mut settings,
+                                    &radial_control_endpoint,
+                                    &mut radial_controller,
+                                    &mut invocation_service,
+                                    &mut listener,
+                                    &trigger,
+                                    quit_trigger.as_ref(),
+                                    help_trigger.as_ref(),
+                                    screen_draw_trigger.as_ref(),
+                                    emergency_trigger.as_ref(),
+                                    &event_tx,
+                                );
                             }
                         }
                     } else if settings.radial.enabled {
                         let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
                         match LauncherInvocationService::start(
-                            config,
-                            related,
+                            route_plan.config,
+                            route_plan.related,
                             Arc::new(move || {
                                 if owner_bridge.is_active() {
                                     PriorityOwner::ScreenDrawRecovery
@@ -877,9 +1019,36 @@ fn main() -> anyhow::Result<()> {
                         ) {
                             Ok(service) => invocation_service = Some(service),
                             Err(error) => {
-                                tracing::error!(%error, "radial trigger service restart failed closed")
+                                tracing::error!(%error, "radial trigger service restart failed closed");
+                                fail_closed_radial_route(
+                                    &mut settings,
+                                    &radial_control_endpoint,
+                                    &mut radial_controller,
+                                    &mut invocation_service,
+                                    &mut listener,
+                                    &trigger,
+                                    quit_trigger.as_ref(),
+                                    help_trigger.as_ref(),
+                                    screen_draw_trigger.as_ref(),
+                                    emergency_trigger.as_ref(),
+                                    &event_tx,
+                                );
                             }
                         }
+                    } else {
+                        listener.stop();
+                        listener = HotkeyTrigger::start_listener(
+                            legacy_listener_triggers(
+                                false,
+                                &trigger,
+                                quit_trigger.as_ref(),
+                                help_trigger.as_ref(),
+                                screen_draw_trigger.as_ref(),
+                                emergency_trigger.as_ref(),
+                            ),
+                            "main",
+                            event_tx.clone(),
+                        );
                     }
                     let _ = multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialConfigDiagnostic(None),
@@ -899,6 +1068,471 @@ fn main() -> anyhow::Result<()> {
             let _ =
                 multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
             radial_controller.invalidate_resources();
+        }
+
+        while let Ok(request) = authoring_endpoint.request_rx.try_recv() {
+            let request_id = request.id();
+            let request_generation = request.generation();
+            let editor_session = request.editor_session();
+            authoring_editor_session = Some(editor_session);
+            let reply = match request {
+                AuthoringRequest::Snapshot { .. } => radial_store
+                    .authoring_snapshot()
+                    .map(|snapshot| AuthoringReply::Snapshot {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        snapshot,
+                    })
+                    .unwrap_or_else(|error| AuthoringReply::Failed {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        message: error.to_string(),
+                    }),
+                AuthoringRequest::ExportPackage {
+                    roots,
+                    expected_revision,
+                    expected_disk_sha256,
+                    ..
+                } => radial_store
+                    .export_package(&roots, expected_revision, &expected_disk_sha256.0)
+                    .map(|bytes| AuthoringReply::PackageExported {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        bytes: bytes.into(),
+                    })
+                    .unwrap_or_else(|error| AuthoringReply::Failed {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        message: error.to_string(),
+                    }),
+                AuthoringRequest::ExportSkin {
+                    skin_id,
+                    expected_revision,
+                    expected_disk_sha256,
+                    ..
+                } => radial_store
+                    .export_skin_bundle(&skin_id, expected_revision, &expected_disk_sha256.0)
+                    .map(|bytes| AuthoringReply::PackageExported {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        bytes: bytes.into(),
+                    })
+                    .unwrap_or_else(|error| AuthoringReply::Failed {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        message: error.to_string(),
+                    }),
+                AuthoringRequest::AuditionManagedAsset { asset_id, .. } => {
+                    let mut assets = multi_launcher::radial::assets::AssetService::new(
+                        app_data_root.path().to_path_buf(),
+                        radial_document.media_search_roots.clone(),
+                    );
+                    let reference =
+                        multi_launcher::radial::model::MediaReference::Managed { asset_id };
+                    let result = assets
+                        .prepare(
+                            &reference,
+                            multi_launcher::radial::model::MediaKind::Sound,
+                            &radial_document.assets,
+                            multi_launcher::radial::assets::PrepareVariant {
+                                effective_style: 0,
+                                dpi_milli: 1_000,
+                                logical_width_milli: 1_000,
+                                logical_height_milli: 1_000,
+                                quality: multi_launcher::radial::model::RenderingQuality::Balanced,
+                            },
+                        )
+                        .and_then(|prepared| match &*prepared.media {
+                            multi_launcher::radial::assets::PreparedMedia::Sound(sound) => {
+                                multi_launcher::radial::audio::audition_wav(
+                                    multi_launcher::radial::model::SessionId::new(format!(
+                                        "radial-editor-audition-{}",
+                                        request_id.0
+                                    )),
+                                    request_generation.0,
+                                    std::sync::Arc::clone(&sound.wav),
+                                )
+                                .then_some(())
+                                .ok_or(multi_launcher::radial::assets::AssetDiagnostic::InvalidWave)
+                            }
+                            multi_launcher::radial::assets::PreparedMedia::Image(_) => Err(
+                                multi_launcher::radial::assets::AssetDiagnostic::UnsupportedFormat,
+                            ),
+                        });
+                    match result {
+                        Ok(()) => AuthoringReply::AssetAuditioned {
+                            id: request_id,
+                            generation: request_generation,
+                            editor_session,
+                        },
+                        Err(error) => AuthoringReply::Failed {
+                            id: request_id,
+                            generation: request_generation,
+                            editor_session,
+                            message: format!("Managed sound audition failed: {error}"),
+                        },
+                    }
+                }
+                AuthoringRequest::FontCatalog { .. } => AuthoringReply::FontCatalog {
+                    id: request_id,
+                    generation: request_generation,
+                    editor_session,
+                    families: radial_controller.font_families().into(),
+                },
+                AuthoringRequest::ReplacePackage {
+                    expected_revision,
+                    expected_disk_sha256,
+                    plan,
+                    backup_path,
+                    confirmed,
+                    ..
+                } => {
+                    native_preview.cancel_all();
+                    let result = if !confirmed {
+                        Err(multi_launcher::radial::store::StoreError::BackupRequired.to_string())
+                    } else if let Err(issue) =
+                        multi_launcher::radial::settings::validate_publication_default(
+                            &settings.radial,
+                            &plan.document,
+                        )
+                    {
+                        Err(issue.message)
+                    } else {
+                        radial_store
+                            .replace_package_with_backup(
+                                plan,
+                                expected_revision,
+                                expected_disk_sha256.0,
+                                backup_path.clone(),
+                            )
+                            .map_err(|error| error.to_string())
+                    };
+                    match result {
+                        Ok(published) => {
+                            authoring_preview_document = None;
+                            radial_document = published;
+                            multi_launcher::gui::install_radial_published_document(Arc::clone(
+                                &radial_document,
+                            ));
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialInvalidate,
+                            );
+                            radial_controller.close(
+                                multi_launcher::radial::native::CloseReason::SettingsReload,
+                                None,
+                            );
+                            radial_controller.replace_document(Arc::clone(&radial_document));
+                            radial_controller.invalidate_resources();
+                            refresh_macro_hotkey_reservations(&settings, &radial_document);
+                            settings_generation = settings_generation.checked_add(1).unwrap_or(1);
+                            let route_plan =
+                                radial_route_plan(&settings, &radial_document, settings_generation);
+                            if let Some(service) = invocation_service.as_ref() {
+                                match service
+                                    .begin_route_handoff(route_plan.config, route_plan.related)
+                                {
+                                    Ok(handoff) => {
+                                        pending_launcher_route = Some(PendingLauncherRoute {
+                                            settings_generation,
+                                            handoff,
+                                            start_legacy: route_plan.start_legacy,
+                                            stop_service: route_plan.stop_service,
+                                        });
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%error, "radial package replacement trigger refresh failed closed");
+                                        settings.radial.enabled = false;
+                                        radial_control_endpoint.set_enabled(false);
+                                        radial_controller.disable();
+                                        if let Some(mut service) = invocation_service.take() {
+                                            service.stop();
+                                        }
+                                        listener.stop();
+                                        listener = HotkeyTrigger::start_listener(
+                                            legacy_listener_triggers(
+                                                false,
+                                                &trigger,
+                                                quit_trigger.as_ref(),
+                                                help_trigger.as_ref(),
+                                                screen_draw_trigger.as_ref(),
+                                                emergency_trigger.as_ref(),
+                                            ),
+                                            "main",
+                                            event_tx.clone(),
+                                        );
+                                    }
+                                }
+                            }
+                            radial_store
+                                .authoring_snapshot()
+                                .map(|snapshot| AuthoringReply::PackageReplaced {
+                                    id: request_id,
+                                    generation: request_generation,
+                                    editor_session,
+                                    snapshot,
+                                    backup_path,
+                                })
+                                .unwrap_or_else(|error| AuthoringReply::Failed {
+                                    id: request_id,
+                                    generation: request_generation,
+                                    editor_session,
+                                    message: error.to_string(),
+                                })
+                        }
+                        Err(message) => AuthoringReply::Failed {
+                            id: request_id,
+                            generation: request_generation,
+                            editor_session,
+                            message,
+                        },
+                    }
+                }
+                AuthoringRequest::LivePreview { candidate, .. } => {
+                    match validate_radial_document(&candidate) {
+                        Ok(()) => {
+                            if authoring_preview_document.is_none() {
+                                authoring_preview_document = Some(Arc::clone(&radial_document));
+                            }
+                            radial_controller.replace_document(candidate);
+                            radial_controller.invalidate_resources();
+                            AuthoringReply::PreviewAccepted {
+                                id: request_id,
+                                generation: request_generation,
+                                editor_session,
+                            }
+                        }
+                        Err(error) => AuthoringReply::Failed {
+                            id: request_id,
+                            generation: request_generation,
+                            editor_session,
+                            message: error.to_string(),
+                        },
+                    }
+                }
+                AuthoringRequest::CancelPreview { .. } => {
+                    if authoring_preview_document.take().is_some() {
+                        radial_controller.replace_document(Arc::clone(&radial_document));
+                        radial_controller.invalidate_resources();
+                    }
+                    AuthoringReply::PreviewCancelled {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                    }
+                }
+                AuthoringRequest::Commit {
+                    disposition,
+                    expected_revision,
+                    expected_disk_sha256,
+                    candidate,
+                    assets,
+                    ..
+                } => {
+                    native_preview.cancel_all();
+                    let result = multi_launcher::radial::settings::validate_publication_default(
+                        &settings.radial,
+                        &candidate,
+                    )
+                    .map_err(|issue| issue.message)
+                    .and_then(|()| {
+                        radial_store
+                            .commit_authoring(
+                                expected_revision,
+                                &expected_disk_sha256,
+                                candidate,
+                                assets,
+                            )
+                            .map_err(|error| error.to_string())
+                    });
+                    match result {
+                        Ok(published) => {
+                            authoring_preview_document = None;
+                            radial_document = Arc::clone(&published.snapshot.document);
+                            multi_launcher::gui::install_radial_published_document(Arc::clone(
+                                &radial_document,
+                            ));
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialInvalidate,
+                            );
+                            radial_controller.close(
+                                multi_launcher::radial::native::CloseReason::SettingsReload,
+                                None,
+                            );
+                            radial_controller.replace_document(Arc::clone(&radial_document));
+                            radial_controller.invalidate_resources();
+                            refresh_macro_hotkey_reservations(&settings, &radial_document);
+                            settings_generation = settings_generation.checked_add(1).unwrap_or(1);
+                            let route_plan =
+                                radial_route_plan(&settings, &radial_document, settings_generation);
+                            if let Some(service) = invocation_service.as_ref() {
+                                match service
+                                    .begin_route_handoff(route_plan.config, route_plan.related)
+                                {
+                                    Ok(handoff) => {
+                                        pending_launcher_route = Some(PendingLauncherRoute {
+                                            settings_generation,
+                                            handoff,
+                                            start_legacy: route_plan.start_legacy,
+                                            stop_service: route_plan.stop_service,
+                                        });
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%error, "radial authoring trigger refresh failed closed");
+                                        settings.radial.enabled = false;
+                                        radial_control_endpoint.set_enabled(false);
+                                        radial_controller.disable();
+                                        if let Some(mut service) = invocation_service.take() {
+                                            service.stop();
+                                        }
+                                        listener.stop();
+                                        listener = HotkeyTrigger::start_listener(
+                                            legacy_listener_triggers(
+                                                false,
+                                                &trigger,
+                                                quit_trigger.as_ref(),
+                                                help_trigger.as_ref(),
+                                                screen_draw_trigger.as_ref(),
+                                                emergency_trigger.as_ref(),
+                                            ),
+                                            "main",
+                                            event_tx.clone(),
+                                        );
+                                    }
+                                }
+                            }
+                            AuthoringReply::Published {
+                                id: request_id,
+                                generation: request_generation,
+                                editor_session,
+                                disposition,
+                                snapshot: published.snapshot,
+                                rollback_assets: published.rollback_assets,
+                            }
+                        }
+                        Err(message) => AuthoringReply::Failed {
+                            id: request_id,
+                            generation: request_generation,
+                            editor_session,
+                            message,
+                        },
+                    }
+                }
+                AuthoringRequest::StartNativePreview {
+                    editor_session,
+                    expected_revision,
+                    expected_disk_sha256,
+                    candidate,
+                    menu_id,
+                    sample_external_context,
+                    ..
+                } => {
+                    radial_controller.close(
+                        multi_launcher::radial::native::CloseReason::SettingsReload,
+                        None,
+                    );
+                    radial_store
+                        .authoring_snapshot()
+                        .map_err(|error| error.to_string())
+                        .and_then(|snapshot| {
+                            if snapshot.revision != expected_revision
+                                || snapshot.disk_sha256 != expected_disk_sha256
+                            {
+                                return Err("native preview draft baseline is stale".into());
+                            }
+                            native_preview.start(
+                                editor_session,
+                                request_generation,
+                                request_id,
+                                candidate,
+                                menu_id,
+                                sample_external_context,
+                            )
+                        })
+                        .map(|result| AuthoringReply::NativePreviewStarted {
+                            id: request_id,
+                            generation: request_generation,
+                            editor_session,
+                            lease: result.lease,
+                            sampled_context: result.sampled_context,
+                        })
+                        .unwrap_or_else(|message| AuthoringReply::Failed {
+                            id: request_id,
+                            generation: request_generation,
+                            editor_session,
+                            message,
+                        })
+                }
+                AuthoringRequest::UpdateNativePreview {
+                    previous,
+                    expected_revision,
+                    expected_disk_sha256,
+                    candidate,
+                    menu_id,
+                    sample_external_context,
+                    ..
+                } => radial_store
+                    .authoring_snapshot()
+                    .map_err(|error| error.to_string())
+                    .and_then(|snapshot| {
+                        if snapshot.revision != expected_revision
+                            || snapshot.disk_sha256 != expected_disk_sha256
+                        {
+                            return Err("native preview draft baseline is stale".into());
+                        }
+                        native_preview.update(
+                            &previous,
+                            candidate,
+                            menu_id,
+                            request_generation,
+                            request_id,
+                            sample_external_context,
+                        )
+                    })
+                    .map(|result| AuthoringReply::NativePreviewUpdated {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        lease: result.lease,
+                        sampled_context: result.sampled_context,
+                    })
+                    .unwrap_or_else(|message| AuthoringReply::Failed {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                        message,
+                    }),
+                AuthoringRequest::StopNativePreview { editor_session, .. } => {
+                    native_preview.stop(editor_session, request_generation, request_id);
+                    AuthoringReply::NativePreviewStopped {
+                        id: request_id,
+                        generation: request_generation,
+                        editor_session,
+                    }
+                }
+            };
+            let _ = authoring_endpoint.reply_tx.send(reply);
+        }
+        for (lease, error) in native_preview.poll() {
+            let reply = if let Some(message) = error {
+                AuthoringReply::NativePreviewFailed {
+                    editor_session: lease.editor_session,
+                    lease,
+                    message,
+                }
+            } else {
+                AuthoringReply::NativePreviewStopped {
+                    id: lease.request_id,
+                    generation: lease.generation,
+                    editor_session: lease.editor_session,
+                }
+            };
+            let _ = authoring_endpoint.reply_tx.send(reply);
         }
 
         let handoff_result = pending_launcher_route
@@ -934,12 +1568,94 @@ fn main() -> anyhow::Result<()> {
                     }
                     Err(error) => {
                         tracing::error!(%error, "launcher route handoff failed closed");
+                        settings.radial.enabled = false;
+                        radial_control_endpoint.set_enabled(false);
+                        radial_controller.disable();
+                        if let Some(mut service) = invocation_service.take() {
+                            service.stop();
+                        }
+                        listener.stop();
+                        listener = HotkeyTrigger::start_listener(
+                            legacy_listener_triggers(
+                                false,
+                                &trigger,
+                                quit_trigger.as_ref(),
+                                help_trigger.as_ref(),
+                                screen_draw_trigger.as_ref(),
+                                emergency_trigger.as_ref(),
+                            ),
+                            "main",
+                            event_tx.clone(),
+                        );
                     }
                 }
             }
         }
 
         let mut radial_notices = Vec::new();
+        while let Ok(request) = radial_control_endpoint.request_rx.try_recv() {
+            match request {
+                RadialControlRequest::Close => radial_notices.push(ServiceNotice {
+                    recovery: false,
+                    intents: vec![InvocationIntent::CloseRadial { session_id: None }],
+                    error: None,
+                    action: None,
+                }),
+                RadialControlRequest::Show(selector) => {
+                    if !settings.radial.enabled {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(
+                                "radial menus are disabled in settings".into(),
+                            ),
+                        );
+                        continue;
+                    }
+                    let selector = match selector {
+                        multi_launcher::radial::control::RadialMenuSelector::Default => {
+                            multi_launcher::radial::control::RadialMenuSelector::IdOrName(
+                                settings
+                                    .radial
+                                    .effective_default_menu_id(&radial_document)
+                                    .as_str()
+                                    .to_owned(),
+                            )
+                        }
+                        selector => selector,
+                    };
+                    match resolve_menu(&radial_document, &selector) {
+                        Ok(menu_id) => {
+                            let interaction = radial_document
+                                .menus
+                                .iter()
+                                .find(|menu| menu.id == menu_id)
+                                .map_or(InteractionMode::StickyClick, |menu| menu.interaction);
+                            let invocation_id = InvocationId(radial_command_invocation_id);
+                            radial_command_invocation_id =
+                                radial_command_invocation_id.checked_add(1).unwrap_or(1);
+                            radial_notices.push(ServiceNotice {
+                                recovery: false,
+                                intents: vec![InvocationIntent::OpenRadial {
+                                    id: invocation_id,
+                                    menu_id,
+                                    context_token: invocation_id.0,
+                                    interaction,
+                                    trigger_still_down: false,
+                                }],
+                                error: None,
+                                action: None,
+                            });
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            tracing::warn!(%message, "radial command could not resolve menu");
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(message),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         if let Some(service) = invocation_service.as_ref() {
             while let Some(mut notice) = service.try_recv() {
                 if notice.recovery {
@@ -1204,10 +1920,29 @@ fn main() -> anyhow::Result<()> {
                 None,
             );
             listener.stop();
-            settings = new_settings.clone();
+            let mut runtime_settings = new_settings.clone();
+            let radial_settings_issues = multi_launcher::radial::settings::validate(
+                &runtime_settings.radial,
+                &radial_document,
+                &reserved_launcher_hotkeys(&runtime_settings),
+            );
+            if !radial_settings_issues.is_empty() {
+                runtime_settings.radial.enabled = false;
+                for issue in radial_settings_issues {
+                    tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings; radial runtime disabled fail-closed");
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(issue.message),
+                    );
+                }
+            }
+            settings = runtime_settings;
+            radial_control_endpoint.set_enabled(settings.radial.enabled);
             settings_generation = settings_generation.checked_add(1).unwrap_or(1);
             if let Ok(document) = radial_store.reload() {
                 radial_document = document;
+                multi_launcher::gui::install_radial_published_document(Arc::clone(
+                    &radial_document,
+                ));
                 radial_controller.replace_document(Arc::clone(&radial_document));
             }
             trigger = Arc::new(HotkeyTrigger::new(settings.hotkey()));
@@ -1223,41 +1958,49 @@ fn main() -> anyhow::Result<()> {
                 &mut emergency_trigger,
             );
             refresh_macro_hotkey_reservations(&settings, &radial_document);
-            shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
+            let route_plan = radial_route_plan(&settings, &radial_document, settings_generation);
+            shared_invocation = route_plan.shared_invocation;
             if !settings.radial.enabled {
                 radial_controller.disable();
             }
             pending_launcher_route = None;
-            let config = radial_invocation_config(
-                &settings,
-                &radial_document,
-                shared_invocation,
-                settings_generation,
-            );
-            let related = if settings.radial.enabled {
-                related_launcher_bindings(&settings, &radial_document, shared_invocation)
-            } else {
-                Vec::new()
-            };
             if let Some(service) = invocation_service.as_ref() {
-                match service.begin_route_handoff(config, related) {
+                match service.begin_route_handoff(route_plan.config, route_plan.related) {
                     Ok(handoff) => {
                         pending_launcher_route = Some(PendingLauncherRoute {
                             settings_generation,
                             handoff,
-                            start_legacy: !shared_invocation,
-                            stop_service: !settings.radial.enabled,
+                            start_legacy: route_plan.start_legacy,
+                            stop_service: route_plan.stop_service,
                         });
                     }
                     Err(error) => {
                         tracing::error!(%error, "launcher route handoff could not be started; remaining fail-closed");
+                        settings.radial.enabled = false;
+                        radial_control_endpoint.set_enabled(false);
+                        radial_controller.disable();
+                        if let Some(mut service) = invocation_service.take() {
+                            service.stop();
+                        }
+                        listener = HotkeyTrigger::start_listener(
+                            legacy_listener_triggers(
+                                false,
+                                &trigger,
+                                quit_trigger.as_ref(),
+                                help_trigger.as_ref(),
+                                screen_draw_trigger.as_ref(),
+                                emergency_trigger.as_ref(),
+                            ),
+                            "main",
+                            event_tx.clone(),
+                        );
                     }
                 }
             } else if settings.radial.enabled {
                 let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
                 match LauncherInvocationService::start(
-                    config,
-                    related,
+                    route_plan.config,
+                    route_plan.related,
                     Arc::new(move || {
                         if owner_bridge.is_active() {
                             PriorityOwner::ScreenDrawRecovery
@@ -1287,18 +2030,19 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     Err(error) => {
-                        tracing::error!(%error,"shared radial invocation reload failed; restoring legacy launcher route");
-                        listener = HotkeyTrigger::start_listener(
-                            legacy_listener_triggers(
-                                false,
-                                &trigger,
-                                quit_trigger.as_ref(),
-                                help_trigger.as_ref(),
-                                screen_draw_trigger.as_ref(),
-                                emergency_trigger.as_ref(),
-                            ),
-                            "main",
-                            event_tx.clone(),
+                        tracing::error!(%error,"shared radial invocation reload failed; disabling radial runtime and restoring legacy launcher route");
+                        fail_closed_radial_route(
+                            &mut settings,
+                            &radial_control_endpoint,
+                            &mut radial_controller,
+                            &mut invocation_service,
+                            &mut listener,
+                            &trigger,
+                            quit_trigger.as_ref(),
+                            help_trigger.as_ref(),
+                            screen_draw_trigger.as_ref(),
+                            emergency_trigger.as_ref(),
+                            &event_tx,
                         );
                     }
                 }
@@ -1361,6 +2105,81 @@ mod tests {
         let settings = Settings::default();
         let result = std::panic::catch_unwind(|| build_viewport_with_icon(&settings, b"not-a-png"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn radial_route_plan_coherently_hands_off_enable_and_disable() {
+        let document = RadialDocument::starter();
+        let enabled = Settings::default();
+        let enabled_plan = radial_route_plan(&enabled, &document, 41);
+        assert!(enabled_plan.shared_invocation);
+        assert!(!enabled_plan.start_legacy);
+        assert!(!enabled_plan.stop_service);
+        assert!(enabled_plan.config.launcher_enabled);
+        assert_eq!(enabled_plan.config.generation, 41);
+
+        let mut disabled = enabled;
+        disabled.radial.enabled = false;
+        let disabled_plan = radial_route_plan(&disabled, &document, 42);
+        assert!(!disabled_plan.shared_invocation);
+        assert!(disabled_plan.start_legacy);
+        assert!(disabled_plan.stop_service);
+        assert!(!disabled_plan.config.launcher_enabled);
+        assert!(disabled_plan.related.is_empty());
+        assert_eq!(disabled_plan.config.generation, 42);
+    }
+
+    #[test]
+    fn route_start_failures_disable_control_and_restore_legacy_plan() {
+        let (event_tx, _event_rx) = channel();
+        let mut settings = Settings::default();
+        settings.radial.enabled = true;
+        let document = Arc::new(RadialDocument::starter());
+        let launcher = Arc::new(HotkeyTrigger::new(settings.hotkey()));
+        let (client, endpoint) = radial_control_service_with_wake(true, None);
+        let mut controller = RadialController::new(document, false, event_tx.clone());
+        let mut service = None;
+        let mut listener = HotkeyTrigger::start_listener(Vec::new(), "main", event_tx.clone());
+
+        fail_closed_radial_route(
+            &mut settings,
+            &endpoint,
+            &mut controller,
+            &mut service,
+            &mut listener,
+            &launcher,
+            None,
+            None,
+            None,
+            None,
+            &event_tx,
+        );
+
+        assert!(!settings.radial.enabled);
+        assert!(!client.is_enabled());
+        assert!(matches!(
+            client.send(RadialControlRequest::Show(
+                multi_launcher::radial::control::RadialMenuSelector::Default
+            )),
+            Err(multi_launcher::radial::control::RadialControlError::Disabled)
+        ));
+        assert!(service.is_none());
+        listener.stop();
+    }
+
+    #[test]
+    fn radial_invocation_uses_configured_default_menu() {
+        let mut document = RadialDocument::starter();
+        let mut second = document.menus[0].clone();
+        second.id = multi_launcher::radial::model::MenuId::new("work");
+        second.name = "Work".into();
+        second.interaction = InteractionMode::ReleaseToSelect;
+        document.menus.push(second);
+        let mut settings = Settings::default();
+        settings.radial.default_menu_id = Some(multi_launcher::radial::model::MenuId::new("work"));
+        let config = radial_invocation_config(&settings, &document, true, 9);
+        assert_eq!(config.menu_id.as_str(), "work");
+        assert_eq!(config.interaction, InteractionMode::ReleaseToSelect);
     }
 
     #[test]

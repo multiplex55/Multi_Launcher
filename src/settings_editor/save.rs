@@ -14,6 +14,11 @@ impl SettingsEditor {
             app.add_error_toast(message);
             return;
         }
+        let radial_document = crate::gui::radial_published_document();
+        if let Some(issue) = self.radial_validation_issues(&radial_document).first() {
+            app.add_error_toast(format!("Failed to save radial settings: {}", issue.message));
+            return;
+        }
 
         self.sync_from_plugin_settings();
         let settings_path = app.settings_path.clone();
@@ -103,6 +108,7 @@ impl SettingsEditor {
         app.preserve_command = new_settings.preserve_command;
         app.clear_query_after_run = new_settings.clear_query_after_run;
         app.require_confirm_destructive = new_settings.require_confirm_destructive;
+        app.radial_feature_settings = new_settings.radial.clone();
         app.query_autocomplete = new_settings.query_autocomplete;
         app.query_results_layout = new_settings.query_results_layout.clone();
         app.recompute_query_results_layout();

@@ -1495,6 +1495,9 @@ mod tests {
         document.menus[0].rings[0].radius = 70.0;
         document.menus[0].rings[0].cell_radius = 28.0;
         document.menus[0].rings[0].gap = 4.0;
+        document.menus[0].rings[0].cells[0].content = CellContent::Dynamic {
+            source: DynamicSource::Favorites,
+        };
         for cell in &mut document.menus[0].rings[0].cells[1..] {
             cell.content = CellContent::Spacer;
         }
@@ -1895,7 +1898,11 @@ mod tests {
     #[test]
     fn shared_submenu_dag_is_memoized_and_bounded_by_edges() {
         let mut d = valid();
-        let template = d.menus.remove(0);
+        let mut template = d.menus.remove(0);
+        d.menus.clear();
+        for cell in &mut template.rings[0].cells {
+            cell.content = CellContent::Spacer;
+        }
         for level in 0..limits::MAX_SUBMENU_DEPTH {
             let mut menu = template.clone();
             menu.id = MenuId::new(format!("shared-{level}"));
