@@ -120,7 +120,7 @@ pub fn create_menu(
         requested_id,
         name,
         crate::radial::model::InteractionMode::StickyClick,
-        crate::radial::model::SubmenuPresentation::Cascade,
+        crate::radial::model::SubmenuPresentation::SameCenter,
     )
 }
 

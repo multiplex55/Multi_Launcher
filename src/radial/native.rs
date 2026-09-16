@@ -1,4 +1,4 @@
-use super::geometry::{LayoutSnapshot, LogicalPoint};
+use super::geometry::{LayoutSnapshot, LogicalPoint, PhysicalPoint};
 use super::model::{CellId, SessionId};
 use super::render::{InputOwner, VectorScene, input_owner};
 use super::session::{NavigationCommand, NavigationModifiers, PointerButton};
@@ -111,6 +111,15 @@ pub enum NativeEvent {
         point: LogicalPoint,
         button: PointerButton,
     },
+    /// Final surface relocation from one synchronous, user-approved system
+    /// drag. Window-position messages update native state only; the controller
+    /// accepts this correlated event and translates the logical session once.
+    Relocated {
+        session_id: SessionId,
+        layout_generation: u64,
+        from: PhysicalPoint,
+        to: PhysicalPoint,
+    },
     CaptureLost {
         session_id: SessionId,
         layout_generation: u64,
@@ -135,6 +144,26 @@ pub enum NativeEvent {
         message: String,
     },
     Stopped,
+}
+
+impl NativeEvent {
+    pub(crate) fn session_id(&self) -> Option<&SessionId> {
+        match self {
+            Self::Ready { session_id, .. }
+            | Self::Closed { session_id, .. }
+            | Self::PointerDown { session_id, .. }
+            | Self::PointerMoved { session_id, .. }
+            | Self::PointerLeft { session_id, .. }
+            | Self::PointerUp { session_id, .. }
+            | Self::Relocated { session_id, .. }
+            | Self::CaptureLost { session_id, .. }
+            | Self::Escape { session_id }
+            | Self::Navigate { session_id, .. }
+            | Self::DisplayChanged { session_id } => Some(session_id),
+            Self::Failed { session_id, .. } => session_id.as_ref(),
+            Self::Stopped => None,
+        }
+    }
 }
 
 struct Wake {
@@ -939,13 +968,15 @@ unsafe extern "system" fn wndproc(
             });
         }
     }
-    if msg == WM_DISPLAYCHANGE {
+    if msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED {
         let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
-        if !ptr.is_null() && hwnd == unsafe { &*ptr }.input_hwnd {
+        if !ptr.is_null() {
             let state = unsafe { &*ptr };
-            let _ = state.events.send(NativeEvent::DisplayChanged {
-                session_id: state.session_id.clone(),
-            });
+            if hwnd == state.input_hwnd || hwnd == state.visual_hwnd {
+                let _ = state.events.send(NativeEvent::DisplayChanged {
+                    session_id: state.session_id.clone(),
+                });
+            }
         }
     }
     if msg == WM_KEYDOWN && w.0 == 0x1B {
@@ -1578,10 +1609,11 @@ impl SystemPlatformSurface {
         if ptr.is_null() {
             return Err("radial window state is unavailable".into());
         }
-        let (previous_x, previous_y, _, _) =
-            physical_scene_bounds(unsafe { &*ptr }.scene.bounds, unsafe { &*ptr }.scale_factor);
-        let target_x = x.saturating_add(unsafe { &*ptr }.surface_x.saturating_sub(previous_x));
-        let target_y = y.saturating_add(unsafe { &*ptr }.surface_y.saturating_sub(previous_y));
+        // The controller's layout is already in absolute desktop coordinates.
+        // Carrying the HWND's previous displacement here would apply a drag a
+        // second time after the controller has translated the session.
+        let target_x = x;
+        let target_y = y;
         cancel_animation(self.visual_hwnd, unsafe { &mut *ptr });
         unsafe { (*ptr).animation_epoch = std::time::Instant::now() };
         let frame = unsafe { &mut *ptr }
@@ -1677,6 +1709,13 @@ impl SystemPlatformSurface {
         unsafe { GetCursorPos(&mut cursor) }
             .map_err(|error| format!("failed to locate pointer for radial drag: {error}"))?;
         let packed = ((cursor.y as u32 & 0xffff) << 16) | (cursor.x as u32 & 0xffff);
+        let from = {
+            let state = unsafe { &*ptr };
+            PhysicalPoint {
+                x: f64::from(state.surface_x),
+                y: f64::from(state.surface_y),
+            }
+        };
         unsafe {
             SendMessageW(
                 self.input_hwnd,
@@ -1686,6 +1725,18 @@ impl SystemPlatformSurface {
             )
         };
         let state = unsafe { &*ptr };
+        let to = PhysicalPoint {
+            x: f64::from(state.surface_x),
+            y: f64::from(state.surface_y),
+        };
+        if to != from {
+            state.events.send(NativeEvent::Relocated {
+                session_id: state.session_id.clone(),
+                layout_generation,
+                from,
+                to,
+            });
+        }
         state.events.send(NativeEvent::CaptureLost {
             session_id: state.session_id.clone(),
             layout_generation,

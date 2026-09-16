@@ -18,6 +18,12 @@ pub enum RadialMenuSelector {
 pub enum RadialControlRequest {
     Show(RadialMenuSelector),
     Close,
+    RestoreSubmenuPresentationMigration,
+    SetActiveParentSubmenuCascade {
+        session_id: super::model::SessionId,
+        parent_frame_id: super::session::FrameId,
+        parent_menu_id: MenuId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,5 +190,29 @@ mod tests {
             endpoint.request_rx.try_recv().unwrap(),
             RadialControlRequest::Close
         );
+    }
+
+    #[test]
+    fn migration_restore_request_is_available_when_runtime_is_disabled() {
+        let (client, endpoint) = radial_control_service_with_wake(false, None);
+        client
+            .send(RadialControlRequest::RestoreSubmenuPresentationMigration)
+            .unwrap();
+        assert_eq!(
+            endpoint.request_rx.try_recv().unwrap(),
+            RadialControlRequest::RestoreSubmenuPresentationMigration
+        );
+    }
+
+    #[test]
+    fn placement_alternative_preserves_session_and_frame_correlation_when_disabled() {
+        let (client, endpoint) = radial_control_service_with_wake(false, None);
+        let request = RadialControlRequest::SetActiveParentSubmenuCascade {
+            session_id: super::super::model::SessionId::new("native-42"),
+            parent_frame_id: super::super::session::FrameId(7),
+            parent_menu_id: MenuId::new("favorites"),
+        };
+        client.send(request.clone()).unwrap();
+        assert_eq!(endpoint.request_rx.try_recv().unwrap(), request);
     }
 }

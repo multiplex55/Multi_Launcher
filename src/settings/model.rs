@@ -571,9 +571,72 @@ pub struct Settings {
     pub query_results_layout: QueryResultsLayoutSettings,
     #[serde(default)]
     pub multi_manager: MultiManagerSettings,
-    #[serde(default)]
+    #[serde(default = "legacy_radial_feature_settings")]
     pub radial: crate::radial::model::RadialFeatureSettings,
+    /// Internal durable marker for the one-time radial submenu conversion.
+    /// It deliberately lives outside the authorable RadialDocument so imports
+    /// and authoring undo cannot erase migration recovery state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radial_submenu_migration: Option<SubmenuPresentationMigrationReceipt>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmenuMigrationState {
+    Prepared,
+    Applied,
+    UndoPrepared,
+    Undone,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmenuMigrationMenuChange {
+    pub menu_id: crate::radial::model::MenuId,
+    pub previous: crate::radial::model::SubmenuPresentation,
+    pub entity_fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmenuPresentationMigrationReceipt {
+    pub migration_id: String,
+    pub version: u32,
+    pub state: SubmenuMigrationState,
+    pub source_settings_sha256: String,
+    pub source_radial_sha256: String,
+    pub settings_backup_path: String,
+    pub settings_backup_sha256: String,
+    pub settings_source_existed: bool,
+    pub radial_backup_path: String,
+    pub radial_backup_sha256: String,
+    pub settings_default_before: crate::radial::model::SubmenuPresentation,
+    pub settings_default_target: crate::radial::model::SubmenuPresentation,
+    pub changed_menus: Vec<SubmenuMigrationMenuChange>,
+    pub target_radial_revision: u64,
+    pub target_radial_sha256: String,
+    /// Canonical hash of settings with the receipt omitted. This avoids a
+    /// self-hash cycle and ignores unordered collection iteration order while
+    /// still giving startup recovery an exact logical target.
+    pub target_settings_content_sha256: String,
+    #[serde(default)]
+    pub undo_restored_menu_ids: Vec<crate::radial::model::MenuId>,
+    pub undo_source_radial_sha256: Option<String>,
+    pub undo_target_radial_revision: Option<u64>,
+    pub undo_target_radial_sha256: Option<String>,
+    pub undo_source_settings_content_sha256: Option<String>,
+    pub undo_target_settings_content_sha256: Option<String>,
+    #[serde(default)]
+    pub undo_settings_default_source: Option<crate::radial::model::SubmenuPresentation>,
+    pub undo_restores_settings_default: bool,
+    pub failure: Option<String>,
+}
+
+fn legacy_radial_feature_settings() -> crate::radial::model::RadialFeatureSettings {
+    let mut settings = crate::radial::model::RadialFeatureSettings::default();
+    settings.default_submenu_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+    settings
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -644,6 +707,7 @@ impl Default for Settings {
             query_results_layout: QueryResultsLayoutSettings::default(),
             multi_manager: MultiManagerSettings::default(),
             radial: crate::radial::model::RadialFeatureSettings::default(),
+            radial_submenu_migration: None,
         }
     }
 }
@@ -711,7 +775,10 @@ mod tests {
     fn empty_settings_deserializes_with_note_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(parsed.note, NoteSettings::default());
-        assert_eq!(parsed.radial, RadialFeatureSettings::default());
+        let mut legacy_radial = RadialFeatureSettings::default();
+        legacy_radial.default_submenu_presentation =
+            crate::radial::model::SubmenuPresentation::Cascade;
+        assert_eq!(parsed.radial, legacy_radial);
         assert_eq!(
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
@@ -749,6 +816,29 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
         assert!(!restored.radial.enabled);
         assert_eq!(restored.radial.hold_threshold_ms, 0);
+    }
+
+    #[test]
+    fn legacy_radial_settings_default_is_cascade_when_radial_is_missing_or_empty() {
+        assert_eq!(
+            Settings::default().radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::SameCenter
+        );
+        let missing: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            missing.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        let empty: Settings = serde_json::from_str(r#"{"radial":{}}"#).unwrap();
+        assert_eq!(
+            empty.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        let parsed: Settings = serde_json::from_str(r#"{"radial":{"enabled":false}}"#).unwrap();
+        assert_eq!(
+            parsed.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
     }
 
     #[test]

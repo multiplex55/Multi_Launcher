@@ -1002,13 +1002,40 @@ fn main() -> anyhow::Result<()> {
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
     let radial_store = RadialStore::new(&app_data_root).map_err(anyhow::Error::msg)?;
-    let mut radial_document = radial_store
-        .reload()
-        .or_else(|error| {
+    let (mut radial_document, radial_store_loaded) = match radial_store.reload() {
+        Ok(document) => (document, true),
+        Err(error) => {
             tracing::warn!(%error, "using retained starter radial definition");
-            radial_store.snapshot()
-        })
-        .map_err(anyhow::Error::msg)?;
+            (radial_store.snapshot().map_err(anyhow::Error::msg)?, false)
+        }
+    };
+    if startup_settings_diagnostic.is_none() && radial_store_loaded {
+        match multi_launcher::radial::submenu_migration::startup_migrate(
+            &radial_store,
+            app_data_root.path().join("settings.json"),
+            true,
+        ) {
+            Ok(outcome) => {
+                settings = outcome.settings;
+                radial_document = outcome.document;
+                if let Some(notice) = outcome.notice {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialMigrationNotice(notice),
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "radial submenu migration did not modify either source store");
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
+                );
+            }
+        }
+    }
+    multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialMigrationState {
+        receipt: settings.radial_submenu_migration.clone(),
+        default_submenu_presentation: settings.radial.default_submenu_presentation,
+    });
     let startup_radial_issues = multi_launcher::radial::settings::validate(
         &settings.radial,
         &radial_document,
@@ -1947,6 +1974,163 @@ fn main() -> anyhow::Result<()> {
                     action: None,
                     cancellation: None,
                 }),
+                RadialControlRequest::RestoreSubmenuPresentationMigration => {
+                    native_preview.cancel_all();
+                    match multi_launcher::radial::submenu_migration::restore(
+                        &radial_store,
+                        app_data_root.path().join("settings.json"),
+                    ) {
+                        Ok(outcome) => {
+                            settings = outcome.settings;
+                            radial_document = outcome.document;
+                            radial_controller.close(
+                                multi_launcher::radial::native::CloseReason::SettingsReload,
+                                None,
+                            );
+                            radial_controller.replace_document(Arc::clone(&radial_document));
+                            radial_resources.reconcile(&mut radial_controller);
+                            radial_control_endpoint.set_enabled(settings.radial.enabled);
+                            settings_generation = settings_generation.checked_add(1).unwrap_or(1);
+                            multi_launcher::gui::install_radial_published_document(Arc::clone(
+                                &radial_document,
+                            ));
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialInvalidate,
+                            );
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialMigrationState {
+                                    receipt: settings.radial_submenu_migration.clone(),
+                                    default_submenu_presentation: settings
+                                        .radial
+                                        .default_submenu_presentation,
+                                },
+                            );
+                            if let Some(notice) = outcome.notice {
+                                multi_launcher::gui::send_event(
+                                    multi_launcher::gui::WatchEvent::RadialMigrationNotice(notice),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "radial submenu migration restore did not complete");
+                            if let Ok(reloaded) = radial_store.reload() {
+                                radial_document = reloaded;
+                            }
+                            radial_controller.close(
+                                multi_launcher::radial::native::CloseReason::SettingsReload,
+                                None,
+                            );
+                            radial_controller.replace_document(Arc::clone(&radial_document));
+                            radial_resources.reconcile(&mut radial_controller);
+                            multi_launcher::gui::install_radial_published_document(Arc::clone(
+                                &radial_document,
+                            ));
+                            if let Ok(reloaded) = Settings::load(
+                                app_data_root
+                                    .path()
+                                    .join("settings.json")
+                                    .to_string_lossy()
+                                    .as_ref(),
+                            ) {
+                                settings = reloaded;
+                                radial_control_endpoint.set_enabled(settings.radial.enabled);
+                            }
+                            settings_generation = settings_generation.checked_add(1).unwrap_or(1);
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialInvalidate,
+                            );
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialMigrationState {
+                                    receipt: settings.radial_submenu_migration.clone(),
+                                    default_submenu_presentation: settings
+                                        .radial
+                                        .default_submenu_presentation,
+                                },
+                            );
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
+                            );
+                        }
+                    }
+                }
+                RadialControlRequest::SetActiveParentSubmenuCascade {
+                    session_id,
+                    parent_frame_id,
+                    parent_menu_id,
+                } => {
+                    let correlation = (session_id.clone(), parent_frame_id);
+                    let result = (|| -> Result<Arc<RadialDocument>, String> {
+                        if !radial_controller.active_frame_matches(
+                            &session_id,
+                            parent_frame_id,
+                            &parent_menu_id,
+                        ) {
+                            return Err("the radial parent frame is no longer active".into());
+                        }
+                        let snapshot = radial_store
+                            .authoring_snapshot()
+                            .map_err(|error| error.to_string())?;
+                        let mut candidate = (*snapshot.document).clone();
+                        let menu = candidate
+                            .menus
+                            .iter_mut()
+                            .find(|menu| menu.id == parent_menu_id)
+                            .ok_or_else(|| "the radial parent menu no longer exists".to_owned())?;
+                        if menu.submenu_presentation
+                            != multi_launcher::radial::model::SubmenuPresentation::SameCenter
+                        {
+                            return Err(
+                                "the parent presentation changed before the request was applied"
+                                    .into(),
+                            );
+                        }
+                        menu.submenu_presentation =
+                            multi_launcher::radial::model::SubmenuPresentation::Cascade;
+                        let committed = radial_store
+                            .commit_authoring(
+                                snapshot.revision,
+                                &snapshot.disk_sha256,
+                                candidate,
+                                multi_launcher::radial::authoring::AssetMutations::default(),
+                            )
+                            .map_err(|error| error.to_string())?;
+                        Ok(Arc::clone(&committed.snapshot.document))
+                    })();
+                    match result {
+                        Ok(document) => {
+                            native_preview.cancel_all();
+                            radial_controller.close(
+                                multi_launcher::radial::native::CloseReason::SettingsReload,
+                                None,
+                            );
+                            radial_document = document;
+                            radial_controller.replace_document(Arc::clone(&radial_document));
+                            radial_resources.reconcile(&mut radial_controller);
+                            multi_launcher::gui::install_radial_published_document(Arc::clone(
+                                &radial_document,
+                            ));
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialInvalidate,
+                            );
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialPlacementActionResult {
+                                    session_id: correlation.0,
+                                    parent_frame_id: correlation.1,
+                                    result: Ok(()),
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            multi_launcher::gui::send_event(
+                                multi_launcher::gui::WatchEvent::RadialPlacementActionResult {
+                                    session_id: correlation.0,
+                                    parent_frame_id: correlation.1,
+                                    result: Err(error),
+                                },
+                            );
+                        }
+                    }
+                }
                 RadialControlRequest::Show(selector) => {
                     if !settings.radial.enabled {
                         multi_launcher::gui::send_event(
@@ -2186,6 +2370,34 @@ fn main() -> anyhow::Result<()> {
                             multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
                         );
                     }
+                    ControllerEvent::LayoutFailed { menu_id, error } => {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
+                                "Radial menu {menu_id} could not be placed: {error:?}"
+                            )),
+                        );
+                    }
+                    ControllerEvent::SubmenuPlacementFailed {
+                        session_id,
+                        parent_frame_id,
+                        parent_menu_id,
+                        child_menu_id,
+                        parent_presentation,
+                        message,
+                    } => {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialSubmenuPlacementFailure(
+                                multi_launcher::gui::RadialPlacementFailureNotice {
+                                    session_id,
+                                    parent_frame_id,
+                                    parent_menu_id,
+                                    child_menu_id,
+                                    parent_presentation,
+                                    message,
+                                },
+                            ),
+                        );
+                    }
                     ControllerEvent::InvocationFailed {
                         invocation_id,
                         message,
@@ -2305,6 +2517,34 @@ fn main() -> anyhow::Result<()> {
                     tracing::error!(%error,"radial native host error");
                     multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
+                    );
+                }
+                ControllerEvent::LayoutFailed { menu_id, error } => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
+                            "Radial menu {menu_id} could not be placed: {error:?}"
+                        )),
+                    );
+                }
+                ControllerEvent::SubmenuPlacementFailed {
+                    session_id,
+                    parent_frame_id,
+                    parent_menu_id,
+                    child_menu_id,
+                    parent_presentation,
+                    message,
+                } => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialSubmenuPlacementFailure(
+                            multi_launcher::gui::RadialPlacementFailureNotice {
+                                session_id,
+                                parent_frame_id,
+                                parent_menu_id,
+                                child_menu_id,
+                                parent_presentation,
+                                message,
+                            },
+                        ),
                     );
                 }
                 ControllerEvent::InvocationFailed {

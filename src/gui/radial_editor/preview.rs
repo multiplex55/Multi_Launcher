@@ -1,13 +1,19 @@
 use crate::radial::authoring::StableSelection;
 use crate::radial::authoring::{AuthoringClient, RadialAuthoringSession};
 use crate::radial::compositor::CompositorCache;
-use crate::radial::geometry::{LogicalPoint, PhysicalPoint, PhysicalRect, ScaleFactor};
+use crate::radial::geometry::{
+    LogicalPoint, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout, shape_center,
+};
 use crate::radial::model::{
     CellContent, CellId, InvocationId, MenuId, RadialDocument, SessionId, SkinId,
 };
-use crate::radial::preparation::PreparedFrameInput;
-use crate::radial::session::{CellRole, SessionEvent, SessionIntent, SessionReducer};
+use crate::radial::preparation::{
+    PreparedFrameInput, PreparedPlacement, PreviewPlacement, ensure_preview_center_back,
+};
+use crate::radial::render::build_scene_prepared_selected;
+use crate::radial::session::{CellRole, FrameId, SessionEvent, SessionIntent, SessionReducer};
 use eframe::egui;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum PreviewPreset {
@@ -33,6 +39,11 @@ pub(super) struct EmbeddedPreview {
     pub(super) intercepted_dispatches: usize,
     pub(super) simulated_drags: usize,
     drag_cell: Option<CellId>,
+    navigation_frames: BTreeMap<FrameId, (String, std::sync::Arc<PreparedFrameInput>)>,
+    pending_frame_id: Option<FrameId>,
+    pending_frame_token: Option<String>,
+    frozen_center: Option<PhysicalPoint>,
+    frozen_scale: Option<ScaleFactor>,
     #[cfg(test)]
     preparation_attempts: usize,
 }
@@ -52,6 +63,11 @@ impl Default for EmbeddedPreview {
             intercepted_dispatches: 0,
             simulated_drags: 0,
             drag_cell: None,
+            navigation_frames: BTreeMap::new(),
+            pending_frame_id: None,
+            pending_frame_token: None,
+            frozen_center: None,
+            frozen_scale: None,
             #[cfg(test)]
             preparation_attempts: 0,
         }
@@ -63,11 +79,30 @@ impl EmbeddedPreview {
         &self,
         session: &RadialAuthoringSession,
     ) -> Option<std::sync::Arc<PreparedFrameInput>> {
-        session
-            .embedded_preview
-            .as_ref()
-            .filter(|(token, _)| token == &self.frame_token)
-            .map(|(_, input)| std::sync::Arc::clone(input))
+        let frame_id = self.reducer.as_ref()?.state.stack.last()?.frame_id;
+        let cached = self
+            .navigation_frames
+            .get(&frame_id)
+            .filter(|(token, input)| {
+                token == &self.frame_token
+                    && self
+                        .reducer
+                        .as_ref()
+                        .and_then(|reducer| reducer.state.stack.last())
+                        .is_some_and(|frame| frame.page == input.page)
+            })
+            .map(|(_, input)| std::sync::Arc::clone(input));
+        cached.or_else(|| {
+            (frame_id == FrameId(1))
+                .then(|| {
+                    session
+                        .embedded_preview
+                        .as_ref()
+                        .filter(|(token, _)| token == &self.frame_token)
+                        .map(|(_, input)| std::sync::Arc::clone(input))
+                })
+                .flatten()
+        })
     }
 
     pub(super) fn sync_preparation(
@@ -116,13 +151,132 @@ impl EmbeddedPreview {
             .as_ref()
             .and_then(|reducer| reducer.state.stack.last())
             .map_or(0, |frame| frame.page);
+        let current_frame = self
+            .reducer
+            .as_ref()
+            .and_then(|reducer| reducer.state.stack.last())
+            .cloned();
         let frame_token = format!(
             "{}:{menu_id}:{selected:?}:{selected_skin:?}:{page}:{preset:?}:assets={}",
             session.generation.0,
             session.pending_assets.preview_identity()
         );
+        if let (Some(pending_frame_id), Some(pending_token)) = (
+            self.pending_frame_id.take(),
+            self.pending_frame_token.take(),
+        ) && let Some(input) = session
+            .embedded_preview
+            .as_ref()
+            .filter(|(reply_token, _)| reply_token == &pending_token)
+            .map(|(_, input)| std::sync::Arc::clone(input))
+        {
+            let mut input = (*input).clone();
+            if pending_frame_id == FrameId(1) {
+                self.frozen_center = Some(input.layout.origin);
+                self.frozen_scale = Some(input.layout.scale_factor);
+            } else if let Some(frame) = current_frame
+                .as_ref()
+                .filter(|frame| frame.frame_id == pending_frame_id)
+            {
+                let menu = document.menus.iter().find(|menu| menu.id == frame.menu_id);
+                if let Some(menu) = menu {
+                    ensure_preview_center_back(&mut input.layout, menu);
+                    let previous_placement = self
+                        .navigation_frames
+                        .get(&pending_frame_id)
+                        .map(|(_, previous)| previous.placement);
+                    let parent_menu = frame
+                        .parent_frame_id
+                        .and_then(|parent_id| {
+                            self.reducer
+                                .as_ref()?
+                                .state
+                                .stack
+                                .iter()
+                                .find(|candidate| candidate.frame_id == parent_id)
+                        })
+                        .and_then(|parent| {
+                            document.menus.iter().find(|menu| menu.id == parent.menu_id)
+                        });
+                    let cascade_requested = parent_menu.is_some_and(|parent| {
+                        parent.submenu_presentation
+                            == crate::radial::model::SubmenuPresentation::Cascade
+                    });
+                    let should_cascade = cascade_requested
+                        && previous_placement != Some(PreparedPlacement::SameCenterFallback)
+                        && (previous_placement == Some(PreparedPlacement::Cascade)
+                            || input.placement == PreparedPlacement::Cascade);
+                    if should_cascade
+                        && let Some(parent_frame_id) = frame.parent_frame_id
+                        && let Some((_, parent)) = self.navigation_frames.get(&parent_frame_id)
+                    {
+                        input.resources =
+                            crate::radial::authoring::native_preview::merge_preview_resources(
+                                &parent.resources,
+                                &input.resources,
+                            );
+                        input.layout = cascade_layout(&parent.layout, input.layout);
+                        input.placement = PreparedPlacement::Cascade;
+                    } else if cascade_requested
+                        && (input.placement == PreparedPlacement::SameCenterFallback
+                            || previous_placement == Some(PreparedPlacement::SameCenterFallback))
+                    {
+                        input.placement = PreparedPlacement::SameCenterFallback;
+                    }
+                    let selected = frame.selected.as_ref();
+                    input.scene = build_scene_prepared_selected(
+                        &input.layout,
+                        session.generation.0,
+                        &input.resources,
+                        selected,
+                    );
+                    if let Some(current) = self
+                        .reducer
+                        .as_mut()
+                        .and_then(|reducer| reducer.state.stack.last_mut())
+                        .filter(|current| current.frame_id == pending_frame_id)
+                    {
+                        current.origin = input.layout.origin;
+                        current.page = input.page;
+                        current.page_count = input.page_count;
+                        current.scale_factor = input.layout.scale_factor.get();
+                    }
+                }
+            }
+            let input = std::sync::Arc::new(input);
+            self.navigation_frames.insert(
+                pending_frame_id,
+                (pending_token.clone(), std::sync::Arc::clone(&input)),
+            );
+            session.embedded_preview = Some((pending_token, input));
+        }
+        if let Some(frame) = current_frame.as_ref()
+            && let Some((cached_token, cached)) = self.navigation_frames.get(&frame.frame_id)
+            && cached_token == &frame_token
+            && cached.page == page
+        {
+            self.frame_token = frame_token.clone();
+            session.embedded_preview = Some((frame_token, std::sync::Arc::clone(cached)));
+            if let Some(current) = self
+                .reducer
+                .as_mut()
+                .and_then(|reducer| reducer.state.stack.last_mut())
+            {
+                current.page = cached.page;
+                current.page_count = cached.page_count;
+                current.origin = cached.layout.origin;
+                current.scale_factor = cached.layout.scale_factor.get();
+            }
+            self.failed_frame_token = None;
+            self.preparation_notice = None;
+            return;
+        }
+        let synthetic_center = self
+            .frozen_center
+            .unwrap_or(PhysicalPoint { x: 240.0, y: 240.0 });
         self.frame_token = frame_token.clone();
-        if let Some((token, input)) = session.embedded_preview.as_ref()
+        if current_frame.as_ref().map(|frame| frame.frame_id) == Some(FrameId(1))
+            && let Some((token, input)) = session.embedded_preview.as_ref()
             && token == &frame_token
         {
             if let Some(frame) = self
@@ -153,27 +307,47 @@ impl EmbeddedPreview {
         } else {
             1.0
         };
+        let scale = self.frozen_scale.map_or_else(
+            || ScaleFactor::new(scale).unwrap(),
+            |scale| {
+                if preset == PreviewPreset::HighDpi {
+                    ScaleFactor::new(2.0).unwrap()
+                } else {
+                    scale
+                }
+            },
+        );
+        let (anchor, placement) = self.preview_placement(
+            &document,
+            current_frame.as_ref(),
+            &menu_id,
+            synthetic_center,
+            scale,
+        );
         #[cfg(test)]
         {
             self.preparation_attempts += 1;
         }
-        let request = session.request_embedded_preview(
+        let request = session.request_embedded_preview_placed(
             std::sync::Arc::new(document),
             menu_id,
             selected,
-            PhysicalPoint { x: 240.0, y: 240.0 },
+            anchor,
             PhysicalRect {
                 min: PhysicalPoint { x: 0.0, y: 0.0 },
                 max: PhysicalPoint { x: 480.0, y: 480.0 },
             },
-            ScaleFactor::new(scale).unwrap(),
+            scale,
             frame_token.clone(),
             page,
             selected_skin,
+            placement,
         );
         match request {
             Ok(request) => {
                 let correlation = (request.id(), request.generation(), request.editor_session());
+                self.pending_frame_id = current_frame.as_ref().map(|frame| frame.frame_id);
+                self.pending_frame_token = Some(frame_token.clone());
                 if let Err(error) = client.send(request) {
                     session.cancel_pending_request(correlation.0, correlation.1, correlation.2);
                     self.fail_preparation(
@@ -189,9 +363,87 @@ impl EmbeddedPreview {
         }
     }
 
+    fn preview_placement(
+        &self,
+        document: &RadialDocument,
+        frame: Option<&crate::radial::session::MenuFrame>,
+        menu_id: &MenuId,
+        same_center: PhysicalPoint,
+        scale: ScaleFactor,
+    ) -> (PhysicalPoint, PreviewPlacement) {
+        let Some(frame) = frame.filter(|frame| frame.parent_frame_id.is_some()) else {
+            return (same_center, PreviewPlacement::FlexibleRoot);
+        };
+        if self.navigation_frames.contains_key(&frame.frame_id) {
+            return (frame.origin, PreviewPlacement::FixedCenter);
+        }
+        let Some(parent_frame_id) = frame.parent_frame_id else {
+            return (same_center, PreviewPlacement::FixedCenter);
+        };
+        let parent_menu = frame
+            .parent_frame_id
+            .and_then(|parent_id| {
+                self.reducer
+                    .as_ref()?
+                    .state
+                    .stack
+                    .iter()
+                    .find(|candidate| candidate.frame_id == parent_id)
+            })
+            .and_then(|parent| document.menus.iter().find(|menu| menu.id == parent.menu_id));
+        let Some(parent_menu) = parent_menu else {
+            return (same_center, PreviewPlacement::FixedCenter);
+        };
+        let parent_layout = self
+            .navigation_frames
+            .get(&parent_frame_id)
+            .map(|(_, input)| &input.layout);
+        let current_parent_center = parent_layout.map_or(same_center, |layout| layout.origin);
+        if parent_menu.submenu_presentation == crate::radial::model::SubmenuPresentation::SameCenter
+        {
+            return (current_parent_center, PreviewPlacement::FixedCenter);
+        }
+        let cascade_center = parent_layout.and_then(|layout| {
+            let submenu_cell = parent_menu
+                .rings
+                .iter()
+                .flat_map(|ring| &ring.cells)
+                .find(|cell| matches!(&cell.content, CellContent::Submenu { menu_id: target } if target == menu_id))?;
+            let cell = layout.cells.iter().find(|cell| cell.cell_id == submenu_cell.id)?;
+            Some(shape_center(&cell.shape, scale))
+        });
+        match cascade_center {
+            Some(center) => (
+                center,
+                PreviewPlacement::Cascade {
+                    fallback_center: current_parent_center,
+                },
+            ),
+            None => (current_parent_center, PreviewPlacement::FixedCenter),
+        }
+    }
+
     fn fail_preparation(&mut self, fingerprint: String, message: String) {
         self.failed_frame_token = Some(fingerprint);
         self.preparation_notice = Some(super::ResourceNotice::error(message));
+        if let Some(reducer) = self.reducer.as_mut()
+            && reducer.state.stack.len() > 1
+        {
+            let frame = reducer.state.stack.last().cloned();
+            let pointer_baseline = frame.map_or(LogicalPoint { x: 240.0, y: 240.0 }, |frame| {
+                let scale = frame.scale_factor.max(f64::EPSILON);
+                LogicalPoint {
+                    x: (frame.origin.x / scale) as f32,
+                    y: (frame.origin.y / scale) as f32,
+                }
+            });
+            reducer.reduce(SessionEvent::Back {
+                geometry_generation: self.document_generation,
+                pointer_baseline,
+            });
+            self.pending_frame_id = None;
+            self.pending_frame_token = None;
+        }
     }
 
     fn retry_preparation(&mut self) {
@@ -200,6 +452,11 @@ impl EmbeddedPreview {
     }
 
     pub(super) fn reset(&mut self, document: &RadialDocument, menu_id: &MenuId, generation: u64) {
+        self.navigation_frames.clear();
+        self.pending_frame_id = None;
+        self.pending_frame_token = None;
+        self.frozen_center = None;
+        self.frozen_scale = None;
         let Some(menu) = document.menus.iter().find(|menu| &menu.id == menu_id) else {
             self.reducer = None;
             return;
@@ -229,14 +486,31 @@ impl EmbeddedPreview {
 
     pub(super) fn back(&mut self) {
         if let Some(reducer) = self.reducer.as_mut() {
+            let frame = reducer.state.stack.last().cloned();
+            let pointer_baseline = frame.map_or(LogicalPoint { x: 240.0, y: 240.0 }, |frame| {
+                let scale = frame.scale_factor.max(f64::EPSILON);
+                LogicalPoint {
+                    x: (frame.origin.x / scale) as f32,
+                    y: (frame.origin.y / scale) as f32,
+                }
+            });
             let _ = reducer.reduce(SessionEvent::Back {
                 geometry_generation: self.document_generation,
-                pointer_baseline: LogicalPoint { x: 240.0, y: 240.0 },
+                pointer_baseline,
             });
         }
     }
 
     pub(super) fn activate(&mut self, document: &RadialDocument, cell_id: &CellId) {
+        if cell_id.as_str() == "__center"
+            && self
+                .reducer
+                .as_ref()
+                .is_some_and(|reducer| reducer.state.stack.len() > 1)
+        {
+            self.back();
+            return;
+        }
         let Some(menu_id) = self.current_menu().cloned() else {
             return;
         };
@@ -251,10 +525,16 @@ impl EmbeddedPreview {
                     .find(|cell| &cell.id == cell_id)
             });
         let role = cell_role(document, &menu_id, cell_id);
+        let submenu_center = cell.and_then(|cell| match &cell.content {
+            CellContent::Submenu { menu_id: target } => {
+                Some(self.requested_child_center(document, &menu_id, target))
+            }
+            _ => None,
+        });
         let event = match cell.map(|cell| &cell.content) {
             Some(CellContent::Submenu { menu_id }) => SessionEvent::OpenChild {
                 menu_id: menu_id.clone(),
-                origin: PhysicalPoint { x: 240.0, y: 240.0 },
+                origin: submenu_center.unwrap_or(PhysicalPoint { x: 240.0, y: 240.0 }),
                 geometry_generation: self.document_generation,
                 pointer_baseline: LogicalPoint { x: 240.0, y: 240.0 },
             },
@@ -302,7 +582,8 @@ impl EmbeddedPreview {
                             .unwrap()
                             .reduce(SessionEvent::OpenChild {
                                 menu_id: menu_id.clone(),
-                                origin: PhysicalPoint { x: 240.0, y: 240.0 },
+                                origin: submenu_center
+                                    .unwrap_or(PhysicalPoint { x: 240.0, y: 240.0 }),
                                 geometry_generation: self.document_generation,
                                 pointer_baseline: LogicalPoint { x: 240.0, y: 240.0 },
                             });
@@ -313,6 +594,61 @@ impl EmbeddedPreview {
                 SessionIntent::CloseTree | SessionIntent::PageChanged { .. } => {}
             }
         }
+    }
+
+    fn requested_child_center(
+        &self,
+        document: &RadialDocument,
+        parent_menu_id: &MenuId,
+        child_menu_id: &MenuId,
+    ) -> PhysicalPoint {
+        let root_center = self
+            .frozen_center
+            .unwrap_or(PhysicalPoint { x: 240.0, y: 240.0 });
+        let current_frame_id = self
+            .reducer
+            .as_ref()
+            .and_then(|reducer| reducer.state.stack.last())
+            .map(|frame| frame.frame_id);
+        let same_center = current_frame_id
+            .and_then(|frame_id| self.navigation_frames.get(&frame_id))
+            .map_or(root_center, |(_, input)| input.layout.origin);
+        let Some(parent) = document
+            .menus
+            .iter()
+            .find(|menu| &menu.id == parent_menu_id)
+        else {
+            return same_center;
+        };
+        if parent.submenu_presentation == crate::radial::model::SubmenuPresentation::SameCenter {
+            return same_center;
+        }
+        let Some(parent_frame_id) = self
+            .reducer
+            .as_ref()
+            .and_then(|reducer| reducer.state.stack.last())
+            .map(|frame| frame.frame_id)
+        else {
+            return same_center;
+        };
+        self.navigation_frames
+            .get(&parent_frame_id)
+            .and_then(|(_, input)| {
+                let source_cell = parent
+                    .rings
+                    .iter()
+                    .flat_map(|ring| &ring.cells)
+                    .find(|cell| {
+                        matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == child_menu_id)
+                    })?;
+                let cell = input
+                    .layout
+                    .cells
+                    .iter()
+                    .find(|cell| cell.cell_id == source_cell.id)?;
+                Some(shape_center(&cell.shape, input.layout.scale_factor))
+            })
+            .unwrap_or(same_center)
     }
 
     fn begin_drag(
@@ -659,6 +995,70 @@ mod tests {
         preview.sync_preparation(session, Some(client), PreviewPreset::Current, None);
     }
 
+    fn finish_preparation_request(
+        preview: &mut EmbeddedPreview,
+        session: &mut RadialAuthoringSession,
+        client: &AuthoringClient,
+        request: crate::radial::authoring::AuthoringRequest,
+        preparer: &mut crate::radial::preparation::PreviewFramePreparer,
+    ) -> std::sync::Arc<PreparedFrameInput> {
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            id,
+            generation,
+            editor_session,
+            candidate,
+            menu_id,
+            selected,
+            anchor,
+            work_area,
+            scale,
+            token,
+            projection,
+        } = request
+        else {
+            panic!("expected an embedded preview preparation request")
+        };
+        let input = std::sync::Arc::new(
+            preparer
+                .prepare(
+                    &candidate,
+                    &menu_id,
+                    anchor,
+                    work_area,
+                    scale,
+                    generation.0,
+                    selected.as_ref(),
+                    &projection,
+                )
+                .unwrap(),
+        );
+        assert!(session.accept_reply(
+            crate::radial::authoring::AuthoringReply::EmbeddedPreviewPrepared {
+                id,
+                generation,
+                editor_session,
+                token,
+                input,
+            }
+        ));
+        sync_current(preview, session, client);
+        preview.prepared_frame(session).unwrap()
+    }
+
+    fn finish_pending_preparation(
+        preview: &mut EmbeddedPreview,
+        session: &mut RadialAuthoringSession,
+        client: &AuthoringClient,
+        endpoint: &crate::radial::authoring::AuthoringMainEndpoint,
+        preparer: &mut crate::radial::preparation::PreviewFramePreparer,
+    ) -> std::sync::Arc<PreparedFrameInput> {
+        let request = endpoint
+            .request_rx
+            .try_recv()
+            .expect("sync_current should enqueue an embedded preview request");
+        finish_preparation_request(preview, session, client, request, preparer)
+    }
+
     #[test]
     fn rejected_overlay_is_memoized_until_inputs_change_or_retry() {
         let (client, _endpoint) = crate::radial::authoring::authoring_control_service();
@@ -743,6 +1143,260 @@ mod tests {
         };
         preview.activate(&document, &action);
         assert_eq!(preview.intercepted_dispatches, 1);
+    }
+
+    #[test]
+    fn embedded_preview_uses_frozen_synthetic_center_and_current_parent_scope() {
+        let mut document = RadialDocument::starter();
+        let root = document.default_menu_id.clone();
+        let child_id = MenuId::new("starter-favorites");
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == root)
+            .unwrap()
+            .submenu_presentation = crate::radial::model::SubmenuPresentation::SameCenter;
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == child_id)
+            .unwrap()
+            .submenu_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+        let document = std::sync::Arc::new(document);
+        let mut session =
+            RadialAuthoringSession::new(crate::radial::authoring::AuthoringSnapshot::new(
+                std::sync::Arc::clone(&document),
+                "preview-frozen-placement",
+            ));
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut preview = EmbeddedPreview::default();
+
+        sync_current(&mut preview, &mut session, &client);
+        let request = endpoint.request_rx.try_recv().unwrap();
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            id,
+            generation,
+            editor_session,
+            candidate,
+            menu_id,
+            anchor,
+            work_area,
+            scale,
+            token,
+            projection,
+            ..
+        } = request
+        else {
+            panic!("embedded root preparation was not requested")
+        };
+        let synthetic_work_area = PhysicalRect {
+            min: PhysicalPoint { x: 0.0, y: 0.0 },
+            max: PhysicalPoint { x: 480.0, y: 480.0 },
+        };
+        assert_eq!(anchor, PhysicalPoint { x: 240.0, y: 240.0 });
+        assert_eq!(work_area, synthetic_work_area);
+        assert_eq!(scale, ScaleFactor::new(1.0).unwrap());
+        assert_eq!(projection.placement, PreviewPlacement::FlexibleRoot);
+        let mut preparer =
+            crate::radial::preparation::PreviewFramePreparer::new(Default::default());
+        let input = std::sync::Arc::new(
+            crate::radial::authoring::native_preview::build_preview_frame_input_projected(
+                &mut preparer,
+                &candidate,
+                &menu_id,
+                anchor,
+                work_area,
+                scale,
+                generation.0,
+                None,
+                &projection,
+            )
+            .unwrap(),
+        );
+        let visible_center = input.layout.origin;
+        let frozen_scale = input.layout.scale_factor;
+        assert_eq!(visible_center, anchor);
+        assert!(session.accept_reply(
+            crate::radial::authoring::AuthoringReply::EmbeddedPreviewPrepared {
+                id,
+                generation,
+                editor_session,
+                token,
+                input,
+            }
+        ));
+        preview.sync_preparation(&mut session, Some(&client), PreviewPreset::Current, None);
+        assert_eq!(preview.frozen_center, Some(visible_center));
+
+        preview.activate(&document, &CellId::new("starter-root-favorites"));
+        assert_eq!(preview.current_menu(), Some(&child_id));
+        sync_current(&mut preview, &mut session, &client);
+        let child_request = endpoint.request_rx.try_recv().unwrap();
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            menu_id,
+            anchor,
+            work_area,
+            scale,
+            projection,
+            ..
+        } = child_request
+        else {
+            panic!("embedded child preparation was not requested")
+        };
+        assert_eq!(menu_id, child_id);
+        assert_eq!(anchor, visible_center);
+        assert_eq!(work_area, synthetic_work_area);
+        assert_eq!(scale, frozen_scale);
+        assert_eq!(projection.placement, PreviewPlacement::FixedCenter);
+    }
+
+    #[test]
+    fn embedded_preview_cascade_same_center_chain_keeps_ancestors_inert_and_back_exact() {
+        let mut document = RadialDocument::starter();
+        let root = document.default_menu_id.clone();
+        let favorites = MenuId::new("starter-favorites");
+        let applications = MenuId::new("starter-applications");
+        let root_menu = document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == root)
+            .unwrap();
+        root_menu.submenu_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+        root_menu.rings[0].radius = 40.0;
+        let favorites_menu = document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == favorites)
+            .unwrap();
+        favorites_menu.submenu_presentation = crate::radial::model::SubmenuPresentation::SameCenter;
+        favorites_menu.rings[0].cells[0].content = CellContent::Submenu {
+            menu_id: applications.clone(),
+        };
+        let document = std::sync::Arc::new(document);
+        let mut session =
+            RadialAuthoringSession::new(crate::radial::authoring::AuthoringSnapshot::new(
+                std::sync::Arc::clone(&document),
+                "preview-mixed-placement",
+            ));
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut preview = EmbeddedPreview::default();
+        let mut preparer =
+            crate::radial::preparation::PreviewFramePreparer::new(Default::default());
+
+        sync_current(&mut preview, &mut session, &client);
+        let root_frame = finish_pending_preparation(
+            &mut preview,
+            &mut session,
+            &client,
+            &endpoint,
+            &mut preparer,
+        );
+        let root_center = root_frame.layout.origin;
+
+        preview.activate(&document, &CellId::new("starter-root-favorites"));
+        sync_current(&mut preview, &mut session, &client);
+        let child_request = endpoint
+            .request_rx
+            .try_recv()
+            .expect("child navigation should enqueue exactly one preparation request");
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            projection, ..
+        } = &child_request
+        else {
+            panic!("expected Cascade child preparation")
+        };
+        assert_eq!(
+            projection.placement,
+            PreviewPlacement::Cascade {
+                fallback_center: root_center,
+            }
+        );
+        let child_frame = finish_preparation_request(
+            &mut preview,
+            &mut session,
+            &client,
+            child_request,
+            &mut preparer,
+        );
+        assert_eq!(child_frame.placement, PreparedPlacement::Cascade);
+        assert_ne!(child_frame.layout.origin, root_center);
+        let retained_root_cell = child_frame
+            .layout
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id.as_str() == "starter-root-favorites")
+            .expect("Cascade child retains the displayed parent cells");
+        assert!(!retained_root_cell.actionable);
+        let child_center = child_frame.layout.origin;
+        let child_frame_id = preview.reducer.as_ref().unwrap().state.stack[1].frame_id;
+
+        preview.activate(&document, &CellId::new("starter-favorites-source"));
+        assert_eq!(preview.current_menu(), Some(&applications));
+        sync_current(&mut preview, &mut session, &client);
+        let grandchild_request = endpoint
+            .request_rx
+            .try_recv()
+            .expect("SameCenter navigation should enqueue one grandchild preparation");
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            anchor,
+            projection,
+            ..
+        } = &grandchild_request
+        else {
+            panic!("expected SameCenter grandchild preparation")
+        };
+        assert_eq!(*anchor, child_center);
+        assert_eq!(projection.placement, PreviewPlacement::FixedCenter);
+        let grandchild_frame = finish_preparation_request(
+            &mut preview,
+            &mut session,
+            &client,
+            grandchild_request,
+            &mut preparer,
+        );
+        assert_eq!(grandchild_frame.layout.origin, child_center);
+        assert!(
+            grandchild_frame
+                .layout
+                .cells
+                .iter()
+                .any(|cell| cell.cell_id.as_str() == "__center" && cell.actionable)
+        );
+        assert!(
+            !grandchild_frame
+                .layout
+                .cells
+                .iter()
+                .any(|cell| cell.cell_id.as_str() == "starter-root-favorites")
+        );
+
+        preview.activate(&document, &CellId::new("__center"));
+        assert_eq!(
+            preview
+                .reducer
+                .as_ref()
+                .unwrap()
+                .state
+                .stack
+                .last()
+                .unwrap()
+                .frame_id,
+            child_frame_id
+        );
+        sync_current(&mut preview, &mut session, &client);
+        assert!(endpoint.request_rx.try_recv().is_err());
+        assert_eq!(
+            preview.prepared_frame(&session).unwrap().as_ref(),
+            child_frame.as_ref()
+        );
+        preview.activate(&document, &CellId::new("__center"));
+        assert_eq!(preview.current_menu(), Some(&root));
+        sync_current(&mut preview, &mut session, &client);
+        assert!(endpoint.request_rx.try_recv().is_err());
+        assert_eq!(
+            preview.prepared_frame(&session).unwrap().as_ref(),
+            root_frame.as_ref()
+        );
     }
 
     #[test]

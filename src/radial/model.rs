@@ -77,6 +77,9 @@ pub struct RadialFeatureSettings {
     /// `None` retains the document-owned default used by legacy settings.
     pub default_menu_id: Option<MenuId>,
     pub default_interaction: InteractionMode,
+    /// Legacy settings which omit this field retain Cascade. Rust-created new
+    /// settings use SameCenter for newly created menus.
+    #[serde(default = "legacy_submenu_presentation")]
     pub default_submenu_presentation: SubmenuPresentation,
     pub safety_policy: RadialSafetyPolicy,
     pub default_item_input_scope: TriggerScope,
@@ -94,7 +97,7 @@ impl Default for RadialFeatureSettings {
             hold_threshold_ms: 350,
             default_menu_id: None,
             default_interaction: InteractionMode::StickyClick,
-            default_submenu_presentation: SubmenuPresentation::Cascade,
+            default_submenu_presentation: SubmenuPresentation::SameCenter,
             safety_policy: RadialSafetyPolicy::InheritLauncher,
             default_item_input_scope: TriggerScope::MenuLocal,
             global_item_inputs: false,
@@ -156,6 +159,10 @@ impl Default for SubmenuPresentation {
     fn default() -> Self {
         Self::Cascade
     }
+}
+
+fn legacy_submenu_presentation() -> SubmenuPresentation {
+    SubmenuPresentation::Cascade
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -955,7 +962,7 @@ fn starter_menu(
         layout: LayoutKind::CircularCells,
         interaction: InteractionMode::StickyClick,
         hover_dwell_ms: None,
-        submenu_presentation: SubmenuPresentation::Cascade,
+        submenu_presentation: SubmenuPresentation::SameCenter,
         after_action: AfterActionPolicy::Inherit,
         center_action: None,
         center_primary_after_action: AfterActionPolicy::Inherit,
@@ -1151,7 +1158,9 @@ mod tests {
         let object = menu_json.as_object_mut().unwrap();
         object.remove("center_primary_after_action");
         object.remove("background_primary_after_action");
+        object.remove("submenu_presentation");
         let legacy: MenuDefinition = serde_json::from_value(menu_json).unwrap();
+        assert_eq!(legacy.submenu_presentation, SubmenuPresentation::Cascade);
         assert_eq!(
             legacy.center_primary_after_action,
             AfterActionPolicy::Inherit
@@ -1159,6 +1168,26 @@ mod tests {
         assert_eq!(
             legacy.background_primary_after_action,
             AfterActionPolicy::Inherit
+        );
+    }
+
+    #[test]
+    fn new_radial_defaults_are_same_center_but_legacy_missing_fields_are_cascade() {
+        assert_eq!(
+            RadialFeatureSettings::default().default_submenu_presentation,
+            SubmenuPresentation::SameCenter
+        );
+        assert_eq!(
+            serde_json::from_value::<RadialFeatureSettings>(serde_json::json!({}))
+                .unwrap()
+                .default_submenu_presentation,
+            SubmenuPresentation::Cascade
+        );
+        assert!(
+            RadialDocument::starter()
+                .menus
+                .iter()
+                .all(|menu| menu.submenu_presentation == SubmenuPresentation::SameCenter)
         );
     }
 

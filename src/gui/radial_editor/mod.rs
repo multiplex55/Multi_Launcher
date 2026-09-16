@@ -2468,7 +2468,7 @@ fn menu_behavior_controls(
     }
     enum_combo(
         ui,
-        "Submenu presentation",
+        "Open child menus",
         &mut menu.submenu_presentation,
         &[
             ("Cascade", SubmenuPresentation::Cascade),

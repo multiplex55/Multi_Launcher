@@ -8,11 +8,15 @@ use super::skin::{
 };
 use std::f32::consts::TAU;
 
+/// A point in physical desktop coordinates. These coordinates can be negative
+/// on monitors positioned above or to the left of the primary display.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PhysicalPoint {
     pub x: f64,
     pub y: f64,
 }
+/// A point in desktop-logical coordinates. Layout snapshots store absolute
+/// desktop-logical positions, not coordinates relative to their HWND.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LogicalPoint {
     pub x: f32,
@@ -27,6 +31,19 @@ pub struct LogicalRect {
 pub struct PhysicalRect {
     pub min: PhysicalPoint,
     pub max: PhysicalPoint,
+}
+
+/// Spatial inputs captured for one radial session. The requested anchor is
+/// retained for diagnostics; navigation is positioned from `visible_center`.
+/// Work area and scale stay frozen for the lifetime of this topology epoch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrozenSpatialContext {
+    pub requested_root_anchor: PhysicalPoint,
+    pub visible_center: PhysicalPoint,
+    pub work_area: PhysicalRect,
+    pub scale_factor: ScaleFactor,
+    pub spatial_generation: u64,
+    pub topology_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,8 +173,13 @@ pub struct LayoutStyleSnapshot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutSnapshot {
+    /// Physical desktop point requested for this placement. For a root this
+    /// is the sampled cursor; children store their requested local/fixed point.
+    /// Navigation must use the session's actual visible center instead.
     pub requested_anchor: PhysicalPoint,
+    /// Physical desktop position of `center`, after root fitting.
     pub origin: PhysicalPoint,
+    /// DPI scale used to convert desktop-logical geometry to physical pixels.
     pub scale_factor: ScaleFactor,
     pub scale: f32,
     pub center: LogicalPoint,
@@ -182,6 +204,11 @@ pub enum LayoutError {
         required_scale: f32,
         minimum_scale: f32,
     },
+    FixedCenterDoesNotFit {
+        required_scale: f32,
+        minimum_scale: f32,
+    },
+    InvalidTranslation,
 }
 
 pub fn layout_document_menu(
@@ -203,6 +230,34 @@ pub fn layout_document_menu(
     )
 }
 
+/// Lay out a child or restored frame at exactly `center`. Unlike the flexible
+/// root fit, this placement never clamps the center or silently shifts it.
+pub fn layout_document_menu_fixed_center(
+    document: &super::model::RadialDocument,
+    menu: &MenuDefinition,
+    center: PhysicalPoint,
+    work_area: PhysicalRect,
+    scale_factor: ScaleFactor,
+    minimum_scale: f32,
+) -> Result<LayoutSnapshot, LayoutError> {
+    let style = compile_menu_tree(document, menu).map_err(|_| LayoutError::InvalidStyle)?;
+    layout_menu_impl(
+        menu,
+        Some(&style),
+        center,
+        work_area,
+        scale_factor,
+        minimum_scale,
+        Placement::FixedCenter,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum Placement {
+    FlexibleRoot,
+    FixedCenter,
+}
+
 pub fn layout_menu(
     menu: &MenuDefinition,
     requested_anchor: PhysicalPoint,
@@ -217,6 +272,7 @@ pub fn layout_menu(
         work_area,
         scale_factor,
         minimum_scale,
+        Placement::FlexibleRoot,
     )
 }
 
@@ -235,6 +291,7 @@ pub fn layout_menu_with_style(
         work_area,
         scale_factor,
         minimum_scale,
+        Placement::FlexibleRoot,
     )
 }
 
@@ -245,12 +302,15 @@ fn layout_menu_impl(
     work_area: PhysicalRect,
     scale_factor: ScaleFactor,
     minimum_scale: f32,
+    placement: Placement,
 ) -> Result<LayoutSnapshot, LayoutError> {
     if !minimum_scale.is_finite() || minimum_scale <= 0.0 || minimum_scale > 1.0 {
         return Err(LayoutError::InvalidScale);
     }
-    let width = ((work_area.max.x - work_area.min.x) / scale_factor.get()) as f32;
-    let height = ((work_area.max.y - work_area.min.y) / scale_factor.get()) as f32;
+    let work_min = scale_factor.physical_to_logical(work_area.min);
+    let work_max = scale_factor.physical_to_logical(work_area.max);
+    let width = work_max.x - work_min.x;
+    let height = work_max.y - work_min.y;
     if width <= 0.0 || height <= 0.0 || !width.is_finite() || !height.is_finite() {
         return Err(LayoutError::InvalidWorkArea);
     }
@@ -342,27 +402,48 @@ fn layout_menu_impl(
     // Reserve deterministic room for labels, glow, and the outer rim. Later
     // renderers may use less, but may not draw outside this snapshot extent.
     let visual_padding = 12.0 + glow_extent + text_extent + menu_shadow_width;
-    let required_scale = (width.min(height) / ((rim_nominal + visual_padding) * 2.0)).min(1.0);
+    let requested_logical = scale_factor.physical_to_logical(requested_anchor);
+    let (fit_width, fit_height) = match placement {
+        Placement::FlexibleRoot => (width, height),
+        Placement::FixedCenter => {
+            let available_left = (requested_logical.x - work_min.x).max(0.0);
+            let available_right = (work_max.x - requested_logical.x).max(0.0);
+            let available_top = (requested_logical.y - work_min.y).max(0.0);
+            let available_bottom = (work_max.y - requested_logical.y).max(0.0);
+            (
+                2.0 * available_left.min(available_right),
+                2.0 * available_top.min(available_bottom),
+            )
+        }
+    };
+    let required_scale =
+        (fit_width.min(fit_height) / ((rim_nominal + visual_padding) * 2.0)).min(1.0);
     if required_scale < minimum_scale {
-        return Err(LayoutError::Oversized {
-            required_scale,
-            minimum_scale,
+        return Err(match placement {
+            Placement::FlexibleRoot => LayoutError::Oversized {
+                required_scale,
+                minimum_scale,
+            },
+            Placement::FixedCenter => LayoutError::FixedCenterDoesNotFit {
+                required_scale,
+                minimum_scale,
+            },
         });
     }
     let scale = required_scale;
     let input_margin = background_nominal * scale;
     let rim_margin = rim_nominal * scale;
     let visual_margin = (rim_nominal + visual_padding) * scale;
-    let requested_logical = scale_factor.physical_to_logical(requested_anchor);
-    let work_min = scale_factor.physical_to_logical(work_area.min);
-    let work_max = scale_factor.physical_to_logical(work_area.max);
-    let center = LogicalPoint {
-        x: requested_logical
-            .x
-            .clamp(work_min.x + visual_margin, work_max.x - visual_margin),
-        y: requested_logical
-            .y
-            .clamp(work_min.y + visual_margin, work_max.y - visual_margin),
+    let center = match placement {
+        Placement::FlexibleRoot => LogicalPoint {
+            x: requested_logical
+                .x
+                .clamp(work_min.x + visual_margin, work_max.x - visual_margin),
+            y: requested_logical
+                .y
+                .clamp(work_min.y + visual_margin, work_max.y - visual_margin),
+        },
+        Placement::FixedCenter => requested_logical,
     };
     let origin = scale_factor.logical_to_physical(center);
     let mut cells = Vec::new();
@@ -565,6 +646,125 @@ fn layout_menu_impl(
                 .unwrap_or_default(),
         },
     })
+}
+
+/// Translate an already fitted desktop-logical layout by a physical desktop
+/// delta. The original requested anchor remains diagnostic history.
+pub fn translate_layout(
+    layout: &mut LayoutSnapshot,
+    physical_delta: PhysicalPoint,
+) -> Result<(), LayoutError> {
+    if !physical_delta.x.is_finite() || !physical_delta.y.is_finite() {
+        return Err(LayoutError::InvalidTranslation);
+    }
+    let logical_delta = LogicalPoint {
+        x: (physical_delta.x / layout.scale_factor.get()) as f32,
+        y: (physical_delta.y / layout.scale_factor.get()) as f32,
+    };
+    if !logical_delta.x.is_finite() || !logical_delta.y.is_finite() {
+        return Err(LayoutError::InvalidTranslation);
+    }
+    let mut translated = layout.clone();
+    translated.origin.x += physical_delta.x;
+    translated.origin.y += physical_delta.y;
+    translate_logical_point(&mut translated.center, logical_delta);
+    translate_rect(&mut translated.background_extent, logical_delta);
+    translate_rect(&mut translated.rim_extent, logical_delta);
+    translate_rect(&mut translated.visual_extent, logical_delta);
+    translate_rect(&mut translated.input_extent, logical_delta);
+    for shape in &mut translated.input_regions {
+        translate_shape(shape, logical_delta);
+    }
+    for cell in &mut translated.cells {
+        translate_shape(&mut cell.shape, logical_delta);
+    }
+    if !translated.origin.x.is_finite()
+        || !translated.origin.y.is_finite()
+        || !logical_point_is_finite(translated.center)
+        || !logical_rect_is_finite(translated.background_extent)
+        || !logical_rect_is_finite(translated.rim_extent)
+        || !logical_rect_is_finite(translated.visual_extent)
+        || !logical_rect_is_finite(translated.input_extent)
+        || translated
+            .input_regions
+            .iter()
+            .any(|shape| !shape_center_is_finite(shape))
+        || translated
+            .cells
+            .iter()
+            .any(|cell| !shape_center_is_finite(&cell.shape))
+    {
+        return Err(LayoutError::InvalidTranslation);
+    }
+    *layout = translated;
+    Ok(())
+}
+
+/// Convert an absolute desktop-logical hit-shape center to physical desktop
+/// coordinates. `LayoutSnapshot::origin` is intentionally not added again.
+pub fn shape_center(shape: &HitShape, scale_factor: ScaleFactor) -> PhysicalPoint {
+    let logical = match shape {
+        HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => *center,
+    };
+    scale_factor.logical_to_physical(logical)
+}
+
+/// Compose the displayed ancestor regions with a Cascade child. Ancestor
+/// cells remain visible but non-actionable; their owned hit regions remain
+/// available for correct native input parity.
+pub fn cascade_layout(parent: &LayoutSnapshot, mut child: LayoutSnapshot) -> LayoutSnapshot {
+    let mut ancestors = parent.cells.clone();
+    for cell in &mut ancestors {
+        cell.actionable = false;
+    }
+    ancestors.extend(child.cells);
+    child.cells = ancestors;
+    let mut input_regions = parent.input_regions.clone();
+    input_regions.extend(child.input_regions);
+    child.input_regions = input_regions;
+    child.input_extent.min.x = child.input_extent.min.x.min(parent.input_extent.min.x);
+    child.input_extent.min.y = child.input_extent.min.y.min(parent.input_extent.min.y);
+    child.input_extent.max.x = child.input_extent.max.x.max(parent.input_extent.max.x);
+    child.input_extent.max.y = child.input_extent.max.y.max(parent.input_extent.max.y);
+    child.visual_extent.min.x = child.visual_extent.min.x.min(parent.visual_extent.min.x);
+    child.visual_extent.min.y = child.visual_extent.min.y.min(parent.visual_extent.min.y);
+    child.visual_extent.max.x = child.visual_extent.max.x.max(parent.visual_extent.max.x);
+    child.visual_extent.max.y = child.visual_extent.max.y.max(parent.visual_extent.max.y);
+    child
+}
+
+fn translate_logical_point(point: &mut LogicalPoint, delta: LogicalPoint) {
+    point.x += delta.x;
+    point.y += delta.y;
+}
+
+fn logical_point_is_finite(point: LogicalPoint) -> bool {
+    point.x.is_finite() && point.y.is_finite()
+}
+
+fn logical_rect_is_finite(rect: LogicalRect) -> bool {
+    logical_point_is_finite(rect.min) && logical_point_is_finite(rect.max)
+}
+
+fn shape_center_is_finite(shape: &HitShape) -> bool {
+    match shape {
+        HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => {
+            logical_point_is_finite(*center)
+        }
+    }
+}
+
+fn translate_rect(rect: &mut LogicalRect, delta: LogicalPoint) {
+    translate_logical_point(&mut rect.min, delta);
+    translate_logical_point(&mut rect.max, delta);
+}
+
+fn translate_shape(shape: &mut HitShape, delta: LogicalPoint) {
+    match shape {
+        HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => {
+            translate_logical_point(center, delta)
+        }
+    }
 }
 
 fn cell_visual(
@@ -789,6 +989,139 @@ mod tests {
         assert!(l.origin.x >= -1920.0);
         assert!(l.visual_extent.min.x >= -1920.0);
     }
+
+    #[test]
+    fn fixed_center_preserves_visible_center_at_negative_fractional_dpi() {
+        let document = RadialDocument::starter();
+        let menu = &document.menus[0];
+        let scale = ScaleFactor::new(1.25).unwrap();
+        let center = PhysicalPoint {
+            x: -1437.5,
+            y: 318.75,
+        };
+        let work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: -2500.0,
+                y: -500.0,
+            },
+            max: PhysicalPoint { x: 0.0, y: 1500.0 },
+        };
+        let layout =
+            layout_document_menu_fixed_center(&document, menu, center, work_area, scale, 0.55)
+                .unwrap();
+        assert_eq!(layout.origin, center);
+        assert_eq!(layout.center, scale.physical_to_logical(center));
+        assert_eq!(layout.requested_anchor, center);
+        if let Some(cell) = layout.cells.first() {
+            let shape = shape_center(&cell.shape, scale);
+            let logical = match &cell.shape {
+                HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => *center,
+            };
+            assert_eq!(shape, scale.logical_to_physical(logical));
+        }
+    }
+
+    #[test]
+    fn fixed_fit_checks_all_work_area_edges_without_clamping() {
+        let document = RadialDocument::starter();
+        let menu = &document.menus[0];
+        let work_area = PhysicalRect {
+            min: PhysicalPoint { x: 0.0, y: 0.0 },
+            max: PhysicalPoint {
+                x: 2000.0,
+                y: 1200.0,
+            },
+        };
+        let scale = ScaleFactor::new(1.25).unwrap();
+        for center in [
+            PhysicalPoint { x: 40.0, y: 600.0 },
+            PhysicalPoint {
+                x: 1960.0,
+                y: 600.0,
+            },
+            PhysicalPoint { x: 1000.0, y: 40.0 },
+            PhysicalPoint {
+                x: 1000.0,
+                y: 1160.0,
+            },
+        ] {
+            assert!(matches!(
+                layout_document_menu_fixed_center(&document, menu, center, work_area, scale, 0.55,),
+                Err(LayoutError::FixedCenterDoesNotFit { .. })
+            ));
+        }
+        let center = PhysicalPoint {
+            x: 1000.0,
+            y: 600.0,
+        };
+        let layout =
+            layout_document_menu_fixed_center(&document, menu, center, work_area, scale, 0.55)
+                .unwrap();
+        assert_eq!(layout.origin, center);
+    }
+
+    #[test]
+    fn translation_moves_every_layout_coordinate_once_and_preserves_request() {
+        let mut layout = layout_menu(
+            &menu(LayoutKind::CircularCells),
+            PhysicalPoint {
+                x: -700.0,
+                y: 300.0,
+            },
+            work(),
+            ScaleFactor::new(1.25).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        let original = layout.clone();
+        let delta = PhysicalPoint { x: 137.5, y: -62.5 };
+        translate_layout(&mut layout, delta).unwrap();
+        let logical_delta = LogicalPoint { x: 110.0, y: -50.0 };
+        assert_eq!(layout.origin.x, original.origin.x + delta.x);
+        assert_eq!(layout.origin.y, original.origin.y + delta.y);
+        assert_eq!(layout.center.x, original.center.x + logical_delta.x);
+        assert_eq!(layout.center.y, original.center.y + logical_delta.y);
+        assert_eq!(layout.requested_anchor, original.requested_anchor);
+        assert_eq!(
+            layout.visual_extent.min.x,
+            original.visual_extent.min.x + logical_delta.x
+        );
+        assert_eq!(
+            layout.input_extent.max.y,
+            original.input_extent.max.y + logical_delta.y
+        );
+        assert_eq!(
+            shape_center(&layout.cells[0].shape, layout.scale_factor).x,
+            shape_center(&original.cells[0].shape, original.scale_factor).x + delta.x
+        );
+    }
+
+    #[test]
+    fn overflowing_translation_is_rejected_without_mutating_layout() {
+        let mut layout = layout_menu(
+            &menu(LayoutKind::CircularCells),
+            PhysicalPoint::default(),
+            work(),
+            ScaleFactor::new(1.25).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        layout.center.x = f32::MAX;
+        let before = layout.clone();
+
+        assert_eq!(
+            translate_layout(
+                &mut layout,
+                PhysicalPoint {
+                    x: f64::from(f32::MAX),
+                    y: 0.0,
+                }
+            ),
+            Err(LayoutError::InvalidTranslation)
+        );
+        assert_eq!(layout, before);
+    }
+
     #[test]
     fn circular_spacer_reserves_geometry_but_cannot_hit() {
         let mut m = menu(LayoutKind::CircularCells);

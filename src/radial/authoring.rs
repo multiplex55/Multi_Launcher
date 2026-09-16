@@ -1455,11 +1455,39 @@ impl RadialAuthoringSession {
         page: usize,
         selected_skin: Option<SkinId>,
     ) -> Result<AuthoringRequest, AuthoringError> {
+        self.request_embedded_preview_placed(
+            candidate,
+            menu_id,
+            selected,
+            anchor,
+            work_area,
+            scale,
+            token,
+            page,
+            selected_skin,
+            crate::radial::preparation::PreviewPlacement::FlexibleRoot,
+        )
+    }
+
+    pub fn request_embedded_preview_placed(
+        &mut self,
+        candidate: Arc<RadialDocument>,
+        menu_id: MenuId,
+        selected: Option<CellId>,
+        anchor: PhysicalPoint,
+        work_area: PhysicalRect,
+        scale: ScaleFactor,
+        token: String,
+        page: usize,
+        selected_skin: Option<SkinId>,
+        placement: crate::radial::preparation::PreviewPlacement,
+    ) -> Result<AuthoringRequest, AuthoringError> {
         if self.pending_request.is_some() {
             return Err(AuthoringError::RequestPending);
         }
         let id = self.next_id();
-        let projection = self.preview_projection(&candidate, &menu_id, page, selected_skin)?;
+        let mut projection = self.preview_projection(&candidate, &menu_id, page, selected_skin)?;
+        projection.placement = placement;
         self.pending_request = Some(PendingAuthoringRequest {
             id,
             generation: self.generation,
@@ -1638,6 +1666,7 @@ impl RadialAuthoringSession {
         .map_err(|error| AuthoringError::AssetOverlayInvalid(error.to_string()))?;
         Ok(PreviewProjection {
             page,
+            placement: super::preparation::PreviewPlacement::FlexibleRoot,
             dynamic: synthetic_preview_dynamic(menu),
             selected_skin,
             assets,

@@ -188,12 +188,19 @@ pub(crate) use state::{
     AuthoringActionRevalidation, PendingConfirmCommand, PendingUniversalActionInvocation,
     UiErrorEvent,
 };
-pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, VirtualDesktopGuiCompletion, WatchEvent};
+pub use state::{
+    ClipboardModifyGuiEvent, RadialPlacementFailureNotice, TestWatchEvent,
+    VirtualDesktopGuiCompletion, WatchEvent,
+};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
     "edit", "ma",
 ];
+
+pub(super) fn radial_placement_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("radial-submenu-placement-recovery")
+}
 
 /// Prefix used to search user saved applications.
 pub const APP_PREFIX: &str = "app";
@@ -844,6 +851,9 @@ pub struct LauncherApp {
     pub clear_query_after_run: bool,
     pub require_confirm_destructive: bool,
     pub(crate) radial_feature_settings: crate::radial::model::RadialFeatureSettings,
+    pub(crate) radial_migration_receipt:
+        Option<crate::settings::SubmenuPresentationMigrationReceipt>,
+    radial_placement_viewport: state::RadialPlacementViewportState,
     pub query_autocomplete: bool,
     pub net_refresh: f32,
     pub net_unit: crate::settings::NetUnit,
@@ -1001,6 +1011,213 @@ impl LauncherApp {
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
             });
         }
+    }
+
+    pub(crate) fn request_radial_submenu_migration_restore(&mut self) {
+        let Some(client) = radial_control_client() else {
+            self.report_error_message(
+                "radial.migration.restore",
+                "Radial migration service is unavailable.",
+            );
+            return;
+        };
+        if let Err(error) = client
+            .send(crate::radial::control::RadialControlRequest::RestoreSubmenuPresentationMigration)
+        {
+            self.report_error_message("radial.migration.restore", error.to_string());
+        }
+    }
+
+    fn show_radial_placement_failure(&mut self, ctx: &egui::Context) {
+        if !self.radial_placement_viewport.present_requested() {
+            return;
+        }
+        let notice = self.radial_placement_viewport.notice().cloned();
+        let close_because_resolved = notice.is_none();
+        let focus_requested = self.radial_placement_viewport.take_focus_request();
+        #[derive(Clone, Copy)]
+        enum Choice {
+            Designer,
+            Cascade,
+            Dismiss,
+        }
+        let mut choice = None;
+        let mut native_close_requested = false;
+        let viewport_id = radial_placement_viewport_id();
+        let viewport_builder = egui::ViewportBuilder::default()
+            .with_title("Radial submenu placement")
+            .with_inner_size([440.0, 170.0])
+            .with_min_inner_size([360.0, 130.0])
+            .with_resizable(false)
+            .with_visible(true)
+            .with_always_on_top();
+        ctx.show_viewport_immediate(viewport_id, viewport_builder, |child, class| {
+            let independent_viewport = class == egui::ViewportClass::Immediate;
+            if independent_viewport && focus_requested {
+                child.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            if close_because_resolved {
+                if independent_viewport {
+                    child.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                return;
+            }
+            if independent_viewport && child.input(|input| input.viewport().close_requested()) {
+                native_close_requested = true;
+                child.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+
+            let Some(notice) = notice.as_ref() else {
+                return;
+            };
+            egui::CentralPanel::default().show(child, |ui| {
+                ui.heading("Radial submenu could not fit");
+                ui.label(format!(
+                    "{} could not be opened from {}.",
+                    notice.child_menu_id, notice.parent_menu_id
+                ));
+                ui.label(&notice.message);
+                ui.small(
+                    "You can edit the menu in Designer or deliberately switch this parent to Cascade.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Show launcher & open Designer").clicked() {
+                        choice = Some(Choice::Designer);
+                    }
+                    if notice.can_switch_parent_to_cascade()
+                        && ui.button("Switch this parent to Cascade").clicked()
+                    {
+                        choice = Some(Choice::Cascade);
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        choice = Some(Choice::Dismiss);
+                    }
+                });
+            });
+            if independent_viewport
+                && matches!(choice, Some(Choice::Designer | Choice::Dismiss))
+            {
+                child.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+        if close_because_resolved || native_close_requested {
+            self.radial_placement_viewport.mark_viewport_closed();
+        }
+        match choice {
+            Some(Choice::Designer) => {
+                if let Some(notice) = notice.as_ref() {
+                    self.open_radial_designer_from_placement(notice, ctx);
+                }
+            }
+            Some(Choice::Cascade) => {
+                let Some(notice) = notice else {
+                    return;
+                };
+                let Some(client) = radial_control_client() else {
+                    self.radial_placement_viewport.update_message(
+                        "Could not switch this parent to Cascade: radial control service is unavailable.",
+                    );
+                    self.report_error_message(
+                        "radial.placement",
+                        "Radial control service is unavailable.",
+                    );
+                    return;
+                };
+                match self.request_radial_placement_cascade(&notice, &client) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        self.radial_placement_viewport.update_message(format!(
+                            "Could not switch {} to Cascade: {error}",
+                            notice.parent_menu_id
+                        ));
+                        self.report_error_message("radial.placement", error.to_string());
+                    }
+                }
+                ctx.request_repaint();
+            }
+            Some(Choice::Dismiss) => {
+                if let Some(notice) = notice.as_ref() {
+                    self.dismiss_radial_placement_notice(notice);
+                }
+                ctx.request_repaint();
+            }
+            None => {}
+        }
+    }
+
+    fn radial_placement_notice_is_current(
+        &self,
+        notice: &state::RadialPlacementFailureNotice,
+    ) -> bool {
+        self.radial_placement_viewport
+            .notice()
+            .is_some_and(|active| {
+                active.session_id == notice.session_id
+                    && active.parent_frame_id == notice.parent_frame_id
+                    && active.parent_menu_id == notice.parent_menu_id
+                    && active.child_menu_id == notice.child_menu_id
+            })
+    }
+
+    fn open_radial_designer_from_placement(
+        &mut self,
+        notice: &state::RadialPlacementFailureNotice,
+        ctx: &egui::Context,
+    ) -> bool {
+        if !self.radial_placement_notice_is_current(notice) {
+            return false;
+        }
+        self.radial_placement_viewport.mark_viewport_closed();
+        // Route the explicit recovery action through the normal launcher
+        // command/outcome path so App::update applies configured show placement.
+        self.activate_action(
+            Action {
+                label: "Show launcher and open Radial Designer".into(),
+                desc: "Show the launcher and open Radial Designer".into(),
+                action: "launcher:show".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Click,
+        );
+        self.focus_panel(Panel::RadialEditor);
+        ctx.request_repaint();
+        true
+    }
+
+    fn dismiss_radial_placement_notice(
+        &mut self,
+        notice: &state::RadialPlacementFailureNotice,
+    ) -> bool {
+        if !self.radial_placement_notice_is_current(notice) {
+            return false;
+        }
+        self.radial_placement_viewport.dismiss_notice();
+        self.radial_placement_viewport.mark_viewport_closed();
+        true
+    }
+
+    fn request_radial_placement_cascade(
+        &self,
+        notice: &state::RadialPlacementFailureNotice,
+        client: &crate::radial::control::RadialControlClient,
+    ) -> Result<bool, crate::radial::control::RadialControlError> {
+        if !notice.can_switch_parent_to_cascade()
+            || !self.radial_placement_notice_is_current(notice)
+        {
+            return Ok(false);
+        }
+        client
+            .send(
+                crate::radial::control::RadialControlRequest::SetActiveParentSubmenuCascade {
+                    session_id: notice.session_id.clone(),
+                    parent_frame_id: notice.parent_frame_id,
+                    parent_menu_id: notice.parent_menu_id.clone(),
+                },
+            )
+            .map(|()| true)
     }
 
     fn set_inline_error(&mut self, msg: String) {
@@ -1994,6 +2211,8 @@ impl LauncherApp {
             clear_query_after_run: settings.clear_query_after_run,
             require_confirm_destructive: settings.require_confirm_destructive,
             radial_feature_settings: settings.radial.clone(),
+            radial_migration_receipt: settings.radial_submenu_migration.clone(),
+            radial_placement_viewport: state::RadialPlacementViewportState::default(),
             query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
@@ -3546,6 +3765,10 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::RadialInvalidate
             | WatchEvent::RadialConfigDiagnostic(_)
             | WatchEvent::RadialRuntimeDiagnostic(_)
+            | WatchEvent::RadialSubmenuPlacementFailure(_)
+            | WatchEvent::RadialPlacementActionResult { .. }
+            | WatchEvent::RadialMigrationNotice(_)
+            | WatchEvent::RadialMigrationState { .. }
             | WatchEvent::ScreenDrawStart => {
                 continue;
             }

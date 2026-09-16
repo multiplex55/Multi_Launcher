@@ -341,6 +341,7 @@ impl SettingsEditor {
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
             radial: self.radial_settings(),
+            radial_submenu_migration: current.radial_submenu_migration.clone(),
         }
     }
 }
@@ -397,6 +398,47 @@ mod tests {
         let editor = SettingsEditor::from_settings(&initial);
         let restored = editor.to_settings(&Settings::default());
         assert_eq!(restored.radial, initial.radial);
+    }
+
+    #[test]
+    fn settings_editor_preserves_hidden_radial_migration_receipt() {
+        let mut initial = Settings::default();
+        initial.radial_submenu_migration =
+            Some(crate::settings::SubmenuPresentationMigrationReceipt {
+                migration_id: "radial-submenu-same-center-v1".into(),
+                version: 1,
+                state: crate::settings::SubmenuMigrationState::Applied,
+                source_settings_sha256: "settings-source".into(),
+                source_radial_sha256: "radial-source".into(),
+                settings_backup_path: "settings.bak".into(),
+                settings_backup_sha256: "settings-backup".into(),
+                settings_source_existed: true,
+                radial_backup_path: "radial.bak".into(),
+                radial_backup_sha256: "radial-backup".into(),
+                settings_default_before: crate::radial::model::SubmenuPresentation::Cascade,
+                settings_default_target: crate::radial::model::SubmenuPresentation::SameCenter,
+                changed_menus: Vec::new(),
+                target_radial_revision: 2,
+                target_radial_sha256: "radial-target".into(),
+                target_settings_content_sha256: "settings-target".into(),
+                undo_restored_menu_ids: Vec::new(),
+                undo_source_radial_sha256: None,
+                undo_target_radial_revision: None,
+                undo_target_radial_sha256: None,
+                undo_source_settings_content_sha256: None,
+                undo_target_settings_content_sha256: None,
+                undo_settings_default_source: None,
+                undo_restores_settings_default: false,
+                failure: None,
+            });
+
+        let editor = SettingsEditor::from_settings(&initial);
+        let restored = editor.to_settings(&initial);
+
+        assert_eq!(
+            restored.radial_submenu_migration,
+            initial.radial_submenu_migration
+        );
     }
 
     #[test]

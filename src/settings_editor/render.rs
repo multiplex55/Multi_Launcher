@@ -134,7 +134,7 @@ impl SettingsEditor {
             ui.small(
                 "Sticky click keeps the tree available for repeated choices; release-to-select activates on release, and hold-and-click requires an explicit click.",
             );
-            egui::ComboBox::from_label("New menu submenu behavior")
+            egui::ComboBox::from_label("New-menu default submenu behavior")
                 .selected_text(match self.radial_default_submenu_presentation {
                     SubmenuPresentation::Cascade => "Cascade",
                     SubmenuPresentation::SameCenter => "Same center",
@@ -222,6 +222,32 @@ impl SettingsEditor {
                 RadialCommandHost::open_radial_editor(app, true);
             }
         });
+        if let Some(receipt) = app.radial_migration_receipt.as_ref() {
+            match receipt.state {
+                crate::settings::SubmenuMigrationState::Applied => {
+                    ui.small("Existing submenu presentations were converted to Same center.");
+                    if ui.button("Restore previous submenu presentation").clicked() {
+                        app.request_radial_submenu_migration_restore();
+                    }
+                }
+                crate::settings::SubmenuMigrationState::Prepared
+                | crate::settings::SubmenuMigrationState::UndoPrepared => {
+                    ui.small("Radial submenu migration recovery is pending.");
+                }
+                crate::settings::SubmenuMigrationState::Undone => {
+                    ui.small("The one-time radial submenu migration has been restored.");
+                }
+                crate::settings::SubmenuMigrationState::Failed => {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        receipt
+                            .failure
+                            .as_deref()
+                            .unwrap_or("Radial migration failed."),
+                    );
+                }
+            }
+        }
     }
 
     fn render_optional_hotkey(

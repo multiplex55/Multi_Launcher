@@ -796,6 +796,7 @@ impl eframe::App for LauncherApp {
         });
 
         self.process_watch_events();
+        self.show_radial_placement_failure(ctx);
 
         let trimmed = self.query.trim().to_string();
         let use_dashboard = self.should_show_dashboard(trimmed.as_str());

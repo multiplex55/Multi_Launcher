@@ -66,6 +66,45 @@ impl LauncherApp {
                 WatchEvent::RadialRuntimeDiagnostic(diagnostic) => {
                     self.report_error_message("radial.runtime", diagnostic);
                 }
+                WatchEvent::RadialSubmenuPlacementFailure(notice) => {
+                    self.radial_placement_viewport.request(notice);
+                    self.egui_ctx.request_repaint();
+                    self.egui_ctx
+                        .request_repaint_of(super::radial_placement_viewport_id());
+                }
+                WatchEvent::RadialPlacementActionResult {
+                    session_id,
+                    parent_frame_id,
+                    result,
+                } => {
+                    if self.radial_placement_viewport.apply_action_result(
+                        &session_id,
+                        parent_frame_id,
+                        result,
+                    ) {
+                        self.egui_ctx.request_repaint();
+                        self.egui_ctx
+                            .request_repaint_of(super::radial_placement_viewport_id());
+                    }
+                }
+                WatchEvent::RadialMigrationNotice(notice) => {
+                    self.add_toast(Toast {
+                        text: notice.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    });
+                }
+                WatchEvent::RadialMigrationState {
+                    receipt,
+                    default_submenu_presentation,
+                } => {
+                    self.radial_migration_receipt = receipt;
+                    self.radial_feature_settings.default_submenu_presentation =
+                        default_submenu_presentation;
+                    self.settings_editor.radial_default_submenu_presentation =
+                        default_submenu_presentation;
+                }
                 WatchEvent::Actions => {
                     let _transaction = crate::actions::transaction_guard();
                     let custom = match load_actions_typed(&self.actions_path) {
@@ -286,7 +325,11 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool, mpsc::channel};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::channel,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -330,6 +373,17 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn placement_notice() -> RadialPlacementFailureNotice {
+        RadialPlacementFailureNotice {
+            session_id: crate::radial::model::SessionId::new("designer-session"),
+            parent_frame_id: crate::radial::session::FrameId(11),
+            parent_menu_id: crate::radial::model::MenuId::new("parent"),
+            child_menu_id: crate::radial::model::MenuId::new("child"),
+            parent_presentation: crate::radial::model::SubmenuPresentation::SameCenter,
+            message: "fixed center does not fit".into(),
+        }
     }
 
     #[test]
@@ -528,6 +582,187 @@ mod tests {
         assert_eq!(app.query, "keep query");
         assert_eq!(app.selected, Some(3));
         assert_eq!(app.error.as_deref(), Some("missing managed radial asset"));
+    }
+
+    #[test]
+    fn hidden_launcher_radial_notice_requests_one_stable_viewport_and_correlated_actions() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let notice = RadialPlacementFailureNotice {
+            session_id: crate::radial::model::SessionId::new("radial-session"),
+            parent_frame_id: crate::radial::session::FrameId(3),
+            parent_menu_id: crate::radial::model::MenuId::new("favorites"),
+            child_menu_id: crate::radial::model::MenuId::new("applications"),
+            parent_presentation: crate::radial::model::SubmenuPresentation::SameCenter,
+            message: "fixed center placement does not fit".into(),
+        };
+        assert!(notice.can_switch_parent_to_cascade());
+        let mut already_cascade = notice.clone();
+        already_cascade.parent_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+        assert!(!already_cascade.can_switch_parent_to_cascade());
+
+        app.event_tx
+            .send(WatchEvent::RadialSubmenuPlacementFailure(notice.clone()))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.radial_placement_viewport.notice(), Some(&notice));
+        assert!(app.radial_placement_viewport.present_requested());
+        let recovery_viewport = super::super::radial_placement_viewport_id();
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.radial_placement_viewport.take_focus_request());
+        assert!(!app.radial_placement_viewport.take_focus_request());
+
+        app.event_tx
+            .send(WatchEvent::RadialSubmenuPlacementFailure(notice.clone()))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(
+            super::super::radial_placement_viewport_id(),
+            recovery_viewport
+        );
+        assert!(app.radial_placement_viewport.take_focus_request());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+
+        app.event_tx
+            .send(WatchEvent::RadialPlacementActionResult {
+                session_id: crate::radial::model::SessionId::new("stale-session"),
+                parent_frame_id: notice.parent_frame_id,
+                result: Ok(()),
+            })
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.radial_placement_viewport.notice(), Some(&notice));
+
+        app.event_tx
+            .send(WatchEvent::RadialPlacementActionResult {
+                session_id: notice.session_id.clone(),
+                parent_frame_id: notice.parent_frame_id,
+                result: Err("revision conflict".into()),
+            })
+            .unwrap();
+        app.process_watch_events();
+        assert!(
+            app.radial_placement_viewport
+                .notice()
+                .is_some_and(|active| {
+                    active.session_id == notice.session_id
+                        && active.parent_frame_id == notice.parent_frame_id
+                        && active.message.contains("revision conflict")
+                })
+        );
+        assert!(app.radial_placement_viewport.present_requested());
+
+        app.event_tx
+            .send(WatchEvent::RadialPlacementActionResult {
+                session_id: notice.session_id.clone(),
+                parent_frame_id: notice.parent_frame_id,
+                result: Ok(()),
+            })
+            .unwrap();
+        app.process_watch_events();
+        assert!(app.radial_placement_viewport.notice().is_none());
+        assert!(app.radial_placement_viewport.present_requested());
+        app.radial_placement_viewport.mark_viewport_closed();
+        assert!(!app.radial_placement_viewport.present_requested());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn placement_designer_action_uses_launcher_show_command_then_opens_editor() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let notice = placement_notice();
+        app.radial_placement_viewport.request(notice.clone());
+
+        assert!(app.open_radial_designer_from_placement(&notice, &ctx));
+
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.is_panel_open(crate::gui::Panel::RadialEditor));
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&crate::gui::Panel::RadialEditor)
+        );
+        assert!(!app.radial_placement_viewport.present_requested());
+        assert!(app.radial_placement_viewport.notice().is_none());
+        assert_eq!(app.test_activation_trace.len(), 1);
+        assert_eq!(app.test_activation_trace[0].0.action, "launcher:show");
+        assert_eq!(
+            app.test_activation_trace[0].1,
+            crate::commands::ActivationSource::Click
+        );
+    }
+
+    #[test]
+    fn placement_dismiss_and_cascade_leave_hidden_launcher_unchanged() {
+        let ctx = egui::Context::default();
+        let notice = placement_notice();
+        let mut dismissed_app = new_app(&ctx);
+        dismissed_app.visible_flag.store(false, Ordering::SeqCst);
+        dismissed_app.restore_flag.store(false, Ordering::SeqCst);
+        dismissed_app
+            .radial_placement_viewport
+            .request(notice.clone());
+
+        assert!(dismissed_app.dismiss_radial_placement_notice(&notice));
+        assert!(!dismissed_app.visible_flag.load(Ordering::SeqCst));
+        assert!(!dismissed_app.restore_flag.load(Ordering::SeqCst));
+        assert!(!dismissed_app.radial_placement_viewport.present_requested());
+        assert!(dismissed_app.test_activation_trace.is_empty());
+
+        let mut cascade_app = new_app(&ctx);
+        cascade_app.visible_flag.store(false, Ordering::SeqCst);
+        cascade_app.restore_flag.store(false, Ordering::SeqCst);
+        cascade_app
+            .radial_placement_viewport
+            .request(notice.clone());
+        let (client, endpoint) =
+            crate::radial::control::radial_control_service_with_wake(true, None);
+
+        assert!(
+            cascade_app
+                .request_radial_placement_cascade(&notice, &client)
+                .unwrap()
+        );
+        assert_eq!(
+            endpoint.request_rx.try_recv().unwrap(),
+            crate::radial::control::RadialControlRequest::SetActiveParentSubmenuCascade {
+                session_id: notice.session_id,
+                parent_frame_id: notice.parent_frame_id,
+                parent_menu_id: notice.parent_menu_id,
+            }
+        );
+        assert!(!cascade_app.visible_flag.load(Ordering::SeqCst));
+        assert!(!cascade_app.restore_flag.load(Ordering::SeqCst));
+        assert!(cascade_app.radial_placement_viewport.present_requested());
+        assert!(cascade_app.test_activation_trace.is_empty());
+    }
+
+    #[test]
+    fn stale_placement_designer_action_cannot_show_launcher_or_change_panel() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let active_notice = placement_notice();
+        app.radial_placement_viewport.request(active_notice.clone());
+        let mut stale_notice = active_notice;
+        stale_notice.parent_frame_id = crate::radial::session::FrameId(12);
+
+        assert!(!app.open_radial_designer_from_placement(&stale_notice, &ctx));
+
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.is_panel_open(crate::gui::Panel::RadialEditor));
+        assert!(app.radial_placement_viewport.present_requested());
+        assert!(app.test_activation_trace.is_empty());
     }
 
     #[test]

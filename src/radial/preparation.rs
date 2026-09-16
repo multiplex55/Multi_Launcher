@@ -11,7 +11,7 @@ use super::font_cache::{
 };
 use super::geometry::{
     CellLayout, HitShape, LayoutSnapshot, PhysicalPoint, PhysicalRect, ScaleFactor,
-    layout_document_menu,
+    layout_document_menu, layout_document_menu_fixed_center,
 };
 use super::model::{CellId, MenuDefinition, MenuId, Override, RadialDocument, RingId, SkinId};
 use super::render::{PreparedSceneResources, VectorScene, build_scene_prepared_selected};
@@ -22,6 +22,7 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedFrameInput {
     pub layout: LayoutSnapshot,
+    pub placement: PreparedPlacement,
     pub scene: VectorScene,
     pub resources: PreparedSceneResources,
     pub diagnostics: Vec<String>,
@@ -32,9 +33,32 @@ pub struct PreparedFrameInput {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PreviewProjection {
     pub page: usize,
+    pub placement: PreviewPlacement,
     pub dynamic: BTreeMap<CellId, FrozenDynamicFrame>,
     pub selected_skin: Option<SkinId>,
     pub assets: ManagedAssetOverlay,
+}
+
+/// Preview callers explicitly choose whether the supplied point is a flexible
+/// root request or an exact frozen center for a child/page restoration.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PreviewPlacement {
+    #[default]
+    FlexibleRoot,
+    FixedCenter,
+    /// A local Cascade point with an explicit SameCenter fallback when the
+    /// strict local fit cannot preserve that point at the minimum scale.
+    Cascade {
+        fallback_center: PhysicalPoint,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparedPlacement {
+    FlexibleRoot,
+    FixedCenter,
+    Cascade,
+    SameCenterFallback,
 }
 
 pub fn synthetic_preview_dynamic(menu: &MenuDefinition) -> BTreeMap<CellId, FrozenDynamicFrame> {
@@ -240,6 +264,40 @@ pub(crate) fn augment_preview_special_cells(layout: &mut LayoutSnapshot, menu: &
     }
 }
 
+/// Child menus reserve their center hit target for navigation Back even when
+/// the authored menu has no center action or control. Runtime native roles
+/// decide the child-center semantics; this helper only guarantees geometry.
+pub(crate) fn ensure_preview_center_back(layout: &mut LayoutSnapshot, menu: &MenuDefinition) {
+    let center_id = CellId::new("__center");
+    if let Some(center) = layout
+        .cells
+        .iter_mut()
+        .find(|cell| cell.cell_id == center_id)
+    {
+        center.actionable = true;
+        return;
+    }
+    let visual = layout
+        .cells
+        .first()
+        .map(|cell| cell.visual.clone())
+        .unwrap_or_default();
+    layout.cells.push(CellLayout {
+        cell_id: center_id,
+        ring_id: RingId::new("__special"),
+        label: String::new(),
+        icon: Override::Inherit,
+        control: menu.center_control,
+        secondary_control: menu.center_secondary_control,
+        shape: HitShape::Circle {
+            center: layout.center,
+            radius: layout.center_radius,
+        },
+        actionable: true,
+        visual,
+    });
+}
+
 pub struct PreviewFramePreparer {
     application_data: PathBuf,
     asset_service: Option<AssetService>,
@@ -316,8 +374,36 @@ impl PreviewFramePreparer {
             Some(&effective),
         );
         let menu = &projected.menu;
-        let mut layout = layout_document_menu(document, menu, anchor, work_area, scale, 0.55)
-            .map_err(|error| format!("preview layout failed: {error:?}"))?;
+        let (placement, prepared_placement) = match projection.placement {
+            PreviewPlacement::FlexibleRoot => (
+                layout_document_menu(document, menu, anchor, work_area, scale, 0.55),
+                PreparedPlacement::FlexibleRoot,
+            ),
+            PreviewPlacement::FixedCenter => (
+                layout_document_menu_fixed_center(document, menu, anchor, work_area, scale, 0.55),
+                PreparedPlacement::FixedCenter,
+            ),
+            PreviewPlacement::Cascade { fallback_center } => {
+                match layout_document_menu_fixed_center(
+                    document, menu, anchor, work_area, scale, 0.55,
+                ) {
+                    Ok(layout) => (Ok(layout), PreparedPlacement::Cascade),
+                    Err(cascade_error) => (
+                        layout_document_menu_fixed_center(
+                            document,
+                            menu,
+                            fallback_center,
+                            work_area,
+                            scale,
+                            0.55,
+                        )
+                        .map_err(|_| cascade_error),
+                        PreparedPlacement::SameCenterFallback,
+                    ),
+                }
+            }
+        };
+        let mut layout = placement.map_err(|error| format!("preview layout failed: {error:?}"))?;
         augment_preview_special_cells(&mut layout, menu);
         let (resources, mut diagnostics) = prepare_visual_resources(
             document,
@@ -363,6 +449,7 @@ impl PreviewFramePreparer {
         let scene = build_scene_prepared_selected(&layout, generation, &resources, selected);
         Ok(PreparedFrameInput {
             layout,
+            placement: prepared_placement,
             scene,
             resources,
             diagnostics,
@@ -499,6 +586,43 @@ mod tests {
             .unwrap();
         assert_ne!(ordinary.layout.center_radius, selected.layout.center_radius);
         assert_ne!(ordinary.scene, selected.scene);
+    }
+
+    #[test]
+    fn cascade_placement_uses_explicit_same_center_fallback_when_local_fit_fails() {
+        let mut document = RadialDocument::starter();
+        let menu_id = document.default_menu_id.clone();
+        document.menus[0].rings[0].radius = 500.0;
+        let local_anchor = PhysicalPoint { x: 150.0, y: 500.0 };
+        let fallback_center = PhysicalPoint { x: 500.0, y: 500.0 };
+        let work_area = PhysicalRect {
+            min: PhysicalPoint { x: 0.0, y: 0.0 },
+            max: PhysicalPoint {
+                x: 1_000.0,
+                y: 1_000.0,
+            },
+        };
+        let scale = ScaleFactor::new(1.0).unwrap();
+        let mut preparer = PreviewFramePreparer::new(PathBuf::new());
+
+        let frame = preparer
+            .prepare(
+                &document,
+                &menu_id,
+                local_anchor,
+                work_area,
+                scale,
+                1,
+                None,
+                &PreviewProjection {
+                    placement: PreviewPlacement::Cascade { fallback_center },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(frame.placement, PreparedPlacement::SameCenterFallback);
+        assert_eq!(frame.layout.origin, fallback_center);
     }
 
     #[test]

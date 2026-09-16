@@ -27,6 +27,7 @@ pub mod session;
 pub mod settings;
 pub mod skin;
 pub mod store;
+pub mod submenu_migration;
 pub mod validation;
 pub mod watch;
 

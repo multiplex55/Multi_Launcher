@@ -59,6 +59,7 @@ pub struct MenuFrame {
     pub menu_id: MenuId,
     pub origin: PhysicalPoint,
     pub geometry_generation: u64,
+    pub spatial_generation: u64,
     pub scale_factor: f64,
     pub page: usize,
     pub page_count: usize,
@@ -102,6 +103,7 @@ pub struct SessionState {
     pub interaction: InteractionMode,
     pub consumed_invocation: Option<InvocationId>,
     pub session_generation: u64,
+    pub spatial_generation: u64,
     pub armed: bool,
     pub arming_baseline: ArmingBaseline,
     pub modifiers: NavigationModifiers,
@@ -152,6 +154,13 @@ pub enum SessionEvent {
     },
     DisplayRelayout {
         geometry_generation: u64,
+        pointer_baseline: LogicalPoint,
+    },
+    Relocated {
+        expected_spatial_generation: u64,
+        spatial_generation: u64,
+        geometry_generation: u64,
+        physical_delta: PhysicalPoint,
         pointer_baseline: LogicalPoint,
     },
     OutsideInteraction,
@@ -223,6 +232,7 @@ pub struct DispatchToken {
     pub ordinal: u64,
 }
 
+#[derive(Clone)]
 pub struct SessionReducer {
     pub state: SessionState,
     invocation_id: InvocationId,
@@ -252,6 +262,7 @@ impl SessionReducer {
                     menu_id: root_menu,
                     origin,
                     geometry_generation,
+                    spatial_generation: 0,
                     scale_factor: 1.0,
                     page: 0,
                     page_count: 1,
@@ -265,6 +276,7 @@ impl SessionReducer {
                 interaction,
                 consumed_invocation: None,
                 session_generation: 1,
+                spatial_generation: 0,
                 armed: false,
                 arming_baseline: ArmingBaseline {
                     point: open_pointer,
@@ -462,6 +474,7 @@ impl SessionReducer {
                     .stack
                     .last()
                     .map_or(1.0, |frame| frame.scale_factor);
+                let spatial_generation = self.state.spatial_generation;
                 if let Some(parent) = self.state.stack.last_mut() {
                     parent.selected = self.state.selected.clone();
                 }
@@ -471,6 +484,7 @@ impl SessionReducer {
                     menu_id,
                     origin,
                     geometry_generation,
+                    spatial_generation,
                     scale_factor,
                     page: 0,
                     page_count: 1,
@@ -529,6 +543,46 @@ impl SessionReducer {
                 if let Some(frame) = self.state.stack.last_mut() {
                     frame.geometry_generation = geometry_generation;
                 }
+                if !self.bump_generation() {
+                    return self.cancel_tree();
+                }
+                self.disarm(pointer_baseline, geometry_generation);
+                vec![]
+            }
+            SessionEvent::Relocated {
+                expected_spatial_generation,
+                spatial_generation,
+                geometry_generation,
+                physical_delta,
+                pointer_baseline,
+            } => {
+                let expected_next = expected_spatial_generation.checked_add(1);
+                if self.state.spatial_generation != expected_spatial_generation
+                    || expected_next != Some(spatial_generation)
+                    || !physical_delta.x.is_finite()
+                    || !physical_delta.y.is_finite()
+                {
+                    return vec![];
+                }
+                let scale = self
+                    .state
+                    .stack
+                    .last()
+                    .map_or(1.0, |frame| frame.scale_factor);
+                let logical_delta = LogicalPoint {
+                    x: (physical_delta.x / scale) as f32,
+                    y: (physical_delta.y / scale) as f32,
+                };
+                if !logical_delta.x.is_finite() || !logical_delta.y.is_finite() {
+                    return vec![];
+                }
+                for frame in &mut self.state.stack {
+                    frame.origin.x += physical_delta.x;
+                    frame.origin.y += physical_delta.y;
+                    frame.geometry_generation = geometry_generation;
+                    frame.spatial_generation = spatial_generation;
+                }
+                self.state.spatial_generation = spatial_generation;
                 if !self.bump_generation() {
                     return self.cancel_tree();
                 }
@@ -966,6 +1020,70 @@ mod tests {
         assert!(!r.state.armed);
         move_to(&mut r, p(20.0, 0.0), None, 13);
         assert!(!r.state.armed);
+    }
+
+    #[test]
+    fn correlated_relocation_translates_each_frame_and_rejects_stale_generation() {
+        let mut r = reducer(InteractionMode::StickyClick);
+        r.state.stack[0].origin = PhysicalPoint {
+            x: -500.0,
+            y: 220.0,
+        };
+        r.state.stack[0].scale_factor = 1.25;
+        r.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("child"),
+            origin: PhysicalPoint {
+                x: -400.0,
+                y: 240.0,
+            },
+            geometry_generation: 11,
+            pointer_baseline: p(100.0, 200.0),
+        });
+        let root_before = r.state.stack[0].origin;
+        let child_before = r.state.stack[1].origin;
+        r.state.armed = true;
+        r.state.pending_press = Some(PendingPress {
+            cell_id: CellId::new("drag"),
+            button: PointerButton::Primary,
+            session_generation: r.state.session_generation,
+            geometry_generation: 11,
+            origin: p(1.0, 2.0),
+            dragged: false,
+            native_drag: true,
+        });
+        let delta = PhysicalPoint { x: 125.0, y: -62.5 };
+        r.reduce(SessionEvent::Relocated {
+            expected_spatial_generation: 0,
+            spatial_generation: 1,
+            geometry_generation: 12,
+            physical_delta: delta,
+            pointer_baseline: p(200.0, 150.0),
+        });
+        assert_eq!(r.state.stack[0].origin.x, root_before.x + delta.x);
+        assert_eq!(r.state.stack[0].origin.y, root_before.y + delta.y);
+        assert_eq!(r.state.stack[1].origin.x, child_before.x + delta.x);
+        assert_eq!(r.state.stack[1].origin.y, child_before.y + delta.y);
+        assert!(
+            r.state
+                .stack
+                .iter()
+                .all(|frame| { frame.geometry_generation == 12 && frame.spatial_generation == 1 })
+        );
+        assert_eq!(r.state.spatial_generation, 1);
+        assert!(!r.state.armed);
+        assert!(r.state.pending_press.is_none());
+        assert_eq!(r.state.arming_baseline.point, p(200.0, 150.0));
+
+        let translated = r.state.stack.clone();
+        r.reduce(SessionEvent::Relocated {
+            expected_spatial_generation: 0,
+            spatial_generation: 1,
+            geometry_generation: 13,
+            physical_delta: PhysicalPoint { x: 999.0, y: 999.0 },
+            pointer_baseline: p(999.0, 999.0),
+        });
+        assert_eq!(r.state.stack, translated);
+        assert_eq!(r.state.spatial_generation, 1);
     }
     #[test]
     fn drag_out_and_return_still_cancels_click() {
