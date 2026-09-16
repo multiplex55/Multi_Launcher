@@ -10,6 +10,7 @@ pub mod compositor;
 pub mod context;
 pub mod control;
 pub mod controller;
+pub mod diagnostics;
 pub mod dynamic;
 pub mod font_cache;
 pub mod geometry;
@@ -28,6 +29,7 @@ pub mod settings;
 pub mod skin;
 pub mod store;
 pub mod submenu_migration;
+pub mod tooltip;
 pub mod validation;
 pub mod watch;
 

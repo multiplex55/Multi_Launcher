@@ -767,8 +767,13 @@ struct WindowState {
     animation_serial: usize,
     visual_hwnd: windows::Win32::Foundation::HWND,
     input_hwnd: windows::Win32::Foundation::HWND,
-    surface_x: i32,
-    surface_y: i32,
+    arrow_cursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR,
+    input_x: i32,
+    input_y: i32,
+    visual_x: i32,
+    visual_y: i32,
+    visual_offset_x: i32,
+    visual_offset_y: i32,
 }
 
 #[cfg(windows)]
@@ -799,7 +804,12 @@ impl CaptureOwnership {
 #[cfg(windows)]
 impl Drop for CaptureOwnership {
     fn drop(&mut self) {
-        self.release();
+        let transition = radial_cursor_transition(CursorPolicyInput::Teardown {
+            capture_active: self.is_active(),
+        });
+        if transition.release_capture {
+            self.release();
+        }
     }
 }
 
@@ -844,6 +854,20 @@ unsafe extern "system" fn wndproc(
                 MA_NOACTIVATE as isize
             },
         );
+    }
+    if msg == WM_SETCURSOR {
+        let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
+        let hit_test = (l.0 as u16 as i16) as i32;
+        if !ptr.is_null()
+            && radial_cursor_transition(CursorPolicyInput::SetCursor {
+                is_input_window: hwnd == unsafe { &*ptr }.input_hwnd,
+                hit_test,
+            })
+            .owns_arrow()
+        {
+            unsafe { SetCursor((*ptr).arrow_cursor) };
+            return windows::Win32::Foundation::LRESULT(1);
+        }
     }
     if msg == WM_NCHITTEST {
         use windows::Win32::Foundation::POINT;
@@ -895,6 +919,13 @@ unsafe extern "system" fn wndproc(
             }
             let (x, y) = signed_message_point(l);
             let state = unsafe { &*ptr };
+            if radial_cursor_transition(CursorPolicyInput::CapturedPointerMove {
+                capture_active: state.capture.is_active(),
+            })
+            .owns_arrow()
+            {
+                unsafe { SetCursor(state.arrow_cursor) };
+            }
             let point = client_physical_to_logical(state.origin, state.scale_factor, x, y);
             let owner = input_owner(&state.layout, point, false);
             let event = if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN {
@@ -919,7 +950,12 @@ unsafe extern "system" fn wndproc(
                     },
                 }
             } else if msg == WM_LBUTTONUP || msg == WM_RBUTTONUP {
-                unsafe { (*ptr).capture.release() };
+                let transition = radial_cursor_transition(CursorPolicyInput::EndCapture {
+                    capture_active: state.capture.is_active(),
+                });
+                if transition.release_capture {
+                    unsafe { (*ptr).capture.release() };
+                }
                 NativeEvent::PointerUp {
                     session_id: state.session_id.clone(),
                     layout_generation: state.scene.generation,
@@ -1005,7 +1041,7 @@ unsafe extern "system" fn wndproc(
             {
                 Ok(frame) => {
                     if let Err(message) =
-                        present_layered(hwnd, state.surface_x, state.surface_y, &frame.image)
+                        present_layered(hwnd, state.visual_x, state.visual_y, &frame.image)
                     {
                         state.events.send(NativeEvent::Failed {
                             session_id: Some(state.session_id.clone()),
@@ -1036,14 +1072,16 @@ unsafe extern "system" fn wndproc(
             let position = unsafe { &*(l.0 as *const WINDOWPOS) };
             if !position.flags.contains(SWP_NOMOVE) {
                 let state = unsafe { &mut *ptr };
-                state.surface_x = position.x;
-                state.surface_y = position.y;
+                state.input_x = position.x;
+                state.input_y = position.y;
+                state.visual_x = position.x.saturating_add(state.visual_offset_x);
+                state.visual_y = position.y.saturating_add(state.visual_offset_y);
                 let _ = unsafe {
                     SetWindowPos(
                         state.visual_hwnd,
                         windows::Win32::Foundation::HWND::default(),
-                        position.x,
-                        position.y,
+                        state.visual_x,
+                        state.visual_y,
                         0,
                         0,
                         SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
@@ -1141,6 +1179,121 @@ fn physical_scene_bounds(
         (max.x - min.x).ceil().max(1.0) as i32,
         (max.y - min.y).ceil().max(1.0) as i32,
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NativeSurfaceBounds {
+    visual: (i32, i32, i32, i32),
+    input: (i32, i32, i32, i32),
+    input_origin: LogicalPoint,
+}
+
+fn native_surface_bounds(scene: &VectorScene, layout: &LayoutSnapshot) -> NativeSurfaceBounds {
+    NativeSurfaceBounds {
+        visual: physical_scene_bounds(scene.bounds, layout.scale_factor),
+        input: physical_scene_bounds(layout.visual_extent, layout.scale_factor),
+        input_origin: layout.visual_extent.min,
+    }
+}
+
+fn radial_arrow_owned_client(is_input_window: bool, hit_test: i32) -> bool {
+    const HTCLIENT_VALUE: i32 = 1;
+    is_input_window && hit_test == HTCLIENT_VALUE
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorHookDecision {
+    OwnArrow,
+    Delegate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorPolicyInput {
+    ClassRegistration,
+    SetCursor {
+        is_input_window: bool,
+        hit_test: i32,
+    },
+    CapturedPointerMove {
+        capture_active: bool,
+    },
+    EndCapture {
+        capture_active: bool,
+    },
+    BeginSystemDrag {
+        capture_active: bool,
+    },
+    Teardown {
+        capture_active: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CursorTransition {
+    decision: CursorHookDecision,
+    release_capture: bool,
+}
+
+impl CursorTransition {
+    fn owns_arrow(self) -> bool {
+        matches!(self.decision, CursorHookDecision::OwnArrow)
+    }
+}
+
+fn radial_cursor_transition(input: CursorPolicyInput) -> CursorTransition {
+    match input {
+        CursorPolicyInput::ClassRegistration => CursorTransition {
+            decision: CursorHookDecision::OwnArrow,
+            release_capture: false,
+        },
+        CursorPolicyInput::SetCursor {
+            is_input_window,
+            hit_test,
+        } => CursorTransition {
+            decision: if radial_arrow_owned_client(is_input_window, hit_test) {
+                CursorHookDecision::OwnArrow
+            } else {
+                CursorHookDecision::Delegate
+            },
+            release_capture: false,
+        },
+        CursorPolicyInput::CapturedPointerMove { capture_active } => CursorTransition {
+            decision: if capture_active {
+                CursorHookDecision::OwnArrow
+            } else {
+                CursorHookDecision::Delegate
+            },
+            release_capture: false,
+        },
+        CursorPolicyInput::EndCapture { capture_active }
+        | CursorPolicyInput::Teardown { capture_active } => CursorTransition {
+            decision: CursorHookDecision::Delegate,
+            release_capture: capture_active,
+        },
+        CursorPolicyInput::BeginSystemDrag { capture_active } => CursorTransition {
+            decision: CursorHookDecision::Delegate,
+            release_capture: capture_active,
+        },
+    }
+}
+
+fn radial_cursor_hook_decision(is_input_window: bool, hit_test: i32) -> CursorHookDecision {
+    radial_cursor_transition(CursorPolicyInput::SetCursor {
+        is_input_window,
+        hit_test,
+    })
+    .decision
+}
+
+fn radial_capture_cursor_decision(
+    capture_active: bool,
+    system_drag_started: bool,
+) -> CursorHookDecision {
+    if system_drag_started {
+        radial_cursor_transition(CursorPolicyInput::BeginSystemDrag { capture_active }).decision
+    } else {
+        radial_cursor_transition(CursorPolicyInput::CapturedPointerMove { capture_active }).decision
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1414,14 +1567,29 @@ impl SystemPlatformSurface {
         use windows::Win32::UI::WindowsAndMessaging::*;
         use windows::core::PCWSTR;
         static REGISTER: OnceLock<Result<(), String>> = OnceLock::new();
+        static ARROW: OnceLock<Result<usize, String>> = OnceLock::new();
         let class: Vec<u16> = "MultiLauncherRadialHost\0".encode_utf16().collect();
         let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }.map_err(|e| e.to_string())?;
+        let arrow_cursor = ARROW
+            .get_or_init(|| {
+                unsafe { LoadCursorW(None, IDC_ARROW) }
+                    .map(|cursor| cursor.0 as usize)
+                    .map_err(|error| format!("failed to load shared arrow cursor: {error}"))
+            })
+            .clone()?;
+        let arrow_cursor = HCURSOR(arrow_cursor as *mut core::ffi::c_void);
+        let class_cursor = radial_cursor_transition(CursorPolicyInput::ClassRegistration);
         REGISTER
             .get_or_init(|| {
                 let wc = WNDCLASSW {
                     hInstance: instance.into(),
                     lpszClassName: PCWSTR(class.as_ptr()),
                     lpfnWndProc: Some(wndproc),
+                    hCursor: if class_cursor.owns_arrow() {
+                        arrow_cursor
+                    } else {
+                        HCURSOR::default()
+                    },
                     ..Default::default()
                 };
                 if unsafe { RegisterClassW(&wc) } == 0 {
@@ -1434,8 +1602,10 @@ impl SystemPlatformSurface {
                 }
             })
             .clone()?;
-        let (x, y, width, height) = physical_scene_bounds(scene.bounds, layout.scale_factor);
-        let logical_origin = scene.bounds.min;
+        let bounds = native_surface_bounds(&scene, &layout);
+        let (visual_x, visual_y, visual_width, visual_height) = bounds.visual;
+        let (input_x, input_y, input_width, input_height) = bounds.input;
+        let input_origin = bounds.input_origin;
         let scale_factor = layout.scale_factor;
         let destroyed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let presented = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1444,7 +1614,7 @@ impl SystemPlatformSurface {
             layout,
             scene,
             events,
-            origin: logical_origin,
+            origin: input_origin,
             scale_factor,
             capture: CaptureOwnership::default(),
             destroyed: Arc::clone(&destroyed),
@@ -1456,8 +1626,13 @@ impl SystemPlatformSurface {
             animation_serial: 0,
             visual_hwnd: HWND::default(),
             input_hwnd: HWND::default(),
-            surface_x: x,
-            surface_y: y,
+            arrow_cursor,
+            input_x,
+            input_y,
+            visual_x,
+            visual_y,
+            visual_offset_x: visual_x.saturating_sub(input_x),
+            visual_offset_y: visual_y.saturating_sub(input_y),
         });
         let ptr = Box::into_raw(state);
         let mut visual_ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
@@ -1470,10 +1645,10 @@ impl SystemPlatformSurface {
                 PCWSTR(class.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
-                x,
-                y,
-                width,
-                height,
+                visual_x,
+                visual_y,
+                visual_width,
+                visual_height,
                 HWND::default(),
                 None,
                 instance,
@@ -1504,10 +1679,10 @@ impl SystemPlatformSurface {
                 PCWSTR(class.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,
-                x,
-                y,
-                width,
-                height,
+                input_x,
+                input_y,
+                input_width,
+                input_height,
                 visual_hwnd,
                 None,
                 instance,
@@ -1533,7 +1708,7 @@ impl SystemPlatformSurface {
         }
         let region = match create_native_input_region(&native_input_region_plan(
             &unsafe { &*ptr }.layout,
-            logical_origin,
+            input_origin,
         )) {
             Ok(region) => region,
             Err(error) => {
@@ -1554,7 +1729,7 @@ impl SystemPlatformSurface {
                 return Err(format!("initial radial composition failed: {error:?}"));
             }
         };
-        if let Err(error) = present_layered(visual_hwnd, x, y, &frame.image) {
+        if let Err(error) = present_layered(visual_hwnd, visual_x, visual_y, &frame.image) {
             return Err(error);
         }
         presented.store(true, Ordering::Release);
@@ -1599,7 +1774,9 @@ impl SystemPlatformSurface {
             SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos,
             ShowWindow, WS_EX_NOACTIVATE,
         };
-        let (x, y, width, height) = physical_scene_bounds(scene.bounds, layout.scale_factor);
+        let bounds = native_surface_bounds(&scene, &layout);
+        let (visual_x, visual_y, visual_width, visual_height) = bounds.visual;
+        let (input_x, input_y, input_width, input_height) = bounds.input;
         let ptr = unsafe {
             windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
                 self.input_hwnd,
@@ -1612,15 +1789,15 @@ impl SystemPlatformSurface {
         // The controller's layout is already in absolute desktop coordinates.
         // Carrying the HWND's previous displacement here would apply a drag a
         // second time after the controller has translated the session.
-        let target_x = x;
-        let target_y = y;
+        let target_x = input_x;
+        let target_y = input_y;
         cancel_animation(self.visual_hwnd, unsafe { &mut *ptr });
         unsafe { (*ptr).animation_epoch = std::time::Instant::now() };
         let frame = unsafe { &mut *ptr }
             .compositor
             .compose(&scene, layout.scale_factor, 0)
             .map_err(|error| format!("radial composition failed: {error:?}"))?;
-        let origin = scene.bounds.min;
+        let origin = bounds.input_origin;
         let region = create_native_input_region(&native_input_region_plan(&layout, origin))?;
         let mut style = unsafe { GetWindowLongPtrW(self.input_hwnd, GWL_EXSTYLE) };
         if activate_on_show {
@@ -1640,8 +1817,8 @@ impl SystemPlatformSurface {
                 },
                 target_x,
                 target_y,
-                width,
-                height,
+                input_width,
+                input_height,
                 SWP_NOACTIVATE,
             )
         };
@@ -1657,23 +1834,27 @@ impl SystemPlatformSurface {
                 } else {
                     HWND_NOTOPMOST
                 },
-                target_x,
-                target_y,
-                width,
-                height,
+                visual_x,
+                visual_y,
+                visual_width,
+                visual_height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )
         }
         .map_err(|error| format!("radial relayout failed: {error}"))?;
-        present_layered(self.visual_hwnd, target_x, target_y, &frame.image)?;
+        present_layered(self.visual_hwnd, visual_x, visual_y, &frame.image)?;
         unsafe {
             (*ptr).layout = layout;
             (*ptr).scene = scene;
             (*ptr).origin = origin;
             (*ptr).scale_factor = frame.scale_factor;
             (*ptr).activate_on_show = activate_on_show;
-            (*ptr).surface_x = target_x;
-            (*ptr).surface_y = target_y;
+            (*ptr).input_x = target_x;
+            (*ptr).input_y = target_y;
+            (*ptr).visual_x = visual_x;
+            (*ptr).visual_y = visual_y;
+            (*ptr).visual_offset_x = visual_x.saturating_sub(target_x);
+            (*ptr).visual_offset_y = visual_y.saturating_sub(target_y);
             (*ptr).presented.store(true, Ordering::Release);
         }
         let _ = unsafe {
@@ -1704,7 +1885,12 @@ impl SystemPlatformSurface {
         if ptr.is_null() || unsafe { &*ptr }.scene.generation != layout_generation {
             return Ok(());
         }
-        unsafe { (*ptr).capture.release() };
+        let transition = radial_cursor_transition(CursorPolicyInput::BeginSystemDrag {
+            capture_active: unsafe { &*ptr }.capture.is_active(),
+        });
+        if transition.release_capture {
+            unsafe { (*ptr).capture.release() };
+        }
         let mut cursor = POINT::default();
         unsafe { GetCursorPos(&mut cursor) }
             .map_err(|error| format!("failed to locate pointer for radial drag: {error}"))?;
@@ -1712,8 +1898,8 @@ impl SystemPlatformSurface {
         let from = {
             let state = unsafe { &*ptr };
             PhysicalPoint {
-                x: f64::from(state.surface_x),
-                y: f64::from(state.surface_y),
+                x: f64::from(state.input_x),
+                y: f64::from(state.input_y),
             }
         };
         unsafe {
@@ -1726,8 +1912,8 @@ impl SystemPlatformSurface {
         };
         let state = unsafe { &*ptr };
         let to = PhysicalPoint {
-            x: f64::from(state.surface_x),
-            y: f64::from(state.surface_y),
+            x: f64::from(state.input_x),
+            y: f64::from(state.input_y),
         };
         if to != from {
             state.events.send(NativeEvent::Relocated {
@@ -1867,7 +2053,12 @@ impl Drop for SystemPlatformSurface {
         };
         if !ptr.is_null() {
             cancel_animation(self.visual_hwnd, unsafe { &mut *ptr });
-            unsafe { (*ptr).capture.release() };
+            let transition = radial_cursor_transition(CursorPolicyInput::Teardown {
+                capture_active: unsafe { &*ptr }.capture.is_active(),
+            });
+            if transition.release_capture {
+                unsafe { (*ptr).capture.release() };
+            }
         }
         let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.input_hwnd) };
         let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.visual_hwnd) };
@@ -2449,6 +2640,131 @@ mod tests {
         };
         assert!(!native_point_owned(&layout, visual_only));
         assert!(native_point_owned(&layout, layout.center));
+    }
+
+    #[test]
+    fn visual_tooltip_overflow_does_not_resize_or_move_the_input_surface() {
+        let document = RadialDocument::starter();
+        let layout = super::super::geometry::layout_document_menu(
+            &document,
+            &document.menus[0],
+            PhysicalPoint { x: 400.0, y: 400.0 },
+            PhysicalRect {
+                min: PhysicalPoint {
+                    x: -600.0,
+                    y: -300.0,
+                },
+                max: PhysicalPoint {
+                    x: 1_200.0,
+                    y: 900.0,
+                },
+            },
+            ScaleFactor::new(1.5).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        let scene = super::super::render::build_scene(&layout, 3);
+        let original = native_surface_bounds(&scene, &layout);
+        let mut expanded_scene = scene.clone();
+        expanded_scene.bounds.min.x -= 120.0;
+        expanded_scene.bounds.min.y -= 36.0;
+        expanded_scene.bounds.max.x += 180.0;
+        expanded_scene.bounds.max.y += 92.0;
+        let expanded = native_surface_bounds(&expanded_scene, &layout);
+
+        assert_eq!(original.input, expanded.input);
+        assert_eq!(original.input_origin, expanded.input_origin);
+        assert_ne!(original.visual, expanded.visual);
+        assert_eq!(
+            native_input_region_plan(&layout, expanded.input_origin),
+            native_input_region_plan(&layout, original.input_origin)
+        );
+    }
+
+    #[test]
+    fn arrow_cursor_is_owned_only_for_the_input_clients_client_area() {
+        assert!(radial_arrow_owned_client(true, 1));
+        assert!(!radial_arrow_owned_client(false, 1));
+        assert!(!radial_arrow_owned_client(true, 2));
+        assert!(!radial_arrow_owned_client(true, -1));
+    }
+
+    #[test]
+    fn cursor_policy_covers_client_ownership_delegation_and_capture_release() {
+        let class = radial_cursor_transition(CursorPolicyInput::ClassRegistration);
+        assert!(class.owns_arrow());
+        assert!(!class.release_capture);
+        let captured_move = radial_cursor_transition(CursorPolicyInput::CapturedPointerMove {
+            capture_active: true,
+        });
+        assert!(captured_move.owns_arrow());
+        assert!(!captured_move.release_capture);
+        let end_capture = radial_cursor_transition(CursorPolicyInput::EndCapture {
+            capture_active: true,
+        });
+        assert_eq!(end_capture.decision, CursorHookDecision::Delegate);
+        assert!(end_capture.release_capture);
+        let system_drag = radial_cursor_transition(CursorPolicyInput::BeginSystemDrag {
+            capture_active: true,
+        });
+        assert_eq!(system_drag.decision, CursorHookDecision::Delegate);
+        assert!(system_drag.release_capture);
+        let idle_drag = radial_cursor_transition(CursorPolicyInput::BeginSystemDrag {
+            capture_active: false,
+        });
+        assert_eq!(idle_drag.decision, CursorHookDecision::Delegate);
+        assert!(!idle_drag.release_capture);
+        let teardown = radial_cursor_transition(CursorPolicyInput::Teardown {
+            capture_active: true,
+        });
+        assert_eq!(teardown.decision, CursorHookDecision::Delegate);
+        assert!(teardown.release_capture);
+        assert_eq!(
+            radial_cursor_hook_decision(true, 1),
+            CursorHookDecision::OwnArrow
+        );
+        assert_eq!(
+            radial_cursor_hook_decision(false, 1),
+            CursorHookDecision::Delegate,
+            "the passive visual window delegates WM_SETCURSOR"
+        );
+        assert_eq!(
+            radial_cursor_hook_decision(true, 2),
+            CursorHookDecision::Delegate,
+            "non-client/system-drag hit tests delegate"
+        );
+        assert_eq!(
+            radial_capture_cursor_decision(true, false),
+            CursorHookDecision::OwnArrow
+        );
+        assert_eq!(
+            radial_capture_cursor_decision(false, true),
+            CursorHookDecision::Delegate,
+            "BeginSystemDrag releases capture before native non-client handling"
+        );
+    }
+
+    #[test]
+    fn native_cursor_paths_use_the_shared_transition_policy() {
+        let production = include_str!("native.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        for input in [
+            "CursorPolicyInput::ClassRegistration",
+            "CursorPolicyInput::SetCursor",
+            "CursorPolicyInput::CapturedPointerMove",
+            "CursorPolicyInput::EndCapture",
+            "CursorPolicyInput::BeginSystemDrag",
+            "CursorPolicyInput::Teardown",
+        ] {
+            assert!(
+                production.contains(input),
+                "production cursor path is not routed through {input}"
+            );
+        }
+        assert!(production.contains("if transition.release_capture"));
+        assert!(production.contains("hCursor: if class_cursor.owns_arrow()"));
     }
 
     #[test]

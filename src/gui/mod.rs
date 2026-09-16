@@ -851,6 +851,7 @@ pub struct LauncherApp {
     pub clear_query_after_run: bool,
     pub require_confirm_destructive: bool,
     pub(crate) radial_feature_settings: crate::radial::model::RadialFeatureSettings,
+    pub(crate) radial_expected_diagnostics: VecDeque<crate::radial::diagnostics::RadialDiagnostic>,
     pub(crate) radial_migration_receipt:
         Option<crate::settings::SubmenuPresentationMigrationReceipt>,
     radial_placement_viewport: state::RadialPlacementViewportState,
@@ -2211,6 +2212,7 @@ impl LauncherApp {
             clear_query_after_run: settings.clear_query_after_run,
             require_confirm_destructive: settings.require_confirm_destructive,
             radial_feature_settings: settings.radial.clone(),
+            radial_expected_diagnostics: VecDeque::new(),
             radial_migration_receipt: settings.radial_submenu_migration.clone(),
             radial_placement_viewport: state::RadialPlacementViewportState::default(),
             query_autocomplete: settings.query_autocomplete,
@@ -3765,6 +3767,7 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::RadialInvalidate
             | WatchEvent::RadialConfigDiagnostic(_)
             | WatchEvent::RadialRuntimeDiagnostic(_)
+            | WatchEvent::RadialDiagnostic(_)
             | WatchEvent::RadialSubmenuPlacementFailure(_)
             | WatchEvent::RadialPlacementActionResult { .. }
             | WatchEvent::RadialMigrationNotice(_)

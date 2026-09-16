@@ -58,7 +58,7 @@ impl SettingsEditor {
     fn render_radial_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
         use crate::commands::RadialCommandHost;
         use crate::radial::model::{
-            InteractionMode, RadialSafetyPolicy, SubmenuPresentation, TriggerScope,
+            InteractionMode, RadialSafetyPolicy, SubmenuPresentation, TooltipScope, TriggerScope,
         };
 
         ui.separator();
@@ -85,6 +85,45 @@ impl SettingsEditor {
                         .speed(10),
                 );
             });
+            egui::ComboBox::from_label("Full-label tooltip scope")
+                .selected_text(match self.radial_tooltip_scope {
+                    TooltipScope::Off => "Off",
+                    TooltipScope::TruncatedOnly => "Truncated labels only",
+                    TooltipScope::AllCells => "All cells",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.radial_tooltip_scope,
+                        TooltipScope::Off,
+                        "Off",
+                    );
+                    ui.selectable_value(
+                        &mut self.radial_tooltip_scope,
+                        TooltipScope::TruncatedOnly,
+                        "Truncated labels only",
+                    );
+                    ui.selectable_value(
+                        &mut self.radial_tooltip_scope,
+                        TooltipScope::AllCells,
+                        "All cells",
+                    );
+                });
+            ui.horizontal(|ui| {
+                ui.label("Tooltip delay (ms)");
+                ui.add(
+                    egui::DragValue::new(&mut self.radial_tooltip_delay_ms)
+                        .clamp_range(
+                            crate::radial::settings::MIN_TOOLTIP_DELAY_MS
+                                ..=crate::radial::settings::MAX_TOOLTIP_DELAY_MS,
+                        )
+                        .speed(25),
+                );
+            });
+            ui.small("Tooltip delay is independent of the launcher hold threshold and item dwell delay.");
+            ui.checkbox(
+                &mut self.radial_show_expected_layout_diagnostics,
+                "Show expected label-layout diagnostics",
+            );
 
             let document = crate::gui::radial_published_document();
             let effective_default = if self.radial_default_menu_id.trim().is_empty() {

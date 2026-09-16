@@ -899,6 +899,18 @@ impl LayoutSnapshot {
             .rev()
             .find(|cell| cell.actionable && contains(&cell.shape, point))
     }
+
+    /// Returns the topmost cell whose authored geometry contains `point`,
+    /// regardless of whether that cell owns click/action input. Tooltip hover
+    /// uses this lookup so protective spacer/ancestor regions can still
+    /// identify a visual cell without changing the input ownership contract
+    /// of [`Self::hit_test`].
+    pub fn geometric_hover_cell(&self, point: LogicalPoint) -> Option<&CellLayout> {
+        self.cells
+            .iter()
+            .rev()
+            .find(|cell| contains(&cell.shape, point))
+    }
 }
 
 fn contains(shape: &HitShape, point: LogicalPoint) -> bool {
@@ -1142,6 +1154,11 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(l.hit_test(p).is_none());
+        assert_eq!(
+            l.geometric_hover_cell(p).map(|cell| &cell.cell_id),
+            Some(&l.cells[0].cell_id)
+        );
+        assert!(!l.geometric_hover_cell(p).unwrap().actionable);
     }
     #[test]
     fn wedge_gap_and_center_are_non_actionable_and_edges_have_one_owner() {

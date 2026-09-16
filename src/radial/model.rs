@@ -87,6 +87,13 @@ pub struct RadialFeatureSettings {
     /// opts into their process-wide ownership. Menu-local inputs do not need
     /// this opt-in because they are admitted only for the current menu frame.
     pub global_item_inputs: bool,
+    /// Controls whether the complete cell label is shown on ordinary hover.
+    pub tooltip_scope: TooltipScope,
+    /// Delay before a stationary eligible hover reveals its tooltip.
+    pub tooltip_delay_ms: u64,
+    /// Retain expected layout diagnostics such as label ellipsis in the
+    /// collapsed radial diagnostics view.
+    pub show_expected_layout_diagnostics: bool,
 }
 
 impl Default for RadialFeatureSettings {
@@ -101,8 +108,20 @@ impl Default for RadialFeatureSettings {
             safety_policy: RadialSafetyPolicy::InheritLauncher,
             default_item_input_scope: TriggerScope::MenuLocal,
             global_item_inputs: false,
+            tooltip_scope: TooltipScope::AllCells,
+            tooltip_delay_ms: 300,
+            show_expected_layout_diagnostics: false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TooltipScope {
+    Off,
+    TruncatedOnly,
+    #[default]
+    AllCells,
 }
 
 impl RadialFeatureSettings {

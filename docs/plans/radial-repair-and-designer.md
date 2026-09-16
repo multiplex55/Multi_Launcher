@@ -22,11 +22,11 @@ its immutable baseline, and its earlier verification evidence remain in
 | immutable feature baseline | `0d0acaf471a52f49a7ebdff61879416eefa9fc9b` (unchanged) |
 | branch point | `f7c5f61ed2faa2288f5c19ddeaea66de6f760a2b` (unchanged) |
 | current milestone | R3 |
-| implementation status | R1 committed at `3e7d428c`; R2 complete and awaiting its coherent commit |
-| last verified source | R2 dirty diff `af13d147351ad335b6b83ed57ca49fed1d8e52b8`; `cargo check` passed; Nextest `12054194-e5f1-4f3d-9a27-54569dd60570` passed 183/183 |
+| implementation status | R1 committed at `3e7d428c`; R2 committed at `231518c3`; R3 verified and awaiting its coherent commit |
+| last verified source | R3 dirty diff `15d0551b712c1d9e358bee029825a10d65914692`; `cargo check` passed; Nextest `71a86cb6-a1d4-4d7e-9223-818c5b4749cf` passed 210/210 |
 | current native evidence gaps | H1-H5, N1-N4, V1-V3, D1-D5, and P1-P2 are unverified for this repair |
 | active Cargo/build/Nextest job | none |
-| next action | commit R2, then implement R3 cursor, full-label tooltip, and typed diagnostic repairs |
+| next action | commit R3, then plan and implement the independent compact Designer in R4 |
 
 The repair-start Git diff was empty. Repository-local reference archives and images
 were not modified. `docs/references/Radial menu v4.zip` was inspected in place as
@@ -74,7 +74,7 @@ visual center stability, and Designer independence require the native acceptance
 | R0 | complete | source/ownership audit, repair start identity, and execution ledger | read-only inspection plus documentation diff check; no initial full suite |
 | R1 | complete | independent chord cycles, reliable owner-viewport wakeups, authoritative hide ordering | focused source-identical gate passed; independent review clean; H1-H3/H5 remain explicitly unverified natively |
 | R2 | complete | frozen session centers, local Cascade, drag/Back transforms, reversible one-time conversion | source-identical geometry/session/migration gate passed; independent review clean; N1-N4/P1 remain explicitly unverified natively |
-| R3 | pending | normal cursor, complete delayed tooltips, typed quiet diagnostics | font/preparation/native/preview gate and V1-V3 live checks |
+| R3 | complete | normal cursor, complete delayed tooltips, typed quiet diagnostics | source-identical focused gate passed; independent review clean; V1-V3 remain explicitly unverified natively |
 | R4 | pending | one independent compact Designer and safe direct manipulation | editor/authoring/lifecycle gate and H4/D1-D5 live checks |
 | R5 | pending | cumulative regression, performance/resources, native matrix, and independent review | complete required Nextest suite and final acceptance record |
 
@@ -268,3 +268,75 @@ Native evidence status for R2:
 The current automation surface cannot drive the native radial HWND, multi-monitor
 pointer input, or real system drag. The automated fake-host/store evidence above is
 not presented as native acceptance; these rows remain required for R5.
+
+## R3 completion record
+
+Implemented behavior and ownership:
+
+- persisted tooltip policy defaults to All cells with an independent 300 ms delay,
+  supports Truncated only and Off, and keeps expected layout diagnostics hidden
+  unless explicitly enabled; older missing, empty, and partial settings deserialize
+  compatibly without disturbing R2's legacy Cascade rule;
+- font preparation retains immutable source text separately from ellipsized wheel
+  text, uses purpose-specific cache keys and bounded wrapping, and prepares the full
+  authored or projected label followed by a distinct nonempty custom description;
+- runtime, native preview, and embedded preview share generation-tagged one-shot
+  hover state, cancellation rules, placement, prepared resources, and typed
+  diagnostics; geometric tooltip hover includes protective cells without granting
+  them action ownership;
+- tooltip placement flips and clamps inside the frozen monitor work area while the
+  native visual HWND expands independently of the shaped input HWND, menu origin,
+  drag relocation, and R2 visible center;
+- the shared system `IDC_ARROW` is installed and applied through one typed cursor
+  transition seam for class registration, client `WM_SETCURSOR`, capture, release,
+  system drag, and teardown; no global cursor mutation or shared-cursor destruction
+  path exists;
+- only ordinary `LabelTruncated` diagnostics are quiet expected layout information;
+  tooltip view limits and real font, glyph, asset, configuration, and runtime faults
+  remain actionable, fingerprint-deduplicated, deterministically bounded, omission-
+  counted, and displayed in bounded editor regions;
+- empty, icon-only, center, and background labels remain empty and never expose
+  stable internal IDs; availability annotations affect only wheel display text and
+  cannot replace the immutable tooltip label.
+
+Verification on the final source identity:
+
+- `cargo fmt --all -- --check`: passed;
+- `git diff --check`: passed (only Git's existing LF/CRLF notices);
+- `cargo check`: passed on dirty diff
+  `15d0551b712c1d9e358bee029825a10d65914692`; durable log
+  `%TEMP%\multi-launcher-r3-final-review-cargo-check-20260916.log`;
+- focused command: `cargo nextest run --no-fail-fast --status-level slow
+  --final-status-level fail --success-output never --failure-output final -E
+  'test(/radial::font_cache/) | test(/radial::preparation/) |
+  test(/radial::render/) | test(/radial::compositor/) |
+  test(/radial::session/) | test(/radial::controller/) |
+  test(/radial::native/) | test(/native_preview/) |
+  test(/radial_editor::preview/) | test(/radial::authoring/) |
+  test(/settings_editor/) | test(/settings::model/) |
+  test(/radial::model/)'`;
+- cwd `G:\Repos\rust\Multi_Launcher`, HEAD `231518c3`, default Nextest profile;
+- durable log `%TEMP%\multi-launcher-r3-final-focused-nextest-20260916.log`;
+- Nextest run `71a86cb6-a1d4-4d7e-9223-818c5b4749cf`: 210 passed,
+  0 failed, 4,329 skipped; true exit code 0;
+- the single final job was observed at about 10 and 25 minutes and completed after
+  25m33s compilation plus 2.769s execution; no replacement job was launched.
+
+Independent review covered cursor ownership and production wiring, passive visual
+overflow, input and relocation isolation, immutable labels, settings compatibility,
+deadline generation/cancellation, diagnostic typing/deduplication/bounds, and
+runtime/native/embedded preview parity. All reported P1/P2 findings were remediated;
+the final closure review reported no remaining P0-P2 issue.
+
+Native evidence status for R3:
+
+- V1 real Windows arrow hover, capture, system-drag, and post-close cursor state:
+  unverified on a real interactive desktop;
+- V2 runtime/native-preview/embedded-preview delayed full-label behavior, monitor-
+  edge placement, unchanged wheel center, and passive click/Back behavior: unverified;
+- V3 repeated truncation quietness plus real missing-asset/glyph and save/import
+  failure visibility: unverified.
+
+The current automation surface cannot drive or inspect the native radial HWND and
+cursor state. Pure policy, fake-host, placement, and preview tests are not presented
+as native evidence; V1-V3 remain required for R5 manual/native acceptance.

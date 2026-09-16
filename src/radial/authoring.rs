@@ -6,6 +6,9 @@
 //! the optional [`native_preview::NativePreviewCoordinator`], and is the only
 //! component allowed to execute persistence requests or create preview surfaces.
 
+use super::diagnostics::{
+    MAX_EXPECTED_LAYOUT_DIAGNOSTICS, MAX_RADIAL_DIAGNOSTICS, bound_diagnostics,
+};
 use super::geometry::{PhysicalPoint, PhysicalRect, ScaleFactor};
 use super::model::{
     AssetId, AssetRecord, CellDefinition, CellId, ConfigRevision, ContextRuleId, HotstringId,
@@ -633,7 +636,7 @@ pub enum AuthoringReply {
         editor_session: AuthoringSessionId,
         lease: NativePreviewLease,
         sampled_context: super::context::InvocationContext,
-        diagnostics: Vec<String>,
+        diagnostics: Vec<super::diagnostics::RadialDiagnostic>,
     },
     NativePreviewUpdated {
         id: AuthoringRequestId,
@@ -641,12 +644,12 @@ pub enum AuthoringReply {
         editor_session: AuthoringSessionId,
         lease: NativePreviewLease,
         sampled_context: super::context::InvocationContext,
-        diagnostics: Vec<String>,
+        diagnostics: Vec<super::diagnostics::RadialDiagnostic>,
     },
     NativePreviewDiagnostics {
         editor_session: AuthoringSessionId,
         lease: NativePreviewLease,
-        diagnostics: Vec<String>,
+        diagnostics: Vec<super::diagnostics::RadialDiagnostic>,
     },
     NativePreviewStopped {
         id: AuthoringRequestId,
@@ -920,7 +923,7 @@ pub struct RadialAuthoringSession {
     pub font_families: Arc<[String]>,
     pub font_catalog_loaded: bool,
     pub embedded_preview: Option<(String, Arc<PreparedFrameInput>)>,
-    pub native_preview_diagnostics: Vec<String>,
+    pub native_preview_diagnostics: Vec<super::diagnostics::RadialDiagnostic>,
     pub pending_native_preview: Option<PendingAuthoringRequest>,
     pub native_preview_may_be_open: bool,
     pending_native_context_sample: bool,
@@ -1670,6 +1673,7 @@ impl RadialAuthoringSession {
             dynamic: synthetic_preview_dynamic(menu),
             selected_skin,
             assets,
+            tooltip_preferences: super::tooltip::TooltipPreferences::default(),
         })
     }
 
@@ -1762,7 +1766,11 @@ impl RadialAuthoringSession {
             {
                 return false;
             }
-            self.native_preview_diagnostics = diagnostics.clone();
+            self.native_preview_diagnostics = bound_diagnostics(
+                diagnostics.clone(),
+                MAX_EXPECTED_LAYOUT_DIAGNOSTICS,
+                MAX_RADIAL_DIAGNOSTICS,
+            );
             return true;
         }
         if let AuthoringReply::NativePreviewStopped {
@@ -1808,7 +1816,11 @@ impl RadialAuthoringSession {
                         self.sampled_preview_context = Some(sampled_context);
                     }
                     self.pending_native_context_sample = false;
-                    self.native_preview_diagnostics = diagnostics;
+                    self.native_preview_diagnostics = bound_diagnostics(
+                        diagnostics,
+                        MAX_EXPECTED_LAYOUT_DIAGNOSTICS,
+                        MAX_RADIAL_DIAGNOSTICS,
+                    );
                 }
                 AuthoringReply::NativePreviewStopped { editor_session, .. } => {
                     if editor_session == self.editor_session {
@@ -2059,6 +2071,21 @@ fn three_way_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn preview_resource_diagnostic(identity: &str) -> super::super::diagnostics::RadialDiagnostic {
+        super::super::diagnostics::RadialDiagnostic::new(
+            super::super::diagnostics::RadialDiagnosticSeverity::Error,
+            super::super::diagnostics::RadialDiagnosticKind::AssetUnavailable(
+                super::super::assets::AssetDiagnostic::NotFound,
+            ),
+            super::super::diagnostics::RadialDiagnosticSource::Asset {
+                menu_id: MenuId::new("preview-test"),
+                identity: identity.to_owned(),
+            },
+            identity,
+            format!("preview asset unavailable: {identity}"),
+        )
+    }
 
     fn snapshot(name: &str, revision: u64) -> AuthoringSnapshot {
         let mut document = RadialDocument::starter();
@@ -2464,19 +2491,25 @@ mod tests {
             editor_session: session.editor_session,
             lease: lease.clone(),
             sampled_context: super::super::context::InvocationContext::empty(2),
-            diagnostics: vec!["draft image fallback".into()],
+            diagnostics: vec![preview_resource_diagnostic("draft image fallback")],
         }));
         assert_eq!(session.native_preview_lease, Some(lease));
-        assert_eq!(session.native_preview_diagnostics, ["draft image fallback"]);
+        assert_eq!(
+            session.native_preview_diagnostics,
+            [preview_resource_diagnostic("draft image fallback")]
+        );
         let active_lease = session.native_preview_lease.clone().unwrap();
         assert!(
             session.accept_reply(AuthoringReply::NativePreviewDiagnostics {
                 editor_session: session.editor_session,
                 lease: active_lease.clone(),
-                diagnostics: vec!["child image missing".into()],
+                diagnostics: vec![preview_resource_diagnostic("child image missing")],
             })
         );
-        assert_eq!(session.native_preview_diagnostics, ["child image missing"]);
+        assert_eq!(
+            session.native_preview_diagnostics,
+            [preview_resource_diagnostic("child image missing")]
+        );
         let mut stale = active_lease;
         stale.generation.0 += 1;
         assert!(
@@ -2486,7 +2519,10 @@ mod tests {
                 diagnostics: Vec::new(),
             })
         );
-        assert_eq!(session.native_preview_diagnostics, ["child image missing"]);
+        assert_eq!(
+            session.native_preview_diagnostics,
+            [preview_resource_diagnostic("child image missing")]
+        );
         let menu_id = session.draft.default_menu_id.clone();
         session
             .mutate(

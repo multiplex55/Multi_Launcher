@@ -59,6 +59,11 @@ impl SettingsEditor {
             radial_enabled: settings.radial.enabled,
             radial_shared_tap_hold: settings.radial.shared_tap_hold,
             radial_hold_threshold_ms: settings.radial.hold_threshold_ms,
+            radial_tooltip_scope: settings.radial.tooltip_scope,
+            radial_tooltip_delay_ms: settings.radial.tooltip_delay_ms,
+            radial_show_expected_layout_diagnostics: settings
+                .radial
+                .show_expected_layout_diagnostics,
             radial_default_menu_id: settings
                 .radial
                 .default_menu_id
@@ -394,6 +399,9 @@ mod tests {
             crate::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
         initial.radial.default_item_input_scope = crate::radial::model::TriggerScope::Global;
         initial.radial.global_item_inputs = true;
+        initial.radial.tooltip_scope = crate::radial::model::TooltipScope::TruncatedOnly;
+        initial.radial.tooltip_delay_ms = 725;
+        initial.radial.show_expected_layout_diagnostics = true;
 
         let editor = SettingsEditor::from_settings(&initial);
         let restored = editor.to_settings(&Settings::default());

@@ -21,7 +21,10 @@ pub struct PreparedGlyph {
 
 pub const MAX_DISCOVERED_FONTS: usize = 512;
 pub const MAX_LAYOUT_CACHE_ENTRIES: usize = 1_024;
+pub const MAX_LAYOUT_DIAGNOSTICS: usize = 512;
 pub const MAX_LABEL_GRAPHEMES: usize = 256;
+pub const MAX_TOOLTIP_SOURCE_GRAPHEMES: usize = 4_096;
+pub const MAX_TOOLTIP_LINES: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScriptClass {
@@ -32,6 +35,24 @@ pub enum ScriptClass {
     Mixed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FontLayoutPurpose {
+    CellLabel,
+    Tooltip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FontWrapPolicy {
+    Ellipsis,
+    Word,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FontAlignment {
+    Center,
+    Left,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FontRequest {
     pub family: Option<String>,
@@ -40,23 +61,36 @@ pub struct FontRequest {
     pub italic: bool,
     pub dpi_milli: u32,
     pub max_width_milli: u32,
+    pub max_height_milli: u32,
+    pub max_lines: u16,
+    pub purpose: FontLayoutPurpose,
+    pub wrap: FontWrapPolicy,
+    pub alignment: FontAlignment,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FontDiagnostic {
     RequestedFamilyMissing(String),
     FallbackFamilyMissing,
     LabelTruncated,
+    TooltipViewLimited,
     MissingGlyph(char),
     FontReadFailed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedTextLayout {
+    /// Complete immutable source supplied by the model or dynamic projection.
+    pub source_text: Arc<str>,
+    /// Bounded string rendered by the compositor.
     pub text: Arc<str>,
     pub selected_family: Arc<str>,
     pub script: ScriptClass,
     pub estimated_width_milli: u32,
+    /// Measured multiline block dimensions in desktop-logical milli-pixels.
+    pub measured_width_milli: u32,
+    pub measured_height_milli: u32,
+    pub line_count: u16,
     /// Preparation-time glyph coverage. Paint never opens or scans fonts.
     pub glyphs: Vec<PreparedGlyph>,
     pub diagnostics: Vec<FontDiagnostic>,
@@ -260,7 +294,14 @@ fn prepare_layout(
         .map(|(family, _)| family.clone())
         .unwrap_or_else(|| fallback[0].to_owned());
 
-    let graphemes = UnicodeSegmentation::graphemes(text, true).collect::<Vec<_>>();
+    let source_grapheme_limit = match request.purpose {
+        FontLayoutPurpose::CellLabel => MAX_LABEL_GRAPHEMES,
+        FontLayoutPurpose::Tooltip => MAX_TOOLTIP_SOURCE_GRAPHEMES,
+    };
+    let graphemes = UnicodeSegmentation::graphemes(text, true)
+        .take(source_grapheme_limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let source_limited = graphemes.len() > source_grapheme_limit;
     let width_per_grapheme = (request.size_milli as u64 * request.dpi_milli as u64 / 1_000)
         .saturating_mul(if matches!(script, ScriptClass::Cjk | ScriptClass::Emoji) {
             10
@@ -268,31 +309,144 @@ fn prepare_layout(
             6
         })
         / 10;
-    let width_limit = request.max_width_milli.max(1) as u64;
+    let dpi_milli = request.dpi_milli.max(1) as u64;
+    let width_limit_physical =
+        (request.max_width_milli.max(1) as u64).saturating_mul(dpi_milli) / 1_000;
     let fit = if width_per_grapheme == 0 {
-        MAX_LABEL_GRAPHEMES
+        MAX_TOOLTIP_SOURCE_GRAPHEMES
     } else {
-        (width_limit / width_per_grapheme) as usize
+        (width_limit_physical / width_per_grapheme) as usize
     }
-    .min(MAX_LABEL_GRAPHEMES);
-    let (display, count) = if graphemes.len() > fit {
-        diagnostics.push(FontDiagnostic::LabelTruncated);
-        let retained = fit.saturating_sub(1);
-        (format!("{}…", graphemes[..retained].concat()), fit.max(1))
-    } else {
-        (text.to_owned(), graphemes.len())
+    .max(1);
+    let (display, line_count, widest_graphemes) = match request.wrap {
+        FontWrapPolicy::Ellipsis => {
+            let visible_count = graphemes.len().min(source_grapheme_limit);
+            let fit = fit.min(MAX_LABEL_GRAPHEMES);
+            if source_limited || visible_count > fit {
+                diagnostics.push(FontDiagnostic::LabelTruncated);
+                let retained = fit.saturating_sub(1).min(visible_count);
+                (
+                    format!("{}…", graphemes[..retained].concat()),
+                    1,
+                    retained.saturating_add(1),
+                )
+            } else {
+                (graphemes.concat(), 1, visible_count)
+            }
+        }
+        FontWrapPolicy::Word => {
+            let bounded = graphemes[..graphemes.len().min(source_grapheme_limit)].concat();
+            let max_lines = usize::from(request.max_lines.max(1)).min(MAX_TOOLTIP_LINES);
+            let height_line_limit = if request.max_height_milli == 0 {
+                max_lines
+            } else {
+                (u64::from(request.max_height_milli) * 1_000
+                    / (u64::from(request.size_milli.max(1)) * 1_200))
+                    .max(1) as usize
+            }
+            .min(max_lines);
+            let (mut rendered, lines, width, line_limited) =
+                wrap_tooltip(&bounded, fit, height_line_limit);
+            if source_limited || line_limited {
+                diagnostics.push(FontDiagnostic::TooltipViewLimited);
+                if !rendered.ends_with('…') {
+                    rendered.push('…');
+                }
+            }
+            (rendered, lines, width)
+        }
     };
     let glyphs = rasterize_glyphs(&display, request, &loaded, &mut diagnostics);
+    let mut unique_diagnostics = BTreeSet::new();
+    diagnostics.retain(|diagnostic| unique_diagnostics.insert(diagnostic.clone()));
+    diagnostics.truncate(MAX_LAYOUT_DIAGNOSTICS);
+    let measured_width_milli = width_per_grapheme
+        .saturating_mul(widest_graphemes as u64)
+        .saturating_mul(1_000)
+        .checked_div(dpi_milli)
+        .unwrap_or(u64::MAX)
+        .min(u32::MAX as u64) as u32;
+    let measured_height_milli = (request.size_milli as u64)
+        .saturating_mul(1_200)
+        .saturating_mul(line_count.max(1) as u64)
+        .min(u32::MAX as u64) as u32;
     PreparedTextLayout {
+        source_text: text.into(),
         text: display.into(),
         selected_family: selected.into(),
         script,
         estimated_width_milli: width_per_grapheme
-            .saturating_mul(count as u64)
+            .saturating_mul(widest_graphemes as u64)
             .min(u32::MAX as u64) as u32,
+        measured_width_milli,
+        measured_height_milli,
+        line_count: line_count.min(u16::MAX as usize) as u16,
         glyphs,
         diagnostics,
     }
+}
+
+fn wrap_tooltip(
+    text: &str,
+    max_graphemes_per_line: usize,
+    max_lines: usize,
+) -> (String, usize, usize, bool) {
+    let mut lines = vec![String::new()];
+    let mut limited = false;
+    let mut paragraphs = text.split('\n').peekable();
+    while let Some(paragraph) = paragraphs.next() {
+        for word in paragraph.split_whitespace() {
+            let current_len = |line: &str| UnicodeSegmentation::graphemes(line, true).count();
+            let line_len = current_len(lines.last().map(String::as_str).unwrap_or_default());
+            if line_len > 0 {
+                if line_len + 1 + UnicodeSegmentation::graphemes(word, true).count()
+                    <= max_graphemes_per_line
+                {
+                    lines.last_mut().expect("one line exists").push(' ');
+                } else {
+                    if lines.len() >= max_lines {
+                        limited = true;
+                        break;
+                    }
+                    lines.push(String::new());
+                }
+            }
+            for grapheme in UnicodeSegmentation::graphemes(word, true) {
+                if current_len(lines.last().map(String::as_str).unwrap_or_default())
+                    >= max_graphemes_per_line
+                {
+                    if lines.len() >= max_lines {
+                        limited = true;
+                        break;
+                    }
+                    lines.push(String::new());
+                }
+                lines
+                    .last_mut()
+                    .expect("one line exists")
+                    .push_str(grapheme);
+            }
+            if limited {
+                break;
+            }
+        }
+        if limited {
+            break;
+        }
+        if paragraphs.peek().is_some() {
+            if lines.len() >= max_lines {
+                limited = true;
+                break;
+            }
+            lines.push(String::new());
+        }
+    }
+    let widest = lines
+        .iter()
+        .map(|line| UnicodeSegmentation::graphemes(line.as_str(), true).count())
+        .max()
+        .unwrap_or_default();
+    (lines.join("\n"), lines.len(), widest, limited)
 }
 
 fn rasterize_glyphs(
@@ -311,63 +465,75 @@ fn rasterize_glyphs(
     let pixel_size = request.size_milli as f32 / 1_000.0 * request.dpi_milli.max(1) as f32
         / 1_000.0
         * scale_tweak;
-    let scaled = first.as_scaled(pixel_size.max(1.0));
-    let mut caret = point(0.0, scaled.ascent() + y_offset * pixel_size);
-    let mut pending = Vec::new();
-    let mut run_width = 0.0_f32;
-    for character in text.chars() {
-        let Some((family, font)) = fonts
-            .iter()
-            .find(|(_, font)| font.glyph_id(character).0 != 0)
-        else {
-            diagnostics.push(FontDiagnostic::MissingGlyph(character));
-            continue;
-        };
-        let scaled = font.as_scaled(pixel_size.max(1.0));
-        let mut glyph = scaled.scaled_glyph(character);
-        let glyph_id = glyph.id.0;
-        glyph.position = caret;
-        caret.x += scaled.h_advance(glyph.id);
-        run_width = run_width.max(caret.x);
-        if let Some(outlined) = scaled.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            let width = bounds.width().ceil().max(0.0) as u32;
-            let height = bounds.height().ceil().max(0.0) as u32;
-            let Some(len) = (width as usize).checked_mul(height as usize) else {
+    let ascent = first.as_scaled(pixel_size.max(1.0)).ascent() + y_offset * pixel_size;
+    let line_height = pixel_size * 1.2;
+    let mut output = Vec::new();
+    for (line_index, line) in text.split('\n').enumerate() {
+        let mut caret = point(0.0, ascent + line_index as f32 * line_height);
+        let mut pending = Vec::new();
+        let mut run_width = 0.0_f32;
+        for character in line.chars() {
+            let Some((family, font)) = fonts
+                .iter()
+                .find(|(_, font)| font.glyph_id(character).0 != 0)
+            else {
+                let diagnostic = FontDiagnostic::MissingGlyph(character);
+                if !diagnostics.contains(&diagnostic) {
+                    diagnostics.push(diagnostic);
+                }
                 continue;
             };
-            let mut alpha = vec![0_u8; len];
-            outlined.draw(|x, y, coverage| {
-                if let Some(slot) = alpha.get_mut(y as usize * width as usize + x as usize) {
-                    *slot = (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
-                }
-            });
-            pending.push((
-                bounds.min.x.floor() as i32,
-                bounds.min.y.floor() as i32,
-                width,
-                height,
-                alpha,
-                glyph_id,
-                family.clone(),
-            ));
+            let scaled = font.as_scaled(pixel_size.max(1.0));
+            let mut glyph = scaled.scaled_glyph(character);
+            let glyph_id = glyph.id.0;
+            glyph.position = caret;
+            caret.x += scaled.h_advance(glyph.id);
+            run_width = run_width.max(caret.x);
+            if let Some(outlined) = scaled.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                let width = bounds.width().ceil().max(0.0) as u32;
+                let height = bounds.height().ceil().max(0.0) as u32;
+                let Some(len) = (width as usize).checked_mul(height as usize) else {
+                    continue;
+                };
+                let mut alpha = vec![0_u8; len];
+                outlined.draw(|x, y, coverage| {
+                    if let Some(slot) = alpha.get_mut(y as usize * width as usize + x as usize) {
+                        *slot = (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                });
+                pending.push((
+                    bounds.min.x.floor() as i32,
+                    bounds.min.y.floor() as i32,
+                    width,
+                    height,
+                    alpha,
+                    glyph_id,
+                    family.clone(),
+                ));
+            }
         }
+        let x_offset = match request.alignment {
+            FontAlignment::Center => -(run_width * 0.5).round() as i32,
+            FontAlignment::Left => 0,
+        };
+        output.extend(
+            pending
+                .into_iter()
+                .map(
+                    |(x, y, width, height, alpha, glyph_id, family)| PreparedGlyph {
+                        glyph_id,
+                        family: family.into(),
+                        x: x + x_offset,
+                        y,
+                        width,
+                        height,
+                        alpha: alpha.into(),
+                    },
+                ),
+        );
     }
-    let center = (run_width * 0.5).round() as i32;
-    pending
-        .into_iter()
-        .map(
-            |(x, y, width, height, alpha, glyph_id, family)| PreparedGlyph {
-                glyph_id,
-                family: family.into(),
-                x: x - center,
-                y,
-                width,
-                height,
-                alpha: alpha.into(),
-            },
-        )
-        .collect()
+    output
 }
 
 fn register_font_path(
@@ -481,6 +647,11 @@ mod tests {
             italic: false,
             dpi_milli: 1_000,
             max_width_milli: width,
+            max_height_milli: 0,
+            max_lines: 1,
+            purpose: FontLayoutPurpose::CellLabel,
+            wrap: FontWrapPolicy::Ellipsis,
+            alignment: FontAlignment::Center,
         }
     }
 
@@ -528,9 +699,98 @@ mod tests {
         );
         assert!(layout.text.ends_with('…'));
         assert!(layout.diagnostics.contains(&FontDiagnostic::LabelTruncated));
+        assert_eq!(
+            &*layout.source_text,
+            "e\u{301} 日本語 abcdefghijklmnopqrstuvwxyz"
+        );
         assert_eq!(layout.script, ScriptClass::Mixed);
         service.prepare("replacement", request(None, 40_000));
         assert_eq!(service.len(), 1);
+    }
+
+    #[test]
+    fn tooltip_layout_wraps_complete_unicode_and_dynamic_text_separately_from_labels() {
+        let catalog = Catalog {
+            families: [normalize_family("Segoe UI")].into_iter().collect(),
+            lookups: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        };
+        let mut service = FontLayoutService::with_catalog(catalog, 8);
+        let source = "日本語 dynamic result with several words and e\u{301} accents";
+        let label_request = request(None, 60_000);
+        let mut tooltip_request = label_request.clone();
+        tooltip_request.max_width_milli = 120_000;
+        tooltip_request.max_height_milli = 240_000;
+        tooltip_request.max_lines = 12;
+        tooltip_request.purpose = FontLayoutPurpose::Tooltip;
+        tooltip_request.wrap = FontWrapPolicy::Word;
+        tooltip_request.alignment = FontAlignment::Left;
+        let label = service.prepare(source, label_request);
+        let tooltip = service.prepare(source, tooltip_request);
+        assert_ne!(label.text, tooltip.text);
+        assert_eq!(&*tooltip.source_text, source);
+        assert!(tooltip.text.contains("日本語"));
+        assert!(tooltip.text.contains("e\u{301}"));
+        assert!(tooltip.line_count > 1);
+        assert!(tooltip.measured_height_milli > 12_000);
+        assert!(
+            !tooltip
+                .diagnostics
+                .contains(&FontDiagnostic::TooltipViewLimited)
+        );
+        assert!(!Arc::ptr_eq(&label, &tooltip));
+    }
+
+    #[test]
+    fn tooltip_view_limit_is_typed_and_does_not_rewrite_source() {
+        let catalog = Catalog {
+            families: [normalize_family("Segoe UI")].into_iter().collect(),
+            lookups: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        };
+        let mut service = FontLayoutService::with_catalog(catalog, 4);
+        let source = "word ".repeat(MAX_TOOLTIP_SOURCE_GRAPHEMES + 10);
+        let mut tooltip_request = request(None, 200_000);
+        tooltip_request.purpose = FontLayoutPurpose::Tooltip;
+        tooltip_request.wrap = FontWrapPolicy::Word;
+        tooltip_request.alignment = FontAlignment::Left;
+        tooltip_request.max_lines = 2;
+        tooltip_request.max_height_milli = 30_000;
+        let tooltip = service.prepare(&source, tooltip_request);
+        assert_eq!(&*tooltip.source_text, source);
+        assert!(tooltip.text.ends_with('…'));
+        assert!(tooltip.line_count <= 2);
+        assert!(
+            tooltip
+                .diagnostics
+                .contains(&FontDiagnostic::TooltipViewLimited)
+        );
+    }
+
+    #[test]
+    fn cache_key_separates_purpose_wrap_constraints_width_and_dpi() {
+        let catalog = Catalog {
+            families: [normalize_family("Segoe UI")].into_iter().collect(),
+            lookups: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        };
+        let mut service = FontLayoutService::with_catalog(catalog, 8);
+        let source = "same text";
+        let label_request = request(None, 80_000);
+        let mut tooltip_request = label_request.clone();
+        tooltip_request.purpose = FontLayoutPurpose::Tooltip;
+        tooltip_request.wrap = FontWrapPolicy::Word;
+        tooltip_request.max_lines = 8;
+        tooltip_request.max_height_milli = 100_000;
+        let label = service.prepare(source, label_request.clone());
+        let tooltip = service.prepare(source, tooltip_request.clone());
+        assert!(!Arc::ptr_eq(&label, &tooltip));
+        tooltip_request.max_width_milli = 120_000;
+        let wider = service.prepare(source, tooltip_request.clone());
+        assert!(!Arc::ptr_eq(&tooltip, &wider));
+        tooltip_request.dpi_milli = 1_500;
+        let high_dpi = service.prepare(source, tooltip_request);
+        assert!(!Arc::ptr_eq(&wider, &high_dpi));
     }
 
     #[test]
@@ -549,6 +809,17 @@ mod tests {
                 .contains(&FontDiagnostic::MissingGlyph(missing))
         );
         assert!(layout.glyphs.is_empty());
+
+        let repeated = service.prepare(&format!("{missing}{missing}"), request(None, 100_000));
+        assert_eq!(
+            repeated
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| matches!(diagnostic, &&FontDiagnostic::MissingGlyph(_)))
+                .count(),
+            1,
+            "repeated missing glyphs are retained as one bounded diagnostic"
+        );
     }
 
     #[test]

@@ -6,6 +6,8 @@ use crate::hotkey::parse_hotkey;
 
 pub const MIN_HOLD_THRESHOLD_MS: u64 = 100;
 pub const MAX_HOLD_THRESHOLD_MS: u64 = 2_000;
+pub const MIN_TOOLTIP_DELAY_MS: u64 = 0;
+pub const MAX_TOOLTIP_DELAY_MS: u64 = 5_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RadialSettingsIssue {
@@ -49,6 +51,14 @@ pub fn validate(
             field: "hold_threshold_ms",
             message: format!(
                 "Hold threshold must be between {MIN_HOLD_THRESHOLD_MS} and {MAX_HOLD_THRESHOLD_MS} ms"
+            ),
+        });
+    }
+    if !(MIN_TOOLTIP_DELAY_MS..=MAX_TOOLTIP_DELAY_MS).contains(&settings.tooltip_delay_ms) {
+        issues.push(RadialSettingsIssue {
+            field: "tooltip_delay_ms",
+            message: format!(
+                "Tooltip delay must be between {MIN_TOOLTIP_DELAY_MS} and {MAX_TOOLTIP_DELAY_MS} ms"
             ),
         });
     }

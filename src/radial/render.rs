@@ -1,7 +1,8 @@
 use super::assets::{PreparedAssetSnapshot, PreparedImage, PreparedMedia, reference_identity};
 use super::font_cache::{FontDiagnostic, PreparedTextLayout, ScriptClass};
-use super::geometry::{HitShape, LayoutSnapshot, LogicalPoint, LogicalRect};
+use super::geometry::{HitShape, LayoutSnapshot, LogicalPoint, LogicalRect, PhysicalRect};
 use super::model::{CellId, MediaReference, Override};
+use super::tooltip::{PreparedTooltip, place_tooltip};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -45,7 +46,7 @@ pub enum VectorPrimitive {
     },
     Tooltip {
         bounds: LogicalRect,
-        text: Arc<PreparedTextLayout>,
+        text: Arc<PreparedTooltip>,
         background: Rgba,
         color: Rgba,
     },
@@ -68,7 +69,7 @@ pub struct PreparedSceneResources {
     /// Keys are stable `reference_identity` values, never mutable indices.
     pub media: BTreeMap<String, PreparedAssetSnapshot>,
     pub text: BTreeMap<CellId, Arc<PreparedTextLayout>>,
-    pub tooltips: BTreeMap<CellId, Arc<PreparedTextLayout>>,
+    pub tooltips: BTreeMap<CellId, Arc<PreparedTooltip>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,7 +80,14 @@ pub enum InputOwner {
 }
 
 pub fn build_scene(layout: &LayoutSnapshot, generation: u64) -> VectorScene {
-    build_scene_internal(layout, generation, &PreparedSceneResources::default(), None)
+    build_scene_internal(
+        layout,
+        generation,
+        &PreparedSceneResources::default(),
+        None,
+        None,
+        None,
+    )
 }
 
 pub fn build_scene_prepared(
@@ -87,7 +95,7 @@ pub fn build_scene_prepared(
     generation: u64,
     resources: &PreparedSceneResources,
 ) -> VectorScene {
-    build_scene_internal(layout, generation, resources, None)
+    build_scene_internal(layout, generation, resources, None, None, None)
 }
 
 pub fn build_scene_selected(
@@ -100,6 +108,8 @@ pub fn build_scene_selected(
         generation,
         &PreparedSceneResources::default(),
         selected,
+        None,
+        None,
     )
 }
 
@@ -109,7 +119,25 @@ pub fn build_scene_prepared_selected(
     resources: &PreparedSceneResources,
     selected: Option<&CellId>,
 ) -> VectorScene {
-    build_scene_internal(layout, generation, resources, selected)
+    build_scene_internal(layout, generation, resources, selected, None, None)
+}
+
+pub fn build_scene_prepared_selected_tooltip(
+    layout: &LayoutSnapshot,
+    generation: u64,
+    resources: &PreparedSceneResources,
+    selected: Option<&CellId>,
+    visible_tooltip: Option<&CellId>,
+    work_area: PhysicalRect,
+) -> VectorScene {
+    build_scene_internal(
+        layout,
+        generation,
+        resources,
+        selected,
+        visible_tooltip,
+        Some(work_area),
+    )
 }
 
 fn build_scene_internal(
@@ -117,6 +145,8 @@ fn build_scene_internal(
     generation: u64,
     resources: &PreparedSceneResources,
     selected: Option<&CellId>,
+    visible_tooltip: Option<&CellId>,
+    work_area: Option<PhysicalRect>,
 ) -> VectorScene {
     let outer_radius = rect_width(layout.rim_extent).max(rect_height(layout.rim_extent)) * 0.5;
     let background_radius =
@@ -340,28 +370,8 @@ fn build_scene_internal(
                 color: rgba_from_style(cell.visual.text_color),
             });
         }
-        if selected == Some(&cell.cell_id)
-            && cell.visual.tooltip_mode != super::model::TooltipMode::Disabled
-            && let Some(tooltip) = resources.tooltips.get(&cell.cell_id)
-        {
-            let tooltip_bounds = LogicalRect {
-                min: LogicalPoint {
-                    x: bounds.min.x,
-                    y: bounds.max.y + 4.0,
-                },
-                max: LogicalPoint {
-                    x: bounds.max.x.max(bounds.min.x + 80.0),
-                    y: bounds.max.y + 24.0,
-                },
-            };
-            primitives.push(VectorPrimitive::Tooltip {
-                bounds: tooltip_bounds,
-                text: Arc::clone(tooltip),
-                background: Rgba(10, 11, 14, 235),
-                color: Rgba(248, 248, 248, 255),
-            });
-        }
     }
+    let mut visual_bounds = layout.visual_extent;
     push_image(
         &mut primitives,
         resources,
@@ -370,8 +380,29 @@ fn build_scene_internal(
         layout.style.image_quality,
         opacity(layout.style.menu_foreground_opacity),
     );
+    if let (Some(cell_id), Some(work_area), Some(tooltip)) = (
+        visible_tooltip,
+        work_area,
+        visible_tooltip.and_then(|cell_id| resources.tooltips.get(cell_id)),
+    ) && let Some(cell) = layout.cells.iter().find(|cell| &cell.cell_id == cell_id)
+    {
+        let anchor = shape_bounds(&cell.shape);
+        let tooltip_bounds = place_tooltip(
+            anchor,
+            tooltip.logical_size(),
+            work_area,
+            layout.scale_factor,
+        );
+        visual_bounds = union_rect(visual_bounds, tooltip_bounds);
+        primitives.push(VectorPrimitive::Tooltip {
+            bounds: tooltip_bounds,
+            text: Arc::clone(tooltip),
+            background: Rgba(10, 11, 14, 242),
+            color: Rgba(248, 248, 248, 255),
+        });
+    }
     VectorScene {
-        bounds: layout.visual_extent,
+        bounds: visual_bounds,
         generation,
         shape_quality: layout.style.shape_quality,
         primitives,
@@ -381,6 +412,7 @@ fn build_scene_internal(
 fn fallback_text(text: &str, family: &str) -> Arc<PreparedTextLayout> {
     Arc::new(PreparedTextLayout {
         text: Arc::from(text),
+        source_text: Arc::from(text),
         selected_family: Arc::from(if family.is_empty() {
             "Segoe UI"
         } else {
@@ -388,9 +420,25 @@ fn fallback_text(text: &str, family: &str) -> Arc<PreparedTextLayout> {
         }),
         script: ScriptClass::Mixed,
         estimated_width_milli: 0,
+        measured_width_milli: 0,
+        measured_height_milli: 0,
+        line_count: 1,
         glyphs: Vec::new(),
         diagnostics: Vec::<FontDiagnostic>::new(),
     })
+}
+
+fn union_rect(left: LogicalRect, right: LogicalRect) -> LogicalRect {
+    LogicalRect {
+        min: LogicalPoint {
+            x: left.min.x.min(right.min.x),
+            y: left.min.y.min(right.min.y),
+        },
+        max: LogicalPoint {
+            x: left.max.x.max(right.max.x),
+            y: left.max.y.max(right.max.y),
+        },
+    }
 }
 
 fn push_image(
@@ -725,6 +773,93 @@ mod tests {
         assert!(scene.primitives.iter().any(|primitive| {
             matches!(primitive, VectorPrimitive::Text { text, size, .. } if text == "Apps" && *size == 22.0)
         }));
+    }
+
+    #[test]
+    fn tooltip_scene_overflow_is_visual_only_and_uses_measured_multiline_bounds() {
+        let layout = layout();
+        let frozen_layout = layout.clone();
+        let cell_id = layout.cells[0].cell_id.clone();
+        let text = Arc::new(crate::radial::font_cache::PreparedTextLayout {
+            source_text: Arc::from("Complete label\nDistinct description"),
+            text: Arc::from("Complete label\nDistinct description"),
+            selected_family: Arc::from("Segoe UI"),
+            script: ScriptClass::Latin,
+            estimated_width_milli: 120_000,
+            measured_width_milli: 120_000,
+            measured_height_milli: 32_000,
+            line_count: 2,
+            glyphs: Vec::new(),
+            diagnostics: Vec::new(),
+        });
+        let mut resources = PreparedSceneResources::default();
+        resources.tooltips.insert(
+            cell_id.clone(),
+            Arc::new(PreparedTooltip {
+                full_label: Arc::from("Complete label"),
+                description: Some(Arc::from("Distinct description")),
+                layout: text,
+                font_size: 13.0,
+                show_label: true,
+                label_was_truncated: false,
+            }),
+        );
+        let work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: -200.0,
+                y: -100.0,
+            },
+            max: PhysicalPoint { x: 800.0, y: 700.0 },
+        };
+        let hidden = build_scene_prepared_selected_tooltip(
+            &layout,
+            10,
+            &resources,
+            Some(&cell_id),
+            None,
+            work_area,
+        );
+        let shown = build_scene_prepared_selected_tooltip(
+            &layout,
+            11,
+            &resources,
+            Some(&cell_id),
+            Some(&cell_id),
+            work_area,
+        );
+        let tooltip_bounds = shown
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                VectorPrimitive::Tooltip { bounds, text, .. } => {
+                    assert_eq!(text.logical_size(), (136.0, 48.0));
+                    Some(*bounds)
+                }
+                _ => None,
+            });
+
+        assert!(tooltip_bounds.is_some());
+        assert_eq!(hidden.bounds, layout.visual_extent);
+        assert!(hidden.primitives.iter().any(|primitive| matches!(
+            primitive,
+            VectorPrimitive::FilledCircle {
+                color: Rgba(92, 112, 148, 252),
+                ..
+            } | VectorPrimitive::FilledWedge {
+                color: Rgba(92, 112, 148, 252),
+                ..
+            }
+        )));
+        assert_ne!(shown.bounds, layout.visual_extent);
+        assert_eq!(layout, frozen_layout);
+        assert_eq!(layout.input_regions, frozen_layout.input_regions);
+        assert_eq!(layout.input_extent, frozen_layout.input_extent);
+        assert!(
+            hidden
+                .primitives
+                .iter()
+                .all(|primitive| { !matches!(primitive, VectorPrimitive::Tooltip { .. }) })
+        );
     }
 
     #[test]

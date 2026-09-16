@@ -31,6 +31,7 @@ pub enum WatchEvent {
     RadialInvalidate,
     RadialConfigDiagnostic(Option<String>),
     RadialRuntimeDiagnostic(String),
+    RadialDiagnostic(crate::radial::diagnostics::RadialDiagnostic),
     RadialSubmenuPlacementFailure(RadialPlacementFailureNotice),
     RadialPlacementActionResult {
         session_id: crate::radial::model::SessionId,
@@ -307,6 +308,7 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::RadialInvalidate => TestWatchEvent::Actions,
             WatchEvent::RadialConfigDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialRuntimeDiagnostic(_) => TestWatchEvent::Actions,
+            WatchEvent::RadialDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialSubmenuPlacementFailure(_) => TestWatchEvent::Actions,
             WatchEvent::RadialPlacementActionResult { .. } => TestWatchEvent::Actions,
             WatchEvent::RadialMigrationNotice(_) => TestWatchEvent::Actions,

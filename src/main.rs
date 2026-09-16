@@ -1072,6 +1072,9 @@ fn main() -> anyhow::Result<()> {
             event_tx.clone(),
             app_data_root.path().to_path_buf(),
         );
+    let tooltip_preferences =
+        multi_launcher::radial::tooltip::TooltipPreferences::from(&settings.radial);
+    let _ = native_preview.set_tooltip_preferences(tooltip_preferences);
     multi_launcher::gui::install_radial_authoring_client(authoring_client);
     let control_wake = event_tx.clone();
     let (radial_control_client, radial_control_endpoint) = radial_control_service_with_wake(
@@ -1091,6 +1094,7 @@ fn main() -> anyhow::Result<()> {
         settings.debug_logging,
         event_tx.clone(),
     );
+    let _ = radial_controller.set_tooltip_preferences(tooltip_preferences);
     let mut radial_resources = RadialRuntimeResources::new(
         app_data_root.path().to_path_buf(),
         event_tx.clone(),
@@ -2370,6 +2374,11 @@ fn main() -> anyhow::Result<()> {
                             multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
                         );
                     }
+                    ControllerEvent::Diagnostic(diagnostic) => {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialDiagnostic(diagnostic),
+                        );
+                    }
                     ControllerEvent::LayoutFailed { menu_id, error } => {
                         multi_launcher::gui::send_event(
                             multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
@@ -2519,6 +2528,11 @@ fn main() -> anyhow::Result<()> {
                         multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
                     );
                 }
+                ControllerEvent::Diagnostic(diagnostic) => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialDiagnostic(diagnostic),
+                    );
+                }
                 ControllerEvent::LayoutFailed { menu_id, error } => {
                     multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
@@ -2652,6 +2666,34 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             settings = runtime_settings;
+            let tooltip_preferences =
+                multi_launcher::radial::tooltip::TooltipPreferences::from(&settings.radial);
+            for event in radial_controller.set_tooltip_preferences(tooltip_preferences) {
+                if let ControllerEvent::Diagnostic(diagnostic) = event {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialDiagnostic(diagnostic),
+                    );
+                }
+            }
+            match native_preview.set_tooltip_preferences(tooltip_preferences) {
+                Ok(Some(diagnostics)) => {
+                    if let Some(lease) = native_preview.active_lease() {
+                        let _ = authoring_endpoint.reply_tx.send(
+                            AuthoringReply::NativePreviewDiagnostics {
+                                editor_session: lease.editor_session,
+                                lease,
+                                diagnostics,
+                            },
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(message) => multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
+                        "Native radial preview could not apply tooltip settings: {message}"
+                    )),
+                ),
+            }
             radial_control_endpoint.set_enabled(settings.radial.enabled);
             settings_generation = settings_generation.checked_add(1).unwrap_or(1);
             if let Ok(document) = radial_store.reload() {

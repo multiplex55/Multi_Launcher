@@ -2,30 +2,43 @@
 
 use super::assets::{AssetService, ManagedAssetOverlay, PrepareVariant, reference_identity};
 use super::bindings::project_menu_frame_with_style;
+use super::diagnostics::{
+    MAX_EXPECTED_LAYOUT_DIAGNOSTICS, MAX_RADIAL_DIAGNOSTICS, RadialDiagnostic,
+    RadialDiagnosticKind, RadialDiagnosticSeverity, RadialDiagnosticSource, bound_diagnostics,
+};
 use super::dynamic::{
     FrozenAvailability, FrozenBinding, FrozenDynamicFrame, FrozenEntryId, FrozenEntryKind,
     FrozenRadialEntry, SourceFingerprint,
 };
 use super::font_cache::{
-    FontLayoutService, FontRequest, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog,
+    FontAlignment, FontLayoutPurpose, FontLayoutService, FontRequest, FontWrapPolicy,
+    MAX_LAYOUT_CACHE_ENTRIES, MAX_TOOLTIP_LINES, SystemFontCatalog,
 };
 use super::geometry::{
     CellLayout, HitShape, LayoutSnapshot, PhysicalPoint, PhysicalRect, ScaleFactor,
     layout_document_menu, layout_document_menu_fixed_center,
 };
-use super::model::{CellId, MenuDefinition, MenuId, Override, RadialDocument, RingId, SkinId};
+use super::model::{
+    CellId, MenuDefinition, MenuId, Override, RadialDocument, RingId, SkinId, TooltipMode,
+};
 use super::render::{PreparedSceneResources, VectorScene, build_scene_prepared_selected};
+use super::tooltip::{
+    MAX_TOOLTIP_HEIGHT_FRACTION, MAX_TOOLTIP_WIDTH_LOGICAL, PreparedTooltip, TooltipPreferences,
+};
 use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedFrameInput {
     pub layout: LayoutSnapshot,
+    pub work_area: super::geometry::PhysicalRect,
+    pub tooltip_preferences: TooltipPreferences,
     pub placement: PreparedPlacement,
     pub scene: VectorScene,
     pub resources: PreparedSceneResources,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<RadialDiagnostic>,
     pub page: usize,
     pub page_count: usize,
 }
@@ -37,6 +50,7 @@ pub struct PreviewProjection {
     pub dynamic: BTreeMap<CellId, FrozenDynamicFrame>,
     pub selected_skin: Option<SkinId>,
     pub assets: ManagedAssetOverlay,
+    pub tooltip_preferences: TooltipPreferences,
 }
 
 /// Preview callers explicitly choose whether the supplied point is a flexible
@@ -108,10 +122,12 @@ pub(crate) fn prepare_visual_resources(
     document: &RadialDocument,
     menu: &MenuDefinition,
     layout: &LayoutSnapshot,
+    work_area: super::geometry::PhysicalRect,
+    tooltip_preferences: TooltipPreferences,
     asset_service: Option<&mut AssetService>,
     font_service: Option<&mut FontLayoutService>,
     overlay: &ManagedAssetOverlay,
-) -> (PreparedSceneResources, Vec<String>) {
+) -> (PreparedSceneResources, Vec<RadialDiagnostic>) {
     let mut resources = PreparedSceneResources::default();
     let variant = PrepareVariant {
         effective_style: scene_resource_fingerprint(layout),
@@ -155,17 +171,40 @@ pub(crate) fn prepare_visual_resources(
                             .media
                             .insert(reference_identity(&reference), snapshot);
                     }
-                    Err(error) => diagnostics.push(format!(
-                        "radial image {} unavailable: {error}",
-                        reference_identity(&reference)
-                    )),
+                    Err(error) => {
+                        let identity = reference_identity(&reference);
+                        diagnostics.push(RadialDiagnostic::new(
+                            RadialDiagnosticSeverity::Error,
+                            RadialDiagnosticKind::AssetUnavailable(error.clone()),
+                            RadialDiagnosticSource::Asset {
+                                menu_id: menu.id.clone(),
+                                identity: identity.clone(),
+                            },
+                            (variant.effective_style, variant.dpi_milli, error.clone()),
+                            format!("radial image {identity} unavailable: {error}"),
+                        ));
+                    }
                 }
             }
         }
     }
     if let Some(service) = font_service {
         for cell in &layout.cells {
-            let request = FontRequest {
+            // The layout label is the wheel's rendered display string and may
+            // contain a frozen availability annotation. Tooltip content must
+            // remain the immutable projected/authored label instead. Synthetic
+            // cells (for example the center/background controls) have no
+            // definition and therefore intentionally stay empty here.
+            let definition = menu
+                .rings
+                .iter()
+                .flat_map(|ring| &ring.cells)
+                .find(|candidate| candidate.id == cell.cell_id);
+            let display_label = cell.label.as_str();
+            let tooltip_label = definition
+                .map(|definition| definition.label.as_str())
+                .unwrap_or_default();
+            let label_request = FontRequest {
                 family: (!cell.visual.font_family.is_empty())
                     .then(|| cell.visual.font_family.clone()),
                 size_milli: (cell.visual.font_size.max(1.0) * 1_000.0) as u32,
@@ -175,39 +214,103 @@ pub(crate) fn prepare_visual_resources(
                 max_width_milli: (layout.style.item_size.max(1.0)
                     * cell.visual.text_box_scale
                     * 1_000.0) as u32,
+                max_height_milli: 0,
+                max_lines: 1,
+                purpose: FontLayoutPurpose::CellLabel,
+                wrap: FontWrapPolicy::Ellipsis,
+                alignment: FontAlignment::Center,
             };
-            let prepared_label = service.prepare(&cell.label, request.clone());
-            diagnostics.extend(
-                prepared_label
-                    .diagnostics
-                    .iter()
-                    .map(|diagnostic| format!("radial font for {}: {diagnostic:?}", cell.cell_id)),
-            );
+            let prepared_label = service.prepare(display_label, label_request.clone());
+            diagnostics.extend(prepared_label.diagnostics.iter().map(|diagnostic| {
+                RadialDiagnostic::from_font(
+                    &menu.id,
+                    &cell.cell_id,
+                    display_label,
+                    &label_request,
+                    diagnostic,
+                )
+            }));
             resources.text.insert(cell.cell_id.clone(), prepared_label);
-            if let Some(definition) = menu
-                .rings
-                .iter()
-                .flat_map(|ring| &ring.cells)
-                .find(|candidate| candidate.id == cell.cell_id)
-            {
-                let explicit = match &definition.tooltip {
-                    Override::Value(value) if !value.is_empty() => Some(value.as_str()),
+            if cell.visual.tooltip_mode != TooltipMode::Disabled {
+                let description = definition.and_then(|definition| match &definition.tooltip {
+                    Override::Value(value) if !value.trim().is_empty() => {
+                        Some(value.trim().to_owned())
+                    }
                     _ => None,
-                };
-                let tooltip = match cell.visual.tooltip_mode {
-                    super::model::TooltipMode::Disabled => None,
-                    super::model::TooltipMode::Explicit => explicit,
-                    super::model::TooltipMode::Automatic => explicit.or(Some(cell.label.as_str())),
-                };
-                if let Some(tooltip) = tooltip {
-                    resources
-                        .tooltips
-                        .insert(cell.cell_id.clone(), service.prepare(tooltip, request));
+                });
+                let was_truncated = resources.text.get(&cell.cell_id).is_some_and(|layout| {
+                    layout
+                        .diagnostics
+                        .contains(&super::font_cache::FontDiagnostic::LabelTruncated)
+                });
+                let show_label = !tooltip_label.trim().is_empty()
+                    && tooltip_preferences.label_is_eligible(was_truncated);
+                let description =
+                    description.filter(|description| description != tooltip_label.trim());
+                if show_label || description.is_some() {
+                    let full_label: Arc<str> = Arc::from(tooltip_label);
+                    let source = match description.as_deref() {
+                        Some(description) if show_label => {
+                            format!("{}\n{}", full_label, description)
+                        }
+                        Some(description) => description.to_owned(),
+                        None => full_label.to_string(),
+                    };
+                    let work_min = layout.scale_factor.physical_to_logical(work_area.min);
+                    let work_max = layout.scale_factor.physical_to_logical(work_area.max);
+                    let max_width = ((work_max.x - work_min.x - 24.0)
+                        .max(1.0)
+                        .min(MAX_TOOLTIP_WIDTH_LOGICAL)
+                        * 1_000.0) as u32;
+                    let max_height = ((work_max.y - work_min.y).max(1.0)
+                        * MAX_TOOLTIP_HEIGHT_FRACTION
+                        * 1_000.0) as u32;
+                    let tooltip_request = FontRequest {
+                        family: label_request.family.clone(),
+                        size_milli: 13_000,
+                        bold: false,
+                        italic: false,
+                        dpi_milli: variant.dpi_milli,
+                        max_width_milli: max_width,
+                        max_height_milli: max_height,
+                        max_lines: MAX_TOOLTIP_LINES as u16,
+                        purpose: FontLayoutPurpose::Tooltip,
+                        wrap: FontWrapPolicy::Word,
+                        alignment: FontAlignment::Left,
+                    };
+                    let layout = service.prepare(&source, tooltip_request.clone());
+                    diagnostics.extend(layout.diagnostics.iter().map(|diagnostic| {
+                        RadialDiagnostic::from_font(
+                            &menu.id,
+                            &cell.cell_id,
+                            &source,
+                            &tooltip_request,
+                            diagnostic,
+                        )
+                    }));
+                    resources.tooltips.insert(
+                        cell.cell_id.clone(),
+                        Arc::new(PreparedTooltip {
+                            full_label,
+                            description: description.map(Arc::from),
+                            layout,
+                            font_size: 13.0,
+                            show_label,
+                            label_was_truncated: was_truncated,
+                        }),
+                    );
                 }
             }
         }
     }
-    (resources, diagnostics)
+    (
+        resources,
+        bound_diagnostics(
+            diagnostics,
+            MAX_EXPECTED_LAYOUT_DIAGNOSTICS,
+            MAX_RADIAL_DIAGNOSTICS,
+        ),
+    )
 }
 
 pub(crate) fn augment_preview_special_cells(layout: &mut LayoutSnapshot, menu: &MenuDefinition) {
@@ -409,6 +512,8 @@ impl PreviewFramePreparer {
             document,
             menu,
             &layout,
+            work_area,
+            projection.tooltip_preferences,
             self.asset_service.as_mut(),
             self.font_service.as_mut(),
             &projection.assets,
@@ -439,16 +544,30 @@ impl PreviewFramePreparer {
                         &projection.assets,
                     )
                 {
-                    diagnostics.push(format!(
-                        "radial sound {} unavailable: {error}",
-                        reference_identity(reference)
+                    let identity = reference_identity(reference);
+                    diagnostics.push(RadialDiagnostic::new(
+                        RadialDiagnosticSeverity::Error,
+                        RadialDiagnosticKind::SoundUnavailable(error.clone()),
+                        RadialDiagnosticSource::Asset {
+                            menu_id: menu.id.clone(),
+                            identity: identity.clone(),
+                        },
+                        (variant.effective_style, variant.dpi_milli, error.clone()),
+                        format!("radial sound {identity} unavailable: {error}"),
                     ));
                 }
             }
         }
+        diagnostics = bound_diagnostics(
+            diagnostics,
+            MAX_EXPECTED_LAYOUT_DIAGNOSTICS,
+            MAX_RADIAL_DIAGNOSTICS,
+        );
         let scene = build_scene_prepared_selected(&layout, generation, &resources, selected);
         Ok(PreparedFrameInput {
             layout,
+            work_area,
+            tooltip_preferences: projection.tooltip_preferences,
             placement: prepared_placement,
             scene,
             resources,
@@ -462,8 +581,9 @@ impl PreviewFramePreparer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radial::diagnostics::RadialDiagnosticKind;
     use crate::radial::model::{
-        AssetId, AssetRecord, CellContent, DynamicSource, MediaKind, MediaReference,
+        AssetId, AssetRecord, CellContent, Control, DynamicSource, MediaKind, MediaReference,
     };
     use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
     use sha2::{Digest, Sha256};
@@ -480,6 +600,225 @@ mod tests {
             },
             ScaleFactor::new(1.0).unwrap(),
         )
+    }
+
+    #[test]
+    fn prepared_tooltip_keeps_complete_label_and_distinct_description_order() {
+        let mut document = RadialDocument::starter();
+        let cell = &mut document.menus[0].rings[0].cells[0];
+        cell.label = "Complete 日本語 label".into();
+        cell.tooltip = Override::Value("  Description remains distinct.  ".into());
+        let cell_id = cell.id.clone();
+        let (anchor, work, scale) = geometry();
+        let mut preparer = PreviewFramePreparer::new(PathBuf::new());
+        let frame = preparer
+            .prepare(
+                &document,
+                &document.default_menu_id,
+                anchor,
+                work,
+                scale,
+                1,
+                None,
+                &PreviewProjection::default(),
+            )
+            .unwrap();
+        let tooltip = frame.resources.tooltips.get(&cell_id).unwrap();
+        assert_eq!(&*tooltip.full_label, "Complete 日本語 label");
+        assert_eq!(
+            tooltip.description.as_deref(),
+            Some("Description remains distinct.")
+        );
+        assert_eq!(
+            tooltip.combined_source(),
+            "Complete 日本語 label\nDescription remains distinct."
+        );
+        assert_eq!(
+            &*tooltip.layout.source_text,
+            "Complete 日本語 label\nDescription remains distinct."
+        );
+
+        let dynamic_document = RadialDocument::starter();
+        let dynamic_menu = dynamic_document
+            .menus
+            .iter()
+            .find(|menu| menu.id.as_str() == "starter-applications")
+            .unwrap()
+            .clone();
+        let dynamic_id = dynamic_menu
+            .rings
+            .iter()
+            .flat_map(|ring| &ring.cells)
+            .find(|cell| matches!(&cell.content, CellContent::Dynamic { .. }))
+            .unwrap()
+            .id
+            .clone();
+        let projection = PreviewProjection {
+            dynamic: synthetic_preview_dynamic(&dynamic_menu),
+            ..PreviewProjection::default()
+        };
+        let dynamic = preparer
+            .prepare(
+                &dynamic_document,
+                &dynamic_menu.id,
+                anchor,
+                work,
+                scale,
+                2,
+                None,
+                &projection,
+            )
+            .unwrap();
+        let projected_cell = dynamic
+            .layout
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id.as_str().starts_with("dyn:"))
+            .unwrap();
+        let projected_tooltip = dynamic
+            .resources
+            .tooltips
+            .get(&projected_cell.cell_id)
+            .unwrap();
+        assert!(
+            projected_cell
+                .cell_id
+                .as_str()
+                .starts_with(&format!("dyn:{}:", dynamic_id))
+        );
+        assert_eq!(
+            projected_tooltip.full_label.as_ref(),
+            projected_cell.label.as_str()
+        );
+        assert!(projected_tooltip.description.is_none());
+
+        document.menus[0].rings[0].cells[0].tooltip = Override::Value("  ".into());
+        let empty = preparer
+            .prepare(
+                &document,
+                &document.default_menu_id,
+                anchor,
+                work,
+                scale,
+                3,
+                None,
+                &PreviewProjection::default(),
+            )
+            .unwrap();
+        let empty_tooltip = empty.resources.tooltips.get(&cell_id).unwrap();
+        assert!(empty_tooltip.description.is_none());
+        let label = document.menus[0].rings[0].cells[0].label.clone();
+        document.menus[0].rings[0].cells[0].tooltip = Override::Value(label);
+        let equal = preparer
+            .prepare(
+                &document,
+                &document.default_menu_id,
+                anchor,
+                work,
+                scale,
+                4,
+                None,
+                &PreviewProjection::default(),
+            )
+            .unwrap();
+        assert!(
+            equal
+                .resources
+                .tooltips
+                .get(&cell_id)
+                .unwrap()
+                .description
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tooltip_full_label_ignores_availability_annotation_on_wheel_label() {
+        let document = RadialDocument::starter();
+        let (anchor, work, scale) = geometry();
+        let mut preparer = PreviewFramePreparer::new(PathBuf::new());
+        let frame = preparer
+            .prepare(
+                &document,
+                &document.default_menu_id,
+                anchor,
+                work,
+                scale,
+                1,
+                None,
+                &PreviewProjection::default(),
+            )
+            .unwrap();
+        let cell_id = document.menus[0].rings[0].cells[0].id.clone();
+        let authored_label = document.menus[0].rings[0].cells[0].label.clone();
+        let mut annotated_layout = frame.layout.clone();
+        let wheel_label = format!("{authored_label} [Left: unavailable]");
+        annotated_layout
+            .cells
+            .iter_mut()
+            .find(|cell| cell.cell_id == cell_id)
+            .unwrap()
+            .label = wheel_label.clone();
+
+        let (resources, _) = prepare_visual_resources(
+            &document,
+            &document.menus[0],
+            &annotated_layout,
+            work,
+            TooltipPreferences::default(),
+            None,
+            preparer.font_service.as_mut(),
+            &ManagedAssetOverlay::default(),
+        );
+        assert_eq!(
+            &*resources.text.get(&cell_id).unwrap().source_text,
+            wheel_label
+        );
+        let tooltip = resources.tooltips.get(&cell_id).unwrap();
+        assert_eq!(&*tooltip.full_label, authored_label);
+        assert_eq!(&*tooltip.layout.source_text, authored_label);
+        assert!(!tooltip.layout.source_text.contains("Left: unavailable"));
+    }
+
+    #[test]
+    fn empty_display_labels_preserve_source_and_do_not_create_id_tooltips() {
+        let mut document = RadialDocument::starter();
+        let empty_cell_id = document.menus[0].rings[0].cells[0].id.clone();
+        document.menus[0].rings[0].cells[0].label.clear();
+        document.menus[0].background_control = Some(Control::Close);
+        let (anchor, work, scale) = geometry();
+        let mut preparer = PreviewFramePreparer::new(PathBuf::new());
+        let frame = preparer
+            .prepare(
+                &document,
+                &document.default_menu_id,
+                anchor,
+                work,
+                scale,
+                1,
+                None,
+                &PreviewProjection::default(),
+            )
+            .unwrap();
+
+        for cell_id in [
+            empty_cell_id,
+            CellId::new("__center"),
+            CellId::new("__background"),
+        ] {
+            assert!(
+                frame
+                    .layout
+                    .cells
+                    .iter()
+                    .find(|cell| cell.cell_id == cell_id)
+                    .is_some_and(|cell| cell.label.is_empty())
+            );
+            let text = frame.resources.text.get(&cell_id).unwrap();
+            assert_eq!(&*text.source_text, "");
+            assert_eq!(&*text.text, "");
+            assert!(!frame.resources.tooltips.contains_key(&cell_id));
+        }
     }
 
     #[test]
@@ -708,12 +1047,10 @@ mod tests {
             super::super::assets::PreparedMedia::Image(image) if image.animated
         )));
         assert!(frame.resources.text.len() == frame.layout.cells.len());
-        assert!(
-            !frame
-                .diagnostics
-                .iter()
-                .any(|message| message.contains("radial sound"))
-        );
+        assert!(!frame.diagnostics.iter().any(|diagnostic| {
+            matches!(&diagnostic.kind, RadialDiagnosticKind::SoundUnavailable(_))
+                && diagnostic.message.contains("radial sound")
+        }));
         assert!(
             !root
                 .path()

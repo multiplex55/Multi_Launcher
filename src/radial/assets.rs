@@ -85,7 +85,7 @@ pub(crate) fn validate_packaged_media(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AssetDiagnostic {
     NotFound,
     ManagedPathOutsideRoot,

@@ -54,7 +54,10 @@ impl LauncherApp {
             match ev {
                 WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
                 WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),
-                WatchEvent::RadialInvalidate => self.invalidate_radial_leases(),
+                WatchEvent::RadialInvalidate => {
+                    self.radial_expected_diagnostics.clear();
+                    self.invalidate_radial_leases();
+                }
                 WatchEvent::RadialConfigDiagnostic(diagnostic) => {
                     if let Some(diagnostic) = diagnostic {
                         self.report_error_message(
@@ -65,6 +68,29 @@ impl LauncherApp {
                 }
                 WatchEvent::RadialRuntimeDiagnostic(diagnostic) => {
                     self.report_error_message("radial.runtime", diagnostic);
+                }
+                WatchEvent::RadialDiagnostic(diagnostic) => {
+                    if diagnostic.is_expected_layout() {
+                        if !self
+                            .radial_expected_diagnostics
+                            .iter()
+                            .any(|retained| retained.fingerprint == diagnostic.fingerprint)
+                        {
+                            if self.radial_expected_diagnostics.len()
+                                == crate::radial::diagnostics::MAX_EXPECTED_LAYOUT_DIAGNOSTICS
+                            {
+                                self.radial_expected_diagnostics.pop_front();
+                            }
+                            self.radial_expected_diagnostics.push_back(diagnostic);
+                        }
+                        self.egui_ctx.request_repaint();
+                    } else if diagnostic.severity
+                        != crate::radial::diagnostics::RadialDiagnosticSeverity::Info
+                    {
+                        self.report_error_message("radial.resource", diagnostic.message);
+                    } else {
+                        tracing::info!(message = %diagnostic.message, "radial diagnostic");
+                    }
                 }
                 WatchEvent::RadialSubmenuPlacementFailure(notice) => {
                     self.radial_placement_viewport.request(notice);
@@ -582,6 +608,27 @@ mod tests {
         assert_eq!(app.query, "keep query");
         assert_eq!(app.selected, Some(3));
         assert_eq!(app.error.as_deref(), Some("missing managed radial asset"));
+    }
+
+    #[test]
+    fn tooltip_view_limit_routes_as_actionable_radial_diagnostic() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.show_inline_errors = true;
+        let diagnostic = crate::radial::diagnostics::RadialDiagnostic::from_font(
+            &crate::radial::model::MenuId::new("menu"),
+            &crate::radial::model::CellId::new("cell"),
+            "a long tooltip",
+            (13_000_u32, 240_000_u32),
+            &crate::radial::font_cache::FontDiagnostic::TooltipViewLimited,
+        );
+        assert!(!diagnostic.is_expected_layout());
+        app.event_tx
+            .send(WatchEvent::RadialDiagnostic(diagnostic.clone()))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.error.as_deref(), Some(diagnostic.message.as_str()));
+        assert!(app.radial_expected_diagnostics.is_empty());
     }
 
     #[test]

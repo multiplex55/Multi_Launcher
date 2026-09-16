@@ -5,6 +5,9 @@ use super::bindings::{
     RadialPrepareRequest, project_menu_frame_with_style,
 };
 use super::context::{InvocationContext, WindowIdentity};
+use super::diagnostics::{
+    MAX_EXPECTED_LAYOUT_DIAGNOSTICS, MAX_RADIAL_DIAGNOSTICS, RadialDiagnostic, bound_diagnostics,
+};
 use super::dynamic::{FrozenAvailability, FrozenBinding};
 use super::font_cache::{FontLayoutService, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog};
 use super::geometry::{
@@ -26,23 +29,27 @@ use super::native::{CloseReason, NativeCommand, NativeEvent, NativeHost};
 use super::preparation::{prepare_visual_resources, scene_resource_fingerprint};
 use super::render::{
     InputOwner, PreparedSceneResources, build_scene, build_scene_prepared,
-    build_scene_prepared_selected,
+    build_scene_prepared_selected, build_scene_prepared_selected_tooltip,
 };
 use super::session::{
     CellRole, FrameId, NavigationCommand, NavigationModifiers, PointerButton, SessionEvent,
     SessionIntent, SessionReducer,
 };
 use super::skin::compile_menu_tree;
+use super::tooltip::{TooltipHoverState, TooltipIdentity, TooltipPreferences};
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
+
+const MAX_VISIBLE_RESOURCE_DIAGNOSTICS: usize = MAX_RADIAL_DIAGNOSTICS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DeadlineKey {
     ActionHandoff,
     Dwell,
+    Tooltip,
 }
 
 enum DeadlineCommand {
@@ -54,6 +61,7 @@ enum DeadlineCommand {
 struct HandoffDeadlineScheduler {
     tx: mpsc::Sender<DeadlineCommand>,
     join: Option<JoinHandle<()>>,
+    armed_deadlines: Mutex<BTreeMap<DeadlineKey, u64>>,
 }
 
 impl HandoffDeadlineScheduler {
@@ -98,12 +106,24 @@ impl HandoffDeadlineScheduler {
         Ok(Self {
             tx,
             join: Some(join),
+            armed_deadlines: Mutex::new(BTreeMap::new()),
         })
     }
     fn arm(&self, key: DeadlineKey, deadline: u64) {
+        if let Ok(mut armed_deadlines) = self.armed_deadlines.lock() {
+            if armed_deadlines.get(&key) == Some(&deadline) {
+                return;
+            }
+            armed_deadlines.insert(key, deadline);
+        }
         let _ = self.tx.send(DeadlineCommand::Arm(key, deadline));
     }
     fn cancel(&self, key: DeadlineKey) {
+        if let Ok(mut armed_deadlines) = self.armed_deadlines.lock()
+            && armed_deadlines.remove(&key).is_none()
+        {
+            return;
+        }
         let _ = self.tx.send(DeadlineCommand::Cancel(key));
     }
 }
@@ -158,6 +178,7 @@ pub enum ControllerEvent {
         invocation_id: InvocationId,
     },
     PrepareRequested(RadialPrepareEnvelope),
+    Diagnostic(RadialDiagnostic),
     Error(String),
 }
 
@@ -233,6 +254,7 @@ struct ActiveSession {
     layout: LayoutSnapshot,
     spatial: FrozenSpatialContext,
     reducer: SessionReducer,
+    tooltip_hover: TooltipHoverState,
     pointer: LogicalPoint,
     application_always_on_top: bool,
     always_on_top: bool,
@@ -305,7 +327,8 @@ pub struct RadialController {
     asset_service: Option<AssetService>,
     font_service: Option<FontLayoutService>,
     font_catalog: Option<SystemFontCatalog>,
-    visible_resource_diagnostics: BTreeSet<String>,
+    visible_resource_diagnostics: VecDeque<u64>,
+    tooltip_preferences: TooltipPreferences,
 }
 impl RadialController {
     pub fn new(document: Arc<RadialDocument>, diagnostics: bool, wake: mpsc::Sender<()>) -> Self {
@@ -353,7 +376,8 @@ impl RadialController {
             asset_service: None,
             font_service: None,
             font_catalog: None,
-            visible_resource_diagnostics: BTreeSet::new(),
+            visible_resource_diagnostics: VecDeque::new(),
+            tooltip_preferences: TooltipPreferences::default(),
             release_waits: BTreeMap::new(),
             grid_keyboard_owner: GridKeyboardOwner::RadialMenu,
         }
@@ -364,6 +388,57 @@ impl RadialController {
             service.replace_search_roots(document.media_search_roots.clone());
         }
         self.document = document;
+    }
+
+    pub fn set_tooltip_preferences(
+        &mut self,
+        preferences: TooltipPreferences,
+    ) -> Vec<ControllerEvent> {
+        if self.tooltip_preferences == preferences {
+            return Vec::new();
+        }
+        self.tooltip_preferences = preferences;
+        let Some((session_id, menu_id, layout, work_area)) = self.active.as_mut().map(|active| {
+            active.tooltip_hover.cancel();
+            (
+                active.session_id.clone(),
+                active.menu_id.clone(),
+                active.layout.clone(),
+                active.spatial.work_area,
+            )
+        }) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let menu = self
+            .document
+            .menus
+            .iter()
+            .find(|menu| menu.id == menu_id)
+            .cloned();
+        let Some(menu) = menu else {
+            return out;
+        };
+        let generation = self.layout_generation_for(&session_id);
+        let (resources, sounds, diagnostics) =
+            self.prepare_scene_resources(&menu, &layout, generation, work_area);
+        if let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.session_id == session_id)
+        {
+            active.resources = resources;
+            active
+                .navigation_resources
+                .insert(active.current_frame_id, active.resources.clone());
+            active
+                .navigation_sounds
+                .insert(active.current_frame_id, sounds);
+        }
+        out.extend(diagnostics.into_iter().map(ControllerEvent::Diagnostic));
+        self.sync_tooltip_deadline();
+        self.refresh_active_scene(&session_id, &mut out);
+        out
     }
 
     /// Installs the preparation-only resource services used by the production
@@ -389,6 +464,9 @@ impl RadialController {
     /// services after the final runtime/editor lease is released.
     pub fn release_resources(&mut self) {
         self.cancel_handoff_deadline();
+        if let Some(scheduler) = &self.deadline_scheduler {
+            scheduler.cancel(DeadlineKey::Tooltip);
+        }
         self.deadline_scheduler = None;
         self.asset_service = None;
         self.font_service = None;
@@ -915,8 +993,12 @@ impl RadialController {
         let generation = self.layout_generation;
         self.layout_generation = self.layout_generation.checked_add(1).unwrap_or(1);
         let (resources, sounds, resource_diagnostics) =
-            self.prepare_scene_resources(&menu, &layout, generation);
-        out.extend(resource_diagnostics.into_iter().map(ControllerEvent::Error));
+            self.prepare_scene_resources(&menu, &layout, generation, work);
+        out.extend(
+            resource_diagnostics
+                .into_iter()
+                .map(ControllerEvent::Diagnostic),
+        );
         let scene = if self.asset_service.is_some() || self.font_service.is_some() {
             build_scene_prepared(&layout, generation, &resources)
         } else {
@@ -975,11 +1057,18 @@ impl RadialController {
         menu: &super::model::MenuDefinition,
         layout: &LayoutSnapshot,
         _generation: u64,
-    ) -> (PreparedSceneResources, PreparedRadialSounds, Vec<String>) {
+        work_area: PhysicalRect,
+    ) -> (
+        PreparedSceneResources,
+        PreparedRadialSounds,
+        Vec<RadialDiagnostic>,
+    ) {
         let (resources, mut diagnostics) = prepare_visual_resources(
             &self.document,
             menu,
             layout,
+            work_area,
+            self.tooltip_preferences,
             self.asset_service.as_mut(),
             self.font_service.as_mut(),
             &super::assets::ManagedAssetOverlay::default(),
@@ -1024,18 +1113,46 @@ impl RadialController {
                                 *destination = Some(Arc::clone(&sound.wav));
                             }
                         }
-                        Err(error) => diagnostics.push(format!(
-                            "radial sound {} unavailable: {error}",
-                            reference_identity(reference)
-                        )),
+                        Err(error) => {
+                            let identity = reference_identity(reference);
+                            diagnostics.push(RadialDiagnostic::new(
+                                super::diagnostics::RadialDiagnosticSeverity::Error,
+                                super::diagnostics::RadialDiagnosticKind::SoundUnavailable(
+                                    error.clone(),
+                                ),
+                                super::diagnostics::RadialDiagnosticSource::Asset {
+                                    menu_id: menu.id.clone(),
+                                    identity: identity.clone(),
+                                },
+                                (variant.effective_style, variant.dpi_milli, error.clone()),
+                                format!("radial sound {identity} unavailable: {error}"),
+                            ));
+                        }
                     }
                 }
             }
         }
-        diagnostics
-            .retain(|diagnostic| self.visible_resource_diagnostics.insert(diagnostic.clone()));
+        diagnostics = bound_diagnostics(
+            diagnostics,
+            MAX_EXPECTED_LAYOUT_DIAGNOSTICS,
+            MAX_RADIAL_DIAGNOSTICS,
+        );
+        diagnostics.retain(|diagnostic| {
+            if self
+                .visible_resource_diagnostics
+                .contains(&diagnostic.fingerprint)
+            {
+                return false;
+            }
+            self.visible_resource_diagnostics
+                .push_back(diagnostic.fingerprint);
+            if self.visible_resource_diagnostics.len() > MAX_VISIBLE_RESOURCE_DIAGNOSTICS {
+                self.visible_resource_diagnostics.pop_front();
+            }
+            true
+        });
         for diagnostic in &diagnostics {
-            self.record(None, diagnostic.clone());
+            self.record(None, diagnostic.message.clone());
         }
         (resources, sounds, diagnostics)
     }
@@ -1054,6 +1171,7 @@ impl RadialController {
             &mut out,
         );
         self.poll_dwell(&mut out);
+        self.poll_tooltip(&mut out);
         out
     }
     pub fn navigate_active(
@@ -1135,6 +1253,23 @@ impl RadialController {
                 },
                 out,
             );
+        }
+    }
+    fn poll_tooltip(&mut self, out: &mut Vec<ControllerEvent>) {
+        let now_ms = monotonic_ms();
+        let ready = self.active.as_ref().and_then(|active| {
+            let (identity, deadline) = active.tooltip_hover.candidate()?;
+            (deadline <= now_ms).then(|| (active.session_id.clone(), identity.clone()))
+        });
+        if let Some((session_id, identity)) = ready
+            && self
+                .active
+                .as_mut()
+                .filter(|active| active.session_id == session_id)
+                .is_some_and(|active| active.tooltip_hover.expire(&identity, now_ms))
+        {
+            self.sync_tooltip_deadline();
+            self.refresh_active_scene(&session_id, out);
         }
     }
     fn handle_native(&mut self, event: NativeEvent, out: &mut Vec<ControllerEvent>) {
@@ -1223,6 +1358,7 @@ impl RadialController {
                     layout: p.layout,
                     spatial: p.spatial,
                     reducer,
+                    tooltip_hover: TooltipHoverState::default(),
                     pointer,
                     application_always_on_top: p.application_always_on_top,
                     always_on_top: p.always_on_top,
@@ -1356,11 +1492,17 @@ impl RadialController {
                 if owner != super::render::InputOwner::Exterior {
                     self.session_event(&session_id, SessionEvent::MenuInteraction, out);
                 }
+                let tooltip_region_owned = !matches!(&owner, super::render::InputOwner::Exterior);
                 let previous_selection = self
                     .active
                     .as_ref()
                     .filter(|active| active.session_id == session_id)
                     .and_then(|active| active.reducer.state.hovered.clone());
+                let previous_visible_tooltip = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| active.tooltip_hover.visible().cloned());
                 if let Some(active) = self
                     .active
                     .as_mut()
@@ -1378,11 +1520,55 @@ impl RadialController {
                     },
                     out,
                 );
+                let tooltip_cell = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| {
+                        tooltip_region_owned
+                            .then(|| active.layout.geometric_hover_cell(point))
+                            .flatten()
+                            .map(|cell| cell.cell_id.clone())
+                    });
                 let current_selection = self
                     .active
                     .as_ref()
                     .filter(|active| active.session_id == session_id)
                     .and_then(|active| active.reducer.state.hovered.clone());
+                let tooltip_identity = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| {
+                        tooltip_cell
+                            .as_ref()
+                            .filter(|cell| active.resources.tooltips.contains_key(*cell))
+                            .map(|cell| TooltipIdentity {
+                                session_id: session_id.clone(),
+                                frame_id: active.current_frame_id,
+                                layout_generation,
+                                cell_id: cell.clone(),
+                            })
+                    });
+                if let Some(active) = self
+                    .active
+                    .as_mut()
+                    .filter(|active| active.session_id == session_id)
+                {
+                    active.tooltip_hover.observe(
+                        tooltip_identity,
+                        true,
+                        monotonic_ms(),
+                        self.tooltip_preferences.delay_ms,
+                    );
+                }
+                self.sync_tooltip_deadline();
+                let current_visible_tooltip = self
+                    .active
+                    .as_ref()
+                    .filter(|active| active.session_id == session_id)
+                    .and_then(|active| active.tooltip_hover.visible().cloned());
+                let tooltip_scene_changed = current_visible_tooltip != previous_visible_tooltip;
                 if current_selection != previous_selection {
                     if let Some(cell) = current_selection.clone()
                         && let Some(active) = self
@@ -1398,6 +1584,8 @@ impl RadialController {
                             monotonic_ms(),
                         );
                     }
+                }
+                if current_selection != previous_selection || tooltip_scene_changed {
                     self.refresh_active_scene(&session_id, out);
                 }
                 if let Some(cell) = hovered
@@ -1437,8 +1625,14 @@ impl RadialController {
                     .as_ref()
                     .filter(|active| active.session_id == session_id)
                     .is_some_and(|active| active.reducer.state.hovered.is_some());
+                let had_visible_tooltip = self
+                    .active
+                    .as_mut()
+                    .filter(|active| active.session_id == session_id)
+                    .is_some_and(|active| active.tooltip_hover.cancel());
                 self.session_event(&session_id, SessionEvent::OutsideInteraction, out);
-                if had_hover {
+                self.sync_tooltip_deadline();
+                if had_hover || had_visible_tooltip {
                     self.refresh_active_scene(&session_id, out);
                 }
             }
@@ -1455,6 +1649,11 @@ impl RadialController {
                 if owner != super::render::InputOwner::Exterior {
                     self.session_event(&session_id, SessionEvent::MenuInteraction, out);
                 }
+                let had_tooltip = self
+                    .active
+                    .as_mut()
+                    .filter(|active| active.session_id == session_id)
+                    .is_some_and(|active| active.tooltip_hover.cancel());
                 let role = self.role_for_button(&session_id, &owner, button);
                 self.session_event(
                     &session_id,
@@ -1466,7 +1665,11 @@ impl RadialController {
                         geometry_generation: layout_generation,
                     },
                     out,
-                )
+                );
+                self.sync_tooltip_deadline();
+                if had_tooltip {
+                    self.refresh_active_scene(&session_id, out);
+                }
             }
             NativeEvent::PointerUp {
                 session_id,
@@ -1498,7 +1701,16 @@ impl RadialController {
                 if self.layout_generation_for(&session_id) != layout_generation {
                     return;
                 }
-                self.session_event(&session_id, SessionEvent::OutsideInteraction, out)
+                let had_tooltip = self
+                    .active
+                    .as_mut()
+                    .filter(|active| active.session_id == session_id)
+                    .is_some_and(|active| active.tooltip_hover.cancel());
+                self.session_event(&session_id, SessionEvent::OutsideInteraction, out);
+                self.sync_tooltip_deadline();
+                if had_tooltip {
+                    self.refresh_active_scene(&session_id, out);
+                }
             }
             NativeEvent::Escape { session_id } => {
                 self.close(CloseReason::Dismissed, Some(&session_id))
@@ -1517,6 +1729,14 @@ impl RadialController {
                 from,
                 to,
             } => {
+                if let Some(active) = self
+                    .active
+                    .as_mut()
+                    .filter(|active| active.session_id == session_id)
+                {
+                    active.tooltip_hover.cancel();
+                }
+                self.sync_tooltip_deadline();
                 let Some(active) = self
                     .active
                     .as_ref()
@@ -1668,6 +1888,29 @@ impl RadialController {
         event: SessionEvent,
         out: &mut Vec<ControllerEvent>,
     ) {
+        if matches!(
+            &event,
+            SessionEvent::PointerDown { .. }
+                | SessionEvent::PointerUp { .. }
+                | SessionEvent::TriggerReleased { .. }
+                | SessionEvent::OpenChild { .. }
+                | SessionEvent::Back { .. }
+                | SessionEvent::PageChanged { .. }
+                | SessionEvent::DisplayRelayout { .. }
+                | SessionEvent::Relocated { .. }
+                | SessionEvent::OutsideInteraction
+                | SessionEvent::SelectKeyboard { .. }
+                | SessionEvent::Navigate { .. }
+                | SessionEvent::DwellExpired { .. }
+                | SessionEvent::ActivateItem { .. }
+                | SessionEvent::Close
+        ) && let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| &active.session_id == id)
+        {
+            active.tooltip_hover.cancel();
+        }
         let page_change = self
             .active
             .as_ref()
@@ -1694,6 +1937,7 @@ impl RadialController {
         };
         let intents = active.reducer.reduce(event);
         self.sync_dwell_deadline();
+        self.sync_tooltip_deadline();
         for intent in intents {
             self.handle_session_intent(id, intent, out);
         }
@@ -2386,8 +2630,8 @@ impl RadialController {
             resolve_window_options(&self.document, &child, application_always_on_top);
         let generation = self.next_layout_generation();
         let (resources, sounds, diagnostics) =
-            self.prepare_scene_resources(&child, &layout, generation);
-        out.extend(diagnostics.into_iter().map(ControllerEvent::Error));
+            self.prepare_scene_resources(&child, &layout, generation, spatial.work_area);
+        out.extend(diagnostics.into_iter().map(ControllerEvent::Diagnostic));
         if let Some(active) = self
             .active
             .as_mut()
@@ -2543,9 +2787,16 @@ impl RadialController {
                 layout = cascade_layout(parent, layout);
             }
             let generation = self.layout_generation_for(id);
+            let work_area = self
+                .active
+                .as_ref()
+                .filter(|active| &active.session_id == id)
+                .expect("page projection requires its active session")
+                .spatial
+                .work_area;
             let (resources, sounds, diagnostics) =
-                self.prepare_scene_resources(&projected.menu, &layout, generation);
-            out.extend(diagnostics.into_iter().map(ControllerEvent::Error));
+                self.prepare_scene_resources(&projected.menu, &layout, generation, work_area);
+            out.extend(diagnostics.into_iter().map(ControllerEvent::Diagnostic));
             page_projection = Some((projected, layout, resources, sounds));
         }
 
@@ -2641,6 +2892,7 @@ impl RadialController {
             active.current_frame_id = frame.frame_id;
             active.menu_id = frame.menu_id.clone();
         }
+        let generation = self.layout_generation_for(id);
         let Some(active) = self
             .active
             .as_ref()
@@ -2650,9 +2902,9 @@ impl RadialController {
         };
         let command = NativeCommand::Present {
             session_id: id.clone(),
-            scene: build_scene_prepared_selected(
+            scene: build_scene_prepared_selected_tooltip(
                 &active.layout,
-                self.layout_generation_for(id),
+                generation,
                 &active.resources,
                 active
                     .reducer
@@ -2660,6 +2912,16 @@ impl RadialController {
                     .hovered
                     .as_ref()
                     .or(active.reducer.state.selected.as_ref()),
+                active
+                    .tooltip_hover
+                    .visible()
+                    .filter(|visible| {
+                        visible.session_id == *id
+                            && visible.frame_id == active.current_frame_id
+                            && visible.layout_generation == generation
+                    })
+                    .map(|visible| &visible.cell_id),
+                active.spatial.work_area,
             ),
             layout: active.layout.clone(),
             always_on_top: active.always_on_top,
@@ -2760,6 +3022,19 @@ impl RadialController {
             scheduler.cancel(DeadlineKey::Dwell);
         }
     }
+    fn sync_tooltip_deadline(&mut self) {
+        let deadline = self.active.as_ref().and_then(|active| {
+            active
+                .tooltip_hover
+                .candidate()
+                .map(|(_, deadline)| deadline)
+        });
+        if let Some(deadline) = deadline {
+            self.arm_deadline(DeadlineKey::Tooltip, deadline);
+        } else if let Some(scheduler) = &self.deadline_scheduler {
+            scheduler.cancel(DeadlineKey::Tooltip);
+        }
+    }
     fn reduce_handoff(&mut self, event: DispatchEvent, out: &mut Vec<ControllerEvent>) {
         let Some(pending) = self.handoff.as_mut() else {
             return;
@@ -2828,6 +3103,16 @@ impl RadialController {
             .as_mut()
             .filter(|active| active.session_id == id)
         {
+            active.tooltip_hover.cancel();
+        }
+        if let Some(scheduler) = &self.deadline_scheduler {
+            scheduler.cancel(DeadlineKey::Tooltip);
+        }
+        if let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.session_id == id)
+        {
             active.closing = true;
         }
         if let Some(host) = self.host.as_ref() {
@@ -2843,6 +3128,9 @@ impl RadialController {
         }
     }
     fn retire_host(&mut self) {
+        if let Some(scheduler) = &self.deadline_scheduler {
+            scheduler.cancel(DeadlineKey::Tooltip);
+        }
         let mut audio_retirement_failed = false;
         if let Some(active) = &mut self.active
             && let Some(audio) = active.audio.take()
@@ -4114,6 +4402,70 @@ mod tests {
     }
 
     #[test]
+    fn protective_runtime_hover_uses_geometry_without_changing_action_owner() {
+        let mut document = RadialDocument::starter();
+        let cell_id = document.menus[0].rings[0].cells[0].id.clone();
+        document.menus[0].rings[0].cells[0].content = CellContent::Spacer;
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        controller.set_tooltip_preferences(TooltipPreferences {
+            delay_ms: 0,
+            ..TooltipPreferences::default()
+        });
+        controller.configure_resources(std::path::PathBuf::new());
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+
+        let layout = controller.active.as_ref().unwrap().layout.clone();
+        let cell = layout
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == cell_id)
+            .unwrap();
+        let point = layout
+            .scale_factor
+            .physical_to_logical(shape_center(&cell.shape, layout.scale_factor));
+        assert!(layout.hit_test(point).is_none());
+        assert_eq!(
+            super::super::render::input_owner(&layout, point, false),
+            InputOwner::Protective
+        );
+        events.lock().unwrap().push_back(NativeEvent::PointerMoved {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+            owner: InputOwner::Protective,
+            point,
+        });
+        controller.poll();
+        let active = controller.active.as_ref().unwrap();
+        assert!(active.reducer.state.hovered.is_none());
+        assert_eq!(
+            active
+                .tooltip_hover
+                .visible()
+                .map(|identity| &identity.cell_id),
+            Some(&cell_id)
+        );
+    }
+
+    #[test]
     fn resource_failure_is_a_normal_controller_event_when_debug_logging_is_disabled() {
         let directory = tempfile::tempdir().unwrap();
         let mut document = RadialDocument::starter();
@@ -4137,7 +4489,22 @@ mod tests {
         );
         controller.configure_resources(directory.path().to_path_buf());
         let output = controller.handle_intents(vec![open()], false);
-        assert!(output.iter().any(|event| matches!(event, ControllerEvent::Error(message) if message.contains("missing.png"))));
+        assert!(output.iter().any(|event| matches!(
+            event,
+            ControllerEvent::Diagnostic(diagnostic)
+                if matches!(
+                    &diagnostic.kind,
+                    super::super::diagnostics::RadialDiagnosticKind::AssetUnavailable(
+                        super::super::assets::AssetDiagnostic::NotFound
+                    )
+                )
+                    && matches!(
+                        &diagnostic.source,
+                        super::super::diagnostics::RadialDiagnosticSource::Asset { identity, .. }
+                            if identity.contains("missing.png")
+                    )
+                    && diagnostic.message.contains("missing.png")
+        )));
         assert!(controller.diagnostics().next().is_none());
     }
 
@@ -4279,12 +4646,11 @@ mod tests {
         );
         controller.configure_resources(directory.path().to_path_buf());
         let (runtime_resources, _, runtime_diagnostics) =
-            controller.prepare_scene_resources(&menu, &layout, 44);
-        assert!(
-            runtime_diagnostics
-                .iter()
-                .all(|diagnostic| diagnostic.contains("LabelTruncated"))
-        );
+            controller.prepare_scene_resources(&menu, &layout, 44, work);
+        assert!(runtime_diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic.kind,
+            super::super::diagnostics::RadialDiagnosticKind::LabelTruncated
+        )));
         let runtime_scene = build_scene_prepared_selected(&layout, 44, &runtime_resources, None);
 
         let mut preview =
@@ -4306,7 +4672,45 @@ mod tests {
         assert_eq!(prepared.resources, runtime_resources);
         assert_eq!(prepared.scene, runtime_scene);
         assert!(prepared.resources.media.len() == 1);
-        assert!(prepared.resources.tooltips.len() == 1);
+        let expected_tooltip_ids: BTreeSet<_> = prepared
+            .layout
+            .cells
+            .iter()
+            .filter(|cell| !cell.label.trim().is_empty())
+            .map(|cell| cell.cell_id.clone())
+            .collect();
+        assert_eq!(
+            prepared
+                .resources
+                .tooltips
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected_tooltip_ids,
+            "AllCells prepares every non-empty user-facing label, even without custom descriptions"
+        );
+        for cell in prepared
+            .layout
+            .cells
+            .iter()
+            .filter(|cell| !cell.label.trim().is_empty())
+        {
+            let tooltip = prepared
+                .resources
+                .tooltips
+                .get(&cell.cell_id)
+                .expect("every non-empty label has an AllCells tooltip");
+            assert_eq!(tooltip.full_label.as_ref(), cell.label.as_str());
+        }
+        for special_id in [CellId::new("__center"), CellId::new("__background")] {
+            let special_text = prepared
+                .resources
+                .text
+                .get(&special_id)
+                .expect("special cells retain prepared text entries");
+            assert!(special_text.source_text.is_empty());
+            assert!(!prepared.resources.tooltips.contains_key(&special_id));
+        }
     }
     #[test]
     fn resource_invalidation_closes_active_generation_and_clears_preparation() {

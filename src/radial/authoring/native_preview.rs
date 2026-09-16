@@ -6,6 +6,7 @@
 
 use super::{AuthoringRequestId, AuthoringSessionId, DraftGeneration, NativePreviewLease};
 use crate::radial::context::{InvocationContext, WindowIdentity};
+use crate::radial::diagnostics::RadialDiagnostic;
 use crate::radial::geometry::{
     FrozenSpatialContext, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout, shape_center,
     translate_layout,
@@ -19,8 +20,11 @@ use crate::radial::preparation::{
     PreparedPlacement, PreviewFramePreparer, PreviewPlacement, PreviewProjection,
     ensure_preview_center_back, synthetic_preview_dynamic,
 };
-use crate::radial::render::build_scene_prepared_selected;
+use crate::radial::render::{build_scene_prepared_selected, build_scene_prepared_selected_tooltip};
 use crate::radial::session::{CellRole, FrameId, SessionEvent, SessionIntent, SessionReducer};
+use crate::radial::tooltip::{
+    TooltipDeadlineScheduler, TooltipHoverState, TooltipIdentity, TooltipPreferences, monotonic_ms,
+};
 use crate::radial::validation::validate;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -109,6 +113,7 @@ struct ActivePreview {
     navigation_frames: BTreeMap<FrameId, PreviewFrameState>,
     reducer: SessionReducer,
     projection: PreviewProjection,
+    tooltip_hover: TooltipHoverState,
 }
 
 #[derive(Clone)]
@@ -124,14 +129,14 @@ struct PreviewFrameState {
 pub struct PreviewLeaseResult {
     pub lease: NativePreviewLease,
     pub sampled_context: InvocationContext,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<RadialDiagnostic>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativePreviewNotice {
     Diagnostics {
         lease: NativePreviewLease,
-        diagnostics: Vec<String>,
+        diagnostics: Vec<RadialDiagnostic>,
     },
     Stopped(NativePreviewLease),
     Failed {
@@ -169,16 +174,23 @@ pub struct NativePreviewCoordinator {
     active: Option<ActivePreview>,
     newest: BTreeMap<AuthoringSessionId, (DraftGeneration, AuthoringRequestId)>,
     last_external: Option<WindowIdentity>,
+    tooltip_wake: Option<mpsc::Sender<()>>,
+    tooltip_scheduler: Option<TooltipDeadlineScheduler>,
+    tooltip_preferences: TooltipPreferences,
     pub intercepted_dispatches: usize,
 }
 
 impl NativePreviewCoordinator {
     pub fn new(wake: mpsc::Sender<()>, application_data: PathBuf) -> Self {
+        let host_wake = wake.clone();
         let factory = Arc::new(move || {
-            NativeHost::spawn_with_wake(Some(wake.clone()))
+            NativeHost::spawn_with_wake(Some(host_wake.clone()))
                 .map(|host| Box::new(host) as Box<dyn PreviewHostPort>)
         });
-        Self::with_factory_and_preparer(factory, PreviewFramePreparer::new(application_data))
+        let mut coordinator =
+            Self::with_factory_and_preparer(factory, PreviewFramePreparer::new(application_data));
+        coordinator.tooltip_wake = Some(wake);
+        coordinator
     }
 
     fn with_factory(factory: HostFactory) -> Self {
@@ -193,8 +205,15 @@ impl NativePreviewCoordinator {
             active: None,
             newest: BTreeMap::new(),
             last_external: None,
+            tooltip_wake: None,
+            tooltip_scheduler: None,
+            tooltip_preferences: TooltipPreferences::default(),
             intercepted_dispatches: 0,
         }
+    }
+
+    pub fn active_lease(&self) -> Option<NativePreviewLease> {
+        self.active.as_ref().map(|active| active.lease.clone())
     }
 
     pub fn start(
@@ -259,6 +278,7 @@ impl NativePreviewCoordinator {
         mut projection: PreviewProjection,
         frozen_context: Option<FrozenSpatialContext>,
     ) -> Result<PreviewLeaseResult, String> {
+        projection.tooltip_preferences = self.tooltip_preferences;
         let sequence = (generation, request_id);
         if self
             .newest
@@ -388,6 +408,7 @@ impl NativePreviewCoordinator {
             navigation_frames: BTreeMap::from([(FrameId(1), root_frame)]),
             reducer,
             projection,
+            tooltip_hover: TooltipHoverState::default(),
         });
         self.send_checked(open)?;
         Ok(PreviewLeaseResult {
@@ -504,6 +525,7 @@ impl NativePreviewCoordinator {
 
     pub fn cancel_all(&mut self) {
         self.stop_active(CloseReason::SettingsReload);
+        let _ = self.sync_tooltip_deadline();
         if let Some(mut host) = self.host.take() {
             host.shutdown();
         }
@@ -533,12 +555,170 @@ impl NativePreviewCoordinator {
                 }
             }
         }
+        let due = self
+            .active
+            .as_ref()
+            .and_then(|active| active.tooltip_hover.candidate())
+            .filter(|(_, deadline)| *deadline <= monotonic_ms())
+            .map(|(identity, _)| identity.clone());
+        if let Some(identity) = due {
+            let lease = self.active.as_ref().map(|active| active.lease.clone());
+            let revealed = self
+                .active
+                .as_mut()
+                .is_some_and(|active| active.tooltip_hover.expire(&identity, monotonic_ms()));
+            if revealed {
+                let _ = self.sync_tooltip_deadline();
+                if let Some(lease) = lease {
+                    match self.present_active() {
+                        Ok(Some(diagnostics)) => {
+                            notices.push(NativePreviewNotice::Diagnostics { lease, diagnostics })
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            notices.push(NativePreviewNotice::Failed { lease, message })
+                        }
+                    }
+                }
+            }
+        }
         notices
     }
 
-    fn handle_event(&mut self, event: NativeEvent) -> Result<Option<Vec<String>>, String> {
+    /// Applies global tooltip preferences to the active authoring preview.
+    /// The prepared resources are refreshed, but the wheel's frozen layout
+    /// remains byte-for-byte stable so settings changes cannot move input.
+    pub fn set_tooltip_preferences(
+        &mut self,
+        preferences: TooltipPreferences,
+    ) -> Result<Option<Vec<RadialDiagnostic>>, String> {
+        if self.tooltip_preferences == preferences {
+            return Ok(None);
+        }
+        self.tooltip_preferences = preferences;
+        let Some((document, menu_id, mut projection, layout, selected, work_area, scale, frame_id)) =
+            self.active.as_mut().map(|active| {
+                active.tooltip_hover.cancel();
+                (
+                    Arc::clone(&active.document),
+                    active.menu_id.clone(),
+                    active.projection.clone(),
+                    active.frame.layout.clone(),
+                    active
+                        .reducer
+                        .state
+                        .hovered
+                        .clone()
+                        .or_else(|| active.reducer.state.selected.clone()),
+                    active.spatial.work_area,
+                    active.spatial.scale_factor,
+                    active.current_frame_id,
+                )
+            })
+        else {
+            self.sync_tooltip_deadline()?;
+            return Ok(None);
+        };
+        let previous_diagnostics = self
+            .active
+            .as_ref()
+            .map(|active| active.frame.diagnostics.clone());
+        projection.tooltip_preferences = preferences;
+        projection.page = self
+            .active
+            .as_ref()
+            .map_or(projection.page, |active| active.frame.page);
+        projection.placement = PreviewPlacement::FixedCenter;
+        let mut frame = build_preview_frame_input_projected(
+            &mut self.preparer,
+            &document,
+            &menu_id,
+            layout.origin,
+            work_area,
+            scale,
+            self.active
+                .as_ref()
+                .map_or(0, |active| active.layout_generation),
+            selected.as_ref(),
+            &projection,
+        )?;
+        frame.layout = layout;
+        if let Some(parent_resources) = self
+            .active
+            .as_ref()
+            .and_then(|active| active.reducer.state.stack.last())
+            .and_then(|current| current.parent_frame_id)
+            .and_then(|parent| {
+                self.active
+                    .as_ref()?
+                    .navigation_frames
+                    .get(&parent)
+                    .map(|frame| frame.frame.resources.clone())
+            })
+        {
+            frame.resources = merge_preview_resources(&parent_resources, &frame.resources);
+        }
+        let current_generation = self
+            .active
+            .as_ref()
+            .map_or(0, |active| active.layout_generation);
+        frame.scene = build_scene_prepared_selected(
+            &frame.layout,
+            current_generation,
+            &frame.resources,
+            selected.as_ref(),
+        );
+        let active = self.active.as_mut().ok_or("preview lease ended")?;
+        active.frame = frame;
+        active.projection = projection;
+        if let Some(frame_state) = active.navigation_frames.get_mut(&frame_id) {
+            frame_state.frame = active.frame.clone();
+            frame_state.projection = active.projection.clone();
+        }
+        self.sync_tooltip_deadline()?;
+        self.present_active()?;
+        let current_diagnostics = self
+            .active
+            .as_ref()
+            .map(|active| active.frame.diagnostics.clone());
+        Ok(previous_diagnostics
+            .zip(current_diagnostics)
+            .and_then(|(previous, current)| (previous != current).then_some(current)))
+    }
+
+    fn sync_tooltip_deadline(&mut self) -> Result<(), String> {
+        let deadline = self
+            .active
+            .as_ref()
+            .and_then(|active| active.tooltip_hover.candidate())
+            .map(|(_, deadline)| deadline);
+        if let Some(deadline) = deadline {
+            if self.tooltip_scheduler.is_none()
+                && let Some(wake) = self.tooltip_wake.clone()
+            {
+                self.tooltip_scheduler = Some(TooltipDeadlineScheduler::spawn(wake)?);
+            }
+            if let Some(scheduler) = &self.tooltip_scheduler {
+                scheduler.arm(deadline);
+            }
+        } else if let Some(scheduler) = &self.tooltip_scheduler {
+            scheduler.cancel();
+        }
+        Ok(())
+    }
+
+    fn handle_event(
+        &mut self,
+        event: NativeEvent,
+    ) -> Result<Option<Vec<RadialDiagnostic>>, String> {
         if matches!(event, NativeEvent::Stopped) {
+            if let Some(active) = self.active.as_mut() {
+                active.tooltip_hover.cancel();
+            }
             self.active = None;
+            if let Some(scheduler) = &self.tooltip_scheduler {
+                scheduler.cancel();
+            }
             self.host.take();
             self.preparer.release();
             return Ok(None);
@@ -615,103 +795,175 @@ impl NativePreviewCoordinator {
         if let NativeEvent::Relocated { from, to, .. } = &event {
             return self.relocate_active(*from, *to);
         }
-        let Some(active) = self.active.as_mut() else {
+        if matches!(
+            &event,
+            NativeEvent::Escape { .. }
+                | NativeEvent::CaptureLost { .. }
+                | NativeEvent::DisplayChanged { .. }
+                | NativeEvent::Closed { .. }
+        ) {
+            match event {
+                NativeEvent::Escape { .. } | NativeEvent::CaptureLost { .. } => {
+                    self.stop_active(CloseReason::Dismissed);
+                }
+                NativeEvent::DisplayChanged { .. } => {
+                    self.stop_active(CloseReason::DisplayRelayout);
+                }
+                NativeEvent::Closed { .. } => {
+                    self.active = None;
+                }
+                _ => unreachable!(),
+            }
+            self.sync_tooltip_deadline()?;
             return Ok(None);
+        }
+        let (native_session, reducer_before, intents, visual_changed) = {
+            let Some(active) = self.active.as_mut() else {
+                return Ok(None);
+            };
+            let reducer_before = active.reducer.clone();
+            let previous_hover = active.reducer.state.hovered.clone();
+            let previous_visible = active.tooltip_hover.visible().cloned();
+            let (intents, visual_changed) = match event {
+                NativeEvent::PointerMoved { point, owner, .. } => {
+                    let cell = active
+                        .frame
+                        .layout
+                        .hit_test(point)
+                        .map(|cell| cell.cell_id.clone());
+                    let tooltip_cell =
+                        (!matches!(&owner, crate::radial::render::InputOwner::Exterior))
+                            .then(|| active.frame.layout.geometric_hover_cell(point))
+                            .flatten()
+                            .map(|cell| cell.cell_id.clone());
+                    let intents = active.reducer.reduce(SessionEvent::PointerMoved {
+                        point,
+                        hovered: cell.clone(),
+                        geometry_generation: generation,
+                    });
+                    let tooltip_identity = tooltip_cell
+                        .as_ref()
+                        .filter(|cell| active.frame.resources.tooltips.contains_key(*cell))
+                        .map(|cell| TooltipIdentity {
+                            session_id: active.native_session.clone(),
+                            frame_id: active.current_frame_id,
+                            layout_generation: generation,
+                            cell_id: cell.clone(),
+                        });
+                    active.tooltip_hover.observe(
+                        tooltip_identity,
+                        true,
+                        monotonic_ms(),
+                        active.projection.tooltip_preferences.delay_ms,
+                    );
+                    if intents
+                        .iter()
+                        .any(|intent| matches!(intent, SessionIntent::BeginNativeDrag { .. }))
+                    {
+                        active.tooltip_hover.cancel();
+                    }
+                    (
+                        intents,
+                        previous_hover != active.reducer.state.hovered
+                            || previous_visible != active.tooltip_hover.visible().cloned(),
+                    )
+                }
+                NativeEvent::PointerLeft { .. } => {
+                    let intents = active.reducer.reduce(SessionEvent::OutsideInteraction);
+                    active.tooltip_hover.cancel();
+                    (
+                        intents,
+                        previous_hover != active.reducer.state.hovered
+                            || previous_visible.is_some(),
+                    )
+                }
+                NativeEvent::PointerDown { point, button, .. } => {
+                    active.tooltip_hover.cancel();
+                    let cell = active
+                        .frame
+                        .layout
+                        .hit_test(point)
+                        .map(|cell| cell.cell_id.clone());
+                    let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
+                        active_cell_role(active, cell, Some(button))
+                    });
+                    let intents = active.reducer.reduce(SessionEvent::PointerDown {
+                        point,
+                        cell,
+                        role,
+                        button,
+                        geometry_generation: generation,
+                    });
+                    (intents, previous_visible.is_some())
+                }
+                NativeEvent::PointerUp { point, button, .. } => {
+                    active.tooltip_hover.cancel();
+                    let cell = active
+                        .frame
+                        .layout
+                        .hit_test(point)
+                        .map(|cell| cell.cell_id.clone());
+                    let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
+                        active_cell_role(active, cell, Some(button))
+                    });
+                    let intents = active.reducer.reduce(SessionEvent::PointerUp {
+                        point,
+                        cell,
+                        role,
+                        button,
+                        geometry_generation: generation,
+                    });
+                    (intents, previous_visible.is_some())
+                }
+                NativeEvent::Navigate {
+                    command, modifiers, ..
+                } => {
+                    active.tooltip_hover.cancel();
+                    active
+                        .reducer
+                        .reduce(SessionEvent::ModifiersChanged(modifiers));
+                    let cells = active
+                        .frame
+                        .layout
+                        .cells
+                        .iter()
+                        .filter(|cell| cell.actionable)
+                        .map(|cell| {
+                            (
+                                cell.cell_id.clone(),
+                                active_cell_role(active, &cell.cell_id, None),
+                            )
+                        })
+                        .collect();
+                    let intents = active.reducer.reduce(SessionEvent::Navigate {
+                        command,
+                        cells,
+                        pointer_baseline: active.frame.layout.center,
+                        geometry_generation: generation,
+                    });
+                    (
+                        intents,
+                        previous_hover.is_some() || previous_visible.is_some(),
+                    )
+                }
+                NativeEvent::Escape { .. }
+                | NativeEvent::CaptureLost { .. }
+                | NativeEvent::DisplayChanged { .. }
+                | NativeEvent::Closed { .. } => unreachable!("handled before reducer borrow"),
+                NativeEvent::Ready { .. }
+                | NativeEvent::Relocated { .. }
+                | NativeEvent::Failed { .. }
+                | NativeEvent::Stopped => (Vec::new(), false),
+            };
+            (
+                active.native_session.clone(),
+                reducer_before,
+                intents,
+                visual_changed,
+            )
         };
-        let reducer_before = active.reducer.clone();
-        let intents = match event {
-            NativeEvent::PointerMoved { point, .. } => {
-                let cell = active
-                    .frame
-                    .layout
-                    .hit_test(point)
-                    .map(|cell| cell.cell_id.clone());
-                active.reducer.reduce(SessionEvent::PointerMoved {
-                    point,
-                    hovered: cell,
-                    geometry_generation: generation,
-                })
-            }
-            NativeEvent::PointerDown { point, button, .. } => {
-                let cell = active
-                    .frame
-                    .layout
-                    .hit_test(point)
-                    .map(|cell| cell.cell_id.clone());
-                let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
-                    active_cell_role(active, cell, Some(button))
-                });
-                active.reducer.reduce(SessionEvent::PointerDown {
-                    point,
-                    cell,
-                    role,
-                    button,
-                    geometry_generation: generation,
-                })
-            }
-            NativeEvent::PointerUp { point, button, .. } => {
-                let cell = active
-                    .frame
-                    .layout
-                    .hit_test(point)
-                    .map(|cell| cell.cell_id.clone());
-                let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
-                    active_cell_role(active, cell, Some(button))
-                });
-                active.reducer.reduce(SessionEvent::PointerUp {
-                    point,
-                    cell,
-                    role,
-                    button,
-                    geometry_generation: generation,
-                })
-            }
-            NativeEvent::Navigate {
-                command, modifiers, ..
-            } => {
-                active
-                    .reducer
-                    .reduce(SessionEvent::ModifiersChanged(modifiers));
-                let cells = active
-                    .frame
-                    .layout
-                    .cells
-                    .iter()
-                    .filter(|cell| cell.actionable)
-                    .map(|cell| {
-                        (
-                            cell.cell_id.clone(),
-                            active_cell_role(active, &cell.cell_id, None),
-                        )
-                    })
-                    .collect();
-                active.reducer.reduce(SessionEvent::Navigate {
-                    command,
-                    cells,
-                    pointer_baseline: active.frame.layout.center,
-                    geometry_generation: generation,
-                })
-            }
-            NativeEvent::Escape { .. } | NativeEvent::CaptureLost { .. } => {
-                self.stop_active(CloseReason::Dismissed);
-                return Ok(None);
-            }
-            NativeEvent::DisplayChanged { .. } => {
-                self.stop_active(CloseReason::DisplayRelayout);
-                return Ok(None);
-            }
-            NativeEvent::Closed { .. } => {
-                self.active = None;
-                return Ok(None);
-            }
-            NativeEvent::Ready { .. }
-            | NativeEvent::PointerLeft { .. }
-            | NativeEvent::Relocated { .. }
-            | NativeEvent::Failed { .. }
-            | NativeEvent::Stopped => Vec::new(),
-        };
-        let native_session = active.native_session.clone();
-        let result = self.apply_intents(intents);
+        self.sync_tooltip_deadline()?;
+        let result = self.apply_intents(intents, visual_changed);
         if result.is_err()
             && let Some(active) = self
                 .active
@@ -726,7 +978,17 @@ impl NativePreviewCoordinator {
     fn apply_intents(
         &mut self,
         intents: Vec<SessionIntent>,
-    ) -> Result<Option<Vec<String>>, String> {
+        present_after: bool,
+    ) -> Result<Option<Vec<RadialDiagnostic>>, String> {
+        let navigation_changed = intents.iter().any(|intent| {
+            matches!(
+                intent,
+                SessionIntent::OpenSubmenu { .. }
+                    | SessionIntent::Back
+                    | SessionIntent::PageChanged { .. }
+                    | SessionIntent::CloseTree
+            )
+        });
         let previous_diagnostics = self
             .active
             .as_ref()
@@ -756,10 +1018,15 @@ impl NativePreviewCoordinator {
                 SessionIntent::CloseTree => self.stop_active(CloseReason::Dismissed),
             }
         }
-        self.present_active_with_previous(previous_diagnostics)
+        self.sync_tooltip_deadline()?;
+        if present_after || navigation_changed {
+            self.present_active_with_previous(previous_diagnostics)
+        } else {
+            Ok(None)
+        }
     }
 
-    fn present_active(&mut self) -> Result<Option<Vec<String>>, String> {
+    fn present_active(&mut self) -> Result<Option<Vec<RadialDiagnostic>>, String> {
         let previous_diagnostics = self
             .active
             .as_ref()
@@ -769,8 +1036,8 @@ impl NativePreviewCoordinator {
 
     fn present_active_with_previous(
         &mut self,
-        previous_diagnostics: Option<Vec<String>>,
-    ) -> Result<Option<Vec<String>>, String> {
+        previous_diagnostics: Option<Vec<RadialDiagnostic>>,
+    ) -> Result<Option<Vec<RadialDiagnostic>>, String> {
         let (command, diagnostics) = {
             let Some(active) = self.active.as_mut() else {
                 return Ok(None);
@@ -782,11 +1049,22 @@ impl NativePreviewCoordinator {
                 .as_ref()
                 .or(active.reducer.state.selected.as_ref())
                 .cloned();
-            active.frame.scene = build_scene_prepared_selected(
+            let visible_tooltip = active
+                .tooltip_hover
+                .visible()
+                .filter(|identity| {
+                    identity.session_id == active.native_session
+                        && identity.frame_id == active.current_frame_id
+                        && identity.layout_generation == active.layout_generation
+                })
+                .map(|identity| &identity.cell_id);
+            active.frame.scene = build_scene_prepared_selected_tooltip(
                 &active.frame.layout,
                 active.layout_generation,
                 &active.frame.resources,
                 selected.as_ref(),
+                visible_tooltip,
+                active.frame.work_area,
             );
             if let Some(reducer_frame) = active.reducer.state.stack.last_mut() {
                 reducer_frame.page = active.frame.page;
@@ -813,6 +1091,10 @@ impl NativePreviewCoordinator {
     }
 
     fn open_submenu(&mut self, cell_id: &CellId) -> Result<(), String> {
+        if let Some(active) = self.active.as_mut() {
+            active.tooltip_hover.cancel();
+        }
+        self.sync_tooltip_deadline()?;
         let (
             document,
             parent_menu_id,
@@ -964,6 +1246,10 @@ impl NativePreviewCoordinator {
     }
 
     fn restore_back(&mut self) -> Result<(), String> {
+        if let Some(active) = self.active.as_mut() {
+            active.tooltip_hover.cancel();
+        }
+        self.sync_tooltip_deadline()?;
         let (frame_id, mut restored, next_generation, native_session) = {
             let active = self.active.as_ref().ok_or("preview lease ended")?;
             let reducer_frame = active
@@ -1028,6 +1314,10 @@ impl NativePreviewCoordinator {
     }
 
     fn reflow_page(&mut self, _page: usize) -> Result<(), String> {
+        if let Some(active) = self.active.as_mut() {
+            active.tooltip_hover.cancel();
+        }
+        self.sync_tooltip_deadline()?;
         let (
             document,
             frame_id,
@@ -1149,7 +1439,11 @@ impl NativePreviewCoordinator {
         &mut self,
         from: PhysicalPoint,
         to: PhysicalPoint,
-    ) -> Result<Option<Vec<String>>, String> {
+    ) -> Result<Option<Vec<RadialDiagnostic>>, String> {
+        if let Some(active) = self.active.as_mut() {
+            active.tooltip_hover.cancel();
+        }
+        self.sync_tooltip_deadline()?;
         let (
             mut frames,
             current_frame_id,
@@ -1271,6 +1565,9 @@ impl NativePreviewCoordinator {
     }
 
     fn stop_active(&mut self, reason: CloseReason) {
+        if let Some(scheduler) = &self.tooltip_scheduler {
+            scheduler.cancel();
+        }
         if let Some(active) = self.active.take()
             && let Some(host) = self.host.as_ref()
         {
@@ -1435,6 +1732,7 @@ fn submenu_target(document: &RadialDocument, menu_id: &MenuId, cell_id: &CellId)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radial::diagnostics::{RadialDiagnosticKind, RadialDiagnosticSource};
     use crate::radial::model::{ActionBinding, TargetSelector};
     use crate::radial::session::{NavigationCommand, NavigationModifiers};
     use std::collections::VecDeque;
@@ -1584,6 +1882,152 @@ mod tests {
             )
             .unwrap()
             .lease
+    }
+
+    #[test]
+    fn native_hover_reveals_from_one_shot_deadline_and_same_cell_motion_does_not_present() {
+        let (mut coordinator, commands, events) = coordinator();
+        coordinator
+            .set_tooltip_preferences(TooltipPreferences {
+                delay_ms: 0,
+                ..TooltipPreferences::default()
+            })
+            .unwrap();
+        let document = Arc::new(RadialDocument::starter());
+        let menu_id = document.default_menu_id.clone();
+        let lease = start_frozen_preview(&mut coordinator, Arc::clone(&document), 99, menu_id);
+        let active = coordinator.active.as_ref().unwrap();
+        let native_session = active.native_session.clone();
+        let generation = active.layout_generation;
+        let cell = active
+            .frame
+            .layout
+            .cells
+            .iter()
+            .find(|cell| {
+                !cell.label.is_empty()
+                    && active.frame.resources.tooltips.contains_key(&cell.cell_id)
+            })
+            .unwrap();
+        let point = active
+            .frame
+            .layout
+            .scale_factor
+            .physical_to_logical(shape_center(&cell.shape, active.frame.layout.scale_factor));
+        let owner = crate::radial::render::input_owner(&active.frame.layout, point, false);
+        events.lock().unwrap().push_back(NativeEvent::PointerMoved {
+            session_id: native_session.clone(),
+            owner: owner.clone(),
+            point,
+            layout_generation: generation,
+        });
+        let _ = coordinator.poll();
+        let active = coordinator.active.as_ref().unwrap();
+        assert_eq!(active.lease, lease);
+        assert!(active.tooltip_hover.visible().is_some());
+        assert!(active.frame.scene.primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                crate::radial::render::VectorPrimitive::Tooltip { .. }
+            )
+        }));
+        let presented = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| matches!(command, NativeCommand::Present { .. }))
+            .count();
+
+        events.lock().unwrap().push_back(NativeEvent::PointerMoved {
+            session_id: native_session,
+            owner,
+            point: crate::radial::geometry::LogicalPoint {
+                x: point.x + 0.1,
+                y: point.y + 0.1,
+            },
+            layout_generation: generation,
+        });
+        let _ = coordinator.poll();
+        assert_eq!(
+            commands
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|command| matches!(command, NativeCommand::Present { .. }))
+                .count(),
+            presented,
+            "pointer motion inside the same visible cell must not repaint the host"
+        );
+    }
+
+    #[test]
+    fn native_protective_hover_uses_geometry_without_becoming_actionable() {
+        let (mut coordinator, _, events) = coordinator();
+        coordinator
+            .set_tooltip_preferences(TooltipPreferences {
+                delay_ms: 0,
+                ..TooltipPreferences::default()
+            })
+            .unwrap();
+        let mut document = RadialDocument::starter();
+        let cell_id = document.menus[0].rings[0].cells[0].id.clone();
+        document.menus[0].rings[0].cells[0].content = CellContent::Spacer;
+        let document = Arc::new(document);
+        let lease = start_frozen_preview(
+            &mut coordinator,
+            Arc::clone(&document),
+            100,
+            document.default_menu_id.clone(),
+        );
+        let active = coordinator.active.as_ref().unwrap();
+        let native_session = active.native_session.clone();
+        let generation = active.layout_generation;
+        let cell = active
+            .frame
+            .layout
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == cell_id)
+            .unwrap();
+        let point = active
+            .frame
+            .layout
+            .scale_factor
+            .physical_to_logical(shape_center(&cell.shape, active.frame.layout.scale_factor));
+        assert!(active.frame.layout.hit_test(point).is_none());
+        assert_eq!(
+            active
+                .frame
+                .layout
+                .geometric_hover_cell(point)
+                .map(|cell| &cell.cell_id),
+            Some(&cell_id)
+        );
+        let owner = crate::radial::render::input_owner(&active.frame.layout, point, false);
+        assert_eq!(owner, crate::radial::render::InputOwner::Protective);
+        events.lock().unwrap().push_back(NativeEvent::PointerMoved {
+            session_id: native_session,
+            owner,
+            point,
+            layout_generation: generation,
+        });
+        let _ = coordinator.poll();
+        let active = coordinator.active.as_ref().unwrap();
+        assert_eq!(active.lease, lease);
+        assert!(active.reducer.state.hovered.is_none());
+        assert_eq!(
+            active
+                .tooltip_hover
+                .visible()
+                .map(|identity| &identity.cell_id),
+            Some(&cell_id)
+        );
+        assert!(active.frame.scene.primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                crate::radial::render::VectorPrimitive::Tooltip { .. }
+            )
+        }));
     }
 
     #[test]
@@ -2080,7 +2524,11 @@ mod tests {
         assert!(submenu_coordinator.poll().iter().any(|notice| matches!(
             notice,
             NativePreviewNotice::Diagnostics { lease: actual, diagnostics }
-                if actual == &lease && diagnostics.iter().any(|message| message.contains("child-missing"))
+                if actual == &lease && diagnostics.iter().any(|diagnostic| matches!(
+                    &diagnostic.source,
+                    RadialDiagnosticSource::Asset { identity, .. }
+                        if identity.contains("child-missing")
+                ))
         )));
 
         events.lock().unwrap().push_back(NativeEvent::Navigate {
@@ -2141,7 +2589,10 @@ mod tests {
             notice,
             NativePreviewNotice::Diagnostics { lease, diagnostics }
                 if lease == &page_started.lease
-                    && diagnostics.iter().any(|message| message.contains("LabelTruncated"))
+                    && diagnostics.iter().any(|diagnostic| matches!(
+                        &diagnostic.kind,
+                        RadialDiagnosticKind::LabelTruncated
+                    ))
         )));
     }
 
@@ -2295,9 +2746,12 @@ mod tests {
                     first.unwrap();
                     assert!(
                         coordinator
-                            .apply_intents(vec![SessionIntent::BeginNativeDrag {
-                                geometry_generation: 1,
-                            }])
+                            .apply_intents(
+                                vec![SessionIntent::BeginNativeDrag {
+                                    geometry_generation: 1,
+                                }],
+                                false
+                            )
                             .is_err()
                     );
                 }

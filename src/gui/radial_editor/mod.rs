@@ -76,6 +76,104 @@ fn show_resource_notice(ui: &mut egui::Ui, notice: &ResourceNotice) {
     ui.colored_label(color, format!("{prefix}: {}", notice.message));
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RadialDiagnosticDisplayModel {
+    actionable: Vec<crate::radial::diagnostics::RadialDiagnostic>,
+    expected_layout: Vec<crate::radial::diagnostics::RadialDiagnostic>,
+    omitted: Option<crate::radial::diagnostics::RadialDiagnosticOmission>,
+}
+
+fn radial_diagnostic_display_model(
+    diagnostics: impl IntoIterator<Item = crate::radial::diagnostics::RadialDiagnostic>,
+) -> RadialDiagnosticDisplayModel {
+    let diagnostics = crate::radial::diagnostics::bound_diagnostics(
+        diagnostics.into_iter().collect(),
+        crate::radial::diagnostics::MAX_EXPECTED_LAYOUT_DIAGNOSTICS,
+        crate::radial::diagnostics::MAX_RADIAL_DIAGNOSTICS,
+    );
+    let omitted = diagnostics
+        .iter()
+        .find_map(|diagnostic| diagnostic.omission());
+    let mut model = RadialDiagnosticDisplayModel {
+        omitted,
+        ..Default::default()
+    };
+    for diagnostic in diagnostics {
+        if diagnostic.omission().is_some() {
+            continue;
+        }
+        if diagnostic.is_expected_layout() {
+            model.expected_layout.push(diagnostic);
+        } else {
+            model.actionable.push(diagnostic);
+        }
+    }
+    model
+}
+
+pub(super) fn show_radial_diagnostics<'a>(
+    ui: &mut egui::Ui,
+    diagnostics: impl IntoIterator<Item = &'a crate::radial::diagnostics::RadialDiagnostic>,
+    show_expected_layout: bool,
+    id_salt: impl std::hash::Hash,
+) {
+    let model = radial_diagnostic_display_model(diagnostics.into_iter().cloned());
+    if !model.actionable.is_empty() || model.omitted.is_some_and(|omitted| omitted.actionable > 0) {
+        egui::CollapsingHeader::new(format!(
+            "Actionable radial diagnostics ({} shown)",
+            model.actionable.len()
+        ))
+        .id_source(("radial-actionable-diagnostics", &id_salt))
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for diagnostic in &model.actionable {
+                        let color = match diagnostic.severity {
+                            crate::radial::diagnostics::RadialDiagnosticSeverity::Info => {
+                                ui.visuals().text_color()
+                            }
+                            crate::radial::diagnostics::RadialDiagnosticSeverity::Warning => {
+                                ui.visuals().warn_fg_color
+                            }
+                            crate::radial::diagnostics::RadialDiagnosticSeverity::Error => {
+                                ui.visuals().error_fg_color
+                            }
+                        };
+                        ui.colored_label(color, &diagnostic.message);
+                    }
+                });
+            if let Some(omitted) = model.omitted.filter(|omitted| omitted.actionable > 0) {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("{} additional diagnostics omitted", omitted.total),
+                );
+            }
+        });
+    }
+
+    let expected_omitted = model.omitted.map_or(0, |omitted| omitted.expected_layout);
+    if show_expected_layout && (!model.expected_layout.is_empty() || expected_omitted > 0) {
+        egui::CollapsingHeader::new(format!(
+            "Expected layout diagnostics ({} shown; {} omitted)",
+            model.expected_layout.len(),
+            expected_omitted,
+        ))
+        .id_source(("radial-expected-layout-diagnostics", &id_salt))
+        .default_open(false)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for diagnostic in &model.expected_layout {
+                        ui.small(format!("{}", diagnostic.message));
+                    }
+                });
+        });
+    }
+}
+
 pub(crate) struct RadialEditorState {
     pub(crate) open: bool,
     session: Option<RadialAuthoringSession>,
@@ -210,6 +308,7 @@ impl RadialEditorState {
     }
 
     pub(crate) fn request_close(&mut self) {
+        self.preview.cancel_tooltip();
         let Some(session) = self.session.as_ref() else {
             self.open = false;
             return;
@@ -226,6 +325,7 @@ impl RadialEditorState {
     }
 
     pub(crate) fn force_close(&mut self) {
+        self.preview.cancel_tooltip();
         self.stop_native_preview();
         self.release_authoring_resources();
         self.open = false;
@@ -283,6 +383,7 @@ impl RadialEditorState {
             }
         }
         if session.is_closed() {
+            self.preview.cancel_tooltip();
             self.release_authoring_resources();
             self.open = false;
         }
@@ -405,25 +506,37 @@ impl RadialEditorState {
                     });
                 }
                 let preview_selection = session.selection.clone();
+                let feature_defaults = app.radial_feature_settings.clone();
+                let tooltip_preferences =
+                    crate::radial::tooltip::TooltipPreferences::from(&feature_defaults);
                 self.preview.sync_preparation(
                     session,
                     self.client.as_ref(),
                     self.preview_preset,
                     preview_selection.as_ref(),
+                    tooltip_preferences,
                 );
                 let prepared_preview = self.preview.prepared_frame(session);
                 let draft = session.draft.clone();
                 let generation = session.generation.0;
+                let editor_session = session.editor_session;
                 let initial_snapshot_pending = session.is_initial_snapshot_pending();
-                let feature_defaults = app.radial_feature_settings.clone();
+                let show_expected_layout_diagnostics =
+                    feature_defaults.show_expected_layout_diagnostics;
                 if initial_snapshot_pending {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Loading the authoritative radial configuration…");
                     });
                 }
+                show_radial_diagnostics(
+                    ui,
+                    app.radial_expected_diagnostics.iter(),
+                    show_expected_layout_diagnostics,
+                    "runtime",
+                );
                 ui.add_enabled_ui(!initial_snapshot_pending, |ui| {
-                    self.preview_controls(ui);
+                    self.preview_controls(ui, show_expected_layout_diagnostics);
                     ui.columns(3, |columns: &mut [egui::Ui]| {
                         self.tree(&mut columns[0], &feature_defaults);
                         self.preview.ui(
@@ -434,6 +547,8 @@ impl RadialEditorState {
                             self.preview_preset,
                             preview_selection.as_ref(),
                             prepared_preview.as_deref(),
+                            editor_session,
+                            show_expected_layout_diagnostics,
                         );
                         self.inspector(&mut columns[2], app);
                     });
@@ -587,7 +702,7 @@ impl RadialEditorState {
         }
     }
 
-    fn preview_controls(&mut self, ui: &mut egui::Ui) {
+    fn preview_controls(&mut self, ui: &mut egui::Ui, show_expected_layout_diagnostics: bool) {
         ui.horizontal(|ui| {
             ui.label("Preview");
             egui::ComboBox::from_id_source("radial-preview-preset")
@@ -651,12 +766,12 @@ impl RadialEditorState {
                         .unwrap_or_else(|| "Context: synthetic".into());
                     ui.small(context_label);
                 }
-                for diagnostic in &session.native_preview_diagnostics {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!("Desktop preview warning: {diagnostic}"),
-                    );
-                }
+                show_radial_diagnostics(
+                    ui,
+                    session.native_preview_diagnostics.iter(),
+                    show_expected_layout_diagnostics,
+                    "native-preview",
+                );
             }
         });
     }
@@ -1879,6 +1994,7 @@ impl RadialEditorState {
     }
 
     fn cancel(&mut self) {
+        self.preview.cancel_tooltip();
         self.stop_native_preview();
         let Some(session) = self.session.as_mut() else {
             self.force_close();
@@ -1892,6 +2008,7 @@ impl RadialEditorState {
                 }
             }
             Err(AuthoringError::NothingToRevert) => {
+                self.preview.cancel_tooltip();
                 self.open = false;
                 self.session = None;
                 self.close_prompt = false;
@@ -3492,6 +3609,45 @@ fn begin_skin_export(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_display_model_bounds_actionables_and_discloses_overflow() {
+        let actionables = (0..=crate::radial::diagnostics::MAX_RADIAL_DIAGNOSTICS).map(|index| {
+            crate::radial::diagnostics::RadialDiagnostic::new(
+                crate::radial::diagnostics::RadialDiagnosticSeverity::Error,
+                crate::radial::diagnostics::RadialDiagnosticKind::AssetUnavailable(
+                    crate::radial::assets::AssetDiagnostic::NotFound,
+                ),
+                crate::radial::diagnostics::RadialDiagnosticSource::Asset {
+                    menu_id: crate::radial::model::MenuId::new("menu"),
+                    identity: format!("missing-{index}"),
+                },
+                index,
+                "asset missing",
+            )
+        });
+        let expected = crate::radial::diagnostics::RadialDiagnostic::from_font(
+            &crate::radial::model::MenuId::new("menu"),
+            &crate::radial::model::CellId::new("cell"),
+            "long label",
+            12_000_u32,
+            &crate::radial::font_cache::FontDiagnostic::LabelTruncated,
+        );
+        let model = radial_diagnostic_display_model(actionables.chain([expected]));
+        assert_eq!(
+            model.actionable.len(),
+            crate::radial::diagnostics::MAX_RADIAL_DIAGNOSTICS - 1
+        );
+        assert!(model.expected_layout.is_empty());
+        assert_eq!(
+            model.omitted,
+            Some(crate::radial::diagnostics::RadialDiagnosticOmission {
+                total: 3,
+                actionable: 2,
+                expected_layout: 1,
+            })
+        );
+    }
 
     #[test]
     fn post_render_move_uses_stable_ids_and_selection_survives_reorder() {

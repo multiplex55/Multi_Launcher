@@ -1,8 +1,9 @@
 use crate::radial::authoring::StableSelection;
-use crate::radial::authoring::{AuthoringClient, RadialAuthoringSession};
+use crate::radial::authoring::{AuthoringClient, AuthoringSessionId, RadialAuthoringSession};
 use crate::radial::compositor::CompositorCache;
 use crate::radial::geometry::{
-    LogicalPoint, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout, shape_center,
+    LogicalPoint, LogicalRect, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout,
+    layout_document_menu, shape_center,
 };
 use crate::radial::model::{
     CellContent, CellId, InvocationId, MenuId, RadialDocument, SessionId, SkinId,
@@ -10,10 +11,14 @@ use crate::radial::model::{
 use crate::radial::preparation::{
     PreparedFrameInput, PreparedPlacement, PreviewPlacement, ensure_preview_center_back,
 };
-use crate::radial::render::build_scene_prepared_selected;
+use crate::radial::render::{build_scene_prepared_selected, build_scene_prepared_selected_tooltip};
 use crate::radial::session::{CellRole, FrameId, SessionEvent, SessionIntent, SessionReducer};
+use crate::radial::tooltip::{
+    TooltipHoverState, TooltipIdentity, TooltipPreferences, monotonic_ms,
+};
 use eframe::egui;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum PreviewPreset {
@@ -44,6 +49,9 @@ pub(super) struct EmbeddedPreview {
     pending_frame_token: Option<String>,
     frozen_center: Option<PhysicalPoint>,
     frozen_scale: Option<ScaleFactor>,
+    tooltip_preferences: TooltipPreferences,
+    tooltip_hover: TooltipHoverState,
+    hovered_cell: Option<CellId>,
     #[cfg(test)]
     preparation_attempts: usize,
 }
@@ -68,6 +76,9 @@ impl Default for EmbeddedPreview {
             pending_frame_token: None,
             frozen_center: None,
             frozen_scale: None,
+            tooltip_preferences: TooltipPreferences::default(),
+            tooltip_hover: TooltipHoverState::default(),
+            hovered_cell: None,
             #[cfg(test)]
             preparation_attempts: 0,
         }
@@ -75,6 +86,11 @@ impl Default for EmbeddedPreview {
 }
 
 impl EmbeddedPreview {
+    pub(super) fn cancel_tooltip(&mut self) {
+        self.tooltip_hover.cancel();
+        self.hovered_cell = None;
+    }
+
     pub(super) fn prepared_frame(
         &self,
         session: &RadialAuthoringSession,
@@ -111,7 +127,12 @@ impl EmbeddedPreview {
         client: Option<&AuthoringClient>,
         preset: PreviewPreset,
         selection: Option<&StableSelection>,
+        tooltip_preferences: TooltipPreferences,
     ) {
+        if self.tooltip_preferences != tooltip_preferences {
+            self.tooltip_preferences = tooltip_preferences;
+            self.cancel_tooltip();
+        }
         let selected_menu = match selection {
             Some(
                 StableSelection::Menu(id)
@@ -157,9 +178,10 @@ impl EmbeddedPreview {
             .and_then(|reducer| reducer.state.stack.last())
             .cloned();
         let frame_token = format!(
-            "{}:{menu_id}:{selected:?}:{selected_skin:?}:{page}:{preset:?}:assets={}",
+            "{}:{menu_id}:{selected:?}:{selected_skin:?}:{page}:{preset:?}:assets={}:tooltips={:?}",
             session.generation.0,
-            session.pending_assets.preview_identity()
+            session.pending_assets.preview_identity(),
+            tooltip_preferences,
         );
         if let (Some(pending_frame_id), Some(pending_token)) = (
             self.pending_frame_id.take(),
@@ -328,7 +350,7 @@ impl EmbeddedPreview {
         {
             self.preparation_attempts += 1;
         }
-        let request = session.request_embedded_preview_placed(
+        let mut request = session.request_embedded_preview_placed(
             std::sync::Arc::new(document),
             menu_id,
             selected,
@@ -343,6 +365,13 @@ impl EmbeddedPreview {
             selected_skin,
             placement,
         );
+        if let Ok(crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            projection,
+            ..
+        }) = &mut request
+        {
+            projection.tooltip_preferences = tooltip_preferences;
+        }
         match request {
             Ok(request) => {
                 let correlation = (request.id(), request.generation(), request.editor_session());
@@ -424,6 +453,7 @@ impl EmbeddedPreview {
     }
 
     fn fail_preparation(&mut self, fingerprint: String, message: String) {
+        self.cancel_tooltip();
         self.failed_frame_token = Some(fingerprint);
         self.preparation_notice = Some(super::ResourceNotice::error(message));
         if let Some(reducer) = self.reducer.as_mut()
@@ -457,6 +487,7 @@ impl EmbeddedPreview {
         self.pending_frame_token = None;
         self.frozen_center = None;
         self.frozen_scale = None;
+        self.cancel_tooltip();
         let Some(menu) = document.menus.iter().find(|menu| &menu.id == menu_id) else {
             self.reducer = None;
             return;
@@ -485,6 +516,7 @@ impl EmbeddedPreview {
     }
 
     pub(super) fn back(&mut self) {
+        self.cancel_tooltip();
         if let Some(reducer) = self.reducer.as_mut() {
             let frame = reducer.state.stack.last().cloned();
             let pointer_baseline = frame.map_or(LogicalPoint { x: 240.0, y: 240.0 }, |frame| {
@@ -502,6 +534,7 @@ impl EmbeddedPreview {
     }
 
     pub(super) fn activate(&mut self, document: &RadialDocument, cell_id: &CellId) {
+        self.cancel_tooltip();
         if cell_id.as_str() == "__center"
             && self
                 .reducer
@@ -704,6 +737,8 @@ impl EmbeddedPreview {
         preset: PreviewPreset,
         selection: Option<&StableSelection>,
         prepared: Option<&PreparedFrameInput>,
+        editor_session: AuthoringSessionId,
+        show_expected_layout_diagnostics: bool,
     ) {
         let selected_menu = match selection {
             Some(
@@ -739,26 +774,160 @@ impl EmbeddedPreview {
         let Some(menu) = document.menus.iter().find(|menu| menu.id == menu_id) else {
             return;
         };
-        if let Some(notice) = &self.preparation_notice {
-            super::show_resource_notice(ui, notice);
+        if self.preparation_notice.is_some() {
+            self.cancel_tooltip();
+            if let Some(notice) = &self.preparation_notice {
+                super::show_resource_notice(ui, notice);
+            }
             if ui.button("Retry preview preparation").clicked() {
                 self.retry_preparation();
             }
             return;
         }
         let Some(input) = prepared else {
+            self.cancel_tooltip();
             ui.colored_label(ui.visuals().error_fg_color, "Preparing preview resources…");
             return;
         };
         let layout = input.layout.clone();
-        for diagnostic in &input.diagnostics {
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("Preview warning: {diagnostic}"),
+        super::show_radial_diagnostics(
+            ui,
+            input.diagnostics.iter(),
+            show_expected_layout_diagnostics,
+            "embedded-preview",
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Back").clicked() {
+                self.back();
+                ui.ctx().request_repaint();
+            }
+            ui.label(format!("Menu: {}", menu.name));
+        });
+        if self.current_menu() != Some(&menu_id) {
+            self.cancel_tooltip();
+            return;
+        }
+        let canvas_size = egui::vec2(360.0, 360.0) * zoom.max(0.1);
+        let (canvas_rect, response) =
+            ui.allocate_exact_size(canvas_size, egui::Sense::click_and_drag());
+
+        let pointer_point = response
+            .interact_pointer_pos()
+            .filter(|_| response.hovered())
+            .map(|pointer| preview_pointer_point(pointer, canvas_rect, &layout));
+        let pointer_down = response.is_pointer_button_down_on()
+            || response.drag_started()
+            || response.dragged()
+            || response.drag_stopped()
+            || response.clicked();
+        if pointer_down {
+            self.cancel_tooltip();
+        }
+
+        if response.drag_started()
+            && let Some((pointer, point)) = response.interact_pointer_pos().zip(pointer_point)
+        {
+            let _ = pointer;
+            if let Some(cell) = layout.hit_test(point) {
+                self.begin_drag(document, &menu.id, &cell.cell_id, point, generation);
+            }
+        }
+        if response.dragged()
+            && self.drag_cell.is_some()
+            && let Some((pointer, point)) = response.interact_pointer_pos().zip(pointer_point)
+        {
+            let _ = pointer;
+            self.continue_drag(
+                point,
+                layout.hit_test(point).map(|cell| cell.cell_id.clone()),
+                generation,
             );
         }
-        let scale_factor = layout.scale_factor;
-        let Ok(frame) = self.compositor.compose(&input.scene, scale_factor, 0) else {
+        if response.drag_stopped() {
+            self.drag_cell = None;
+        }
+        if response.clicked()
+            && let Some(point) = pointer_point
+            && let Some(cell) = layout.hit_test(point)
+        {
+            self.activate(document, &cell.cell_id);
+            ui.ctx().request_repaint();
+        }
+
+        if response.hovered() && !pointer_down {
+            let hit = pointer_point.and_then(|point| layout.hit_test(point));
+            self.hovered_cell = hit.map(|cell| cell.cell_id.clone());
+            let tooltip_cell = pointer_point
+                .and_then(|point| layout.geometric_hover_cell(point))
+                .map(|cell| cell.cell_id.clone());
+            let identity = tooltip_cell
+                .as_ref()
+                .filter(|cell| input.resources.tooltips.contains_key(*cell))
+                .and_then(|cell| {
+                    self.reducer
+                        .as_ref()
+                        .and_then(|reducer| reducer.state.stack.last())
+                        .map(|frame| TooltipIdentity {
+                            session_id: SessionId::new(format!(
+                                "editor-preview-{}",
+                                editor_session.0
+                            )),
+                            frame_id: frame.frame_id,
+                            layout_generation: input.scene.generation,
+                            cell_id: cell.clone(),
+                        })
+                });
+            self.tooltip_hover.observe(
+                identity,
+                true,
+                monotonic_ms(),
+                self.tooltip_preferences.delay_ms,
+            );
+        } else if !response.hovered() || pointer_down {
+            self.cancel_tooltip();
+        }
+
+        let now = monotonic_ms();
+        let candidate = self
+            .tooltip_hover
+            .candidate()
+            .map(|(identity, deadline)| (identity.clone(), deadline));
+        if let Some((identity, deadline)) = candidate {
+            if deadline <= now {
+                self.tooltip_hover.expire(&identity, now);
+            } else {
+                ui.ctx()
+                    .request_repaint_after(Duration::from_millis(deadline - now));
+            }
+        }
+        let current_identity = self
+            .tooltip_hover
+            .visible()
+            .filter(|identity| {
+                identity.session_id
+                    == SessionId::new(format!("editor-preview-{}", editor_session.0))
+                    && self
+                        .reducer
+                        .as_ref()
+                        .and_then(|reducer| reducer.state.stack.last())
+                        .is_some_and(|frame| frame.frame_id == identity.frame_id)
+                    && identity.layout_generation == input.scene.generation
+            })
+            .map(|identity| identity.cell_id.clone());
+        let selected = self.hovered_cell.as_ref().or_else(|| {
+            self.reducer
+                .as_ref()
+                .and_then(|reducer| reducer.state.selected.as_ref())
+        });
+        let scene = build_scene_prepared_selected_tooltip(
+            &layout,
+            input.scene.generation,
+            &input.resources,
+            selected,
+            current_identity.as_ref(),
+            input.work_area,
+        );
+        let Ok(frame) = self.compositor.compose(&scene, layout.scale_factor, 0) else {
             ui.colored_label(
                 ui.visuals().error_fg_color,
                 "Error: preview compositor failed",
@@ -776,56 +945,15 @@ impl EmbeddedPreview {
                 egui::TextureOptions::LINEAR,
             ));
         }
-        ui.horizontal(|ui| {
-            if ui.button("Back").clicked() {
-                self.back();
-            }
-            ui.label(format!("Menu: {}", menu.name));
-        });
         if let Some(texture) = &self.texture {
-            let response = ui.add(
-                egui::Image::new(texture)
-                    .fit_to_exact_size(egui::vec2(360.0, 360.0) * zoom)
-                    .sense(egui::Sense::click_and_drag()),
+            let scene_rect =
+                preview_scene_rect(frame.logical_bounds, layout.visual_extent, canvas_rect);
+            ui.painter().image(
+                texture.id(),
+                scene_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
             );
-            if response.clicked()
-                && let Some(pointer) = response.interact_pointer_pos()
-            {
-                let delta = pointer - response.rect.min;
-                let size = response.rect.size();
-                let uv = egui::vec2(delta.x / size.x, delta.y / size.y);
-                let point = LogicalPoint {
-                    x: layout.visual_extent.min.x
-                        + uv.x * (layout.visual_extent.max.x - layout.visual_extent.min.x),
-                    y: layout.visual_extent.min.y
-                        + uv.y * (layout.visual_extent.max.y - layout.visual_extent.min.y),
-                };
-                if let Some(cell) = layout.hit_test(point) {
-                    self.activate(document, &cell.cell_id);
-                }
-            }
-            if response.drag_started()
-                && let Some(pointer) = response.interact_pointer_pos()
-            {
-                let point = preview_pointer_point(pointer, response.rect, &layout);
-                if let Some(cell) = layout.hit_test(point) {
-                    self.begin_drag(document, &menu.id, &cell.cell_id, point, generation);
-                }
-            }
-            if response.dragged()
-                && self.drag_cell.is_some()
-                && let Some(pointer) = response.interact_pointer_pos()
-            {
-                let point = preview_pointer_point(pointer, response.rect, &layout);
-                self.continue_drag(
-                    point,
-                    layout.hit_test(point).map(|cell| cell.cell_id.clone()),
-                    generation,
-                );
-            }
-            if response.drag_stopped() {
-                self.drag_cell = None;
-            }
         }
     }
 }
@@ -851,6 +979,29 @@ fn preview_pointer_point(
         y: layout.visual_extent.min.y
             + uv.y * (layout.visual_extent.max.y - layout.visual_extent.min.y),
     }
+}
+
+fn preview_scene_rect(
+    scene_bounds: LogicalRect,
+    wheel_bounds: LogicalRect,
+    canvas_rect: egui::Rect,
+) -> egui::Rect {
+    let world_width = (wheel_bounds.max.x - wheel_bounds.min.x).max(f32::EPSILON);
+    let world_height = (wheel_bounds.max.y - wheel_bounds.min.y).max(f32::EPSILON);
+    egui::Rect::from_min_max(
+        egui::pos2(
+            canvas_rect.min.x
+                + (scene_bounds.min.x - wheel_bounds.min.x) * canvas_rect.width() / world_width,
+            canvas_rect.min.y
+                + (scene_bounds.min.y - wheel_bounds.min.y) * canvas_rect.height() / world_height,
+        ),
+        egui::pos2(
+            canvas_rect.min.x
+                + (scene_bounds.max.x - wheel_bounds.min.x) * canvas_rect.width() / world_width,
+            canvas_rect.min.y
+                + (scene_bounds.max.y - wheel_bounds.min.y) * canvas_rect.height() / world_height,
+        ),
+    )
 }
 
 fn cell_role(document: &RadialDocument, menu_id: &MenuId, cell_id: &CellId) -> CellRole {
@@ -987,12 +1138,89 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn closing_or_replacing_preview_clears_pending_and_visible_tooltips() {
+        let mut preview = EmbeddedPreview::default();
+        let identity = TooltipIdentity {
+            session_id: SessionId::new("editor-preview-test"),
+            frame_id: FrameId(1),
+            layout_generation: 1,
+            cell_id: CellId::new("test-cell"),
+        };
+
+        preview.hovered_cell = Some(identity.cell_id.clone());
+        preview
+            .tooltip_hover
+            .observe(Some(identity.clone()), true, 10, 300);
+        preview.cancel_tooltip();
+        assert!(preview.tooltip_hover.candidate().is_none());
+        assert!(preview.hovered_cell.is_none());
+
+        preview
+            .tooltip_hover
+            .observe(Some(identity.clone()), true, 10, 0);
+        assert!(preview.tooltip_hover.expire(&identity, 10));
+        preview.hovered_cell = Some(identity.cell_id.clone());
+        preview.cancel_tooltip();
+        assert!(preview.tooltip_hover.visible().is_none());
+        assert!(preview.hovered_cell.is_none());
+    }
+
+    #[test]
+    fn embedded_tooltip_overflow_keeps_the_wheel_canvas_transform_fixed() {
+        let document = RadialDocument::starter();
+        let layout = layout_document_menu(
+            &document,
+            &document.menus[0],
+            PhysicalPoint { x: 240.0, y: 240.0 },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 480.0, y: 480.0 },
+            },
+            ScaleFactor::new(1.0).unwrap(),
+            0.55,
+        )
+        .unwrap();
+        let canvas = egui::Rect::from_min_size(egui::pos2(12.0, 34.0), egui::vec2(360.0, 360.0));
+        let wheel = layout.visual_extent;
+        let expanded = LogicalRect {
+            min: LogicalPoint {
+                x: wheel.min.x - 100.0,
+                y: wheel.min.y - 50.0,
+            },
+            max: LogicalPoint {
+                x: wheel.max.x + 180.0,
+                y: wheel.max.y + 80.0,
+            },
+        };
+        let expanded_screen = preview_scene_rect(expanded, wheel, canvas);
+        let scale_x = expanded_screen.width() / (expanded.max.x - expanded.min.x);
+        let scale_y = expanded_screen.height() / (expanded.max.y - expanded.min.y);
+        assert_eq!(preview_scene_rect(wheel, wheel, canvas), canvas);
+        assert!(
+            (expanded_screen.min.x + (wheel.min.x - expanded.min.x) * scale_x - canvas.min.x).abs()
+                < 0.001
+        );
+        assert!(
+            (expanded_screen.max.y - (expanded.max.y - wheel.max.y) * scale_y - canvas.max.y).abs()
+                < 0.001
+        );
+        let pointer_at_wheel_center = preview_pointer_point(canvas.center(), canvas, &layout);
+        assert_eq!(pointer_at_wheel_center, layout.center);
+    }
+
     fn sync_current(
         preview: &mut EmbeddedPreview,
         session: &mut RadialAuthoringSession,
         client: &AuthoringClient,
     ) {
-        preview.sync_preparation(session, Some(client), PreviewPreset::Current, None);
+        preview.sync_preparation(
+            session,
+            Some(client),
+            PreviewPreset::Current,
+            None,
+            TooltipPreferences::default(),
+        );
     }
 
     fn finish_preparation_request(
@@ -1225,7 +1453,13 @@ mod tests {
                 input,
             }
         ));
-        preview.sync_preparation(&mut session, Some(&client), PreviewPreset::Current, None);
+        preview.sync_preparation(
+            &mut session,
+            Some(&client),
+            PreviewPreset::Current,
+            None,
+            TooltipPreferences::default(),
+        );
         assert_eq!(preview.frozen_center, Some(visible_center));
 
         preview.activate(&document, &CellId::new("starter-root-favorites"));

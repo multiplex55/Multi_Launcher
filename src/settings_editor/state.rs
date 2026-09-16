@@ -18,6 +18,9 @@ pub struct SettingsEditor {
     pub(crate) radial_enabled: bool,
     pub(crate) radial_shared_tap_hold: bool,
     pub(crate) radial_hold_threshold_ms: u64,
+    pub(crate) radial_tooltip_scope: crate::radial::model::TooltipScope,
+    pub(crate) radial_tooltip_delay_ms: u64,
+    pub(crate) radial_show_expected_layout_diagnostics: bool,
     pub(crate) radial_default_menu_id: String,
     pub(crate) radial_default_interaction: crate::radial::model::InteractionMode,
     pub(crate) radial_default_submenu_presentation: crate::radial::model::SubmenuPresentation,
@@ -172,6 +175,13 @@ impl SettingsEditor {
             return Err("Failed to save settings: radial hold threshold is outside 100-2000 ms");
         }
         if self.radial_enabled
+            && !(crate::radial::settings::MIN_TOOLTIP_DELAY_MS
+                ..=crate::radial::settings::MAX_TOOLTIP_DELAY_MS)
+                .contains(&self.radial_tooltip_delay_ms)
+        {
+            return Err("Failed to save settings: radial tooltip delay is outside 0-5000 ms");
+        }
+        if self.radial_enabled
             && self.radial_default_item_input_scope == crate::radial::model::TriggerScope::Global
             && !self.radial_global_item_inputs
         {
@@ -202,6 +212,9 @@ impl SettingsEditor {
             safety_policy: self.radial_safety_policy,
             default_item_input_scope: self.radial_default_item_input_scope,
             global_item_inputs: self.radial_global_item_inputs,
+            tooltip_scope: self.radial_tooltip_scope,
+            tooltip_delay_ms: self.radial_tooltip_delay_ms,
+            show_expected_layout_diagnostics: self.radial_show_expected_layout_diagnostics,
         }
     }
 

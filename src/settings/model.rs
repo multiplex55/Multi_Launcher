@@ -780,6 +780,12 @@ mod tests {
             crate::radial::model::SubmenuPresentation::Cascade;
         assert_eq!(parsed.radial, legacy_radial);
         assert_eq!(
+            parsed.radial.tooltip_scope,
+            crate::radial::model::TooltipScope::AllCells
+        );
+        assert_eq!(parsed.radial.tooltip_delay_ms, 300);
+        assert!(!parsed.radial.show_expected_layout_diagnostics);
+        assert_eq!(
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
         );
@@ -839,6 +845,25 @@ mod tests {
             parsed.radial.default_submenu_presentation,
             crate::radial::model::SubmenuPresentation::Cascade
         );
+        let partial: Settings = serde_json::from_str(
+            r#"{"radial":{"tooltip_scope":"truncated_only","tooltip_delay_ms":725,"show_expected_layout_diagnostics":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            partial.radial.tooltip_scope,
+            crate::radial::model::TooltipScope::TruncatedOnly
+        );
+        assert_eq!(partial.radial.tooltip_delay_ms, 725);
+        assert!(partial.radial.show_expected_layout_diagnostics);
+        assert_eq!(
+            partial.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        let restored: Settings = serde_json::from_str(
+            &serde_json::to_string(&partial).expect("tooltip settings serialize"),
+        )
+        .expect("tooltip settings deserialize");
+        assert_eq!(restored.radial, partial.radial);
     }
 
     #[test]
