@@ -166,7 +166,7 @@ never by executing or initializing imported code.
 | M3 actions/context/submenus/handoffs | complete | decision-review remediation passed the combined focused M3 Nextest gate; native interactive evidence remains unverified |
 | M4 skins/assets/import/export/recovery | complete | closure remediation and source-identical combined focused gate passed; native interactive evidence remains explicitly unverified |
 | M5 complete editors/settings/commands/starters | complete | contextual bindings carry captured identity across every surface; exact replacement gate and warning-free check passed |
-| M6 hardening/performance/full verification/review | in_progress | M6.1 lifecycle through M6.6 bounded performance/observability source implemented pending focused gate; full Nextest, native evidence, serialized baseline/candidate measurements, independent review remain |
+| M6 hardening/performance/full verification/review | in_progress | source, focused/full gates, release build, serialized benchmarks, and independent review passed; automated live Win32 host evidence passed, while physical chord, real cross-process clicks, Narrator, high-contrast, mixed-DPI, and destructive-target handoff remain manual release checks |
 
 Each milestone is implemented and committed sequentially by one writer. Tests are
 written with each coherent batch and run only at gates. One Cargo/build/test job may
@@ -378,8 +378,11 @@ and Cargo job before repeating the identical profile/environment against the can
 checkout. For the candidate-only radial microbench, run three serialized
 `cargo bench --bench radial_runtime` samples and retain Criterion output outside the
 application-data sandbox. Record exact revisions, Rust/Cargo versions, power state,
-display/DPI, cold/warm classification, and all raw samples; do not compare the new
-radial target to an invented baseline or historical numbers.
+display/DPI, and cold/warm classification. Retain raw samples for named
+baseline/candidate comparisons; for same-target stability repetitions, retain a full
+aggregate table plus the command and exit record unless a named saved-baseline run is
+requested. Do not compare the new radial target to an invented baseline or historical
+numbers.
 
 M6 focused candidate gate attempt 1 used inventory UUID
 `5ed514d4-c5a7-4c8a-ba93-8069f9e9f91e` at HEAD
@@ -649,7 +652,286 @@ passed. The tracked Rust/Cargo/bench diff identity remains
 `4bfd373f319b2445e7cc223f4710f28f1996e8e8`. M6 remains `in_progress`; no native
 interactive, complete-suite, or serialized performance evidence is claimed.
 
-| Requirement | Direct source/test evidence (execution pending M6 gate) |
+Final Rust/release verification ran from clean commit
+`da0215fb08d8f4dff198147dbfe0b7daf667a247` with one Cargo tree at a time and no
+source correction. `cargo fmt --all -- --check` passed under UUID
+`4fa1eeb0-42dc-475f-9486-9b783ba7bad9` in `5.507s` (log
+output was empty and no separate log file was retained). Warning-free
+`cargo check` passed under UUID `6575782e-31a9-4dcf-8134-7259e384d90e` in
+`9.935s` (`9.82s` Cargo time; log
+`multi-launcher-final-check-6575782e-31a9-4dcf-8134-7259e384d90e.log`).
+`cargo clippy --all-targets` passed under UUID
+`029af54c-4b91-4292-b27a-65ea5a4c7c95` in `1m25.846s`; no new warning-denial policy
+was added, and the lib-test target reported the repository's existing 253-warning
+baseline (log `multi-launcher-final-clippy-029af54c-4b91-4292-b27a-65ea5a4c7c95.log`).
+`cargo build --release` passed under UUID
+`6498b1d7-e62b-4271-a732-108f840db935` in `4m43.801s` (`4m43s` Cargo time; log
+`multi-launcher-final-release-6498b1d7-e62b-4271-a732-108f840db935.log`).
+`git diff --check` passed under UUID `31933192-4bf3-43fd-8721-4e5f82204fc6` in
+`0.048s`; output was empty and no separate log file was retained.
+
+The complete requested `cargo nextest run --no-fail-fast --status-level slow
+--final-status-level fail --success-output never --failure-output final` passed under
+wrapper UUID `2ef74c86-3c15-403d-9413-6f67665d763d` and Nextest run
+`974be829-9b53-448b-8360-0a66c3ad939d`: Cargo compiled in `21m10s`, all 4,434
+executed tests passed in `80.014s`, 8 were skipped, and wrapper wall time was
+`23m06.791s` (log
+`multi-launcher-final-nextest-2ef74c86-3c15-403d-9413-6f67665d763d.log`). A source
+scan found no Rust documentation code fences under `src`, so there are no doctest
+examples requiring a separate doctest invocation. The sole generated
+`clipboard_modifiers.json` fixture was removed after the suite. M6 remains
+`in_progress` pending the documented native interactive and serialized performance
+evidence; this gate makes no such claims.
+
+### M6 serialized performance evidence
+
+Measurements ran serially, baseline first, on Windows `10.0.19045`, Intel64 Family 6
+Model 158 Stepping 9 with 8 logical processors, `rustc 1.97.1`/`cargo 1.97.1`.
+The active Windows power scheme was `Balanced`
+(`381b4222-f694-41f0-9685-ff5bb260df2e`); no `Win32_Battery` device was present.
+Baseline commit `0d0acaf471a52f49a7ebdff61879416eefa9fc9b` used isolated worktree
+`C:\Users\Jay\AppData\Local\Temp\multi-launcher-perf-baseline-0d0acaf` and target
+`target/perf-baseline-0d0acaf`; candidate commit
+`da0215fb08d8f4dff198147dbfe0b7daf667a247` used
+`target/perf-candidate-da0215fb`. The search benchmark sources are semantically
+identical (`git diff --no-index` empty; hashes differ only by line endings). Both
+commands used locked commit-specific dependencies and Criterion 0.5.1 arguments
+`--warm-up-time 2 --measurement-time 5 --sample-size 20 --noplot --verbose`.
+Criterion's own CLI parser and `cargo bench --help` were inspected before launch.
+
+The first baseline launch UUID `f8ff1e92-22af-44b0-9b8b-f16c320b2a47` exited `101`
+in `1.453s` before compilation because sandbox path canonicalization denied the
+cross-worktree target. The identical approved replacement passed under UUID
+`fb2c8534-175b-4832-aa36-0e92766b97cf` in `9m25.913s` (`6m54s` compilation). The
+candidate search passed under UUID `9860824b-70db-4db2-bf59-dc642d7f1a54` in
+`9m59.548s` (`7m23s` compilation). Outliers below are
+low-severe/low-mild/high-mild/high-severe. Times and 95% median confidence intervals
+are microseconds; MAD is the median absolute deviation point estimate. The regression
+rule is candidate median greater than baseline median plus the larger of 10% or three
+times the larger measured MAD.
+
+| Search benchmark | Baseline median [CI], MAD, outliers | Candidate median [CI], MAD, outliers | Delta / allowance | Result |
+|---|---:|---:|---:|---|
+| completion/build_index/10000 | 3572.4457 [3535.7826, 3591.2333], 54.3566, 1/1/2/1 | 3531.0525 [3483.6040, 3628.2125], 94.6303, 0/0/0/0 | -1.16% / 10.00% | pass |
+| completion/build_index/500 | 267.9977 [264.0675, 288.1817], 16.0066, 0/0/0/1 | 267.9587 [265.4254, 273.0942], 8.7171, 0/0/0/0 | -0.01% / 17.92% | pass |
+| completion/suggestion_lookup/10000 | 1.1465 [1.1318, 1.1940], 0.0439, 0/0/0/0 | 1.7287 [1.6655, 1.7457], 0.0815, 0/0/0/1 | +50.77% / 21.32% | single-run flag; resolved below |
+| search_command_cache/lookup_real/250 | 101.2238 [99.4348, 101.7043], 1.6692, 0/0/0/0 | 105.3063 [104.2850, 106.2100], 1.9206, 0/0/1/0 | +4.03% / 10.00% | pass |
+| dynamic/browser_tabs_cached_filter_1000 | 192.6195 [186.9365, 202.8195], 14.2717, 0/0/0/0 | 201.8710 [196.9367, 205.9047], 8.4736, 0/0/1/1 | +4.80% / 22.23% | pass |
+| dynamic/browser_tabs_clear_command | 1.1859 [1.1312, 1.2896], 0.1147, 0/0/2/0 | 1.1406 [1.1067, 1.1760], 0.0631, 0/0/2/0 | -3.82% / 29.02% | pass |
+| dynamic/layout | 32.3671 [32.2899, 32.7828], 0.3604, 0/0/1/0 | 25.8439 [25.7333, 25.9562], 0.1905, 0/0/2/1 | -20.15% / 10.00% | pass |
+| dynamic/missing | 242.7150 [240.8758, 244.7434], 3.3633, 0/0/1/0 | 256.0118 [254.5119, 257.8783], 2.8354, 0/1/0/1 | +5.48% / 10.00% | pass |
+| dynamic/mouse_gestures | 4.1426 [4.1147, 4.1953], 0.0863, 0/0/1/1 | 4.0338 [3.9685, 4.0949], 0.0982, 0/0/1/0 | -2.63% / 10.00% | pass |
+| dynamic/network | 4.9729 [4.8522, 5.0392], 0.1282, 0/0/1/0 | 4.8138 [4.7515, 4.8971], 0.1235, 0/0/0/1 | -3.20% / 10.00% | pass |
+| dynamic/processes | 41.7818 [40.9329, 42.5690], 1.2775, 0/0/0/0 | 44.3376 [43.0716, 45.6595], 2.7687, 0/0/0/0 | +6.12% / 19.88% | pass |
+| dynamic/shell | 2.4359 [2.3948, 2.4648], 0.0591, 0/0/1/1 | 2.4614 [2.4354, 2.5202], 0.0742, 0/0/1/1 | +1.05% / 10.00% | pass |
+| dynamic/sysinfo | 3.0764 [3.0612, 3.1257], 0.0587, 0/1/0/1 | 3.2050 [3.0734, 3.6662], 0.4244, 0/0/1/0 | +4.18% / 41.38% | pass |
+| dynamic/volume | 3.7787 [3.7509, 3.8411], 0.0904, 0/0/0/1 | 3.8024 [3.7599, 3.8752], 0.1079, 0/0/0/0 | +0.63% / 10.00% | pass |
+| static/representative_500/broad_real | 389.4530 [379.7959, 393.4381], 12.2363, 0/0/0/0 | 420.1641 [408.6172, 431.4789], 19.1218, 0/0/1/0 | +7.89% / 14.73% | pass |
+| static/representative_500/high_specificity_real | 152.3244 [149.1761, 157.2398], 6.8194, 0/0/0/1 | 153.1639 [152.0050, 154.7538], 2.3573, 0/2/1/1 | +0.55% / 13.43% | pass |
+| static/representative_500/no_match_real | 81.3640 [80.9036, 81.9441], 0.8601, 0/0/0/0 | 83.7283 [82.5335, 84.3275], 1.7714, 0/0/0/0 | +2.91% / 10.00% | pass |
+| static/stress_10k/cached_repeat | 0.0080 [0.0078, 0.0083], 0.0006, 0/0/0/0 | 0.0094 [0.0092, 0.0098], 0.0010, 0/0/1/0 | +17.84% / 37.44% | pass |
+| static/stress_10k/real_query_cycle | 2871.8593 [2838.9446, 2927.8474], 81.1723, 0/0/0/0 | 3065.7640 [3059.8878, 3108.6277], 41.8557, 0/1/0/0 | +6.75% / 10.00% | pass |
+
+The first of three serialized candidate-only `radial_runtime` commands used the same
+Criterion settings and passed under UUID
+`1a84cbc1-4082-42df-abf8-d7c1832e8a23` in `7m46.706s` (`3m33s` compilation).
+Two further identical invocations in exec sessions `94794` and `29032` both exited
+`0`; the former rebuilt in `3m29s`, while the latter reused the artifact in `0.97s`.
+All three retained the same absolute threshold classification below. The table records
+the first run's median [95% CI], MAD, and outliers; units are explicit. Criterion's
+ordinary unnamed repetition updates its `base`/`new` state, so the two stability
+repetitions are retained as command/exit records rather than falsely claiming three
+separately named raw-sample archives.
+
+| Cells | Operation | Median [CI] | MAD | Outliers |
+|---:|---|---:|---:|---:|
+| 8 | hit | 14.9833 ns [14.7492, 15.4037] | 0.6232 ns | 0/1/1/1 |
+| 8 | layout | 2.1244 us [2.0814, 2.1706] | 0.0689 us | 0/0/0/0 |
+| 8 | page_0 | 9.4083 us [9.2206, 9.7683] | 0.4781 us | 0/0/1/0 |
+| 8 | scene | 3.3846 us [3.2642, 3.4505] | 0.1504 us | 0/0/1/0 |
+| 8 | selection | 3.5407 us [3.5044, 3.6219] | 0.1723 us | 0/0/1/1 |
+| 8 | static composition | 4.0420 ms [4.0342, 4.0802] | 0.0475 ms | 0/0/0/1 |
+| 8 | warmed composition | 154.5350 ns [150.6391, 166.6779] | 17.1134 ns | 0/0/1/0 |
+| 32 | hit | 33.3683 ns [33.1901, 33.6395] | 0.4189 ns | 0/1/0/0 |
+| 32 | layout | 8.2037 us [7.9477, 8.3785] | 0.3794 us | 0/0/1/0 |
+| 32 | page_0 | 12.9854 us [12.7497, 13.2872] | 0.4741 us | 0/0/0/0 |
+| 32 | page_3 | 13.7199 us [13.3352, 13.8321] | 0.5054 us | 0/0/0/1 |
+| 32 | scene | 13.6614 us [13.5537, 13.7948] | 0.2306 us | 0/0/0/1 |
+| 32 | selection | 12.6346 us [12.4129, 12.8758] | 0.3660 us | 0/0/1/0 |
+| 32 | static composition | 5.9257 ms [5.8970, 5.9421] | 0.0419 ms | 0/0/0/0 |
+| 32 | warmed composition | 512.4612 ns [479.8900, 546.0287] | 61.1184 ns | 0/0/1/1 |
+| 128 | hit | 116.4828 ns [115.6312, 117.4723] | 1.8050 ns | 0/0/0/0 |
+| 128 | layout | 34.6328 us [34.0239, 34.9956] | 0.9082 us | 0/2/1/0 |
+| 128 | page_0 | 27.3128 us [26.7964, 28.3991] | 1.5375 us | 0/0/2/0 |
+| 128 | page_15 | 29.1500 us [28.6049, 29.7769] | 1.0456 us | 0/0/0/0 |
+| 128 | scene | 55.0993 us [54.5061, 56.1110] | 1.2344 us | 0/0/0/0 |
+| 128 | selection | 55.3491 us [54.7919, 55.9575] | 1.2931 us | 0/0/1/0 |
+| 128 | static composition | 13.9014 ms [13.8482, 13.9589] | 0.0888 ms | 0/0/2/1 |
+| 128 | warmed composition | 1.7683 us [1.7186, 1.8211] | 0.0948 us | 0/0/3/0 |
+| 512 | hit | 605.4071 ns [603.4310, 611.7436] | 6.5028 ns | 0/0/0/0 |
+| 512 | layout | 126.4905 us [124.8738, 127.5472] | 2.2916 us | 0/0/0/0 |
+| 512 | page_0 | 84.8036 us [83.2737, 86.7069] | 2.8117 us | 0/0/0/0 |
+| 512 | page_63 | 87.2937 us [84.6417, 90.5522] | 5.4625 us | 0/0/1/0 |
+| 512 | scene | 196.8995 us [192.9771, 198.1744] | 3.8530 us | 0/0/0/0 |
+| 512 | selection | 203.0363 us [198.7579, 205.5240] | 4.9274 us | 0/0/0/0 |
+| 512 | static composition | 81.2490 ms [80.8097, 81.4411] | 0.6427 ms | 0/0/0/1 |
+| 512 | warmed composition | 7.2667 us [6.9444, 7.5399] | 0.6033 us | 0/0/1/0 |
+
+All hit medians satisfy the provisional 0.5 ms threshold. The `static_composition`
+case creates a fresh cache and performs its first composition, so its applicable cold
+asset/first-frame threshold is 150 ms: 8, 32, 128, and 512 cells all pass at 4.0420,
+5.9257, 13.9014, and 81.2490 ms. It is not correctly compared with the steady-frame
+33.3 ms dense threshold. `warmed_composition` and selection-scene construction all
+pass the 16.7 ms small/medium and 33.3 ms dense thresholds; the slowest of those is the
+512-cell selection case at 0.2030 ms. This benchmark is a pure per-operation harness,
+so it is not startup, idle, native-present, or end-to-end frame evidence. Every
+composition used the configured 128 MiB aggregate cache budget and completed, but the
+harness does not export a byte watermark; it therefore provides no measured
+cache-headroom claim beyond functional admission under that cap.
+
+Across the repetitions, the only greater-than-15% point change from the first series
+that was not an improvement was the third run's 8-cell scene median (about `3.96 us`
+versus `3.38 us`). An exact-filter investigation used a 3-second warmup, 10-second
+measurement, and 100 samples and exited `0` in `14.755s`; its median was
+`3.2681-3.3172 us` and slope interval `3.3148-3.3823 us`, reproducing the first series
+rather than the excursion. The absolute result remains four orders of magnitude below
+the applicable frame budget, so no source change is justified.
+
+Verbose logs and Criterion raw estimates are retained. Baseline search log SHA-256 is
+`9FC543D4B880D613313FAE29D0B5A3C242F336C41372283ACE5FEC24A1D04363`, candidate
+search log `3F4C47F786285AA179737FDEDE60C4044FC2972B1FB0A2196433254F809C9A9A`, and
+candidate radial log `F9192A096C684671CE5F54EB85004CDFDE801765B1C7E8F1FEAB0E21C52DAB98` under
+`%TEMP%`; raw estimates remain under the two isolated target `criterion` directories
+(19 baseline search and 50 candidate search/radial estimate sets). The single-run
+lookup flag was investigated as recorded below. At this stage, live native and
+application-process evidence had not yet run; it is recorded later. The benchmark does
+not export a separate runtime byte watermark, so none is claimed. The cache-budget
+acceptance is instead exact and deterministic: the full passing suite includes
+`aggregate_byte_budget_evicts_deterministically_and_invalidation_is_exact`,
+`completed_and_static_layers_share_one_budget`, and the 100-cycle assertion that
+retained bytes never exceed the injected budget and return to zero after invalidation.
+
+#### Lookup flag investigation and threshold correction
+
+The exact Criterion filter was verified with
+`cargo bench --locked --bench search -- 'completion/suggestion_lookup/10000' --list`;
+it listed only that benchmark. Four runs then alternated candidate, baseline,
+candidate, baseline using the already-built isolated target directories, identical
+toolchain/environment, and the longer settings `--warm-up-time 3 --measurement-time
+10 --sample-size 100 --noplot --verbose`. Each used a distinct saved-baseline label.
+
+| Order | Commit | UUID | Wall / compile | Median [95% CI] | MAD | Outliers |
+|---:|---|---|---:|---:|---:|---:|
+| 1 | candidate | `1f202927-24f5-46a9-b7f1-34d090616417` | 3m54.127s / 3m36s | 1.190109 us [1.180247, 1.206290] | 0.055503 us | 0/0/2/0 |
+| 2 | baseline | `772bf357-53f2-4d33-8cae-f19070f552a6` | 18.455s / 0.98s | 1.176390 us [1.168417, 1.196739] | 0.060994 us | 0/0/1/0 |
+| 3 | candidate | `a1b1455c-6a66-4a7a-9f64-bee2972fe0cb` | 18.443s / 0.94s | 1.183810 us [1.164572, 1.204599] | 0.073696 us | 0/0/1/1 |
+| 4 | baseline | `4278e68a-54f2-4aa0-a59f-1afb95c40b9d` | 3m20.734s / 3m02s | 1.177560 us [1.161417, 1.189794] | 0.066561 us | 0/0/4/3 |
+
+Outliers are low-severe/low-mild/high-mild/high-severe. The individual distributions
+overlap materially. Pooling the two 100-sample raw distributions per commit gives a
+baseline median/MAD of 1.177158/0.042283 us and candidate median/MAD of
+1.188431/0.042584 us. The candidate delta is +0.958%; the specified allowance is
+10.852%, so repeated evidence does **not** classify this as a regression. The original
+20-sample candidate median of 1.7287 us was an order/noise excursion, not reproduced
+by either longer candidate run, and the material latency remains approximately 1.2 us.
+
+Call-path inspection confirms the benchmark constructs the 10,000-entry FST once and
+measures only `completion::suggestions`: lowercase the fixed query, create an FST range
+stream, collect at most five matching strings. `benches/search.rs`,
+`src/completion.rs`, and `src/actions/mod.rs` have empty baseline-to-candidate source
+diffs; both locks resolve `fst 0.4.7` with the same checksum. Candidate manifest
+differences are radial/Windows features, additional image codecs, SHA-256 support, and
+the radial benchmark target; none changes the measured lookup implementation or its
+FST dependency. Because the regression did not repeat, profiling was not triggered and
+no unrelated source change is justified.
+
+Logs are retained under `%TEMP%` with SHA-256 values: C1
+`8081AECD8C4BA9705F162706D7783B53072617442F60984E8408EAF04DDBF20F`, B1
+`8F6433AF6E6B6A145ADB11C555935AD9521C0D8C18AB08C3CA372AB1148677F3`, C2
+`9BDD553CCF1A73235705E8E84758EC99EF48F729CC4C9877763110680A7F55F8`, and B2
+`C82FB264193508D8467BE41FF2FE12F4C8A0BDA514EB05599E52F75DDCE5D458`.
+Raw estimates remain under the named `investigation-c1`, `investigation-b1`,
+`investigation-c2`, and `investigation-b2` Criterion directories. The corrected radial
+classification leaves every measured provisional latency threshold passing. Cache
+byte watermark evidence remains unverified. At this benchmark stage there was no
+startup, idle, or live native claim; the subsequent evidence is recorded below.
+
+### M6 live Windows host and idle-resource evidence
+
+The opt-in ignored probe
+`radial::native::tests::live_radial_host_probe` ran on the candidate commit with
+`MULTI_LAUNCHER_RADIAL_LIVE_PROBE=1` and passed 1/1 (`3,845` filtered out) after a
+`2m26s` debug build; the test itself completed in `0.05s`. This creates the real
+Windows layered visual HWND and shaped input-proxy HWND on an interactive desktop,
+asserts both are visible and distinct, proves creation does not change the foreground
+window, proves `WindowFromPoint` selects the proxy over an owned wheel point, proves
+an exterior point is not owned by the proxy, and destroys the surface before exit.
+This is direct native HWND/input-shape evidence, but it does not claim delivery of a
+physical click into another process or visual-quality inspection.
+
+Environment: Windows `10.0.19045`, candidate
+`da0215fb08d8f4dff198147dbfe0b7daf667a247`, NVIDIA GeForce GTX 1080 driver
+`32.0.15.6094`, one active `2560x1440@59 Hz` display at `(0,0)`, and applied DPI
+`192` (200%). A Parsec Virtual Display Adapter was installed but exposed no active
+resolution. The host was configured at 200%, but the isolated live probe deliberately
+constructs a `ScaleFactor::new(1.0)` layout and the idle launches do not open the lazy
+native surface. The evidence therefore covers real Win32 ownership on a 200%-configured
+single-monitor host, not 200%-scale rendering/input, mixed DPI, or negative-origin
+coverage. Native desktop automation was unavailable in the Codex session: the exposed
+Computer Use inventory contained browser surfaces only, and the lower-level Windows
+target service reported that it was not configured.
+
+The exact isolated baseline and candidate release binaries were also launched from
+separate disposable profiles with `MULTI_LAUNCHER_PERF=1`. Readiness is elapsed time
+from `Start-Process` until a nonzero responsive main-window handle. The first run used
+an empty profile (cold profile); the second reused its generated settings/index state
+(warm profile). Each readiness point was followed by a 30-second idle sample, then the
+exact process was stopped before the next run.
+
+| Revision / profile | Ready | Idle CPU | Handles | Threads | Working set | Private bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline `0d0acaf`, cold | 775.5 ms | 1.578125 s | 667 | 55 | 88,276,992 | 99,897,344 |
+| candidate `da0215fb`, cold | 978.0 ms | 4.281250 s | 672 | 57 | 93,208,576 | 104,038,400 |
+| baseline `0d0acaf`, warm | 413.3 ms | 0.562500 s | 664 | 55 | 81,805,312 | 93,401,088 |
+| candidate `da0215fb`, warm | 419.8 ms | 0.515625 s | 667 | 56 | 82,644,992 | 93,089,792 |
+
+Cold profile work includes one-time default persistence/indexing and is recorded as an
+observation, not a stable regression signal. The matched warm readiness delta is
+`+1.57%`; candidate idle CPU is slightly lower, with +3 handles, +1 thread,
++839,680 working-set bytes, and -311,296 private bytes. Direct UI search could not be
+driven because native Computer Use was unavailable. The gate is therefore explicitly
+revised to use the serialized, purpose-built baseline/candidate Criterion search target
+recorded above for the search workload; it exercises the actual completion, dynamic,
+command-cache, and static search implementations without unsafe UI input synthesis.
+
+The release binary was launched twice from the disposable data root
+`.radial-acceptance-candidate` with `MULTI_LAUNCHER_PERF=1`, once with the persisted
+radial setting disabled and once enabled. Both remained responsive. A 30-second idle
+sample after initial startup produced:
+
+| Mode | CPU delta | Handles | Threads | Working set | Private bytes |
+|---|---:|---:|---:|---:|---:|
+| disabled | 0.015625 s | 663 | 55 | 83,165,184 | 93,822,976 |
+| enabled | 0.000000 s | 667 | 56 | 82,735,104 | 93,085,696 |
+
+The enabled-minus-disabled point sample is four handles and one thread, with no
+measurable idle CPU increase; memory differences are restart noise rather than a
+regression claim. The earlier settled enabled sample independently observed 658
+handles, 51 threads, a 93,401,088-byte working set, a 103,501,824-byte private set,
+and 0.015625 CPU seconds over 30 seconds. These are bounded process observations, not
+per-resource ownership attribution or a multi-run statistical startup benchmark.
+
+The manual checklist in `docs/manual-smoke-tests.md` remains authoritative for the
+parts no automated probe can establish: physical 0/100/349/350/351-ms shared-chord
+behavior and suppression, real second-process click delivery, visual contrast,
+keyboard-only authoring, Narrator/AccessKit speech, high-contrast rendering,
+mixed/fractional-DPI and negative-origin monitors, real target churn/UIPI, and physical
+capture handoffs. Those rows are intentionally not marked passed. M6 remains
+`in_progress` until a human records the applicable manual results (with explicit N/A
+reasons for unavailable hardware) or the release owner accepts them as a separate
+release-validation gate.
+
+| Requirement | Direct source/test evidence |
 |---:|---|
 | 39 | `universal_actions::persisted_resolver::custom_identity_survives_reorder_but_never_retargets_a_deleted_slot`; menu stable-ID edits |
 | 40 | `bindings::ephemeral_clipboard_list_browser_and_window_targets_revalidate_exactly`; `target::ephemeral_targets_do_not_claim_persistent_identity` |
@@ -2153,8 +2435,10 @@ M4 is complete; native interactive evidence remains unverified.
 - No `Preferences.json`, Radify sounds, or Radify `Settings.json` is supplied;
   source-defined defaults and generated shape are evidence, and fixtures must be
   labelled synthetic.
-- Native cross-process click-through, nonactivation, mixed-DPI behavior, real chord
-  suppression, visual quality, and resource/performance measurements are unverified
-  until their stated live gates run.
+- Real dual-HWND creation, nonactivation, owned/exterior input-region routing, release
+  startup/idle process samples, search benchmarks, and radial microbenchmarks are
+  verified as recorded above. Physical cross-process click delivery, mixed-DPI and
+  negative-origin behavior, real chord suppression, visual quality/accessibility,
+  lifecycle repetition, and per-resource attribution remain manual release checks.
 - Radify stock icon/emoji rights and all RM4 redistribution rights are insufficient
   for bundling; references remain user-provided compatibility inputs.
