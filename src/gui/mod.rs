@@ -150,7 +150,7 @@ use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSett
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
-use crate::visibility::{VisiblePlacementPolicy, apply_visibility};
+use crate::visibility::{ViewportWake, VisiblePlacementPolicy, apply_visibility};
 use action_sheet::ActionSheetState;
 use chrono::NaiveDate;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
@@ -176,7 +176,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use url::Url;
@@ -231,7 +231,32 @@ fn normalize_static_window_config(
     }
 }
 
-static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> = Lazy::new(|| Mutex::new(Vec::new()));
+struct AppEventSink {
+    id: u64,
+    sender: Sender<WatchEvent>,
+    wake: Option<ViewportWake>,
+    queued: Arc<AtomicUsize>,
+}
+
+const APP_EVENT_PENDING_CAPACITY: usize = 256;
+
+struct AppEventRegistry {
+    sinks: Vec<AppEventSink>,
+    /// Events emitted before the first GUI owner registers. Once an owner has
+    /// existed, a disposed owner must not cause stale work to leak into a
+    /// future viewport.
+    pending_before_owner: VecDeque<WatchEvent>,
+    owner_registered: bool,
+}
+
+static APP_EVENT_REGISTRY: Lazy<Mutex<AppEventRegistry>> = Lazy::new(|| {
+    Mutex::new(AppEventRegistry {
+        sinks: Vec::new(),
+        pending_before_owner: VecDeque::new(),
+        owner_registered: false,
+    })
+});
+static NEXT_APP_EVENT_SINK_ID: AtomicU64 = AtomicU64::new(1);
 static RADIAL_AUTHORING_CLIENT: Lazy<Mutex<Option<crate::radial::authoring::AuthoringClient>>> =
     Lazy::new(|| Mutex::new(None));
 static RADIAL_CONTROL_CLIENT: Lazy<Mutex<Option<crate::radial::control::RadialControlClient>>> =
@@ -277,15 +302,125 @@ pub(crate) fn radial_published_document() -> Arc<crate::radial::model::RadialDoc
         .unwrap_or_else(|_| Arc::new(crate::radial::model::RadialDocument::starter()))
 }
 
-pub fn register_event_sender(tx: Sender<WatchEvent>) {
-    if let Ok(mut guard) = APP_EVENT_TXS.lock() {
-        guard.push(tx);
+/// Owns one GUI event sink registration. Dropping it removes the sink from
+/// the process-wide fan-out, so a closed launcher viewport cannot remain in
+/// the registry indefinitely.
+pub struct EventSinkRegistration {
+    id: u64,
+    queued: Arc<AtomicUsize>,
+}
+
+impl EventSinkRegistration {
+    /// Attach the viewport wake after registration. If events arrived before
+    /// attachment, wake once after releasing the registry lock so the queued
+    /// work is not stranded.
+    pub fn attach_wake(&self, wake: ViewportWake) {
+        let wake_now = APP_EVENT_REGISTRY.lock().ok().and_then(|mut registry| {
+            let sink = registry.sinks.iter_mut().find(|sink| sink.id == self.id)?;
+            sink.wake = Some(wake.clone());
+            (sink.queued.load(Ordering::Acquire) > 0).then_some(wake)
+        });
+        if let Some(wake) = wake_now {
+            wake.wake();
+        }
+    }
+
+    pub(crate) fn event_consumed(&self) {
+        let _ = self
+            .queued
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_sub(1))
+            });
     }
 }
 
+impl Drop for EventSinkRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = APP_EVENT_REGISTRY.lock() {
+            registry.sinks.retain(|sink| sink.id != self.id);
+        }
+    }
+}
+
+fn register_event_sink(
+    tx: Sender<WatchEvent>,
+    wake: Option<ViewportWake>,
+) -> EventSinkRegistration {
+    let registration = EventSinkRegistration {
+        id: NEXT_APP_EVENT_SINK_ID.fetch_add(1, Ordering::Relaxed),
+        queued: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut wake_now = None;
+    if let Ok(mut registry) = APP_EVENT_REGISTRY.lock() {
+        let first_owner = !registry.owner_registered;
+        registry.owner_registered = true;
+        let sink = AppEventSink {
+            id: registration.id,
+            sender: tx,
+            wake,
+            queued: Arc::clone(&registration.queued),
+        };
+        if first_owner {
+            let pending = registry.pending_before_owner.drain(..).collect::<Vec<_>>();
+            for event in pending {
+                if sink.sender.send(event).is_err() {
+                    return registration;
+                }
+                sink.queued.fetch_add(1, Ordering::Release);
+            }
+        }
+        if sink.queued.load(Ordering::Acquire) > 0 {
+            wake_now = sink.wake.clone();
+        }
+        registry.sinks.push(sink);
+    }
+    if let Some(wake) = wake_now {
+        wake.wake();
+    }
+    registration
+}
+
+/// Register a GUI event sink with the viewport that owns its work queue.
+pub fn register_event_sender_with_wake(
+    tx: Sender<WatchEvent>,
+    wake: ViewportWake,
+) -> EventSinkRegistration {
+    register_event_sink(tx, Some(wake))
+}
+
+pub fn register_event_sender(tx: Sender<WatchEvent>) -> EventSinkRegistration {
+    register_event_sink(tx, None)
+}
+
 pub fn send_event(ev: WatchEvent) {
-    if let Ok(mut guard) = APP_EVENT_TXS.lock() {
-        guard.retain(|tx| tx.send(ev.clone()).is_ok());
+    let wakes = APP_EVENT_REGISTRY
+        .lock()
+        .map(|mut registry| {
+            if registry.sinks.is_empty() {
+                if !registry.owner_registered {
+                    if registry.pending_before_owner.len() == APP_EVENT_PENDING_CAPACITY {
+                        registry.pending_before_owner.pop_front();
+                    }
+                    registry.pending_before_owner.push_back(ev);
+                }
+                return Vec::new();
+            }
+            let mut wakes = Vec::new();
+            registry.sinks.retain_mut(|sink| {
+                if sink.sender.send(ev.clone()).is_err() {
+                    return false;
+                }
+                sink.queued.fetch_add(1, Ordering::Release);
+                if let Some(wake) = &sink.wake {
+                    wakes.push(wake.clone());
+                }
+                true
+            });
+            wakes
+        })
+        .unwrap_or_default();
+    for wake in wakes {
+        wake.wake();
     }
 }
 
@@ -574,6 +709,7 @@ pub struct LauncherApp {
     pub dashboard_editor: DashboardEditorDialog,
     pub show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
+    event_sink: EventSinkRegistration,
     event_tx: Sender<WatchEvent>,
     egui_ctx: egui::Context,
     virtual_desktop_interaction_token: u64,
@@ -1297,7 +1433,7 @@ impl LauncherApp {
     ) -> Self {
         crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
         let (tx, rx) = channel();
-        register_event_sender(tx.clone());
+        let event_sink = register_event_sender_with_wake(tx.clone(), ViewportWake::root(ctx));
         let mut watchers = Vec::new();
         let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
@@ -1713,6 +1849,7 @@ impl LauncherApp {
             dashboard_editor: DashboardEditorDialog::default(),
             show_dashboard_editor: false,
             rx,
+            event_sink,
             event_tx: tx,
             egui_ctx: ctx.clone(),
             virtual_desktop_interaction_token: 0,
@@ -3474,6 +3611,13 @@ mod tests {
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+    fn reset_event_registry_for_test() {
+        let mut registry = super::APP_EVENT_REGISTRY.lock().unwrap();
+        registry.sinks.clear();
+        registry.pending_before_owner.clear();
+        registry.owner_registered = false;
+    }
+
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
             ctx,
@@ -3491,6 +3635,109 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn event_sink_attaches_wake_to_work_already_in_queue() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        let (tx, rx) = channel();
+        let registration = register_event_sender(tx);
+        send_event(WatchEvent::Actions);
+        assert!(rx.try_recv().is_ok());
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake_count_for_callback = Arc::clone(&wake_count);
+        registration.attach_wake(ViewportWake::from_callback(
+            egui::ViewportId::ROOT,
+            move |_| {
+                wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        registration.event_consumed();
+    }
+
+    #[test]
+    fn event_sink_enqueues_before_waking_and_handles_bursts() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        let (tx, rx) = channel();
+        let rx = Arc::new(Mutex::new(rx));
+        let saw_events = Arc::new(Mutex::new(Vec::new()));
+        let rx_for_callback = Arc::clone(&rx);
+        let saw_events_for_callback = Arc::clone(&saw_events);
+        let registration = register_event_sender_with_wake(
+            tx,
+            ViewportWake::from_callback(egui::ViewportId::ROOT, move |_| {
+                let event = rx_for_callback
+                    .lock()
+                    .unwrap()
+                    .try_recv()
+                    .expect("wake must follow enqueue");
+                saw_events_for_callback.lock().unwrap().push(event);
+            }),
+        );
+
+        send_event(WatchEvent::Actions);
+        send_event(WatchEvent::Folders);
+        send_event(WatchEvent::Bookmarks);
+
+        let events = saw_events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                WatchEvent::Actions,
+                WatchEvent::Folders,
+                WatchEvent::Bookmarks
+            ]
+        ));
+        drop(events);
+        registration.event_consumed();
+        registration.event_consumed();
+        registration.event_consumed();
+    }
+
+    #[test]
+    fn disposed_or_dead_event_sinks_are_not_called_again() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        let (tx, rx) = channel();
+        let registration = register_event_sender(tx);
+        drop(registration);
+        send_event(WatchEvent::Actions);
+        assert!(rx.try_recv().is_err());
+
+        let (dead_tx, dead_rx) = channel();
+        let _dead_registration = register_event_sender(dead_tx);
+        drop(dead_rx);
+        send_event(WatchEvent::Actions);
+    }
+
+    #[test]
+    fn event_sink_delivers_work_emitted_before_first_owner_registers() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        send_event(WatchEvent::Actions);
+
+        let (tx, rx) = channel();
+        let registration = register_event_sender(tx);
+        assert!(matches!(rx.try_recv(), Ok(WatchEvent::Actions)));
+        assert!(
+            rx.try_recv().is_err(),
+            "pre-registration work delivered once"
+        );
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake_count_for_callback = Arc::clone(&wake_count);
+        registration.attach_wake(ViewportWake::from_callback(
+            egui::ViewportId::ROOT,
+            move |_| {
+                wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        registration.event_consumed();
     }
 
     fn custom_action(label: &str) -> Action {

@@ -21,12 +21,12 @@ its immutable baseline, and its earlier verification evidence remain in
 | repair start worktree | clean: no staged, unstaged, or untracked changes |
 | immutable feature baseline | `0d0acaf471a52f49a7ebdff61879416eefa9fc9b` (unchanged) |
 | branch point | `f7c5f61ed2faa2288f5c19ddeaea66de6f760a2b` (unchanged) |
-| current milestone | R1 |
-| implementation status | pending implementation |
-| last verified source | R0 read-only audit at repair-start HEAD; no Cargo/build/test run |
+| current milestone | R2 |
+| implementation status | R1 complete; awaiting coherent commit before R2 implementation |
+| last verified source | R1 dirty diff `ab42549871c0d8c0fccbe6db51759cb7d83b9270`; Nextest `b63c2945-5c7a-4f95-b7f2-c227cd2dfdcb` passed 214/214 |
 | current native evidence gaps | H1-H5, N1-N4, V1-V3, D1-D5, and P1-P2 are unverified for this repair |
 | active Cargo/build/Nextest job | none |
-| next action | implement R1 independent chord cycles and owner-viewport queue/wake delivery |
+| next action | commit R1, then implement R2 frozen session geometry and reversible SameCenter conversion |
 
 The repair-start Git diff was empty. Repository-local reference archives and images
 were not modified. `docs/references/Radial menu v4.zip` was inspected in place as
@@ -72,7 +72,7 @@ visual center stability, and Designer independence require the native acceptance
 | Milestone | State | Deliverable | Gate |
 |---|---|---|---|
 | R0 | complete | source/ownership audit, repair start identity, and execution ledger | read-only inspection plus documentation diff check; no initial full suite |
-| R1 | pending | independent chord cycles, reliable owner-viewport wakeups, authoritative hide ordering | combined invocation/event/visibility Nextest gate and H1-H3/H5 live checks |
+| R1 | complete | independent chord cycles, reliable owner-viewport wakeups, authoritative hide ordering | focused source-identical gate passed; independent review clean; H1-H3/H5 remain explicitly unverified natively |
 | R2 | pending | frozen session centers, local Cascade, drag/Back transforms, reversible one-time conversion | geometry/session/migration gate and N1-N4/P1 live checks |
 | R3 | pending | normal cursor, complete delayed tooltips, typed quiet diagnostics | font/preparation/native/preview gate and V1-V3 live checks |
 | R4 | pending | one independent compact Designer and safe direct manipulation | editor/authoring/lifecycle gate and H4/D1-D5 live checks |
@@ -148,3 +148,54 @@ moving GUI-owned preparation/action execution to another thread.
 R1 is done only after the focused source-identical gate passes, the diff contains no
 legacy bypass or polling workaround, H1-H3/H5 are recorded as passed/failed/unverified,
 and a coherent repair commit exists.
+
+## R1 completion record
+
+Implemented behavior and ownership:
+
+- radial lifecycle state and the next physical chord cycle are orthogonal, with
+  typed/stale-safe opening, active, closing, external-admission, and release-drain
+  transitions;
+- tap toggles only the launcher grid and hold toggles only the radial, including
+  delayed release-to-select cancellation, opening/active replacement, Escape,
+  Screen Draw/exclusive cancellation, direct triggers, and external sessions;
+- grid visibility transfers radial keyboard ownership on every ordered shared or
+  legacy/direct-only edge, persists that owner through native preparation, and
+  preserves multiple tap transitions drained in one main-loop iteration;
+- GUI events use disposable sender/wake registrations, a bounded pre-owner backlog,
+  enqueue-before-wake ordering, dead-sink removal, and explicit root-viewport wakes;
+- hide invalidates queued restoration so a later frame cannot resurrect the grid.
+
+Verification on the final source identity:
+
+- `cargo fmt --all -- --check`: passed;
+- `git diff --check`: passed (only Git's existing LF/CRLF notices);
+- focused command: `cargo nextest run --no-fail-fast --status-level slow
+  --final-status-level fail --success-output never --failure-output final -E
+  'test(/invocation/) | test(/visibility/) | test(/watch/) |
+  test(/event_sink/) | test(/radial::controller/) | test(/radial::session/) |
+  test(/queued_radial_opens/) | binary(focus_visibility) |
+  binary(trigger_visibility) | binary(gui_visibility)'`;
+- cwd `G:\Repos\rust\Multi_Launcher`, HEAD `0a1f4a47`, dirty diff
+  `ab42549871c0d8c0fccbe6db51759cb7d83b9270`, default Nextest profile;
+- durable log `%TEMP%\multi-launcher-r1-nextest-keyboard-owner-20260916.log`;
+- Nextest run `b63c2945-5c7a-4f95-b7f2-c227cd2dfdcb`: 214 passed,
+  0 failed, 4,258 skipped; true exit code 0;
+- the single job was observed at about 10 minutes and completed after 22m22s
+  compilation plus 4.911s execution; no competing Cargo process was present.
+
+Independent review rechecked the production hook, controller, GUI delivery,
+visibility, external-replacement, metadata-retirement, ordered-toggle, direct-only,
+and pending-to-Ready paths. All reported findings were remediated and the final
+review reported no substantive R1 finding.
+
+Native evidence status for R1:
+
+- H1 shared-chord tap/hold truth table: unverified on a real Windows desktop;
+- H2 focused-grid tap-to-hide without flicker/restore: unverified natively;
+- H3 hidden-grid hold/open without pointer activity: unverified natively;
+- H5 Screen Draw priority/recovery interaction: unverified natively.
+
+The current automation surface cannot drive native Windows input or inspect the
+application HWND, so unit/integration evidence is not presented as native evidence.
+These rows remain required for R5 manual/native acceptance.

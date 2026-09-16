@@ -657,7 +657,7 @@ impl LauncherApp {
             finalize_alternates(&mut child_frame, &binding_resolver, &request.context);
             frames.insert(child.id.clone(), child_frame);
         }
-        let _ = envelope.reply.send(RadialPrepareReply {
+        let reply_sent = envelope.reply.send(RadialPrepareReply {
             generation: request.generation,
             invocation_id: request.invocation_id,
             menu_id,
@@ -667,7 +667,9 @@ impl LauncherApp {
             static_cells,
             frames,
         });
-        let _ = envelope.wake.send(());
+        if reply_sent.is_ok() {
+            let _ = envelope.wake.send(());
+        }
     }
     /// Resolve a stable radial binding against the catalogs that are current
     /// at dispatch time. This intentionally rebuilds exact identities; stored

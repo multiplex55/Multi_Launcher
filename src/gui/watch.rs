@@ -7,6 +7,15 @@ pub(super) fn watch_file(
     event: WatchEvent,
     repaint: egui::Context,
 ) -> notify::Result<RecommendedWatcher> {
+    watch_file_with_wake(path, tx, event, ViewportWake::root(&repaint))
+}
+
+pub(super) fn watch_file_with_wake(
+    path: &Path,
+    tx: Sender<WatchEvent>,
+    event: WatchEvent,
+    wake: ViewportWake,
+) -> notify::Result<RecommendedWatcher> {
     let target = path.to_path_buf();
     let target_is_directory = path.is_dir();
     let mut watcher = RecommendedWatcher::new(
@@ -21,7 +30,7 @@ pub(super) fn watch_file(
                     target_is_directory,
                 ) {
                     if tx.send(event.clone()).is_ok() {
-                        repaint.request_repaint();
+                        wake.wake();
                     }
                 }
             }
@@ -41,6 +50,7 @@ pub(super) fn watch_file(
 impl LauncherApp {
     pub fn process_watch_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
+            self.event_sink.event_consumed();
             match ev {
                 WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
                 WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),

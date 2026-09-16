@@ -4,7 +4,7 @@ use super::{Hotkey, Key};
 pub use crate::radial::invocation::InputProvenance;
 use crate::radial::invocation::{
     ContextToken, InvocationEvent, InvocationIntent, InvocationReducer, LifecycleCancellation,
-    SettingsGeneration, Timestamp,
+    RadialLifecycle, SettingsGeneration, Timestamp,
 };
 use crate::radial::model::{InteractionMode, InvocationId, MenuId, SessionId};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -201,6 +201,7 @@ pub struct LauncherInvocationAdapter {
     next_id: u64,
     owned: Option<InvocationId>,
     owned_primary: Option<u32>,
+    owned_provenance: Option<InputProvenance>,
     owned_primary_down_suppressed: bool,
     candidate_primary_down: Option<InputProvenance>,
     recovery_primary: Option<RecoveryOwnership>,
@@ -232,6 +233,7 @@ impl LauncherInvocationAdapter {
             next_id: 1,
             owned: None,
             owned_primary: None,
+            owned_provenance: None,
             owned_primary_down_suppressed: false,
             candidate_primary_down: None,
             recovery_primary: None,
@@ -240,6 +242,12 @@ impl LauncherInvocationAdapter {
     }
     pub fn config(&self) -> &InvocationConfig {
         &self.config
+    }
+    pub fn radial_lifecycle(&self) -> &RadialLifecycle {
+        self.reducer.radial_lifecycle()
+    }
+    pub fn feedback(&mut self, event: InvocationEvent) -> Vec<InvocationIntent> {
+        self.reducer.reduce(event)
     }
     fn navigation_modifiers(&self) -> crate::radial::session::NavigationModifiers {
         crate::radial::session::NavigationModifiers {
@@ -277,6 +285,7 @@ impl LauncherInvocationAdapter {
         if !reason.preserves_input_continuity() {
             self.owned = None;
             self.owned_primary = None;
+            self.owned_provenance = None;
             self.owned_primary_down_suppressed = false;
             self.recovery_primary = None;
             self.modifiers = Modifiers::default();
@@ -295,6 +304,31 @@ impl LauncherInvocationAdapter {
         } else {
             Vec::new()
         }
+    }
+    /// Retire the reducer's current radial lifecycle for a session-scoped
+    /// close request.  This is separate from the native Escape ownership so a
+    /// pending preparation can be cancelled even though it has no session id,
+    /// and a pending physical close cannot later issue a duplicate close.
+    pub fn request_radial_close(&mut self) -> Vec<InvocationIntent> {
+        let Some(id) = self.reducer.radial_lifecycle().invocation_id() else {
+            return Vec::new();
+        };
+        let session_id = self.reducer.radial_lifecycle().session_id();
+        let was_active = matches!(
+            self.reducer.radial_lifecycle(),
+            RadialLifecycle::Active { .. }
+        );
+        let mut intents = self
+            .reducer
+            .reduce(InvocationEvent::RadialCloseRequested { id, session_id });
+        if was_active {
+            if let Some(session_id) = self.reducer.radial_lifecycle().session_id() {
+                intents.push(InvocationIntent::CloseRadial {
+                    session_id: Some(session_id),
+                });
+            }
+        }
+        intents
     }
     fn preempt(&mut self) -> Vec<InvocationIntent> {
         self.reducer.reduce(InvocationEvent::CancelLifecycle {
@@ -336,7 +370,11 @@ impl LauncherInvocationAdapter {
             };
         }
         if self.owned.is_some() && self.owned_primary == Some(event.vk) {
-            return self.process_owned_primary(event);
+            return if self.owned_provenance == Some(event.provenance) {
+                self.process_owned_primary(event)
+            } else {
+                AdapterOutcome::pass()
+            };
         }
         if !self.config.launcher_enabled {
             return AdapterOutcome::pass();
@@ -411,30 +449,38 @@ impl LauncherInvocationAdapter {
         self.next_id = self.next_id.checked_add(1).unwrap_or(1);
         self.owned = Some(id);
         self.owned_primary = Some(primary);
+        self.owned_provenance = Some(provenance);
         self.owned_primary_down_suppressed = primary_down_suppressed;
         AdapterOutcome {
             consume: true,
             recovery: false,
-            intents: self.reducer.reduce(InvocationEvent::ChordPressed {
-                id,
-                primary_key: primary,
-                at,
-                threshold_ms: self.config.threshold_ms,
-                generation: self.config.generation,
-                context_token: id.0,
-                menu_id: self.config.menu_id.clone(),
-                interaction: self.config.interaction,
-                repeat: false,
-            }),
+            intents: self.reducer.reduce_with_provenance(
+                InvocationEvent::ChordPressed {
+                    id,
+                    primary_key: primary,
+                    at,
+                    threshold_ms: self.config.threshold_ms,
+                    generation: self.config.generation,
+                    context_token: id.0,
+                    menu_id: self.config.menu_id.clone(),
+                    interaction: self.config.interaction,
+                    repeat: false,
+                },
+                provenance,
+            ),
         }
     }
 
     fn process_owned_primary(&mut self, event: KeyEvent) -> AdapterOutcome {
         let id = self.owned.expect("owned primary has invocation");
+        if self.owned_provenance != Some(event.provenance) {
+            return AdapterOutcome::pass();
+        }
         if event.transition == KeyTransition::Up {
             let consume = self.owned_primary_down_suppressed;
             self.owned = None;
             self.owned_primary = None;
+            self.owned_provenance = None;
             self.owned_primary_down_suppressed = false;
             self.candidate_primary_down = None;
             return AdapterOutcome {
@@ -448,17 +494,20 @@ impl LauncherInvocationAdapter {
         AdapterOutcome {
             consume: true,
             recovery: false,
-            intents: self.reducer.reduce(InvocationEvent::ChordPressed {
-                id,
-                primary_key: event.vk,
-                at: event.at,
-                threshold_ms: self.config.threshold_ms,
-                generation: self.config.generation,
-                context_token: id.0,
-                menu_id: self.config.menu_id.clone(),
-                interaction: self.config.interaction,
-                repeat: true,
-            }),
+            intents: self.reducer.reduce_with_provenance(
+                InvocationEvent::ChordPressed {
+                    id,
+                    primary_key: event.vk,
+                    at: event.at,
+                    threshold_ms: self.config.threshold_ms,
+                    generation: self.config.generation,
+                    context_token: id.0,
+                    menu_id: self.config.menu_id.clone(),
+                    interaction: self.config.interaction,
+                    repeat: true,
+                },
+                event.provenance,
+            ),
         }
     }
 }
@@ -633,29 +682,78 @@ impl EscapeOwnership {
         self.owned_vk = None;
     }
 
-    fn feedback(&mut self, event: &InvocationEvent) {
+    fn claim_without_session(&mut self, event: KeyEvent, accept_external_injected: bool) -> bool {
+        if self.owned_provenance.is_some()
+            || event.transition != KeyTransition::Down
+            || event.provenance == InputProvenance::SelfInjected
+            || (event.provenance == InputProvenance::ExternalInjected && !accept_external_injected)
+        {
+            return false;
+        }
+        self.owned_provenance = Some(event.provenance);
+        self.owned_vk = Some(event.vk);
+        true
+    }
+
+    fn feedback_correlated(&mut self, event: &InvocationEvent, lifecycle: &RadialLifecycle) {
+        let current_id = lifecycle.invocation_id();
         match event {
-            InvocationEvent::RadialSessionOpened { id, session_id } => {
-                self.active_session = Some((*id, session_id.clone()))
+            InvocationEvent::ExternalSessionAdmitted { id, .. } if current_id == Some(*id) => {
+                // A replacement invalidates any native Escape lease from the
+                // previous lifecycle while the new external session is still
+                // preparing.  The matching Opened event installs ownership
+                // again with the new session id.
+                self.active_session = None;
+            }
+            InvocationEvent::RadialSessionOpened { id, session_id }
+            | InvocationEvent::ExternalSessionOpened { id, session_id, .. }
+                if matches!(
+                    lifecycle,
+                    RadialLifecycle::Active {
+                        id: current,
+                        session_id: current_session,
+                        ..
+                    } if current == id && current_session == session_id
+                ) =>
+            {
+                self.active_session = Some((*id, session_id.clone()));
+            }
+            InvocationEvent::RadialSessionOpened { id, .. }
+            | InvocationEvent::ExternalSessionOpened { id, .. }
+            | InvocationEvent::ExternalSessionAdmitted { id, .. }
+            | InvocationEvent::RadialSessionClosed { id }
+            | InvocationEvent::RadialClosedForAction { id }
+                if current_id != Some(*id)
+                    && self
+                        .active_session
+                        .as_ref()
+                        .is_some_and(|(active, _)| active == id) =>
+            {
+                // A stale lifecycle event may retire only its own Escape
+                // ownership; it cannot install or clear ownership for the
+                // newer lifecycle represented by the reducer.
+                self.active_session = None;
             }
             InvocationEvent::RadialSessionClosed { id }
             | InvocationEvent::RadialClosedForAction { id }
-                if self
-                    .active_session
-                    .as_ref()
-                    .is_some_and(|(active, _)| active == id) =>
+                if current_id.is_none()
+                    && self
+                        .active_session
+                        .as_ref()
+                        .is_some_and(|(active, _)| active == id) =>
             {
-                self.active_session = None
+                self.active_session = None;
             }
             _ => {}
         }
     }
 
-    fn process(
+    fn process_with_navigation(
         &mut self,
         event: KeyEvent,
         accept_external_injected: bool,
         modifiers: crate::radial::session::NavigationModifiers,
+        allow_navigation: bool,
     ) -> Option<AdapterOutcome> {
         let navigation = match event.vk {
             0x25 | 0x26 => Some(crate::radial::session::NavigationCommand::Previous),
@@ -683,6 +781,9 @@ impl EscapeOwnership {
                 intents: Vec::new(),
             });
         }
+        if navigation.is_some() && !allow_navigation {
+            return None;
+        }
         if event.provenance == InputProvenance::SelfInjected
             || (event.provenance == InputProvenance::ExternalInjected && !accept_external_injected)
             || event.transition != KeyTransition::Down
@@ -709,6 +810,55 @@ impl EscapeOwnership {
             intents,
         })
     }
+
+    #[cfg(test)]
+    fn process(
+        &mut self,
+        event: KeyEvent,
+        accept_external_injected: bool,
+        modifiers: crate::radial::session::NavigationModifiers,
+    ) -> Option<AdapterOutcome> {
+        self.process_with_navigation(event, accept_external_injected, modifiers, true)
+    }
+}
+
+/// Apply the hook's Escape ownership boundary to one key transition.  Keeping
+/// this routing seam outside the Windows callback lets tests exercise the same
+/// opening/no-session path that native input uses, including release draining.
+fn route_escape_event(
+    escape: &mut EscapeOwnership,
+    adapter: &mut LauncherInvocationAdapter,
+    event: KeyEvent,
+    accept_external_injected: bool,
+    modifiers: crate::radial::session::NavigationModifiers,
+    allow_navigation: bool,
+) -> Option<AdapterOutcome> {
+    let accepted_escape = event.vk == 0x1B
+        && event.transition == KeyTransition::Down
+        && event.provenance != InputProvenance::SelfInjected
+        && (event.provenance != InputProvenance::ExternalInjected || accept_external_injected);
+    let mut out = escape.process_with_navigation(
+        event,
+        accept_external_injected,
+        modifiers,
+        allow_navigation,
+    );
+    if accepted_escape {
+        let lifecycle_intents = adapter.request_radial_close();
+        if !lifecycle_intents.is_empty() {
+            let mut routed = out.take().unwrap_or_else(AdapterOutcome::pass);
+            if !routed.consume {
+                routed.consume = escape.claim_without_session(event, accept_external_injected);
+            }
+            for intent in lifecycle_intents {
+                if !routed.intents.contains(&intent) {
+                    routed.intents.push(intent);
+                }
+            }
+            out = Some(routed);
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -1393,16 +1543,22 @@ mod native_service {
                 unsafe { CallNextHookEx(None, code, w, l) }
             };
         }
+        let key_event = KeyEvent {
+            vk: data.vkCode,
+            transition,
+            at,
+            provenance,
+        };
+        let accept_external_injected = state.adapter.config().accept_external_injected;
+        let allow_navigation = state.active_frame.is_some();
         let navigation_modifiers = state.adapter.navigation_modifiers();
-        if let Some(out) = state.escape.process(
-            KeyEvent {
-                vk: data.vkCode,
-                transition,
-                at,
-                provenance,
-            },
-            state.adapter.config().accept_external_injected,
+        if let Some(out) = route_escape_event(
+            &mut state.escape,
+            &mut state.adapter,
+            key_event,
+            accept_external_injected,
             navigation_modifiers,
+            allow_navigation,
         ) {
             let consume = out.consume;
             publish(state, out);
@@ -1791,8 +1947,11 @@ mod native_service {
                                 }
                                 match command {
                                     ServiceCommand::Feedback(event) => {
-                                        state.escape.feedback(&event);
-                                        let intents = state.adapter.reducer.reduce(event);
+                                        let intents = state.adapter.feedback(event.clone());
+                                        state.escape.feedback_correlated(
+                                            &event,
+                                            state.adapter.radial_lifecycle(),
+                                        );
                                         let _ = update_timers(state, &intents);
                                         let _ = state.notices.send(ServiceNotice {
                                             recovery: false,
@@ -2022,6 +2181,16 @@ mod tests {
             provenance: InputProvenance::Physical,
         }
     }
+    fn active_lifecycle(id: InvocationId, session_id: SessionId) -> RadialLifecycle {
+        RadialLifecycle::Active {
+            id,
+            menu_id: MenuId::new("starter"),
+            context_token: id.0,
+            interaction: InteractionMode::StickyClick,
+            session_id,
+            trigger_still_down: false,
+        }
+    }
     #[test]
     fn complex_chord_owns_primary_down_repeat_and_release_not_modifiers() {
         let mut a = LauncherInvocationAdapter::new(cfg()).unwrap();
@@ -2084,6 +2253,33 @@ mod tests {
         ));
     }
     #[test]
+    fn delayed_release_to_select_cancels_without_opening_a_late_surface() {
+        let mut config = cfg();
+        config.interaction = InteractionMode::ReleaseToSelect;
+        let mut adapter = LauncherInvocationAdapter::new(config).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let down = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        let id = match down.intents.as_slice() {
+            [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
+            _ => unreachable!(),
+        };
+        let release = adapter.process(e(0x23, KeyTransition::Up, 900), PriorityOwner::Launcher);
+        assert!(release.consume);
+        assert!(matches!(
+            release.intents.as_slice(),
+            [
+                InvocationIntent::CancelDeadline { id: cancelled },
+                InvocationIntent::HoldCancelledBeforePresentation { id: cancelled_hold }
+            ] if *cancelled == id && *cancelled_hold == id
+        ));
+        assert!(matches!(
+            adapter.radial_lifecycle(),
+            RadialLifecycle::Closed
+        ));
+    }
+    #[test]
     fn consecutive_shared_holds_receive_unique_correlated_context_tokens() {
         let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
         for vk in [0xA0, 0xA4, 0x5B] {
@@ -2098,8 +2294,19 @@ mod tests {
             [InvocationIntent::OpenRadial { context_token, .. }] => *context_token,
             _ => panic!(),
         };
+        let first_session = SessionId::new("first-session");
+        adapter.feedback(InvocationEvent::RadialSessionOpened {
+            id: first_id,
+            session_id: first_session.clone(),
+        });
         adapter.process(e(0x23, KeyTransition::Up, 400), PriorityOwner::Launcher);
-        adapter.dismiss_active();
+        assert!(matches!(
+            adapter.request_radial_close().as_slice(),
+            [InvocationIntent::CloseRadial {
+                session_id: Some(actual)
+            }] if actual == &first_session
+        ));
+        adapter.feedback(InvocationEvent::RadialSessionClosed { id: first_id });
         let second = adapter.process(e(0x23, KeyTransition::Down, 500), PriorityOwner::Launcher);
         let second_id = match second.intents[0] {
             InvocationIntent::ScheduleDeadline { id, .. } => id,
@@ -2130,10 +2337,7 @@ mod tests {
             a.reload(c, LifecycleCancellation::SettingsReload)
                 .unwrap()
                 .as_slice(),
-            [
-                InvocationIntent::CancelDeadline { .. },
-                InvocationIntent::CancelRadialLifecycle { .. }
-            ]
+            [InvocationIntent::CancelDeadline { .. }]
         ));
         assert!(a.deadline(id, 351, 4).is_empty());
         assert!(
@@ -2513,10 +2717,7 @@ mod tests {
         adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
         assert!(matches!(
             adapter.preempt().as_slice(),
-            [
-                InvocationIntent::CancelDeadline { .. },
-                InvocationIntent::CancelRadialLifecycle { .. }
-            ]
+            [InvocationIntent::CancelDeadline { .. }]
         ));
         assert!(
             adapter
@@ -2550,10 +2751,14 @@ mod tests {
     #[test]
     fn escape_provenance_and_down_repeat_up_are_balanced() {
         let mut escape = EscapeOwnership::default();
-        escape.feedback(&InvocationEvent::RadialSessionOpened {
-            id: InvocationId(7),
-            session_id: crate::radial::model::SessionId::new("active"),
-        });
+        let session_id = SessionId::new("active");
+        escape.feedback_correlated(
+            &InvocationEvent::RadialSessionOpened {
+                id: InvocationId(7),
+                session_id: session_id.clone(),
+            },
+            &active_lifecycle(InvocationId(7), session_id.clone()),
+        );
         let mut own = e(0x1B, KeyTransition::Down, 1);
         own.provenance = InputProvenance::SelfInjected;
         assert!(
@@ -2579,9 +2784,12 @@ mod tests {
                 .unwrap()
                 .consume
         );
-        escape.feedback(&InvocationEvent::RadialSessionClosed {
-            id: InvocationId(7),
-        });
+        escape.feedback_correlated(
+            &InvocationEvent::RadialSessionClosed {
+                id: InvocationId(7),
+            },
+            &RadialLifecycle::Closed,
+        );
         assert!(
             escape
                 .process(e(0x1B, KeyTransition::Up, 4), true, Default::default())
@@ -2600,10 +2808,13 @@ mod tests {
     fn owned_navigation_key_is_correlated_and_balanced() {
         let mut ownership = EscapeOwnership::default();
         let session_id = crate::radial::model::SessionId::new("active");
-        ownership.feedback(&InvocationEvent::RadialSessionOpened {
-            id: InvocationId(8),
-            session_id: session_id.clone(),
-        });
+        ownership.feedback_correlated(
+            &InvocationEvent::RadialSessionOpened {
+                id: InvocationId(8),
+                session_id: session_id.clone(),
+            },
+            &active_lifecycle(InvocationId(8), session_id.clone()),
+        );
         let down = ownership
             .process(
                 e(0x27, KeyTransition::Down, 1),
@@ -2621,7 +2832,7 @@ mod tests {
                 session_id: actual,
                 command: crate::radial::session::NavigationCommand::Next,
                 modifiers: crate::radial::session::NavigationModifiers { control: true, .. },
-            }] if actual == &session_id
+            }] if *actual == session_id
         ));
         assert!(
             ownership
@@ -2766,15 +2977,30 @@ mod tests {
             _ => unreachable!(),
         };
         adapter.deadline(open_id, 351, 4);
+        adapter.feedback(InvocationEvent::RadialSessionOpened {
+            id: open_id,
+            session_id: SessionId::new("dismiss-session"),
+        });
         adapter.process(e(0x23, KeyTransition::Up, 352), PriorityOwner::Launcher);
 
         let dismiss = adapter.process(e(0x23, KeyTransition::Down, 400), PriorityOwner::Launcher);
         assert!(dismiss.consume);
         assert!(matches!(
             dismiss.intents.as_slice(),
-            [InvocationIntent::CloseRadial { .. }]
+            [InvocationIntent::ScheduleDeadline { .. }]
         ));
-        let release = adapter.process(e(0x23, KeyTransition::Up, 401), PriorityOwner::Launcher);
+        let dismiss_id = match dismiss.intents.as_slice() {
+            [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
+            _ => unreachable!(),
+        };
+        let close = adapter.deadline(dismiss_id, 751, 4);
+        assert!(matches!(
+            close.as_slice(),
+            [InvocationIntent::CloseRadial {
+                session_id: Some(_)
+            }]
+        ));
+        let release = adapter.process(e(0x23, KeyTransition::Up, 752), PriorityOwner::Launcher);
         assert!(release.consume);
         assert!(release.intents.is_empty());
         assert!(!adapter.has_owned_cycle());
@@ -2797,9 +3023,7 @@ mod tests {
             _ => unreachable!(),
         };
         adapter.deadline(id, 351, 4);
-        adapter
-            .reducer
-            .reduce(InvocationEvent::RadialClosedForAction { id });
+        adapter.feedback(InvocationEvent::RadialClosedForAction { id });
         let released = adapter.process(e(0x23, KeyTransition::Up, 352), PriorityOwner::Launcher);
         assert!(released.consume);
         assert!(matches!(
@@ -2836,6 +3060,332 @@ mod tests {
     }
 
     #[test]
+    fn owned_primary_release_requires_matching_provenance() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let down = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        assert!(down.consume);
+
+        let mut mismatched_up = e(0x23, KeyTransition::Up, 2);
+        mismatched_up.provenance = InputProvenance::ExternalInjected;
+        let ignored = adapter.process(mismatched_up, PriorityOwner::Launcher);
+        assert!(!ignored.consume && ignored.intents.is_empty());
+
+        let release = adapter.process(e(0x23, KeyTransition::Up, 3), PriorityOwner::Launcher);
+        assert!(release.consume);
+        assert!(!adapter.has_owned_cycle());
+    }
+
+    #[test]
+    fn escape_request_cancels_opening_without_allowing_a_late_open() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let down = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        let id = match down.intents[0] {
+            InvocationIntent::ScheduleDeadline { id, .. } => id,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            adapter.deadline(id, 351, 4).as_slice(),
+            [InvocationIntent::OpenRadial { .. }]
+        ));
+        assert!(matches!(
+            adapter.request_radial_close().as_slice(),
+            [InvocationIntent::CancelRadialLifecycle {
+                id: actual,
+                reason: LifecycleCancellation::SessionReplaced
+            }] if *actual == id
+        ));
+        adapter.process(e(0x23, KeyTransition::Up, 352), PriorityOwner::Launcher);
+        assert!(adapter.request_radial_close().is_empty());
+    }
+
+    #[test]
+    fn escape_request_closes_the_current_session_once() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let down = adapter.process(e(0x23, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        let id = match down.intents[0] {
+            InvocationIntent::ScheduleDeadline { id, .. } => id,
+            _ => unreachable!(),
+        };
+        adapter.deadline(id, 351, 4);
+        let session_id = SessionId::new("escape-active");
+        adapter.feedback(InvocationEvent::RadialSessionOpened {
+            id,
+            session_id: session_id.clone(),
+        });
+        let intents = adapter.request_radial_close();
+        assert!(matches!(
+            intents.as_slice(),
+            [InvocationIntent::CloseRadial {
+                session_id: Some(actual)
+            }] if actual == &session_id
+        ));
+        assert!(adapter.request_radial_close().is_empty());
+    }
+
+    #[test]
+    fn external_session_feedback_is_owned_by_shared_close_and_escape_routes() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        let external_id = InvocationId(1 << 63);
+        let session_id = SessionId::new("external-session");
+        assert!(
+            adapter
+                .feedback(InvocationEvent::ExternalSessionAdmitted {
+                    id: external_id,
+                    menu_id: MenuId::new("starter"),
+                    context_token: external_id.0,
+                    interaction: InteractionMode::StickyClick,
+                })
+                .is_empty()
+        );
+        assert!(
+            adapter
+                .feedback(InvocationEvent::ExternalSessionOpened {
+                    id: external_id,
+                    session_id: session_id.clone(),
+                    menu_id: MenuId::new("starter"),
+                    context_token: external_id.0,
+                    interaction: InteractionMode::StickyClick,
+                })
+                .is_empty()
+        );
+        assert!(matches!(
+            adapter.radial_lifecycle(),
+            RadialLifecycle::Active {
+                id,
+                session_id: actual,
+                ..
+            } if *id == external_id && actual == &session_id
+        ));
+
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        }
+        let shared = adapter.process(e(0x23, KeyTransition::Down, 2), PriorityOwner::Launcher);
+        assert!(shared.consume);
+        let shared_id = match shared.intents.as_slice() {
+            [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            adapter.deadline(shared_id, 352, 4).as_slice(),
+            [InvocationIntent::CloseRadial {
+                session_id: Some(actual)
+            }] if actual == &session_id
+        ));
+        adapter.process(e(0x23, KeyTransition::Up, 3), PriorityOwner::Launcher);
+        adapter.feedback(InvocationEvent::RadialSessionClosed { id: external_id });
+
+        let second_external_id = InvocationId((1 << 63) + 1);
+        let second_session_id = SessionId::new("external-session-2");
+        adapter.feedback(InvocationEvent::ExternalSessionAdmitted {
+            id: second_external_id,
+            menu_id: MenuId::new("starter"),
+            context_token: second_external_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+        adapter.feedback(InvocationEvent::ExternalSessionOpened {
+            id: second_external_id,
+            session_id: second_session_id.clone(),
+            menu_id: MenuId::new("starter"),
+            context_token: second_external_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+        let mut escape = EscapeOwnership::default();
+        let down = route_escape_event(
+            &mut escape,
+            &mut adapter,
+            KeyEvent {
+                vk: 0x1B,
+                transition: KeyTransition::Down,
+                at: 4,
+                provenance: InputProvenance::Physical,
+            },
+            true,
+            Default::default(),
+            false,
+        )
+        .expect("active external session owns Escape");
+        assert!(down.consume);
+        assert!(matches!(
+            down.intents.as_slice(),
+            [InvocationIntent::CloseRadial {
+                session_id: Some(actual)
+            }] if actual == &second_session_id
+        ));
+        let up = route_escape_event(
+            &mut escape,
+            &mut adapter,
+            KeyEvent {
+                vk: 0x1B,
+                transition: KeyTransition::Up,
+                at: 5,
+                provenance: InputProvenance::Physical,
+            },
+            true,
+            Default::default(),
+            false,
+        )
+        .expect("Escape release drains ownership");
+        assert!(up.consume && up.intents.is_empty());
+    }
+
+    #[test]
+    fn external_replacement_retargets_shared_hold_and_escape_to_new_session() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        let old_id = InvocationId(8_100);
+        let old_session = SessionId::new("replacement-old");
+        adapter.feedback(InvocationEvent::ExternalSessionAdmitted {
+            id: old_id,
+            menu_id: MenuId::new("starter"),
+            context_token: old_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+        adapter.feedback(InvocationEvent::ExternalSessionOpened {
+            id: old_id,
+            session_id: old_session,
+            menu_id: MenuId::new("starter"),
+            context_token: old_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+
+        let new_id = InvocationId(8_101);
+        let new_session = SessionId::new("replacement-new");
+        adapter.feedback(InvocationEvent::ExternalSessionAdmitted {
+            id: new_id,
+            menu_id: MenuId::new("replacement"),
+            context_token: new_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+        assert!(
+            matches!(adapter.radial_lifecycle(), RadialLifecycle::Opening { id, .. } if *id == new_id)
+        );
+        adapter.feedback(InvocationEvent::ExternalSessionOpened {
+            id: new_id,
+            session_id: new_session.clone(),
+            menu_id: MenuId::new("replacement"),
+            context_token: new_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+
+        // A late close from the replaced session cannot clear the new Escape
+        // lease. Exercise the same correlated feedback boundary as the hook.
+        let mut escape = EscapeOwnership::default();
+        escape.feedback_correlated(
+            &InvocationEvent::ExternalSessionOpened {
+                id: new_id,
+                session_id: new_session.clone(),
+                menu_id: MenuId::new("replacement"),
+                context_token: new_id.0,
+                interaction: InteractionMode::StickyClick,
+            },
+            adapter.radial_lifecycle(),
+        );
+        escape.feedback_correlated(
+            &InvocationEvent::RadialSessionClosed { id: old_id },
+            adapter.radial_lifecycle(),
+        );
+        let down = route_escape_event(
+            &mut escape,
+            &mut adapter,
+            KeyEvent {
+                vk: 0x1B,
+                transition: KeyTransition::Down,
+                at: 20,
+                provenance: InputProvenance::Physical,
+            },
+            true,
+            Default::default(),
+            false,
+        )
+        .expect("replacement lifecycle owns Escape");
+        assert!(matches!(
+            down.intents.as_slice(),
+            [InvocationIntent::CloseRadial {
+                session_id: Some(actual)
+            }] if actual == &new_session
+        ));
+        let up = route_escape_event(
+            &mut escape,
+            &mut adapter,
+            KeyEvent {
+                vk: 0x1B,
+                transition: KeyTransition::Up,
+                at: 21,
+                provenance: InputProvenance::Physical,
+            },
+            true,
+            Default::default(),
+            false,
+        )
+        .expect("matching Escape release is consumed");
+        assert!(up.consume);
+    }
+
+    #[test]
+    fn shared_hold_after_external_replacement_closes_only_new_session() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        let old_id = InvocationId(8_200);
+        adapter.feedback(InvocationEvent::ExternalSessionAdmitted {
+            id: old_id,
+            menu_id: MenuId::new("starter"),
+            context_token: old_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+        adapter.feedback(InvocationEvent::ExternalSessionOpened {
+            id: old_id,
+            session_id: SessionId::new("old-replaced-session"),
+            menu_id: MenuId::new("starter"),
+            context_token: old_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+
+        let new_id = InvocationId(8_201);
+        let new_session = SessionId::new("new-replaced-session");
+        adapter.feedback(InvocationEvent::ExternalSessionAdmitted {
+            id: new_id,
+            menu_id: MenuId::new("replacement"),
+            context_token: new_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+        adapter.feedback(InvocationEvent::ExternalSessionOpened {
+            id: new_id,
+            session_id: new_session.clone(),
+            menu_id: MenuId::new("replacement"),
+            context_token: new_id.0,
+            interaction: InteractionMode::StickyClick,
+        });
+
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 1), PriorityOwner::Launcher);
+        }
+        let down = adapter.process(e(0x23, KeyTransition::Down, 2), PriorityOwner::Launcher);
+        let cycle = match down.intents.as_slice() {
+            [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            adapter.deadline(cycle, 352, 4).as_slice(),
+            [InvocationIntent::CloseRadial {
+                session_id: Some(actual)
+            }] if actual == &new_session
+        ));
+        assert!(
+            adapter
+                .process(e(0x23, KeyTransition::Up, 353), PriorityOwner::Launcher)
+                .consume
+        );
+    }
+
+    #[test]
     fn lifecycle_matrix_cancels_pending_and_active_without_legacy_fallback() {
         let reasons = [
             LifecycleCancellation::SettingsReload,
@@ -2858,10 +3408,10 @@ mod tests {
                 _ => unreachable!(),
             };
             let cancellation = pending.cancel_lifecycle(reason);
-            assert!(cancellation.iter().any(|intent| matches!(
-                intent,
-                InvocationIntent::CancelRadialLifecycle { reason: actual, .. } if *actual == reason
-            )));
+            assert!(matches!(
+                cancellation.as_slice(),
+                [InvocationIntent::CancelDeadline { id: cancelled }] if *cancelled == id
+            ));
             assert!(
                 !cancellation
                     .iter()

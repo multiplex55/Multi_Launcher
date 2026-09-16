@@ -691,7 +691,7 @@ impl eframe::App for LauncherApp {
             // reset any queued toggle when window not visible
             self.help_flag.store(false, Ordering::SeqCst);
         }
-        if do_restore {
+        if do_restore && self.visible_flag.load(Ordering::SeqCst) {
             tracing::debug!("Restoring window on restore_flag");
             apply_visibility(
                 true,

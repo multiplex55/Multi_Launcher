@@ -575,7 +575,7 @@ fn practice_mode_suppresses_execute_action() {
     service.update_config(config);
 
     let (tx, rx) = std::sync::mpsc::channel();
-    register_event_sender(tx);
+    let _event_sink = register_event_sender(tx);
 
     assert!(handle.emit(HookEvent::RButtonDown));
     sleep(Duration::from_millis(5));

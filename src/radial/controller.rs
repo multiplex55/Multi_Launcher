@@ -118,6 +118,15 @@ impl Drop for HandoffDeadlineScheduler {
 #[derive(Clone, Debug)]
 pub enum ControllerEvent {
     ToggleLegacyLauncher,
+    /// The controller accepted an externally initiated open. The main thread
+    /// correlates the invocation id with its command metadata and admits that
+    /// lifecycle to the shared input service before forwarding preparation.
+    ExternalSessionAdmitted {
+        invocation_id: InvocationId,
+    },
+    InvocationCompleted {
+        invocation_id: InvocationId,
+    },
     Opened {
         invocation_id: InvocationId,
         session_id: SessionId,
@@ -137,6 +146,13 @@ pub enum ControllerEvent {
     },
     PrepareRequested(RadialPrepareEnvelope),
     Error(String),
+}
+
+/// The owner of keyboard input while a radial session is present.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GridKeyboardOwner {
+    RadialMenu,
+    LegacyLauncher,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticRecord {
@@ -265,6 +281,7 @@ pub struct RadialController {
     queued_item_activation: Option<QueuedItemActivation>,
     release_aliases: BTreeMap<InvocationId, InvocationId>,
     release_waits: BTreeMap<InvocationId, BTreeSet<InvocationId>>,
+    grid_keyboard_owner: GridKeyboardOwner,
     asset_service: Option<AssetService>,
     font_service: Option<FontLayoutService>,
     font_catalog: Option<SystemFontCatalog>,
@@ -318,6 +335,7 @@ impl RadialController {
             font_catalog: None,
             visible_resource_diagnostics: BTreeSet::new(),
             release_waits: BTreeMap::new(),
+            grid_keyboard_owner: GridKeyboardOwner::RadialMenu,
         }
     }
     pub fn replace_document(&mut self, document: Arc<RadialDocument>) {
@@ -478,6 +496,26 @@ impl RadialController {
                         &mut out,
                     )
                 }
+                InvocationIntent::OpenExternalRadial {
+                    id,
+                    menu_id,
+                    context_token,
+                    interaction,
+                    trigger_still_down,
+                } => {
+                    out.push(ControllerEvent::ExternalSessionAdmitted { invocation_id: id });
+                    let context = self.capture_context(context_token);
+                    self.request_open(
+                        id,
+                        menu_id,
+                        interaction,
+                        always_on_top,
+                        context,
+                        trigger_still_down,
+                        true,
+                        &mut out,
+                    )
+                }
                 InvocationIntent::ToggleDirectMenu {
                     id,
                     menu_id,
@@ -500,6 +538,7 @@ impl RadialController {
                             bridge.waiting = None;
                         }
                         self.close(CloseReason::Dismissed, None);
+                        out.push(ControllerEvent::InvocationCompleted { invocation_id: id });
                         continue;
                     }
                     let interaction = self
@@ -509,6 +548,7 @@ impl RadialController {
                         .find(|m| m.id == menu_id)
                         .map_or(InteractionMode::StickyClick, |m| m.interaction);
                     let context = self.capture_context(id.0);
+                    out.push(ControllerEvent::ExternalSessionAdmitted { invocation_id: id });
                     self.request_open(
                         id,
                         menu_id,
@@ -654,6 +694,9 @@ impl RadialController {
                             }
                         }
                         self.activate_item(&menu_id, &cell_id, gesture, source, &mut out);
+                        if scope == TriggerScope::Global {
+                            out.push(ControllerEvent::InvocationCompleted { invocation_id: id });
+                        }
                     } else if scope == TriggerScope::Global {
                         let interaction = self
                             .document
@@ -670,6 +713,7 @@ impl RadialController {
                             trigger_still_down,
                         });
                         let context = self.capture_context(id.0);
+                        out.push(ControllerEvent::ExternalSessionAdmitted { invocation_id: id });
                         self.request_open(
                             id,
                             menu_id,
@@ -682,9 +726,34 @@ impl RadialController {
                         );
                     }
                 }
+                InvocationIntent::HoldCancelledBeforePresentation { id } => {
+                    if self
+                        .preparation
+                        .as_ref()
+                        .and_then(|bridge| bridge.waiting.as_ref())
+                        .is_some_and(|waiting| waiting.invocation_id == id)
+                    {
+                        if let Some(bridge) = &mut self.preparation {
+                            bridge.waiting = None;
+                        }
+                    }
+                    if self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.invocation_id == id)
+                    {
+                        self.close(CloseReason::Dismissed, None);
+                    }
+                    if self
+                        .queued_item_activation
+                        .as_ref()
+                        .is_some_and(|queued| queued.id == id)
+                    {
+                        self.queued_item_activation = None;
+                    }
+                }
                 InvocationIntent::ScheduleDeadline { .. }
-                | InvocationIntent::CancelDeadline { .. }
-                | InvocationIntent::HoldCancelledBeforePresentation { .. } => {}
+                | InvocationIntent::CancelDeadline { .. } => {}
             }
         }
         out
@@ -1061,6 +1130,11 @@ impl RadialController {
                     p.invocation_id,
                     p.layout.center,
                 );
+                let keyboard_event = match self.grid_keyboard_owner {
+                    GridKeyboardOwner::RadialMenu => SessionEvent::ResumeKeyboard,
+                    GridKeyboardOwner::LegacyLauncher => SessionEvent::SuspendKeyboard,
+                };
+                reducer.reduce(keyboard_event);
                 if let Some(root) = reducer.state.stack.last_mut() {
                     root.scale_factor = p.layout.scale_factor.get();
                     root.page_count = p
@@ -2380,6 +2454,43 @@ impl RadialController {
                 .then(|| (active.session_id.clone(), active.menu_id.clone()))
         })
     }
+    /// Keep the radial tree visible while giving keyboard focus to the legacy
+    /// launcher grid. Pointer interaction can resume menu ownership through
+    /// the existing `MenuInteraction` event.
+    pub fn suspend_active_keyboard(&mut self) {
+        self.set_grid_keyboard_owner(GridKeyboardOwner::LegacyLauncher);
+    }
+    /// Return keyboard ownership to the still-visible radial tree after the
+    /// legacy launcher grid is hidden again.  The native session and pointer
+    /// state remain untouched, so a no-mouse grid toggle cannot lose context.
+    pub fn resume_active_keyboard(&mut self) {
+        self.set_grid_keyboard_owner(GridKeyboardOwner::RadialMenu);
+    }
+    pub fn set_grid_keyboard_owner(&mut self, owner: GridKeyboardOwner) {
+        self.grid_keyboard_owner = owner;
+        let Some(session_id) = self.active.as_ref().map(|active| active.session_id.clone()) else {
+            return;
+        };
+        let event = match owner {
+            GridKeyboardOwner::RadialMenu => SessionEvent::ResumeKeyboard,
+            GridKeyboardOwner::LegacyLauncher => SessionEvent::SuspendKeyboard,
+        };
+        let mut ignored = Vec::new();
+        self.session_event(&session_id, event, &mut ignored);
+    }
+    pub fn grid_keyboard_owner(&self) -> GridKeyboardOwner {
+        self.grid_keyboard_owner
+    }
+    /// Transfer keyboard ownership for one legacy-grid toggle. The caller
+    /// supplies the grid state immediately before that edge so several queued
+    /// toggles remain ordered without synthesizing pointer movement.
+    pub fn handle_legacy_grid_toggle(&mut self, grid_was_visible: bool) {
+        if grid_was_visible {
+            self.set_grid_keyboard_owner(GridKeyboardOwner::RadialMenu);
+        } else {
+            self.set_grid_keyboard_owner(GridKeyboardOwner::LegacyLauncher);
+        }
+    }
     fn record(&mut self, session_id: Option<SessionId>, message: String) {
         if let Some(log) = &mut self.diagnostics {
             if log.len() == 64 {
@@ -2787,6 +2898,13 @@ mod tests {
     use image::{DynamicImage, ImageOutputFormat, Rgba, RgbaImage};
     use std::io::Cursor;
     use std::sync::Mutex;
+    #[derive(Default)]
+    struct NoopViewport;
+    impl crate::visibility::ViewportCtx for NoopViewport {
+        fn send_viewport_cmd(&self, _cmd: eframe::egui::ViewportCommand) {}
+
+        fn request_repaint(&self) {}
+    }
     struct Fake {
         sent: Arc<Mutex<Vec<NativeCommand>>>,
         events: Arc<Mutex<VecDeque<NativeEvent>>>,
@@ -3479,11 +3597,55 @@ mod tests {
             }],
             false,
         );
-        let ControllerEvent::PrepareRequested(envelope) = &events[0] else {
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ControllerEvent::ExternalSessionAdmitted {
+                invocation_id: InvocationId(77),
+                ..
+            }
+        )));
+        let Some(ControllerEvent::PrepareRequested(envelope)) = events
+            .iter()
+            .find(|event| matches!(event, ControllerEvent::PrepareRequested(_)))
+        else {
             panic!("expected preparation")
         };
         assert!(!envelope.request.allow_context_rules);
         assert_eq!(envelope.request.requested_menu_id.as_str(), "starter");
+    }
+    #[test]
+    fn external_open_admission_precedes_native_preparation() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events, made);
+        let (tx, rx) = mpsc::channel();
+        let (wake, _wake_rx) = mpsc::channel();
+        controller.preparation = Some(PreparationBridge {
+            tx,
+            rx,
+            wake,
+            next_generation: 1,
+            waiting: None,
+        });
+        let events = controller.handle_intents(
+            vec![InvocationIntent::OpenExternalRadial {
+                id: InvocationId(78),
+                menu_id: MenuId::new("starter"),
+                context_token: 780,
+                interaction: InteractionMode::StickyClick,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ControllerEvent::ExternalSessionAdmitted {
+                    invocation_id: InvocationId(78)
+                },
+                ControllerEvent::PrepareRequested(_)
+            ]
+        ));
     }
     #[test]
     fn backend_failure_does_not_publish_pending_or_active() {
@@ -3543,7 +3705,7 @@ mod tests {
             }],
             false,
         );
-        controller.handle_intents(
+        let completed = controller.handle_intents(
             vec![InvocationIntent::ToggleDirectMenu {
                 id: InvocationId(11),
                 menu_id: MenuId::new("starter"),
@@ -3554,11 +3716,17 @@ mod tests {
             false,
         );
         assert!(matches!(
+            completed.as_slice(),
+            [ControllerEvent::InvocationCompleted {
+                invocation_id: InvocationId(11)
+            }]
+        ));
+        assert!(matches!(
             sent.lock().unwrap().last(),
             Some(NativeCommand::Close { .. })
         ));
 
-        controller.handle_intents(
+        let replaced = controller.handle_intents(
             vec![InvocationIntent::ToggleDirectMenu {
                 id: InvocationId(12),
                 menu_id: MenuId::new("second"),
@@ -3568,6 +3736,13 @@ mod tests {
             }],
             false,
         );
+        assert!(replaced.iter().any(|event| matches!(
+            event,
+            ControllerEvent::ExternalSessionAdmitted {
+                invocation_id: InvocationId(12),
+                ..
+            }
+        )));
         assert!(matches!(
             sent.lock().unwrap().last(),
             Some(NativeCommand::Open { .. })
@@ -3576,6 +3751,241 @@ mod tests {
             controller.pending.as_ref().unwrap().menu_id.as_str(),
             "second"
         );
+    }
+
+    #[test]
+    fn legacy_grid_toggle_round_trip_restores_radial_keyboard_without_mouse() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events.clone(), made);
+        controller.handle_intents(
+            vec![InvocationIntent::ToggleDirectMenu {
+                id: InvocationId(1_001),
+                menu_id: MenuId::new("starter"),
+                primary_key: 0x54,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+        let original_scope = controller.active_input_scope();
+        assert!(original_scope.is_some());
+
+        // Two queued hidden -> visible -> hidden edges must be preserved even
+        // though viewport commands are applied only after this event batch.
+        let visibility = AtomicBool::new(false);
+        let mut toggles = crate::visibility::VisibilityToggleBatch::default();
+        let first_was_visible = toggles.record_toggle(&visibility);
+        assert!(!first_was_visible);
+        controller.handle_legacy_grid_toggle(first_was_visible);
+        assert!(controller.active_input_scope().is_none());
+
+        let second_was_visible = toggles.record_toggle(&visibility);
+        assert!(second_was_visible);
+        controller.handle_legacy_grid_toggle(second_was_visible);
+        assert!(!visibility.load(Ordering::SeqCst));
+        assert_eq!(toggles.final_visible(), Some(false));
+        assert_eq!(controller.active_input_scope(), original_scope);
+    }
+
+    #[test]
+    fn legacy_hotkey_trigger_transfers_keyboard_for_direct_radial_session() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events.clone(), made);
+        controller.handle_intents(
+            vec![InvocationIntent::ToggleDirectMenu {
+                id: InvocationId(1_003),
+                menu_id: MenuId::new("starter"),
+                primary_key: 0x54,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id,
+            layout_generation: generation,
+        });
+        controller.poll();
+        let original_scope = controller.active_input_scope();
+        assert!(original_scope.is_some());
+
+        let trigger = crate::hotkey::HotkeyTrigger::new(
+            crate::hotkey::parse_hotkey("End").expect("test hotkey parses"),
+        );
+        let visibility = Arc::new(AtomicBool::new(false));
+        let restore_flag = Arc::new(AtomicBool::new(false));
+        let ctx = Arc::new(Mutex::new(Some(NoopViewport)));
+        let mut queued_visibility = None;
+
+        *trigger.open.lock().unwrap() = true;
+        assert!(crate::visibility::handle_visibility_trigger_with_owner(
+            &trigger,
+            &visibility,
+            &restore_flag,
+            &ctx,
+            &mut queued_visibility,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
+        ));
+        assert!(visibility.load(Ordering::SeqCst));
+        assert!(controller.active_input_scope().is_none());
+
+        *trigger.open.lock().unwrap() = true;
+        assert!(crate::visibility::handle_visibility_trigger_with_owner(
+            &trigger,
+            &visibility,
+            &restore_flag,
+            &ctx,
+            &mut queued_visibility,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
+        ));
+        assert!(!visibility.load(Ordering::SeqCst));
+        assert_eq!(controller.active_input_scope(), original_scope);
+    }
+
+    #[test]
+    fn grid_keyboard_owner_persists_from_opening_through_native_ready() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events.clone(), made);
+        controller.handle_intents(
+            vec![InvocationIntent::ToggleDirectMenu {
+                id: InvocationId(1_002),
+                menu_id: MenuId::new("starter"),
+                primary_key: 0x54,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+
+        // The grid is shown while native preparation is still pending. There
+        // is no active reducer to suspend yet, so the controller must retain
+        // this owner and apply it when the session becomes Ready.
+        let trigger = crate::hotkey::HotkeyTrigger::new(
+            crate::hotkey::parse_hotkey("End").expect("test hotkey parses"),
+        );
+        let visibility = Arc::new(AtomicBool::new(false));
+        let restore_flag = Arc::new(AtomicBool::new(false));
+        let ctx = Arc::new(Mutex::new(Some(NoopViewport)));
+        let mut queued_visibility = None;
+        *trigger.open.lock().unwrap() = true;
+        assert!(crate::visibility::handle_visibility_trigger_with_owner(
+            &trigger,
+            &visibility,
+            &restore_flag,
+            &ctx,
+            &mut queued_visibility,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
+        ));
+        assert!(visibility.load(Ordering::SeqCst));
+        assert_eq!(
+            controller.grid_keyboard_owner(),
+            GridKeyboardOwner::LegacyLauncher
+        );
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id,
+            layout_generation: generation,
+        });
+        controller.poll();
+        assert!(controller.active_input_scope().is_none());
+
+        // Hiding the grid returns ownership without mouse movement.
+        *trigger.open.lock().unwrap() = true;
+        assert!(crate::visibility::handle_visibility_trigger_with_owner(
+            &trigger,
+            &visibility,
+            &restore_flag,
+            &ctx,
+            &mut queued_visibility,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
+        ));
+        assert!(!visibility.load(Ordering::SeqCst));
+        assert_eq!(
+            controller.grid_keyboard_owner(),
+            GridKeyboardOwner::RadialMenu
+        );
+        assert!(controller.active_input_scope().is_some());
+    }
+
+    #[test]
+    fn active_global_item_input_publishes_explicit_terminal_completion() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events.clone(), made);
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id,
+            layout_generation: generation,
+        });
+        controller.poll();
+
+        let events = controller.handle_intents(
+            vec![InvocationIntent::ActivateItem {
+                id: InvocationId(88),
+                menu_id: MenuId::new("starter"),
+                cell_id: CellId::new("starter-root-close"),
+                gesture: ClickGesture::Primary,
+                scope: TriggerScope::Global,
+                source: crate::commands::ActivationSource::RadialShortcut,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ControllerEvent::InvocationCompleted {
+                invocation_id: InvocationId(88)
+            }
+        )));
     }
 
     #[test]

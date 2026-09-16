@@ -22,7 +22,9 @@ use multi_launcher::radial::control::{
     RadialControlMainEndpoint, RadialControlRequest, radial_control_service_with_wake, resolve_menu,
 };
 use multi_launcher::radial::controller::{ControllerEvent, RadialController};
-use multi_launcher::radial::invocation::{InvocationIntent, LifecycleCancellation};
+use multi_launcher::radial::invocation::{
+    InvocationEvent, InvocationIntent, LifecycleCancellation,
+};
 use multi_launcher::radial::item_input::compile_item_inputs;
 use multi_launcher::radial::model::{InteractionMode, InvocationId, RadialDocument};
 use multi_launcher::radial::store::{ExternalReloadOutcome, RadialStore};
@@ -31,7 +33,9 @@ use multi_launcher::radial::watch::RadialConfigWatcher;
 use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
-use multi_launcher::visibility::handle_visibility_trigger;
+use multi_launcher::visibility::{
+    VisibilityToggleBatch, handle_visibility_toggle_batch, handle_visibility_trigger_with_owner,
+};
 use multi_launcher::{indexer, logging};
 
 use eframe::{egui, icon_data};
@@ -43,7 +47,7 @@ use std::sync::{
 };
 use std::thread;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
 };
 
@@ -319,6 +323,63 @@ fn radial_invocation_config(
     }
 }
 
+fn external_radial_lifecycle_metadata(
+    intent: &InvocationIntent,
+    document: &RadialDocument,
+) -> Option<(
+    InvocationId,
+    multi_launcher::radial::model::MenuId,
+    InteractionMode,
+    u64,
+)> {
+    let (id, menu_id, requested_interaction, requested_context) = match intent {
+        InvocationIntent::OpenExternalRadial {
+            id,
+            menu_id,
+            context_token,
+            interaction,
+            ..
+        } => (*id, menu_id, Some(*interaction), Some(*context_token)),
+        InvocationIntent::ToggleDirectMenu { id, menu_id, .. } => (*id, menu_id, None, None),
+        InvocationIntent::ActivateItem {
+            id,
+            menu_id,
+            scope: multi_launcher::radial::model::TriggerScope::Global,
+            ..
+        } => (*id, menu_id, None, None),
+        _ => return None,
+    };
+    let interaction = requested_interaction.unwrap_or_else(|| {
+        document
+            .menus
+            .iter()
+            .find(|menu| menu.id == *menu_id)
+            .map_or(InteractionMode::StickyClick, |menu| menu.interaction)
+    });
+    Some((
+        id,
+        menu_id.clone(),
+        interaction,
+        requested_context.unwrap_or(id.0),
+    ))
+}
+
+type ExternalRadialMetadata = (multi_launcher::radial::model::MenuId, InteractionMode, u64);
+
+fn retire_external_radial_invocation(
+    invocations: &mut HashMap<InvocationId, ExternalRadialMetadata>,
+    invocation_id: InvocationId,
+) -> bool {
+    take_external_radial_metadata(invocations, invocation_id).is_some()
+}
+
+fn take_external_radial_metadata(
+    invocations: &mut HashMap<InvocationId, ExternalRadialMetadata>,
+    invocation_id: InvocationId,
+) -> Option<ExternalRadialMetadata> {
+    invocations.remove(&invocation_id)
+}
+
 fn related_launcher_bindings(
     settings: &Settings,
     document: &RadialDocument,
@@ -379,6 +440,9 @@ fn reject_radial_opens_while_exclusive(
             !matches!(
                 intent,
                 multi_launcher::radial::invocation::InvocationIntent::OpenRadial { .. }
+                    | multi_launcher::radial::invocation::InvocationIntent::OpenExternalRadial {
+                        ..
+                    }
                     | multi_launcher::radial::invocation::InvocationIntent::ToggleDirectMenu { .. }
                     | multi_launcher::radial::invocation::InvocationIntent::ToggleLegacyLauncher { .. }
                     | multi_launcher::radial::invocation::InvocationIntent::ActivateItem { .. }
@@ -1068,6 +1132,8 @@ fn main() -> anyhow::Result<()> {
     let mut queued_visibility: Option<bool> = None;
     let mut previous_exclusive = false;
     let mut pending_launcher_route: Option<PendingLauncherRoute> = None;
+    let mut external_radial_invocations: HashMap<InvocationId, ExternalRadialMetadata> =
+        HashMap::new();
 
     loop {
         if let Err(err) = event_rx.recv() {
@@ -1914,7 +1980,7 @@ fn main() -> anyhow::Result<()> {
                                 radial_command_invocation_id.checked_add(1).unwrap_or(1);
                             radial_notices.push(ServiceNotice {
                                 recovery: false,
-                                intents: vec![InvocationIntent::OpenRadial {
+                                intents: vec![InvocationIntent::OpenExternalRadial {
                                     id: invocation_id,
                                     menu_id,
                                     context_token: invocation_id.0,
@@ -2063,6 +2129,7 @@ fn main() -> anyhow::Result<()> {
         if exclusive {
             reject_radial_opens_while_exclusive(&mut radial_notices);
         }
+        let mut grid_toggle_batch = VisibilityToggleBatch::default();
         let mut invocation_route_failed = false;
         for notice in radial_notices {
             if let Some(cancellation) = notice.cancellation {
@@ -2072,12 +2139,46 @@ fn main() -> anyhow::Result<()> {
             if let Some(error) = notice.error {
                 tracing::error!(%error, "launcher invocation service failed closed");
             }
+            for intent in &notice.intents {
+                if let Some((id, menu_id, interaction, context_token)) =
+                    external_radial_lifecycle_metadata(intent, &radial_document)
+                {
+                    external_radial_invocations.insert(id, (menu_id, interaction, context_token));
+                }
+            }
             for event in radial_controller.handle_intents(notice.intents, settings.always_on_top) {
                 match event {
                     ControllerEvent::ToggleLegacyLauncher => {
-                        if let Ok(mut flag) = trigger.open.lock() {
-                            *flag = true
+                        let was_visible = grid_toggle_batch.record_toggle(&visibility);
+                        radial_controller.handle_legacy_grid_toggle(was_visible);
+                    }
+                    ControllerEvent::ExternalSessionAdmitted { invocation_id } => {
+                        let metadata = take_external_radial_metadata(
+                            &mut external_radial_invocations,
+                            invocation_id,
+                        );
+                        if let Some((menu_id, interaction, context_token)) = metadata {
+                            if let Some(service) = invocation_service.as_ref() {
+                                let _ =
+                                    service.feedback(InvocationEvent::ExternalSessionAdmitted {
+                                        id: invocation_id,
+                                        menu_id,
+                                        context_token,
+                                        interaction,
+                                    });
+                            }
+                        } else {
+                            tracing::error!(
+                                invocation = invocation_id.0,
+                                "external radial admission lacked its registered metadata"
+                            );
                         }
+                    }
+                    ControllerEvent::InvocationCompleted { invocation_id } => {
+                        retire_external_radial_invocation(
+                            &mut external_radial_invocations,
+                            invocation_id,
+                        );
                     }
                     ControllerEvent::Error(error) => {
                         tracing::error!(%error,"radial controller error");
@@ -2086,9 +2187,13 @@ fn main() -> anyhow::Result<()> {
                         );
                     }
                     ControllerEvent::InvocationFailed {
-                        invocation_id: _,
+                        invocation_id,
                         message,
                     } => {
+                        retire_external_radial_invocation(
+                            &mut external_radial_invocations,
+                            invocation_id,
+                        );
                         tracing::error!(%message,"radial invocation failed");
                         if let Some(service) = invocation_service.as_ref() {
                             let _ = service.cancel_lifecycle(LifecycleCancellation::HostFailure);
@@ -2098,8 +2203,15 @@ fn main() -> anyhow::Result<()> {
                         invocation_id,
                         session_id,
                     } => {
+                        retire_external_radial_invocation(
+                            &mut external_radial_invocations,
+                            invocation_id,
+                        );
                         if let Some(service) = invocation_service.as_ref() {
-                            let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionOpened{id:invocation_id,session_id});
+                            let _ = service.feedback(InvocationEvent::RadialSessionOpened {
+                                id: invocation_id,
+                                session_id,
+                            });
                         }
                     }
                     ControllerEvent::Closed {
@@ -2107,6 +2219,10 @@ fn main() -> anyhow::Result<()> {
                         reason,
                         ..
                     } => {
+                        retire_external_radial_invocation(
+                            &mut external_radial_invocations,
+                            invocation_id,
+                        );
                         if let Some(service) = invocation_service.as_ref() {
                             let event = if reason
                                 == multi_launcher::radial::native::CloseReason::ActionHandoff
@@ -2158,6 +2274,33 @@ fn main() -> anyhow::Result<()> {
         }
         for event in radial_controller.poll() {
             match event {
+                ControllerEvent::ExternalSessionAdmitted { invocation_id } => {
+                    let metadata = take_external_radial_metadata(
+                        &mut external_radial_invocations,
+                        invocation_id,
+                    );
+                    if let Some((menu_id, interaction, context_token)) = metadata {
+                        if let Some(service) = invocation_service.as_ref() {
+                            let _ = service.feedback(InvocationEvent::ExternalSessionAdmitted {
+                                id: invocation_id,
+                                menu_id,
+                                context_token,
+                                interaction,
+                            });
+                        }
+                    } else {
+                        tracing::error!(
+                            invocation = invocation_id.0,
+                            "external radial admission lacked its registered metadata"
+                        );
+                    }
+                }
+                ControllerEvent::InvocationCompleted { invocation_id } => {
+                    retire_external_radial_invocation(
+                        &mut external_radial_invocations,
+                        invocation_id,
+                    );
+                }
                 ControllerEvent::Error(error) => {
                     tracing::error!(%error,"radial native host error");
                     multi_launcher::gui::send_event(
@@ -2165,9 +2308,13 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
                 ControllerEvent::InvocationFailed {
-                    invocation_id: _,
+                    invocation_id,
                     message,
                 } => {
+                    retire_external_radial_invocation(
+                        &mut external_radial_invocations,
+                        invocation_id,
+                    );
                     tracing::error!(%message,"radial native host failed");
                     if let Some(service) = invocation_service.as_ref() {
                         let _ = service.cancel_lifecycle(LifecycleCancellation::HostFailure);
@@ -2177,8 +2324,15 @@ fn main() -> anyhow::Result<()> {
                     invocation_id,
                     session_id,
                 } => {
+                    retire_external_radial_invocation(
+                        &mut external_radial_invocations,
+                        invocation_id,
+                    );
                     if let Some(service) = invocation_service.as_ref() {
-                        let _=service.feedback(multi_launcher::radial::invocation::InvocationEvent::RadialSessionOpened{id:invocation_id,session_id});
+                        let _ = service.feedback(InvocationEvent::RadialSessionOpened {
+                            id: invocation_id,
+                            session_id,
+                        });
                     }
                 }
                 ControllerEvent::Closed {
@@ -2186,6 +2340,10 @@ fn main() -> anyhow::Result<()> {
                     reason,
                     ..
                 } => {
+                    retire_external_radial_invocation(
+                        &mut external_radial_invocations,
+                        invocation_id,
+                    );
                     if let Some(service) = invocation_service.as_ref() {
                         let event = if reason
                             == multi_launcher::radial::native::CloseReason::ActionHandoff
@@ -2197,7 +2355,10 @@ fn main() -> anyhow::Result<()> {
                         let _ = service.feedback(event);
                     }
                 }
-                ControllerEvent::ToggleLegacyLauncher => {}
+                ControllerEvent::ToggleLegacyLauncher => {
+                    let was_visible = grid_toggle_batch.record_toggle(&visibility);
+                    radial_controller.handle_legacy_grid_toggle(was_visible);
+                }
                 ControllerEvent::DispatchRequested(request) => {
                     multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialDispatch(request),
@@ -2395,7 +2556,25 @@ fn main() -> anyhow::Result<()> {
         radial_resources.reconcile(&mut radial_controller);
 
         let visibility_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handle_visibility_trigger(
+            let grid_toggles_changed = handle_visibility_toggle_batch(
+                &grid_toggle_batch,
+                &restore_flag,
+                &ctx,
+                &mut queued_visibility,
+                {
+                    let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
+                    (x as f32, y as f32)
+                },
+                settings.follow_mouse,
+                settings.static_location_enabled,
+                settings.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                settings.static_size.map(|(w, h)| (w as f32, h as f32)),
+                {
+                    let (w, h) = settings.window_size.unwrap_or((400, 220));
+                    (w as f32, h as f32)
+                },
+            );
+            let legacy_trigger_changed = handle_visibility_trigger_with_owner(
                 trigger.as_ref(),
                 &visibility,
                 &restore_flag,
@@ -2413,7 +2592,9 @@ fn main() -> anyhow::Result<()> {
                     let (w, h) = settings.window_size.unwrap_or((400, 220));
                     (w as f32, h as f32)
                 },
-            )
+                |was_visible| radial_controller.handle_legacy_grid_toggle(was_visible),
+            );
+            grid_toggles_changed || legacy_trigger_changed
         }));
 
         match visibility_result {
@@ -2925,5 +3106,58 @@ mod tests {
             notices[0].intents.as_slice(),
             [multi_launcher::radial::invocation::InvocationIntent::CancelDeadline { .. }]
         ));
+    }
+
+    #[test]
+    fn external_radial_terminal_metadata_is_retired_exactly_once() {
+        let mut invocations = HashMap::new();
+        let id = InvocationId(9_001);
+        let metadata = (
+            multi_launcher::radial::model::MenuId::new("starter"),
+            InteractionMode::StickyClick,
+            id.0,
+        );
+        invocations.insert(id, metadata.clone());
+        assert_eq!(
+            take_external_radial_metadata(&mut invocations, id),
+            Some(metadata)
+        );
+        assert!(!retire_external_radial_invocation(&mut invocations, id));
+
+        for raw_id in 9_002..9_012 {
+            let id = InvocationId(raw_id);
+            invocations.insert(
+                id,
+                (
+                    multi_launcher::radial::model::MenuId::new("starter"),
+                    InteractionMode::StickyClick,
+                    id.0,
+                ),
+            );
+            assert!(retire_external_radial_invocation(&mut invocations, id));
+        }
+        assert!(invocations.is_empty());
+    }
+
+    #[test]
+    fn external_open_metadata_preserves_requested_context_and_interaction() {
+        let document = RadialDocument::starter();
+        let id = InvocationId(9_100);
+        let intent = InvocationIntent::OpenExternalRadial {
+            id,
+            menu_id: document.default_menu_id.clone(),
+            context_token: 42,
+            interaction: InteractionMode::HoldAndClick,
+            trigger_still_down: false,
+        };
+        assert_eq!(
+            external_radial_lifecycle_metadata(&intent, &document),
+            Some((
+                id,
+                document.default_menu_id.clone(),
+                InteractionMode::HoldAndClick,
+                42,
+            ))
+        );
     }
 }

@@ -156,6 +156,8 @@ pub enum SessionEvent {
     },
     OutsideInteraction,
     MenuInteraction,
+    SuspendKeyboard,
+    ResumeKeyboard,
     SelectKeyboard {
         cell: CellId,
     },
@@ -541,6 +543,14 @@ impl SessionReducer {
                 vec![]
             }
             SessionEvent::MenuInteraction => {
+                self.state.keyboard_ownership = KeyboardOwnership::MenuNavigation;
+                vec![]
+            }
+            SessionEvent::SuspendKeyboard => {
+                self.state.keyboard_ownership = KeyboardOwnership::ExternalApplication;
+                vec![]
+            }
+            SessionEvent::ResumeKeyboard => {
                 self.state.keyboard_ownership = KeyboardOwnership::MenuNavigation;
                 vec![]
             }
