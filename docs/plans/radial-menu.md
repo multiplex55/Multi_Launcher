@@ -2,6 +2,12 @@
 
 Status: approved; M0-M5 complete
 
+> **Superseded repair track:** The approved R0-R5 runtime/Designer repair changes
+> shared tap/hold behavior, SameCenter defaults/placement, tooltip diagnostics, and
+> editor presentation. Its live status and evidence are maintained separately in
+> `docs/plans/radial-repair-and-designer.md`. Historical M0-M6 records below remain
+> immutable evidence and do not establish repair acceptance.
+
 Canonical requirements: `docs/multi_launcher_radial_codex_plan.md`
 Historical navigation notes: `docs/multi_launcher_radial_source_notes.md`
 
