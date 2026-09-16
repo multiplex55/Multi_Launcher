@@ -180,6 +180,47 @@ Milestones should be ordered so foundational abstractions are established before
 
 Prefer milestones that can each be implemented, tested, and committed independently.
 
+## Planner-to-Implementer Handoff Standard
+
+The planner should optimize for the clarity of the implementation handoff, not for
+maximizing planning work.
+
+Inspect enough repository state to identify the real architectural owner, relevant
+callers, dependencies, invariants, migration boundaries, and tests. Stop expanding the
+planning investigation once the implementer can execute the milestone confidently.
+Do not pre-implement the milestone, debug hypothetical compiler failures, or exhaustively
+inspect unrelated subsystems merely to make the plan longer. Planning should normally use
+read-only source and test inspection rather than running builds or test suites; execute
+tooling only when it is genuinely needed to resolve a concrete planning ambiguity.
+
+Each milestone handed to an implementation agent should be explicit about:
+
+* **Objective** — the concrete end state to create;
+* **Architectural ownership** — which component owns the behavior and why;
+* **Relevant current state** — only the facts the implementer would otherwise have to
+  rediscover before editing;
+* **Scope** — concrete modules, types, functions, call sites, or data flows when known;
+* **Required changes** — ordered behavior and integration steps, including migration
+  order when multiple components are involved;
+* **Invariants** — existing behavior and compatibility that must remain true;
+* **Non-goals** — nearby work that is intentionally outside the milestone;
+* **Dependencies** — earlier milestones or assumptions that must already hold;
+* **Tests** — behavior to add or migrate, including existing tests whose implementation
+  assumptions may intentionally change;
+* **Verification** — the narrowest useful commands/checks for the milestone;
+* **Done criteria** — an objective completion checklist;
+* **Genuine uncertainties** — only facts the implementer truly needs to confirm in the
+  live repository, not routine coding choices.
+
+The planner should use exact paths and symbol names when supported by inspection, but
+must not invent them. Short signatures or pseudocode are appropriate only when they
+clarify an important interface or state transition. Ordinary helper naming, local Rust
+ownership choices, compiler-driven adjustments, and equivalent low-level implementation
+details belong to the implementation agent.
+
+Use the fewest milestones that keep ownership clear and progress independently
+verifiable. Do not split work into extra planning stages solely to appear thorough.
+
 Avoid milestones such as:
 
 > Refactor command system.
@@ -808,6 +849,12 @@ If none remain, state that no known issues remain within the implemented scope.
 When operating as the parent/orchestration agent:
 
 * use specialized planning, implementation, and review agents when available;
+* hand each implementation agent one explicit milestone packet with its objective,
+  scope, required changes, invariants, non-goals, tests, verification, and done
+  criteria; do not make the implementation agent reconstruct the planner's intent
+  from a broad project narrative;
+* preserve the planner's scope boundaries when delegating; add clarification only when
+  current repository state materially changed after planning;
 * keep the parent focused on project state, milestone coordination, verification, and Git boundaries;
 * delegate repository-heavy investigation where useful;
 * execute write-heavy milestones sequentially;
@@ -819,8 +866,10 @@ When operating as the parent/orchestration agent:
 
 When operating as a child implementation agent:
 
+* treat the assigned milestone packet as the executable scope contract;
 * implement only the assigned milestone;
-* inspect necessary surrounding code;
+* inspect necessary surrounding code to validate and execute that scope, rather than
+  re-planning the overall initiative;
 * do not independently expand the overall project plan;
 * do not begin later milestones;
 * report completed changes and verification back to the parent.
