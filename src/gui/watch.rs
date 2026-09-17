@@ -720,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_designer_action_uses_launcher_show_command_then_opens_editor() {
+    fn placement_designer_action_opens_editor_without_showing_launcher() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.visible_flag.store(false, Ordering::SeqCst);
@@ -730,8 +730,8 @@ mod tests {
 
         assert!(app.open_radial_designer_from_placement(&notice, &ctx));
 
-        assert!(app.visible_flag.load(Ordering::SeqCst));
-        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
         assert!(app.is_panel_open(crate::gui::Panel::RadialEditor));
         assert_eq!(
             app.panel_stack.last(),
@@ -739,12 +739,7 @@ mod tests {
         );
         assert!(!app.radial_placement_viewport.present_requested());
         assert!(app.radial_placement_viewport.notice().is_none());
-        assert_eq!(app.test_activation_trace.len(), 1);
-        assert_eq!(app.test_activation_trace[0].0.action, "launcher:show");
-        assert_eq!(
-            app.test_activation_trace[0].1,
-            crate::commands::ActivationSource::Click
-        );
+        assert!(app.test_activation_trace.is_empty());
     }
 
     #[test]

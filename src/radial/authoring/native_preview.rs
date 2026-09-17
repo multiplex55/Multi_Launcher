@@ -1623,7 +1623,13 @@ fn active_cell_role(
     if active.reducer.state.stack.len() > 1 && cell_id.as_str() == "__center" {
         CellRole::Back
     } else {
-        cell_role(&active.document, &active.menu_id, cell_id, button)
+        cell_role(
+            &active.document,
+            &active.menu_id,
+            cell_id,
+            &active.frame.provenance,
+            button,
+        )
     }
 }
 
@@ -1631,6 +1637,7 @@ fn cell_role(
     document: &RadialDocument,
     menu_id: &MenuId,
     cell_id: &CellId,
+    projected_provenance: &BTreeMap<CellId, crate::radial::bindings::ProjectedDynamicProvenance>,
     button: Option<crate::radial::session::PointerButton>,
 ) -> CellRole {
     if cell_id.as_str().starts_with("__radial_page_next:") {
@@ -1638,9 +1645,6 @@ fn cell_role(
     }
     if cell_id.as_str().starts_with("__radial_page_previous:") {
         return CellRole::PreviousPage;
-    }
-    if cell_id.as_str().starts_with("dyn:") {
-        return CellRole::Action;
     }
     let menu = document.menus.iter().find(|menu| &menu.id == menu_id);
     if let Some(menu) = menu {
@@ -1673,6 +1677,18 @@ fn cell_role(
         if let Some(role) = binding {
             return role;
         }
+    }
+    // An authored stable ID wins over a generated projection entry if the
+    // user intentionally chose a dyn:-looking ID.
+    if projected_provenance.contains_key(cell_id)
+        && !menu.is_some_and(|menu| {
+            menu.rings
+                .iter()
+                .flat_map(|ring| &ring.cells)
+                .any(|cell| &cell.id == cell_id)
+        })
+    {
+        return CellRole::Action;
     }
     let content = menu
         .and_then(|menu| {

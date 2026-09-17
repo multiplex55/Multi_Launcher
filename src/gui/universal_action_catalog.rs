@@ -19,7 +19,7 @@ use super::{ActivationSource, LauncherApp};
 /// No runtime index from this snapshot is itself persistable. Assignment always
 /// goes through [`UniversalActionPickerRow::assignment`].
 #[derive(Clone)]
-pub(super) struct UniversalActionCatalogSnapshot {
+pub(crate) struct UniversalActionCatalogSnapshot {
     pub(super) entries: Vec<ResolvedActionTarget>,
     pub(super) recent_entries: Vec<(ResolvedActionTarget, String)>,
     pub(super) dashboard: std::sync::Arc<DashboardDataSnapshot>,
@@ -116,7 +116,7 @@ impl UniversalActionAuthoringCatalog {
         &self.rows
     }
 
-    fn build(
+    pub(crate) fn build(
         snapshot: &UniversalActionCatalogSnapshot,
         invocation: &InvocationContext,
         query: &str,
@@ -281,7 +281,7 @@ fn resolved_window(window: &WindowIdentity) -> ResolvedActionTarget {
 }
 
 impl LauncherApp {
-    pub(super) fn universal_action_catalog_snapshot(&self) -> UniversalActionCatalogSnapshot {
+    pub(crate) fn universal_action_catalog_snapshot(&self) -> UniversalActionCatalogSnapshot {
         let resolver = ActionTargetResolver;
         let custom_len = self.custom_len.min(self.actions.len());
         let resolver_context = ActionTargetResolverContext::new(

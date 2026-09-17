@@ -573,11 +573,123 @@ pub struct Settings {
     pub multi_manager: MultiManagerSettings,
     #[serde(default = "legacy_radial_feature_settings")]
     pub radial: crate::radial::model::RadialFeatureSettings,
+    /// Local-only presentation state for the independent Radial Designer.
+    /// This never participates in portable radial documents or authoring
+    /// history and is intentionally tolerant of deleted entity IDs.
+    #[serde(default)]
+    pub radial_designer: RadialDesignerPreferences,
     /// Internal durable marker for the one-time radial submenu conversion.
     /// It deliberately lives outside the authorable RadialDocument so imports
     /// and authoring undo cannot erase migration recovery state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radial_submenu_migration: Option<SubmenuPresentationMigrationReceipt>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadialDesignerMode {
+    #[default]
+    Design,
+    PreviewTest,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RadialDesignerPreferences {
+    pub window_size: (f32, f32),
+    pub window_position: Option<(f32, f32)>,
+    /// The child viewport's logical-points-to-physical-pixels scale at the
+    /// time `window_position` was recorded.  It is required to map a saved
+    /// egui position back into the Win32 virtual desktop during restoration.
+    #[serde(default)]
+    pub window_scale_factor: Option<f32>,
+    pub tree_width: f32,
+    pub inspector_width: f32,
+    pub tree_visible: bool,
+    pub inspector_visible: bool,
+    pub show_skins: bool,
+    pub active_mode: RadialDesignerMode,
+    pub zoom: f32,
+    pub pan: (f32, f32),
+    pub expanded_sections: std::collections::BTreeMap<String, bool>,
+}
+
+impl Default for RadialDesignerPreferences {
+    fn default() -> Self {
+        Self {
+            window_size: (900.0, 650.0),
+            window_position: None,
+            window_scale_factor: None,
+            tree_width: 180.0,
+            inspector_width: 300.0,
+            tree_visible: true,
+            inspector_visible: true,
+            show_skins: false,
+            active_mode: RadialDesignerMode::Design,
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+            expanded_sections: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl RadialDesignerPreferences {
+    pub const MAX_EXPANDED_SECTIONS: usize = 128;
+    pub const MIN_WINDOW_SCALE_FACTOR: f32 = 0.5;
+    pub const MAX_WINDOW_SCALE_FACTOR: f32 = 8.0;
+
+    pub fn normalized(mut self) -> Self {
+        if !self.window_size.0.is_finite() || !self.window_size.1.is_finite() {
+            self.window_size = Self::default().window_size;
+        }
+        self.window_size.0 = self.window_size.0.clamp(520.0, 2400.0);
+        self.window_size.1 = self.window_size.1.clamp(380.0, 1800.0);
+        if self
+            .window_position
+            .is_some_and(|position| !position.0.is_finite() || !position.1.is_finite())
+        {
+            self.window_position = None;
+        } else if let Some(position) = self.window_position.as_mut() {
+            position.0 = position.0.clamp(-100_000.0, 100_000.0);
+            position.1 = position.1.clamp(-100_000.0, 100_000.0);
+        }
+        if self.window_scale_factor.is_none_or(|scale| {
+            !scale.is_finite()
+                || !(Self::MIN_WINDOW_SCALE_FACTOR..=Self::MAX_WINDOW_SCALE_FACTOR).contains(&scale)
+        }) {
+            // Without the child viewport's own scale, an old logical point
+            // cannot be converted to a reliable virtual-screen coordinate.
+            // Let the OS place legacy/invalid geometry instead of guessing.
+            self.window_scale_factor = None;
+            self.window_position = None;
+        }
+        self.tree_width = if self.tree_width.is_finite() {
+            self.tree_width.clamp(120.0, 420.0)
+        } else {
+            180.0
+        };
+        self.inspector_width = if self.inspector_width.is_finite() {
+            self.inspector_width.clamp(220.0, 560.0)
+        } else {
+            300.0
+        };
+        self.zoom = if self.zoom.is_finite() {
+            self.zoom.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+        if !self.pan.0.is_finite() || !self.pan.1.is_finite() {
+            self.pan = (0.0, 0.0);
+        }
+        self.pan.0 = self.pan.0.clamp(-10_000.0, 10_000.0);
+        self.pan.1 = self.pan.1.clamp(-10_000.0, 10_000.0);
+        while self.expanded_sections.len() > Self::MAX_EXPANDED_SECTIONS {
+            if let Some(first) = self.expanded_sections.keys().next().cloned() {
+                self.expanded_sections.remove(&first);
+            }
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,6 +819,7 @@ impl Default for Settings {
             query_results_layout: QueryResultsLayoutSettings::default(),
             multi_manager: MultiManagerSettings::default(),
             radial: crate::radial::model::RadialFeatureSettings::default(),
+            radial_designer: RadialDesignerPreferences::default(),
             radial_submenu_migration: None,
         }
     }
@@ -789,6 +902,52 @@ mod tests {
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
         );
+    }
+
+    #[test]
+    fn radial_designer_preferences_are_compatible_and_bounded() {
+        let parsed: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            parsed.radial_designer,
+            super::RadialDesignerPreferences::default()
+        );
+
+        let preferences = super::RadialDesignerPreferences {
+            window_size: (f32::NAN, 10.0),
+            window_position: Some((f32::INFINITY, -200_000.0)),
+            window_scale_factor: Some(f32::NAN),
+            tree_width: -1.0,
+            inspector_width: 2_000.0,
+            tree_visible: true,
+            inspector_visible: true,
+            show_skins: true,
+            active_mode: super::RadialDesignerMode::PreviewTest,
+            zoom: 100.0,
+            pan: (50_000.0, -50_000.0),
+            expanded_sections: (0..=super::RadialDesignerPreferences::MAX_EXPANDED_SECTIONS)
+                .map(|index| (format!("section-{index}"), true))
+                .collect(),
+        }
+        .normalized();
+        assert_eq!(preferences.window_size, (900.0, 650.0));
+        assert_eq!(preferences.window_position, None);
+        assert_eq!(preferences.window_scale_factor, None);
+        assert_eq!(preferences.tree_width, 120.0);
+        assert_eq!(preferences.inspector_width, 560.0);
+        assert_eq!(preferences.zoom, 4.0);
+        assert_eq!(preferences.pan, (10_000.0, -10_000.0));
+        assert_eq!(
+            preferences.expanded_sections.len(),
+            super::RadialDesignerPreferences::MAX_EXPANDED_SECTIONS
+        );
+
+        let legacy = super::RadialDesignerPreferences {
+            window_position: Some((1_280.0, 100.0)),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(legacy.window_position, None);
+        assert_eq!(legacy.window_scale_factor, None);
     }
 
     #[test]

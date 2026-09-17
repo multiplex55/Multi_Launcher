@@ -4888,6 +4888,7 @@ mod tests {
             static_cells: Default::default(),
             dynamic: Default::default(),
             alternates: Default::default(),
+            dynamic_provenance: Default::default(),
             page: 0,
             page_count: 1,
         };
@@ -5622,6 +5623,7 @@ mod tests {
             static_cells: cells,
             dynamic: BTreeMap::new(),
             alternates,
+            dynamic_provenance: BTreeMap::new(),
             page: 0,
             page_count: 1,
         };

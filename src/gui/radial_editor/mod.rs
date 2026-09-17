@@ -2,9 +2,11 @@
 
 mod asset_picker;
 mod audio_controls;
+mod canvas;
 mod import_export;
 mod preview;
 mod skin_editor;
+mod work_area;
 
 use crate::gui::LauncherApp;
 use crate::radial::authoring::menu::{self, ResizeResolution, SubmenuDuplication};
@@ -17,9 +19,311 @@ use crate::radial::model::{
     AfterActionPolicy, CellContent, CellId, Control, DynamicSource, InteractionMode, LayoutKind,
     MenuId, RadialDocument, RingId, SubmenuPresentation,
 };
+use canvas::{
+    CanvasPoint, CanvasTransform, DesignerMode, DragPayload, PlacementDraft, PreferenceDebounce,
+    ProjectedCellProvenance, ProjectedSelection, VisitedMenuPath, WindowGeometry,
+};
 use eframe::egui;
 use import_export::PendingImport;
 use preview::{EmbeddedPreview, PreviewPreset};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+pub(crate) fn radial_designer_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("radial-designer")
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DesignerUiIntent {
+    TestAction {
+        binding: crate::radial::model::ActionBinding,
+        invocation: InvocationContext,
+        history_query: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum DesignerFileDialogRequest {
+    StyleMedia {
+        scope: skin_editor::StyleScope,
+        section: String,
+        field: String,
+        media_kind: crate::radial::model::MediaKind,
+        managed: bool,
+    },
+    CellExternalIcon {
+        menu_id: MenuId,
+        ring_id: RingId,
+        cell_id: CellId,
+    },
+    ImportManaged {
+        kind: crate::radial::model::MediaKind,
+        label: String,
+        extensions: Vec<String>,
+    },
+    PreviewPackage,
+    ExportMenu {
+        menu_id: MenuId,
+    },
+    ExportPackage {
+        roots: Vec<MenuId>,
+    },
+    ExportSkin {
+        skin_id: crate::radial::model::SkinId,
+    },
+    PreviewLegacy {
+        source: crate::radial::compatibility::CompatibilitySource,
+    },
+    ReplaceBackup,
+}
+
+#[derive(Clone, Debug)]
+enum DesignerFileDialogResult {
+    Cancelled,
+    File(std::path::PathBuf),
+    Files(Vec<std::path::PathBuf>),
+}
+
+#[derive(Default)]
+pub(crate) struct DesignerIntentBridge {
+    intents: Mutex<VecDeque<DesignerUiIntent>>,
+    /// Native dialogs are requested by the deferred viewport but must be
+    /// opened by the root update after the editor lock is released.  Keeping
+    /// this queue on the bridge makes the hand-off explicit and lets the
+    /// enqueue side wake the root exactly once per accepted request.
+    file_dialogs: Mutex<VecDeque<DesignerFileDialogRequest>>,
+    file_dialog_pending: AtomicBool,
+    /// A child viewport sets this bit once its debounced presentation state
+    /// is ready.  The bit is consumed by the root persistence boundary, so a
+    /// quiescent/hidden root still receives one explicit wake rather than
+    /// relying on a raw-frame poll.
+    preferences_ready: AtomicBool,
+    wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    viewport_wake: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl DesignerIntentBridge {
+    fn push(&self, intent: DesignerUiIntent) {
+        let accepted = if let Ok(mut intents) = self.intents.lock() {
+            if intents.len() < 64 {
+                intents.push_back(intent);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !accepted {
+            return;
+        }
+        let wake = self
+            .wake
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    fn set_wake(&self, wake: Option<Arc<dyn Fn() + Send + Sync>>) {
+        if let Ok(mut slot) = self.wake.lock() {
+            *slot = wake;
+        }
+    }
+
+    fn set_viewport_wake(&self, wake: Option<Arc<dyn Fn() + Send + Sync>>) {
+        if let Ok(mut slot) = self.viewport_wake.lock() {
+            *slot = wake;
+        }
+    }
+
+    fn wake_root(&self) {
+        let wake = self
+            .wake
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    fn wake_viewport(&self) {
+        let wake = self
+            .viewport_wake
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
+    fn enqueue_file_dialog(&self, request: DesignerFileDialogRequest) {
+        let accepted = if let Ok(mut requests) = self.file_dialogs.lock() {
+            // A stalled native dialog must not allow an unbounded queue to
+            // grow behind the root update.
+            if requests.len() < 8 {
+                requests.push_back(request);
+                self.file_dialog_pending.store(true, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if accepted {
+            // Deliberately wake only after the queue lock has been released;
+            // the root callback may synchronously inspect the bridge.
+            self.wake_root();
+        }
+    }
+
+    fn take_file_dialog(&self) -> Option<DesignerFileDialogRequest> {
+        self.file_dialogs.lock().ok().and_then(|mut requests| {
+            let request = requests.pop_front();
+            if requests.is_empty() {
+                // Update the flag while holding the same queue lock as the
+                // pop.  An enqueue that races this operation then acquires
+                // the lock afterwards and restores the pending bit instead
+                // of having its wake silently lost.
+                self.file_dialog_pending.store(false, Ordering::Release);
+            }
+            request
+        })
+    }
+
+    pub(crate) fn has_pending_file_dialog(&self) -> bool {
+        self.file_dialog_pending.load(Ordering::Acquire)
+    }
+
+    fn enqueue_preferences_ready(&self) {
+        if !self.preferences_ready.swap(true, Ordering::AcqRel) {
+            self.wake_root();
+        }
+    }
+
+    fn take_preferences_ready(&self) -> bool {
+        self.preferences_ready.swap(false, Ordering::AcqRel)
+    }
+
+    fn clear_preferences_ready(&self) {
+        self.preferences_ready.store(false, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn has_pending_preferences(&self) -> bool {
+        self.preferences_ready.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn drain(&self) -> Vec<DesignerUiIntent> {
+        self.intents
+            .lock()
+            .map(|mut intents| intents.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    fn clear(&self) {
+        if let Ok(mut intents) = self.intents.lock() {
+            intents.clear();
+        }
+        if let Ok(mut requests) = self.file_dialogs.lock() {
+            requests.clear();
+            self.file_dialog_pending.store(false, Ordering::Release);
+        }
+        // Preference readiness belongs to the root persistence hand-off.  A
+        // close may clear the request queues and unregister callbacks after
+        // setting this bit; leave it intact until ROOT consumes the saved
+        // presentation snapshot.
+    }
+}
+
+#[derive(Clone)]
+struct DesignerFrameContext {
+    feature_defaults: crate::radial::model::RadialFeatureSettings,
+    expected_diagnostics: Vec<crate::radial::diagnostics::RadialDiagnostic>,
+    action_catalog: crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
+    require_confirm_destructive: bool,
+    intent_bridge: Arc<DesignerIntentBridge>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingCellDrop {
+    source_menu: MenuId,
+    source_ring: RingId,
+    source_cell: CellId,
+    destination_menu: MenuId,
+    destination_ring: RingId,
+    destination_cell: CellId,
+    destination_index: usize,
+    generation: crate::radial::authoring::DraftGeneration,
+}
+
+/// The popup is a multi-frame editor, not a one-frame command.  Keep all
+/// editable values together with the generation and target from which they
+/// were initialized so a delayed Apply can never merge stale fields into a
+/// newer authoring draft.
+#[derive(Clone, Debug, PartialEq)]
+struct PropertiesDraft {
+    target: StableSelection,
+    generation: crate::radial::authoring::DraftGeneration,
+    label: String,
+    content_kind: u8,
+    action_binding: Option<crate::radial::model::ActionBinding>,
+    dynamic_source: u8,
+    submenu_target: Option<MenuId>,
+    icon_kind: u8,
+    original_content: CellContent,
+    original_icon: crate::radial::model::Override<crate::radial::model::MediaReference>,
+}
+
+impl PropertiesDraft {
+    fn from_cell(
+        target: StableSelection,
+        generation: crate::radial::authoring::DraftGeneration,
+        cell: &crate::radial::model::CellDefinition,
+    ) -> Self {
+        Self {
+            target,
+            generation,
+            label: cell.label.clone(),
+            content_kind: cell_content_kind_key(&cell.content),
+            action_binding: match &cell.content {
+                CellContent::Action { binding } => Some(binding.clone()),
+                _ => None,
+            },
+            dynamic_source: match &cell.content {
+                CellContent::Dynamic { source } => dynamic_source_key(source),
+                _ => 0,
+            },
+            submenu_target: match &cell.content {
+                CellContent::Submenu { menu_id } => Some(menu_id.clone()),
+                _ => None,
+            },
+            icon_kind: match &cell.icon {
+                crate::radial::model::Override::Inherit => 0,
+                crate::radial::model::Override::Clear => 1,
+                crate::radial::model::Override::Value(_) => 2,
+            },
+            original_content: cell.content.clone(),
+            original_icon: cell.icon.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_current(
+        &self,
+        target: &StableSelection,
+        generation: crate::radial::authoring::DraftGeneration,
+    ) -> bool {
+        &self.target == target && self.generation == generation
+    }
+}
 
 #[derive(Clone, Debug)]
 enum EditorCommand {
@@ -30,6 +334,7 @@ enum EditorCommand {
         destination_menu: MenuId,
         destination_ring: RingId,
         index: usize,
+        expected_generation: crate::radial::authoring::DraftGeneration,
     },
 }
 
@@ -124,7 +429,7 @@ pub(super) fn show_radial_diagnostics<'a>(
             model.actionable.len()
         ))
         .id_source(("radial-actionable-diagnostics", &id_salt))
-        .default_open(true)
+        .default_open(false)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .max_height(180.0)
@@ -176,6 +481,9 @@ pub(super) fn show_radial_diagnostics<'a>(
 
 pub(crate) struct RadialEditorState {
     pub(crate) open: bool,
+    viewport_close_pending: bool,
+    viewport_restore_pending: bool,
+    viewport_focus_pending: bool,
     session: Option<RadialAuthoringSession>,
     client: Option<AuthoringClient>,
     preview: EmbeddedPreview,
@@ -184,7 +492,14 @@ pub(crate) struct RadialEditorState {
     delete_ring_prompt: Option<(MenuId, RingId)>,
     resize_prompt: Option<menu::ResizePlan>,
     action_filter: String,
-    drag_source: Option<(MenuId, RingId, CellId)>,
+    submenu_name: String,
+    submenu_link_target: Option<MenuId>,
+    drag_source: Option<(
+        MenuId,
+        RingId,
+        CellId,
+        crate::radial::authoring::DraftGeneration,
+    )>,
     post_render: Vec<EditorCommand>,
     preview_zoom: f32,
     preview_preset: PreviewPreset,
@@ -198,12 +513,34 @@ pub(crate) struct RadialEditorState {
     style_text_inputs: std::collections::BTreeMap<String, String>,
     ring_resize_drafts: std::collections::BTreeMap<(MenuId, RingId), usize>,
     focus_restore: Option<StableSelection>,
+    preferences: crate::settings::RadialDesignerPreferences,
+    preferences_dirty: bool,
+    preference_debounce: PreferenceDebounce,
+    preferences_flush_requested: bool,
+    designer_mode: DesignerMode,
+    tree_visible: bool,
+    inspector_visible: bool,
+    tree_width: f32,
+    inspector_width: f32,
+    canvas_pan: CanvasPoint,
+    pan_drag_start: Option<CanvasPoint>,
+    visited_path: VisitedMenuPath,
+    projected_selection: Option<ProjectedSelection>,
+    drag_payload: Option<DragPayload>,
+    placement_draft: Option<PlacementDraft>,
+    pending_drop: Option<PendingCellDrop>,
+    properties_popup: Option<StableSelection>,
+    properties_draft: Option<PropertiesDraft>,
+    intent_bridge: Arc<DesignerIntentBridge>,
 }
 
 impl Default for RadialEditorState {
     fn default() -> Self {
         Self {
             open: false,
+            viewport_close_pending: false,
+            viewport_restore_pending: true,
+            viewport_focus_pending: false,
             session: None,
             client: None,
             preview: EmbeddedPreview::default(),
@@ -212,6 +549,8 @@ impl Default for RadialEditorState {
             delete_ring_prompt: None,
             resize_prompt: None,
             action_filter: String::new(),
+            submenu_name: "New submenu".into(),
+            submenu_link_target: None,
             drag_source: None,
             post_render: Vec::new(),
             preview_zoom: 1.0,
@@ -226,20 +565,484 @@ impl Default for RadialEditorState {
             style_text_inputs: Default::default(),
             ring_resize_drafts: Default::default(),
             focus_restore: None,
+            preferences: Default::default(),
+            preferences_dirty: false,
+            preference_debounce: PreferenceDebounce::default(),
+            preferences_flush_requested: false,
+            designer_mode: DesignerMode::Design,
+            tree_visible: true,
+            inspector_visible: true,
+            tree_width: 180.0,
+            inspector_width: 300.0,
+            canvas_pan: CanvasPoint::default(),
+            pan_drag_start: None,
+            visited_path: VisitedMenuPath::default(),
+            projected_selection: None,
+            drag_payload: None,
+            placement_draft: None,
+            pending_drop: None,
+            properties_popup: None,
+            properties_draft: None,
+            intent_bridge: Arc::new(DesignerIntentBridge::default()),
         }
     }
 }
 
 impl RadialEditorState {
+    pub(crate) fn set_preferences(
+        &mut self,
+        preferences: crate::settings::RadialDesignerPreferences,
+    ) {
+        let preferences = preferences.normalized();
+        self.designer_mode = match preferences.active_mode {
+            crate::settings::RadialDesignerMode::Design => DesignerMode::Design,
+            crate::settings::RadialDesignerMode::PreviewTest => DesignerMode::PreviewTest,
+        };
+        self.tree_visible = preferences.tree_visible;
+        self.inspector_visible = preferences.inspector_visible;
+        self.show_resources = preferences.show_skins;
+        self.tree_width = preferences.tree_width;
+        self.inspector_width = preferences.inspector_width;
+        self.preview_zoom = preferences.zoom;
+        self.canvas_pan = CanvasPoint::new(preferences.pan.0, preferences.pan.1);
+        self.preferences = preferences;
+        self.preferences_dirty = false;
+        self.preference_debounce.clear();
+        self.preferences_flush_requested = false;
+        self.intent_bridge.clear_preferences_ready();
+    }
+
+    fn mark_preferences_changed(&mut self) {
+        self.preferences_dirty = true;
+        self.preference_debounce.mark_changed(Instant::now());
+        self.preferences.tree_visible = self.tree_visible;
+        self.preferences.inspector_visible = self.inspector_visible;
+        self.preferences.show_skins = self.show_resources;
+        self.preferences.tree_width = self.tree_width;
+        self.preferences.inspector_width = self.inspector_width;
+        self.preferences.zoom = self.preview_zoom;
+        self.preferences.pan = (self.canvas_pan.x, self.canvas_pan.y);
+        self.preferences.active_mode = match self.designer_mode {
+            DesignerMode::Design => crate::settings::RadialDesignerMode::Design,
+            DesignerMode::PreviewTest => crate::settings::RadialDesignerMode::PreviewTest,
+        };
+    }
+
+    fn enqueue_preferences_ready_if_due(&self) {
+        if self.preferences_dirty && self.preference_debounce.ready(Instant::now()) {
+            self.intent_bridge.enqueue_preferences_ready();
+        }
+    }
+
+    pub(crate) fn take_preferences_for_persist(
+        &mut self,
+    ) -> Option<crate::settings::RadialDesignerPreferences> {
+        let signaled = self.intent_bridge.take_preferences_ready();
+        let ready = signaled || self.preference_debounce.ready(Instant::now());
+        (self.preferences_dirty && (ready || self.preferences_flush_requested)).then(|| {
+            self.preferences_dirty = false;
+            self.preference_debounce.clear();
+            self.preferences_flush_requested = false;
+            self.preferences.clone().normalized()
+        })
+    }
+
+    pub(crate) fn intent_bridge(&self) -> Arc<DesignerIntentBridge> {
+        Arc::clone(&self.intent_bridge)
+    }
+
+    /// Drain at most one native file dialog request.  The request is removed
+    /// under the editor lock, the blocking native dialog is opened without
+    /// that lock, and only then is the result applied to the session.  This is
+    /// the ownership boundary that keeps import/export dialogs independent of
+    /// the deferred viewport callback.
+    pub(crate) fn process_pending_file_dialog(shared: &Arc<Mutex<Self>>) {
+        let bridge = shared
+            .lock()
+            .ok()
+            .map(|editor| Arc::clone(&editor.intent_bridge));
+        let Some(bridge) = bridge else {
+            return;
+        };
+        let request = bridge.take_file_dialog();
+        let Some(request) = request else {
+            return;
+        };
+        let result = open_designer_file_dialog(&request);
+        if let Ok(mut editor) = shared.lock() {
+            editor.apply_file_dialog_result(request, result);
+        }
+        // Dialog completion is an event for the independent viewport.  Wake
+        // it only after the editor lock is released.
+        bridge.wake_viewport();
+    }
+
+    fn apply_file_dialog_result(
+        &mut self,
+        request: DesignerFileDialogRequest,
+        result: DesignerFileDialogResult,
+    ) {
+        let (file, files) = match result {
+            DesignerFileDialogResult::Cancelled => (None, None),
+            DesignerFileDialogResult::File(path) => (Some(path), None),
+            DesignerFileDialogResult::Files(paths) => (None, Some(paths)),
+        };
+        match request {
+            DesignerFileDialogRequest::StyleMedia {
+                scope,
+                section,
+                field,
+                media_kind,
+                managed,
+            } => {
+                let Some(path) = file else { return };
+                let selected =
+                    asset_picker::read_bounded(&path, crate::radial::assets::MAX_SOURCE_BYTES)
+                        .and_then(|bytes| {
+                            asset_picker::ResourceChoice::from_selected_file(
+                                &path, bytes, media_kind, managed,
+                            )
+                        });
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                match selected {
+                    Ok(choice) => {
+                        self.resource_notice = Some(if managed {
+                            ResourceNotice::info(choice.portability_diagnostic())
+                        } else {
+                            ResourceNotice::warning(choice.portability_diagnostic())
+                        });
+                        if let Err(error) = skin_editor::set_media_override(
+                            session, &scope, &section, &field, &choice,
+                        ) {
+                            self.resource_notice = Some(ResourceNotice::error(error));
+                        }
+                    }
+                    Err(error) => {
+                        self.resource_notice = Some(ResourceNotice::error(error));
+                    }
+                }
+            }
+            DesignerFileDialogRequest::CellExternalIcon {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => {
+                let Some(path) = file else { return };
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                let mut document = (*session.draft).clone();
+                let Some(cell) = document
+                    .menus
+                    .iter_mut()
+                    .find(|menu| menu.id == menu_id)
+                    .and_then(|menu| menu.rings.iter_mut().find(|ring| ring.id == ring_id))
+                    .and_then(|ring| ring.cells.iter_mut().find(|cell| cell.id == cell_id))
+                else {
+                    return;
+                };
+                cell.icon = crate::radial::model::Override::Value(
+                    crate::radial::model::MediaReference::ExternalFile {
+                        path: path.display().to_string(),
+                    },
+                );
+                if let Err(error) = session.replace_document_atomic(document) {
+                    self.resource_notice = Some(ResourceNotice::error(format!("{error:?}")));
+                }
+            }
+            DesignerFileDialogRequest::ImportManaged {
+                kind,
+                label,
+                extensions: _,
+            } => {
+                let Some(path) = file else { return };
+                let selected =
+                    asset_picker::read_bounded(&path, crate::radial::assets::MAX_SOURCE_BYTES)
+                        .and_then(|bytes| {
+                            asset_picker::ResourceChoice::from_selected_file(
+                                &path, bytes, kind, true,
+                            )
+                        })
+                        .and_then(|choice| {
+                            self.session
+                                .as_mut()
+                                .ok_or_else(|| "Radial authoring session unavailable".to_owned())
+                                .and_then(|session| {
+                                    asset_picker::add_resource(session, &choice).map(|_| choice)
+                                })
+                        });
+                match selected {
+                    Ok(choice) => {
+                        self.resource_notice = Some(ResourceNotice::info(format!(
+                            "{}: {}",
+                            label,
+                            choice.portability_diagnostic()
+                        )));
+                    }
+                    Err(error) => {
+                        self.resource_notice = Some(ResourceNotice::error(error));
+                    }
+                }
+            }
+            DesignerFileDialogRequest::PreviewPackage => {
+                let Some(path) = file else { return };
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                self.pending_import = match asset_picker::read_bounded(
+                    &path,
+                    crate::radial::package::MAX_PACKAGE_COMPRESSED_BYTES,
+                ) {
+                    Ok(bytes) => match PendingImport::package(&bytes, session) {
+                        Ok(preview) => Some(preview),
+                        Err(error) => {
+                            self.resource_notice = Some(ResourceNotice::error(error.to_string()));
+                            None
+                        }
+                    },
+                    Err(error) => {
+                        self.resource_notice = Some(ResourceNotice::error(error.to_string()));
+                        None
+                    }
+                };
+            }
+            DesignerFileDialogRequest::ExportMenu { menu_id } => {
+                let Some(path) = file else { return };
+                self.begin_export_package(vec![menu_id], path);
+            }
+            DesignerFileDialogRequest::ExportPackage { roots } => {
+                let Some(path) = file else { return };
+                self.begin_export_package(roots, path);
+            }
+            DesignerFileDialogRequest::ExportSkin { skin_id } => {
+                let Some(path) = file else { return };
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                if session.is_dirty() {
+                    self.resource_notice = Some(ResourceNotice::warning(
+                        "Save or apply the draft before exporting persisted package bytes",
+                    ));
+                    return;
+                }
+                match session.request_export_skin(skin_id) {
+                    Ok(request) => match &self.client {
+                        Some(client) => match client.send(request) {
+                            Ok(()) => self.export_destination = Some(path),
+                            Err(error) => session.last_error = Some(format!("{error:?}")),
+                        },
+                        None => {
+                            session.last_error = Some("Radial authoring service unavailable".into())
+                        }
+                    },
+                    Err(error) => session.last_error = Some(format!("{error:?}")),
+                }
+            }
+            DesignerFileDialogRequest::PreviewLegacy { source } => {
+                let Some(paths) = files else {
+                    return;
+                };
+                let Some(session) = self.session.as_ref() else {
+                    return;
+                };
+                match preview_legacy_files(&paths, source, session) {
+                    Ok(preview) => self.pending_import = Some(preview),
+                    Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
+                }
+            }
+            DesignerFileDialogRequest::ReplaceBackup => {
+                let Some(path) = file else { return };
+                self.replace_backup_path = Some(path);
+            }
+        }
+    }
+
+    fn begin_export_package(&mut self, roots: Vec<MenuId>, path: std::path::PathBuf) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if session.is_dirty() {
+            self.resource_notice = Some(ResourceNotice::warning(
+                "Save or apply the draft before exporting persisted package bytes",
+            ));
+            return;
+        }
+        match session.request_export_package(roots) {
+            Ok(request) => match &self.client {
+                Some(client) => match client.send(request) {
+                    Ok(()) => self.export_destination = Some(path),
+                    Err(error) => session.last_error = Some(format!("{error:?}")),
+                },
+                None => session.last_error = Some("Radial authoring service unavailable".into()),
+            },
+            Err(error) => session.last_error = Some(format!("{error:?}")),
+        }
+    }
+
+    /// Register one stable deferred viewport.  The callback owns only the
+    /// editor state and immutable service/catalog snapshots; it never borrows
+    /// `LauncherApp` or the root egui frame.
+    pub(crate) fn show_deferred(shared: &Arc<Mutex<Self>>, ctx: &egui::Context, app: &LauncherApp) {
+        let (
+            open,
+            viewport_close_pending,
+            viewport_restore_pending,
+            viewport_focus_pending,
+            preferences,
+            action_catalog,
+            feature_defaults,
+            diagnostics,
+            require_confirm,
+        ) = match shared.lock() {
+            Ok(editor) => (
+                editor.open,
+                editor.viewport_close_pending,
+                editor.viewport_restore_pending,
+                editor.viewport_focus_pending,
+                editor.preferences.clone().normalized(),
+                app.universal_action_catalog_snapshot(),
+                app.radial_feature_settings.clone(),
+                app.radial_expected_diagnostics.iter().cloned().collect(),
+                app.require_confirm_destructive,
+            ),
+            Err(_) => return,
+        };
+        if !open && !viewport_close_pending {
+            return;
+        }
+        let viewport_id = radial_designer_viewport_id();
+        let reply_ctx = ctx.clone();
+        let reply_wake: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || reply_ctx.request_repaint_of(viewport_id));
+        let intent_bridge = shared
+            .lock()
+            .map(|editor| Arc::clone(&editor.intent_bridge))
+            .unwrap_or_else(|_| Arc::new(DesignerIntentBridge::default()));
+        let root_ctx = ctx.clone();
+        intent_bridge.set_wake(Some(Arc::new(move || {
+            root_ctx.request_repaint_of(egui::ViewportId::ROOT);
+        })));
+        intent_bridge.set_viewport_wake(Some(Arc::clone(&reply_wake)));
+        if let Ok(editor) = shared.lock()
+            && let Some(client) = editor.client.as_ref()
+        {
+            client.set_reply_wake(Some(reply_wake));
+        }
+        let frame = DesignerFrameContext {
+            feature_defaults,
+            expected_diagnostics: diagnostics,
+            action_catalog,
+            require_confirm_destructive: require_confirm,
+            intent_bridge,
+        };
+        let saved_geometry = WindowGeometry {
+            position: preferences
+                .window_position
+                .map(|(x, y)| CanvasPoint::new(x, y)),
+            size: CanvasPoint::new(preferences.window_size.0, preferences.window_size.1),
+        };
+        let saved_position_scale_factor = preferences.window_scale_factor;
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("Radial Designer")
+            .with_min_inner_size([520.0, 380.0])
+            .with_resizable(true)
+            .with_visible(open);
+        if viewport_restore_pending {
+            // The initial builder only supplies a bounded size.  Desktop
+            // position and mixed-DPI normalization belong to the child
+            // callback, where the Designer's own zoom factor is known.
+            builder = builder.with_inner_size([saved_geometry.size.x, saved_geometry.size.y]);
+        }
+        let shared = Arc::clone(shared);
+        if viewport_focus_pending {
+            if let Ok(mut editor) = shared.lock() {
+                editor.viewport_focus_pending = false;
+            }
+        }
+        ctx.show_viewport_deferred(viewport_id, builder, move |child, class| {
+            let Ok(mut editor) = shared.lock() else {
+                return;
+            };
+            let close_requested = class != egui::ViewportClass::Embedded
+                && child.input(|input| input.viewport().close_requested());
+            if close_requested {
+                editor.request_close();
+                // A dirty designer must keep its deferred viewport alive long
+                // enough to show Save/Discard/Keep editing.  Clean close is
+                // handled below by sending the actual Close command.
+                if editor.open {
+                    child.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+            }
+            if !editor.open {
+                if class != egui::ViewportClass::Embedded {
+                    child.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                editor.viewport_close_pending = false;
+                return;
+            }
+            if class == egui::ViewportClass::Embedded {
+                // Embedded callbacks are not an authoring surface.  Keep the
+                // state alive for the caller to close/reopen, but never render
+                // the authoritative editor into the root viewport.
+                egui::Window::new("Radial Designer unavailable")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_size(egui::vec2(380.0, 150.0))
+                    .show(child, |ui| {
+                        ui.label("Radial Designer requires an independent viewport.");
+                        ui.small("This host only provides an embedded viewport.");
+                    });
+                return;
+            }
+            if editor.viewport_restore_pending {
+                let restored = work_area::restore_geometry(
+                    child,
+                    saved_geometry,
+                    saved_position_scale_factor,
+                    child.zoom_factor(),
+                );
+                child.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                    restored.size.x,
+                    restored.size.y,
+                )));
+                if let Some(position) = restored.position {
+                    child.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                        position.x, position.y,
+                    )));
+                }
+                editor.viewport_restore_pending = false;
+            }
+            if viewport_focus_pending && class != egui::ViewportClass::Embedded {
+                child.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            editor.viewport_ui(child, &frame, class);
+        });
+    }
+
     pub(crate) fn open(&mut self) {
         if self.open {
+            self.viewport_focus_pending = true;
             return;
         }
         self.open = true;
+        self.viewport_close_pending = false;
+        self.viewport_restore_pending = true;
+        self.viewport_focus_pending = true;
         self.close_prompt = false;
         self.drag_source = None;
         self.post_render.clear();
         self.focus_restore = None;
+        self.visited_path = VisitedMenuPath::new(RadialDocument::starter().default_menu_id);
+        self.projected_selection = None;
+        self.drag_payload = None;
+        self.placement_draft = None;
+        self.pending_drop = None;
+        self.properties_popup = None;
+        self.properties_draft = None;
+        self.pan_drag_start = None;
         let document = RadialDocument::starter();
         let mut session = RadialAuthoringSession::new(AuthoringSnapshot {
             revision: document.revision,
@@ -259,6 +1062,13 @@ impl RadialEditorState {
     pub(crate) fn open_skins(&mut self) {
         self.open();
         self.show_resources = true;
+        self.mark_preferences_changed();
+    }
+
+    pub(crate) fn open_menus(&mut self) {
+        self.open();
+        self.show_resources = false;
+        self.mark_preferences_changed();
     }
 
     #[cfg(test)]
@@ -301,6 +1111,8 @@ impl RadialEditorState {
         let document = RadialDocument::starter();
         self.open = true;
         self.client = None;
+        self.properties_popup = None;
+        self.properties_draft = None;
         self.session = Some(RadialAuthoringSession::new(AuthoringSnapshot::new(
             std::sync::Arc::new(document),
             "test",
@@ -309,15 +1121,55 @@ impl RadialEditorState {
 
     pub(crate) fn request_close(&mut self) {
         self.preview.cancel_tooltip();
+        // Window move/resize state must be persisted when close interaction
+        // ends, even if the debounce interval has not elapsed.
+        self.preferences_flush_requested = true;
+        self.preference_debounce.flush();
+        self.intent_bridge.enqueue_preferences_ready();
+        self.intent_bridge.clear();
+        self.placement_draft = None;
+        self.pending_drop = None;
+        self.properties_popup = None;
+        self.properties_draft = None;
+        // A preview preparation has no durable side effect and can be
+        // cancelled locally.  This lets an OS close finish promptly without
+        // leaving a late preparation reply attached to a hidden viewport.
+        let pending_preview = self.session.as_ref().and_then(|session| {
+            session.pending_request.filter(|pending| {
+                pending.kind == crate::radial::authoring::PendingRequestKind::PrepareEmbeddedPreview
+            })
+        });
+        if let Some(pending) = pending_preview {
+            // Preparation has no durable side effect, so it can be canceled
+            // locally.  Keep the draft alive long enough for the ordinary
+            // dirty-close decision below; a clean draft will close now while
+            // an edited draft still gets Save/Discard/Keep editing.
+            if let Some(session) = self.session.as_mut() {
+                session.cancel_pending_request(
+                    pending.id,
+                    pending.generation,
+                    pending.editor_session,
+                );
+            }
+        }
         let Some(session) = self.session.as_ref() else {
             self.open = false;
+            self.viewport_close_pending = true;
             return;
         };
+        let native_preview_active = session.native_preview_may_be_open
+            || session.native_preview_lease.is_some()
+            || session.pending_native_preview.is_some();
         match session.close_decision() {
             CloseDecision::CloseClean => {
-                self.stop_native_preview();
+                if native_preview_active {
+                    self.stop_native_preview();
+                }
+                self.preview.dispose();
                 self.release_authoring_resources();
                 self.open = false;
+                self.viewport_close_pending = true;
+                self.session = None;
             }
             CloseDecision::PromptDirty => self.close_prompt = true,
             CloseDecision::AwaitingRequest => {}
@@ -326,12 +1178,23 @@ impl RadialEditorState {
 
     pub(crate) fn force_close(&mut self) {
         self.preview.cancel_tooltip();
+        self.preferences_flush_requested = true;
+        self.preference_debounce.flush();
+        self.intent_bridge.enqueue_preferences_ready();
         self.stop_native_preview();
+        self.preview.dispose();
         self.release_authoring_resources();
         self.open = false;
+        self.viewport_close_pending = true;
+        self.viewport_restore_pending = true;
+        self.viewport_focus_pending = false;
         self.session = None;
         self.close_prompt = false;
         self.focus_restore = None;
+        self.placement_draft = None;
+        self.pending_drop = None;
+        self.properties_popup = None;
+        self.properties_draft = None;
     }
 
     fn send_commit(&mut self, disposition: CommitDisposition) {
@@ -383,14 +1246,27 @@ impl RadialEditorState {
             }
         }
         if session.is_closed() {
-            self.preview.cancel_tooltip();
+            self.preview.dispose();
             self.release_authoring_resources();
+            self.placement_draft = None;
+            self.pending_drop = None;
             self.open = false;
+            self.viewport_close_pending = true;
         }
     }
 
     fn release_authoring_resources(&mut self) {
+        if self.preferences_dirty {
+            // Preserve the final close flush before unregistering the wake
+            // callbacks.  ROOT can consume the bit after this viewport has
+            // disposed its authoring resources.
+            self.intent_bridge.enqueue_preferences_ready();
+        }
+        self.intent_bridge.set_wake(None);
+        self.intent_bridge.set_viewport_wake(None);
+        self.intent_bridge.clear();
         if let (Some(client), Some(session)) = (&self.client, &self.session) {
+            client.set_reply_wake(None);
             client.release_resources(session.editor_session());
         }
         self.client = None;
@@ -460,59 +1336,75 @@ impl RadialEditorState {
         }
     }
 
-    pub(crate) fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+    fn viewport_ui(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &DesignerFrameContext,
+        viewport_class: egui::ViewportClass,
+    ) {
+        if viewport_class == egui::ViewportClass::Embedded {
+            return;
+        }
         self.poll_replies();
         self.sync_native_preview_generation();
         if !self.open {
             return;
         }
+        if let Some(document) = self.session.as_ref().map(|session| session.draft.clone()) {
+            self.visited_path
+                .ensure_root(document.default_menu_id.clone(), |id| {
+                    document.menus.iter().any(|menu| &menu.id == id)
+                });
+        }
         let selection_before = self
             .session
             .as_ref()
             .and_then(|session| session.selection.clone());
-        let mut window_open = true;
-        egui::Window::new("Radial Menu Editor")
-            .id(egui::Id::new("radial-menu-editor"))
-            .open(&mut window_open)
-            .default_size(egui::vec2(1100.0, 720.0))
-            .show(ctx, |ui| {
-                self.toolbar(ui);
-                ui.separator();
-                let Some(session) = self.session.as_mut() else {
-                    ui.spinner();
-                    return;
-                };
-                if let Some(conflict_reason) = session
+        let tooltip_preferences =
+            crate::radial::tooltip::TooltipPreferences::from(&frame.feature_defaults);
+        let (
+            conflict_reason,
+            preview_selection,
+            prepared_preview,
+            draft,
+            generation,
+            editor_session,
+            initial_snapshot_pending,
+            show_expected_layout_diagnostics,
+        ) = match self.session.as_mut() {
+            Some(session) => {
+                let conflict_reason = session
                     .conflict
                     .as_ref()
-                    .map(|conflict| conflict.reason.clone())
-                {
-                    ui.group(|ui| {
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            format!("Conflict: {conflict_reason}"),
-                        );
-                        ui.horizontal(|ui| {
-                            for (label, resolution) in [
-                                ("Reload", ConflictResolution::Reload),
-                                ("Discard local", ConflictResolution::DiscardDraft),
-                                ("Rebase", ConflictResolution::Rebase),
-                            ] {
-                                if ui.button(label).clicked() {
-                                    let _ = session.resolve_conflict(resolution);
-                                }
-                            }
-                        });
-                    });
+                    .map(|conflict| conflict.reason.clone());
+                if self.designer_mode == DesignerMode::Design {
+                    let selected_menu =
+                        session
+                            .selection
+                            .as_ref()
+                            .and_then(|selection| match selection {
+                                StableSelection::Menu(menu_id) => Some(menu_id.clone()),
+                                StableSelection::Ring { menu_id, .. }
+                                | StableSelection::Cell { menu_id, .. } => Some(menu_id.clone()),
+                                _ => None,
+                            });
+                    if let Some(selected_menu) = selected_menu.filter(|menu_id| {
+                        session.draft.menus.iter().any(|menu| &menu.id == menu_id)
+                    }) {
+                        self.visited_path
+                            .select_menu(session.draft.default_menu_id.clone(), selected_menu);
+                    }
                 }
                 let preview_selection = session.selection.clone();
-                let feature_defaults = app.radial_feature_settings.clone();
-                let tooltip_preferences =
-                    crate::radial::tooltip::TooltipPreferences::from(&feature_defaults);
+                let preparation_preset = if self.designer_mode == DesignerMode::Design {
+                    PreviewPreset::Current
+                } else {
+                    self.preview_preset
+                };
                 self.preview.sync_preparation(
                     session,
                     self.client.as_ref(),
-                    self.preview_preset,
+                    preparation_preset,
                     preview_selection.as_ref(),
                     tooltip_preferences,
                 );
@@ -522,42 +1414,140 @@ impl RadialEditorState {
                 let editor_session = session.editor_session;
                 let initial_snapshot_pending = session.is_initial_snapshot_pending();
                 let show_expected_layout_diagnostics =
-                    feature_defaults.show_expected_layout_diagnostics;
-                if initial_snapshot_pending {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Loading the authoritative radial configuration…");
-                    });
-                }
-                show_radial_diagnostics(
-                    ui,
-                    app.radial_expected_diagnostics.iter(),
+                    frame.feature_defaults.show_expected_layout_diagnostics;
+                (
+                    conflict_reason,
+                    preview_selection,
+                    prepared_preview,
+                    draft,
+                    generation,
+                    editor_session,
+                    initial_snapshot_pending,
                     show_expected_layout_diagnostics,
-                    "runtime",
-                );
-                ui.add_enabled_ui(!initial_snapshot_pending, |ui| {
-                    self.preview_controls(ui, show_expected_layout_diagnostics);
-                    ui.columns(3, |columns: &mut [egui::Ui]| {
-                        self.tree(&mut columns[0], &feature_defaults);
-                        self.preview.ui(
-                            &mut columns[1],
-                            &draft,
-                            generation,
-                            self.preview_zoom,
-                            self.preview_preset,
-                            preview_selection.as_ref(),
-                            prepared_preview.as_deref(),
-                            editor_session,
-                            show_expected_layout_diagnostics,
-                        );
-                        self.inspector(&mut columns[2], app);
-                    });
-                    if self.show_resources {
-                        ui.separator();
-                        self.resources_ui(ui);
-                    }
+                )
+            }
+            None => {
+                egui::CentralPanel::default().show(ctx, |ui| ui.spinner());
+                return;
+            }
+        };
+
+        let expanded_sections_before = self.preferences.expanded_sections.clone();
+        let designer_body = |ui: &mut egui::Ui| {
+            self.toolbar(ui);
+            ui.separator();
+            if let Some(reason) = conflict_reason.as_deref() {
+                self.conflict_ui(ui, reason);
+                ui.separator();
+            }
+            self.preview_controls(ui, show_expected_layout_diagnostics);
+            ui.separator();
+            if initial_snapshot_pending {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading the authoritative radial configuration…");
                 });
-            });
+            }
+            show_radial_diagnostics(
+                ui,
+                frame.expected_diagnostics.iter(),
+                show_expected_layout_diagnostics,
+                "runtime",
+            );
+            ui.add_enabled_ui(
+                !initial_snapshot_pending && conflict_reason.is_none(),
+                |ui| {
+                    self.designer_controls(ui);
+                    self.pending_drop_ui(ui);
+                    let available_height = ui.available_height().max(180.0);
+                    let available_width = ui.available_width().max(320.0);
+                    let tree_width = if self.tree_visible {
+                        self.tree_width
+                            .clamp(120.0, (available_width - 260.0).max(120.0))
+                    } else {
+                        0.0
+                    };
+                    let inspector_width = if self.inspector_visible {
+                        self.inspector_width
+                            .clamp(220.0, (available_width - tree_width - 220.0).max(220.0))
+                    } else {
+                        0.0
+                    };
+                    if self.show_resources {
+                        // Skins/assets are the main bounded content in Skins
+                        // mode.  They replace the full-height canvas rather
+                        // than being appended below it, so every control is
+                        // reachable through this internal scroll region at
+                        // compact viewport sizes.
+                        egui::ScrollArea::vertical()
+                            .id_source("radial-designer-resources")
+                            .max_height(available_height)
+                            .show(ui, |ui| self.resources_ui(ui));
+                    } else {
+                        let canvas_width =
+                            (available_width - tree_width - inspector_width - 12.0).max(180.0);
+                        ui.horizontal(|ui| {
+                            if self.tree_visible {
+                                ui.allocate_ui(egui::vec2(tree_width, available_height), |ui| {
+                                    self.tree(ui, &frame.feature_defaults);
+                                });
+                                ui.separator();
+                            }
+                            ui.allocate_ui(egui::vec2(canvas_width, available_height), |ui| {
+                                self.preview.ui(
+                                    ui,
+                                    &draft,
+                                    generation,
+                                    self.preview_zoom,
+                                    self.preview_preset,
+                                    preview_selection.as_ref(),
+                                    prepared_preview.as_deref(),
+                                    editor_session,
+                                    show_expected_layout_diagnostics,
+                                    self.designer_mode,
+                                    self.session.as_mut(),
+                                    &mut self.projected_selection,
+                                    &mut self.drag_payload,
+                                    &mut self.placement_draft,
+                                    &mut self.pending_drop,
+                                    &mut self.properties_popup,
+                                    &mut self.visited_path,
+                                    &mut self.canvas_pan,
+                                    &mut self.pan_drag_start,
+                                );
+                            });
+                            if self.inspector_visible {
+                                ui.separator();
+                                ui.allocate_ui(
+                                    egui::vec2(inspector_width, available_height),
+                                    |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .id_source("radial-designer-inspector")
+                                            .max_height(available_height)
+                                            .show(ui, |ui| self.inspector(ui, frame));
+                                    },
+                                );
+                            }
+                        });
+                    }
+                },
+            );
+        };
+        // `show_deferred` handles the embedded class with a bounded status
+        // message before this body can be reached.  The authoritative editor
+        // is therefore rendered only by the independent native viewport.
+        if viewport_class != egui::ViewportClass::Embedded {
+            egui::CentralPanel::default().show(ctx, designer_body);
+        }
+        if self.preferences.expanded_sections != expanded_sections_before {
+            self.mark_preferences_changed();
+        }
+        self.properties_popup_ui(ctx, frame);
+        if self.preferences.zoom != self.preview_zoom
+            || self.preferences.pan != (self.canvas_pan.x, self.canvas_pan.y)
+        {
+            self.mark_preferences_changed();
+        }
         if !self
             .session
             .as_ref()
@@ -565,11 +1555,43 @@ impl RadialEditorState {
         {
             self.apply_post_render();
         }
-        if !window_open {
-            self.request_close();
-        }
         self.prompts(ctx);
         self.keyboard_shortcuts(ctx);
+        if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
+            let size = (rect.width(), rect.height());
+            if size.0.is_finite() && size.1.is_finite() && size.0 > 0.0 && size.1 > 0.0 {
+                let size = (size.0, size.1);
+                if self.preferences.window_size != size {
+                    self.preferences.window_size = size;
+                    self.mark_preferences_changed();
+                }
+            }
+        }
+        if viewport_class != egui::ViewportClass::Embedded {
+            if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
+                let position = (rect.min.x, rect.min.y);
+                let scale_factor = ctx.pixels_per_point();
+                if position.0.is_finite()
+                    && position.1.is_finite()
+                    && scale_factor.is_finite()
+                    && (crate::settings::RadialDesignerPreferences::MIN_WINDOW_SCALE_FACTOR
+                        ..=crate::settings::RadialDesignerPreferences::MAX_WINDOW_SCALE_FACTOR)
+                        .contains(&scale_factor)
+                {
+                    let position_changed = self.preferences.window_position != Some(position);
+                    let scale_changed = self.preferences.window_scale_factor != Some(scale_factor);
+                    if position_changed {
+                        self.preferences.window_position = Some(position);
+                    }
+                    if scale_changed {
+                        self.preferences.window_scale_factor = Some(scale_factor);
+                    }
+                    if position_changed || scale_changed {
+                        self.mark_preferences_changed();
+                    }
+                }
+            }
+        }
         let selection_after = self
             .session
             .as_ref()
@@ -577,6 +1599,464 @@ impl RadialEditorState {
         if selection_after != selection_before {
             self.focus_restore = selection_after;
         }
+        self.enqueue_preferences_ready_if_due();
+        if self.preferences_dirty && !self.preferences_flush_requested {
+            ctx.request_repaint_after(Duration::from_millis(300));
+        }
+    }
+
+    fn conflict_ui(&mut self, ui: &mut egui::Ui, reason: &str) {
+        ui.group(|ui| {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Radial configuration changed externally",
+            );
+            ui.label(reason);
+            ui.small("Choose how to reconcile the open draft before continuing to edit.");
+            ui.horizontal(|ui| {
+                if ui.button("Reload external").clicked() {
+                    self.resolve_conflict(ConflictResolution::Reload);
+                }
+                if ui.button("Discard draft").clicked() {
+                    self.resolve_conflict(ConflictResolution::DiscardDraft);
+                }
+                if ui.button("Rebase local draft").clicked() {
+                    self.resolve_conflict(ConflictResolution::Rebase);
+                }
+            });
+        });
+    }
+
+    fn properties_popup_ui(&mut self, ctx: &egui::Context, frame: &DesignerFrameContext) {
+        let Some(StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        }) = self.properties_popup.clone()
+        else {
+            return;
+        };
+        let cell = self
+            .session
+            .as_ref()
+            .and_then(|session| {
+                session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == menu_id)
+                    .and_then(|menu| menu.rings.iter().find(|ring| ring.id == ring_id))
+                    .and_then(|ring| ring.cells.iter().find(|cell| cell.id == cell_id))
+            })
+            .cloned();
+        let Some(cell) = cell else {
+            self.properties_popup = None;
+            self.properties_draft = None;
+            return;
+        };
+        let target = StableSelection::Cell {
+            menu_id: menu_id.clone(),
+            ring_id: ring_id.clone(),
+            cell_id: cell_id.clone(),
+        };
+        let generation = self
+            .session
+            .as_ref()
+            .map(|session| session.generation)
+            .unwrap_or_default();
+        // A draft is initialized exactly once for a target.  If the service
+        // advances the generation while the popup is open, retain the edits
+        // and let Apply reject the stale generation instead of silently
+        // replacing them with a newer snapshot.
+        if self
+            .properties_draft
+            .as_ref()
+            .is_none_or(|draft| draft.target != target)
+        {
+            self.properties_draft = Some(PropertiesDraft::from_cell(
+                target.clone(),
+                generation,
+                &cell,
+            ));
+        }
+        let Some(draft) = self.properties_draft.as_mut() else {
+            return;
+        };
+        let mut apply = false;
+        let mut cancel = false;
+        let mut popup_open = true;
+        let invocation_context = self
+            .session
+            .as_ref()
+            .and_then(|session| session.sampled_preview_context.clone())
+            .unwrap_or_else(|| InvocationContext::empty(0));
+        let action_rows =
+            crate::gui::universal_action_catalog::UniversalActionAuthoringCatalog::build(
+                &frame.action_catalog,
+                &invocation_context,
+                "",
+            )
+            .rows()
+            .iter()
+            .take(50)
+            .cloned()
+            .collect::<Vec<_>>();
+        let submenu_choices = self
+            .session
+            .as_ref()
+            .map(|session| {
+                session
+                    .draft
+                    .menus
+                    .iter()
+                    .filter(|menu| menu.id != menu_id)
+                    .map(|menu| (menu.id.clone(), menu.name.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        egui::Window::new("Cell properties")
+            .id(egui::Id::new(("radial-designer-cell-popup", &cell_id)))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(300.0)
+            .open(&mut popup_open)
+            .show(ctx, |ui| {
+                ui.label("Cell properties");
+                ui.add(egui::TextEdit::singleline(&mut draft.label).hint_text("Label"));
+                enum_combo(
+                    ui,
+                    "Type",
+                    &mut draft.content_kind,
+                    &[
+                        ("Spacer", 0),
+                        ("Action", 1),
+                        ("Submenu", 2),
+                        ("Dynamic source", 3),
+                        ("Control", 4),
+                    ],
+                );
+                if draft.content_kind == 3 {
+                    enum_combo(
+                        ui,
+                        "Dynamic source",
+                        &mut draft.dynamic_source,
+                        &[
+                            ("Favorites", 0),
+                            ("Recent", 1),
+                            ("Clipboard", 2),
+                            ("Snippets", 3),
+                            ("Notes", 4),
+                            ("Windows", 5),
+                            ("Macros", 6),
+                            ("Applications", 7),
+                            ("Dashboard", 8),
+                            ("Launcher results", 9),
+                            ("Launcher query", 10),
+                        ],
+                    );
+                }
+                if draft.content_kind == 1 {
+                    ui.label(if draft.action_binding.is_some() {
+                        "Action assigned"
+                    } else {
+                        "Choose an action"
+                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for row in &action_rows {
+                                let label = row.presentation.label.clone();
+                                if ui
+                                    .selectable_label(
+                                        draft.action_binding.as_ref() == row.binding.as_ref(),
+                                        label,
+                                    )
+                                    .on_hover_text(&row.target_command)
+                                    .clicked()
+                                {
+                                    draft.action_binding = row.assignment().ok();
+                                }
+                            }
+                        });
+                }
+                if draft.content_kind == 2 {
+                    egui::ComboBox::from_label("Submenu")
+                        .selected_text(
+                            draft
+                                .submenu_target
+                                .as_ref()
+                                .and_then(|target| {
+                                    submenu_choices
+                                        .iter()
+                                        .find(|(id, _)| id == target)
+                                        .map(|(_, name)| name.clone())
+                                })
+                                .unwrap_or_else(|| "Choose menu".into()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (id, name) in &submenu_choices {
+                                ui.selectable_value(
+                                    &mut draft.submenu_target,
+                                    Some(id.clone()),
+                                    name,
+                                );
+                            }
+                        });
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Icon");
+                    ui.selectable_value(&mut draft.icon_kind, 0, "Inherit");
+                    ui.selectable_value(&mut draft.icon_kind, 1, "Clear");
+                    ui.selectable_value(&mut draft.icon_kind, 2, "Keep value");
+                });
+                ui.small(
+                    "Action bindings and advanced appearance options are available in Inspector.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Open in Inspector").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if !popup_open {
+            cancel = true;
+        }
+        if cancel {
+            self.properties_popup = None;
+            self.properties_draft = None;
+            return;
+        }
+        if apply {
+            let draft = self
+                .properties_draft
+                .clone()
+                .expect("draft initialized above");
+            let content = match draft.content_kind {
+                0 => CellContent::Spacer,
+                1 => match &draft.original_content {
+                    CellContent::Action { .. } => draft
+                        .action_binding
+                        .map(|binding| CellContent::Action { binding })
+                        .unwrap_or_else(|| draft.original_content.clone()),
+                    _ => {
+                        let Some(binding) = draft.action_binding else {
+                            self.resource_notice = Some(ResourceNotice::warning(
+                                "Choose an action before applying this type",
+                            ));
+                            return;
+                        };
+                        CellContent::Action { binding }
+                    }
+                },
+                2 => {
+                    let Some(menu_id) = draft.submenu_target.clone() else {
+                        self.resource_notice = Some(ResourceNotice::warning(
+                            "Choose a submenu before applying this type",
+                        ));
+                        return;
+                    };
+                    CellContent::Submenu { menu_id }
+                }
+                3 => CellContent::Dynamic {
+                    source: dynamic_source_for_key(draft.dynamic_source),
+                },
+                _ => CellContent::Control {
+                    control: match &draft.original_content {
+                        CellContent::Control { control } => *control,
+                        _ => Control::Back,
+                    },
+                },
+            };
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            if session.generation != draft.generation {
+                self.resource_notice = Some(ResourceNotice::warning(
+                    "Cell properties draft is stale; reopen it before applying",
+                ));
+                return;
+            }
+            let mut document = (*session.draft).clone();
+            if let Some(slot) = document
+                .menus
+                .iter_mut()
+                .find(|menu| menu.id == menu_id)
+                .and_then(|menu| menu.rings.iter_mut().find(|ring| ring.id == ring_id))
+                .and_then(|ring| ring.cells.iter_mut().find(|cell| cell.id == cell_id))
+            {
+                slot.label = draft.label;
+                slot.content = content;
+                slot.icon = match draft.icon_kind {
+                    0 => crate::radial::model::Override::Inherit,
+                    1 => crate::radial::model::Override::Clear,
+                    _ => draft.original_icon,
+                };
+                if let Err(error) = menu::validate_submenu_graph(&document) {
+                    self.resource_notice = Some(ResourceNotice::error(format!(
+                        "Cell properties rejected: {error:?}"
+                    )));
+                } else if let Err(error) = session.replace_document_atomic(document) {
+                    self.resource_notice = Some(ResourceNotice::error(format!(
+                        "Cell properties failed: {error:?}"
+                    )));
+                } else {
+                    self.properties_popup = None;
+                    self.properties_draft = None;
+                    self.placement_draft = None;
+                }
+            }
+        }
+    }
+
+    fn resolve_conflict(&mut self, resolution: ConflictResolution) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if let Err(error) = session.resolve_conflict(resolution) {
+            session.last_error = Some(format!("{error:?}"));
+        } else {
+            self.preview.cancel_tooltip();
+            self.visited_path
+                .replace_invalid_tail(|id| session.draft.menus.iter().any(|menu| &menu.id == id));
+        }
+    }
+
+    fn designer_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Mode:");
+            if ui
+                .selectable_label(self.designer_mode == DesignerMode::Design, "Design")
+                .clicked()
+            {
+                self.designer_mode = DesignerMode::Design;
+                self.preview.cancel_tooltip();
+                self.mark_preferences_changed();
+            }
+            if ui
+                .selectable_label(
+                    self.designer_mode == DesignerMode::PreviewTest,
+                    "Preview / Test",
+                )
+                .clicked()
+            {
+                self.designer_mode = DesignerMode::PreviewTest;
+                self.preview.cancel_tooltip();
+                self.mark_preferences_changed();
+            }
+            ui.separator();
+            if ui.button("Fit").clicked() {
+                self.preview_zoom = 1.0;
+                self.canvas_pan = CanvasPoint::default();
+                self.pan_drag_start = None;
+                self.preview.cancel_tooltip();
+                self.mark_preferences_changed();
+            }
+            if ui.selectable_label(!self.show_resources, "Menus").clicked() {
+                self.show_resources = false;
+                self.mark_preferences_changed();
+            }
+            if ui.selectable_label(self.show_resources, "Skins").clicked() {
+                self.show_resources = true;
+                self.mark_preferences_changed();
+            }
+            if ui
+                .selectable_label(self.tree_visible, "Tree")
+                .on_hover_text("Show or hide the menu tree")
+                .clicked()
+            {
+                self.tree_visible = !self.tree_visible;
+                self.mark_preferences_changed();
+            }
+            if ui
+                .selectable_label(self.inspector_visible, "Inspector")
+                .on_hover_text("Show or hide the inspector")
+                .clicked()
+            {
+                self.inspector_visible = !self.inspector_visible;
+                self.mark_preferences_changed();
+            }
+            if self.tree_visible {
+                let response = ui.add(
+                    egui::DragValue::new(&mut self.tree_width)
+                        .prefix("Tree ")
+                        .suffix(" px")
+                        .clamp_range(120.0..=420.0),
+                );
+                if response.changed() {
+                    self.mark_preferences_changed();
+                }
+            }
+            if self.inspector_visible {
+                let response = ui.add(
+                    egui::DragValue::new(&mut self.inspector_width)
+                        .prefix("Inspector ")
+                        .suffix(" px")
+                        .clamp_range(220.0..=560.0),
+                );
+                if response.changed() {
+                    self.mark_preferences_changed();
+                }
+            }
+            ui.small("Direct Design gestures edit the draft only");
+        });
+    }
+
+    fn pending_drop_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(pending) = self.pending_drop.clone() else {
+            return;
+        };
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Destination occupied");
+                ui.small("Choose Swap to exchange both authored slots, or Cancel.");
+                if ui.button("Swap").clicked() {
+                    let result = self
+                        .session
+                        .as_mut()
+                        .ok_or(crate::radial::authoring::menu::MenuEditError::MissingEntity)
+                        .and_then(|session| {
+                            crate::radial::authoring::menu::move_cell_to_slot(
+                                session,
+                                (
+                                    &pending.source_menu,
+                                    &pending.source_ring,
+                                    &pending.source_cell,
+                                ),
+                                (
+                                    &pending.destination_menu,
+                                    &pending.destination_ring,
+                                    pending.destination_index,
+                                ),
+                                crate::radial::authoring::menu::CellDropResolution::Swap,
+                                pending.generation,
+                            )
+                        });
+                    match result {
+                        Ok(()) => self.projected_selection = None,
+                        Err(error) => {
+                            self.projected_selection = Some(ProjectedSelection {
+                                label: format!("Swap cancelled: {error:?}"),
+                                provenance: ProjectedCellProvenance::Authored {
+                                    menu_id: pending.destination_menu.clone(),
+                                    ring_id: pending.destination_ring.clone(),
+                                    cell_id: pending.destination_cell.clone(),
+                                },
+                            });
+                        }
+                    }
+                    self.pending_drop = None;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.pending_drop = None;
+                }
+            });
+        });
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -723,16 +2203,20 @@ impl RadialEditorState {
                         );
                     }
                 });
-            ui.add(
+            let zoom_response = ui.add(
                 egui::Slider::new(&mut self.preview_zoom, 0.5..=2.0)
                     .text("Zoom")
                     .logarithmic(true),
             );
+            if zoom_response.changed() {
+                self.mark_preferences_changed();
+            }
             if ui
                 .selectable_label(self.show_resources, "Skins, assets & packages")
                 .clicked()
             {
                 self.show_resources = !self.show_resources;
+                self.mark_preferences_changed();
             }
             ui.small("Preview controls are UI-only");
             ui.separator();
@@ -921,41 +2405,16 @@ impl RadialEditorState {
                                                     ("Managed file", true),
                                                     ("External file", false),
                                                 ] {
-                                                    if ui.button(label).clicked()
-                                                        && let Some(path) = rfd::FileDialog::new().pick_file()
-                                                    {
-                                                        let selected = asset_picker::read_bounded(
-                                                            &path,
-                                                            crate::radial::assets::MAX_SOURCE_BYTES,
-                                                        )
-                                                            .and_then(|bytes| {
-                                                                asset_picker::ResourceChoice::from_selected_file(
-                                                                    &path, bytes, media_kind, managed,
-                                                                )
-                                                            });
-                                                        match selected {
-                                                            Ok(choice) => {
-                                                                self.resource_notice = Some(if managed {
-                                                                    ResourceNotice::info(
-                                                                        choice.portability_diagnostic(),
-                                                                    )
-                                                                } else {
-                                                                    ResourceNotice::warning(
-                                                                        choice.portability_diagnostic(),
-                                                                    )
-                                                                });
-                                                                if let Err(error) = skin_editor::set_media_override(
-                                                                    session,
-                                                                    &scope,
-                                                                    &row.section,
-                                                                    &row.field,
-                                                                    &choice,
-                                                                ) {
-                                                                    self.resource_notice = Some(ResourceNotice::error(error));
-                                                                }
-                                                            }
-                                                            Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
-                                                        }
+                                                    if ui.button(label).clicked() {
+                                                        self.intent_bridge.enqueue_file_dialog(
+                                                            DesignerFileDialogRequest::StyleMedia {
+                                                                scope: scope.clone(),
+                                                                section: row.section.clone(),
+                                                                field: row.field.clone(),
+                                                                media_kind,
+                                                                managed,
+                                                            },
+                                                        );
                                                     }
                                                 }
                                                 if ui.button("Search-path").clicked()
@@ -1006,7 +2465,7 @@ impl RadialEditorState {
                 }
             }
         }
-        document_rule_controls(ui, session);
+        document_rule_controls(ui, session, &mut self.preferences.expanded_sections);
         ui.separator();
         ui.label("Managed assets");
         ui.horizontal(|ui| {
@@ -1022,26 +2481,17 @@ impl RadialEditorState {
                     &["wav"][..],
                 ),
             ] {
-                if ui.button(label).clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter(label, extensions)
-                        .pick_file()
-                {
-                    match asset_picker::read_bounded(&path, crate::radial::assets::MAX_SOURCE_BYTES)
-                        .and_then(|bytes| {
-                            asset_picker::ResourceChoice::from_selected_file(
-                                &path, bytes, kind, true,
-                            )
-                        })
-                        .and_then(|choice| {
-                            asset_picker::add_resource(session, &choice).map(|_| choice)
-                        }) {
-                        Ok(choice) => {
-                            self.resource_notice =
-                                Some(ResourceNotice::info(choice.portability_diagnostic()))
-                        }
-                        Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
-                    }
+                if ui.button(label).clicked() {
+                    self.intent_bridge.enqueue_file_dialog(
+                        DesignerFileDialogRequest::ImportManaged {
+                            kind,
+                            label: label.to_owned(),
+                            extensions: extensions
+                                .iter()
+                                .map(|extension| (*extension).to_owned())
+                                .collect(),
+                        },
+                    );
                 }
             }
         });
@@ -1099,53 +2549,14 @@ impl RadialEditorState {
         };
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Preview .mlradial import").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Multi Launcher radial", &["mlradial"])
-                    .pick_file()
-            {
-                self.pending_import = match asset_picker::read_bounded(
-                    &path,
-                    crate::radial::package::MAX_PACKAGE_COMPRESSED_BYTES,
-                ) {
-                    Ok(bytes) => match PendingImport::package(&bytes, session) {
-                        Ok(preview) => Some(preview),
-                        Err(error) => {
-                            self.resource_notice = Some(ResourceNotice::error(error.to_string()));
-                            None
-                        }
-                    },
-                    Err(error) => {
-                        self.resource_notice = Some(ResourceNotice::error(error.to_string()));
-                        None
-                    }
-                };
+            if ui.button("Preview .mlradial import").clicked() {
+                self.intent_bridge
+                    .enqueue_file_dialog(DesignerFileDialogRequest::PreviewPackage);
             }
             if ui.button("Export selected menu").clicked() {
                 if let Some(menu_id) = selected_menu_id(session) {
-                    if session.is_dirty() {
-                        self.resource_notice = Some(ResourceNotice::warning(
-                            "Save or apply the draft before exporting persisted package bytes",
-                        ));
-                    } else if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Multi Launcher radial", &["mlradial"])
-                        .set_file_name("menu.mlradial")
-                        .save_file()
-                    {
-                        match session.request_export_package(vec![menu_id]) {
-                            Ok(request) => match &self.client {
-                                Some(client) => match client.send(request) {
-                                    Ok(()) => self.export_destination = Some(path),
-                                    Err(error) => session.last_error = Some(format!("{error:?}")),
-                                },
-                                None => {
-                                    session.last_error =
-                                        Some("Radial authoring service unavailable".into())
-                                }
-                            },
-                            Err(error) => session.last_error = Some(format!("{error:?}")),
-                        }
-                    }
+                    self.intent_bridge
+                        .enqueue_file_dialog(DesignerFileDialogRequest::ExportMenu { menu_id });
                 }
             }
             if ui.button("Export full package").clicked() {
@@ -1155,23 +2566,14 @@ impl RadialEditorState {
                     .iter()
                     .map(|menu| menu.id.clone())
                     .collect::<Vec<_>>();
-                match begin_package_export(
-                    self.client.as_ref(),
-                    session,
-                    roots,
-                    "all-radial-menus.mlradial",
-                ) {
-                    Ok(path) => self.export_destination = path,
-                    Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
-                }
+                self.intent_bridge
+                    .enqueue_file_dialog(DesignerFileDialogRequest::ExportPackage { roots });
             }
             if ui.button("Export selected skin").clicked()
                 && let Some(StableSelection::Skin(skin_id)) = session.selection.clone()
             {
-                match begin_skin_export(self.client.as_ref(), session, skin_id, "skin.mlradial") {
-                    Ok(path) => self.export_destination = path,
-                    Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
-                }
+                self.intent_bridge
+                    .enqueue_file_dialog(DesignerFileDialogRequest::ExportSkin { skin_id });
             }
             for (label, source) in [
                 (
@@ -1183,13 +2585,9 @@ impl RadialEditorState {
                     crate::radial::compatibility::CompatibilitySource::RadialMenuV4,
                 ),
             ] {
-                if ui.button(label).clicked()
-                    && let Some(paths) = rfd::FileDialog::new().pick_files()
-                {
-                    match preview_legacy_files(&paths, source, session) {
-                        Ok(preview) => self.pending_import = Some(preview),
-                        Err(error) => self.resource_notice = Some(ResourceNotice::error(error)),
-                    }
+                if ui.button(label).clicked() {
+                    self.intent_bridge
+                        .enqueue_file_dialog(DesignerFileDialogRequest::PreviewLegacy { source });
                 }
             }
         });
@@ -1231,10 +2629,9 @@ impl RadialEditorState {
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Choose verified backup destination…").clicked() {
-                        self.replace_backup_path = rfd::FileDialog::new()
-                            .add_filter("JSON", &["json"])
-                            .set_file_name("radial-before-import.json")
-                            .save_file();
+                        self.intent_bridge.enqueue_file_dialog(
+                            DesignerFileDialogRequest::ReplaceBackup,
+                        );
                     }
                     if let Some(path) = &self.replace_backup_path {
                         ui.label(path.display().to_string());
@@ -1285,6 +2682,9 @@ impl RadialEditorState {
         let drag_source = &mut self.drag_source;
         let post_render = &mut self.post_render;
         let focus_restore = &mut self.focus_restore;
+        let expanded_sections = &mut self.preferences.expanded_sections;
+        let preferences_dirty = &mut self.preferences_dirty;
+        let visited_path = &mut self.visited_path;
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -1293,9 +2693,19 @@ impl RadialEditorState {
             for menu in &menus {
                 let menu_selected =
                     session.selection == Some(StableSelection::Menu(menu.id.clone()));
+                let expansion_key = format!("menu:{}", menu.id);
+                let default_open = expanded_sections
+                    .get(&expansion_key)
+                    .copied()
+                    // Keep the initial tree discoverable (and its stable
+                    // AccessKit names present) until the user explicitly
+                    // collapses this menu.  Once recorded, the preference is
+                    // authoritative and is never overridden by selection.
+                    .unwrap_or(true);
                 let header = egui::CollapsingHeader::new(&menu.name)
                     .id_source(menu::widget_key("menu", menu.id.as_str(), "tree"))
-                    .default_open(true)
+                    .default_open(default_open)
+                    .open(Some(default_open))
                     .show(ui, |ui| {
                         for ring in &menu.rings {
                             let ring_selection = StableSelection::Ring {
@@ -1322,6 +2732,7 @@ impl RadialEditorState {
                                 *focus_restore = None;
                             }
                             if ring_response.clicked() {
+                                visited_path.select_direct(menu.id.clone());
                                 session.select(Some(ring_selection));
                             }
                             ui.indent(
@@ -1367,6 +2778,7 @@ impl RadialEditorState {
                                             *focus_restore = None;
                                         }
                                         if response.clicked() {
+                                            visited_path.select_direct(menu.id.clone());
                                             session.select(Some(selection));
                                         }
                                         if response.drag_started() {
@@ -1374,13 +2786,18 @@ impl RadialEditorState {
                                                 menu.id.clone(),
                                                 ring.id.clone(),
                                                 cell.id.clone(),
+                                                session.generation,
                                             ));
                                         }
                                         if response.hovered()
                                             && ui.input(|input| input.pointer.any_released())
                                         {
-                                            if let Some((source_menu, source_ring, cell)) =
-                                                drag_source.take()
+                                            if let Some((
+                                                source_menu,
+                                                source_ring,
+                                                cell,
+                                                expected_generation,
+                                            )) = drag_source.take()
                                             {
                                                 post_render.push(EditorCommand::MoveCell {
                                                     source_menu,
@@ -1389,6 +2806,7 @@ impl RadialEditorState {
                                                     destination_menu: menu.id.clone(),
                                                     destination_ring: ring.id.clone(),
                                                     index,
+                                                    expected_generation,
                                                 });
                                             }
                                         }
@@ -1397,12 +2815,22 @@ impl RadialEditorState {
                             );
                         }
                     });
+                let is_open = header.body_returned.is_some();
+                let expansion_was_interacted_with = expanded_sections.contains_key(&expansion_key)
+                    || header.header_response.clicked();
+                if expansion_was_interacted_with
+                    && expanded_sections.get(&expansion_key).copied() != Some(is_open)
+                {
+                    expanded_sections.insert(expansion_key, is_open);
+                    *preferences_dirty = true;
+                }
                 if focus_restore.as_ref() == Some(&StableSelection::Menu(menu.id.clone())) {
                     header.header_response.request_focus();
                     *focus_restore = None;
                 }
                 if header.header_response.clicked() || menu_selected && session.selection.is_none()
                 {
+                    visited_path.select_direct(menu.id.clone());
                     session.select(Some(StableSelection::Menu(menu.id.clone())));
                 }
             }
@@ -1425,8 +2853,12 @@ impl RadialEditorState {
         });
     }
 
-    fn inspector(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+    fn inspector(&mut self, ui: &mut egui::Ui, frame: &DesignerFrameContext) {
         ui.heading("Inspector");
+        if let Some(selection) = self.projected_selection.clone() {
+            self.projected_selection_ui(ui, &selection);
+            ui.separator();
+        }
         let Some(selection) = self
             .session
             .as_ref()
@@ -1436,17 +2868,15 @@ impl RadialEditorState {
             return;
         };
         match selection {
-            StableSelection::Menu(menu_id) => self.menu_inspector(
-                ui,
-                menu_id,
-                app.radial_feature_settings.default_menu_id.as_ref(),
-            ),
+            StableSelection::Menu(menu_id) => {
+                self.menu_inspector(ui, menu_id, frame.feature_defaults.default_menu_id.as_ref())
+            }
             StableSelection::Ring { menu_id, ring_id } => self.ring_inspector(ui, menu_id, ring_id),
             StableSelection::Cell {
                 menu_id,
                 ring_id,
                 cell_id,
-            } => self.cell_inspector(ui, app, menu_id, ring_id, cell_id),
+            } => self.cell_inspector(ui, frame, menu_id, ring_id, cell_id),
             _ => {
                 ui.label("This entity is edited by a later milestone.");
             }
@@ -1522,7 +2952,8 @@ impl RadialEditorState {
             .cloned()
         {
             let original = edited.clone();
-            let continuous = menu_behavior_controls(ui, &mut edited);
+            let continuous =
+                menu_behavior_controls(ui, &mut edited, &mut self.preferences.expanded_sections);
             if edited != original || continuous.is_some() {
                 let mut document = (*session.draft).clone();
                 if let Some(menu) = document.menus.iter_mut().find(|menu| menu.id == menu_id) {
@@ -1573,6 +3004,54 @@ impl RadialEditorState {
                 self.delete_message = Some(format!("Delete blocked: {error:?}"));
             }
         }
+    }
+
+    fn projected_selection_ui(&mut self, ui: &mut egui::Ui, selection: &ProjectedSelection) {
+        let ProjectedCellProvenance::Dynamic {
+            menu_id,
+            ring_id,
+            source_cell_id,
+            source,
+            result_index,
+            ..
+        } = &selection.provenance
+        else {
+            return;
+        };
+        ui.group(|ui| {
+            ui.label("Generated preview result (read-only)");
+            ui.label(&selection.label);
+            ui.label(format!("Source: {source:?} · result {result_index}"));
+            let source_selection = self.session.as_ref().and_then(|session| {
+                session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| &menu.id == menu_id)
+                    .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                    .and_then(|ring| {
+                        ring.cells.iter().find_map(|cell| {
+                            (cell.id == *source_cell_id
+                                && matches!(&cell.content, CellContent::Dynamic { .. }))
+                            .then(|| StableSelection::Cell {
+                                menu_id: menu_id.clone(),
+                                ring_id: ring_id.clone(),
+                                cell_id: cell.id.clone(),
+                            })
+                        })
+                    })
+            });
+            if let Some(source_selection) = source_selection {
+                if ui.button("Edit dynamic source definition").clicked() {
+                    if let Some(session) = self.session.as_mut() {
+                        session.select(Some(source_selection));
+                    }
+                    self.projected_selection = None;
+                }
+            } else {
+                ui.small("The authored source definition is not present in this menu.");
+            }
+        });
     }
 
     fn ring_inspector(&mut self, ui: &mut egui::Ui, menu_id: MenuId, ring_id: RingId) {
@@ -1707,7 +3186,7 @@ impl RadialEditorState {
     fn cell_inspector(
         &mut self,
         ui: &mut egui::Ui,
-        app: &mut LauncherApp,
+        frame: &DesignerFrameContext,
         menu_id: MenuId,
         ring_id: RingId,
         cell_id: CellId,
@@ -1732,6 +3211,17 @@ impl RadialEditorState {
             return;
         };
         ui.label(format!("ID: {}", cell_id));
+        if self.placement_draft.as_ref().is_some_and(|draft| {
+            draft.menu_id == menu_id && draft.ring_id == ring_id && draft.cell_id == cell_id
+        }) {
+            ui.group(|ui| {
+                ui.label("Placement draft");
+                ui.small("Choose valid content below to commit this empty authored slot.");
+                if ui.button("Cancel placement").clicked() {
+                    self.placement_draft = None;
+                }
+            });
+        }
         let mut label = cell.label.clone();
         let label_response = ui
             .push_id(
@@ -1766,9 +3256,28 @@ impl RadialEditorState {
                 "Secondary after action",
                 &mut edited.secondary_after_action,
             );
-            let content_edit = cell_content_controls(ui, &session.draft, &mut edited);
-            let media_edit = cell_media_controls(ui, &session.draft, &mut edited);
-            let trigger_edit = cell_trigger_controls(ui, session, &mut edited);
+            let content_edit = cell_content_controls(
+                ui,
+                &session.draft,
+                &mut edited,
+                &mut self.preferences.expanded_sections,
+            );
+            let media_edit = cell_media_controls(
+                ui,
+                &session.draft,
+                &mut edited,
+                &self.intent_bridge,
+                &mut self.preferences.expanded_sections,
+                &menu_id,
+                &ring_id,
+                &cell_id,
+            );
+            let trigger_edit = cell_trigger_controls(
+                ui,
+                session,
+                &mut edited,
+                &mut self.preferences.expanded_sections,
+            );
             let continuous = content_edit.or(media_edit).or(trigger_edit);
             if edited != original || continuous.is_some() {
                 let mut document = (*session.draft).clone();
@@ -1783,17 +3292,84 @@ impl RadialEditorState {
                             .find(|candidate| candidate.id == cell_id)
                     })
                 {
+                    let completes_placement = matches!(&original.content, CellContent::Spacer)
+                        && !matches!(&edited.content, CellContent::Spacer);
                     *slot = edited;
-                    if let Some(edit) = continuous {
-                        let _ = dispatch_widget_document_edit(
-                            session,
-                            document,
-                            format!("cell:{menu_id}/{ring_id}/{cell_id}"),
-                            &edit.field,
-                            edit.signals,
-                        );
+                    if let Err(error) = menu::validate_submenu_graph(&document) {
+                        self.delete_message = Some(format!("Cell edit blocked: {error:?}"));
                     } else {
-                        let _ = session.replace_document_atomic(document);
+                        if let Some(edit) = continuous {
+                            let _ = dispatch_widget_document_edit(
+                                session,
+                                document,
+                                format!("cell:{menu_id}/{ring_id}/{cell_id}"),
+                                &edit.field,
+                                edit.signals,
+                            );
+                        } else {
+                            let _ = session.replace_document_atomic(document);
+                        }
+                        if completes_placement {
+                            self.placement_draft = None;
+                        }
+                    }
+                }
+            }
+        }
+        if matches!(&cell.content, CellContent::Spacer) {
+            ui.separator();
+            ui.label("Empty authored slot");
+            ui.text_edit_singleline(&mut self.submenu_name);
+            if ui.button("Create and link new submenu").clicked() {
+                if let Err(error) = menu::create_submenu_and_link(
+                    session,
+                    &menu_id,
+                    &ring_id,
+                    &cell_id,
+                    &self.submenu_name,
+                ) {
+                    self.delete_message = Some(format!("Create submenu failed: {error:?}"));
+                }
+            }
+            let mut linked_menu = self.submenu_link_target.clone();
+            if linked_menu
+                .as_ref()
+                .is_some_and(|id| !session.draft.menus.iter().any(|menu| &menu.id == id))
+            {
+                linked_menu = None;
+            }
+            egui::ComboBox::from_label("Link existing submenu")
+                .selected_text(
+                    linked_menu
+                        .as_ref()
+                        .and_then(|id| session.draft.menus.iter().find(|menu| &menu.id == id))
+                        .map_or_else(|| "Choose menu".into(), |menu| menu.name.clone()),
+                )
+                .show_ui(ui, |ui| {
+                    for menu in &session.draft.menus {
+                        if menu.id != menu_id {
+                            ui.selectable_value(
+                                &mut linked_menu,
+                                Some(menu.id.clone()),
+                                &menu.name,
+                            );
+                        }
+                    }
+                });
+            self.submenu_link_target = linked_menu.clone();
+            if ui
+                .add_enabled(linked_menu.is_some(), egui::Button::new("Link existing"))
+                .clicked()
+            {
+                if let Some(linked_menu) = linked_menu {
+                    if let Err(error) = menu::link_existing_submenu(
+                        session,
+                        &menu_id,
+                        &ring_id,
+                        &cell_id,
+                        &linked_menu,
+                    ) {
+                        self.delete_message = Some(format!("Link submenu failed: {error:?}"));
                     }
                 }
             }
@@ -1832,8 +3408,11 @@ impl RadialEditorState {
         ui.separator();
         ui.label("Universal Action");
         ui.text_edit_singleline(&mut self.action_filter);
-        let catalog =
-            app.universal_action_authoring_catalog(&invocation_context, &self.action_filter);
+        let catalog = crate::gui::universal_action_catalog::UniversalActionAuthoringCatalog::build(
+            &frame.action_catalog,
+            &invocation_context,
+            &self.action_filter,
+        );
         egui::ScrollArea::vertical()
             .max_height(260.0)
             .show(ui, |ui| {
@@ -1875,13 +3454,17 @@ impl RadialEditorState {
                                     .clicked()
                                     && let Ok(binding) = row.assignment()
                                 {
-                                    let _ = menu::set_cell_content(
+                                    if menu::set_cell_content(
                                         session,
                                         &menu_id,
                                         &ring_id,
                                         &cell_id,
                                         CellContent::Action { binding },
-                                    );
+                                    )
+                                    .is_ok()
+                                    {
+                                        self.placement_draft = None;
+                                    }
                                 }
                                 for (label, gesture) in [
                                     (
@@ -1930,16 +3513,20 @@ impl RadialEditorState {
                                     .clicked()
                                     && let Ok(binding) = row.assignment()
                                 {
-                                    let _ = app.test_radial_authoring_action(
-                                        &binding,
-                                        &invocation_context,
-                                        &self.action_filter,
-                                    );
+                                    frame.intent_bridge.push(DesignerUiIntent::TestAction {
+                                        binding,
+                                        invocation: invocation_context.clone(),
+                                        history_query: self.action_filter.clone(),
+                                    });
                                 }
                                 if row.destructive {
                                     ui.colored_label(
                                         ui.visuals().warn_fg_color,
-                                        "Destructive action",
+                                        if frame.require_confirm_destructive {
+                                            "Destructive action · confirmation required"
+                                        } else {
+                                            "Destructive action"
+                                        },
                                     );
                                 }
                                 ui.vertical(|ui| {
@@ -1978,15 +3565,39 @@ impl RadialEditorState {
                     destination_menu,
                     destination_ring,
                     index,
+                    expected_generation,
                 } => {
-                    if menu::move_cell(
+                    let destination_cell = session
+                        .draft
+                        .menus
+                        .iter()
+                        .find(|menu| menu.id == destination_menu)
+                        .and_then(|menu| menu.rings.iter().find(|ring| ring.id == destination_ring))
+                        .and_then(|ring| ring.cells.get(index))
+                        .map(|cell| cell.id.clone());
+                    match menu::move_cell_to_slot(
                         session,
                         (&source_menu, &source_ring, &cell),
                         (&destination_menu, &destination_ring, index),
-                    )
-                    .is_ok()
-                    {
-                        self.focus_restore = session.selection.clone();
+                        menu::CellDropResolution::MoveIntoSpacer,
+                        expected_generation,
+                    ) {
+                        Ok(()) => self.focus_restore = session.selection.clone(),
+                        Err(menu::MenuEditError::DestinationOccupied) => {
+                            if let Some(destination_cell) = destination_cell {
+                                self.pending_drop = Some(PendingCellDrop {
+                                    source_menu,
+                                    source_ring,
+                                    source_cell: cell,
+                                    destination_menu,
+                                    destination_ring,
+                                    destination_cell,
+                                    destination_index: index,
+                                    generation: expected_generation,
+                                });
+                            }
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -2008,8 +3619,10 @@ impl RadialEditorState {
                 }
             }
             Err(AuthoringError::NothingToRevert) => {
-                self.preview.cancel_tooltip();
+                self.preview.dispose();
+                self.release_authoring_resources();
                 self.open = false;
+                self.viewport_close_pending = true;
                 self.session = None;
                 self.close_prompt = false;
             }
@@ -2203,6 +3816,26 @@ fn cell_tree_accessible_name(cell: &crate::radial::model::CellDefinition, index:
         return format!("{role} icon");
     }
     format!("Cell {} ({})", index + 1, cell.id)
+}
+
+fn cell_content_kind(content: &CellContent) -> &'static str {
+    match content {
+        CellContent::Action { .. } => "Action",
+        CellContent::Dynamic { .. } => "Dynamic item",
+        CellContent::Submenu { .. } => "Submenu",
+        CellContent::Control { .. } => "Control",
+        CellContent::Spacer => "Spacer",
+    }
+}
+
+fn cell_content_kind_key(content: &CellContent) -> u8 {
+    match content {
+        CellContent::Spacer => 0,
+        CellContent::Action { .. } => 1,
+        CellContent::Submenu { .. } => 2,
+        CellContent::Dynamic { .. } => 3,
+        CellContent::Control { .. } => 4,
+    }
 }
 
 fn selected_menu_id(session: &RadialAuthoringSession) -> Option<MenuId> {
@@ -2547,9 +4180,31 @@ fn style_value_widget(
     changed.map(|(value, phase)| (skin_editor::with_payload(value), phase))
 }
 
+fn persisted_section(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    key: &str,
+    expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+    body: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let open = expanded_sections.get(key).copied().unwrap_or(false);
+    let response = egui::CollapsingHeader::new(label)
+        .id_source(("radial-designer-section", key))
+        .default_open(open)
+        .open(Some(open))
+        .show(ui, body);
+    if response.header_response.changed() {
+        expanded_sections.insert(key.to_owned(), !open);
+        true
+    } else {
+        false
+    }
+}
+
 fn menu_behavior_controls(
     ui: &mut egui::Ui,
     menu: &mut crate::radial::model::MenuDefinition,
+    expanded_sections: &mut std::collections::BTreeMap<String, bool>,
 ) -> Option<ContinuousWidgetEdit> {
     let mut continuous = None;
     enum_combo(
@@ -2606,90 +4261,104 @@ fn menu_behavior_controls(
         &mut menu.mirror_primary_to_secondary,
         "Mirror primary to secondary",
     );
-    ui.collapsing("Center mappings", |ui| {
-        let before = menu.center_control;
-        optional_control_combo(ui, "Primary control", &mut menu.center_control);
-        if menu.center_control.is_some() && menu.center_control != before {
-            menu.center_action = None;
-        }
-        if menu.center_action.is_some() && ui.button("Clear primary action").clicked() {
-            menu.center_action = None;
-        }
-        after_action_combo(
-            ui,
-            "Primary after action",
-            &mut menu.center_primary_after_action,
-        );
-        let before = menu.center_secondary_control;
-        optional_control_combo(ui, "Secondary control", &mut menu.center_secondary_control);
-        if menu.center_secondary_control.is_some() && menu.center_secondary_control != before {
-            menu.center_secondary_action = None;
-        }
-        if menu.center_secondary_action.is_some() && ui.button("Clear secondary action").clicked() {
-            menu.center_secondary_action = None;
-        }
-        after_action_combo(
-            ui,
-            "Secondary after action",
-            &mut menu.center_secondary_after_action,
-        );
-        ui.small(if menu.center_action.is_some() {
-            "Primary action assigned"
-        } else {
-            "No primary action"
-        });
-        ui.small(if menu.center_secondary_action.is_some() {
-            "Secondary action assigned"
-        } else {
-            "No secondary action"
-        });
-    });
-    ui.collapsing("Background mappings", |ui| {
-        let before = menu.background_control;
-        optional_control_combo(ui, "Primary control", &mut menu.background_control);
-        if menu.background_control.is_some() && menu.background_control != before {
-            menu.background_action = None;
-        }
-        if menu.background_action.is_some() && ui.button("Clear primary action").clicked() {
-            menu.background_action = None;
-        }
-        after_action_combo(
-            ui,
-            "Primary after action",
-            &mut menu.background_primary_after_action,
-        );
-        let before = menu.background_secondary_control;
-        optional_control_combo(
-            ui,
-            "Secondary control",
-            &mut menu.background_secondary_control,
-        );
-        if menu.background_secondary_control.is_some()
-            && menu.background_secondary_control != before
-        {
-            menu.background_secondary_action = None;
-        }
-        if menu.background_secondary_action.is_some()
-            && ui.button("Clear secondary action").clicked()
-        {
-            menu.background_secondary_action = None;
-        }
-        after_action_combo(
-            ui,
-            "Secondary after action",
-            &mut menu.background_secondary_after_action,
-        );
-        ui.small(if menu.background_action.is_some() {
-            "Primary action assigned"
-        } else {
-            "No primary action"
-        });
-        ui.small(if menu.background_secondary_action.is_some() {
-            "Secondary action assigned"
-        } else {
-            "No secondary action"
-        });
-    });
+    persisted_section(
+        ui,
+        "Center mappings",
+        &format!("menu:{}:center-mappings", menu.id),
+        expanded_sections,
+        |ui| {
+            let before = menu.center_control;
+            optional_control_combo(ui, "Primary control", &mut menu.center_control);
+            if menu.center_control.is_some() && menu.center_control != before {
+                menu.center_action = None;
+            }
+            if menu.center_action.is_some() && ui.button("Clear primary action").clicked() {
+                menu.center_action = None;
+            }
+            after_action_combo(
+                ui,
+                "Primary after action",
+                &mut menu.center_primary_after_action,
+            );
+            let before = menu.center_secondary_control;
+            optional_control_combo(ui, "Secondary control", &mut menu.center_secondary_control);
+            if menu.center_secondary_control.is_some() && menu.center_secondary_control != before {
+                menu.center_secondary_action = None;
+            }
+            if menu.center_secondary_action.is_some()
+                && ui.button("Clear secondary action").clicked()
+            {
+                menu.center_secondary_action = None;
+            }
+            after_action_combo(
+                ui,
+                "Secondary after action",
+                &mut menu.center_secondary_after_action,
+            );
+            ui.small(if menu.center_action.is_some() {
+                "Primary action assigned"
+            } else {
+                "No primary action"
+            });
+            ui.small(if menu.center_secondary_action.is_some() {
+                "Secondary action assigned"
+            } else {
+                "No secondary action"
+            });
+        },
+    );
+    persisted_section(
+        ui,
+        "Background mappings",
+        &format!("menu:{}:background-mappings", menu.id),
+        expanded_sections,
+        |ui| {
+            let before = menu.background_control;
+            optional_control_combo(ui, "Primary control", &mut menu.background_control);
+            if menu.background_control.is_some() && menu.background_control != before {
+                menu.background_action = None;
+            }
+            if menu.background_action.is_some() && ui.button("Clear primary action").clicked() {
+                menu.background_action = None;
+            }
+            after_action_combo(
+                ui,
+                "Primary after action",
+                &mut menu.background_primary_after_action,
+            );
+            let before = menu.background_secondary_control;
+            optional_control_combo(
+                ui,
+                "Secondary control",
+                &mut menu.background_secondary_control,
+            );
+            if menu.background_secondary_control.is_some()
+                && menu.background_secondary_control != before
+            {
+                menu.background_secondary_action = None;
+            }
+            if menu.background_secondary_action.is_some()
+                && ui.button("Clear secondary action").clicked()
+            {
+                menu.background_secondary_action = None;
+            }
+            after_action_combo(
+                ui,
+                "Secondary after action",
+                &mut menu.background_secondary_after_action,
+            );
+            ui.small(if menu.background_action.is_some() {
+                "Primary action assigned"
+            } else {
+                "No primary action"
+            });
+            ui.small(if menu.background_secondary_action.is_some() {
+                "Secondary action assigned"
+            } else {
+                "No secondary action"
+            });
+        },
+    );
     continuous
 }
 
@@ -2746,6 +4415,7 @@ fn cell_content_controls(
     ui: &mut egui::Ui,
     document: &RadialDocument,
     cell: &mut crate::radial::model::CellDefinition,
+    expanded_sections: &mut std::collections::BTreeMap<String, bool>,
 ) -> Option<ContinuousWidgetEdit> {
     let mut continuous = None;
     if ui.button("Dynamic source").clicked() && !matches!(cell.content, CellContent::Dynamic { .. })
@@ -2857,103 +4527,109 @@ fn cell_content_controls(
             ui.small("Spacer (no action)");
         }
     };
-    ui.collapsing("Alternate clicks and controls", |ui| {
-        let mut remove_click = None;
-        for (index, binding) in cell.alternate_clicks.iter_mut().enumerate() {
-            enum_combo(
-                ui,
-                "Gesture",
-                &mut binding.gesture,
-                &[
-                    ("Primary", crate::radial::model::ClickGesture::Primary),
-                    ("Secondary", crate::radial::model::ClickGesture::Secondary),
-                    (
-                        "Ctrl+primary",
-                        crate::radial::model::ClickGesture::CtrlPrimary,
-                    ),
-                    (
-                        "Shift+primary",
-                        crate::radial::model::ClickGesture::ShiftPrimary,
-                    ),
-                    (
-                        "Alt+primary",
-                        crate::radial::model::ClickGesture::AltPrimary,
-                    ),
-                ],
-            );
-            after_action_combo(ui, "After action", &mut binding.after_action);
-            if ui.button("Remove alternate action").clicked() {
-                remove_click = Some(index);
+    persisted_section(
+        ui,
+        "Alternate clicks and controls",
+        &format!("cell:{}:alternate-controls", cell.id),
+        expanded_sections,
+        |ui| {
+            let mut remove_click = None;
+            for (index, binding) in cell.alternate_clicks.iter_mut().enumerate() {
+                enum_combo(
+                    ui,
+                    "Gesture",
+                    &mut binding.gesture,
+                    &[
+                        ("Primary", crate::radial::model::ClickGesture::Primary),
+                        ("Secondary", crate::radial::model::ClickGesture::Secondary),
+                        (
+                            "Ctrl+primary",
+                            crate::radial::model::ClickGesture::CtrlPrimary,
+                        ),
+                        (
+                            "Shift+primary",
+                            crate::radial::model::ClickGesture::ShiftPrimary,
+                        ),
+                        (
+                            "Alt+primary",
+                            crate::radial::model::ClickGesture::AltPrimary,
+                        ),
+                    ],
+                );
+                after_action_combo(ui, "After action", &mut binding.after_action);
+                if ui.button("Remove alternate action").clicked() {
+                    remove_click = Some(index);
+                }
             }
-        }
-        if let Some(index) = remove_click {
-            cell.alternate_clicks.remove(index);
-        }
-        let mut remove_control = None;
-        for (index, binding) in cell.alternate_controls.iter_mut().enumerate() {
-            enum_combo(
-                ui,
-                "Control gesture",
-                &mut binding.gesture,
-                &[
-                    ("Secondary", crate::radial::model::ClickGesture::Secondary),
-                    (
-                        "Ctrl+primary",
-                        crate::radial::model::ClickGesture::CtrlPrimary,
-                    ),
-                ],
-            );
-            enum_combo(
-                ui,
-                "Control",
-                &mut binding.control,
-                &[
-                    ("Back", Control::Back),
-                    ("Close", Control::Close),
-                    ("Drag", Control::Drag),
-                ],
-            );
-            if ui.button("Remove alternate control").clicked() {
-                remove_control = Some(index);
+            if let Some(index) = remove_click {
+                cell.alternate_clicks.remove(index);
             }
-        }
-        if let Some(index) = remove_control {
-            cell.alternate_controls.remove(index);
-        }
-        if ui.button("Add alternate control").clicked() {
-            let gesture = [
-                crate::radial::model::ClickGesture::Secondary,
-                crate::radial::model::ClickGesture::CtrlPrimary,
-                crate::radial::model::ClickGesture::ShiftPrimary,
-                crate::radial::model::ClickGesture::AltPrimary,
-            ]
-            .into_iter()
-            .find(|gesture| {
-                !cell
-                    .alternate_controls
-                    .iter()
-                    .any(|entry| entry.gesture == *gesture)
-                    && !cell
-                        .alternate_clicks
+            let mut remove_control = None;
+            for (index, binding) in cell.alternate_controls.iter_mut().enumerate() {
+                enum_combo(
+                    ui,
+                    "Control gesture",
+                    &mut binding.gesture,
+                    &[
+                        ("Secondary", crate::radial::model::ClickGesture::Secondary),
+                        (
+                            "Ctrl+primary",
+                            crate::radial::model::ClickGesture::CtrlPrimary,
+                        ),
+                    ],
+                );
+                enum_combo(
+                    ui,
+                    "Control",
+                    &mut binding.control,
+                    &[
+                        ("Back", Control::Back),
+                        ("Close", Control::Close),
+                        ("Drag", Control::Drag),
+                    ],
+                );
+                if ui.button("Remove alternate control").clicked() {
+                    remove_control = Some(index);
+                }
+            }
+            if let Some(index) = remove_control {
+                cell.alternate_controls.remove(index);
+            }
+            if ui.button("Add alternate control").clicked() {
+                let gesture = [
+                    crate::radial::model::ClickGesture::Secondary,
+                    crate::radial::model::ClickGesture::CtrlPrimary,
+                    crate::radial::model::ClickGesture::ShiftPrimary,
+                    crate::radial::model::ClickGesture::AltPrimary,
+                ]
+                .into_iter()
+                .find(|gesture| {
+                    !cell
+                        .alternate_controls
                         .iter()
                         .any(|entry| entry.gesture == *gesture)
-            });
-            if let Some(gesture) = gesture {
-                cell.alternate_controls
-                    .push(crate::radial::model::ControlClickBinding {
-                        gesture,
-                        control: Control::Back,
-                    });
+                        && !cell
+                            .alternate_clicks
+                            .iter()
+                            .any(|entry| entry.gesture == *gesture)
+                });
+                if let Some(gesture) = gesture {
+                    cell.alternate_controls
+                        .push(crate::radial::model::ControlClickBinding {
+                            gesture,
+                            control: Control::Back,
+                        });
+                }
             }
-        }
-        let control_gestures = cell
-            .alternate_controls
-            .iter()
-            .map(|entry| entry.gesture)
-            .collect::<std::collections::BTreeSet<_>>();
-        cell.alternate_clicks
-            .retain(|entry| !control_gestures.contains(&entry.gesture));
-    });
+            let control_gestures = cell
+                .alternate_controls
+                .iter()
+                .map(|entry| entry.gesture)
+                .collect::<std::collections::BTreeSet<_>>();
+            cell.alternate_clicks
+                .retain(|entry| !control_gestures.contains(&entry.gesture));
+        },
+    );
     continuous
 }
 
@@ -2996,108 +4672,122 @@ fn cell_media_controls(
     ui: &mut egui::Ui,
     document: &RadialDocument,
     cell: &mut crate::radial::model::CellDefinition,
+    intent_bridge: &DesignerIntentBridge,
+    expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+    menu_id: &MenuId,
+    ring_id: &RingId,
+    cell_id: &CellId,
 ) -> Option<ContinuousWidgetEdit> {
     use crate::radial::model::{MediaKind, MediaReference, Override};
     let mut continuous = None;
-    ui.collapsing("Icon and tooltip", |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Tooltip");
-            if ui.button("Inherit").clicked() {
-                cell.tooltip = Override::Inherit;
+    persisted_section(
+        ui,
+        "Icon and tooltip",
+        &format!("cell:{}:icon-tooltip", cell.id),
+        expanded_sections,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Tooltip");
+                if ui.button("Inherit").clicked() {
+                    cell.tooltip = Override::Inherit;
+                }
+                if ui.button("Clear").clicked() {
+                    cell.tooltip = Override::Clear;
+                }
+                if ui.button("Set").clicked() && !matches!(cell.tooltip, Override::Value(_)) {
+                    cell.tooltip = Override::Value(cell.label.clone());
+                }
+                if let Override::Value(value) = &mut cell.tooltip {
+                    let response = ui.text_edit_singleline(value);
+                    set_first_edit(
+                        &mut continuous,
+                        continuous_widget_edit(&response, "tooltip"),
+                    );
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Icon");
+                if ui.button("Inherit").clicked() {
+                    cell.icon = Override::Inherit;
+                }
+                if ui.button("Clear").clicked() {
+                    cell.icon = Override::Clear;
+                }
+                if ui.button("External file").clicked() {
+                    intent_bridge.enqueue_file_dialog(
+                        DesignerFileDialogRequest::CellExternalIcon {
+                            menu_id: menu_id.clone(),
+                            ring_id: ring_id.clone(),
+                            cell_id: cell_id.clone(),
+                        },
+                    );
+                }
+                if ui.button("Search path").clicked() {
+                    cell.icon = Override::Value(MediaReference::SearchPath {
+                        file_name: "icon.png".into(),
+                    });
+                }
+                if ui.button("Icon resource").clicked() {
+                    cell.icon = Override::Value(MediaReference::IconResource {
+                        path: "shell32.dll".into(),
+                        index: 1,
+                    });
+                }
+            });
+            let managed: Vec<_> = document
+                .assets
+                .iter()
+                .filter(|asset| asset.kind == MediaKind::Image)
+                .map(|asset| asset.id.clone())
+                .collect();
+            if !managed.is_empty() {
+                let mut selected = match &cell.icon {
+                    Override::Value(MediaReference::Managed { asset_id }) => Some(asset_id.clone()),
+                    _ => None,
+                };
+                egui::ComboBox::from_label("Managed icon")
+                    .selected_text(selected.as_ref().map_or("Choose asset", |id| id.as_str()))
+                    .show_ui(ui, |ui| {
+                        for id in managed {
+                            ui.selectable_value(&mut selected, Some(id.clone()), id.as_str());
+                        }
+                    });
+                if let Some(asset_id) = selected {
+                    cell.icon = Override::Value(MediaReference::Managed { asset_id });
+                }
             }
-            if ui.button("Clear").clicked() {
-                cell.tooltip = Override::Clear;
+            match &mut cell.icon {
+                Override::Value(MediaReference::SearchPath { file_name }) => {
+                    let response = ui.text_edit_singleline(file_name);
+                    set_first_edit(
+                        &mut continuous,
+                        continuous_widget_edit(&response, "icon.search_path"),
+                    );
+                }
+                Override::Value(MediaReference::ExternalFile { path }) => {
+                    let response = ui.text_edit_singleline(path);
+                    set_first_edit(
+                        &mut continuous,
+                        continuous_widget_edit(&response, "icon.external_path"),
+                    );
+                }
+                Override::Value(MediaReference::IconResource { path, index }) => {
+                    let path_response = ui.text_edit_singleline(path);
+                    set_first_edit(
+                        &mut continuous,
+                        continuous_widget_edit(&path_response, "icon.resource_path"),
+                    );
+                    let index_response =
+                        ui.add(egui::DragValue::new(index).prefix("Resource index "));
+                    set_first_edit(
+                        &mut continuous,
+                        continuous_widget_edit(&index_response, "icon.resource_index"),
+                    );
+                }
+                _ => {}
             }
-            if ui.button("Set").clicked() && !matches!(cell.tooltip, Override::Value(_)) {
-                cell.tooltip = Override::Value(cell.label.clone());
-            }
-            if let Override::Value(value) = &mut cell.tooltip {
-                let response = ui.text_edit_singleline(value);
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&response, "tooltip"),
-                );
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Icon");
-            if ui.button("Inherit").clicked() {
-                cell.icon = Override::Inherit;
-            }
-            if ui.button("Clear").clicked() {
-                cell.icon = Override::Clear;
-            }
-            if ui.button("External file").clicked()
-                && let Some(path) = rfd::FileDialog::new().pick_file()
-            {
-                cell.icon = Override::Value(MediaReference::ExternalFile {
-                    path: path.display().to_string(),
-                });
-            }
-            if ui.button("Search path").clicked() {
-                cell.icon = Override::Value(MediaReference::SearchPath {
-                    file_name: "icon.png".into(),
-                });
-            }
-            if ui.button("Icon resource").clicked() {
-                cell.icon = Override::Value(MediaReference::IconResource {
-                    path: "shell32.dll".into(),
-                    index: 1,
-                });
-            }
-        });
-        let managed: Vec<_> = document
-            .assets
-            .iter()
-            .filter(|asset| asset.kind == MediaKind::Image)
-            .map(|asset| asset.id.clone())
-            .collect();
-        if !managed.is_empty() {
-            let mut selected = match &cell.icon {
-                Override::Value(MediaReference::Managed { asset_id }) => Some(asset_id.clone()),
-                _ => None,
-            };
-            egui::ComboBox::from_label("Managed icon")
-                .selected_text(selected.as_ref().map_or("Choose asset", |id| id.as_str()))
-                .show_ui(ui, |ui| {
-                    for id in managed {
-                        ui.selectable_value(&mut selected, Some(id.clone()), id.as_str());
-                    }
-                });
-            if let Some(asset_id) = selected {
-                cell.icon = Override::Value(MediaReference::Managed { asset_id });
-            }
-        }
-        match &mut cell.icon {
-            Override::Value(MediaReference::SearchPath { file_name }) => {
-                let response = ui.text_edit_singleline(file_name);
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&response, "icon.search_path"),
-                );
-            }
-            Override::Value(MediaReference::ExternalFile { path }) => {
-                let response = ui.text_edit_singleline(path);
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&response, "icon.external_path"),
-                );
-            }
-            Override::Value(MediaReference::IconResource { path, index }) => {
-                let path_response = ui.text_edit_singleline(path);
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&path_response, "icon.resource_path"),
-                );
-                let index_response = ui.add(egui::DragValue::new(index).prefix("Resource index "));
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&index_response, "icon.resource_index"),
-                );
-            }
-            _ => {}
-        }
-    });
+        },
+    );
     continuous
 }
 
@@ -3105,78 +4795,89 @@ fn cell_trigger_controls(
     ui: &mut egui::Ui,
     session: &mut RadialAuthoringSession,
     cell: &mut crate::radial::model::CellDefinition,
+    expanded_sections: &mut std::collections::BTreeMap<String, bool>,
 ) -> Option<ContinuousWidgetEdit> {
     let mut continuous = None;
-    ui.collapsing("Shortcuts and hotstrings", |ui| {
-        let mut remove_shortcut = None;
-        for (index, shortcut) in cell.shortcuts.iter_mut().enumerate() {
-            let response = ui.text_edit_singleline(&mut shortcut.chord);
-            set_first_edit(
-                &mut continuous,
-                continuous_widget_edit(&response, format!("shortcut:{}.chord", shortcut.id)),
-            );
-            enum_combo(
-                ui,
-                "Scope",
-                &mut shortcut.scope,
-                &[
-                    ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
-                    ("Global", crate::radial::model::TriggerScope::Global),
-                ],
-            );
-            if ui.button("Remove shortcut").clicked() {
-                remove_shortcut = Some(index);
+    persisted_section(
+        ui,
+        "Shortcuts and hotstrings",
+        &format!("cell:{}:shortcuts-hotstrings", cell.id),
+        expanded_sections,
+        |ui| {
+            let mut remove_shortcut = None;
+            for (index, shortcut) in cell.shortcuts.iter_mut().enumerate() {
+                let response = ui.text_edit_singleline(&mut shortcut.chord);
+                set_first_edit(
+                    &mut continuous,
+                    continuous_widget_edit(&response, format!("shortcut:{}.chord", shortcut.id)),
+                );
+                enum_combo(
+                    ui,
+                    "Scope",
+                    &mut shortcut.scope,
+                    &[
+                        ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
+                        ("Global", crate::radial::model::TriggerScope::Global),
+                    ],
+                );
+                if ui.button("Remove shortcut").clicked() {
+                    remove_shortcut = Some(index);
+                }
             }
-        }
-        if let Some(index) = remove_shortcut {
-            cell.shortcuts.remove(index);
-        }
-        if ui.button("Add shortcut").clicked() {
-            cell.shortcuts.push(crate::radial::model::ItemShortcut {
-                id: session.allocate_shortcut_id("shortcut"),
-                chord: "Ctrl+Alt+1".into(),
-                gesture: crate::radial::model::ClickGesture::Primary,
-                scope: crate::radial::model::TriggerScope::MenuLocal,
-            });
-        }
-        let mut remove_hotstring = None;
-        for (index, hotstring) in cell.hotstrings.iter_mut().enumerate() {
-            let response = ui.text_edit_singleline(&mut hotstring.text);
-            set_first_edit(
-                &mut continuous,
-                continuous_widget_edit(&response, format!("hotstring:{}.text", hotstring.id)),
-            );
-            ui.checkbox(&mut hotstring.case_sensitive, "Case sensitive");
-            enum_combo(
-                ui,
-                "Scope",
-                &mut hotstring.scope,
-                &[
-                    ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
-                    ("Global", crate::radial::model::TriggerScope::Global),
-                ],
-            );
-            if ui.button("Remove hotstring").clicked() {
-                remove_hotstring = Some(index);
+            if let Some(index) = remove_shortcut {
+                cell.shortcuts.remove(index);
             }
-        }
-        if let Some(index) = remove_hotstring {
-            cell.hotstrings.remove(index);
-        }
-        if ui.button("Add hotstring").clicked() {
-            cell.hotstrings.push(crate::radial::model::ItemHotstring {
-                id: session.allocate_hotstring_id("hotstring"),
-                text: ";radial".into(),
-                gesture: crate::radial::model::ClickGesture::Primary,
-                case_sensitive: false,
-                scope: crate::radial::model::TriggerScope::MenuLocal,
-            });
-        }
-    });
+            if ui.button("Add shortcut").clicked() {
+                cell.shortcuts.push(crate::radial::model::ItemShortcut {
+                    id: session.allocate_shortcut_id("shortcut"),
+                    chord: "Ctrl+Alt+1".into(),
+                    gesture: crate::radial::model::ClickGesture::Primary,
+                    scope: crate::radial::model::TriggerScope::MenuLocal,
+                });
+            }
+            let mut remove_hotstring = None;
+            for (index, hotstring) in cell.hotstrings.iter_mut().enumerate() {
+                let response = ui.text_edit_singleline(&mut hotstring.text);
+                set_first_edit(
+                    &mut continuous,
+                    continuous_widget_edit(&response, format!("hotstring:{}.text", hotstring.id)),
+                );
+                ui.checkbox(&mut hotstring.case_sensitive, "Case sensitive");
+                enum_combo(
+                    ui,
+                    "Scope",
+                    &mut hotstring.scope,
+                    &[
+                        ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
+                        ("Global", crate::radial::model::TriggerScope::Global),
+                    ],
+                );
+                if ui.button("Remove hotstring").clicked() {
+                    remove_hotstring = Some(index);
+                }
+            }
+            if let Some(index) = remove_hotstring {
+                cell.hotstrings.remove(index);
+            }
+            if ui.button("Add hotstring").clicked() {
+                cell.hotstrings.push(crate::radial::model::ItemHotstring {
+                    id: session.allocate_hotstring_id("hotstring"),
+                    text: ";radial".into(),
+                    gesture: crate::radial::model::ClickGesture::Primary,
+                    case_sensitive: false,
+                    scope: crate::radial::model::TriggerScope::MenuLocal,
+                });
+            }
+        },
+    );
     continuous
 }
 
-fn document_rule_controls(ui: &mut egui::Ui, session: &mut RadialAuthoringSession) {
+fn document_rule_controls(
+    ui: &mut egui::Ui,
+    session: &mut RadialAuthoringSession,
+    expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+) {
     let mut document = (*session.draft).clone();
     let original = document.clone();
     let mut continuous: Option<(String, ContinuousWidgetEdit)> = None;
@@ -3185,177 +4886,195 @@ fn document_rule_controls(ui: &mut egui::Ui, session: &mut RadialAuthoringSessio
         .iter()
         .map(|menu| (menu.id.clone(), menu.name.clone()))
         .collect();
-    ui.collapsing("Context rules", |ui| {
-        let mut remove = None;
-        for (index, rule) in document.context_rules.iter_mut().enumerate() {
-            ui.group(|ui| {
-                ui.checkbox(&mut rule.enabled, "Enabled");
-                let priority_response =
-                    ui.add(egui::DragValue::new(&mut rule.priority).prefix("Priority "));
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&priority_response, "priority")
-                        .map(|edit| (format!("context-rule:{}", rule.id), edit)),
-                );
-                ui.label(format!("ID: {}", rule.id));
-                let entity = format!("context-rule:{}", rule.id);
-                let process_edit =
-                    optional_text(ui, "Process", &mut rule.process_name).map(|signals| {
-                        ContinuousWidgetEdit {
-                            field: "process_name".into(),
-                            signals,
-                        }
-                    });
-                set_first_edit(
-                    &mut continuous,
-                    process_edit.map(|edit| (entity.clone(), edit)),
-                );
-                let title_edit =
-                    optional_text(ui, "Window title contains", &mut rule.window_title_contains)
-                        .map(|signals| ContinuousWidgetEdit {
-                            field: "window_title_contains".into(),
-                            signals,
+    persisted_section(
+        ui,
+        "Context rules",
+        "document:context-rules",
+        expanded_sections,
+        |ui| {
+            let mut remove = None;
+            for (index, rule) in document.context_rules.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.checkbox(&mut rule.enabled, "Enabled");
+                    let priority_response =
+                        ui.add(egui::DragValue::new(&mut rule.priority).prefix("Priority "));
+                    set_first_edit(
+                        &mut continuous,
+                        continuous_widget_edit(&priority_response, "priority")
+                            .map(|edit| (format!("context-rule:{}", rule.id), edit)),
+                    );
+                    ui.label(format!("ID: {}", rule.id));
+                    let entity = format!("context-rule:{}", rule.id);
+                    let process_edit =
+                        optional_text(ui, "Process", &mut rule.process_name).map(|signals| {
+                            ContinuousWidgetEdit {
+                                field: "process_name".into(),
+                                signals,
+                            }
                         });
-                set_first_edit(
-                    &mut continuous,
-                    title_edit.map(|edit| (entity.clone(), edit)),
-                );
-                let monitor_edit =
-                    optional_text(ui, "Monitor ID", &mut rule.monitor_id).map(|signals| {
-                        ContinuousWidgetEdit {
-                            field: "monitor_id".into(),
-                            signals,
-                        }
-                    });
-                set_first_edit(&mut continuous, monitor_edit.map(|edit| (entity, edit)));
-                egui::ComboBox::from_label("Menu")
-                    .selected_text(rule.menu_id.to_string())
-                    .show_ui(ui, |ui| {
-                        for (id, name) in &menu_choices {
-                            ui.selectable_value(&mut rule.menu_id, id.clone(), name);
-                        }
-                    });
-                if ui.button("Remove rule").clicked() {
-                    remove = Some(index);
-                }
-            });
-        }
-        if let Some(index) = remove {
-            document.context_rules.remove(index);
-        }
-        if ui.button("Add context rule").clicked()
-            && let Some(menu) = document.menus.first()
-        {
-            let id = session.allocate_context_rule_id("context");
-            let menu_id = menu.id.clone();
-            document
-                .context_rules
-                .push(crate::radial::model::ContextRule {
-                    id,
-                    enabled: true,
-                    priority: 0,
-                    process_name: None,
-                    window_title_contains: None,
-                    monitor_id: None,
-                    menu_id,
+                    set_first_edit(
+                        &mut continuous,
+                        process_edit.map(|edit| (entity.clone(), edit)),
+                    );
+                    let title_edit =
+                        optional_text(ui, "Window title contains", &mut rule.window_title_contains)
+                            .map(|signals| ContinuousWidgetEdit {
+                                field: "window_title_contains".into(),
+                                signals,
+                            });
+                    set_first_edit(
+                        &mut continuous,
+                        title_edit.map(|edit| (entity.clone(), edit)),
+                    );
+                    let monitor_edit =
+                        optional_text(ui, "Monitor ID", &mut rule.monitor_id).map(|signals| {
+                            ContinuousWidgetEdit {
+                                field: "monitor_id".into(),
+                                signals,
+                            }
+                        });
+                    set_first_edit(&mut continuous, monitor_edit.map(|edit| (entity, edit)));
+                    egui::ComboBox::from_label("Menu")
+                        .selected_text(rule.menu_id.to_string())
+                        .show_ui(ui, |ui| {
+                            for (id, name) in &menu_choices {
+                                ui.selectable_value(&mut rule.menu_id, id.clone(), name);
+                            }
+                        });
+                    if ui.button("Remove rule").clicked() {
+                        remove = Some(index);
+                    }
                 });
-        }
-    });
-    ui.collapsing("Custom triggers", |ui| {
-        let mut remove = None;
-        for (index, trigger) in document.custom_triggers.iter_mut().enumerate() {
-            ui.group(|ui| {
-                ui.label(format!("ID: {}", trigger.id));
-                let chord_response = ui.text_edit_singleline(&mut trigger.chord);
-                set_first_edit(
-                    &mut continuous,
-                    continuous_widget_edit(&chord_response, "chord")
-                        .map(|edit| (format!("custom-trigger:{}", trigger.id), edit)),
-                );
-                enum_combo(
-                    ui,
-                    "Scope",
-                    &mut trigger.scope,
-                    &[
-                        ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
-                        ("Global", crate::radial::model::TriggerScope::Global),
-                    ],
-                );
-                egui::ComboBox::from_label("Menu")
-                    .selected_text(trigger.menu_id.to_string())
-                    .show_ui(ui, |ui| {
-                        for (id, name) in &menu_choices {
-                            ui.selectable_value(&mut trigger.menu_id, id.clone(), name);
-                        }
+            }
+            if let Some(index) = remove {
+                document.context_rules.remove(index);
+            }
+            if ui.button("Add context rule").clicked()
+                && let Some(menu) = document.menus.first()
+            {
+                let id = session.allocate_context_rule_id("context");
+                let menu_id = menu.id.clone();
+                document
+                    .context_rules
+                    .push(crate::radial::model::ContextRule {
+                        id,
+                        enabled: true,
+                        priority: 0,
+                        process_name: None,
+                        window_title_contains: None,
+                        monitor_id: None,
+                        menu_id,
                     });
-                if ui.button("Remove trigger").clicked() {
-                    remove = Some(index);
-                }
-            });
-        }
-        if let Some(index) = remove {
-            document.custom_triggers.remove(index);
-        }
-        if ui.button("Add custom trigger").clicked()
-            && let Some(menu) = document.menus.first()
-        {
-            let id = session.allocate_trigger_id("trigger");
-            let chord = "Ctrl+Shift+1".into();
-            let menu_id = menu.id.clone();
-            document
-                .custom_triggers
-                .push(crate::radial::model::TriggerDefinition {
-                    id,
-                    chord,
-                    menu_id,
-                    scope: crate::radial::model::TriggerScope::MenuLocal,
+            }
+        },
+    );
+    persisted_section(
+        ui,
+        "Custom triggers",
+        "document:custom-triggers",
+        expanded_sections,
+        |ui| {
+            let mut remove = None;
+            for (index, trigger) in document.custom_triggers.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.label(format!("ID: {}", trigger.id));
+                    let chord_response = ui.text_edit_singleline(&mut trigger.chord);
+                    set_first_edit(
+                        &mut continuous,
+                        continuous_widget_edit(&chord_response, "chord")
+                            .map(|edit| (format!("custom-trigger:{}", trigger.id), edit)),
+                    );
+                    enum_combo(
+                        ui,
+                        "Scope",
+                        &mut trigger.scope,
+                        &[
+                            ("Menu local", crate::radial::model::TriggerScope::MenuLocal),
+                            ("Global", crate::radial::model::TriggerScope::Global),
+                        ],
+                    );
+                    egui::ComboBox::from_label("Menu")
+                        .selected_text(trigger.menu_id.to_string())
+                        .show_ui(ui, |ui| {
+                            for (id, name) in &menu_choices {
+                                ui.selectable_value(&mut trigger.menu_id, id.clone(), name);
+                            }
+                        });
+                    if ui.button("Remove trigger").clicked() {
+                        remove = Some(index);
+                    }
                 });
-        }
-    });
-    ui.collapsing("Media search paths", |ui| {
-        for (index, root) in document
-            .media_search_roots
-            .image_directories
-            .iter_mut()
-            .enumerate()
-        {
-            let response = ui.text_edit_singleline(root);
-            set_first_edit(
-                &mut continuous,
-                continuous_widget_edit(&response, format!("image_directories[{index}]"))
-                    .map(|edit| ("media-search-roots".into(), edit)),
-            );
-        }
-        if ui.button("Add image search path").clicked() {
-            document
+            }
+            if let Some(index) = remove {
+                document.custom_triggers.remove(index);
+            }
+            if ui.button("Add custom trigger").clicked()
+                && let Some(menu) = document.menus.first()
+            {
+                let id = session.allocate_trigger_id("trigger");
+                let chord = "Ctrl+Shift+1".into();
+                let menu_id = menu.id.clone();
+                document
+                    .custom_triggers
+                    .push(crate::radial::model::TriggerDefinition {
+                        id,
+                        chord,
+                        menu_id,
+                        scope: crate::radial::model::TriggerScope::MenuLocal,
+                    });
+            }
+        },
+    );
+    persisted_section(
+        ui,
+        "Media search paths",
+        "document:media-search-paths",
+        expanded_sections,
+        |ui| {
+            for (index, root) in document
                 .media_search_roots
                 .image_directories
-                .push(String::new());
-        }
-        for (index, root) in document
-            .media_search_roots
-            .sound_directories
-            .iter_mut()
-            .enumerate()
-        {
-            let response = ui.text_edit_singleline(root);
-            set_first_edit(
-                &mut continuous,
-                continuous_widget_edit(&response, format!("sound_directories[{index}]"))
-                    .map(|edit| ("media-search-roots".into(), edit)),
-            );
-        }
-        if ui.button("Add sound search path").clicked() {
-            document
+                .iter_mut()
+                .enumerate()
+            {
+                let response = ui.text_edit_singleline(root);
+                set_first_edit(
+                    &mut continuous,
+                    continuous_widget_edit(&response, format!("image_directories[{index}]"))
+                        .map(|edit| ("media-search-roots".into(), edit)),
+                );
+            }
+            if ui.button("Add image search path").clicked() {
+                document
+                    .media_search_roots
+                    .image_directories
+                    .push(String::new());
+            }
+            for (index, root) in document
                 .media_search_roots
                 .sound_directories
-                .push(String::new());
-        }
-        ui.checkbox(
-            &mut document.media_search_roots.search_windows_media_for_sounds,
-            "Search Windows media for sounds",
-        );
-    });
+                .iter_mut()
+                .enumerate()
+            {
+                let response = ui.text_edit_singleline(root);
+                set_first_edit(
+                    &mut continuous,
+                    continuous_widget_edit(&response, format!("sound_directories[{index}]"))
+                        .map(|edit| ("media-search-roots".into(), edit)),
+                );
+            }
+            if ui.button("Add sound search path").clicked() {
+                document
+                    .media_search_roots
+                    .sound_directories
+                    .push(String::new());
+            }
+            ui.checkbox(
+                &mut document.media_search_roots.search_windows_media_for_sounds,
+                "Search Windows media for sounds",
+            );
+        },
+    );
     if document != original || continuous.is_some() {
         if let Some((entity, edit)) = continuous {
             let _ =
@@ -3554,61 +5273,239 @@ fn preview_legacy_files(
     Ok(PendingImport::legacy(preview, session))
 }
 
-fn begin_package_export(
-    client: Option<&AuthoringClient>,
-    session: &mut RadialAuthoringSession,
-    roots: Vec<MenuId>,
-    file_name: &str,
-) -> Result<Option<std::path::PathBuf>, String> {
-    if session.is_dirty() {
-        return Err("Save or apply the draft before exporting persisted package bytes".into());
+fn open_designer_file_dialog(request: &DesignerFileDialogRequest) -> DesignerFileDialogResult {
+    match request {
+        DesignerFileDialogRequest::StyleMedia { .. }
+        | DesignerFileDialogRequest::CellExternalIcon { .. } => {
+            rfd::FileDialog::new().pick_file().map_or(
+                DesignerFileDialogResult::Cancelled,
+                DesignerFileDialogResult::File,
+            )
+        }
+        DesignerFileDialogRequest::ImportManaged {
+            label, extensions, ..
+        } => {
+            let extensions = extensions.iter().map(String::as_str).collect::<Vec<_>>();
+            rfd::FileDialog::new()
+                .add_filter(label, &extensions)
+                .pick_file()
+                .map_or(
+                    DesignerFileDialogResult::Cancelled,
+                    DesignerFileDialogResult::File,
+                )
+        }
+        DesignerFileDialogRequest::PreviewPackage => rfd::FileDialog::new()
+            .add_filter("Multi Launcher radial", &["mlradial"])
+            .pick_file()
+            .map_or(
+                DesignerFileDialogResult::Cancelled,
+                DesignerFileDialogResult::File,
+            ),
+        DesignerFileDialogRequest::ExportMenu { .. } => rfd::FileDialog::new()
+            .add_filter("Multi Launcher radial", &["mlradial"])
+            .set_file_name("menu.mlradial")
+            .save_file()
+            .map_or(
+                DesignerFileDialogResult::Cancelled,
+                DesignerFileDialogResult::File,
+            ),
+        DesignerFileDialogRequest::ExportPackage { .. } => rfd::FileDialog::new()
+            .add_filter("Multi Launcher radial", &["mlradial"])
+            .set_file_name("all-radial-menus.mlradial")
+            .save_file()
+            .map_or(
+                DesignerFileDialogResult::Cancelled,
+                DesignerFileDialogResult::File,
+            ),
+        DesignerFileDialogRequest::ExportSkin { .. } => rfd::FileDialog::new()
+            .add_filter("Multi Launcher radial", &["mlradial"])
+            .set_file_name("skin.mlradial")
+            .save_file()
+            .map_or(
+                DesignerFileDialogResult::Cancelled,
+                DesignerFileDialogResult::File,
+            ),
+        DesignerFileDialogRequest::PreviewLegacy { .. } => {
+            rfd::FileDialog::new().pick_files().map_or(
+                DesignerFileDialogResult::Cancelled,
+                DesignerFileDialogResult::Files,
+            )
+        }
+        DesignerFileDialogRequest::ReplaceBackup => rfd::FileDialog::new()
+            .add_filter("JSON", &["json"])
+            .set_file_name("radial-before-import.json")
+            .save_file()
+            .map_or(
+                DesignerFileDialogResult::Cancelled,
+                DesignerFileDialogResult::File,
+            ),
     }
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Multi Launcher radial", &["mlradial"])
-        .set_file_name(file_name)
-        .save_file()
-    else {
-        return Ok(None);
-    };
-    let request = session
-        .request_export_package(roots)
-        .map_err(|error| format!("{error:?}"))?;
-    client
-        .ok_or("Radial authoring service unavailable")?
-        .send(request)
-        .map_err(|error| format!("{error:?}"))?;
-    Ok(Some(path))
-}
-
-fn begin_skin_export(
-    client: Option<&AuthoringClient>,
-    session: &mut RadialAuthoringSession,
-    skin_id: crate::radial::model::SkinId,
-    file_name: &str,
-) -> Result<Option<std::path::PathBuf>, String> {
-    if session.is_dirty() {
-        return Err("Save or apply the draft before exporting persisted package bytes".into());
-    }
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Multi Launcher radial", &["mlradial"])
-        .set_file_name(file_name)
-        .save_file()
-    else {
-        return Ok(None);
-    };
-    let request = session
-        .request_export_skin(skin_id)
-        .map_err(|error| format!("{error:?}"))?;
-    client
-        .ok_or("Radial authoring service unavailable")?
-        .send(request)
-        .map_err(|error| format!("{error:?}"))?;
-    Ok(Some(path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn designer_viewport_identity_and_duplicate_open_reuse_one_draft() {
+        assert_eq!(radial_designer_viewport_id(), radial_designer_viewport_id());
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.make_dirty_for_test();
+        let generation = editor.session.as_ref().unwrap().generation;
+        editor.open();
+        assert_eq!(editor.session.as_ref().unwrap().generation, generation);
+        assert!(editor.is_dirty());
+        editor.open_skins();
+        assert!(editor.is_showing_resources());
+    }
+
+    #[test]
+    fn cancelling_center_placement_keeps_the_authoring_document_unchanged() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let (menu_id, ring_id, cell_id, generation, before) = {
+            let session = editor.session.as_ref().unwrap();
+            (
+                session.draft.menus[0].id.clone(),
+                session.draft.menus[0].rings[0].id.clone(),
+                session.draft.menus[0].rings[0].cells[0].id.clone(),
+                session.generation,
+                session.draft.clone(),
+            )
+        };
+        editor.placement_draft = Some(PlacementDraft::new(menu_id, ring_id, cell_id, generation));
+        editor.placement_draft = None;
+        assert_eq!(editor.session.as_ref().unwrap().draft, before);
+    }
+
+    #[test]
+    fn closing_during_preview_preparation_disposes_the_pending_viewport_state() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_mut().unwrap();
+        session.pending_request = Some(crate::radial::authoring::PendingAuthoringRequest {
+            id: crate::radial::authoring::AuthoringRequestId(42),
+            generation: session.generation,
+            editor_session: session.editor_session,
+            kind: crate::radial::authoring::PendingRequestKind::PrepareEmbeddedPreview,
+        });
+
+        editor.request_close();
+
+        assert!(!editor.open);
+        assert!(editor.session.is_none());
+        assert!(editor.viewport_close_pending);
+    }
+
+    #[test]
+    fn queued_test_intents_wake_the_root_owner_without_draining_in_the_viewport() {
+        let bridge = std::sync::Arc::new(DesignerIntentBridge::default());
+        let wake_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callback_count = std::sync::Arc::clone(&wake_count);
+        bridge.set_wake(Some(std::sync::Arc::new(move || {
+            callback_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        bridge.push(DesignerUiIntent::TestAction {
+            binding: crate::radial::model::ActionBinding::Contextual {
+                selector: crate::radial::model::TargetSelector::CapturedForeground,
+                action_id: crate::universal_actions::ActionId::new("test"),
+            },
+            invocation: InvocationContext::empty(0),
+            history_query: String::new(),
+        });
+        assert_eq!(wake_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(bridge.drain().len(), 1);
+    }
+
+    #[test]
+    fn file_dialog_enqueue_and_return_wake_the_correct_owners() {
+        let bridge = std::sync::Arc::new(DesignerIntentBridge::default());
+        let root_wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let viewport_wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let root_count = std::sync::Arc::clone(&root_wakes);
+        let root_bridge = std::sync::Arc::clone(&bridge);
+        bridge.set_wake(Some(std::sync::Arc::new(move || {
+            // The callback can inspect the queue: enqueue has released the
+            // queue lock before waking ROOT.
+            assert!(root_bridge.has_pending_file_dialog());
+            root_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        let viewport_count = std::sync::Arc::clone(&viewport_wakes);
+        bridge.set_viewport_wake(Some(std::sync::Arc::new(move || {
+            viewport_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        bridge.enqueue_file_dialog(DesignerFileDialogRequest::PreviewPackage);
+        assert_eq!(root_wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(bridge.take_file_dialog().is_some());
+        bridge.wake_viewport();
+        assert_eq!(viewport_wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        bridge.clear();
+        assert!(!bridge.has_pending_file_dialog());
+    }
+
+    #[test]
+    fn debounced_preferences_wake_root_and_close_flush_survives_disposal() {
+        let bridge = std::sync::Arc::new(DesignerIntentBridge::default());
+        let root_wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let root_count = std::sync::Arc::clone(&root_wakes);
+        let root_bridge = std::sync::Arc::clone(&bridge);
+        bridge.set_wake(Some(std::sync::Arc::new(move || {
+            assert!(root_bridge.has_pending_preferences());
+            root_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+
+        let mut editor = RadialEditorState::default();
+        editor.intent_bridge = std::sync::Arc::clone(&bridge);
+        editor.preferences_dirty = true;
+        let now = Instant::now();
+        editor
+            .preference_debounce
+            .mark_changed(now - Duration::from_millis(300));
+        editor.enqueue_preferences_ready_if_due();
+        assert_eq!(root_wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(editor.take_preferences_for_persist().is_some());
+        assert!(!bridge.has_pending_preferences());
+
+        // The close path queues the final flush before the editor disposes
+        // its callbacks.  ROOT can still consume the snapshot afterward.
+        editor.open_test_snapshot();
+        editor.preferences_dirty = true;
+        editor
+            .preference_debounce
+            .mark_changed(now - Duration::from_millis(300));
+        editor.request_close();
+        assert_eq!(root_wakes.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(editor.session.is_none());
+        assert!(bridge.has_pending_preferences());
+        assert!(editor.take_preferences_for_persist().is_some());
+        assert!(!bridge.has_pending_preferences());
+    }
+
+    #[test]
+    fn properties_draft_is_stable_across_frames_and_rejects_stale_apply() {
+        let document = RadialDocument::starter();
+        let cell = &document.menus[0].rings[0].cells[0];
+        let original_label = cell.label.clone();
+        let target = StableSelection::Cell {
+            menu_id: document.menus[0].id.clone(),
+            ring_id: document.menus[0].rings[0].id.clone(),
+            cell_id: cell.id.clone(),
+        };
+        let generation = crate::radial::authoring::DraftGeneration(7);
+        let mut draft = PropertiesDraft::from_cell(target.clone(), generation, cell);
+        draft.label = "edited over several frames".into();
+        assert!(draft.is_current(&target, generation));
+        assert!(!draft.is_current(&target, crate::radial::authoring::DraftGeneration(8)));
+        assert_eq!(draft.label, "edited over several frames");
+        // Cancel is represented by dropping the draft; no document is ever
+        // touched by local popup edits.
+        drop(draft);
+        assert_eq!(
+            PropertiesDraft::from_cell(target, generation, cell).label,
+            original_label
+        );
+    }
 
     #[test]
     fn diagnostic_display_model_bounds_actionables_and_discloses_overflow() {
@@ -3651,7 +5548,8 @@ mod tests {
 
     #[test]
     fn post_render_move_uses_stable_ids_and_selection_survives_reorder() {
-        let document = RadialDocument::starter();
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].content = CellContent::Spacer;
         let snapshot = AuthoringSnapshot::new(std::sync::Arc::new(document), "test");
         let mut editor = RadialEditorState::default();
         editor.open = true;
@@ -3665,6 +5563,7 @@ mod tests {
             ring_id: ring_id.clone(),
             cell_id: cell_id.clone(),
         }));
+        let expected_generation = session.generation;
         editor.post_render.push(EditorCommand::MoveCell {
             source_menu: menu_id.clone(),
             source_ring: ring_id.clone(),
@@ -3672,6 +5571,7 @@ mod tests {
             destination_menu: menu_id.clone(),
             destination_ring: ring_id.clone(),
             index: 0,
+            expected_generation,
         });
         editor.apply_post_render();
         assert_eq!(

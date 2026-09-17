@@ -1,7 +1,7 @@
 //! Shared preparation boundary for runtime and authoring preview frames.
 
 use super::assets::{AssetService, ManagedAssetOverlay, PrepareVariant, reference_identity};
-use super::bindings::project_menu_frame_with_style;
+use super::bindings::{ProjectedDynamicProvenance, project_menu_frame_with_style};
 use super::diagnostics::{
     MAX_EXPECTED_LAYOUT_DIAGNOSTICS, MAX_RADIAL_DIAGNOSTICS, RadialDiagnostic,
     RadialDiagnosticKind, RadialDiagnosticSeverity, RadialDiagnosticSource, bound_diagnostics,
@@ -41,6 +41,10 @@ pub struct PreparedFrameInput {
     pub diagnostics: Vec<RadialDiagnostic>,
     pub page: usize,
     pub page_count: usize,
+    /// Generated cells are projected from authored Dynamic definitions.  This
+    /// typed map is carried with the prepared frame so editor hit testing can
+    /// address the exact source/result without interpreting synthetic IDs.
+    pub provenance: BTreeMap<CellId, ProjectedDynamicProvenance>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -574,6 +578,7 @@ impl PreviewFramePreparer {
             diagnostics,
             page: projected.page,
             page_count: projected.page_count,
+            provenance: projected.dynamic_provenance.clone(),
         })
     }
 }
@@ -691,6 +696,16 @@ mod tests {
             projected_cell.label.as_str()
         );
         assert!(projected_tooltip.description.is_none());
+        let provenance = dynamic
+            .provenance
+            .get(&projected_cell.cell_id)
+            .expect("generated result carries typed source provenance");
+        assert_eq!(provenance.source_cell_id, dynamic_id);
+        assert_eq!(provenance.result_index, 0);
+        assert_eq!(
+            provenance.fingerprint,
+            projection.dynamic.get(&dynamic_id).unwrap().fingerprint
+        );
 
         document.menus[0].rings[0].cells[0].tooltip = Override::Value("  ".into());
         let empty = preparer

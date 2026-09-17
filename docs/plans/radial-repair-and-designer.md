@@ -21,12 +21,12 @@ its immutable baseline, and its earlier verification evidence remain in
 | repair start worktree | clean: no staged, unstaged, or untracked changes |
 | immutable feature baseline | `0d0acaf471a52f49a7ebdff61879416eefa9fc9b` (unchanged) |
 | branch point | `f7c5f61ed2faa2288f5c19ddeaea66de6f760a2b` (unchanged) |
-| current milestone | R3 |
-| implementation status | R1 committed at `3e7d428c`; R2 committed at `231518c3`; R3 verified and awaiting its coherent commit |
-| last verified source | R3 dirty diff `15d0551b712c1d9e358bee029825a10d65914692`; `cargo check` passed; Nextest `71a86cb6-a1d4-4d7e-9223-818c5b4749cf` passed 210/210 |
+| current milestone | R4 |
+| implementation status | R1 committed at `3e7d428c`; R2 committed at `231518c3`; R3 committed at `b1310969`; R4 verified and awaiting its coherent commit |
+| last verified source | R4 dirty diff `183951abb3359e90ac4987b5a04c32240d3ab4f1`; `cargo check` passed; Nextest `600c6fb4-79b5-41aa-b65a-6c35c0e3e3ea` passed 221/221 |
 | current native evidence gaps | H1-H5, N1-N4, V1-V3, D1-D5, and P1-P2 are unverified for this repair |
 | active Cargo/build/Nextest job | none |
-| next action | commit R3, then plan and implement the independent compact Designer in R4 |
+| next action | commit R4, then perform cumulative R5 verification and acceptance review |
 
 The repair-start Git diff was empty. Repository-local reference archives and images
 were not modified. `docs/references/Radial menu v4.zip` was inspected in place as
@@ -75,7 +75,7 @@ visual center stability, and Designer independence require the native acceptance
 | R1 | complete | independent chord cycles, reliable owner-viewport wakeups, authoritative hide ordering | focused source-identical gate passed; independent review clean; H1-H3/H5 remain explicitly unverified natively |
 | R2 | complete | frozen session centers, local Cascade, drag/Back transforms, reversible one-time conversion | source-identical geometry/session/migration gate passed; independent review clean; N1-N4/P1 remain explicitly unverified natively |
 | R3 | complete | normal cursor, complete delayed tooltips, typed quiet diagnostics | source-identical focused gate passed; independent review clean; V1-V3 remain explicitly unverified natively |
-| R4 | pending | one independent compact Designer and safe direct manipulation | editor/authoring/lifecycle gate and H4/D1-D5 live checks |
+| R4 | complete | one independent compact Designer and safe direct manipulation | source-identical focused gate passed; independent review clean; H4/D1-D5 remain explicitly unverified natively |
 | R5 | pending | cumulative regression, performance/resources, native matrix, and independent review | complete required Nextest suite and final acceptance record |
 
 Each write-heavy milestone has one writer, is verified and diff-reviewed before its
@@ -340,3 +340,91 @@ Native evidence status for R3:
 The current automation surface cannot drive or inspect the native radial HWND and
 cursor state. Pure policy, fake-host, placement, and preview tests are not presented
 as native evidence; V1-V3 remain required for R5 manual/native acceptance.
+
+## R4 completion record
+
+Implemented behavior and ownership:
+
+- one stable deferred `Radial Designer` viewport now owns the authoring presentation;
+  duplicate Menus/Skins opens reuse and focus the same draft while the launcher root
+  may remain hidden, and an embedded backend reports bounded unavailability instead
+  of silently restoring the former embedded editor;
+- authoring requests, replies, root-owned intents, file dialogs, Test Action, and
+  debounced preference delivery use enqueue-before-target-wake bridges with disposable
+  child registrations; no polling or pointer activity is required for progress;
+- clean, dirty, awaiting-request, Save, checked Cancel-after-Apply, Keep Editing,
+  failure, and in-flight native-preview close paths retain or release the session and
+  resources explicitly without closing the root application or an unrelated runtime
+  radial;
+- the compact toolbar/tree/canvas/inspector layout bounds and scrolls Menus and Skins
+  content independently, retains explicit pane/section/tree state, and preserves all
+  prior inspector, asset, audio, package, import/export, Apply/Save/Cancel, conflict,
+  reference-guard, and explicit Test Action controls;
+- a single canvas transform owns Fit, pan, zoom, child DPI, painting, hit testing,
+  slots, drag targets, and passive tooltip overflow; Design mode selects, adds, edits,
+  opens, moves, and swaps without dispatch, while Preview/Test remains intercepted;
+- visited submenu paths are distinct from selection, retain real traversal edges for
+  reused DAGs, and direct tree selection establishes a fresh root without inventing a
+  parent;
+- typed projected provenance carries exact authored/generated/source/result identity;
+  authored dynamic-source cells remain editable and movable, while generated results
+  cannot be persisted or dragged and can navigate to their exact source definition;
+- pure authoring operations atomically fill Spacer slots, create-and-link SameCenter
+  children, validate cycles, move into Spacer, require explicit occupied Swap or
+  Cancel, add valid rings, preserve stable IDs, reject stale generations, and create
+  one undo entry per completed gesture;
+- serde-defaulted local Designer preferences are normalized, bounded, debounced, and
+  preserved independently of documents and Settings-editor snapshots; Windows restore
+  selects the native monitor from saved child logical coordinates and scale, converts
+  real `rcWork` through target DPI and current child zoom, and falls back to
+  positionless OS placement when legacy geometry cannot be verified.
+
+Verification on the final source identity:
+
+- `cargo fmt --all -- --check`: passed;
+- `git diff --check`: passed (only Git's existing LF/CRLF notices);
+- `cargo check`: passed; final production check log
+  `%TEMP%\multi-launcher-r4-zoom-space-cargo-check-20260917.log`;
+- focused command: `cargo nextest run --no-fail-fast --status-level slow
+  --final-status-level fail --success-output never --failure-output final -E
+  'test(/radial_designer/) | test(/radial_editor/) |
+  test(/radial::authoring/) | test(/native_preview/) |
+  test(/settings::model/) | test(/settings_editor/) |
+  test(/commands::handlers::radial/) | test(/gui::command_host/) |
+  test(/placement_designer/) | test(/unpinning_dirty_radial_editor/) |
+  test(/universal_action/)'`;
+- cwd `G:\Repos\rust\Multi_Launcher`, HEAD `b1310969`, default Nextest profile;
+- durable log `%TEMP%\multi-launcher-r4-final-focused-nextest-green-20260917.log`;
+- final pre-ledger source diff `183951abb3359e90ac4987b5a04c32240d3ab4f1`;
+- Nextest run `600c6fb4-79b5-41aa-b65a-6c35c0e3e3ea`: 221 passed,
+  0 failed, 4,355 skipped; true exit code 0;
+- the source-affecting targeted job was observed at about 10 minutes and completed
+  after 23m47s compilation; the unchanged full focused binary then completed in
+  7.019s. No replacement or competing Cargo job was launched.
+
+Independent review covered viewport independence, hidden-root command/reply/dialog
+progress, multi-frame property drafts, compact Skins reachability, typed generated
+provenance, Settings concurrency, embedded-backend rejection, visited paths, atomic
+slot/graph operations, preference delivery, and negative-origin mixed-DPI/zoom work-
+area restoration. All reported P1/P2 findings were remediated; final closure review
+reported no remaining P0-P2 issue.
+
+Native evidence status for R4:
+
+- H4 focused-Designer shared tap/hold priority and release isolation: unverified on
+  a real interactive Windows desktop;
+- D1 independent native viewport, hidden-root operation, reply progress, and complete
+  control reachability: unverified;
+- D2 resize/pane/section/tree/zoom/pan persistence without automatic expansion or
+  refit: unverified;
+- D3 center/slot add, properties, move, occupied Cancel/Swap, create-and-link,
+  breadcrumb, and undo/redo behavior: unverified;
+- D4 Design/native/embedded nonexecution and explicit Test Action confirmation:
+  unverified;
+- D5 dirty close, checked revert/conflict/import, and in-flight native-preview close
+  lifecycle: unverified.
+
+The current automation surface cannot operate the native Designer viewport or perform
+real pointer, focus, hotkey, monitor-topology, file-dialog, and HWND observations.
+Automated state/geometry/fake-host evidence is not presented as H4/D1-D5 acceptance;
+those rows remain required for R5 manual/native acceptance.

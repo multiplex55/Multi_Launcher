@@ -9,6 +9,8 @@ use crate::persistence::RecoveryTarget;
 pub(crate) struct LauncherInteractionSnapshot {
     panel_instances: Vec<usize>,
     confirmation_open: bool,
+    radial_editor_open: bool,
+    root_visible: bool,
 }
 
 fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
@@ -89,6 +91,8 @@ impl LauncherApp {
             panel_instances,
             confirmation_open: self.pending_confirm.is_some()
                 || self.pending_universal_confirm.is_some(),
+            radial_editor_open: self.is_panel_open(Panel::RadialEditor),
+            root_visible: self.visible_flag.load(std::sync::atomic::Ordering::SeqCst),
         }
     }
 
@@ -102,7 +106,14 @@ impl LauncherApp {
             .iter()
             .zip(&before.panel_instances)
             .any(|(after, before)| after > before);
-        if opened_panel || (after.confirmation_open && !before.confirmation_open) {
+        // The Designer is an independent deferred viewport.  Opening it must
+        // not make a hidden launcher grid visible just because the generic
+        // interaction restore path observed a newly-opened panel.
+        let opened_hidden_designer =
+            !before.radial_editor_open && after.radial_editor_open && !before.root_visible;
+        if (opened_panel && !opened_hidden_designer)
+            || (after.confirmation_open && !before.confirmation_open)
+        {
             self.visible_flag.store(true, Ordering::SeqCst);
             self.restore_flag.store(true, Ordering::SeqCst);
         }

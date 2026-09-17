@@ -699,7 +699,7 @@ pub struct LauncherApp {
     pub launcher_hwnd: Option<usize>,
     pub multi_manager_dialog: MultiManagerDialog,
     pub multi_manager_settings_dialog: MultiManagerSettingsDialog,
-    radial_editor: radial_editor::RadialEditorState,
+    radial_editor: Arc<Mutex<radial_editor::RadialEditorState>>,
     /// Hold watchers so the `RecommendedWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
@@ -1083,7 +1083,7 @@ impl LauncherApp {
                     "You can edit the menu in Designer or deliberately switch this parent to Cascade.",
                 );
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Show launcher & open Designer").clicked() {
+                    if ui.button("Open Designer").clicked() {
                         choice = Some(Choice::Designer);
                     }
                     if notice.can_switch_parent_to_cascade()
@@ -1171,18 +1171,8 @@ impl LauncherApp {
             return false;
         }
         self.radial_placement_viewport.mark_viewport_closed();
-        // Route the explicit recovery action through the normal launcher
-        // command/outcome path so App::update applies configured show placement.
-        self.activate_action(
-            Action {
-                label: "Show launcher and open Radial Designer".into(),
-                desc: "Show the launcher and open Radial Designer".into(),
-                action: "launcher:show".into(),
-                args: None,
-            },
-            None,
-            ActivationSource::Click,
-        );
+        // The Designer is an independent deferred viewport. Opening it from
+        // placement recovery must not show or move the launcher's root grid.
         self.focus_panel(Panel::RadialEditor);
         ctx.request_repaint();
         true
@@ -2052,7 +2042,11 @@ impl LauncherApp {
             launcher_hwnd: None,
             multi_manager_dialog: MultiManagerDialog::default(),
             multi_manager_settings_dialog: MultiManagerSettingsDialog::default(),
-            radial_editor: radial_editor::RadialEditorState::default(),
+            radial_editor: {
+                let mut editor = radial_editor::RadialEditorState::default();
+                editor.set_preferences(settings.radial_designer.clone());
+                Arc::new(Mutex::new(editor))
+            },
             watchers,
             dashboard,
             dashboard_runtime,
@@ -2818,7 +2812,11 @@ impl LauncherApp {
             Panel::Plugins => self.show_plugins,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open,
-            Panel::RadialEditor => self.radial_editor.open,
+            Panel::RadialEditor => self
+                .radial_editor
+                .lock()
+                .map(|editor| editor.open)
+                .unwrap_or(false),
         }
     }
 
@@ -3058,9 +3056,15 @@ impl LauncherApp {
                 self.panel_states.multi_manager_settings_dialog = false;
             }
             Panel::RadialEditor => {
-                self.radial_editor.request_close();
-                self.panel_states.radial_editor = self.radial_editor.open;
-                if self.radial_editor.open {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.request_close();
+                }
+                self.panel_states.radial_editor = self
+                    .radial_editor
+                    .lock()
+                    .map(|editor| editor.open)
+                    .unwrap_or(false);
+                if self.panel_states.radial_editor {
                     self.panel_stack.push(Panel::RadialEditor);
                 }
             }
@@ -3254,7 +3258,9 @@ impl LauncherApp {
                 self.panel_states.multi_manager_settings_dialog = false;
             }
             Panel::RadialEditor => {
-                self.radial_editor.force_close();
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.force_close();
+                }
                 self.panel_states.radial_editor = false;
             }
         }
@@ -3312,7 +3318,11 @@ impl LauncherApp {
             Panel::Plugins => self.show_plugins = true,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open = true,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open = true,
-            Panel::RadialEditor => self.radial_editor.open(),
+            Panel::RadialEditor => {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.open();
+                }
+            }
         }
         if !self.panel_stack.contains(&panel) {
             self.panel_stack.push(panel);
@@ -3339,9 +3349,15 @@ impl LauncherApp {
                 // Unpinning is a user close request, not authority to discard
                 // an authoring draft. Dirty state must pass through the
                 // editor's explicit save/discard/keep-editing prompt.
-                self.radial_editor.request_close();
-                self.panel_states.radial_editor = self.radial_editor.open;
-                if self.radial_editor.open && !self.panel_stack.contains(&panel) {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.request_close();
+                }
+                self.panel_states.radial_editor = self
+                    .radial_editor
+                    .lock()
+                    .map(|editor| editor.open)
+                    .unwrap_or(false);
+                if self.panel_states.radial_editor && !self.panel_stack.contains(&panel) {
                     self.panel_stack.push(panel);
                 }
             } else {
@@ -5213,17 +5229,17 @@ mod tests {
     fn unpinning_dirty_radial_editor_requires_explicit_close_confirmation() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        app.radial_editor.open_test_snapshot();
-        app.radial_editor.make_dirty_for_test();
+        app.radial_editor.lock().unwrap().open_test_snapshot();
+        app.radial_editor.lock().unwrap().make_dirty_for_test();
         app.pinned_panels.push(Panel::RadialEditor);
         app.panel_stack.push(Panel::RadialEditor);
 
         app.toggle_pin(Panel::RadialEditor);
 
         assert!(!app.pinned_panels.contains(&Panel::RadialEditor));
-        assert!(app.radial_editor.open);
-        assert!(app.radial_editor.is_dirty());
-        assert!(app.radial_editor.has_close_prompt());
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(app.radial_editor.lock().unwrap().is_dirty());
+        assert!(app.radial_editor.lock().unwrap().has_close_prompt());
         assert!(app.panel_stack.contains(&Panel::RadialEditor));
     }
 

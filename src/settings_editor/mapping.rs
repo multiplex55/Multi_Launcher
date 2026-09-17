@@ -75,6 +75,7 @@ impl SettingsEditor {
             radial_safety_policy: settings.radial.safety_policy,
             radial_default_item_input_scope: settings.radial.default_item_input_scope,
             radial_global_item_inputs: settings.radial.global_item_inputs,
+            radial_designer: settings.radial_designer.clone(),
             debug_logging: settings.debug_logging,
             show_toasts: settings.enable_toasts,
             show_inline_errors: settings.show_inline_errors,
@@ -346,6 +347,10 @@ impl SettingsEditor {
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
             radial: self.radial_settings(),
+            // The Designer persists independently from this editor.  Use the
+            // latest settings snapshot supplied by the caller so an older
+            // SettingsEditor cannot overwrite a concurrent Designer update.
+            radial_designer: current.radial_designer.clone(),
             radial_submenu_migration: current.radial_submenu_migration.clone(),
         }
     }
@@ -406,6 +411,32 @@ mod tests {
         let editor = SettingsEditor::from_settings(&initial);
         let restored = editor.to_settings(&Settings::default());
         assert_eq!(restored.radial, initial.radial);
+    }
+
+    #[test]
+    fn settings_editor_preserves_concurrent_radial_designer_preferences() {
+        let mut opening = Settings::default();
+        opening.radial_designer.show_skins = true;
+        opening.radial_designer.tree_visible = false;
+        opening.radial_designer.window_size = (1_200.0, 800.0);
+        opening
+            .radial_designer
+            .expanded_sections
+            .insert("menu:work".into(), false);
+
+        let editor = SettingsEditor::from_settings(&opening);
+        let mut current = Settings::default();
+        current.radial_designer.show_skins = false;
+        current.radial_designer.tree_visible = true;
+        current.radial_designer.window_position = Some((-1_440.0, 80.0));
+        current.radial_designer.window_scale_factor = Some(1.5);
+        current
+            .radial_designer
+            .expanded_sections
+            .insert("inspector:cell-content".into(), true);
+        let restored = editor.to_settings(&current);
+
+        assert_eq!(restored.radial_designer, current.radial_designer);
     }
 
     #[test]

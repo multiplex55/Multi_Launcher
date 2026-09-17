@@ -739,13 +739,44 @@ pub struct AuthoringClient {
     request_tx: mpsc::Sender<AuthoringRequest>,
     reply_rx: Arc<std::sync::Mutex<mpsc::Receiver<AuthoringReply>>>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// An editor viewport may be created after the main-owned service.  Keep
+    /// its repaint callback separate from the root wake so replies can wake
+    /// the actual owner without changing the service's lifetime boundary.
+    reply_wake: Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
     resource_tx: mpsc::Sender<AuthoringResourceDemand>,
 }
 
 pub struct AuthoringMainEndpoint {
     pub request_rx: mpsc::Receiver<AuthoringRequest>,
-    pub reply_tx: mpsc::Sender<AuthoringReply>,
+    pub reply_tx: AuthoringReplySender,
     pub resource_rx: mpsc::Receiver<AuthoringResourceDemand>,
+}
+
+/// Main-owner side of the authoring reply channel.  Sending a reply wakes the
+/// root and the currently registered deferred Designer viewport, so a reply
+/// never depends on an unrelated timer or pointer event to become visible.
+pub struct AuthoringReplySender {
+    tx: mpsc::Sender<AuthoringReply>,
+    root_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    reply_wake: Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+}
+
+impl AuthoringReplySender {
+    pub fn send(&self, reply: AuthoringReply) -> Result<(), mpsc::SendError<AuthoringReply>> {
+        self.tx.send(reply)?;
+        if let Some(wake) = &self.root_wake {
+            wake();
+        }
+        let wake = self
+            .reply_wake
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(wake) = wake {
+            wake();
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -764,22 +795,49 @@ pub fn authoring_control_service_with_wake(
     let (request_tx, request_rx) = mpsc::channel();
     let (reply_tx, reply_rx) = mpsc::channel();
     let (resource_tx, resource_rx) = mpsc::channel();
+    let reply_wake = Arc::new(std::sync::Mutex::new(None));
     (
         AuthoringClient {
             request_tx,
             reply_rx: Arc::new(std::sync::Mutex::new(reply_rx)),
-            wake,
+            wake: wake.clone(),
+            reply_wake: Arc::clone(&reply_wake),
             resource_tx,
         },
         AuthoringMainEndpoint {
             request_rx,
-            reply_tx,
+            reply_tx: AuthoringReplySender {
+                tx: reply_tx,
+                root_wake: wake,
+                reply_wake,
+            },
             resource_rx,
         },
     )
 }
 
 impl AuthoringClient {
+    /// Install or clear the callback for the currently open deferred editor
+    /// viewport.  Cloned clients share this slot, while the root service wake
+    /// remains unchanged.  Replacing a closed viewport callback is therefore
+    /// safe and does not retain an old egui context.
+    pub fn set_reply_wake(&self, wake: Option<Arc<dyn Fn() + Send + Sync>>) {
+        if let Ok(mut slot) = self.reply_wake.lock() {
+            *slot = wake;
+        }
+    }
+
+    fn wake_reply_owner(&self) {
+        let wake = self
+            .reply_wake
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
+
     pub fn acquire_resources(&self, editor_session: AuthoringSessionId) {
         let _ = self
             .resource_tx
@@ -787,6 +845,7 @@ impl AuthoringClient {
         if let Some(wake) = &self.wake {
             wake();
         }
+        self.wake_reply_owner();
     }
 
     pub fn release_resources(&self, editor_session: AuthoringSessionId) {
@@ -796,6 +855,7 @@ impl AuthoringClient {
         if let Some(wake) = &self.wake {
             wake();
         }
+        self.wake_reply_owner();
     }
 
     pub fn send(&self, request: AuthoringRequest) -> Result<(), AuthoringError> {
@@ -805,6 +865,7 @@ impl AuthoringClient {
         if let Some(wake) = &self.wake {
             wake();
         }
+        self.wake_reply_owner();
         Ok(())
     }
 
@@ -2973,5 +3034,25 @@ mod tests {
             })
             .unwrap();
         assert_eq!(client.try_recv().unwrap().id(), AuthoringRequestId(7));
+    }
+
+    #[test]
+    fn authoring_replies_wake_the_registered_designer_owner() {
+        let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (client, endpoint) = authoring_control_service_with_wake(None);
+        let callback_ticks = std::sync::Arc::clone(&ticks);
+        client.set_reply_wake(Some(std::sync::Arc::new(move || {
+            callback_ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        endpoint
+            .reply_tx
+            .send(AuthoringReply::PreviewCancelled {
+                id: AuthoringRequestId(9),
+                generation: DraftGeneration(1),
+                editor_session: AuthoringSessionId(2),
+            })
+            .unwrap();
+        assert_eq!(ticks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(client.try_recv().unwrap().id(), AuthoringRequestId(9));
     }
 }

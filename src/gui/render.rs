@@ -1208,10 +1208,48 @@ impl eframe::App for LauncherApp {
             ed.ui(ctx, self);
             self.plugin_editor = ed;
         }
-        if self.radial_editor.open {
-            let mut editor = std::mem::take(&mut self.radial_editor);
-            editor.ui(ctx, self);
-            self.radial_editor = editor;
+        crate::gui::radial_editor::RadialEditorState::show_deferred(&self.radial_editor, ctx, self);
+        let file_dialog_pending = self
+            .radial_editor
+            .lock()
+            .map(|editor| editor.intent_bridge().has_pending_file_dialog())
+            .unwrap_or(false);
+        if file_dialog_pending {
+            crate::gui::radial_editor::RadialEditorState::process_pending_file_dialog(
+                &self.radial_editor,
+            );
+        }
+        let designer_intents = self
+            .radial_editor
+            .lock()
+            .map(|editor| editor.intent_bridge())
+            .map(|bridge| bridge.drain())
+            .unwrap_or_default();
+        for intent in designer_intents {
+            match intent {
+                crate::gui::radial_editor::DesignerUiIntent::TestAction {
+                    binding,
+                    invocation,
+                    history_query,
+                } => {
+                    let _ =
+                        self.test_radial_authoring_action(&binding, &invocation, &history_query);
+                }
+            }
+        }
+        let designer_preferences = self
+            .radial_editor
+            .lock()
+            .ok()
+            .and_then(|mut editor| editor.take_preferences_for_persist());
+        if let Some(preferences) = designer_preferences {
+            let settings_path = self.settings_path.clone();
+            if let Err(error) = crate::settings::Settings::update(&settings_path, |settings| {
+                settings.radial_designer = preferences;
+                Ok(())
+            }) {
+                self.report_error_message("radial.designer.preferences", error.to_string());
+            }
         }
         if self.show_dashboard_editor && !self.dashboard_editor.open {
             let registry = self.dashboard.registry().clone();

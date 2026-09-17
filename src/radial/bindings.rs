@@ -49,6 +49,17 @@ pub struct PreparedCell {
     pub history_query: String,
 }
 
+/// Typed identity for one generated dynamic result.  The generated display
+/// CellId remains an implementation detail of the immutable projection; UI
+/// hit testing uses this record to recover the authored source and frozen
+/// result without parsing an ID string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectedDynamicProvenance {
+    pub source_cell_id: CellId,
+    pub result_index: usize,
+    pub fingerprint: super::dynamic::SourceFingerprint,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedMenuFrame {
     pub base_menu: MenuDefinition,
@@ -57,6 +68,7 @@ pub struct PreparedMenuFrame {
     pub static_cells: BTreeMap<CellId, PreparedCell>,
     pub dynamic: BTreeMap<CellId, FrozenDynamicFrame>,
     pub alternates: BTreeMap<(CellId, super::model::ClickGesture), PreparedCell>,
+    pub dynamic_provenance: BTreeMap<CellId, ProjectedDynamicProvenance>,
     pub page: usize,
     pub page_count: usize,
 }
@@ -85,6 +97,7 @@ pub fn project_menu_frame_with_style(
     let mut projected = menu.clone();
     let source_static = static_cells.clone();
     let mut cells = static_cells;
+    let mut dynamic_provenance = BTreeMap::new();
     let ring_pages: Vec<_> = menu
         .rings
         .iter()
@@ -181,6 +194,14 @@ pub fn project_menu_frame_with_style(
                         history_query: entry.history_query.clone(),
                     },
                 );
+                dynamic_provenance.insert(
+                    id.clone(),
+                    ProjectedDynamicProvenance {
+                        source_cell_id: source_cell.id.clone(),
+                        result_index: source_index,
+                        fingerprint: frame.fingerprint.clone(),
+                    },
+                );
                 expanded.push(CellDefinition {
                     id,
                     label: entry.label.clone(),
@@ -214,6 +235,7 @@ pub fn project_menu_frame_with_style(
         static_cells: source_static,
         dynamic: dynamic.clone(),
         alternates: BTreeMap::new(),
+        dynamic_provenance,
         page,
         page_count,
     }

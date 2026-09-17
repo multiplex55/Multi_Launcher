@@ -36,8 +36,12 @@ impl RadialCommandHost for LauncherApp {
 
     fn open_radial_editor(&mut self, skins: bool) {
         self.focus_panel(super::Panel::RadialEditor);
-        if skins {
-            self.radial_editor.open_skins();
+        if let Ok(mut editor) = self.radial_editor.lock() {
+            if skins {
+                editor.open_skins();
+            } else {
+                editor.open_menus();
+            }
         }
         self.panel_states.radial_editor = true;
     }
@@ -946,22 +950,31 @@ mod tests {
     #[test]
     fn radial_editor_commands_open_the_stable_panel_and_skins_section() {
         let mut app = test_app();
+        app.visible_flag.store(false, Ordering::SeqCst);
         app.activate_action(
             action("radial edit"),
             None,
             crate::commands::ActivationSource::Click,
         );
-        assert!(app.radial_editor.open);
-        assert!(!app.radial_editor.is_showing_resources());
-        assert!(!app.radial_editor.is_dirty());
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(!app.radial_editor.lock().unwrap().is_showing_resources());
+        assert!(!app.radial_editor.lock().unwrap().is_dirty());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
         app.activate_action(
             action("radial skins"),
             None,
             crate::commands::ActivationSource::Click,
         );
-        assert!(app.radial_editor.open);
-        assert!(app.radial_editor.is_showing_resources());
-        assert!(!app.radial_editor.is_dirty());
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(app.radial_editor.lock().unwrap().is_showing_resources());
+        assert!(!app.radial_editor.lock().unwrap().is_dirty());
+        app.activate_action(
+            action("radial edit"),
+            None,
+            crate::commands::ActivationSource::Click,
+        );
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(!app.radial_editor.lock().unwrap().is_showing_resources());
     }
 
     #[test]

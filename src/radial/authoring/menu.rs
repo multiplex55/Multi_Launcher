@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{RadialAuthoringSession, StableSelection};
 use crate::radial::model::{
-    CellContent, CellDefinition, CellId, MenuDefinition, MenuId, RadialDocument, RingDefinition,
-    RingId,
+    AfterActionPolicy, CellContent, CellDefinition, CellId, InteractionMode, MenuDefinition,
+    MenuId, RadialDocument, RingDefinition, RingId, SubmenuPresentation,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +64,21 @@ pub enum MenuEditError {
     SubmenuCycle,
     ResolutionRequired,
     InvalidDestination,
+    DestinationOccupied,
+    DynamicCell,
+    StaleGeneration,
+}
+
+/// Resolution chosen by the user after a drag reaches an authored slot.
+///
+/// A move into a spacer exchanges the two stable cell identities.  An
+/// occupied destination is never overwritten implicitly: callers must choose
+/// [`Self::Swap`] explicitly or cancel the gesture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellDropResolution {
+    MoveIntoSpacer,
+    Swap,
+    Cancel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -224,6 +239,14 @@ pub fn set_cell_content(
     content: CellContent,
 ) -> Result<(), MenuEditError> {
     let mut document = (*session.draft).clone();
+    if let CellContent::Submenu { menu_id: child_id } = &content {
+        if !document.menus.iter().any(|menu| &menu.id == child_id) {
+            return Err(MenuEditError::MissingEntity);
+        }
+        if would_create_submenu_cycle(&document, menu_id, child_id) {
+            return Err(MenuEditError::SubmenuCycle);
+        }
+    }
     let cell = find_ring_mut(&mut document, menu_id, ring_id)?
         .cells
         .iter_mut()
@@ -288,6 +311,22 @@ pub fn add_ring(
     menu_id: &MenuId,
 ) -> Result<RingId, MenuEditError> {
     let id = session.allocate_ring_id("ring");
+    let cells = (0..8)
+        .map(|cell_index| CellDefinition {
+            id: session.allocate_cell_id(&format!("cell-{cell_index}")),
+            label: "Spacer".into(),
+            content: CellContent::Spacer,
+            alternate_clicks: Vec::new(),
+            alternate_controls: Vec::new(),
+            after_action: AfterActionPolicy::Inherit,
+            secondary_after_action: AfterActionPolicy::Inherit,
+            icon: Default::default(),
+            tooltip: Default::default(),
+            style: Default::default(),
+            shortcuts: Vec::new(),
+            hotstrings: Vec::new(),
+        })
+        .collect();
     let mut document = (*session.draft).clone();
     let menu = document
         .menus
@@ -301,7 +340,7 @@ pub fn add_ring(
         cell_radius: 28.0,
         rotation_degrees: -90.0,
         gap: 4.0,
-        cells: Vec::new(),
+        cells,
         style: Default::default(),
     });
     session
@@ -458,26 +497,212 @@ pub fn move_cell(
     source: (&MenuId, &RingId, &CellId),
     destination: (&MenuId, &RingId, usize),
 ) -> Result<(), MenuEditError> {
-    let mut document = (*session.draft).clone();
-    let source_ring = find_ring_mut(&mut document, source.0, source.1)?;
-    let index = source_ring
+    let expected_generation = session.generation;
+    move_cell_to_slot(
+        session,
+        source,
+        destination,
+        CellDropResolution::MoveIntoSpacer,
+        expected_generation,
+    )
+}
+
+/// Apply one stable-ID slot operation after a drag has completed.
+///
+/// `expected_generation` is captured at drag start.  Any intervening edit
+/// invalidates the operation rather than applying a stale borrowed pointer or
+/// silently moving a newer version of the document.
+pub fn move_cell_to_slot(
+    session: &mut RadialAuthoringSession,
+    source: (&MenuId, &RingId, &CellId),
+    destination: (&MenuId, &RingId, usize),
+    resolution: CellDropResolution,
+    expected_generation: super::DraftGeneration,
+) -> Result<(), MenuEditError> {
+    if resolution == CellDropResolution::Cancel {
+        return Ok(());
+    }
+    if session.generation != expected_generation {
+        return Err(MenuEditError::StaleGeneration);
+    }
+    let source_ring = find_ring(&session.draft, source.0, source.1)?;
+    let source_index = source_ring
         .cells
         .iter()
         .position(|cell| &cell.id == source.2)
         .ok_or(MenuEditError::MissingEntity)?;
-    let cell = source_ring.cells.remove(index);
-    let destination_ring = find_ring_mut(&mut document, destination.0, destination.1)?;
-    let insert = destination.2.min(destination_ring.cells.len());
-    destination_ring.cells.insert(insert, cell.clone());
+    let destination_ring = find_ring(&session.draft, destination.0, destination.1)?;
+    let destination_cell = destination_ring
+        .cells
+        .get(destination.2)
+        .ok_or(MenuEditError::InvalidDestination)?;
+    if source.0 == destination.0 && source.1 == destination.1 && source_index == destination.2 {
+        return Ok(());
+    }
+    let destination_is_spacer = matches!(&destination_cell.content, CellContent::Spacer);
+    if !destination_is_spacer && resolution != CellDropResolution::Swap {
+        return Err(MenuEditError::DestinationOccupied);
+    }
+
+    let mut document = (*session.draft).clone();
+    if source.0 == destination.0 && source.1 == destination.1 {
+        let ring = find_ring_mut(&mut document, source.0, source.1)?;
+        ring.cells.swap(source_index, destination.2);
+    } else {
+        let source_cell = find_ring(&document, source.0, source.1)?
+            .cells
+            .get(source_index)
+            .cloned()
+            .ok_or(MenuEditError::MissingEntity)?;
+        let destination_cell = find_ring(&document, destination.0, destination.1)?
+            .cells
+            .get(destination.2)
+            .cloned()
+            .ok_or(MenuEditError::InvalidDestination)?;
+        find_ring_mut(&mut document, source.0, source.1)?.cells[source_index] = destination_cell;
+        find_ring_mut(&mut document, destination.0, destination.1)?.cells[destination.2] =
+            source_cell.clone();
+    }
     session
         .replace_document_atomic(document)
         .map_err(|_| MenuEditError::MissingEntity)?;
     session.select(Some(StableSelection::Cell {
         menu_id: destination.0.clone(),
         ring_id: destination.1.clone(),
-        cell_id: cell.id,
+        cell_id: source.2.clone(),
     }));
     Ok(())
+}
+
+/// Create a fresh SameCenter submenu and link it to one empty authored slot
+/// as one undoable stable-ID transaction.
+pub fn create_submenu_and_link(
+    session: &mut RadialAuthoringSession,
+    parent_menu_id: &MenuId,
+    parent_ring_id: &RingId,
+    parent_cell_id: &CellId,
+    name: &str,
+) -> Result<MenuId, MenuEditError> {
+    let mut document = (*session.draft).clone();
+    let parent = document
+        .menus
+        .iter()
+        .find(|menu| &menu.id == parent_menu_id)
+        .ok_or(MenuEditError::MissingEntity)?;
+    let parent_ring = parent
+        .rings
+        .iter()
+        .find(|ring| &ring.id == parent_ring_id)
+        .ok_or(MenuEditError::MissingEntity)?;
+    let parent_cell = parent_ring
+        .cells
+        .iter()
+        .find(|cell| &cell.id == parent_cell_id)
+        .ok_or(MenuEditError::MissingEntity)?;
+    if !matches!(&parent_cell.content, CellContent::Spacer) {
+        return Err(MenuEditError::DestinationOccupied);
+    }
+    let skin_id = document
+        .skins
+        .first()
+        .map(|skin| skin.id.clone())
+        .ok_or(MenuEditError::MissingEntity)?;
+    let child_id = session.allocate_menu_id(if name.trim().is_empty() {
+        "submenu"
+    } else {
+        name
+    });
+    let ring_id = session.allocate_ring_id("ring");
+    let cells = (0..8)
+        .map(|_| CellDefinition {
+            id: session.allocate_cell_id("cell"),
+            label: "Spacer".into(),
+            content: CellContent::Spacer,
+            alternate_clicks: Vec::new(),
+            alternate_controls: Vec::new(),
+            after_action: AfterActionPolicy::Inherit,
+            secondary_after_action: AfterActionPolicy::Inherit,
+            icon: Default::default(),
+            tooltip: Default::default(),
+            style: Default::default(),
+            shortcuts: Vec::new(),
+            hotstrings: Vec::new(),
+        })
+        .collect();
+    document.menus.push(MenuDefinition {
+        id: child_id.clone(),
+        name: if name.trim().is_empty() {
+            "New submenu".into()
+        } else {
+            name.trim().to_owned()
+        },
+        layout: crate::radial::model::LayoutKind::CircularCells,
+        interaction: InteractionMode::StickyClick,
+        hover_dwell_ms: None,
+        submenu_presentation: SubmenuPresentation::SameCenter,
+        after_action: AfterActionPolicy::Inherit,
+        center_action: None,
+        center_primary_after_action: AfterActionPolicy::Inherit,
+        center_secondary_action: None,
+        center_secondary_after_action: AfterActionPolicy::Inherit,
+        center_control: Some(crate::radial::model::Control::Back),
+        center_secondary_control: None,
+        background_action: None,
+        background_primary_after_action: AfterActionPolicy::Inherit,
+        background_secondary_action: None,
+        background_control: None,
+        background_secondary_control: None,
+        background_secondary_after_action: AfterActionPolicy::Inherit,
+        mirror_primary_to_secondary: false,
+        skin_id,
+        center_radius: 30.0,
+        rings: vec![RingDefinition {
+            id: ring_id,
+            radius: 92.0,
+            cell_radius: 28.0,
+            rotation_degrees: -90.0,
+            gap: 4.0,
+            cells,
+            style: Default::default(),
+        }],
+        style: Default::default(),
+    });
+    let parent_cell = find_ring_mut(&mut document, parent_menu_id, parent_ring_id)?
+        .cells
+        .iter_mut()
+        .find(|cell| &cell.id == parent_cell_id)
+        .ok_or(MenuEditError::MissingEntity)?;
+    parent_cell.content = CellContent::Submenu {
+        menu_id: child_id.clone(),
+    };
+    session
+        .replace_document_atomic(document)
+        .map_err(|_| MenuEditError::MissingEntity)?;
+    session.select(Some(StableSelection::Cell {
+        menu_id: parent_menu_id.clone(),
+        ring_id: parent_ring_id.clone(),
+        cell_id: parent_cell_id.clone(),
+    }));
+    Ok(child_id)
+}
+
+/// Link an existing menu to a slot after validating the complete graph.
+pub fn link_existing_submenu(
+    session: &mut RadialAuthoringSession,
+    parent_menu_id: &MenuId,
+    parent_ring_id: &RingId,
+    parent_cell_id: &CellId,
+    child_menu_id: &MenuId,
+) -> Result<(), MenuEditError> {
+    set_cell_content(
+        session,
+        parent_menu_id,
+        parent_ring_id,
+        parent_cell_id,
+        CellContent::Submenu {
+            menu_id: child_menu_id.clone(),
+        },
+    )
 }
 
 pub fn resize_plan(
@@ -705,6 +930,51 @@ fn ensure_acyclic(document: &RadialDocument) -> Result<(), MenuEditError> {
     Ok(())
 }
 
+/// Validate the complete submenu graph before a compound UI edit is
+/// committed.  Callers that edit a cloned cell/document can use this same
+/// guard as [`set_cell_content`] so the graph cannot bypass the typed link
+/// boundary.
+pub fn validate_submenu_graph(document: &RadialDocument) -> Result<(), MenuEditError> {
+    ensure_acyclic(document)
+}
+
+fn would_create_submenu_cycle(
+    document: &RadialDocument,
+    parent_menu_id: &MenuId,
+    child_menu_id: &MenuId,
+) -> bool {
+    if parent_menu_id == child_menu_id {
+        return true;
+    }
+    let mut visiting = BTreeSet::new();
+    menu_reaches(document, child_menu_id, parent_menu_id, &mut visiting)
+}
+
+fn menu_reaches(
+    document: &RadialDocument,
+    current: &MenuId,
+    target: &MenuId,
+    visiting: &mut BTreeSet<MenuId>,
+) -> bool {
+    if !visiting.insert(current.clone()) {
+        return false;
+    }
+    let reaches = document
+        .menus
+        .iter()
+        .find(|menu| &menu.id == current)
+        .is_some_and(|menu| {
+            menu.rings.iter().flat_map(|ring| &ring.cells).any(|cell| {
+                let CellContent::Submenu { menu_id } = &cell.content else {
+                    return false;
+                };
+                menu_id == target || menu_reaches(document, menu_id, target, visiting)
+            })
+        });
+    visiting.remove(current);
+    reaches
+}
+
 fn find_ring<'a>(
     document: &'a RadialDocument,
     menu_id: &MenuId,
@@ -828,6 +1098,24 @@ mod tests {
                 && cell.style == Default::default()
         }));
     }
+
+    #[test]
+    fn adding_ring_creates_valid_starter_spacer_slots() {
+        let mut session = session();
+        let menu = session.draft.menus[0].id.clone();
+        let ring = add_ring(&mut session, &menu).unwrap();
+        let ring = session.draft.menus[0]
+            .rings
+            .iter()
+            .find(|candidate| candidate.id == ring)
+            .unwrap();
+        assert_eq!(ring.cells.len(), 8);
+        assert!(ring.cells.iter().all(|cell| {
+            matches!(&cell.content, CellContent::Spacer) && cell.label == "Spacer"
+        }));
+        assert!(crate::radial::validation::validate(&session.draft).is_ok());
+    }
+
     use crate::radial::authoring::{AuthoringSnapshot, DiskSha256};
 
     fn session() -> RadialAuthoringSession {
@@ -837,6 +1125,205 @@ mod tests {
             document: std::sync::Arc::new(document),
             disk_sha256: DiskSha256("test".into()),
         })
+    }
+
+    fn make_root_slot_spacer(session: &mut RadialAuthoringSession, cell_index: usize) {
+        // The production starter document intentionally has no empty root
+        // slot.  These authoring tests need a real Spacer destination so they
+        // exercise the typed drop/link semantics rather than an occupied slot.
+        let mut document = (*session.draft).clone();
+        let cell = &mut document.menus[0].rings[0].cells[cell_index];
+        cell.label = "Spacer".into();
+        cell.content = CellContent::Spacer;
+        session.draft = std::sync::Arc::new(document);
+    }
+
+    #[test]
+    fn create_submenu_and_link_is_one_undoable_same_center_edit() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let menu = session.draft.menus[0].id.clone();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let cell = session.draft.menus[0].rings[0].cells[7].id.clone();
+        let before = session.draft.clone();
+        let child = create_submenu_and_link(&mut session, &menu, &ring, &cell, "Child").unwrap();
+        assert_eq!(session.draft.menus.len(), before.menus.len() + 1);
+        assert!(session.draft.menus.iter().any(|menu| menu.id == child));
+        assert!(matches!(
+            session.draft.menus[0].rings[0].cells[7].content,
+            CellContent::Submenu { ref menu_id } if menu_id == &child
+        ));
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*before);
+        assert!(!session.undo(), "create/link is a single undo step");
+    }
+
+    #[test]
+    fn slot_drop_swaps_with_spacer_and_rejects_occupied_without_overwrite() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let menu = session.draft.menus[0].id.clone();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let source = session.draft.menus[0].rings[0].cells[0].id.clone();
+        let destination = session.draft.menus[0].rings[0].cells[7].id.clone();
+        let expected = session.generation;
+        let unchanged = session.draft.clone();
+        move_cell_to_slot(
+            &mut session,
+            (&menu, &ring, &source),
+            (&menu, &ring, 7),
+            CellDropResolution::Cancel,
+            expected,
+        )
+        .unwrap();
+        assert_eq!(&*session.draft, &*unchanged);
+        let expected = session.generation;
+        move_cell_to_slot(
+            &mut session,
+            (&menu, &ring, &source),
+            (&menu, &ring, 7),
+            CellDropResolution::MoveIntoSpacer,
+            expected,
+        )
+        .unwrap();
+        assert_eq!(session.draft.menus[0].rings[0].cells[7].id, source);
+        assert_eq!(session.draft.menus[0].rings[0].cells[0].id, destination);
+
+        let occupied = session.draft.menus[0].rings[0].cells[1].id.clone();
+        let unchanged = session.draft.clone();
+        let expected = session.generation;
+        assert_eq!(
+            move_cell_to_slot(
+                &mut session,
+                (&menu, &ring, &source),
+                (&menu, &ring, 1),
+                CellDropResolution::MoveIntoSpacer,
+                expected,
+            ),
+            Err(MenuEditError::DestinationOccupied)
+        );
+        assert_eq!(&*session.draft, &*unchanged);
+        let expected = session.generation;
+        move_cell_to_slot(
+            &mut session,
+            (&menu, &ring, &source),
+            (&menu, &ring, 1),
+            CellDropResolution::Swap,
+            expected,
+        )
+        .unwrap();
+        assert_eq!(session.draft.menus[0].rings[0].cells[1].id, source);
+        assert_eq!(session.draft.menus[0].rings[0].cells[7].id, occupied);
+    }
+
+    #[test]
+    fn stale_slot_drop_is_rejected() {
+        let mut session = session();
+        let menu = session.draft.menus[0].id.clone();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let source = session.draft.menus[0].rings[0].cells[0].id.clone();
+        let expected = session.generation;
+        rename_menu(
+            &mut session,
+            menu.clone(),
+            "changed".into(),
+            super::super::EditPhase::Atomic,
+        )
+        .unwrap();
+        assert_eq!(
+            move_cell_to_slot(
+                &mut session,
+                (&menu, &ring, &source),
+                (&menu, &ring, 7),
+                CellDropResolution::Swap,
+                expected,
+            ),
+            Err(MenuEditError::StaleGeneration)
+        );
+    }
+
+    #[test]
+    fn authored_dynamic_source_can_move_to_a_spacer() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let menu = session.draft.menus[0].id.clone();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let mut document = (*session.draft).clone();
+        document.menus[0].rings[0].cells[0].content = CellContent::Dynamic {
+            source: crate::radial::model::DynamicSource::Favorites,
+        };
+        let source = document.menus[0].rings[0].cells[0].id.clone();
+        session.draft = std::sync::Arc::new(document);
+        let generation = session.generation;
+        move_cell_to_slot(
+            &mut session,
+            (&menu, &ring, &source),
+            (&menu, &ring, 7),
+            CellDropResolution::MoveIntoSpacer,
+            generation,
+        )
+        .expect("authored Dynamic source definitions are movable");
+        assert_eq!(session.draft.menus[0].rings[0].cells[7].id, source);
+        assert!(matches!(
+            session.draft.menus[0].rings[0].cells[7].content,
+            CellContent::Dynamic { .. }
+        ));
+    }
+
+    #[test]
+    fn authored_dyn_prefixed_id_is_still_movable() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let menu = session.draft.menus[0].id.clone();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let mut document = (*session.draft).clone();
+        document.menus[0].rings[0].cells[0].id = CellId::new("dyn:authored-slot");
+        session.draft = std::sync::Arc::new(document);
+        let source = session.draft.menus[0].rings[0].cells[0].id.clone();
+        let generation = session.generation;
+        move_cell_to_slot(
+            &mut session,
+            (&menu, &ring, &source),
+            (&menu, &ring, 7),
+            CellDropResolution::MoveIntoSpacer,
+            generation,
+        )
+        .expect("an authored dyn:-prefixed ID remains a stable authored cell");
+        assert_eq!(session.draft.menus[0].rings[0].cells[7].id, source);
+    }
+
+    #[test]
+    fn submenu_links_reject_graph_cycles() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let root = session.draft.menus[0].id.clone();
+        let child = create_menu(&mut session, "child", "Child").unwrap();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let cell = session.draft.menus[0].rings[0].cells[7].id.clone();
+        link_existing_submenu(&mut session, &root, &ring, &cell, &child).unwrap();
+        let child_ring = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| menu.id == child)
+            .unwrap()
+            .rings[0]
+            .id
+            .clone();
+        let child_cell = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| menu.id == child)
+            .unwrap()
+            .rings[0]
+            .cells[0]
+            .id
+            .clone();
+        assert_eq!(
+            link_existing_submenu(&mut session, &child, &child_ring, &child_cell, &root),
+            Err(MenuEditError::SubmenuCycle)
+        );
     }
 
     #[test]

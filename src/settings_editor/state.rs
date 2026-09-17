@@ -27,6 +27,7 @@ pub struct SettingsEditor {
     pub(crate) radial_safety_policy: crate::radial::model::RadialSafetyPolicy,
     pub(crate) radial_default_item_input_scope: crate::radial::model::TriggerScope,
     pub(crate) radial_global_item_inputs: bool,
+    pub(crate) radial_designer: crate::settings::RadialDesignerPreferences,
     pub(crate) debug_logging: bool,
     pub(crate) show_toasts: bool,
     pub(crate) show_inline_errors: bool,

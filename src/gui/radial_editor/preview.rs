@@ -1,12 +1,17 @@
+use super::PendingCellDrop;
+use super::canvas::{
+    CanvasPoint, CanvasTransform, DesignerMode, DragPayload, PlacementDraft,
+    ProjectedCellProvenance, ProjectedSelection, VisitedMenuPath,
+};
 use crate::radial::authoring::StableSelection;
 use crate::radial::authoring::{AuthoringClient, AuthoringSessionId, RadialAuthoringSession};
 use crate::radial::compositor::CompositorCache;
 use crate::radial::geometry::{
-    LogicalPoint, LogicalRect, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout,
+    HitShape, LogicalPoint, LogicalRect, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout,
     layout_document_menu, shape_center,
 };
 use crate::radial::model::{
-    CellContent, CellId, InvocationId, MenuId, RadialDocument, SessionId, SkinId,
+    CellContent, CellId, InvocationId, MenuId, RadialDocument, RingId, SessionId, SkinId,
 };
 use crate::radial::preparation::{
     PreparedFrameInput, PreparedPlacement, PreviewPlacement, ensure_preview_center_back,
@@ -31,6 +36,16 @@ pub(super) enum PreviewPreset {
     HighDpi,
 }
 
+/// A Preview/Test dispatch is always consumed locally, but retaining its
+/// typed projection identity keeps the read-only surface honest: a generated
+/// result can be inspected as the exact authored source/result that produced
+/// it without pretending that its synthetic CellId is part of the document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct InterceptedDynamicDispatch {
+    pub(super) generated_cell_id: CellId,
+    pub(super) provenance: crate::radial::bindings::ProjectedDynamicProvenance,
+}
+
 pub(super) struct EmbeddedPreview {
     reducer: Option<SessionReducer>,
     root: Option<MenuId>,
@@ -42,6 +57,7 @@ pub(super) struct EmbeddedPreview {
     compositor: CompositorCache,
     texture: Option<egui::TextureHandle>,
     pub(super) intercepted_dispatches: usize,
+    pub(super) last_intercepted_dynamic_dispatch: Option<InterceptedDynamicDispatch>,
     pub(super) simulated_drags: usize,
     drag_cell: Option<CellId>,
     navigation_frames: BTreeMap<FrameId, (String, std::sync::Arc<PreparedFrameInput>)>,
@@ -69,6 +85,7 @@ impl Default for EmbeddedPreview {
             compositor: CompositorCache::default(),
             texture: None,
             intercepted_dispatches: 0,
+            last_intercepted_dynamic_dispatch: None,
             simulated_drags: 0,
             drag_cell: None,
             navigation_frames: BTreeMap::new(),
@@ -89,6 +106,29 @@ impl EmbeddedPreview {
     pub(super) fn cancel_tooltip(&mut self) {
         self.tooltip_hover.cancel();
         self.hovered_cell = None;
+    }
+
+    /// Drop all prepared navigation state when the owning viewport closes.
+    /// A late service reply is generation/session checked by authoring, but
+    /// clearing this local cache as well prevents a hidden viewport from
+    /// resurrecting an old prepared frame on a subsequent open.
+    pub(super) fn dispose(&mut self) {
+        self.cancel_tooltip();
+        self.reducer = None;
+        self.root = None;
+        self.document_generation = 0;
+        self.selection_token.clear();
+        self.frame_token.clear();
+        self.failed_frame_token = None;
+        self.preparation_notice = None;
+        self.last_intercepted_dynamic_dispatch = None;
+        self.navigation_frames.clear();
+        self.pending_frame_id = None;
+        self.pending_frame_token = None;
+        self.frozen_center = None;
+        self.frozen_scale = None;
+        self.texture = None;
+        self.drag_cell = None;
     }
 
     pub(super) fn prepared_frame(
@@ -488,6 +528,7 @@ impl EmbeddedPreview {
         self.frozen_center = None;
         self.frozen_scale = None;
         self.cancel_tooltip();
+        self.last_intercepted_dynamic_dispatch = None;
         let Some(menu) = document.menus.iter().find(|menu| &menu.id == menu_id) else {
             self.reducer = None;
             return;
@@ -533,7 +574,12 @@ impl EmbeddedPreview {
         }
     }
 
-    pub(super) fn activate(&mut self, document: &RadialDocument, cell_id: &CellId) {
+    pub(super) fn activate(
+        &mut self,
+        document: &RadialDocument,
+        prepared: Option<&PreparedFrameInput>,
+        cell_id: &CellId,
+    ) {
         self.cancel_tooltip();
         if cell_id.as_str() == "__center"
             && self
@@ -547,7 +593,7 @@ impl EmbeddedPreview {
         let Some(menu_id) = self.current_menu().cloned() else {
             return;
         };
-        let cell = document
+        let authored_cell = document
             .menus
             .iter()
             .find(|menu| menu.id == menu_id)
@@ -557,7 +603,21 @@ impl EmbeddedPreview {
                     .flat_map(|ring| &ring.cells)
                     .find(|cell| &cell.id == cell_id)
             });
-        let role = cell_role(document, &menu_id, cell_id);
+        // A projected dynamic result is intentionally absent from the
+        // authored document. Use the prepared typed map for its action
+        // semantics, while authored membership wins if an ID happens to
+        // collide with a generated-looking value.
+        let generated_provenance = authored_cell
+            .is_none()
+            .then(|| prepared.and_then(|input| input.provenance.get(cell_id)))
+            .flatten()
+            .cloned();
+        let cell = authored_cell;
+        let role = if generated_provenance.is_some() {
+            CellRole::Action
+        } else {
+            cell_role(document, &menu_id, cell_id)
+        };
         let submenu_center = cell.and_then(|cell| match &cell.content {
             CellContent::Submenu { menu_id: target } => {
                 Some(self.requested_child_center(document, &menu_id, target))
@@ -606,7 +666,15 @@ impl EmbeddedPreview {
         let intents = self.reducer.as_mut().unwrap().reduce(event);
         for intent in intents {
             match intent {
-                SessionIntent::Dispatch { .. } => self.intercepted_dispatches += 1,
+                SessionIntent::Dispatch { cell_id, .. } => {
+                    self.intercepted_dispatches += 1;
+                    if let Some(provenance) = generated_provenance.clone() {
+                        self.last_intercepted_dynamic_dispatch = Some(InterceptedDynamicDispatch {
+                            generated_cell_id: cell_id,
+                            provenance,
+                        });
+                    }
+                }
                 SessionIntent::OpenSubmenu { .. } => {
                     if let Some(CellContent::Submenu { menu_id }) = cell.map(|cell| &cell.content) {
                         let _ = self
@@ -739,6 +807,16 @@ impl EmbeddedPreview {
         prepared: Option<&PreparedFrameInput>,
         editor_session: AuthoringSessionId,
         show_expected_layout_diagnostics: bool,
+        mode: DesignerMode,
+        authoring_session: Option<&mut RadialAuthoringSession>,
+        projected_selection: &mut Option<ProjectedSelection>,
+        drag_payload: &mut Option<DragPayload>,
+        placement_draft: &mut Option<PlacementDraft>,
+        pending_drop: &mut Option<PendingCellDrop>,
+        properties_popup: &mut Option<StableSelection>,
+        visited_path: &mut VisitedMenuPath,
+        canvas_pan: &mut CanvasPoint,
+        pan_drag_start: &mut Option<CanvasPoint>,
     ) {
         let selected_menu = match selection {
             Some(
@@ -755,13 +833,28 @@ impl EmbeddedPreview {
         let root = selected_menu
             .or_else(|| self.root.clone())
             .unwrap_or_else(|| document.default_menu_id.clone());
-        let synthetic = representative_document(document, preset, &root, selected_skin.as_ref());
+        // Design gestures must address stable entities in the authoring draft.
+        // Preview presets may intentionally clone/truncate rings and rewrite
+        // IDs, so keep those representative documents on the explicit
+        // Preview/Test side of the split only.
+        let synthetic = if mode == DesignerMode::Design {
+            document.clone()
+        } else {
+            representative_document(document, preset, &root, selected_skin.as_ref())
+        };
         let document = &synthetic;
-        let mut menu_id = self
-            .current_menu()
-            .cloned()
-            .filter(|id| document.menus.iter().any(|menu| &menu.id == id))
-            .unwrap_or_else(|| root.clone());
+        let mut menu_id = if mode == DesignerMode::Design {
+            visited_path
+                .current()
+                .cloned()
+                .filter(|id| document.menus.iter().any(|menu| &menu.id == id))
+                .unwrap_or_else(|| root.clone())
+        } else {
+            self.current_menu()
+                .cloned()
+                .filter(|id| document.menus.iter().any(|menu| &menu.id == id))
+                .unwrap_or_else(|| root.clone())
+        };
         let token = format!("{root:?}:{selected_skin:?}:{preset:?}");
         if self.reducer.is_none()
             || self.document_generation != generation
@@ -796,6 +889,27 @@ impl EmbeddedPreview {
             show_expected_layout_diagnostics,
             "embedded-preview",
         );
+        if mode == DesignerMode::Design {
+            self.design_ui(
+                ui,
+                document,
+                menu,
+                generation,
+                editor_session,
+                &input,
+                authoring_session,
+                projected_selection,
+                drag_payload,
+                placement_draft,
+                pending_drop,
+                properties_popup,
+                visited_path,
+                zoom,
+                canvas_pan,
+                pan_drag_start,
+            );
+            return;
+        }
         ui.horizontal(|ui| {
             if ui.button("Back").clicked() {
                 self.back();
@@ -807,14 +921,33 @@ impl EmbeddedPreview {
             self.cancel_tooltip();
             return;
         }
-        let canvas_size = egui::vec2(360.0, 360.0) * zoom.max(0.1);
+        let available = ui.available_size();
+        let canvas_size = egui::vec2(available.x.max(180.0), available.y.max(180.0));
         let (canvas_rect, response) =
             ui.allocate_exact_size(canvas_size, egui::Sense::click_and_drag());
+        let canvas_painter = ui.painter().with_clip_rect(canvas_rect);
+        let transform = CanvasTransform {
+            zoom,
+            ..CanvasTransform::fit(
+                CanvasPoint::new(canvas_rect.min.x, canvas_rect.min.y),
+                CanvasPoint::new(canvas_rect.width(), canvas_rect.height()),
+                CanvasPoint::new(layout.visual_extent.min.x, layout.visual_extent.min.y),
+                CanvasPoint::new(layout.visual_extent.max.x, layout.visual_extent.max.y),
+                layout.scale_factor.get() as f32,
+            )
+        }
+        .normalized();
 
         let pointer_point = response
             .interact_pointer_pos()
             .filter(|_| response.hovered())
-            .map(|pointer| preview_pointer_point(pointer, canvas_rect, &layout));
+            .map(|pointer| {
+                let point = transform.screen_to_world(CanvasPoint::new(pointer.x, pointer.y));
+                LogicalPoint {
+                    x: point.x,
+                    y: point.y,
+                }
+            });
         let pointer_down = response.is_pointer_button_down_on()
             || response.drag_started()
             || response.dragged()
@@ -850,7 +983,7 @@ impl EmbeddedPreview {
             && let Some(point) = pointer_point
             && let Some(cell) = layout.hit_test(point)
         {
-            self.activate(document, &cell.cell_id);
+            self.activate(document, Some(input), &cell.cell_id);
             ui.ctx().request_repaint();
         }
 
@@ -946,13 +1079,681 @@ impl EmbeddedPreview {
             ));
         }
         if let Some(texture) = &self.texture {
-            let scene_rect =
-                preview_scene_rect(frame.logical_bounds, layout.visual_extent, canvas_rect);
-            ui.painter().image(
+            let scene_rect = transform_logical_rect(&transform, frame.logical_bounds);
+            canvas_painter.image(
                 texture.id(),
                 scene_rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn design_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &RadialDocument,
+        menu: &crate::radial::model::MenuDefinition,
+        generation: u64,
+        editor_session: AuthoringSessionId,
+        input: &PreparedFrameInput,
+        mut authoring_session: Option<&mut RadialAuthoringSession>,
+        projected_selection: &mut Option<ProjectedSelection>,
+        drag_payload: &mut Option<DragPayload>,
+        placement_draft: &mut Option<PlacementDraft>,
+        pending_drop: &mut Option<PendingCellDrop>,
+        properties_popup: &mut Option<StableSelection>,
+        visited_path: &mut VisitedMenuPath,
+        zoom: f32,
+        canvas_pan: &mut CanvasPoint,
+        pan_drag_start: &mut Option<CanvasPoint>,
+    ) {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(visited_path.as_slice().len() > 1, egui::Button::new("Back"))
+                .clicked()
+            {
+                visited_path.back();
+                if let Some(parent) = visited_path.current().cloned()
+                    && let Some(session) = authoring_session.as_deref_mut()
+                {
+                    session.select(Some(StableSelection::Menu(parent)));
+                }
+                self.cancel_tooltip();
+                ui.ctx().request_repaint();
+            }
+            ui.label(format!("Design · {}", menu.name));
+            ui.small(
+                visited_path
+                    .as_slice()
+                    .iter()
+                    .map(MenuId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" › "),
+            );
+        });
+        let available = ui.available_size();
+        let canvas_size = egui::vec2(available.x.max(180.0), available.y.max(180.0));
+        let (canvas_rect, response) =
+            ui.allocate_exact_size(canvas_size, egui::Sense::click_and_drag());
+        let canvas_painter = ui.painter().with_clip_rect(canvas_rect);
+        let transform = CanvasTransform::fit(
+            CanvasPoint::new(canvas_rect.min.x, canvas_rect.min.y),
+            CanvasPoint::new(canvas_rect.width(), canvas_rect.height()),
+            CanvasPoint::new(
+                input.layout.visual_extent.min.x,
+                input.layout.visual_extent.min.y,
+            ),
+            CanvasPoint::new(
+                input.layout.visual_extent.max.x,
+                input.layout.visual_extent.max.y,
+            ),
+            input.layout.scale_factor.get() as f32,
+        );
+        let transform = CanvasTransform {
+            zoom,
+            pan: *canvas_pan,
+            ..transform
+        }
+        .normalized();
+        let pointer_world = response
+            .interact_pointer_pos()
+            .filter(|_| response.hovered())
+            .map(|point| transform.screen_to_world(CanvasPoint::new(point.x, point.y)));
+        let hovered = pointer_world.and_then(|point| {
+            input.layout.geometric_hover_cell(LogicalPoint {
+                x: point.x,
+                y: point.y,
+            })
+        });
+        let hovered_provenance =
+            hovered.map(|cell| projected_provenance(document, &menu.id, cell, &input.provenance));
+        let center_hit = pointer_world.is_some_and(|point| {
+            hovered.is_none()
+                && menu.center_action.is_none()
+                && menu.center_control.is_none()
+                && distance(point, input.layout.center) <= input.layout.center_radius
+        });
+
+        if response.drag_started() {
+            *pending_drop = None;
+            if let Some(provenance) = hovered_provenance.clone().filter(|p| p.is_authored()) {
+                *drag_payload = Some(DragPayload {
+                    source: provenance,
+                    generation: crate::radial::authoring::DraftGeneration(generation),
+                });
+            } else if center_hit {
+                *drag_payload = Some(DragPayload {
+                    source: ProjectedCellProvenance::Center,
+                    generation: crate::radial::authoring::DraftGeneration(generation),
+                });
+                *projected_selection = Some(ProjectedSelection {
+                    label: "Choose an empty slot for the new cell".into(),
+                    provenance: ProjectedCellProvenance::Center,
+                });
+            } else {
+                *pan_drag_start = Some(*canvas_pan);
+            }
+        }
+        if response.dragged()
+            && drag_payload.is_none()
+            && let Some(start) = *pan_drag_start
+        {
+            let delta = response.drag_delta();
+            *canvas_pan = CanvasPoint::new(start.x + delta.x, start.y + delta.y);
+        }
+        if response.drag_stopped() {
+            if let Some(payload) = drag_payload.take() {
+                let destination = hovered_provenance.clone();
+                if matches!(&payload.source, ProjectedCellProvenance::Center) {
+                    let target = destination
+                        .as_ref()
+                        .and_then(ProjectedCellProvenance::authored_ids)
+                        .and_then(|(menu_id, ring_id, cell_id)| {
+                            document
+                                .menus
+                                .iter()
+                                .find(|menu| &menu.id == menu_id)
+                                .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                                .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+                                .filter(|cell| matches!(&cell.content, CellContent::Spacer))
+                                .map(|_| (menu_id.clone(), ring_id.clone(), cell_id.clone()))
+                        });
+                    if payload.generation == crate::radial::authoring::DraftGeneration(generation) {
+                        if let Some((menu_id, ring_id, cell_id)) = target {
+                            if let Some(session) = authoring_session.as_deref_mut() {
+                                session.select(Some(StableSelection::Cell {
+                                    menu_id: menu_id.clone(),
+                                    ring_id: ring_id.clone(),
+                                    cell_id: cell_id.clone(),
+                                }));
+                            }
+                            *properties_popup = Some(StableSelection::Cell {
+                                menu_id: menu_id.clone(),
+                                ring_id: ring_id.clone(),
+                                cell_id: cell_id.clone(),
+                            });
+                            *placement_draft = Some(PlacementDraft::new(
+                                menu_id,
+                                ring_id,
+                                cell_id,
+                                payload.generation,
+                            ));
+                            *projected_selection = Some(ProjectedSelection {
+                                label: "Placement draft · choose content in the inspector".into(),
+                                provenance: destination.unwrap_or(ProjectedCellProvenance::Center),
+                            });
+                        } else {
+                            *placement_draft = None;
+                            *projected_selection = Some(ProjectedSelection {
+                                label: "Placement cancelled: drop on an empty authored slot".into(),
+                                provenance: destination.unwrap_or(ProjectedCellProvenance::Center),
+                            });
+                        }
+                    } else {
+                        *placement_draft = None;
+                        *projected_selection = Some(ProjectedSelection {
+                            label: "Placement cancelled: draft is stale".into(),
+                            provenance: destination.unwrap_or(ProjectedCellProvenance::Center),
+                        });
+                    }
+                } else {
+                    match (
+                        payload.source.authored_ids(),
+                        destination
+                            .as_ref()
+                            .and_then(ProjectedCellProvenance::authored_ids),
+                    ) {
+                        (
+                            Some((source_menu, source_ring, source_cell)),
+                            Some((dest_menu, dest_ring, dest_cell)),
+                        ) => {
+                            let destination_index =
+                                cell_index(document, dest_menu, dest_ring, Some(dest_cell));
+                            let destination_occupied = document
+                                .menus
+                                .iter()
+                                .find(|menu| &menu.id == dest_menu)
+                                .and_then(|menu| {
+                                    menu.rings.iter().find(|ring| &ring.id == dest_ring)
+                                })
+                                .and_then(|ring| ring.cells.get(destination_index))
+                                .is_some_and(|cell| !matches!(&cell.content, CellContent::Spacer));
+                            if source_menu == dest_menu
+                                && source_ring == dest_ring
+                                && source_cell == dest_cell
+                            {
+                                // Dropping a cell onto itself is an explicit no-op,
+                                // not an occupied-slot confirmation.
+                            } else if destination_occupied {
+                                *pending_drop = Some(PendingCellDrop {
+                                    source_menu: source_menu.clone(),
+                                    source_ring: source_ring.clone(),
+                                    source_cell: source_cell.clone(),
+                                    destination_menu: dest_menu.clone(),
+                                    destination_ring: dest_ring.clone(),
+                                    destination_cell: dest_cell.clone(),
+                                    destination_index,
+                                    generation: payload.generation,
+                                });
+                                if let Some(destination) = destination {
+                                    *projected_selection = Some(ProjectedSelection {
+                                        label: "Destination occupied — choose Swap or Cancel"
+                                            .into(),
+                                        provenance: destination,
+                                    });
+                                }
+                            } else {
+                                let result = authoring_session
+                                    .as_deref_mut()
+                                    .ok_or(
+                                        crate::radial::authoring::menu::MenuEditError::MissingEntity,
+                                    )
+                                    .and_then(|session| {
+                                        crate::radial::authoring::menu::move_cell_to_slot(
+                                            session,
+                                            (source_menu, source_ring, source_cell),
+                                            (dest_menu, dest_ring, destination_index),
+                                            crate::radial::authoring::menu::CellDropResolution::MoveIntoSpacer,
+                                            payload.generation,
+                                        )
+                                    });
+                                if let Err(error) = result {
+                                    if let Some(destination) = destination {
+                                        *projected_selection = Some(ProjectedSelection {
+                                            label: format!("Drop cancelled: {error:?}"),
+                                            provenance: destination,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        (_, Some(_)) => {
+                            if let Some(destination) = destination {
+                                *projected_selection = Some(ProjectedSelection {
+                                    label: "Drop cancelled: source is not an authored slot".into(),
+                                    provenance: destination,
+                                });
+                            }
+                        }
+                        (_, None) => {
+                            *projected_selection = Some(ProjectedSelection {
+                                label: "Drop cancelled: generated preview cells are read-only"
+                                    .into(),
+                                provenance: destination
+                                    .unwrap_or(ProjectedCellProvenance::Background),
+                            });
+                        }
+                    }
+                }
+            }
+            *pan_drag_start = None;
+        }
+        if response.clicked() || response.secondary_clicked() {
+            if let Some(provenance) = hovered_provenance.clone() {
+                *projected_selection = Some(ProjectedSelection {
+                    label: hovered.map_or_else(String::new, |cell| cell.label.clone()),
+                    provenance: provenance.clone(),
+                });
+                if response.secondary_clicked()
+                    && let Some((menu_id, ring_id, cell_id)) = provenance.authored_ids()
+                {
+                    *properties_popup = Some(StableSelection::Cell {
+                        menu_id: menu_id.clone(),
+                        ring_id: ring_id.clone(),
+                        cell_id: cell_id.clone(),
+                    });
+                }
+                if let Some((menu_id, ring_id, cell_id)) = provenance.authored_ids()
+                    && let Some(session) = authoring_session.as_deref_mut()
+                {
+                    let hovered_is_spacer = document
+                        .menus
+                        .iter()
+                        .find(|candidate| &candidate.id == menu_id)
+                        .and_then(|candidate| {
+                            candidate.rings.iter().find(|ring| &ring.id == ring_id)
+                        })
+                        .and_then(|ring| {
+                            ring.cells.iter().find(|candidate| &candidate.id == cell_id)
+                        })
+                        .is_some_and(|candidate| matches!(&candidate.content, CellContent::Spacer));
+                    if hovered_is_spacer {
+                        *placement_draft = Some(PlacementDraft::new(
+                            menu_id.clone(),
+                            ring_id.clone(),
+                            cell_id.clone(),
+                            crate::radial::authoring::DraftGeneration(generation),
+                        ));
+                        *properties_popup = Some(StableSelection::Cell {
+                            menu_id: menu_id.clone(),
+                            ring_id: ring_id.clone(),
+                            cell_id: cell_id.clone(),
+                        });
+                    }
+                    session.select(Some(StableSelection::Cell {
+                        menu_id: menu_id.clone(),
+                        ring_id: ring_id.clone(),
+                        cell_id: cell_id.clone(),
+                    }));
+                }
+            } else if let Some(point) = pointer_world
+                && menu.center_action.is_none()
+                && menu.center_control.is_none()
+                && distance(point, input.layout.center) <= input.layout.center_radius
+            {
+                // The center affordance is a placement draft only.  It never
+                // enters the runtime reducer or dispatch path.
+                *projected_selection = Some(ProjectedSelection {
+                    label: "Choose an empty slot for the new cell".into(),
+                    provenance: ProjectedCellProvenance::Center,
+                });
+                if let Some((ring_id, cell_id)) = menu.rings.iter().find_map(|ring| {
+                    ring.cells
+                        .iter()
+                        .find(|cell| matches!(&cell.content, CellContent::Spacer))
+                        .map(|cell| (ring.id.clone(), cell.id.clone()))
+                }) && let Some(session) = authoring_session.as_deref_mut()
+                {
+                    *placement_draft = Some(PlacementDraft::new(
+                        menu.id.clone(),
+                        ring_id.clone(),
+                        cell_id.clone(),
+                        crate::radial::authoring::DraftGeneration(generation),
+                    ));
+                    *properties_popup = Some(StableSelection::Cell {
+                        menu_id: menu.id.clone(),
+                        ring_id: ring_id.clone(),
+                        cell_id: cell_id.clone(),
+                    });
+                    session.select(Some(StableSelection::Cell {
+                        menu_id: menu.id.clone(),
+                        ring_id,
+                        cell_id,
+                    }));
+                }
+            }
+            if response.secondary_clicked() {
+                ui.ctx().request_repaint();
+            }
+        }
+        if response.double_clicked()
+            && let Some(ProjectedCellProvenance::Authored {
+                menu_id,
+                ring_id,
+                cell_id,
+            }) = hovered_provenance.as_ref()
+            && let Some(cell) = document
+                .menus
+                .iter()
+                .find(|candidate| &candidate.id == menu_id)
+                .and_then(|candidate| candidate.rings.iter().find(|ring| &ring.id == ring_id))
+                .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+            && let CellContent::Submenu { menu_id: child } = &cell.content
+        {
+            if visited_path.enter(child.clone()) {
+                if let Some(session) = authoring_session.as_deref_mut() {
+                    session.select(Some(StableSelection::Menu(child.clone())));
+                }
+                self.cancel_tooltip();
+                ui.ctx().request_repaint();
+            }
+        }
+
+        let scene = build_scene_prepared_selected_tooltip(
+            &input.layout,
+            input.scene.generation,
+            &input.resources,
+            None,
+            None,
+            input.work_area,
+        );
+        let Ok(frame) = self
+            .compositor
+            .compose(&scene, input.layout.scale_factor, 0)
+        else {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                "Error: preview compositor failed",
+            );
+            return;
+        };
+        let size = [frame.image.width() as usize, frame.image.height() as usize];
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, frame.image.as_raw());
+        if let Some(texture) = self.texture.as_mut() {
+            texture.set(color, egui::TextureOptions::LINEAR);
+        } else {
+            self.texture = Some(ui.ctx().load_texture(
+                "radial-designer-preview",
+                color,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        if let Some(texture) = &self.texture {
+            let scene_rect = transform_logical_rect(&transform, frame.logical_bounds);
+            canvas_painter.image(
+                texture.id(),
+                scene_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        if let Some(payload) = drag_payload.as_ref() {
+            if let Some(cell) = hovered {
+                let target_is_authored = hovered_provenance
+                    .as_ref()
+                    .is_some_and(|provenance| provenance.is_authored());
+                let target_is_spacer = target_is_authored
+                    && document
+                        .menus
+                        .iter()
+                        .find(|candidate| candidate.id == menu.id)
+                        .and_then(|candidate| {
+                            candidate.rings.iter().find(|ring| ring.id == cell.ring_id)
+                        })
+                        .and_then(|ring| {
+                            ring.cells
+                                .iter()
+                                .find(|candidate| candidate.id == cell.cell_id)
+                        })
+                        .is_some_and(|candidate| matches!(&candidate.content, CellContent::Spacer));
+                let color = if target_is_spacer {
+                    egui::Color32::from_rgb(110, 220, 150)
+                } else if target_is_authored {
+                    egui::Color32::from_rgb(245, 190, 85)
+                } else {
+                    egui::Color32::from_rgb(230, 100, 100)
+                };
+                paint_cell_outline(
+                    &canvas_painter,
+                    &transform,
+                    &cell.shape,
+                    egui::Stroke::new(2.0_f32, color),
+                );
+            }
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let label = payload
+                    .source
+                    .authored_ids()
+                    .and_then(|(source_menu, source_ring, source_cell)| {
+                        document
+                            .menus
+                            .iter()
+                            .find(|candidate| &candidate.id == source_menu)
+                            .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == source_ring))
+                            .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == source_cell))
+                            .map(|cell| cell.label.clone())
+                    })
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or_else(|| "Authored cell".into());
+                canvas_painter.text(
+                    pointer + egui::vec2(12.0, 12.0),
+                    egui::Align2::LEFT_TOP,
+                    label,
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    egui::Color32::from_rgb(240, 240, 240),
+                );
+            }
+        }
+        for cell in &input.layout.cells {
+            if cell.actionable {
+                continue;
+            }
+            paint_passive_cell_outline(&canvas_painter, &transform, &cell.shape);
+        }
+        if menu.center_action.is_none() && menu.center_control.is_none() {
+            let center = transform.world_to_screen(CanvasPoint::new(
+                input.layout.center.x,
+                input.layout.center.y,
+            ));
+            canvas_painter.text(
+                egui::pos2(center.x, center.y),
+                egui::Align2::CENTER_CENTER,
+                "+",
+                egui::TextStyle::Heading.resolve(ui.style()),
+                ui.visuals().widgets.inactive.fg_stroke.color,
+            );
+        }
+        if let Some(selected) = projected_selection.as_ref() {
+            ui.small(format!("Selected: {}", selected.label));
+        }
+        if drag_payload.is_some() {
+            ui.small("Dragging authored cell — drop on a spacer slot");
+        }
+        if placement_draft.is_some() {
+            ui.small("Placement draft — choose content in the inspector or cancel");
+        }
+        let _ = editor_session;
+    }
+}
+
+fn distance(left: CanvasPoint, right: LogicalPoint) -> f32 {
+    let dx = left.x - right.x;
+    let dy = left.y - right.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn projected_provenance(
+    document: &RadialDocument,
+    menu_id: &MenuId,
+    cell: &crate::radial::geometry::CellLayout,
+    prepared_provenance: &BTreeMap<CellId, crate::radial::bindings::ProjectedDynamicProvenance>,
+) -> ProjectedCellProvenance {
+    if cell.cell_id.as_str() == "__center" {
+        return ProjectedCellProvenance::Center;
+    }
+    if cell.cell_id.as_str() == "__background" {
+        return ProjectedCellProvenance::Background;
+    }
+    if cell.cell_id.as_str().starts_with("__radial_") {
+        return ProjectedCellProvenance::Control;
+    }
+    // Authored membership is authoritative even when a user chose an ID that
+    // resembles the projection's historical `dyn:` display format.
+    if let Some(authored) = document
+        .menus
+        .iter()
+        .find(|menu| &menu.id == menu_id)
+        .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == &cell.ring_id))
+        .and_then(|ring| {
+            ring.cells
+                .iter()
+                .find(|candidate| candidate.id == cell.cell_id)
+        })
+    {
+        return ProjectedCellProvenance::Authored {
+            menu_id: menu_id.clone(),
+            ring_id: cell.ring_id.clone(),
+            cell_id: authored.id.clone(),
+        };
+    }
+    if let Some(projected) = prepared_provenance.get(&cell.cell_id)
+        && let Some(source) = document
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| {
+                menu.rings
+                    .iter()
+                    .flat_map(|ring| &ring.cells)
+                    .find(|candidate| candidate.id == projected.source_cell_id)
+            })
+            .and_then(|source| match &source.content {
+                CellContent::Dynamic { source } => Some(source.clone()),
+                _ => None,
+            })
+    {
+        return ProjectedCellProvenance::Dynamic {
+            menu_id: menu_id.clone(),
+            ring_id: cell.ring_id.clone(),
+            source_cell_id: projected.source_cell_id.clone(),
+            source,
+            result_index: projected.result_index,
+            fingerprint: projected.fingerprint.clone(),
+        };
+    }
+    ProjectedCellProvenance::Dynamic {
+        menu_id: menu_id.clone(),
+        ring_id: cell.ring_id.clone(),
+        source_cell_id: cell.cell_id.clone(),
+        source: crate::radial::model::DynamicSource::Favorites,
+        result_index: 0,
+        fingerprint: crate::radial::dynamic::SourceFingerprint {
+            generation: 0,
+            source: "unknown-dynamic".into(),
+            query: None,
+        },
+    }
+}
+
+fn cell_index(
+    document: &RadialDocument,
+    menu_id: &MenuId,
+    ring_id: &RingId,
+    cell_id: Option<&CellId>,
+) -> usize {
+    cell_id
+        .and_then(|cell_id| {
+            document
+                .menus
+                .iter()
+                .find(|menu| &menu.id == menu_id)
+                .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                .and_then(|ring| ring.cells.iter().position(|cell| &cell.id == cell_id))
+        })
+        .unwrap_or(usize::MAX)
+}
+
+fn transform_logical_rect(transform: &CanvasTransform, rect: LogicalRect) -> egui::Rect {
+    let min = transform.world_to_screen(CanvasPoint::new(rect.min.x, rect.min.y));
+    let max = transform.world_to_screen(CanvasPoint::new(rect.max.x, rect.max.y));
+    egui::Rect::from_min_max(egui::pos2(min.x, min.y), egui::pos2(max.x, max.y))
+}
+
+fn paint_passive_cell_outline(
+    painter: &egui::Painter,
+    transform: &CanvasTransform,
+    shape: &HitShape,
+) {
+    paint_cell_outline(
+        painter,
+        transform,
+        shape,
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(130)),
+    );
+}
+
+fn paint_cell_outline(
+    painter: &egui::Painter,
+    transform: &CanvasTransform,
+    shape: &HitShape,
+    stroke: egui::Stroke,
+) {
+    match shape {
+        HitShape::Circle { center, radius } => {
+            let world_center = *center;
+            let screen_center =
+                transform.world_to_screen(CanvasPoint::new(world_center.x, world_center.y));
+            let edge = transform
+                .world_to_screen(CanvasPoint::new(world_center.x + radius, world_center.y));
+            painter.circle_stroke(
+                egui::pos2(screen_center.x, screen_center.y),
+                (edge.x - screen_center.x).abs(),
+                stroke,
+            );
+        }
+        HitShape::Wedge {
+            center,
+            inner_radius,
+            outer_radius,
+            start_angle,
+            end_angle,
+        } => {
+            let world_center = *center;
+            let screen_center =
+                transform.world_to_screen(CanvasPoint::new(world_center.x, world_center.y));
+            let outer = transform.world_to_screen(CanvasPoint::new(
+                world_center.x + outer_radius * start_angle.cos(),
+                world_center.y + outer_radius * start_angle.sin(),
+            ));
+            let inner = transform.world_to_screen(CanvasPoint::new(
+                world_center.x + inner_radius * end_angle.cos(),
+                world_center.y + inner_radius * end_angle.sin(),
+            ));
+            painter.line_segment(
+                [
+                    egui::pos2(screen_center.x, screen_center.y),
+                    egui::pos2(outer.x, outer.y),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(screen_center.x, screen_center.y),
+                    egui::pos2(inner.x, inner.y),
+                ],
+                stroke,
             );
         }
     }
@@ -1010,9 +1811,6 @@ fn cell_role(document: &RadialDocument, menu_id: &MenuId, cell_id: &CellId) -> C
     }
     if cell_id.as_str().starts_with("__radial_page_previous:") {
         return CellRole::PreviousPage;
-    }
-    if cell_id.as_str().starts_with("dyn:") {
-        return CellRole::Action;
     }
     let menu = document.menus.iter().find(|menu| &menu.id == menu_id);
     if let Some(menu) = menu {
@@ -1356,7 +2154,7 @@ mod tests {
         let mut preview = EmbeddedPreview::default();
         preview.reset(&document, &root, 1);
         let submenu = document.menus[0].rings[0].cells[0].id.clone();
-        preview.activate(&document, &submenu);
+        preview.activate(&document, None, &submenu);
         assert_eq!(preview.current_menu(), Some(&child.id));
         preview.back();
         assert_eq!(preview.current_menu(), Some(&root));
@@ -1369,8 +2167,62 @@ mod tests {
                 },
             },
         };
-        preview.activate(&document, &action);
+        preview.activate(&document, None, &action);
         assert_eq!(preview.intercepted_dispatches, 1);
+    }
+
+    #[test]
+    fn generated_preview_click_intercepts_exact_typed_dynamic_provenance() {
+        let document = RadialDocument::starter();
+        let menu = document
+            .menus
+            .iter()
+            .find(|menu| {
+                menu.rings.iter().any(|ring| {
+                    ring.cells
+                        .iter()
+                        .any(|cell| matches!(&cell.content, CellContent::Dynamic { .. }))
+                })
+            })
+            .expect("starter document should contain a dynamic source menu");
+        let menu_id = menu.id.clone();
+        let dynamic = crate::radial::preparation::synthetic_preview_dynamic(menu);
+        let mut preparer =
+            crate::radial::preparation::PreviewFramePreparer::new(Default::default());
+        let prepared = preparer
+            .prepare(
+                &document,
+                &menu_id,
+                PhysicalPoint { x: 240.0, y: 240.0 },
+                PhysicalRect {
+                    min: PhysicalPoint { x: 0.0, y: 0.0 },
+                    max: PhysicalPoint { x: 480.0, y: 480.0 },
+                },
+                ScaleFactor::new(1.0).unwrap(),
+                23,
+                None,
+                &crate::radial::preparation::PreviewProjection {
+                    dynamic,
+                    ..Default::default()
+                },
+            )
+            .expect("synthetic preview should prepare");
+        let (generated_cell_id, expected_provenance) = prepared
+            .provenance
+            .iter()
+            .next()
+            .expect("projection should carry generated provenance");
+        let mut preview = EmbeddedPreview::default();
+        preview.reset(&document, &menu_id, 23);
+        preview.activate(&document, Some(&prepared), generated_cell_id);
+
+        assert_eq!(preview.intercepted_dispatches, 1);
+        let intercepted = preview
+            .last_intercepted_dynamic_dispatch
+            .as_ref()
+            .expect("generated dispatch should retain its provenance");
+        assert_eq!(&intercepted.generated_cell_id, generated_cell_id);
+        assert_eq!(&intercepted.provenance, expected_provenance);
     }
 
     #[test]
@@ -1462,7 +2314,7 @@ mod tests {
         );
         assert_eq!(preview.frozen_center, Some(visible_center));
 
-        preview.activate(&document, &CellId::new("starter-root-favorites"));
+        preview.activate(&document, None, &CellId::new("starter-root-favorites"));
         assert_eq!(preview.current_menu(), Some(&child_id));
         sync_current(&mut preview, &mut session, &client);
         let child_request = endpoint.request_rx.try_recv().unwrap();
@@ -1527,7 +2379,7 @@ mod tests {
         );
         let root_center = root_frame.layout.origin;
 
-        preview.activate(&document, &CellId::new("starter-root-favorites"));
+        preview.activate(&document, None, &CellId::new("starter-root-favorites"));
         sync_current(&mut preview, &mut session, &client);
         let child_request = endpoint
             .request_rx
@@ -1564,7 +2416,7 @@ mod tests {
         let child_center = child_frame.layout.origin;
         let child_frame_id = preview.reducer.as_ref().unwrap().state.stack[1].frame_id;
 
-        preview.activate(&document, &CellId::new("starter-favorites-source"));
+        preview.activate(&document, None, &CellId::new("starter-favorites-source"));
         assert_eq!(preview.current_menu(), Some(&applications));
         sync_current(&mut preview, &mut session, &client);
         let grandchild_request = endpoint
@@ -1604,7 +2456,7 @@ mod tests {
                 .any(|cell| cell.cell_id.as_str() == "starter-root-favorites")
         );
 
-        preview.activate(&document, &CellId::new("__center"));
+        preview.activate(&document, None, &CellId::new("__center"));
         assert_eq!(
             preview
                 .reducer
@@ -1623,7 +2475,7 @@ mod tests {
             preview.prepared_frame(&session).unwrap().as_ref(),
             child_frame.as_ref()
         );
-        preview.activate(&document, &CellId::new("__center"));
+        preview.activate(&document, None, &CellId::new("__center"));
         assert_eq!(preview.current_menu(), Some(&root));
         sync_current(&mut preview, &mut session, &client);
         assert!(endpoint.request_rx.try_recv().is_err());
@@ -1676,7 +2528,7 @@ mod tests {
         let mut preview = EmbeddedPreview::default();
         preview.reset(&document, &menu_id, 11);
         preview.reducer.as_mut().unwrap().state.stack[0].page_count = prepared.page_count;
-        preview.activate(&document, &page_cell);
+        preview.activate(&document, None, &page_cell);
         assert_eq!(preview.reducer.as_ref().unwrap().state.stack[0].page, 1);
         preview.begin_drag(
             &document,
