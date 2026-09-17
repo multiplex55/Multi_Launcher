@@ -21,12 +21,12 @@ its immutable baseline, and its earlier verification evidence remain in
 | repair start worktree | clean: no staged, unstaged, or untracked changes |
 | immutable feature baseline | `0d0acaf471a52f49a7ebdff61879416eefa9fc9b` (unchanged) |
 | branch point | `f7c5f61ed2faa2288f5c19ddeaea66de6f760a2b` (unchanged) |
-| current milestone | R4 |
-| implementation status | R1 committed at `3e7d428c`; R2 committed at `231518c3`; R3 committed at `b1310969`; R4 verified and awaiting its coherent commit |
-| last verified source | R4 dirty diff `183951abb3359e90ac4987b5a04c32240d3ab4f1`; `cargo check` passed; Nextest `600c6fb4-79b5-41aa-b65a-6c35c0e3e3ea` passed 221/221 |
+| current milestone | R5 |
+| implementation status | R1-R4 committed; R5 automated verification/review complete at `95c50c95`; native release acceptance remains unverified |
+| last verified source | source commit `95c50c9564e56efb06ec87a6fa60e89538015958`; `cargo check` passed; focused Nextest `e6d52fdf-6abf-41fa-aac9-c1620e4cfa3c` passed 12/12; full Nextest `68fde588-c498-4dc5-8d1b-25eabfe25b76` passed 4,570/4,570 with 8 skipped |
 | current native evidence gaps | H1-H5, N1-N4, V1-V3, D1-D5, and P1-P2 are unverified for this repair |
 | active Cargo/build/Nextest job | none |
-| next action | commit R4, then perform cumulative R5 verification and acceptance review |
+| next action | perform the H1-H5, N1-N4, V1-V3, D1-D5, and P1-P2 checklist on an interactive Windows acceptance host |
 
 The repair-start Git diff was empty. Repository-local reference archives and images
 were not modified. `docs/references/Radial menu v4.zip` was inspected in place as
@@ -76,7 +76,7 @@ visual center stability, and Designer independence require the native acceptance
 | R2 | complete | frozen session centers, local Cascade, drag/Back transforms, reversible one-time conversion | source-identical geometry/session/migration gate passed; independent review clean; N1-N4/P1 remain explicitly unverified natively |
 | R3 | complete | normal cursor, complete delayed tooltips, typed quiet diagnostics | source-identical focused gate passed; independent review clean; V1-V3 remain explicitly unverified natively |
 | R4 | complete | one independent compact Designer and safe direct manipulation | source-identical focused gate passed; independent review clean; H4/D1-D5 remain explicitly unverified natively |
-| R5 | pending | cumulative regression, performance/resources, native matrix, and independent review | complete required Nextest suite and final acceptance record |
+| R5 | complete | cumulative regression, lower-layer performance/resources, explicit native matrix, and independent review | automated gates passed and review findings closed; native release acceptance explicitly unverified |
 
 Each write-heavy milestone has one writer, is verified and diff-reviewed before its
 coherent commit, and completes before the next writer begins. Independent review is
@@ -428,3 +428,98 @@ The current automation surface cannot operate the native Designer viewport or pe
 real pointer, focus, hotkey, monitor-topology, file-dialog, and HWND observations.
 Automated state/geometry/fake-host evidence is not presented as H4/D1-D5 acceptance;
 those rows remain required for R5 manual/native acceptance.
+
+## R5 completion record
+
+Final automated verification and review are complete. Native release acceptance is
+not complete: this session had no interactive Windows desktop, controllable monitor
+topology, benign copied user profile, or reliable way to inspect real cursor/focus/
+HWND behavior. H1-H5, N1-N4, V1-V3, D1-D5, and P1-P2 are therefore all recorded as
+**unverified**, never inferred from mocks or source inspection.
+
+Final remediation:
+
+- the unchanged `thread_reaper` full-suite test no longer assumes that the supervisor
+  must enter a second condition-variable wait; test-only signaling now waits for the
+  actual reclaimed-capacity/quiescent-state predicate (`2c5c2081`);
+- queued Designer native dialogs re-wake their root owner after each completed request,
+  so a coalesced burst cannot strand the next root-owned dialog;
+- center `+` auto-selects only one unambiguous authored spacer; multiple outlined
+  destinations require an explicit slot click/drop and no-slot state is non-mutating;
+- generated/control preview cells visibly reject drag instead of silently becoming a
+  canvas pan;
+- fallback render labels share one immutable `Arc<str>` between identical display and
+  source text, removing the measured extra allocation per cell while preserving the
+  full-label contract (`95c50c95`).
+
+Final commands and results on source-identical commit `95c50c95` (the commits only
+recorded the already-tested source):
+
+- `cargo fmt --all` and subsequent `cargo fmt --all -- --check`: passed;
+- `cargo check`: passed; durable log
+  `%TEMP%\multi-launcher-r5-remediation-cargo-check-20260917.log`;
+- `git diff --check`: passed (Git emitted only existing LF/CRLF notices);
+- focused remediation command: `cargo nextest run --no-fail-fast --status-level slow
+  --final-status-level fail --success-output never --failure-output final -E
+  'test(/file_dialog_enqueue_and_return/) | test(/center_add_auto_targets/) |
+  test(/generated_drag_is_read_only/) | test(/hung_handle_does_not_block/) |
+  test(/radial::render/)'`; Nextest run
+  `e6d52fdf-6abf-41fa-aac9-c1620e4cfa3c`: 12 passed, 0 failed,
+  4,566 skipped; durable log
+  `%TEMP%\multi-launcher-r5-remediation-focused-nextest-20260917.log`;
+- final unfiltered command: `cargo nextest run --no-fail-fast --status-level slow
+  --final-status-level fail --success-output never --failure-output final`; Nextest
+  run `68fde588-c498-4dc5-8d1b-25eabfe25b76`: 4,570 passed, 0 failed,
+  8 skipped in 73.189 seconds; durable log
+  `%TEMP%\multi-launcher-r5-full-nextest-post-review-final-20260917.log`.
+
+The full suite includes the existing 100-cycle compositor/native-host/resource-release,
+font-cache, asset-cache, tooltip-deadline, Designer disposal, preview-lease, and reply-
+wake tests. These establish bounded in-process ownership under their deterministic test
+adapters. They do not measure live process handles, threads, HWNDs, CPU, idle repaint
+activity, end-to-end hold/presentation latency, or interactive Designer responsiveness;
+those process/native resource observations remain unverified.
+
+Matched lower-layer Criterion runs used repair start `eda06f76` and the candidate under
+the same release profile, sequentially, with isolated `%TEMP%` targets. Commands used
+`cargo bench --locked --bench radial_runtime -- --warm-up-time 2 --measurement-time 5
+--sample-size 20 --noplot --verbose`, with durable baseline/candidate logs under
+`%TEMP%\multi-launcher-r5-bench-*-20260917.log`. The first pass exposed a linear
+scene/selection regression caused by the duplicate fallback-label allocation. Exact
+512-cell repeats used 3-second warmup, 8-second measurement, and 30 samples before and
+after the repair. Median point estimates after repair were:
+
+| 512-cell workload | Repair start | Final candidate | Change |
+|---|---:|---:|---:|
+| layout | 135.76 us | 137.58 us | +1.34% |
+| hit ownership | 652.70 ns | 645.00 ns | -1.18% |
+| scene (exact repeat) | 230.13 us | 225.74 us | -1.91% |
+| selection (exact repeat) | 213.70 us | 225.06 us | +5.31% |
+| static composition | 84.16 ms | 83.56 ms | -0.71% |
+| warmed composition | 7.37 us | 7.53 us | +2.16% |
+| first-page projection | 88.90 us | 94.31 us | +6.08% |
+| last-page projection | 92.44 us | 94.72 us | +2.47% |
+
+No final 512-cell result crossed the historical material-regression threshold (the
+larger of 10% or three times the larger median absolute deviation). This is pure
+layout/render/projection evidence, not native UI latency or idle/resource evidence.
+
+Independent cumulative review covered lost wakes, focused visibility and invocation
+identity, Screen Draw priority, session coordinates, migration recovery/undo, viewport
+lifetime, tooltip/input bounds, diagnostic typing, generated provenance, destructive
+drag/undo, compatibility, production-route tests, the thread-reaper test repair, and
+the render allocation repair. It found three P2 Designer gaps (dialog queue re-wake,
+ambiguous center placement, and generated drag fallback); all were remediated and the
+closure review reported no remaining P0-P2 finding.
+
+Interactive acceptance must use benign actions and a disposable copied profile. Run
+the matrix exactly as specified in the canonical repair contract: H1-H5 for stationary
+hidden/focused/both-surface/Designer/Screen-Draw input cycles; N1-N4 for multi-level
+SameCenter, edge/drag/mixed-monitor, impossible-fit, and explicit Cascade navigation;
+V1-V3 for real arrow/drag cursors, delayed complete authored/dynamic tooltips, and quiet
+truncation with actionable real failures; D1-D5 for independent compact Designer,
+persisted panes/sections/view, slot/submenu/undo gestures, nonexecution, and dirty/
+conflict/preview close; P1-P2 for real backup/selective undo/later Cascade and stable
+persisted/imported references plus unchanged grid behavior. Record build identity,
+Windows version, monitor origins/DPI, input method, copied profile, tester, date, and
+pass/fail evidence for every row.
