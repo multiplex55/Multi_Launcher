@@ -30,6 +30,8 @@ struct JoinReaper {
     spawn_supervisor: SupervisorSpawner,
     #[cfg(test)]
     registration_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    wait_started: Condvar,
 }
 
 impl JoinReaper {
@@ -41,6 +43,8 @@ impl JoinReaper {
             spawn_supervisor,
             #[cfg(test)]
             registration_hook: Mutex::new(None),
+            #[cfg(test)]
+            wait_started: Condvar::new(),
         })
     }
 
@@ -161,6 +165,7 @@ impl JoinReaper {
                     #[cfg(test)]
                     {
                         state.waits += 1;
+                        self.wait_started.notify_all();
                     }
                     state = self.completed.wait(state).unwrap();
                 }
@@ -294,6 +299,7 @@ mod tests {
             let _ = release_hung_rx.recv();
             drop(hung_completed);
         });
+        let hung_completion = Arc::clone(&hung_permit.completion);
         hung_permit.reap(hung).unwrap();
 
         let mut held = Vec::new();
@@ -311,18 +317,29 @@ mod tests {
         completed_permit
             .reap(thread::spawn(move || drop(completed)))
             .unwrap();
-        while reaper.outstanding.load(Ordering::Acquire) == REAPER_CAPACITY {
-            thread::yield_now();
+
+        // The supervisor may have entered its first wait before the completed
+        // worker was registered. Wait for the state predicate that proves the
+        // completed handle was reclaimed and only the hung handle remains.
+        let mut state = reaper.state.lock().unwrap();
+        while state.pending.len() != 1 || state.completions != 0 || !state.supervisor_active {
+            state = reaper.wait_started.wait(state).unwrap();
         }
         assert_eq!(
             reaper.outstanding.load(Ordering::Acquire),
             REAPER_CAPACITY - 1
         );
-        while reaper.state.lock().unwrap().waits < 2 {
-            thread::yield_now();
-        }
-        let state = reaper.state.lock().unwrap();
+        assert_eq!(state.pending.len(), 1, "the hung handle remains registered");
+        assert!(Arc::ptr_eq(&state.pending[0].completion, &hung_completion));
+        assert_eq!(
+            state.completions, 0,
+            "no completion remains to be reclaimed"
+        );
         assert!(state.supervisor_active);
+        assert!(
+            state.waits >= 1,
+            "the supervisor must have reached its quiescent wait"
+        );
         let waits_with_hung_worker = state.waits;
         drop(state);
         for _ in 0..100 {
