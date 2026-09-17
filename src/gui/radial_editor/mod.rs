@@ -163,6 +163,16 @@ impl DesignerIntentBridge {
         }
     }
 
+    fn finish_file_dialog(&self) {
+        // The completed request changed Designer state, while any queued
+        // request still belongs to the root because native dialogs must not
+        // run from the deferred viewport callback.
+        self.wake_viewport();
+        if self.has_pending_file_dialog() {
+            self.wake_root();
+        }
+    }
+
     fn enqueue_file_dialog(&self, request: DesignerFileDialogRequest) {
         let accepted = if let Ok(mut requests) = self.file_dialogs.lock() {
             // A stalled native dialog must not allow an unbounded queue to
@@ -674,7 +684,7 @@ impl RadialEditorState {
         }
         // Dialog completion is an event for the independent viewport.  Wake
         // it only after the editor lock is released.
-        bridge.wake_viewport();
+        bridge.finish_file_dialog();
     }
 
     fn apply_file_dialog_result(
@@ -5436,10 +5446,20 @@ mod tests {
             viewport_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         })));
         bridge.enqueue_file_dialog(DesignerFileDialogRequest::PreviewPackage);
-        assert_eq!(root_wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        bridge.enqueue_file_dialog(DesignerFileDialogRequest::ReplaceBackup);
+        assert_eq!(root_wakes.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert!(bridge.take_file_dialog().is_some());
-        bridge.wake_viewport();
+        bridge.finish_file_dialog();
         assert_eq!(viewport_wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            root_wakes.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "a queued dialog must schedule another root-owned drain"
+        );
+        assert!(bridge.take_file_dialog().is_some());
+        bridge.finish_file_dialog();
+        assert_eq!(viewport_wakes.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(root_wakes.load(std::sync::atomic::Ordering::SeqCst), 3);
         bridge.clear();
         assert!(!bridge.has_pending_file_dialog());
     }

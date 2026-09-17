@@ -410,9 +410,10 @@ fn build_scene_internal(
 }
 
 fn fallback_text(text: &str, family: &str) -> Arc<PreparedTextLayout> {
+    let source_text: Arc<str> = Arc::from(text);
     Arc::new(PreparedTextLayout {
-        text: Arc::from(text),
-        source_text: Arc::from(text),
+        text: Arc::clone(&source_text),
+        source_text,
         selected_family: Arc::from(if family.is_empty() {
             "Segoe UI"
         } else {

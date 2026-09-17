@@ -11,7 +11,8 @@ use crate::radial::geometry::{
     layout_document_menu, shape_center,
 };
 use crate::radial::model::{
-    CellContent, CellId, InvocationId, MenuId, RadialDocument, RingId, SessionId, SkinId,
+    CellContent, CellId, InvocationId, MenuDefinition, MenuId, RadialDocument, RingId, SessionId,
+    SkinId,
 };
 use crate::radial::preparation::{
     PreparedFrameInput, PreparedPlacement, PreviewPlacement, ensure_preview_center_back,
@@ -34,6 +35,42 @@ pub(super) enum PreviewPreset {
     Submenu,
     LongLabels,
     HighDpi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DesignDragDisposition {
+    Authored,
+    Center,
+    ReadOnly,
+    Pan,
+}
+
+fn design_drag_disposition(
+    hovered: Option<&ProjectedCellProvenance>,
+    center_hit: bool,
+) -> DesignDragDisposition {
+    match hovered {
+        Some(ProjectedCellProvenance::Authored { .. }) => DesignDragDisposition::Authored,
+        Some(ProjectedCellProvenance::Dynamic { .. }) | Some(ProjectedCellProvenance::Control) => {
+            DesignDragDisposition::ReadOnly
+        }
+        Some(ProjectedCellProvenance::Center) if center_hit => DesignDragDisposition::Center,
+        Some(_) => DesignDragDisposition::Pan,
+        None if center_hit => DesignDragDisposition::Center,
+        None => DesignDragDisposition::Pan,
+    }
+}
+
+fn empty_authored_slots(menu: &MenuDefinition) -> Vec<(RingId, CellId)> {
+    menu.rings
+        .iter()
+        .flat_map(|ring| {
+            ring.cells
+                .iter()
+                .filter(|cell| matches!(&cell.content, CellContent::Spacer))
+                .map(|cell| (ring.id.clone(), cell.id.clone()))
+        })
+        .collect()
 }
 
 /// A Preview/Test dispatch is always consumed locally, but retaining its
@@ -1178,22 +1215,35 @@ impl EmbeddedPreview {
 
         if response.drag_started() {
             *pending_drop = None;
-            if let Some(provenance) = hovered_provenance.clone().filter(|p| p.is_authored()) {
-                *drag_payload = Some(DragPayload {
-                    source: provenance,
-                    generation: crate::radial::authoring::DraftGeneration(generation),
-                });
-            } else if center_hit {
-                *drag_payload = Some(DragPayload {
-                    source: ProjectedCellProvenance::Center,
-                    generation: crate::radial::authoring::DraftGeneration(generation),
-                });
-                *projected_selection = Some(ProjectedSelection {
-                    label: "Choose an empty slot for the new cell".into(),
-                    provenance: ProjectedCellProvenance::Center,
-                });
-            } else {
-                *pan_drag_start = Some(*canvas_pan);
+            *pan_drag_start = None;
+            match design_drag_disposition(hovered_provenance.as_ref(), center_hit) {
+                DesignDragDisposition::Authored => {
+                    *drag_payload = hovered_provenance.clone().map(|source| DragPayload {
+                        source,
+                        generation: crate::radial::authoring::DraftGeneration(generation),
+                    });
+                }
+                DesignDragDisposition::Center => {
+                    *drag_payload = Some(DragPayload {
+                        source: ProjectedCellProvenance::Center,
+                        generation: crate::radial::authoring::DraftGeneration(generation),
+                    });
+                    *projected_selection = Some(ProjectedSelection {
+                        label: "Choose an empty slot for the new cell".into(),
+                        provenance: ProjectedCellProvenance::Center,
+                    });
+                }
+                DesignDragDisposition::ReadOnly => {
+                    *projected_selection = Some(ProjectedSelection {
+                        label: "Generated preview cells are read-only and cannot be dragged".into(),
+                        provenance: hovered_provenance
+                            .clone()
+                            .unwrap_or(ProjectedCellProvenance::Background),
+                    });
+                }
+                DesignDragDisposition::Pan => {
+                    *pan_drag_start = Some(*canvas_pan);
+                }
             }
         }
         if response.dragged()
@@ -1405,33 +1455,32 @@ impl EmbeddedPreview {
             {
                 // The center affordance is a placement draft only.  It never
                 // enters the runtime reducer or dispatch path.
+                let empty_slots = empty_authored_slots(&menu);
+                let label = match empty_slots.as_slice() {
+                    [] => "No empty authored slot — add or resize a ring first".into(),
+                    [_] => "Placement draft · choose content in the inspector".into(),
+                    _ => "Choose a highlighted empty slot, or drag + onto it".into(),
+                };
                 *projected_selection = Some(ProjectedSelection {
-                    label: "Choose an empty slot for the new cell".into(),
+                    label,
                     provenance: ProjectedCellProvenance::Center,
                 });
-                if let Some((ring_id, cell_id)) = menu.rings.iter().find_map(|ring| {
-                    ring.cells
-                        .iter()
-                        .find(|cell| matches!(&cell.content, CellContent::Spacer))
-                        .map(|cell| (ring.id.clone(), cell.id.clone()))
-                }) && let Some(session) = authoring_session.as_deref_mut()
+                if let [(ring_id, cell_id)] = empty_slots.as_slice()
+                    && let Some(session) = authoring_session.as_deref_mut()
                 {
+                    let selection = StableSelection::Cell {
+                        menu_id: menu.id.clone(),
+                        ring_id: ring_id.clone(),
+                        cell_id: cell_id.clone(),
+                    };
                     *placement_draft = Some(PlacementDraft::new(
                         menu.id.clone(),
                         ring_id.clone(),
                         cell_id.clone(),
                         crate::radial::authoring::DraftGeneration(generation),
                     ));
-                    *properties_popup = Some(StableSelection::Cell {
-                        menu_id: menu.id.clone(),
-                        ring_id: ring_id.clone(),
-                        cell_id: cell_id.clone(),
-                    });
-                    session.select(Some(StableSelection::Cell {
-                        menu_id: menu.id.clone(),
-                        ring_id,
-                        cell_id,
-                    }));
+                    *properties_popup = Some(selection.clone());
+                    session.select(Some(selection));
                 }
             }
             if response.secondary_clicked() {
@@ -1934,6 +1983,53 @@ mod tests {
             document,
             "preview-test",
         ))
+    }
+
+    #[test]
+    fn center_add_auto_targets_only_one_unambiguous_empty_slot() {
+        let mut menu = RadialDocument::starter().menus[0].clone();
+        menu.rings.truncate(1);
+        menu.rings[0].cells.truncate(1);
+        menu.rings[0].cells[0].content = CellContent::Spacer;
+        let one = empty_authored_slots(&menu);
+        assert_eq!(one.len(), 1);
+
+        let mut second_ring = menu.rings[0].clone();
+        second_ring.id = RingId::new("second-ring");
+        second_ring.cells[0].id = CellId::new("second-slot");
+        menu.rings.push(second_ring);
+        assert_eq!(empty_authored_slots(&menu).len(), 2);
+
+        menu.rings.iter_mut().for_each(|ring| ring.cells.clear());
+        assert!(empty_authored_slots(&menu).is_empty());
+    }
+
+    #[test]
+    fn generated_drag_is_read_only_instead_of_becoming_canvas_pan() {
+        let generated = ProjectedCellProvenance::Dynamic {
+            menu_id: MenuId::new("menu"),
+            ring_id: RingId::new("ring"),
+            source_cell_id: CellId::new("source"),
+            source: crate::radial::model::DynamicSource::Favorites,
+            result_index: 0,
+            fingerprint: crate::radial::dynamic::SourceFingerprint {
+                generation: 1,
+                source: "favorites".into(),
+                query: None,
+            },
+        };
+        assert_eq!(
+            design_drag_disposition(Some(&generated), false),
+            DesignDragDisposition::ReadOnly
+        );
+        assert_eq!(
+            design_drag_disposition(None, false),
+            DesignDragDisposition::Pan
+        );
+        assert_eq!(
+            design_drag_disposition(None, true),
+            DesignDragDisposition::Center
+        );
     }
 
     #[test]
