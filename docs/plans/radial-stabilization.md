@@ -1,7 +1,7 @@
 # Radial stabilization ledger
 
-Status: **S2 complete — tooltip metrics and stable hover presentation.**
-S0 and S1 remain complete; no native pass is claimed. This ledger records
+Status: **S3 complete — bounded visual-first Designer.**
+S0–S3 remain complete; no native pass is claimed. This ledger records
 the current checkout, ownership boundaries, source-backed causes, and the
 evidence still needed for S1–S5. The current checkout is authoritative; the
 supplied source snapshot and reference archives are historical/visual inputs.
@@ -238,7 +238,7 @@ keystrokes, or sensitive window titles.
 | S0 | `complete` | Identity, ownership map, source-only H0–H6 matrix, request classification, preference audit, causes, hypotheses, and planned trace recorded. |
 | S1 | `complete` | Focused hotkey/visibility and Designer/runtime close lifecycle repairs and gate. |
 | S2 | `complete` | Tooltip units and stable hover/native presentation repairs and gate. |
-| S3 | `pending` | Slot-first compact Designer layout/interaction repairs and gate. |
+| S3 | `complete` | Slot-first compact Designer layout/interaction repairs and gate. |
 | S4 | `pending` | Complete overlapping Cascade scenes and safe ancestor Back repairs and gate. |
 | S5 | `pending` | Integrated full verification, native matrix, responsiveness/resource evidence, and independent review. |
 
@@ -265,6 +265,108 @@ Second observation due: first check + 900 seconds
 Later observations due: previous check + 1,200 seconds
 Completion notification:
 Actual result / all failures / next corrective batch:
+```
+
+### S3 active-job record
+
+The S3 implementation and focused gate completed from committed source HEAD
+`56567765f0d6f844f9cbf3c1aa5455fc2eaf7e55`.  Source fingerprints were captured
+before the authoritative Cargo gate; the wrapper records its persistent PID and
+start identity before invoking Cargo and waits for that identity to be recorded
+here.  There must be one Cargo/Nextest process tree only.
+
+```text
+Job purpose / milestone: S3 bounded visual-first Designer focused gate
+Command and cwd: selector preflight, then cargo nextest run --no-fail-fast, cargo check, cargo fmt --all -- --check, git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; selector preflight before one focused batch
+Source SHA + source/untracked diff fingerprint: 56567765f0d6f844f9cbf3c1aa5455fc2eaf7e55 + mod.rs SHA256 87F8B62E3830EE26FD65A949DC79B56810656B8E852AE2FAC0DAF12636D5128B; preview.rs SHA256 EB22FFE00DE9D89808B4782EFBD9A8103F6779BF26D2C7842D97A20DA50DAEF9; settings/model.rs SHA256 6D2B959F32C6654D3740C9E87FCD0AA7331301617D0CA718FCE6DE6398DE3396
+Session/PID + process start and identity: PTY session `22104`; wrapper PID `18708` (`pwsh`), start `2026-09-18T05:03:44.2269617Z`; identity persisted in target/s3-focused.identity before Cargo launch; one sequential Cargo tree
+Durable stdout/stderr log: target/s3-focused.log
+Exit-code record: target/s3-focused.exit
+Launch time: `2026-09-18T05:03:44.2269617Z`
+First observation due: `2026-09-18T05:13:44.2269617Z` (launch + 600 seconds)
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: attempt 1 completed at `2026-09-18T05:33:02.5765032Z`; selector preflight exit 0; focused `--no-fail-fast` batch ran 300 tests with 300 passed and 4,289 skipped; `cargo check` exit 0; `git diff --check` exit 0; `cargo fmt --all -- --check` exit 1 with formatter-only diffs in `mod.rs`. Test-generated `clipboard_modifiers.json` was removed, `cargo fmt --all` applied, and the corrective gate below is authoritative.
+```
+
+### S3 corrective active-job record
+
+Formatter output was applied after the first gate exited.  The corrective run
+uses the same verified selector and one sequential Cargo tree; no source edits
+will occur while it runs.
+
+```text
+Job purpose / milestone: S3 corrective bounded visual-first Designer focused gate
+Command and cwd: selector preflight, then cargo nextest run --no-fail-fast, cargo check, cargo fmt --all -- --check, git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; selector preflight before one focused batch
+Source SHA + source/untracked diff fingerprint: 56567765f0d6f844f9cbf3c1aa5455fc2eaf7e55 + mod.rs SHA256 4D2BFF8E89917D1358FD2A40AB03EBFE9557F2061B86C87B1FE9849DE5D41B93; preview.rs SHA256 EB22FFE00DE9D89808B4782EFBD9A8103F6779BF26D2C7842D97A20DA50DAEF9; settings/model.rs SHA256 6D2B959F32C6654D3740C9E87FCD0AA7331301617D0CA718FCE6DE6398DE3396
+Session/PID + process start and identity: PTY session `2707`; wrapper PID `13668` (`pwsh`), start `2026-09-18T05:34:49.9776526Z`; identity persisted in target/s3-focused-corrective.identity before Cargo launch; one sequential Cargo tree
+Durable stdout/stderr log: target/s3-focused-corrective.log
+Exit-code record: target/s3-focused-corrective.exit
+Launch time: `2026-09-18T05:34:49.9776526Z`
+First observation due: `2026-09-18T05:44:49.9776526Z` (launch + 600 seconds)
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: corrective gate completed at `2026-09-18T05:57:25.7486384Z`; selector preflight exit 0; focused `--no-fail-fast` batch ran 181 tests with 181 passed and 4,408 skipped; `cargo check`, `cargo fmt --all -- --check`, and `git diff --check` each exited 0; overall exit 0. No further corrective batch remains within S3.
+```
+
+### S3 implementation and evidence
+
+The Designer presentation now has a serde-backed `layout_version`: untouched
+legacy pane defaults migrate once to a canvas-first visual workspace, while an
+explicit legacy pane choice is preserved and marked current.  `Reset Designer
+layout` restores only presentation preferences (pane visibility/widths,
+sections, mode, zoom/pan, skins view, and saved window geometry); the draft,
+selection, undo history, assets, bindings, and radial document remain owned by
+the authoring session.
+
+The viewport body allocates a bounded top-down control/status region and a
+pane-width plan derived from the actual remaining rect.  Optional tree and
+inspector panes are hidden by default, each receives its own vertical scroll
+region when enabled, and side panes yield width to a positive canvas at compact
+sizes.  Wrapped controls and named breadcrumbs keep navigation reachable at
+720×520 and 900×650 without forcing a larger window.  Tree sections remain
+closed until explicitly expanded; user names keep full-name hover access while
+ring IDs are secondary detail.  The existing `CanvasTransform` remains the
+single drawing/hit/drag/pan/DPI boundary, and preview controls stay UI-only.
+
+Focused regression coverage verifies canvas-first defaults, bounded compact
+pane sums, UI-only reset on a dirty selected draft, legacy preference
+migration/preservation, explicit tree expansion for accessibility, existing
+direct-edit and preview boundaries, settings-editor preservation, and native
+preview invariants.  The corrective gate selected 181 tests and passed all of
+them (4,408 skipped); the first broader selector attempt also passed 300 tests
+before exposing only formatter output, which was applied before the
+authoritative rerun.  No native desktop execution or screenshot/high-DPI
+acceptance was performed; native D1–D13 remain explicitly unverified.
+
+The post-gate pane-gap correction was checked separately because it changed
+only the bounded width arithmetic after the authoritative run.  Its durable
+targeted check is recorded below.
+
+Final post-inspection source fingerprint after the explicit-section opening
+correction: `mod.rs` SHA256
+`EC343D869A28A606CDF9BB26BDEB628CCA12702EE251CDB60091730BFFFA72BE`.
+
+### S3 post-gate fix check
+
+```text
+Job purpose / milestone: S3 targeted verification of one-pane/two-pane width correction
+Command and cwd: cargo nextest list/run -p multi_launcher --no-fail-fast -E 'test(/^gui::radial_editor::tests::(default_designer_layout_is_canvas_first_and_panes_fit_compact_windows|resetting_designer_layout_does_not_touch_dirty_document_or_selection)$/)'; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; nonempty selector preflight before focused batch
+Source SHA + source/untracked diff fingerprint: 56567765f0d6f844f9cbf3c1aa5455fc2eaf7e55 + mod.rs SHA256 27E47E3A4948AA84BCC76F24024FF676E34228906568AB27D50FA485B909B939
+Session/PID + process start and identity: PTY session `91629`; wrapper PID `12740` (`pwsh`), start `2026-09-18T05:59:39.1685628Z`; identity persisted in target/s3-fix-check.identity before Cargo launch; one sequential Cargo tree
+Durable stdout/stderr log: target/s3-fix-check.log
+Exit-code record: target/s3-fix-check.exit
+Launch time: `2026-09-18T05:59:39.1685628Z`
+First observation due: `2026-09-18T06:09:39.1685628Z` (launch + 600 seconds)
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: targeted check completed at `2026-09-18T06:25:06.1330124Z`; selector preflight exit 0; 2 tests passed and 4,587 skipped; fmt check and diff check exit 0; overall exit 0. No further corrective batch remains within S3.
 ```
 
 ### S1 active-job record

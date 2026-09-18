@@ -947,19 +947,24 @@ impl EmbeddedPreview {
             );
             return;
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Back").clicked() {
                 self.back();
                 ui.ctx().request_repaint();
             }
-            ui.label(format!("Menu: {}", menu.name));
+            ui.label(format!("Menu: {}", menu.name))
+                .on_hover_text(menu.name.clone());
         });
         if self.current_menu() != Some(&menu_id) {
             self.cancel_tooltip();
             return;
         }
         let available = ui.available_size();
-        let canvas_size = egui::vec2(available.x.max(180.0), available.y.max(180.0));
+        if available.x <= 1.0 || available.y <= 1.0 {
+            self.cancel_tooltip();
+            return;
+        }
+        let canvas_size = egui::vec2(available.x, available.y);
         let (canvas_rect, response) =
             ui.allocate_exact_size(canvas_size, egui::Sense::click_and_drag());
         let canvas_painter = ui.painter().with_clip_rect(canvas_rect);
@@ -1146,7 +1151,7 @@ impl EmbeddedPreview {
         canvas_pan: &mut CanvasPoint,
         pan_drag_start: &mut Option<CanvasPoint>,
     ) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(visited_path.as_slice().len() > 1, egui::Button::new("Back"))
                 .clicked()
@@ -1160,18 +1165,27 @@ impl EmbeddedPreview {
                 self.cancel_tooltip();
                 ui.ctx().request_repaint();
             }
-            ui.label(format!("Design · {}", menu.name));
-            ui.small(
-                visited_path
-                    .as_slice()
-                    .iter()
-                    .map(MenuId::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" › "),
-            );
+            ui.label(format!("Design · {}", menu.name))
+                .on_hover_text(menu.name.clone());
+            let breadcrumb = visited_path
+                .as_slice()
+                .iter()
+                .filter_map(|id| {
+                    document
+                        .menus
+                        .iter()
+                        .find(|candidate| &candidate.id == id)
+                        .map(|candidate| candidate.name.clone())
+                })
+                .collect::<Vec<_>>()
+                .join(" › ");
+            ui.small(breadcrumb);
         });
         let available = ui.available_size();
-        let canvas_size = egui::vec2(available.x.max(180.0), available.y.max(180.0));
+        if available.x <= 1.0 || available.y <= 1.0 {
+            return;
+        }
+        let canvas_size = egui::vec2(available.x, available.y);
         let (canvas_rect, response) =
             ui.allocate_exact_size(canvas_size, egui::Sense::click_and_drag());
         let canvas_painter = ui.painter().with_clip_rect(canvas_rect);

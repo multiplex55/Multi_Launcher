@@ -585,8 +585,8 @@ impl Default for RadialEditorState {
             preference_debounce: PreferenceDebounce::default(),
             preferences_flush_requested: false,
             designer_mode: DesignerMode::Design,
-            tree_visible: true,
-            inspector_visible: true,
+            tree_visible: false,
+            inspector_visible: false,
             tree_width: 180.0,
             inspector_width: 300.0,
             canvas_pan: CanvasPoint::default(),
@@ -603,12 +603,73 @@ impl Default for RadialEditorState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DesignerPaneLayout {
+    tree_width: f32,
+    canvas_width: f32,
+    inspector_width: f32,
+    height: f32,
+}
+
+/// Allocate every Designer pane from the actual remaining viewport.  Side
+/// panes yield width before the canvas does, and the final widths always fit
+/// within the caller's bounded rect (including compact 720px windows).
+fn designer_pane_layout(
+    available: egui::Vec2,
+    tree_visible: bool,
+    inspector_visible: bool,
+    tree_width: f32,
+    inspector_width: f32,
+) -> DesignerPaneLayout {
+    const GAP: f32 = 6.0;
+    const MIN_CANVAS: f32 = 140.0;
+    const MIN_TREE: f32 = 120.0;
+    const MIN_INSPECTOR: f32 = 220.0;
+
+    let width = if available.x.is_finite() {
+        available.x.clamp(1.0, 10_000.0)
+    } else {
+        1.0
+    };
+    let height = if available.y.is_finite() {
+        available.y.clamp(1.0, 10_000.0)
+    } else {
+        1.0
+    };
+    let gap_count = [tree_visible, inspector_visible]
+        .into_iter()
+        .filter(|visible| *visible)
+        .count();
+    let gaps = GAP * gap_count as f32;
+    let mut tree = tree_visible
+        .then(|| tree_width.clamp(MIN_TREE, 420.0))
+        .unwrap_or(0.0);
+    let mut inspector = inspector_visible
+        .then(|| inspector_width.clamp(MIN_INSPECTOR, 560.0))
+        .unwrap_or(0.0);
+    let side_total = tree + inspector;
+    let side_budget = (width - gaps - MIN_CANVAS).max(0.0);
+    if side_total > side_budget && side_total > 0.0 {
+        let ratio = side_budget / side_total;
+        tree *= ratio;
+        inspector *= ratio;
+    }
+    let canvas = (width - gaps - tree - inspector).max(1.0);
+    DesignerPaneLayout {
+        tree_width: tree,
+        canvas_width: canvas,
+        inspector_width: inspector,
+        height,
+    }
+}
+
 impl RadialEditorState {
     pub(crate) fn set_preferences(
         &mut self,
         preferences: crate::settings::RadialDesignerPreferences,
     ) {
-        let preferences = preferences.normalized();
+        let previous = preferences.clone().normalized();
+        let preferences = preferences.migrate_layout();
         self.designer_mode = match preferences.active_mode {
             crate::settings::RadialDesignerMode::Design => DesignerMode::Design,
             crate::settings::RadialDesignerMode::PreviewTest => DesignerMode::PreviewTest,
@@ -620,16 +681,47 @@ impl RadialEditorState {
         self.inspector_width = preferences.inspector_width;
         self.preview_zoom = preferences.zoom;
         self.canvas_pan = CanvasPoint::new(preferences.pan.0, preferences.pan.1);
-        self.preferences = preferences;
-        self.preferences_dirty = false;
+        self.preferences = preferences.clone();
+        // Persist a one-time legacy presentation upgrade, but do not mark a
+        // normal startup dirty.  Only the presentation marker and pane
+        // visibility can change here; the authoring draft is untouched.
+        self.preferences_dirty = preferences != previous;
         self.preference_debounce.clear();
+        if self.preferences_dirty {
+            self.preference_debounce.mark_changed(Instant::now());
+        }
         self.preferences_flush_requested = false;
         self.intent_bridge.clear_preferences_ready();
+    }
+
+    /// Restore only the Designer presentation.  The authoring session,
+    /// selection, undo history, assets, and persisted radial document are
+    /// intentionally outside this boundary.
+    fn reset_designer_layout(&mut self) {
+        let preferences = crate::settings::RadialDesignerPreferences::default();
+        self.preferences = preferences.clone();
+        self.designer_mode = match preferences.active_mode {
+            crate::settings::RadialDesignerMode::Design => DesignerMode::Design,
+            crate::settings::RadialDesignerMode::PreviewTest => DesignerMode::PreviewTest,
+        };
+        self.tree_visible = preferences.tree_visible;
+        self.inspector_visible = preferences.inspector_visible;
+        self.show_resources = preferences.show_skins;
+        self.tree_width = preferences.tree_width;
+        self.inspector_width = preferences.inspector_width;
+        self.preview_zoom = preferences.zoom;
+        self.canvas_pan = CanvasPoint::new(preferences.pan.0, preferences.pan.1);
+        self.pan_drag_start = None;
+        self.viewport_restore_pending = true;
+        self.preview.cancel_tooltip();
+        self.mark_preferences_changed();
     }
 
     fn mark_preferences_changed(&mut self) {
         self.preferences_dirty = true;
         self.preference_debounce.mark_changed(Instant::now());
+        self.preferences.layout_version =
+            crate::settings::RadialDesignerPreferences::CURRENT_LAYOUT_VERSION;
         self.preferences.tree_visible = self.tree_visible;
         self.preferences.inspector_visible = self.inspector_visible;
         self.preferences.show_skins = self.show_resources;
@@ -1603,20 +1695,13 @@ impl RadialEditorState {
                 |ui| {
                     self.designer_controls(ui);
                     self.pending_drop_ui(ui);
-                    let available_height = ui.available_height().max(180.0);
-                    let available_width = ui.available_width().max(320.0);
-                    let tree_width = if self.tree_visible {
-                        self.tree_width
-                            .clamp(120.0, (available_width - 260.0).max(120.0))
-                    } else {
-                        0.0
-                    };
-                    let inspector_width = if self.inspector_visible {
-                        self.inspector_width
-                            .clamp(220.0, (available_width - tree_width - 220.0).max(220.0))
-                    } else {
-                        0.0
-                    };
+                    let pane = designer_pane_layout(
+                        ui.available_size(),
+                        self.tree_visible,
+                        self.inspector_visible,
+                        self.tree_width,
+                        self.inspector_width,
+                    );
                     if self.show_resources {
                         // Skins/assets are the main bounded content in Skins
                         // mode.  They replace the full-height canvas rather
@@ -1625,49 +1710,54 @@ impl RadialEditorState {
                         // compact viewport sizes.
                         egui::ScrollArea::vertical()
                             .id_source("radial-designer-resources")
-                            .max_height(available_height)
                             .show(ui, |ui| self.resources_ui(ui));
                     } else {
-                        let canvas_width =
-                            (available_width - tree_width - inspector_width - 12.0).max(180.0);
                         ui.horizontal(|ui| {
-                            if self.tree_visible {
-                                ui.allocate_ui(egui::vec2(tree_width, available_height), |ui| {
-                                    self.tree(ui, &frame.feature_defaults);
-                                });
-                                ui.separator();
-                            }
-                            ui.allocate_ui(egui::vec2(canvas_width, available_height), |ui| {
-                                self.preview.ui(
-                                    ui,
-                                    &draft,
-                                    generation,
-                                    self.preview_zoom,
-                                    self.preview_preset,
-                                    preview_selection.as_ref(),
-                                    prepared_preview.as_deref(),
-                                    editor_session,
-                                    show_expected_layout_diagnostics,
-                                    self.designer_mode,
-                                    self.session.as_mut(),
-                                    &mut self.projected_selection,
-                                    &mut self.drag_payload,
-                                    &mut self.placement_draft,
-                                    &mut self.pending_drop,
-                                    &mut self.properties_popup,
-                                    &mut self.visited_path,
-                                    &mut self.canvas_pan,
-                                    &mut self.pan_drag_start,
+                            if pane.tree_width > 0.0 {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(pane.tree_width, pane.height),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        self.tree(ui, &frame.feature_defaults);
+                                    },
                                 );
-                            });
-                            if self.inspector_visible {
-                                ui.separator();
-                                ui.allocate_ui(
-                                    egui::vec2(inspector_width, available_height),
+                                ui.add_space(6.0);
+                            }
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(pane.canvas_width, pane.height),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    self.preview.ui(
+                                        ui,
+                                        &draft,
+                                        generation,
+                                        self.preview_zoom,
+                                        self.preview_preset,
+                                        preview_selection.as_ref(),
+                                        prepared_preview.as_deref(),
+                                        editor_session,
+                                        show_expected_layout_diagnostics,
+                                        self.designer_mode,
+                                        self.session.as_mut(),
+                                        &mut self.projected_selection,
+                                        &mut self.drag_payload,
+                                        &mut self.placement_draft,
+                                        &mut self.pending_drop,
+                                        &mut self.properties_popup,
+                                        &mut self.visited_path,
+                                        &mut self.canvas_pan,
+                                        &mut self.pan_drag_start,
+                                    );
+                                },
+                            );
+                            if pane.inspector_width > 0.0 {
+                                ui.add_space(6.0);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(pane.inspector_width, pane.height),
+                                    egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
                                         egui::ScrollArea::vertical()
                                             .id_source("radial-designer-inspector")
-                                            .max_height(available_height)
                                             .show(ui, |ui| self.inspector(ui, frame));
                                     },
                                 );
@@ -2072,7 +2162,7 @@ impl RadialEditorState {
     }
 
     fn designer_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Mode:");
             if ui
                 .selectable_label(self.designer_mode == DesignerMode::Design, "Design")
@@ -2125,28 +2215,39 @@ impl RadialEditorState {
                 self.inspector_visible = !self.inspector_visible;
                 self.mark_preferences_changed();
             }
-            if self.tree_visible {
-                let response = ui.add(
-                    egui::DragValue::new(&mut self.tree_width)
-                        .prefix("Tree ")
-                        .suffix(" px")
-                        .clamp_range(120.0..=420.0),
-                );
-                if response.changed() {
-                    self.mark_preferences_changed();
+            ui.menu_button("Layout", |ui| {
+                ui.label("Presentation only");
+                if self.tree_visible {
+                    let response = ui.add(
+                        egui::DragValue::new(&mut self.tree_width)
+                            .prefix("Tree ")
+                            .suffix(" px")
+                            .clamp_range(120.0..=420.0),
+                    );
+                    if response.changed() {
+                        self.mark_preferences_changed();
+                    }
                 }
-            }
-            if self.inspector_visible {
-                let response = ui.add(
-                    egui::DragValue::new(&mut self.inspector_width)
-                        .prefix("Inspector ")
-                        .suffix(" px")
-                        .clamp_range(220.0..=560.0),
-                );
-                if response.changed() {
-                    self.mark_preferences_changed();
+                if self.inspector_visible {
+                    let response = ui.add(
+                        egui::DragValue::new(&mut self.inspector_width)
+                            .prefix("Inspector ")
+                            .suffix(" px")
+                            .clamp_range(220.0..=560.0),
+                    );
+                    if response.changed() {
+                        self.mark_preferences_changed();
+                    }
                 }
-            }
+                if ui
+                    .button("Reset Designer layout")
+                    .on_hover_text("Reset panes, sections, canvas view, and window geometry only")
+                    .clicked()
+                {
+                    self.reset_designer_layout();
+                    ui.close_menu();
+                }
+            });
             ui.small("Direct Design gestures edit the draft only");
         });
     }
@@ -2327,7 +2428,7 @@ impl RadialEditorState {
     }
 
     fn preview_controls(&mut self, ui: &mut egui::Ui, show_expected_layout_diagnostics: bool) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Preview");
             egui::ComboBox::from_id_source("radial-preview-preset")
                 .selected_text(format!("{:?}", self.preview_preset))
@@ -2853,17 +2954,16 @@ impl RadialEditorState {
                 let default_open = expanded_sections
                     .get(&expansion_key)
                     .copied()
-                    // Keep the initial tree discoverable (and its stable
-                    // AccessKit names present) until the user explicitly
-                    // collapses this menu.  Once recorded, the preference is
-                    // authoritative and is never overridden by selection.
-                    .unwrap_or(true);
+                    // A collapsed tree is the compact default.  Once a
+                    // section is explicitly opened or closed, its persisted
+                    // value is authoritative and selection/diagnostics never
+                    // force it open.
+                    .unwrap_or(false);
                 let header = egui::CollapsingHeader::new(&menu.name)
                     .id_source(menu::widget_key("menu", menu.id.as_str(), "tree"))
                     .default_open(default_open)
-                    .open(Some(default_open))
                     .show(ui, |ui| {
-                        for ring in &menu.rings {
+                        for (ring_index, ring) in menu.rings.iter().enumerate() {
                             let ring_selection = StableSelection::Ring {
                                 menu_id: menu.id.clone(),
                                 ring_id: ring.id.clone(),
@@ -2878,11 +2978,16 @@ impl RadialEditorState {
                                     |ui| {
                                         ui.selectable_label(
                                             session.selection.as_ref() == Some(&ring_selection),
-                                            format!("Ring {}", ring.id),
+                                            format!("Ring {}", ring_index + 1),
                                         )
                                     },
                                 )
                                 .inner;
+                            ring_response.clone().on_hover_text(format!(
+                                "Ring {} · {}",
+                                ring_index + 1,
+                                ring.id
+                            ));
                             if focus_restore.as_ref() == Some(&ring_selection) {
                                 ring_response.request_focus();
                                 *focus_restore = None;
@@ -2916,8 +3021,13 @@ impl RadialEditorState {
                                                         == Some(&selection);
                                                     let accessible_name =
                                                         cell_tree_accessible_name(cell, index);
-                                                    let response =
-                                                        ui.selectable_label(selected, &cell.label);
+                                                    let response = ui
+                                                        .selectable_label(selected, &cell.label)
+                                                        .on_hover_text(if cell.label.is_empty() {
+                                                            accessible_name.clone()
+                                                        } else {
+                                                            cell.label.clone()
+                                                        });
                                                     response.widget_info(|| {
                                                         egui::WidgetInfo::selected(
                                                             egui::WidgetType::SelectableLabel,
@@ -2972,6 +3082,10 @@ impl RadialEditorState {
                         }
                     });
                 let is_open = header.body_returned.is_some();
+                header
+                    .header_response
+                    .clone()
+                    .on_hover_text(menu.name.clone());
                 let expansion_was_interacted_with = expanded_sections.contains_key(&expansion_key)
                     || header.header_response.clicked();
                 if expansion_was_interacted_with
@@ -5530,6 +5644,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_designer_layout_is_canvas_first_and_panes_fit_compact_windows() {
+        let preferences = crate::settings::RadialDesignerPreferences::default();
+        assert!(!preferences.tree_visible);
+        assert!(!preferences.inspector_visible);
+        let canvas_only = designer_pane_layout(
+            egui::vec2(900.0, 650.0),
+            preferences.tree_visible,
+            preferences.inspector_visible,
+            preferences.tree_width,
+            preferences.inspector_width,
+        );
+        assert!(canvas_only.canvas_width >= 899.0);
+        let compact = designer_pane_layout(
+            egui::vec2(700.0, 470.0),
+            true,
+            true,
+            preferences.tree_width,
+            preferences.inspector_width,
+        );
+        assert!(compact.canvas_width > 0.0);
+        assert!(compact.height <= 470.0);
+        assert!(
+            compact.tree_width + compact.canvas_width + compact.inspector_width + 12.0 <= 700.01
+        );
+        let one_pane = designer_pane_layout(
+            egui::vec2(700.0, 470.0),
+            true,
+            false,
+            preferences.tree_width,
+            preferences.inspector_width,
+        );
+        assert!(one_pane.tree_width + one_pane.canvas_width + 6.0 <= 700.01);
+    }
+
+    #[test]
+    fn resetting_designer_layout_does_not_touch_dirty_document_or_selection() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.make_dirty_for_test();
+        let selection = StableSelection::Menu(
+            editor
+                .session
+                .as_ref()
+                .expect("session")
+                .draft
+                .default_menu_id
+                .clone(),
+        );
+        editor
+            .session
+            .as_mut()
+            .expect("session")
+            .select(Some(selection.clone()));
+        let before_draft = editor.session.as_ref().unwrap().draft.clone();
+        let before_generation = editor.session.as_ref().unwrap().generation;
+        editor.tree_visible = true;
+        editor.inspector_visible = true;
+        editor.tree_width = 410.0;
+        editor.inspector_width = 540.0;
+        editor.preview_zoom = 1.8;
+        editor.canvas_pan = CanvasPoint::new(22.0, -11.0);
+        editor.reset_designer_layout();
+        let session = editor.session.as_ref().unwrap();
+        assert_eq!(session.draft, before_draft);
+        assert_eq!(session.generation, before_generation);
+        assert_eq!(session.selection, Some(selection));
+        assert!(!editor.tree_visible);
+        assert!(!editor.inspector_visible);
+        assert_eq!(editor.preview_zoom, 1.0);
+        assert_eq!(editor.canvas_pan, CanvasPoint::default());
+        assert!(editor.preferences_dirty);
+    }
+
+    #[test]
     fn designer_viewport_identity_and_duplicate_open_reuse_one_draft() {
         assert_eq!(radial_designer_viewport_id(), radial_designer_viewport_id());
         let mut editor = RadialEditorState::default();
@@ -6086,6 +6274,11 @@ mod tests {
             std::sync::Arc::new(document),
             "test",
         )));
+        let menu_id = editor.session.as_ref().unwrap().draft.menus[0].id.clone();
+        editor
+            .preferences
+            .expanded_sections
+            .insert(format!("menu:{menu_id}"), true);
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
