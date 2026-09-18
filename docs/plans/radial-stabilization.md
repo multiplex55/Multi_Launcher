@@ -1,7 +1,7 @@
 # Radial stabilization ledger
 
-Status: **S1 complete — focused lifecycle repair and verification.** S0
-remains complete; no native pass is claimed. This ledger records
+Status: **S2 complete — tooltip metrics and stable hover presentation.**
+S0 and S1 remain complete; no native pass is claimed. This ledger records
 the current checkout, ownership boundaries, source-backed causes, and the
 evidence still needed for S1–S5. The current checkout is authoritative; the
 supplied source snapshot and reference archives are historical/visual inputs.
@@ -237,7 +237,7 @@ keystrokes, or sensitive window titles.
 |---|---|---|
 | S0 | `complete` | Identity, ownership map, source-only H0–H6 matrix, request classification, preference audit, causes, hypotheses, and planned trace recorded. |
 | S1 | `complete` | Focused hotkey/visibility and Designer/runtime close lifecycle repairs and gate. |
-| S2 | `pending` | Tooltip units and stable hover/native presentation repairs and gate. |
+| S2 | `complete` | Tooltip units and stable hover/native presentation repairs and gate. |
 | S3 | `pending` | Slot-first compact Designer layout/interaction repairs and gate. |
 | S4 | `pending` | Complete overlapping Cascade scenes and safe ancestor Back repairs and gate. |
 | S5 | `pending` | Integrated full verification, native matrix, responsiveness/resource evidence, and independent review. |
@@ -345,6 +345,75 @@ Exit-code record: target/s1-focused-postfix2.exit
 Command/result: selector preflight exit 0; focused --no-fail-fast batch exit 0, 127 passed / 3,858 skipped; cargo check exit 0; cargo fmt --all -- --check exit 0; overall exit 0 at 2026-09-18T02:50:00.1457544Z
 Diagnosed result: Save/Discard failure prompts remain actionable after the close prompt is dismissed for the send attempt. Native H/C remains explicitly unverified.
 ```
+
+### S2 active-job record
+
+The first authoritative S2 gate completed on the durable identity below. Its
+focused batch found one test assertion defect; Cargo check, fmt, and diff
+check still completed cleanly. The test assertion has now been corrected to
+compare physical glyph bounds after the same physical-to-logical conversion
+used by production metrics. A single corrective focused gate is recorded
+below; no overlapping Cargo process is allowed.
+
+```text
+Job purpose / milestone: S2 focused tooltip metrics and native presentation gate
+Command and cwd: corrected selector preflight passed with `cargo nextest list -p multi_launcher -E 'test(/^(radial::(font_cache|tooltip|preparation|render|compositor|native|controller)|radial::authoring::native_preview|gui::radial_editor::preview)::tests::/)'`; authoritative `cargo nextest run -p multi_launcher --no-fail-fast -E 'test(/^(radial::(font_cache|tooltip|preparation|render|compositor|native|controller)|radial::authoring::native_preview|gui::radial_editor::preview)::tests::/)'`, then `cargo check`, `cargo fmt --all -- --check`, and `git diff --check`; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; selector preflight before one focused --no-fail-fast batch
+Source SHA + source/untracked diff fingerprint: 1500af056b8939fdc11c481bb0e19daa8c70b85c + font_cache.rs SHA256 CA9989801FEA229D7B1DE08A8B5E016F72CAECD2C79074E26CAAC6097CDE29C2; native.rs SHA256 B710B906B818FC518E8DF608A2567849A12FC8E9BC9A334106165D2950540414
+Session/PID + process start and identity: PTY session `47827`; wrapper PID `2784` (`pwsh`), start `2026-09-18T03:59:27.7936870Z`; one sequential Cargo/Nextest tree
+Durable stdout/stderr log: target/s2-focused-final.log
+Exit-code record: target/s2-focused-final.exit
+Launch time: `2026-09-18T03:59:27.7936870Z`
+First observation due: `2026-09-18T04:09:27.7936870Z` (launch + 600 seconds)
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Corrected selector preflight: exit 0; 127 focused tests listed; `-E/--filterset` is the installed Nextest flag (the abandoned `--filter-expr` attempt selected 508 workspace tests and was terminated before execution).
+Actual result / all failures / next corrective batch: focused batch exit 100, 130 tests run (129 passed, 1 failed), with `NEXTTEST_EXIT=100`; failure was the new DPI test comparing logical milli-width to physical-pixel glyph bounds. `CHECK_EXIT=0`, `FMT_EXIT=0`, `DIFF_CHECK_EXIT=0`, overall exit 100 at `2026-09-18T04:21:45.3675104Z`. Corrected assertion is recorded in the next gate.
+```
+
+### S2 gate corrective batch
+
+```text
+Job purpose / milestone: S2 corrective focused tooltip metrics and native presentation gate
+Command and cwd: same verified selector and command as the active-job record above; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; one focused --no-fail-fast batch, then cargo check, cargo fmt --all -- --check, and git diff --check
+Source SHA + source/untracked diff fingerprint: 1500af056b8939fdc11c481bb0e19daa8c70b85c + font_cache.rs SHA256 EB4D96066521C427B19137B8D095AF02A2FD6C0BD2AE1AA8CDC57D84E66364D2; native.rs SHA256 B710B906B818FC518E8DF608A2567849A12FC8E9BC9A334106165D2950540414
+Session/PID + process start and identity: PTY session `55619`; wrapper PID `27048` (`pwsh`), start `2026-09-18T04:48:46.7783802Z`; one sequential Cargo/Nextest tree
+Durable stdout/stderr log: target/s2-focused-corrective.log
+Exit-code record: target/s2-focused-corrective.exit
+Launch time: `2026-09-18T04:48:46.7783802Z`
+First observation due: `2026-09-18T04:58:46.7783802Z` (launch + 600 seconds)
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: focused nextest completed with 130/130 passed and 4,456 skipped; cargo check, fmt, and diff check completed with exit 0; overall exit 0 at `2026-09-18T04:49:45.2060065Z`. Native H/C remains explicitly unverified; no S3 work was started.
+```
+
+### S2 implementation and evidence
+
+The producer now keeps line height in logical milli-pixels by dividing before
+line multiplication (`13_000 * 1_200 / 1_000 = 15_600`). Retained tooltip
+width and height use the actual raster glyph extents and line advances,
+converted from physical pixels to logical milli-pixels once and rounded
+outward. Source text, grapheme handling, explicit breaks, fallback
+diagnostics, label ellipsis, placement, and tooltip-only visual overflow
+contracts remain unchanged.
+
+Native presentation now retains a typed input/style/layout snapshot. A
+same-layout visual update is `PixelOnly` and publishes the complete new
+layered bitmap without input hide/show, region rebuild, input reposition,
+activation/style changes, or animation-epoch reset. Layout/style/ownership
+changes remain `Structural` and reconcile the input proxy after the new frame
+has been published. The call-plan regression covers same-layout hover and
+structural anchor/policy changes. The shared compositor/native-preview/
+embedded paths continue to consume the same measured layout and visual scene.
+
+The first gate exposed only a test-unit mismatch: the new DPI regression
+compared logical milli-width to physical-pixel glyph bounds. The assertion was
+corrected to use the production physical-to-logical conversion; the corrective
+gate passed. No native desktop execution or pixel trace was performed, so the
+native H/C rows and T1–T9 remain explicitly unverified.
 
 ## S0 verification record
 

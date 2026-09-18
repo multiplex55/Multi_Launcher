@@ -760,6 +760,7 @@ struct WindowState {
     capture: CaptureOwnership,
     destroyed: Arc<std::sync::atomic::AtomicBool>,
     presented: Arc<std::sync::atomic::AtomicBool>,
+    always_on_top: bool,
     activate_on_show: bool,
     compositor: super::compositor::CompositorCache,
     animation_epoch: std::time::Instant,
@@ -1314,6 +1315,61 @@ struct NativeInputRegionPlan {
     overlays: Vec<NativeRegionShape>,
 }
 
+/// Describes the retained input-side state that a new visual frame is allowed
+/// to reuse. Tooltip/selection/animation scenes can change the visual bounds
+/// without changing this snapshot; those updates must not hide, move, or
+/// rebuild the input proxy.
+#[derive(Clone, Debug, PartialEq)]
+struct NativePresentationSnapshot {
+    input: (i32, i32, i32, i32),
+    input_origin: LogicalPoint,
+    input_region: NativeInputRegionPlan,
+    layout: LayoutSnapshot,
+    always_on_top: bool,
+    activate_on_show: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativePresentationKind {
+    /// The retained input proxy and its style/ownership are unchanged. The
+    /// caller may publish a new layered bitmap without touching input state.
+    PixelOnly,
+    /// Geometry, hit regions, style, or activation policy changed and the
+    /// input proxy must be reconciled after the new bitmap is ready.
+    Structural,
+}
+
+fn native_presentation_snapshot(
+    layout: &LayoutSnapshot,
+    always_on_top: bool,
+    activate_on_show: bool,
+) -> NativePresentationSnapshot {
+    let bounds = NativeSurfaceBounds {
+        visual: (0, 0, 0, 0),
+        input: physical_scene_bounds(layout.visual_extent, layout.scale_factor),
+        input_origin: layout.visual_extent.min,
+    };
+    NativePresentationSnapshot {
+        input: bounds.input,
+        input_origin: bounds.input_origin,
+        input_region: native_input_region_plan(layout, bounds.input_origin),
+        layout: layout.clone(),
+        always_on_top,
+        activate_on_show,
+    }
+}
+
+fn native_presentation_kind(
+    previous: Option<&NativePresentationSnapshot>,
+    next: &NativePresentationSnapshot,
+) -> NativePresentationKind {
+    if previous.is_some_and(|previous| previous == next) {
+        NativePresentationKind::PixelOnly
+    } else {
+        NativePresentationKind::Structural
+    }
+}
+
 fn native_input_region_plan(
     layout: &LayoutSnapshot,
     window_origin: LogicalPoint,
@@ -1619,6 +1675,7 @@ impl SystemPlatformSurface {
             capture: CaptureOwnership::default(),
             destroyed: Arc::clone(&destroyed),
             presented: Arc::clone(&presented),
+            always_on_top,
             activate_on_show,
             compositor: super::compositor::CompositorCache::default(),
             animation_epoch: std::time::Instant::now(),
@@ -1791,63 +1848,97 @@ impl SystemPlatformSurface {
         // second time after the controller has translated the session.
         let target_x = input_x;
         let target_y = input_y;
-        cancel_animation(self.visual_hwnd, unsafe { &mut *ptr });
-        unsafe { (*ptr).animation_epoch = std::time::Instant::now() };
-        let frame = unsafe { &mut *ptr }
-            .compositor
-            .compose(&scene, layout.scale_factor, 0)
-            .map_err(|error| format!("radial composition failed: {error:?}"))?;
-        let origin = bounds.input_origin;
-        let region = create_native_input_region(&native_input_region_plan(&layout, origin))?;
-        let mut style = unsafe { GetWindowLongPtrW(self.input_hwnd, GWL_EXSTYLE) };
-        if activate_on_show {
-            style &= !(WS_EX_NOACTIVATE.0 as isize);
-        } else {
-            style |= WS_EX_NOACTIVATE.0 as isize;
-        }
-        unsafe { SetWindowLongPtrW(self.input_hwnd, GWL_EXSTYLE, style) };
-        let _ = unsafe { ShowWindow(self.input_hwnd, SW_HIDE) };
-        let input_positioned = unsafe {
-            SetWindowPos(
-                self.input_hwnd,
-                if always_on_top {
-                    HWND_TOPMOST
-                } else {
-                    HWND_NOTOPMOST
-                },
-                target_x,
-                target_y,
-                input_width,
-                input_height,
-                SWP_NOACTIVATE,
+        let previous = unsafe {
+            native_presentation_snapshot(
+                &(*ptr).layout,
+                (*ptr).always_on_top,
+                (*ptr).activate_on_show,
             )
         };
-        if let Err(error) = input_positioned {
-            return Err(format!("radial input proxy relayout failed: {error}"));
-        }
-        apply_native_input_region(self.input_hwnd, region)?;
-        unsafe {
-            SetWindowPos(
-                self.visual_hwnd,
-                if always_on_top {
-                    HWND_TOPMOST
-                } else {
-                    HWND_NOTOPMOST
-                },
-                visual_x,
-                visual_y,
-                visual_width,
-                visual_height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-        }
-        .map_err(|error| format!("radial relayout failed: {error}"))?;
+        let next = native_presentation_snapshot(&layout, always_on_top, activate_on_show);
+        let presentation_kind = native_presentation_kind(Some(&previous), &next);
+        let animation_time_ms = match presentation_kind {
+            NativePresentationKind::Structural => {
+                cancel_animation(self.visual_hwnd, unsafe { &mut *ptr });
+                unsafe { (*ptr).animation_epoch = std::time::Instant::now() };
+                0
+            }
+            NativePresentationKind::PixelOnly => unsafe {
+                (*ptr)
+                    .animation_epoch
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64
+            },
+        };
+        let frame = unsafe { &mut *ptr }
+            .compositor
+            .compose(&scene, layout.scale_factor, animation_time_ms)
+            .map_err(|error| format!("radial composition failed: {error:?}"))?;
+        let origin = bounds.input_origin;
+        let region = if presentation_kind == NativePresentationKind::Structural {
+            Some(create_native_input_region(&next.input_region)?)
+        } else {
+            None
+        };
+        // Publish the complete new bitmap and its visual bounds before any
+        // input proxy hide/relayout. This prevents the old pixels from being
+        // moved or shown ahead of the frame that belongs at that position.
         present_layered(self.visual_hwnd, visual_x, visual_y, &frame.image)?;
+        if presentation_kind == NativePresentationKind::Structural {
+            let mut style = unsafe { GetWindowLongPtrW(self.input_hwnd, GWL_EXSTYLE) };
+            if activate_on_show {
+                style &= !(WS_EX_NOACTIVATE.0 as isize);
+            } else {
+                style |= WS_EX_NOACTIVATE.0 as isize;
+            }
+            unsafe { SetWindowLongPtrW(self.input_hwnd, GWL_EXSTYLE, style) };
+            let _ = unsafe { ShowWindow(self.input_hwnd, SW_HIDE) };
+            let input_positioned = unsafe {
+                SetWindowPos(
+                    self.input_hwnd,
+                    if always_on_top {
+                        HWND_TOPMOST
+                    } else {
+                        HWND_NOTOPMOST
+                    },
+                    target_x,
+                    target_y,
+                    input_width,
+                    input_height,
+                    SWP_NOACTIVATE,
+                )
+            };
+            if let Err(error) = input_positioned {
+                return Err(format!("radial input proxy relayout failed: {error}"));
+            }
+            apply_native_input_region(
+                self.input_hwnd,
+                region.expect("structural presentation created an input region"),
+            )?;
+            unsafe {
+                SetWindowPos(
+                    self.visual_hwnd,
+                    if always_on_top {
+                        HWND_TOPMOST
+                    } else {
+                        HWND_NOTOPMOST
+                    },
+                    visual_x,
+                    visual_y,
+                    visual_width,
+                    visual_height,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            }
+            .map_err(|error| format!("radial relayout failed: {error}"))?;
+        }
         unsafe {
             (*ptr).layout = layout;
             (*ptr).scene = scene;
             (*ptr).origin = origin;
             (*ptr).scale_factor = frame.scale_factor;
+            (*ptr).always_on_top = always_on_top;
             (*ptr).activate_on_show = activate_on_show;
             (*ptr).input_x = target_x;
             (*ptr).input_y = target_y;
@@ -1857,16 +1948,18 @@ impl SystemPlatformSurface {
             (*ptr).visual_offset_y = visual_y.saturating_sub(target_y);
             (*ptr).presented.store(true, Ordering::Release);
         }
-        let _ = unsafe {
-            ShowWindow(
-                self.input_hwnd,
-                if activate_on_show {
-                    SW_SHOW
-                } else {
-                    SW_SHOWNOACTIVATE
-                },
-            )
-        };
+        if presentation_kind == NativePresentationKind::Structural {
+            let _ = unsafe {
+                ShowWindow(
+                    self.input_hwnd,
+                    if activate_on_show {
+                        SW_SHOW
+                    } else {
+                        SW_SHOWNOACTIVATE
+                    },
+                )
+            };
+        }
         schedule_animation(
             self.visual_hwnd,
             unsafe { &mut *ptr },
@@ -2678,6 +2771,43 @@ mod tests {
         assert_eq!(
             native_input_region_plan(&layout, expanded.input_origin),
             native_input_region_plan(&layout, original.input_origin)
+        );
+    }
+
+    #[test]
+    fn same_layout_hover_is_a_visual_only_native_presentation_delta() {
+        let layout = layout_menu(
+            &RadialDocument::starter().menus[0],
+            PhysicalPoint { x: 300.0, y: 300.0 },
+            PhysicalRect {
+                min: PhysicalPoint {
+                    x: -400.0,
+                    y: -250.0,
+                },
+                max: PhysicalPoint { x: 800.0, y: 650.0 },
+            },
+            ScaleFactor::new(1.25).unwrap(),
+            0.5,
+        )
+        .unwrap();
+        let previous = native_presentation_snapshot(&layout, false, false);
+        let same_layout = native_presentation_snapshot(&layout, false, false);
+        assert_eq!(
+            native_presentation_kind(Some(&previous), &same_layout),
+            NativePresentationKind::PixelOnly
+        );
+
+        let mut changed_layout = layout.clone();
+        changed_layout.requested_anchor.x += 1.0;
+        let changed = native_presentation_snapshot(&changed_layout, false, false);
+        assert_eq!(
+            native_presentation_kind(Some(&previous), &changed),
+            NativePresentationKind::Structural
+        );
+        let changed_policy = native_presentation_snapshot(&layout, true, false);
+        assert_eq!(
+            native_presentation_kind(Some(&previous), &changed_policy),
+            NativePresentationKind::Structural
         );
     }
 

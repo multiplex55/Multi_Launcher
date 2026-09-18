@@ -356,34 +356,95 @@ fn prepare_layout(
             (rendered, lines, width)
         }
     };
-    let glyphs = rasterize_glyphs(&display, request, &loaded, &mut diagnostics);
+    let rasterized = rasterize_glyphs(&display, request, &loaded, &mut diagnostics);
     let mut unique_diagnostics = BTreeSet::new();
     diagnostics.retain(|diagnostic| unique_diagnostics.insert(diagnostic.clone()));
     diagnostics.truncate(MAX_LAYOUT_DIAGNOSTICS);
-    let measured_width_milli = width_per_grapheme
+    let measured_width_milli = measured_width_milli(&rasterized, dpi_milli);
+    let measured_height_milli = measured_height_milli(
+        &rasterized,
+        request.size_milli,
+        line_count.max(1),
+        dpi_milli,
+    );
+    let estimated_width_milli = width_per_grapheme
         .saturating_mul(widest_graphemes as u64)
         .saturating_mul(1_000)
         .checked_div(dpi_milli)
         .unwrap_or(u64::MAX)
-        .min(u32::MAX as u64) as u32;
-    let measured_height_milli = (request.size_milli as u64)
-        .saturating_mul(1_200)
-        .saturating_mul(line_count.max(1) as u64)
         .min(u32::MAX as u64) as u32;
     PreparedTextLayout {
         source_text: text.into(),
         text: display.into(),
         selected_family: selected.into(),
         script,
-        estimated_width_milli: width_per_grapheme
-            .saturating_mul(widest_graphemes as u64)
-            .min(u32::MAX as u64) as u32,
+        estimated_width_milli,
         measured_width_milli,
         measured_height_milli,
         line_count: line_count.min(u16::MAX as usize) as u16,
-        glyphs,
+        glyphs: rasterized.glyphs,
         diagnostics,
     }
+}
+
+/// Convert a physical-pixel extent to desktop-logical milli-pixels while
+/// rounding outwards. Glyph rasterization is performed at the requested DPI,
+/// but the retained layout contract is always logical, independent of scale.
+fn physical_extent_to_logical_milli(extent: f32, dpi_milli: u64) -> u32 {
+    if !extent.is_finite() || extent <= 0.0 {
+        return 0;
+    }
+    ((f64::from(extent) * 1_000.0 / dpi_milli.max(1) as f64)
+        .ceil()
+        .min(u32::MAX as f64)) as u32
+}
+
+/// A 1.2 line-height expressed in the layout's milli-pixel unit. Keep the
+/// division before multiplying by the line count: `13_000 * 1_200` is a
+/// milli-milli value, not 15,600 logical pixels.
+fn line_height_milli(size_milli: u32, line_count: usize) -> u32 {
+    u64::from(size_milli)
+        .saturating_mul(1_200)
+        .checked_div(1_000)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(line_count.max(1) as u64)
+        .min(u32::MAX as u64) as u32
+}
+
+fn measured_width_milli(rasterized: &RasterizedText, dpi_milli: u64) -> u32 {
+    let mut min_x = 0_i32;
+    let mut max_x = 0_i32;
+    for glyph in &rasterized.glyphs {
+        min_x = min_x.min(glyph.x);
+        max_x = max_x.max(
+            glyph
+                .x
+                .saturating_add(glyph.width.min(i32::MAX as u32) as i32),
+        );
+    }
+    let glyph_extent = max_x.saturating_sub(min_x).max(0) as f32;
+    physical_extent_to_logical_milli(glyph_extent.max(rasterized.max_advance_px), dpi_milli)
+}
+
+fn measured_height_milli(
+    rasterized: &RasterizedText,
+    size_milli: u32,
+    line_count: usize,
+    dpi_milli: u64,
+) -> u32 {
+    let mut min_y = 0_i32;
+    let mut max_y = 0_i32;
+    for glyph in &rasterized.glyphs {
+        min_y = min_y.min(glyph.y);
+        max_y = max_y.max(
+            glyph
+                .y
+                .saturating_add(glyph.height.min(i32::MAX as u32) as i32),
+        );
+    }
+    let glyph_extent = max_y.saturating_sub(min_y).max(0) as f32;
+    line_height_milli(size_milli, line_count)
+        .max(physical_extent_to_logical_milli(glyph_extent, dpi_milli))
 }
 
 fn wrap_tooltip(
@@ -449,15 +510,23 @@ fn wrap_tooltip(
     (lines.join("\n"), lines.len(), widest, limited)
 }
 
+struct RasterizedText {
+    glyphs: Vec<PreparedGlyph>,
+    max_advance_px: f32,
+}
+
 fn rasterize_glyphs(
     text: &str,
     request: &FontRequest,
     fonts: &[(String, ab_glyph::FontArc)],
     diagnostics: &mut Vec<FontDiagnostic>,
-) -> Vec<PreparedGlyph> {
+) -> RasterizedText {
     use ab_glyph::{Font, ScaleFont, point};
     let Some((_, first)) = fonts.first() else {
-        return Vec::new();
+        return RasterizedText {
+            glyphs: Vec::new(),
+            max_advance_px: 0.0,
+        };
     };
     let (scale_tweak, y_offset) = crate::annotation::raster::default_font_arc()
         .map(|(_, tweak)| (tweak.scale, tweak.y_offset))
@@ -468,6 +537,7 @@ fn rasterize_glyphs(
     let ascent = first.as_scaled(pixel_size.max(1.0)).ascent() + y_offset * pixel_size;
     let line_height = pixel_size * 1.2;
     let mut output = Vec::new();
+    let mut max_advance_px = 0.0_f32;
     for (line_index, line) in text.split('\n').enumerate() {
         let mut caret = point(0.0, ascent + line_index as f32 * line_height);
         let mut pending = Vec::new();
@@ -513,6 +583,7 @@ fn rasterize_glyphs(
                 ));
             }
         }
+        max_advance_px = max_advance_px.max(run_width);
         let x_offset = match request.alignment {
             FontAlignment::Center => -(run_width * 0.5).round() as i32,
             FontAlignment::Left => 0,
@@ -533,7 +604,10 @@ fn rasterize_glyphs(
                 ),
         );
     }
-    output
+    RasterizedText {
+        glyphs: output,
+        max_advance_px,
+    }
 }
 
 fn register_font_path(
@@ -765,6 +839,85 @@ mod tests {
                 .diagnostics
                 .contains(&FontDiagnostic::TooltipViewLimited)
         );
+    }
+
+    #[test]
+    fn thirteen_unit_line_height_is_stored_in_logical_milli_pixels() {
+        let catalog = Catalog {
+            families: [normalize_family("Segoe UI")].into_iter().collect(),
+            lookups: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        };
+        let mut service = FontLayoutService::with_catalog(catalog, 4);
+        let mut request = request(None, 200_000);
+        request.size_milli = 13_000;
+        let layout = service.prepare("Ag", request);
+        assert_eq!(line_height_milli(13_000, 1), 15_600);
+        assert_eq!(layout.measured_height_milli, 15_600);
+    }
+
+    #[test]
+    fn raster_bounds_and_logical_metrics_remain_stable_across_dpi() {
+        let catalog = Catalog {
+            families: [normalize_family("Segoe UI")].into_iter().collect(),
+            lookups: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        };
+        let mut service = FontLayoutService::with_catalog(catalog, 8);
+        let mut baseline = request(None, 200_000);
+        baseline.size_milli = 13_000;
+        baseline.purpose = FontLayoutPurpose::Tooltip;
+        baseline.wrap = FontWrapPolicy::Word;
+        baseline.alignment = FontAlignment::Left;
+        let source = "Ag e\u{301}";
+        let one = service.prepare(source, baseline.clone());
+        baseline.dpi_milli = 1_250;
+        let one_twenty_five = service.prepare(source, baseline.clone());
+        baseline.dpi_milli = 1_500;
+        let one_fifty = service.prepare(source, baseline.clone());
+        baseline.dpi_milli = 2_000;
+        let two = service.prepare(source, baseline);
+
+        for (layout, dpi_milli) in [
+            (&one, 1_000),
+            (&one_twenty_five, 1_250),
+            (&one_fifty, 1_500),
+            (&two, 2_000),
+        ] {
+            let glyph_max = layout
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.x.saturating_add(glyph.width as i32))
+                .max()
+                .unwrap_or_default();
+            let glyph_min = layout
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.x)
+                .min()
+                .unwrap_or_default();
+            let glyph_extent = (glyph_max - glyph_min).max(0) as f32;
+            assert!(
+                layout.measured_width_milli
+                    >= physical_extent_to_logical_milli(glyph_extent, dpi_milli)
+            );
+            assert!(layout.measured_height_milli >= 15_600);
+        }
+        assert!(
+            (one.measured_width_milli as i32 - one_twenty_five.measured_width_milli as i32).abs()
+                <= 2_000
+        );
+        assert!(
+            (one.measured_width_milli as i32 - one_fifty.measured_width_milli as i32).abs()
+                <= 2_000
+        );
+        assert!((one.measured_width_milli as i32 - two.measured_width_milli as i32).abs() <= 2_000);
+        assert_eq!(
+            one.measured_height_milli,
+            one_twenty_five.measured_height_milli
+        );
+        assert_eq!(one.measured_height_milli, one_fifty.measured_height_milli);
+        assert_eq!(one.measured_height_milli, two.measured_height_milli);
     }
 
     #[test]
