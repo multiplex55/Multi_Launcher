@@ -150,7 +150,9 @@ use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSett
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
-use crate::visibility::{ViewportWake, VisiblePlacementPolicy, apply_visibility};
+use crate::visibility::{
+    RootViewportCtx, ViewportCtx, ViewportWake, VisiblePlacementPolicy, apply_visibility,
+};
 use action_sheet::ActionSheetState;
 use chrono::NaiveDate;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};

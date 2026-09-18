@@ -34,7 +34,8 @@ use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::{
-    VisibilityToggleBatch, handle_visibility_toggle_batch, handle_visibility_trigger_with_owner,
+    RootViewportCtx, ViewportCtx, VisibilityToggleBatch, handle_visibility_toggle_batch,
+    handle_visibility_trigger_with_owner,
 };
 use multi_launcher::{indexer, logging};
 
@@ -789,7 +790,7 @@ fn spawn_gui(
     Arc<AtomicBool>,
     Arc<AtomicBool>,
     Arc<AtomicBool>,
-    Arc<Mutex<Option<egui::Context>>>,
+    Arc<Mutex<Option<RootViewportCtx>>>,
 ) {
     let custom_len_for_window = custom_len;
     let mut reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
@@ -863,7 +864,7 @@ fn spawn_gui(
             native_options,
             Box::new(move |cc| {
                 if let Ok(mut guard) = ctx_clone.lock() {
-                    *guard = Some(cc.egui_ctx.clone());
+                    *guard = Some(RootViewportCtx::new(&cc.egui_ctx));
                 } else {
                     tracing::error!("failed to lock ctx_clone");
                 }

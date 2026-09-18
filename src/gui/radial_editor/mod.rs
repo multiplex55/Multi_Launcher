@@ -11,8 +11,9 @@ mod work_area;
 use crate::gui::LauncherApp;
 use crate::radial::authoring::menu::{self, ResizeResolution, SubmenuDuplication};
 use crate::radial::authoring::{
-    AuthoringClient, AuthoringError, AuthoringSnapshot, CloseDecision, CommitDisposition,
-    ConflictResolution, DiskSha256, EditKey, EditPhase, RadialAuthoringSession, StableSelection,
+    AuthoringClient, AuthoringError, AuthoringSnapshot, CloseIntent, CommitDisposition,
+    ConflictResolution, DiskSha256, EditKey, EditPhase, PendingRequestKind, RadialAuthoringSession,
+    StableSelection,
 };
 use crate::radial::context::InvocationContext;
 use crate::radial::model::{
@@ -497,6 +498,8 @@ pub(crate) struct RadialEditorState {
     session: Option<RadialAuthoringSession>,
     client: Option<AuthoringClient>,
     preview: EmbeddedPreview,
+    close_intent: CloseIntent,
+    close_stop_attempted: bool,
     close_prompt: bool,
     delete_message: Option<String>,
     delete_ring_prompt: Option<(MenuId, RingId)>,
@@ -554,6 +557,8 @@ impl Default for RadialEditorState {
             session: None,
             client: None,
             preview: EmbeddedPreview::default(),
+            close_intent: CloseIntent::None,
+            close_stop_attempted: false,
             close_prompt: false,
             delete_message: None,
             delete_ring_prompt: None,
@@ -838,15 +843,24 @@ impl RadialEditorState {
                     return;
                 }
                 match session.request_export_skin(skin_id) {
-                    Ok(request) => match &self.client {
-                        Some(client) => match client.send(request) {
+                    Ok(request) => {
+                        let pending = session.pending_request;
+                        let result = self.client.as_ref().map_or_else(
+                            || Err(AuthoringError::ServiceClosed),
+                            |client| client.send(request),
+                        );
+                        match result {
                             Ok(()) => self.export_destination = Some(path),
-                            Err(error) => session.last_error = Some(format!("{error:?}")),
-                        },
-                        None => {
-                            session.last_error = Some("Radial authoring service unavailable".into())
+                            Err(error) => {
+                                if let Some(pending) = pending {
+                                    session.reconcile_request_delivery_failure(
+                                        pending,
+                                        format!("{error:?}"),
+                                    );
+                                }
+                            }
                         }
-                    },
+                    }
                     Err(error) => session.last_error = Some(format!("{error:?}")),
                 }
             }
@@ -880,13 +894,22 @@ impl RadialEditorState {
             return;
         }
         match session.request_export_package(roots) {
-            Ok(request) => match &self.client {
-                Some(client) => match client.send(request) {
+            Ok(request) => {
+                let pending = session.pending_request;
+                let result = self.client.as_ref().map_or_else(
+                    || Err(AuthoringError::ServiceClosed),
+                    |client| client.send(request),
+                );
+                match result {
                     Ok(()) => self.export_destination = Some(path),
-                    Err(error) => session.last_error = Some(format!("{error:?}")),
-                },
-                None => session.last_error = Some("Radial authoring service unavailable".into()),
-            },
+                    Err(error) => {
+                        if let Some(pending) = pending {
+                            session
+                                .reconcile_request_delivery_failure(pending, format!("{error:?}"));
+                        }
+                    }
+                }
+            }
             Err(error) => session.last_error = Some(format!("{error:?}")),
         }
     }
@@ -1041,6 +1064,8 @@ impl RadialEditorState {
         self.viewport_close_pending = false;
         self.viewport_restore_pending = true;
         self.viewport_focus_pending = true;
+        self.close_intent = CloseIntent::None;
+        self.close_stop_attempted = false;
         self.close_prompt = false;
         self.drag_source = None;
         self.post_render.clear();
@@ -1063,7 +1088,12 @@ impl RadialEditorState {
         if let Some(client) = &self.client {
             client.acquire_resources(session.editor_session());
             if let Ok(request) = session.request_snapshot() {
-                let _ = client.send(request);
+                let pending = session.pending_request;
+                if let Err(error) = client.send(request)
+                    && let Some(pending) = pending
+                {
+                    session.reconcile_request_delivery_failure(pending, format!("{error:?}"));
+                }
             }
         }
         self.session = Some(session);
@@ -1120,6 +1150,8 @@ impl RadialEditorState {
     pub(crate) fn open_test_snapshot(&mut self) {
         let document = RadialDocument::starter();
         self.open = true;
+        self.close_intent = CloseIntent::None;
+        self.close_stop_attempted = false;
         self.client = None;
         self.properties_popup = None;
         self.properties_draft = None;
@@ -1130,6 +1162,14 @@ impl RadialEditorState {
     }
 
     pub(crate) fn request_close(&mut self) {
+        if self.close_intent == CloseIntent::Requested {
+            return;
+        }
+        self.close_intent = CloseIntent::Requested;
+        self.close_stop_attempted = false;
+        if let Some(session) = self.session.as_mut() {
+            session.request_close_intent();
+        }
         self.preview.cancel_tooltip();
         // Window move/resize state must be persisted when close interaction
         // ends, even if the debounce interval has not elapsed.
@@ -1144,45 +1184,81 @@ impl RadialEditorState {
         // A preview preparation has no durable side effect and can be
         // cancelled locally.  This lets an OS close finish promptly without
         // leaving a late preparation reply attached to a hidden viewport.
-        let pending_preview = self.session.as_ref().and_then(|session| {
-            session.pending_request.filter(|pending| {
-                pending.kind == crate::radial::authoring::PendingRequestKind::PrepareEmbeddedPreview
-            })
-        });
-        if let Some(pending) = pending_preview {
-            // Preparation has no durable side effect, so it can be canceled
-            // locally.  Keep the draft alive long enough for the ordinary
-            // dirty-close decision below; a clean draft will close now while
-            // an edited draft still gets Save/Discard/Keep editing.
-            if let Some(session) = self.session.as_mut() {
-                session.cancel_pending_request(
-                    pending.id,
-                    pending.generation,
-                    pending.editor_session,
-                );
+        // Read-only/preview preparation can be invalidated locally.  Durable
+        // requests remain pending until their correlated terminal reply.
+        if let Some(pending) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.pending_request)
+            .filter(|pending| pending.kind.is_disposable())
+            && let Some(session) = self.session.as_mut()
+        {
+            session.cancel_pending_request_exact(pending);
+        }
+        if let Some(pending) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.pending_native_preview)
+            && matches!(
+                pending.kind,
+                PendingRequestKind::StartNativePreview | PendingRequestKind::UpdateNativePreview
+            )
+        {
+            // The request has already crossed the client boundary.  Queue a
+            // correlated stop behind it instead of dropping the local slot:
+            // the service will process Start/Update then Stop in order, and
+            // the close path will wait for the terminal stop reply.
+            self.stop_native_preview();
+        }
+        self.maybe_finish_close();
+    }
+
+    fn finish_close(&mut self) {
+        self.preview.dispose();
+        self.release_authoring_resources();
+        self.open = false;
+        self.viewport_close_pending = true;
+        self.session = None;
+        self.close_prompt = false;
+        self.close_intent = CloseIntent::None;
+        self.close_stop_attempted = false;
+    }
+
+    fn maybe_finish_close(&mut self) {
+        if self.close_intent != CloseIntent::Requested {
+            if self.close_intent != CloseIntent::DiscardRequested {
+                return;
             }
         }
         let Some(session) = self.session.as_ref() else {
             self.open = false;
             self.viewport_close_pending = true;
+            self.close_intent = CloseIntent::None;
+            self.close_stop_attempted = false;
             return;
         };
-        let native_preview_active = session.native_preview_may_be_open
-            || session.native_preview_lease.is_some()
-            || session.pending_native_preview.is_some();
-        match session.close_decision() {
-            CloseDecision::CloseClean => {
-                if native_preview_active {
-                    self.stop_native_preview();
-                }
-                self.preview.dispose();
-                self.release_authoring_resources();
-                self.open = false;
-                self.viewport_close_pending = true;
-                self.session = None;
-            }
-            CloseDecision::PromptDirty => self.close_prompt = true,
-            CloseDecision::AwaitingRequest => {}
+        if session.is_closed() {
+            self.finish_close();
+            return;
+        }
+        // Commit/ReplacePackage and an in-flight native stop are terminal
+        // work.  Do not dispose the callbacks or session before their exact
+        // reply arrives.
+        if session.pending_request.is_some() || session.pending_native_preview.is_some() {
+            return;
+        }
+        let native_preview_active =
+            session.native_preview_may_be_open || session.native_preview_lease.is_some();
+        if native_preview_active && !self.close_stop_attempted {
+            self.stop_native_preview();
+            return;
+        }
+        if self.close_intent == CloseIntent::DiscardRequested {
+            self.finish_close();
+        } else if session.is_dirty() {
+            self.close_prompt = true;
+        } else {
+            self.finish_close();
         }
     }
 
@@ -1199,6 +1275,8 @@ impl RadialEditorState {
         self.viewport_restore_pending = true;
         self.viewport_focus_pending = false;
         self.session = None;
+        self.close_intent = CloseIntent::None;
+        self.close_stop_attempted = false;
         self.close_prompt = false;
         self.focus_restore = None;
         self.placement_draft = None;
@@ -1211,57 +1289,87 @@ impl RadialEditorState {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        let request = session.request_commit(disposition);
-        match (request, &self.client) {
-            (Ok(request), Some(client)) => {
-                if let Err(error) = client.send(request) {
-                    session.last_error = Some(format!("{error:?}"));
+        let mut delivery_failed = false;
+        match session.request_commit(disposition) {
+            Ok(request) => {
+                let pending = session.pending_request;
+                let result = self.client.as_ref().map_or_else(
+                    || Err(AuthoringError::ServiceClosed),
+                    |client| client.send(request),
+                );
+                if let Err(error) = result
+                    && let Some(pending) = pending
+                {
+                    session.reconcile_request_delivery_failure(pending, format!("{error:?}"));
+                    delivery_failed = true;
                 }
             }
-            (Err(error), _) => session.last_error = Some(format!("{error:?}")),
-            (_, None) => session.last_error = Some("Radial authoring service unavailable".into()),
+            Err(error) => {
+                session.last_error = Some(format!("{error:?}"));
+                delivery_failed = true;
+            }
+        }
+        if delivery_failed && self.close_intent != CloseIntent::None {
+            // Keep the close decision actionable after a failed Save or
+            // Discard transaction instead of leaving the editor latched in a
+            // non-prompting close state.
+            self.close_prompt = true;
         }
     }
 
     fn poll_replies(&mut self) {
-        let Some(client) = &self.client else { return };
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        while let Some(reply) = client.try_recv() {
-            session.accept_reply(reply);
-        }
-        if !session.font_catalog_loaded && session.pending_request.is_none() {
-            match session.request_font_catalog() {
-                Ok(request) => {
-                    if let Err(error) = client.send(request) {
-                        session.last_error = Some(format!("{error:?}"));
+        let session_closed = {
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            if let Some(client) = &self.client {
+                while let Some(reply) = client.try_recv() {
+                    session.accept_reply(reply);
+                }
+            }
+            if self.close_intent == CloseIntent::None
+                && !session.font_catalog_loaded
+                && session.pending_request.is_none()
+            {
+                match session.request_font_catalog() {
+                    Ok(request) => {
+                        let pending = session.pending_request;
+                        let result = self.client.as_ref().map_or_else(
+                            || Err(AuthoringError::ServiceClosed),
+                            |client| client.send(request),
+                        );
+                        if let Err(error) = result
+                            && let Some(pending) = pending
+                        {
+                            session
+                                .reconcile_request_delivery_failure(pending, format!("{error:?}"));
+                        }
+                    }
+                    Err(error) => session.last_error = Some(format!("{error:?}")),
+                }
+            }
+            if let (Some(bytes), Some(path)) = (
+                session.exported_package.take(),
+                self.export_destination.take(),
+            ) {
+                match crate::common::atomic_file::save_atomic(&path, &bytes) {
+                    Ok(()) => {
+                        self.resource_notice = Some(ResourceNotice::info(format!(
+                            "Exported package to {}",
+                            path.display()
+                        )))
+                    }
+                    Err(error) => {
+                        self.resource_notice = Some(ResourceNotice::error(error.to_string()))
                     }
                 }
-                Err(error) => session.last_error = Some(format!("{error:?}")),
             }
-        }
-        if let (Some(bytes), Some(path)) = (
-            session.exported_package.take(),
-            self.export_destination.take(),
-        ) {
-            match crate::common::atomic_file::save_atomic(&path, &bytes) {
-                Ok(()) => {
-                    self.resource_notice = Some(ResourceNotice::info(format!(
-                        "Exported package to {}",
-                        path.display()
-                    )))
-                }
-                Err(error) => self.resource_notice = Some(ResourceNotice::error(error.to_string())),
-            }
-        }
-        if session.is_closed() {
-            self.preview.dispose();
-            self.release_authoring_resources();
-            self.placement_draft = None;
-            self.pending_drop = None;
-            self.open = false;
-            self.viewport_close_pending = true;
+            session.is_closed()
+        };
+        if session_closed {
+            self.finish_close();
+        } else {
+            self.maybe_finish_close();
         }
     }
 
@@ -1301,14 +1409,20 @@ impl RadialEditorState {
         } else {
             session.request_start_native_preview(menu_id, self.sample_native_context, selected_skin)
         };
-        match (request, &self.client) {
-            (Ok(request), Some(client)) => {
-                if let Err(error) = client.send(request) {
-                    session.last_error = Some(format!("{error:?}"));
+        match request {
+            Ok(request) => {
+                let pending = session.pending_native_preview;
+                let result = self.client.as_ref().map_or_else(
+                    || Err(AuthoringError::ServiceClosed),
+                    |client| client.send(request),
+                );
+                if let Err(error) = result
+                    && let Some(pending) = pending
+                {
+                    session.reconcile_request_delivery_failure(pending, format!("{error:?}"));
                 }
             }
-            (Err(error), _) => session.last_error = Some(format!("{error:?}")),
-            (_, None) => session.last_error = Some("Radial authoring service unavailable".into()),
+            Err(error) => session.last_error = Some(format!("{error:?}")),
         }
     }
 
@@ -1316,11 +1430,29 @@ impl RadialEditorState {
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        let Ok(request) = session.request_stop_native_preview() else {
-            return;
-        };
-        if let Some(client) = &self.client {
-            let _ = client.send(request);
+        let request = session.request_stop_native_preview();
+        match request {
+            Ok(request) => {
+                let pending = session.pending_native_preview;
+                let result = self.client.as_ref().map_or_else(
+                    || Err(AuthoringError::ServiceClosed),
+                    |client| client.send(request),
+                );
+                if self.close_intent == CloseIntent::Requested {
+                    self.close_stop_attempted = true;
+                }
+                if let Err(error) = result
+                    && let Some(pending) = pending
+                {
+                    session.reconcile_request_delivery_failure(pending, format!("{error:?}"));
+                }
+            }
+            Err(error) => {
+                if self.close_intent == CloseIntent::Requested {
+                    self.close_stop_attempted = true;
+                }
+                session.last_error = Some(format!("{error:?}"));
+            }
         }
     }
 
@@ -1356,7 +1488,9 @@ impl RadialEditorState {
             return;
         }
         self.poll_replies();
-        self.sync_native_preview_generation();
+        if self.close_intent == CloseIntent::None {
+            self.sync_native_preview_generation();
+        }
         if !self.open {
             return;
         }
@@ -2521,13 +2655,18 @@ impl RadialEditorState {
                     } else {
                         match session.request_audition_managed_asset(asset.id.clone()) {
                             Ok(request) => {
-                                if let Some(client) = &self.client {
-                                    if let Err(error) = client.send(request) {
-                                        session.last_error = Some(format!("{error:?}"));
-                                    }
-                                } else {
-                                    session.last_error =
-                                        Some("Radial authoring service unavailable".into());
+                                let pending = session.pending_request;
+                                let result = self.client.as_ref().map_or_else(
+                                    || Err(AuthoringError::ServiceClosed),
+                                    |client| client.send(request),
+                                );
+                                if let Err(error) = result
+                                    && let Some(pending) = pending
+                                {
+                                    session.reconcile_request_delivery_failure(
+                                        pending,
+                                        format!("{error:?}"),
+                                    );
                                 }
                             }
                             Err(error) => session.last_error = Some(format!("{error:?}")),
@@ -2661,21 +2800,28 @@ impl RadialEditorState {
                         backup_path,
                         self.replace_confirmed,
                     ) {
-                        Ok(request) => match &self.client {
-                            Some(client) => {
-                                if let Err(error) = client.send(request) {
-                                    session.last_error = Some(format!("{error:?}"));
-                                } else {
+                        Ok(request) => {
+                            let pending = session.pending_request;
+                            let result = self.client.as_ref().map_or_else(
+                                || Err(AuthoringError::ServiceClosed),
+                                |client| client.send(request),
+                            );
+                            match result {
+                                Ok(()) => {
                                     self.pending_import = None;
                                     self.replace_confirmed = false;
                                     self.replace_backup_path = None;
                                 }
+                                Err(error) => {
+                                    if let Some(pending) = pending {
+                                        session.reconcile_request_delivery_failure(
+                                            pending,
+                                            format!("{error:?}"),
+                                        );
+                                    }
+                                }
                             }
-                            None => {
-                                session.last_error =
-                                    Some("Radial authoring service unavailable".into())
-                            }
-                        },
+                        }
                         Err(error) => session.last_error = Some(format!("{error:?}")),
                     }
                 }
@@ -3616,6 +3762,10 @@ impl RadialEditorState {
 
     fn cancel(&mut self) {
         self.preview.cancel_tooltip();
+        self.close_intent = CloseIntent::DiscardRequested;
+        if let Some(session) = self.session.as_mut() {
+            session.request_discard_close_intent();
+        }
         self.stop_native_preview();
         let Some(session) = self.session.as_mut() else {
             self.force_close();
@@ -3624,19 +3774,33 @@ impl RadialEditorState {
         let result = session.request_commit(CommitDisposition::RevertAppliedAndClose);
         match result {
             Ok(request) => {
-                if let Some(client) = &self.client {
-                    let _ = client.send(request);
+                let pending = session.pending_request;
+                let result = self.client.as_ref().map_or_else(
+                    || Err(AuthoringError::ServiceClosed),
+                    |client| client.send(request),
+                );
+                if let Err(error) = result
+                    && let Some(pending) = pending
+                {
+                    session.reconcile_request_delivery_failure(pending, format!("{error:?}"));
+                    self.close_intent = CloseIntent::Requested;
+                    session.request_close_intent();
+                    self.close_prompt = true;
                 }
             }
             Err(AuthoringError::NothingToRevert) => {
-                self.preview.dispose();
-                self.release_authoring_resources();
-                self.open = false;
-                self.viewport_close_pending = true;
-                self.session = None;
+                // If StopNativePreview was queued, retain the session until
+                // its terminal reply; otherwise this discard is already a
+                // safe clean teardown.
                 self.close_prompt = false;
+                self.maybe_finish_close();
             }
-            Err(error) => session.last_error = Some(format!("{error:?}")),
+            Err(error) => {
+                session.last_error = Some(format!("{error:?}"));
+                self.close_intent = CloseIntent::Requested;
+                session.request_close_intent();
+                self.close_prompt = true;
+            }
         }
     }
 
@@ -3649,15 +3813,24 @@ impl RadialEditorState {
                     ui.label("Save, discard, or keep editing?");
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
-                            self.send_commit(CommitDisposition::Save);
                             self.close_prompt = false;
+                            self.send_commit(CommitDisposition::Save);
                         }
                         if ui.button("Discard").clicked() {
-                            self.cancel();
+                            self.close_intent = CloseIntent::DiscardRequested;
+                            if let Some(session) = self.session.as_mut() {
+                                session.request_discard_close_intent();
+                            }
                             self.close_prompt = false;
+                            self.cancel();
                         }
                         if ui.button("Keep editing").clicked() {
                             self.close_prompt = false;
+                            self.close_intent = CloseIntent::None;
+                            self.close_stop_attempted = false;
+                            if let Some(session) = self.session.as_mut() {
+                                session.clear_close_intent();
+                            }
                         }
                     });
                 });
@@ -5406,6 +5579,43 @@ mod tests {
         assert!(!editor.open);
         assert!(editor.session.is_none());
         assert!(editor.viewport_close_pending);
+    }
+
+    #[test]
+    fn closing_pending_native_preview_supersedes_with_terminal_stop() {
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.client = Some(client);
+        let start = {
+            let session = editor.session.as_mut().unwrap();
+            session
+                .request_start_native_preview(session.draft.default_menu_id.clone(), false, None)
+                .unwrap()
+        };
+        editor.client.as_ref().unwrap().send(start).unwrap();
+
+        editor.request_close();
+
+        let queued_start = endpoint.request_rx.try_recv().expect("start request");
+        let queued_stop = endpoint.request_rx.try_recv().expect("stop request");
+        assert!(matches!(
+            queued_start,
+            crate::radial::authoring::AuthoringRequest::StartNativePreview { .. }
+        ));
+        assert!(matches!(
+            queued_stop,
+            crate::radial::authoring::AuthoringRequest::StopNativePreview { .. }
+        ));
+        assert!(editor.open);
+        assert_eq!(
+            editor
+                .session
+                .as_ref()
+                .and_then(|session| session.pending_native_preview)
+                .map(|pending| pending.kind),
+            Some(crate::radial::authoring::PendingRequestKind::StopNativePreview)
+        );
     }
 
     #[test]

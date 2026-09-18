@@ -1,7 +1,7 @@
 # Radial stabilization ledger
 
-Status: **S0 complete — source/diff audit only.** No reported bug is marked
-fixed, no native pass is claimed, and S1 has not started. This ledger records
+Status: **S1 complete — focused lifecycle repair and verification.** S0
+remains complete; no native pass is claimed. This ledger records
 the current checkout, ownership boundaries, source-backed causes, and the
 evidence still needed for S1–S5. The current checkout is authoritative; the
 supplied source snapshot and reference archives are historical/visual inputs.
@@ -236,7 +236,7 @@ keystrokes, or sensitive window titles.
 | Milestone | Status | S0 boundary |
 |---|---|---|
 | S0 | `complete` | Identity, ownership map, source-only H0–H6 matrix, request classification, preference audit, causes, hypotheses, and planned trace recorded. |
-| S1 | `pending` | Focused hotkey/visibility and Designer/runtime close lifecycle repairs and gate. |
+| S1 | `complete` | Focused hotkey/visibility and Designer/runtime close lifecycle repairs and gate. |
 | S2 | `pending` | Tooltip units and stable hover/native presentation repairs and gate. |
 | S3 | `pending` | Slot-first compact Designer layout/interaction repairs and gate. |
 | S4 | `pending` | Complete overlapping Cascade scenes and safe ancestor Back repairs and gate. |
@@ -265,6 +265,85 @@ Second observation due: first check + 900 seconds
 Later observations due: previous check + 1,200 seconds
 Completion notification:
 Actual result / all failures / next corrective batch:
+```
+
+### S1 active-job record
+
+Implementation completed from committed source HEAD
+`1250338dbb60cf5d01bd1b05dbebf5cbff20d2d9`. This post-gate lifecycle fix has
+source fingerprint `88BFDBC594EAC94EEFBBBE69E798F78C770B1A6538DE20C6C45D75CF676CA3F9`.
+The process identity and true exit result below are from the one sequential
+post-fix gate; no duplicate Cargo/Nextest process was started.
+
+```text
+Job purpose / milestone: S1 focused lifecycle gate
+Command and cwd: cargo nextest list/run, cargo check, cargo fmt --all -- --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; filter verification precedes focused `--no-fail-fast` batch
+Source SHA + source/untracked diff fingerprint: 1250338dbb60cf5d01bd1b05dbebf5cbff20d2d9 + `88BFDBC594EAC94EEFBBBE69E798F78C770B1A6538DE20C6C45D75CF676CA3F9`
+Session/PID + process start and identity: PTY session `66043`; wrapper PID `28828` (`pwsh`), start `2026-09-18T02:48:29.8994822Z`; one sequential Cargo tree
+Durable stdout/stderr log: target/s1-focused-postfix2.log (ignored build-artifact path)
+Exit-code record: target/s1-focused-postfix2.exit (ignored build-artifact path)
+Launch time: `2026-09-18T02:48:29.8994822Z`
+First observation due: `2026-09-18T02:58:29.8994822Z` (launch + 600 seconds)
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: selector preflight exit 0; final focused post-fix gate completed 127/127 tests with cargo check and fmt clean; no corrective batch remains within S1.
+```
+
+### S1 gate attempt 1 record
+
+```text
+Source SHA + source/untracked diff fingerprint: 1250338dbb60cf5d01bd1b05dbebf5cbff20d2d9 + CC64B1E1DEE28D15052F8CA911E26987909A5745F9B01DF7A3BA55C2085A3A23
+Session/PID + process start and identity: PTY 14230; wrapper PID 29144 (pwsh); 2026-09-18T02:24:58.7452131Z
+Durable stdout/stderr log: target/s1-focused.log
+Exit-code record: target/s1-focused.exit
+Command/result: focused 125-test nextest batch --no-fail-fast: exit 100, 123 passed / 2 failed; cargo check: 0; cargo fmt --all -- --check: 1
+Diagnosed failures: native preview stop supersession test needed the new stop policy; child-context visibility test needed a registered deferred viewport. Both were corrected before rerun.
+```
+
+### S1 gate attempt 2 record
+
+```text
+Source SHA + source/untracked diff fingerprint: 1250338dbb60cf5d01bd1b05dbebf5cbff20d2d9 + 2D5FC3B26507147018B682B1A0455D4A86916A3F7F228FB07FE332DEEE0BB4D6
+Session/PID + process start and identity: PTY 31024; wrapper PID 30472 (pwsh); 2026-09-18T02:28:12.5919060Z
+Durable stdout/stderr log: target/s1-focused-rerun.log
+Exit-code record: target/s1-focused-rerun.exit
+Command/result: focused 125-test nextest batch --no-fail-fast: exit 100, 124 passed / 1 failed; cargo check: 0; cargo fmt --all -- --check: 1
+Diagnosed failure: child-context visibility fixture needed the child `ViewportInfo` entry in `RawInput`; corrected before final gate.
+```
+
+### S1 gate attempt 3 record
+
+```text
+Source SHA + source/untracked diff fingerprint: 1250338dbb60cf5d01bd1b05dbebf5cbff20d2d9 + 178FFA99D17985595B4E64C6089C55BF5CCCA78B97294215C79F7F96CC6A6B5C
+Session/PID + process start and identity: PTY 67229; wrapper PID 26284 (pwsh); 2026-09-18T02:33:30.1198934Z
+Durable stdout/stderr log: target/s1-focused-final.log
+Exit-code record: target/s1-focused-final.exit
+Command/result: focused --no-fail-fast batch: exit 0, 126 passed / 3,858 skipped; cargo check: 0; cargo fmt --all -- --check: 0
+Diagnosed result: clean before the additional close-time native supersession and discard-intent correction.
+```
+
+### S1 gate attempt 4 record
+
+```text
+Source SHA + source/untracked diff fingerprint: 1250338dbb60cf5d01bd1b05dbebf5cbff20d2d9 + 972346392AE24E683F2EDACC3A26D0CDF6C751B9A08080C22CA3CD583D21DA9B
+Session/PID + process start and identity: PTY 49602; wrapper PID 30228 (pwsh); 2026-09-18T02:43:37.9023731Z
+Durable stdout/stderr log: target/s1-focused-postfix.log
+Exit-code record: target/s1-focused-postfix.exit
+Command/result: selector preflight exit 0; focused --no-fail-fast batch exit 0, 127 passed / 3,858 skipped; cargo check exit 0; cargo fmt --all -- --check exit 0; overall exit 0 at 2026-09-18T02:46:03.3130224Z
+Diagnosed result: close-time native Start/Update supersession and typed discard-close intent compile and pass the focused gate. Native H/C remains explicitly unverified.
+```
+
+### S1 gate attempt 5 record
+
+```text
+Source SHA + source/untracked diff fingerprint: 1250338dbb60cf5d01bd1b05dbebf5cbff20d2d9 + 88BFDBC594EAC94EEFBBBE69E798F78C770B1A6538DE20C6C45D75CF676CA3F9
+Session/PID + process start and identity: PTY 66043; wrapper PID 28828 (pwsh); 2026-09-18T02:48:29.8994822Z
+Durable stdout/stderr log: target/s1-focused-postfix2.log
+Exit-code record: target/s1-focused-postfix2.exit
+Command/result: selector preflight exit 0; focused --no-fail-fast batch exit 0, 127 passed / 3,858 skipped; cargo check exit 0; cargo fmt --all -- --check exit 0; overall exit 0 at 2026-09-18T02:50:00.1457544Z
+Diagnosed result: Save/Discard failure prompts remain actionable after the close prompt is dismissed for the send attempt. Native H/C remains explicitly unverified.
 ```
 
 ## S0 verification record

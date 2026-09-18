@@ -93,6 +93,37 @@ impl VisibilityToggleBatch {
     }
 }
 
+/// A root-bound command boundary for visibility work issued outside the root
+/// viewport's own frame callback.  An `egui::Context` can be shared by the
+/// root and deferred child viewports; its unqualified command methods target
+/// whichever viewport is current at the call site.  Visibility ownership is
+/// always the root launcher, so make that target explicit here.
+#[derive(Clone)]
+pub struct RootViewportCtx {
+    ctx: egui::Context,
+}
+
+impl RootViewportCtx {
+    pub fn new(ctx: &egui::Context) -> Self {
+        Self { ctx: ctx.clone() }
+    }
+
+    #[cfg(test)]
+    fn viewport_id(&self) -> egui::ViewportId {
+        egui::ViewportId::ROOT
+    }
+}
+
+impl ViewportCtx for RootViewportCtx {
+    fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
+        self.ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, cmd);
+    }
+
+    fn request_repaint(&self) {
+        self.ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+}
+
 /// Apply every queued toggle in order. This deliberately applies each edge,
 /// rather than reducing a batch to its final parity, so viewport side effects
 /// and owners that follow those edges remain synchronized.
@@ -378,6 +409,35 @@ mod tests {
             None,
             (400.0, 220.0),
         );
+    }
+
+    #[test]
+    fn root_visibility_boundary_targets_root_from_child_context() {
+        let ctx = egui::Context::default();
+        let child_id = egui::ViewportId::from_hash_of("designer-test");
+        ctx.set_embed_viewports(false);
+        ctx.show_viewport_deferred(
+            child_id,
+            egui::ViewportBuilder::default(),
+            |_child, _class| {},
+        );
+        let mut input = egui::RawInput::default();
+        input.viewport_id = child_id;
+        input.viewports.insert(
+            child_id,
+            egui::ViewportInfo {
+                parent: Some(egui::ViewportId::ROOT),
+                ..Default::default()
+            },
+        );
+        let _ = ctx.run(input, |child| {
+            assert_eq!(child.viewport_id(), child_id);
+            let root = RootViewportCtx::new(child);
+            assert_eq!(root.viewport_id(), egui::ViewportId::ROOT);
+            root.request_repaint();
+            assert!(child.has_requested_repaint_for(&egui::ViewportId::ROOT));
+            root.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        });
     }
 
     #[test]

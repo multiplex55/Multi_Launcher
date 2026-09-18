@@ -2181,6 +2181,15 @@ mod tests {
             provenance: InputProvenance::Physical,
         }
     }
+
+    fn external_e(vk: u32, t: KeyTransition, at: u64) -> KeyEvent {
+        KeyEvent {
+            vk,
+            transition: t,
+            at,
+            provenance: InputProvenance::ExternalInjected,
+        }
+    }
     fn active_lifecycle(id: InvocationId, session_id: SessionId) -> RadialLifecycle {
         RadialLifecycle::Active {
             id,
@@ -2251,6 +2260,58 @@ mod tests {
             a.deadline(id2, 850, 4).as_slice(),
             [InvocationIntent::OpenRadial { .. }]
         ));
+    }
+
+    #[test]
+    fn configured_chord_accepts_admitted_external_tap_with_full_release() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(
+                external_e(vk, KeyTransition::Down, 0),
+                PriorityOwner::Launcher,
+            );
+        }
+        let down = adapter.process(
+            external_e(0x23, KeyTransition::Down, 10),
+            PriorityOwner::Launcher,
+        );
+        let id = match down.intents.as_slice() {
+            [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
+            other => panic!("unexpected tap intents: {other:?}"),
+        };
+        let repeat = adapter.process(
+            external_e(0x23, KeyTransition::Repeat, 20),
+            PriorityOwner::Launcher,
+        );
+        assert!(repeat.consume && repeat.intents.is_empty());
+        let release = adapter.process(
+            external_e(0x23, KeyTransition::Up, 100),
+            PriorityOwner::Launcher,
+        );
+        assert!(matches!(
+            release.intents.as_slice(),
+            [InvocationIntent::CancelDeadline { id: cancelled }, InvocationIntent::ToggleLegacyLauncher { id: toggled }]
+                if *cancelled == id && *toggled == id
+        ));
+        for vk in [0xA0, 0xA4, 0x5B] {
+            assert!(
+                !adapter
+                    .process(
+                        external_e(vk, KeyTransition::Up, 110),
+                        PriorityOwner::Launcher,
+                    )
+                    .consume
+            );
+        }
+        assert!(
+            adapter
+                .process(
+                    external_e(0x23, KeyTransition::Up, 120),
+                    PriorityOwner::Launcher,
+                )
+                .intents
+                .is_empty()
+        );
     }
     #[test]
     fn delayed_release_to_select_cancels_without_opening_a_late_surface() {

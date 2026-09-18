@@ -684,6 +684,7 @@ impl eframe::App for LauncherApp {
             self.window_pos = (rect.min.x as i32, rect.min.y as i32);
         }
         let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
+        let root_ctx = RootViewportCtx::new(ctx);
         if self.visible_flag.load(Ordering::SeqCst) && self.help_flag.swap(false, Ordering::SeqCst)
         {
             self.help_window.overlay_open = !self.help_window.overlay_open;
@@ -696,7 +697,7 @@ impl eframe::App for LauncherApp {
             apply_visibility(
                 true,
                 VisiblePlacementPolicy::PreserveCurrentGeometry,
-                ctx,
+                &root_ctx,
                 self.offscreen_pos,
                 self.follow_mouse,
                 self.static_location_enabled,
@@ -716,7 +717,7 @@ impl eframe::App for LauncherApp {
             apply_visibility(
                 should_be_visible,
                 VisiblePlacementPolicy::ApplyConfiguredPlacement,
-                ctx,
+                &root_ctx,
                 self.offscreen_pos,
                 self.follow_mouse,
                 self.static_location_enabled,
@@ -1784,13 +1785,13 @@ impl LauncherApp {
         self.visible_flag.store(true, Ordering::SeqCst);
         self.last_visible = true;
         self.restore_flag.store(false, Ordering::SeqCst);
+        let root_ctx = RootViewportCtx::new(&self.egui_ctx);
         if !restored_exact_geometry && launcher_was_logically_hidden {
             // A successful terminal operation commits and discards the exact
             // snapshot while leaving the HWND parked. Establish a guaranteed
             // onscreen fallback before optional configured placement; a later
             // static or follow-mouse command in the same batch supersedes it.
-            self.egui_ctx
-                .send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
+            root_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
         }
         crate::visibility::apply_visibility(
             true,
@@ -1803,7 +1804,7 @@ impl LauncherApp {
                 // configured placement instead of preserving parked geometry.
                 crate::visibility::VisiblePlacementPolicy::ApplyConfiguredPlacement
             },
-            &self.egui_ctx,
+            &root_ctx,
             self.offscreen_pos,
             self.follow_mouse,
             self.static_location_enabled,

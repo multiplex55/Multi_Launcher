@@ -329,6 +329,7 @@ pub struct RadialController {
     font_catalog: Option<SystemFontCatalog>,
     visible_resource_diagnostics: VecDeque<u64>,
     tooltip_preferences: TooltipPreferences,
+    terminal_events: VecDeque<ControllerEvent>,
 }
 impl RadialController {
     pub fn new(document: Arc<RadialDocument>, diagnostics: bool, wake: mpsc::Sender<()>) -> Self {
@@ -378,6 +379,7 @@ impl RadialController {
             font_catalog: None,
             visible_resource_diagnostics: VecDeque::new(),
             tooltip_preferences: TooltipPreferences::default(),
+            terminal_events: VecDeque::new(),
             release_waits: BTreeMap::new(),
             grid_keyboard_owner: GridKeyboardOwner::RadialMenu,
         }
@@ -1157,7 +1159,7 @@ impl RadialController {
         (resources, sounds, diagnostics)
     }
     pub fn poll(&mut self) -> Vec<ControllerEvent> {
-        let mut out = vec![];
+        let mut out = self.terminal_events.drain(..).collect::<Vec<_>>();
         self.poll_preparation(&mut out);
         loop {
             let event = self.host.as_ref().and_then(|h| h.try_recv());
@@ -3115,15 +3117,32 @@ impl RadialController {
         {
             active.closing = true;
         }
-        if let Some(host) = self.host.as_ref() {
-            if host
-                .send(NativeCommand::Close {
+        let close_failed = self.host.as_ref().is_some_and(|host| {
+            host.send(NativeCommand::Close {
+                session_id: id.clone(),
+                reason,
+            })
+            .is_err()
+        });
+        if close_failed {
+            let invocation_id = self
+                .pending
+                .as_ref()
+                .filter(|pending| pending.session_id == id)
+                .map(|pending| pending.invocation_id)
+                .or_else(|| {
+                    self.active
+                        .as_ref()
+                        .filter(|active| active.session_id == id)
+                        .map(|active| active.invocation_id)
+                });
+            self.retire_host();
+            if let Some(invocation_id) = invocation_id {
+                self.terminal_events.push_back(ControllerEvent::Closed {
+                    invocation_id,
                     session_id: id,
                     reason,
-                })
-                .is_err()
-            {
-                self.retire_host();
+                });
             }
         }
     }
@@ -3612,6 +3631,26 @@ mod tests {
         }
         fn shutdown(&mut self) {}
     }
+
+    struct CloseFailingFake {
+        events: Arc<Mutex<VecDeque<NativeEvent>>>,
+    }
+
+    impl HostPort for CloseFailingFake {
+        fn send(&self, command: NativeCommand) -> Result<(), String> {
+            if matches!(command, NativeCommand::Close { .. }) {
+                Err("test close transport failure".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn try_recv(&self) -> Option<NativeEvent> {
+            self.events.lock().unwrap().pop_front()
+        }
+
+        fn shutdown(&mut self) {}
+    }
     fn controller(
         events: Arc<Mutex<VecDeque<NativeEvent>>>,
         created: Arc<Mutex<usize>>,
@@ -3627,6 +3666,44 @@ mod tests {
                 }))
             }),
         )
+    }
+
+    #[test]
+    fn close_send_failure_emits_correlated_terminal_feedback() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(RadialDocument::starter()),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(CloseFailingFake {
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().expect("pending session");
+        let invocation_id = pending.invocation_id;
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+
+        controller.close(CloseReason::Dismissed, Some(&session_id));
+        let events = controller.poll();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ControllerEvent::Closed {
+                invocation_id: id,
+                session_id: closed,
+                reason: CloseReason::Dismissed,
+            } if *id == invocation_id && closed == &session_id
+        )));
+        assert!(controller.active.is_none());
+        assert!(controller.pending.is_none());
     }
     fn open() -> InvocationIntent {
         InvocationIntent::OpenRadial {

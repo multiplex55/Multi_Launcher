@@ -901,6 +901,18 @@ pub enum CloseDecision {
     AwaitingRequest,
 }
 
+/// Persistent intent carried across request/reply turns while the Designer is
+/// waiting for a safe terminal close.  This is deliberately separate from the
+/// dirty prompt: a clean close and a dirty Save/Discard close both need to
+/// suppress new preparation work until their owned resources are retired.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CloseIntent {
+    #[default]
+    None,
+    Requested,
+    DiscardRequested,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PendingRequestKind {
     Snapshot,
@@ -916,6 +928,37 @@ pub enum PendingRequestKind {
     StartNativePreview,
     UpdateNativePreview,
     StopNativePreview,
+}
+
+impl PendingRequestKind {
+    pub fn is_disposable(self) -> bool {
+        matches!(
+            self,
+            Self::Snapshot
+                | Self::FontCatalog
+                | Self::PrepareEmbeddedPreview
+                | Self::ExportPackage
+                | Self::ExportSkin
+                | Self::AuditionManagedAsset
+                | Self::LivePreview
+                | Self::CancelPreview
+        )
+    }
+
+    pub fn is_preview_lifecycle(self) -> bool {
+        matches!(
+            self,
+            Self::LivePreview
+                | Self::CancelPreview
+                | Self::StartNativePreview
+                | Self::UpdateNativePreview
+                | Self::StopNativePreview
+        )
+    }
+
+    pub fn is_durable(self) -> bool {
+        matches!(self, Self::Commit(_) | Self::ReplacePackage)
+    }
 }
 
 fn reply_matches_pending_kind(reply: &AuthoringReply, kind: PendingRequestKind) -> bool {
@@ -987,6 +1030,7 @@ pub struct RadialAuthoringSession {
     pub native_preview_diagnostics: Vec<super::diagnostics::RadialDiagnostic>,
     pub pending_native_preview: Option<PendingAuthoringRequest>,
     pub native_preview_may_be_open: bool,
+    pub close_intent: CloseIntent,
     pending_native_context_sample: bool,
     cancel_checkpoint: Option<AuthoringSnapshot>,
     rollback_assets: AssetMutations,
@@ -1026,6 +1070,7 @@ impl RadialAuthoringSession {
             native_preview_diagnostics: Vec::new(),
             pending_native_preview: None,
             native_preview_may_be_open: false,
+            close_intent: CloseIntent::None,
             pending_native_context_sample: false,
             rollback_assets: AssetMutations::default(),
             cancel_checkpoint: None,
@@ -1096,6 +1141,22 @@ impl RadialAuthoringSession {
         } else {
             CloseDecision::CloseClean
         }
+    }
+
+    pub fn request_close_intent(&mut self) {
+        self.close_intent = CloseIntent::Requested;
+    }
+
+    pub fn request_discard_close_intent(&mut self) {
+        self.close_intent = CloseIntent::DiscardRequested;
+    }
+
+    pub fn clear_close_intent(&mut self) {
+        self.close_intent = CloseIntent::None;
+    }
+
+    pub fn close_requested(&self) -> bool {
+        self.close_intent != CloseIntent::None
     }
 
     pub fn select(&mut self, selection: Option<StableSelection>) {
@@ -1591,6 +1652,51 @@ impl RadialAuthoringSession {
         }
     }
 
+    /// Cancel only the exact request represented by `pending`.  Native
+    /// preview requests use a separate slot, so closing code must reconcile
+    /// both slots without touching a newer request or a different session.
+    pub fn cancel_pending_request_exact(&mut self, pending: PendingAuthoringRequest) -> bool {
+        if self.pending_request == Some(pending) {
+            self.pending_request = None;
+            return true;
+        }
+        if self.pending_native_preview == Some(pending) {
+            self.pending_native_preview = None;
+            self.pending_native_context_sample = false;
+            if matches!(
+                pending.kind,
+                PendingRequestKind::StartNativePreview | PendingRequestKind::UpdateNativePreview
+            ) && self.native_preview_lease.is_none()
+            {
+                self.native_preview_may_be_open = false;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Reconcile a request which could not be delivered to the authoring
+    /// service.  Matching all correlation fields prevents a failed old send
+    /// from clearing a newer request.  The error remains visible to the
+    /// editor so the user can retry or keep editing.
+    pub fn reconcile_request_delivery_failure(
+        &mut self,
+        pending: PendingAuthoringRequest,
+        message: impl Into<String>,
+    ) -> bool {
+        let matched = self.cancel_pending_request_exact(pending);
+        if !matched {
+            return false;
+        }
+        if matches!(pending.kind, PendingRequestKind::StopNativePreview)
+            && self.native_preview_lease.is_none()
+        {
+            self.native_preview_may_be_open = false;
+        }
+        self.last_error = Some(message.into());
+        true
+    }
+
     pub fn request_replace_package(
         &mut self,
         plan: ImportPlan,
@@ -1739,6 +1845,18 @@ impl RadialAuthoringSession {
     }
 
     pub fn request_stop_native_preview(&mut self) -> Result<AuthoringRequest, AuthoringError> {
+        if self.pending_request.is_some()
+            || self
+                .pending_native_preview
+                .is_some_and(|pending| pending.kind == PendingRequestKind::StopNativePreview)
+        {
+            return Err(AuthoringError::RequestPending);
+        }
+        // A stop is the terminal operation for a preview lifecycle.  It
+        // supersedes an in-flight start/update correlation so a late success
+        // cannot reopen or move a closing preview.
+        self.pending_native_preview = None;
+        self.pending_native_context_sample = false;
         let id = self.next_id();
         self.pending_native_preview = Some(PendingAuthoringRequest {
             id,
@@ -2153,6 +2271,71 @@ mod tests {
         document.revision = ConfigRevision(revision);
         document.menus[0].name = name.into();
         AuthoringSnapshot::new(Arc::new(document), format!("sha-{revision}"))
+    }
+
+    #[test]
+    fn pending_request_classes_and_delivery_reconciliation_are_exact() {
+        let disposable = [
+            PendingRequestKind::Snapshot,
+            PendingRequestKind::FontCatalog,
+            PendingRequestKind::PrepareEmbeddedPreview,
+            PendingRequestKind::ExportPackage,
+            PendingRequestKind::ExportSkin,
+            PendingRequestKind::AuditionManagedAsset,
+            PendingRequestKind::LivePreview,
+            PendingRequestKind::CancelPreview,
+        ];
+        for kind in disposable {
+            assert!(kind.is_disposable());
+            assert!(!kind.is_durable());
+        }
+        for kind in [
+            PendingRequestKind::StartNativePreview,
+            PendingRequestKind::UpdateNativePreview,
+            PendingRequestKind::StopNativePreview,
+        ] {
+            assert!(kind.is_preview_lifecycle());
+            assert!(!kind.is_durable());
+        }
+        for kind in [
+            PendingRequestKind::Commit(CommitDisposition::Apply),
+            PendingRequestKind::Commit(CommitDisposition::Save),
+            PendingRequestKind::Commit(CommitDisposition::RevertAppliedAndClose),
+            PendingRequestKind::ReplacePackage,
+        ] {
+            assert!(kind.is_durable());
+            assert!(!kind.is_disposable());
+        }
+
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let pending = PendingAuthoringRequest {
+            id: AuthoringRequestId(11),
+            generation: session.generation,
+            editor_session: session.editor_session,
+            kind: PendingRequestKind::FontCatalog,
+        };
+        session.pending_request = Some(pending);
+        let stale = PendingAuthoringRequest {
+            id: AuthoringRequestId(12),
+            ..pending
+        };
+        assert!(!session.reconcile_request_delivery_failure(stale, "stale send"));
+        assert_eq!(session.pending_request, Some(pending));
+        assert!(session.reconcile_request_delivery_failure(pending, "send failed"));
+        assert!(session.pending_request.is_none());
+        assert_eq!(session.last_error.as_deref(), Some("send failed"));
+
+        let menu = session.draft.default_menu_id.clone();
+        let start = session
+            .request_start_native_preview(menu, false, None)
+            .unwrap();
+        let stop = session.request_stop_native_preview().unwrap();
+        assert!(matches!(stop, AuthoringRequest::StopNativePreview { .. }));
+        assert_ne!(start.id(), stop.id());
+        assert_eq!(
+            session.pending_native_preview.map(|pending| pending.kind),
+            Some(PendingRequestKind::StopNativePreview)
+        );
     }
 
     #[test]
