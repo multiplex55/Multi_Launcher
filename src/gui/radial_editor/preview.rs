@@ -7,8 +7,8 @@ use crate::radial::authoring::StableSelection;
 use crate::radial::authoring::{AuthoringClient, AuthoringSessionId, RadialAuthoringSession};
 use crate::radial::compositor::CompositorCache;
 use crate::radial::geometry::{
-    HitShape, LogicalPoint, LogicalRect, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout,
-    layout_document_menu, shape_center,
+    HitShape, LogicalPoint, LogicalRect, PhysicalPoint, PhysicalRect, ScaleFactor,
+    cascade_candidate_centers, layout_document_menu, shape_center,
 };
 use crate::radial::model::{
     CellContent, CellId, InvocationId, MenuDefinition, MenuId, RadialDocument, RingId, SessionId,
@@ -17,7 +17,10 @@ use crate::radial::model::{
 use crate::radial::preparation::{
     PreparedFrameInput, PreparedPlacement, PreviewPlacement, ensure_preview_center_back,
 };
-use crate::radial::render::{build_scene_prepared_selected, build_scene_prepared_selected_tooltip};
+use crate::radial::render::{
+    SceneLayer, build_scene_prepared_selected, build_scene_prepared_selected_tooltip,
+    compose_layered_scene, input_owner,
+};
 use crate::radial::session::{CellRole, FrameId, SessionEvent, SessionIntent, SessionReducer};
 use crate::radial::tooltip::{
     TooltipHoverState, TooltipIdentity, TooltipPreferences, monotonic_ms,
@@ -184,7 +187,7 @@ impl EmbeddedPreview {
                         .and_then(|reducer| reducer.state.stack.last())
                         .is_some_and(|frame| frame.page == input.page)
             })
-            .map(|(_, input)| std::sync::Arc::clone(input));
+            .map(|(_, input)| self.composed_frame(frame_id, input));
         cached.or_else(|| {
             (frame_id == FrameId(1))
                 .then(|| {
@@ -192,10 +195,140 @@ impl EmbeddedPreview {
                         .embedded_preview
                         .as_ref()
                         .filter(|(token, _)| token == &self.frame_token)
-                        .map(|(_, input)| std::sync::Arc::clone(input))
+                        .map(|(_, input)| self.composed_frame(frame_id, input))
                 })
                 .flatten()
         })
+    }
+
+    fn composed_frame(
+        &self,
+        frame_id: FrameId,
+        input: &std::sync::Arc<PreparedFrameInput>,
+    ) -> std::sync::Arc<PreparedFrameInput> {
+        let Some(reducer) = self.reducer.as_ref() else {
+            return std::sync::Arc::clone(input);
+        };
+        let Some(current) = reducer.state.stack.last() else {
+            return std::sync::Arc::clone(input);
+        };
+        let cascade = current.frame_id == frame_id
+            && current.parent_frame_id.is_some()
+            && self
+                .navigation_frames
+                .get(&frame_id)
+                .is_some_and(|(_, frame)| frame.placement == PreparedPlacement::Cascade);
+        if !cascade {
+            return std::sync::Arc::clone(input);
+        }
+        let layers: Vec<_> = reducer
+            .state
+            .stack
+            .iter()
+            .filter_map(|frame| {
+                let (_, frame_input) = self.navigation_frames.get(&frame.frame_id)?;
+                Some(SceneLayer {
+                    frame_id: frame.frame_id,
+                    layout: frame_input.layout.clone(),
+                    resources: frame_input.resources.clone(),
+                    selected: frame.selected.clone(),
+                    visible_tooltip: None,
+                })
+            })
+            .collect();
+        let Some(layered) = compose_layered_scene(&layers, input.scene.generation, input.work_area)
+        else {
+            return std::sync::Arc::clone(input);
+        };
+        let mut display = (**input).clone();
+        display.layout = layered.layout;
+        display.scene = layered.scene;
+        std::sync::Arc::new(display)
+    }
+
+    fn composed_scene(
+        &self,
+        frame_id: FrameId,
+        generation: u64,
+        selected: Option<&CellId>,
+        visible_tooltip: Option<&CellId>,
+        work_area: PhysicalRect,
+        fallback: &PreparedFrameInput,
+    ) -> (
+        crate::radial::geometry::LayoutSnapshot,
+        crate::radial::render::VectorScene,
+    ) {
+        let Some(reducer) = self.reducer.as_ref() else {
+            return (
+                fallback.layout.clone(),
+                build_scene_prepared_selected_tooltip(
+                    &fallback.layout,
+                    generation,
+                    &fallback.resources,
+                    selected,
+                    visible_tooltip,
+                    work_area,
+                ),
+            );
+        };
+        let cascade = reducer
+            .state
+            .stack
+            .last()
+            .is_some_and(|frame| frame.frame_id == frame_id)
+            && self
+                .navigation_frames
+                .get(&frame_id)
+                .is_some_and(|(_, frame)| frame.placement == PreparedPlacement::Cascade);
+        if !cascade {
+            return (
+                fallback.layout.clone(),
+                build_scene_prepared_selected_tooltip(
+                    &fallback.layout,
+                    generation,
+                    &fallback.resources,
+                    selected,
+                    visible_tooltip,
+                    work_area,
+                ),
+            );
+        }
+        let layers: Vec<_> = reducer
+            .state
+            .stack
+            .iter()
+            .filter_map(|frame| {
+                let (_, frame_input) = self.navigation_frames.get(&frame.frame_id)?;
+                Some(SceneLayer {
+                    frame_id: frame.frame_id,
+                    layout: frame_input.layout.clone(),
+                    resources: frame_input.resources.clone(),
+                    selected: if frame.frame_id == frame_id {
+                        selected.cloned()
+                    } else {
+                        frame.selected.clone()
+                    },
+                    visible_tooltip: (frame.frame_id == frame_id)
+                        .then_some(visible_tooltip.map(Clone::clone))
+                        .flatten(),
+                })
+            })
+            .collect();
+        compose_layered_scene(&layers, generation, work_area)
+            .map(|layered| (layered.layout, layered.scene))
+            .unwrap_or_else(|| {
+                (
+                    fallback.layout.clone(),
+                    build_scene_prepared_selected_tooltip(
+                        &fallback.layout,
+                        generation,
+                        &fallback.resources,
+                        selected,
+                        visible_tooltip,
+                        work_area,
+                    ),
+                )
+            })
     }
 
     pub(super) fn sync_preparation(
@@ -280,48 +413,6 @@ impl EmbeddedPreview {
                 let menu = document.menus.iter().find(|menu| menu.id == frame.menu_id);
                 if let Some(menu) = menu {
                     ensure_preview_center_back(&mut input.layout, menu);
-                    let previous_placement = self
-                        .navigation_frames
-                        .get(&pending_frame_id)
-                        .map(|(_, previous)| previous.placement);
-                    let parent_menu = frame
-                        .parent_frame_id
-                        .and_then(|parent_id| {
-                            self.reducer
-                                .as_ref()?
-                                .state
-                                .stack
-                                .iter()
-                                .find(|candidate| candidate.frame_id == parent_id)
-                        })
-                        .and_then(|parent| {
-                            document.menus.iter().find(|menu| menu.id == parent.menu_id)
-                        });
-                    let cascade_requested = parent_menu.is_some_and(|parent| {
-                        parent.submenu_presentation
-                            == crate::radial::model::SubmenuPresentation::Cascade
-                    });
-                    let should_cascade = cascade_requested
-                        && previous_placement != Some(PreparedPlacement::SameCenterFallback)
-                        && (previous_placement == Some(PreparedPlacement::Cascade)
-                            || input.placement == PreparedPlacement::Cascade);
-                    if should_cascade
-                        && let Some(parent_frame_id) = frame.parent_frame_id
-                        && let Some((_, parent)) = self.navigation_frames.get(&parent_frame_id)
-                    {
-                        input.resources =
-                            crate::radial::authoring::native_preview::merge_preview_resources(
-                                &parent.resources,
-                                &input.resources,
-                            );
-                        input.layout = cascade_layout(&parent.layout, input.layout);
-                        input.placement = PreparedPlacement::Cascade;
-                    } else if cascade_requested
-                        && (input.placement == PreparedPlacement::SameCenterFallback
-                            || previous_placement == Some(PreparedPlacement::SameCenterFallback))
-                    {
-                        input.placement = PreparedPlacement::SameCenterFallback;
-                    }
                     let selected = frame.selected.as_ref();
                     input.scene = build_scene_prepared_selected(
                         &input.layout,
@@ -347,7 +438,8 @@ impl EmbeddedPreview {
                 pending_frame_id,
                 (pending_token.clone(), std::sync::Arc::clone(&input)),
             );
-            session.embedded_preview = Some((pending_token, input));
+            session.embedded_preview =
+                Some((pending_token, self.composed_frame(pending_frame_id, &input)));
         }
         if let Some(frame) = current_frame.as_ref()
             && let Some((cached_token, cached)) = self.navigation_frames.get(&frame.frame_id)
@@ -355,7 +447,8 @@ impl EmbeddedPreview {
             && cached.page == page
         {
             self.frame_token = frame_token.clone();
-            session.embedded_preview = Some((frame_token, std::sync::Arc::clone(cached)));
+            session.embedded_preview =
+                Some((frame_token, self.composed_frame(frame.frame_id, cached)));
             if let Some(current) = self
                 .reducer
                 .as_mut()
@@ -611,6 +704,22 @@ impl EmbeddedPreview {
         }
     }
 
+    fn navigate_to_frame(
+        &mut self,
+        frame_id: FrameId,
+        geometry_generation: u64,
+        pointer_baseline: LogicalPoint,
+    ) {
+        self.cancel_tooltip();
+        if let Some(reducer) = self.reducer.as_mut() {
+            let _ = reducer.reduce(SessionEvent::NavigateToFrame {
+                frame_id,
+                geometry_generation,
+                pointer_baseline,
+            });
+        }
+    }
+
     pub(super) fn activate(
         &mut self,
         document: &RadialDocument,
@@ -738,7 +847,7 @@ impl EmbeddedPreview {
         &self,
         document: &RadialDocument,
         parent_menu_id: &MenuId,
-        child_menu_id: &MenuId,
+        _child_menu_id: &MenuId,
     ) -> PhysicalPoint {
         let root_center = self
             .frozen_center
@@ -771,20 +880,17 @@ impl EmbeddedPreview {
         };
         self.navigation_frames
             .get(&parent_frame_id)
-            .and_then(|(_, input)| {
-                let source_cell = parent
-                    .rings
-                    .iter()
-                    .flat_map(|ring| &ring.cells)
-                    .find(|cell| {
-                        matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == child_menu_id)
-                    })?;
-                let cell = input
-                    .layout
-                    .cells
-                    .iter()
-                    .find(|cell| cell.cell_id == source_cell.id)?;
-                Some(shape_center(&cell.shape, input.layout.scale_factor))
+            .map(|(_, input)| {
+                cascade_candidate_centers(
+                    &input.layout,
+                    PhysicalRect {
+                        min: PhysicalPoint { x: 0.0, y: 0.0 },
+                        max: PhysicalPoint { x: 480.0, y: 480.0 },
+                    },
+                )
+                .into_iter()
+                .next()
+                .unwrap_or(same_center)
             })
             .unwrap_or(same_center)
     }
@@ -1003,7 +1109,10 @@ impl EmbeddedPreview {
             && let Some((pointer, point)) = response.interact_pointer_pos().zip(pointer_point)
         {
             let _ = pointer;
-            if let Some(cell) = layout.hit_test(point) {
+            if let crate::radial::render::InputOwner::Actionable(cell_id) =
+                input_owner(&layout, point, false)
+                && let Some(cell) = layout.cells.iter().find(|cell| cell.cell_id == cell_id)
+            {
                 self.begin_drag(document, &menu.id, &cell.cell_id, point, generation);
             }
         }
@@ -1023,9 +1132,16 @@ impl EmbeddedPreview {
         }
         if response.clicked()
             && let Some(point) = pointer_point
-            && let Some(cell) = layout.hit_test(point)
         {
-            self.activate(document, Some(input), &cell.cell_id);
+            match input_owner(&layout, point, false) {
+                crate::radial::render::InputOwner::NavigateToFrame(frame_id) => {
+                    self.navigate_to_frame(frame_id, generation, point);
+                }
+                crate::radial::render::InputOwner::Actionable(cell_id) => {
+                    self.activate(document, Some(input), &cell_id);
+                }
+                _ => {}
+            }
             ui.ctx().request_repaint();
         }
 
@@ -1094,14 +1210,21 @@ impl EmbeddedPreview {
                 .as_ref()
                 .and_then(|reducer| reducer.state.selected.as_ref())
         });
-        let scene = build_scene_prepared_selected_tooltip(
-            &layout,
+        let frame_id = self
+            .reducer
+            .as_ref()
+            .and_then(|reducer| reducer.state.stack.last())
+            .map(|frame| frame.frame_id)
+            .unwrap_or(FrameId(1));
+        let (display_layout, scene) = self.composed_scene(
+            frame_id,
             input.scene.generation,
-            &input.resources,
             selected,
             current_identity.as_ref(),
             input.work_area,
+            &input,
         );
+        let layout = display_layout;
         let Ok(frame) = self.compositor.compose(&scene, layout.scale_factor, 0) else {
             ui.colored_label(
                 ui.visuals().error_fg_color,
@@ -1524,13 +1647,19 @@ impl EmbeddedPreview {
             }
         }
 
-        let scene = build_scene_prepared_selected_tooltip(
-            &input.layout,
+        let frame_id = self
+            .reducer
+            .as_ref()
+            .and_then(|reducer| reducer.state.stack.last())
+            .map(|frame| frame.frame_id)
+            .unwrap_or(FrameId(1));
+        let (_, scene) = self.composed_scene(
+            frame_id,
             input.scene.generation,
-            &input.resources,
             None,
             None,
             input.work_area,
+            input,
         );
         let Ok(frame) = self
             .compositor
@@ -2518,11 +2647,24 @@ mod tests {
         assert_ne!(child_frame.layout.origin, root_center);
         let retained_root_cell = child_frame
             .layout
-            .cells
-            .iter()
-            .find(|cell| cell.cell_id.as_str() == "starter-root-favorites")
-            .expect("Cascade child retains the displayed parent cells");
-        assert!(!retained_root_cell.actionable);
+            .layered_input
+            .as_ref()
+            .and_then(|input| input.layers.first())
+            .and_then(|layer| {
+                layer
+                    .cells
+                    .iter()
+                    .find(|cell| cell.cell_id.as_str() == "starter-root-favorites")
+            })
+            .expect("Cascade scene retains the complete parent layer");
+        assert!(
+            child_frame
+                .layout
+                .cells
+                .iter()
+                .all(|cell| cell.cell_id.as_str() != "starter-root-favorites")
+        );
+        assert!(retained_root_cell.actionable);
         let child_center = child_frame.layout.origin;
         let child_frame_id = preview.reducer.as_ref().unwrap().state.stack[1].frame_id;
 

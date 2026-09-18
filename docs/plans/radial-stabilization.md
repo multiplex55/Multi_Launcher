@@ -1,6 +1,6 @@
 # Radial stabilization ledger
 
-Status: **S3 complete — bounded visual-first Designer.**
+Status: **S4 complete — shared layered Cascade scene and exact-frame Back.**
 S0–S3 remain complete; no native pass is claimed. This ledger records
 the current checkout, ownership boundaries, source-backed causes, and the
 evidence still needed for S1–S5. The current checkout is authoritative; the
@@ -239,7 +239,7 @@ keystrokes, or sensitive window titles.
 | S1 | `complete` | Focused hotkey/visibility and Designer/runtime close lifecycle repairs and gate. |
 | S2 | `complete` | Tooltip units and stable hover/native presentation repairs and gate. |
 | S3 | `complete` | Slot-first compact Designer layout/interaction repairs and gate. |
-| S4 | `pending` | Complete overlapping Cascade scenes and safe ancestor Back repairs and gate. |
+| S4 | `complete` | Shared unflattened Cascade layers, exact-frame ancestor navigation, and parity across runtime/native preview/embedded preview; focused gate and post-removal checks passed. |
 | S5 | `pending` | Integrated full verification, native matrix, responsiveness/resource evidence, and independent review. |
 
 ## Slow-job policy and active-job template
@@ -266,6 +266,200 @@ Later observations due: previous check + 1,200 seconds
 Completion notification:
 Actual result / all failures / next corrective batch:
 ```
+
+### S4 active-job record
+
+The S4 implementation is being verified from committed source HEAD
+2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1. The focused gate must use one
+Cargo/Nextest process tree and no source edits while it runs. The active
+identity below is completed before launch and is updated with the true exit
+status and any corrective batch.
+
+```text
+Job purpose / milestone: S4 shared layered Cascade scene and exact-frame Back focused gate
+Command and cwd: selector preflight; cargo nextest run --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; then cargo check; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; installed nextest filterset preflight before the focused batch
+Source SHA + source/untracked diff fingerprint: 2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1 + geometry.rs 6E5AFD8C337D45445BFA1D02949078657A8010417D3966492A06EC7B36CBDF9B; render.rs FD8B529FD908D7046751782E4762763B7FB3C4591607D228374B0AE90A8F5BF3; session.rs 8BC74FBC3661AB3C09C7518164F3443A04B2B5EE0BC328DD9508D813ECC4FF50; controller.rs 56B990713B53899E721C4536F54FBDA08854E8270C0CEEA1967911E07BD0B9AA; native_preview.rs 89013E6C05CCB68A0CC21A4AD4A509ED8B93E7E60DD3BA598FDABD68A1526C74; preview.rs BC4F301F26F95C6A8DC63231C5835D1146CF03A1495827A2F1D18409C750F41E
+Session/PID + process start and identity: compile preflight PTY session 48954; wrapper PID 29816 (pwsh), start 2026-09-18T02:47:08.7614974-04:00; identity target/s4-check.identity; one sequential Cargo tree
+Durable stdout/stderr log: target/s4-check.log (compile preflight; authoritative gate will use target/s4-focused.log)
+Exit-code record: target/s4-check.exit (compile preflight; authoritative gate will use target/s4-focused.exit)
+Launch time: 2026-09-18T02:47:08.7614974-04:00
+First observation due: launch + 600 seconds
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: compile preflight PTY 48954 completed exit 101 at 2026-09-18T02:48:06.8932522-04:00; one embedded drag pattern incorrectly treated InputOwner as Option. Corrective compile preflight below fixes that pattern and the now-unused child-menu parameter.
+```
+
+### S4 corrective compile preflight
+
+```text
+Job purpose / milestone: S4 compile corrective preflight after first type error
+Command and cwd: cargo check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target
+Source SHA + source/untracked diff fingerprint: 2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1 + preview.rs BC4F301F26F95C6A8DC63231C5835D1146CF03A1495827A2F1D18409C750F41E; prior five S4 fingerprints unchanged above
+Session/PID + process start and identity: compile corrective PTY session 33524; wrapper PID 21180 (pwsh), start 2026-09-18T02:49:31.7373104-04:00; identity target/s4-check-corrective.identity; one sequential Cargo tree
+Durable stdout/stderr log: target/s4-check-corrective.log
+Exit-code record: target/s4-check-corrective.exit
+Launch time: 2026-09-18T02:49:31.7373104-04:00
+First observation due: launch + 600 seconds
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: compile preflight completed exit 0; the focused corrective compile is recorded below.
+```
+
+### S4 focused gate record
+
+```text
+Job purpose / milestone: S4 focused layered Cascade tests and compile/format gate
+Command and cwd: cargo nextest list -p multi_launcher -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; cargo nextest run -p multi_launcher --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; cargo check; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; selector preflight before one focused batch
+Source SHA + source/untracked diff fingerprint: 2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1 + geometry.rs 32CB696D64D859F9F92404BF8692D9A418332DCD6CDF380D5D80FE91D6283B13; render.rs D5A055646B163044BC1F02DDDF08815DB08A4AF8D706192385E594D6B862B7A0; session.rs 7EEC1959863E603F3AAC128A539D2F4697C01F41268E202EE1F51E0B46F67819; controller.rs EAB51957BD684F337D780BC8E16BCC0F687DDE7E05BF861CC84C91AC48EF55A4; native_preview.rs E93E27B9BB93CBB8126B200F55F51DF50E097EDEA78CE81E6B08160BAD3E5542; preview.rs 2411051C415C677A7E89891E23E3B0BEEF636A3036F6DAA0DC5F9FEE4D8D2D3C
+Session/PID + process start and identity: PTY session 96455; wrapper PID 22216 (pwsh), start 2026-09-18T02:52:55.3197544-04:00; identity target/s4-focused.identity; one sequential Cargo/Nextest tree
+Durable stdout/stderr log: target/s4-focused.log
+Exit-code record: target/s4-focused.exit
+Launch time: 2026-09-18T02:52:55.3197544-04:00
+First observation due: launch + 600 seconds
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: PTY 96455 completed at `2026-09-18T02:58:01-04:00` with compile exit 101 before the focused run; the migrated controller test still referenced removed `cascade_layout`, and the render test emitted one unused-mut warning. The test migration was corrected; the next corrective gate recorded 144/146 before the final fixture correction.
+```
+
+### S4 corrective focused gate record
+
+```text
+Job purpose / milestone: S4 corrective focused layered Cascade tests after legacy-helper test migration
+Command and cwd: same selector preflight, focused --no-fail-fast batch, cargo check, cargo fmt --all -- --check, and git diff --check as the S4 focused gate above; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; selector preflight before one focused batch
+Source SHA + source/untracked diff fingerprint: 2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1 + geometry.rs 32CB696D64D859F9F92404BF8692D9A418332DCD6CDF380D5D80FE91D6283B13; render.rs 6449228EF70917AEDE6E1AF1BC10FFBDDBEB4913B9E83A3F315B05D3545FB5D3; session.rs 7EEC1959863E603F3AAC128A539D2F4697C01F41268E202EE1F51E0B46F67819; controller.rs 3C0029151CD2833E3108B21D559D59E0E91DEFBBB625E5E0A7FC8C1B727DFC0A; native_preview.rs E93E27B9BB93CBB8126B200F55F51DF50E097EDEA78CE81E6B08160BAD3E5542; preview.rs 2411051C415C677A7E89891E23E3B0BEEF636A3036F6DAA0DC5F9FEE4D8D2D3C
+Session/PID + process start and identity: PTY session 65898; wrapper PID 17772 (pwsh), start 2026-09-18T02:59:20.5494307-04:00; identity target/s4-focused-corrective.identity; one sequential Cargo/Nextest tree
+Durable stdout/stderr log: target/s4-focused-corrective.log
+Exit-code record: target/s4-focused-corrective.exit
+Launch time: 2026-09-18T02:59:20.5494307-04:00
+First observation due: launch + 600 seconds
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: PTY 65898 completed 2026-09-18T03:43:30.0263749-04:00 with selector preflight exit 0; focused Nextest ran 146 tests (144 passed, 2 failed, 4,447 skipped); cargo check, fmt check, and diff check each exited 0. Failures were stale tests expecting flattened parent cells and selected-cell Cascade fallback behavior; both are migrated below.
+```
+
+### S4 final focused gate record
+
+```text
+Job purpose / milestone: S4 final shared layered Cascade tests and compile/format gate
+Command and cwd: cargo nextest list -p multi_launcher -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; cargo nextest run -p multi_launcher --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; cargo check; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; selector preflight before one focused batch
+Source SHA + source/untracked diff fingerprint: 2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1 + geometry.rs 32CB696D64D859F9F92404BF8692D9A418332DCD6CDF380D5D80FE91D6283B13; render.rs 6449228EF70917AEDE6E1AF1BC10FFBDDBEB4913B9E83A3F315B05D3545FB5D3; session.rs 7EEC1959863E603F3AAC128A539D2F4697C01F41268E202EE1F51E0B46F67819; controller.rs 3C0029151CD2833E3108B21D559D59E0E91DEFBBB625E5E0A7FC8C1B727DFC0A; native_preview.rs A33CEE82148AFEABB51BE8DFC5788EB883C4A15CED72A1CEB86C97C1308249E2; preview.rs 20965A00DA5A79625B2E5D9556ACEF8C382B3700F96162230310D57FE61CD4BB
+Session/PID + process start and identity: PTY session 93337; wrapper PID 30200 (pwsh), start 2026-09-18T03:45:31.0842299-04:00; identity target/s4-focused-final.identity; one sequential Cargo/Nextest tree
+Durable stdout/stderr log: target/s4-focused-final.log
+Exit-code record: target/s4-focused-final.exit
+Launch time: 2026-09-18T03:45:31.0842299-04:00
+First observation due: launch + 600 seconds
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: PTY 93337 completed at `2026-09-18T04:16:11-04:00`; focused batch ran 146 tests (145 passed, 1 failed, 4,447 skipped); cargo check and diff check exited 0; fmt check exited 1 on one formatter-only multiline literal in the migrated native-preview test. The fixture was corrected and the final corrective gate is recorded below.
+```
+
+### S4 focused corrective gate record
+
+The final gate exposed one stale Cascade fallback fixture.  The coordinator now
+selects an inward diagonal candidate as the normal Cascade path; the fixture
+was migrated to assert that shared placement while directly retaining coverage
+of `PreparedPlacement::SameCenterFallback` for an impossible local anchor.
+The source remains frozen during the corrective gate below.
+
+```text
+Job purpose / milestone: S4 corrective focused layered Cascade gate after edge-aware fallback fixture migration
+Command and cwd: selector preflight; cargo nextest run --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; then cargo check; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; installed nextest filterset preflight before one focused --no-fail-fast batch
+Source SHA + source/untracked diff fingerprint: 2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1 + native_preview.rs A835FF9AD5B25B8EECE772EC3A582C5485372E8A8662E54140AD17B4925C0540; prior S4 fingerprints unchanged
+Session/PID + process start and identity: PTY session 9120; wrapper PID 24336 (pwsh), start 2026-09-18T04:39:49.3684976-04:00; identity target/s4-focused-corrective2.identity; one sequential Cargo/Nextest tree
+Durable stdout/stderr log: target/s4-focused-corrective2.log
+Exit-code record: target/s4-focused-corrective2.exit
+Launch time: 2026-09-18T04:39:49.3684976-04:00
+First observation due: launch + 600 seconds
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: isolated selector completed at `2026-09-18T09:26:43Z`; preflight listed 1 test and the focused run passed 1/1 with 4,592 skipped, exit 0. The migrated fixture passes; the full corrective gate below remains required.
+```
+
+### S4 final corrective gate record
+
+```text
+Job purpose / milestone: S4 final corrective shared layered Cascade tests and compile/format gate
+Command and cwd: cargo nextest list -p multi_launcher -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; cargo nextest run -p multi_launcher --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'; cargo check; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; selector preflight before one focused --no-fail-fast batch
+Source SHA + source/untracked diff fingerprint: 2a24f2a8bd4b89d1151704b8fa1d65c1bb4ad0a1 + native_preview.rs A835FF9AD5B25B8EECE772EC3A582C5485372E8A8662E54140AD17B4925C0540; prior S4 fingerprints unchanged
+Session/PID + process start and identity: PTY session 71551; wrapper PID 27056 (pwsh), start 2026-09-18T05:28:38.4605661-04:00; identity target/s4-focused-corrective-final2.identity; one sequential Cargo/Nextest tree
+Durable stdout/stderr log: target/s4-focused-corrective-final2.log
+Exit-code record: target/s4-focused-corrective-final2.exit
+Launch time: 2026-09-18T05:28:38.4605661-04:00
+First observation due: launch + 600 seconds
+Second observation due: first check + 900 seconds
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: focused batch completed at `2026-09-18T06:16:11-04:00`; selector preflight exit 0; 146/146 tests passed with 4,447 skipped; cargo check exit 0; fmt check exit 1 only for one multiline literal; diff check exit 0. `cargo fmt --all` and the post-format checks below completed afterward.
+```
+
+### S4 post-format validation
+
+The only final-gate failure was formatter output for the migrated test.  The
+formatter was applied after the Cargo tree exited; this changed no behavior or
+test logic.
+
+```text
+Command and cwd: cargo fmt --all; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Source fingerprint: native_preview.rs 080466F7B730A8B7A84A6E6C88AE5CF5E9782A5DC8E87234C8A4D5B8565DA019; prior S4 fingerprints unchanged
+Actual result: formatter application exit 0; fmt check exit 0; diff check exit 0. The obsolete flattened helper was then removed; the post-removal check is recorded below.
+```
+
+### S4 post-removal validation
+
+```text
+Command and cwd: cargo check; cargo fmt --all -- --check; git diff --check; G:\Repos\rust\Multi_Launcher
+Session: PTY 58761 for cargo check; source was frozen during the check
+Source fingerprint: geometry.rs B420503DEBE522DE768860A5CABA1A23F2FA5F14547BBBD3F501B6884AADE7F5; native_preview.rs 080466F7B730A8B7A84A6E6C88AE5CF5E9782A5DC8E87234C8A4D5B8565DA019
+Actual result: cargo check exit 0 (12.94s); fmt check exit 0; diff check exit 0; repository search found no `cascade_layout` or obsolete `merge_preview_resources` references under runtime/preview source. The final unused resource-flattening helper was removed after the focused gate; this check confirmed the mechanical cleanup compiles.
+```
+
+### S4 implementation and evidence
+
+Each retained navigation frame now keeps its own complete layout, style,
+resources, and typed `FrameId`.  `LayeredInput` preserves those independent
+hit maps, while `SceneLayer`/`LayeredScene` composes oldest ancestor through
+active child into one shared visual scene.  Runtime controller, native preview,
+and embedded Designer preview all use the same scene builder; no ancestor gets
+its own native window.
+
+Cascade placement uses actual parent extents and frozen work-area direction to
+choose a modest diagonal overlap.  The preparation boundary retains an explicit
+SameCenter fallback for a local point that cannot fit.  Root invocation origin,
+parent-frame submenu origins, exact-frame Back/pop restoration, negative/DPI
+coordinates, and drag translation remain owned by the existing geometry/session
+boundaries.
+
+Layered hit ownership is frontmost-first: child footprints and gaps are
+protective, actionable cells belong only to their own frame, and exposed
+ancestor cells return an exact `NavigateToFrame(FrameId)` target.  The session
+reducer truncates to that frame, clears transient hover/action state, and
+consumes the complete pointer release so the same gesture cannot dispatch an
+ancestor action.  Repeated menu IDs are disambiguated by `FrameId`.
+
+Evidence: the final corrective selector preflight passed; focused Nextest ran
+146/146 tests with 4,447 skipped; cargo check passed; formatter and diff checks
+passed after the formatter-only fixture correction; the stale `cascade_layout`
+path is absent; and the post-removal cargo check passed.  The isolated migrated
+fallback test also passed 1/1 with 4,592 skipped.
+
+Native acceptance remains explicitly unverified: K1–K8 (real HWND region/pixel
+presentation, desktop input routing, native screenshot overlap, and native
+resource teardown) were not exercised.  No native-pass claim is made; the
+remaining risk is platform-specific presentation behavior beyond the shared
+fake-host and production-adapter tests.
 
 ### S3 active-job record
 

@@ -2,11 +2,13 @@ use super::model::{
     CellContent, CellId, Control, LayoutKind, MediaReference, MenuDefinition, Override,
     RenderingQuality, RingId, TooltipMode,
 };
+use super::session::FrameId;
 use super::skin::{
     EffectiveCellStyle, EffectiveMenuTree, StyleField, StyleSource, compile_menu_tree,
     resolved_bool, resolved_clone, resolved_f32,
 };
 use std::f32::consts::TAU;
+use std::sync::Arc;
 
 /// A point in physical desktop coordinates. These coordinates can be negative
 /// on monitors positioned above or to the left of the primary display.
@@ -193,6 +195,32 @@ pub struct LayoutSnapshot {
     pub input_regions: Vec<HitShape>,
     pub cells: Vec<CellLayout>,
     pub style: LayoutStyleSnapshot,
+    /// Cascade input ownership is retained separately from the active frame's
+    /// authored geometry.  The native host consumes this optional map when a
+    /// shared layered scene is presented; ordinary/SameCenter layouts leave it
+    /// unset and keep their existing hit contract.
+    pub layered_input: Option<Arc<LayeredInput>>,
+}
+
+/// The minimal geometry/style information required to route input for one
+/// retained Cascade frame.  This deliberately does not contain a flattened
+/// cell list: each layer keeps its own complete layout and exact `FrameId`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredInputLayer {
+    pub frame_id: FrameId,
+    pub input_extent: LogicalRect,
+    pub input_regions: Vec<HitShape>,
+    pub center: LogicalPoint,
+    pub center_radius: f32,
+    pub fill_center_hit_zone: bool,
+    pub fill_item_hit_zones: bool,
+    pub cells: Vec<CellLayout>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredInput {
+    /// Layers are ordered oldest ancestor to active child.
+    pub layers: Vec<LayeredInputLayer>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -645,6 +673,7 @@ fn layout_menu_impl(
                 .map(|v| resolved_clone(&v.effects.menu_shadow_outer_color))
                 .unwrap_or_default(),
         },
+        layered_input: None,
     })
 }
 
@@ -678,6 +707,19 @@ pub fn translate_layout(
     for cell in &mut translated.cells {
         translate_shape(&mut cell.shape, logical_delta);
     }
+    if let Some(layered) = translated.layered_input.as_mut() {
+        let layered = Arc::make_mut(layered);
+        for layer in &mut layered.layers {
+            translate_rect(&mut layer.input_extent, logical_delta);
+            for shape in &mut layer.input_regions {
+                translate_shape(shape, logical_delta);
+            }
+            translate_logical_point(&mut layer.center, logical_delta);
+            for cell in &mut layer.cells {
+                translate_shape(&mut cell.shape, logical_delta);
+            }
+        }
+    }
     if !translated.origin.x.is_finite()
         || !translated.origin.y.is_finite()
         || !logical_point_is_finite(translated.center)
@@ -700,6 +742,106 @@ pub fn translate_layout(
     Ok(())
 }
 
+/// Build the host geometry for a shared Cascade presentation without
+/// changing any retained frame.  The returned snapshot uses the active
+/// frame's style/cells while its extents and input map cover every layer.
+pub fn compose_layered_layout(layers: &[(FrameId, &LayoutSnapshot)]) -> Option<LayoutSnapshot> {
+    let (_, active) = layers.last()?;
+    let mut composite = (*active).clone();
+    let mut visual_extent = active.visual_extent;
+    let mut input_extent = active.input_extent;
+    let mut background_extent = active.background_extent;
+    let mut rim_extent = active.rim_extent;
+    let mut input_regions = Vec::new();
+    let mut input_layers = Vec::with_capacity(layers.len());
+    for (frame_id, layout) in layers {
+        visual_extent = union_rect(visual_extent, layout.visual_extent);
+        input_extent = union_rect(input_extent, layout.input_extent);
+        background_extent = union_rect(background_extent, layout.background_extent);
+        rim_extent = union_rect(rim_extent, layout.rim_extent);
+        input_regions.extend(layout.input_regions.clone());
+        input_layers.push(LayeredInputLayer {
+            frame_id: *frame_id,
+            input_extent: layout.input_extent,
+            input_regions: layout.input_regions.clone(),
+            center: layout.center,
+            center_radius: layout.center_radius,
+            fill_center_hit_zone: layout.style.fill_center_hit_zone,
+            fill_item_hit_zones: layout.style.fill_item_hit_zones,
+            cells: layout.cells.clone(),
+        });
+    }
+    composite.background_extent = background_extent;
+    composite.rim_extent = rim_extent;
+    composite.visual_extent = visual_extent;
+    composite.input_extent = input_extent;
+    composite.input_regions = input_regions;
+    composite.layered_input = Some(Arc::new(LayeredInput {
+        layers: input_layers,
+    }));
+    Some(composite)
+}
+
+fn union_rect(left: LogicalRect, right: LogicalRect) -> LogicalRect {
+    LogicalRect {
+        min: LogicalPoint {
+            x: left.min.x.min(right.min.x),
+            y: left.min.y.min(right.min.y),
+        },
+        max: LogicalPoint {
+            x: left.max.x.max(right.max.x),
+            y: left.max.y.max(right.max.y),
+        },
+    }
+}
+
+/// Return a stable set of modest diagonal Cascade centers.  The first choice
+/// points toward the roomier diagonal of the frozen work area; callers try
+/// the alternatives when the child's actual extents cannot fit there.  The
+/// offset is derived from the parent rim, so unequal-size menus overlap by a
+/// predictable amount without anchoring the whole stack to one selected cell.
+pub fn cascade_candidate_centers(
+    parent: &LayoutSnapshot,
+    work_area: PhysicalRect,
+) -> Vec<PhysicalPoint> {
+    let parent_width = (parent.rim_extent.max.x - parent.rim_extent.min.x).abs()
+        * parent.scale_factor.get() as f32;
+    let parent_height = (parent.rim_extent.max.y - parent.rim_extent.min.y).abs()
+        * parent.scale_factor.get() as f32;
+    let dx = (parent_width * 0.42).max(18.0) as f64;
+    let dy = (parent_height * 0.30).max(14.0) as f64;
+    let horizontal = if parent.origin.x <= (work_area.min.x + work_area.max.x) * 0.5 {
+        1.0
+    } else {
+        -1.0
+    };
+    let vertical = if parent.origin.y <= (work_area.min.y + work_area.max.y) * 0.5 {
+        1.0
+    } else {
+        -1.0
+    };
+    let candidates = [
+        (horizontal, vertical),
+        (-horizontal, vertical),
+        (horizontal, -vertical),
+        (-horizontal, -vertical),
+    ];
+    let mut output = Vec::with_capacity(candidates.len());
+    for (x_sign, y_sign) in candidates {
+        let point = PhysicalPoint {
+            x: parent.origin.x + dx * x_sign,
+            y: parent.origin.y + dy * y_sign,
+        };
+        if !output.iter().any(|candidate: &PhysicalPoint| {
+            (candidate.x - point.x).abs() < f64::EPSILON
+                && (candidate.y - point.y).abs() < f64::EPSILON
+        }) {
+            output.push(point);
+        }
+    }
+    output
+}
+
 /// Convert an absolute desktop-logical hit-shape center to physical desktop
 /// coordinates. `LayoutSnapshot::origin` is intentionally not added again.
 pub fn shape_center(shape: &HitShape, scale_factor: ScaleFactor) -> PhysicalPoint {
@@ -707,30 +849,6 @@ pub fn shape_center(shape: &HitShape, scale_factor: ScaleFactor) -> PhysicalPoin
         HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => *center,
     };
     scale_factor.logical_to_physical(logical)
-}
-
-/// Compose the displayed ancestor regions with a Cascade child. Ancestor
-/// cells remain visible but non-actionable; their owned hit regions remain
-/// available for correct native input parity.
-pub fn cascade_layout(parent: &LayoutSnapshot, mut child: LayoutSnapshot) -> LayoutSnapshot {
-    let mut ancestors = parent.cells.clone();
-    for cell in &mut ancestors {
-        cell.actionable = false;
-    }
-    ancestors.extend(child.cells);
-    child.cells = ancestors;
-    let mut input_regions = parent.input_regions.clone();
-    input_regions.extend(child.input_regions);
-    child.input_regions = input_regions;
-    child.input_extent.min.x = child.input_extent.min.x.min(parent.input_extent.min.x);
-    child.input_extent.min.y = child.input_extent.min.y.min(parent.input_extent.min.y);
-    child.input_extent.max.x = child.input_extent.max.x.max(parent.input_extent.max.x);
-    child.input_extent.max.y = child.input_extent.max.y.max(parent.input_extent.max.y);
-    child.visual_extent.min.x = child.visual_extent.min.x.min(parent.visual_extent.min.x);
-    child.visual_extent.min.y = child.visual_extent.min.y.min(parent.visual_extent.min.y);
-    child.visual_extent.max.x = child.visual_extent.max.x.max(parent.visual_extent.max.x);
-    child.visual_extent.max.y = child.visual_extent.max.y.max(parent.visual_extent.max.y);
-    child
 }
 
 fn translate_logical_point(point: &mut LogicalPoint, delta: LogicalPoint) {
@@ -1070,6 +1188,90 @@ mod tests {
             layout_document_menu_fixed_center(&document, menu, center, work_area, scale, 0.55)
                 .unwrap();
         assert_eq!(layout.origin, center);
+    }
+
+    #[test]
+    fn layered_layout_keeps_complete_frame_inputs_and_active_cells() {
+        let document = RadialDocument::starter();
+        let work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: -1200.0,
+                y: -800.0,
+            },
+            max: PhysicalPoint {
+                x: 1200.0,
+                y: 800.0,
+            },
+        };
+        let scale = ScaleFactor::new(1.25).unwrap();
+        let parent = layout_document_menu_fixed_center(
+            &document,
+            &document.menus[0],
+            PhysicalPoint { x: -260.0, y: 90.0 },
+            work_area,
+            scale,
+            0.55,
+        )
+        .unwrap();
+        let child = layout_document_menu_fixed_center(
+            &document,
+            &document.menus[0],
+            PhysicalPoint { x: 40.0, y: 120.0 },
+            work_area,
+            scale,
+            0.55,
+        )
+        .unwrap();
+        let parent_cell_count = parent.cells.len();
+        let child_cell_count = child.cells.len();
+        let composed =
+            compose_layered_layout(&[(FrameId(7), &parent), (FrameId(11), &child)]).unwrap();
+        let layered = composed.layered_input.as_ref().unwrap();
+        assert_eq!(
+            layered
+                .layers
+                .iter()
+                .map(|layer| layer.frame_id)
+                .collect::<Vec<_>>(),
+            vec![FrameId(7), FrameId(11)]
+        );
+        assert_eq!(layered.layers[0].cells.len(), parent_cell_count);
+        assert_eq!(layered.layers[1].cells.len(), child_cell_count);
+        assert_eq!(composed.cells.len(), child_cell_count);
+        assert!(composed.visual_extent.min.x <= parent.visual_extent.min.x);
+        assert!(composed.visual_extent.max.x >= parent.visual_extent.max.x);
+    }
+
+    #[test]
+    fn cascade_candidates_are_stable_diagonal_and_edge_aware() {
+        let menu = menu(LayoutKind::CircularCells);
+        let work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: -800.0,
+                y: -600.0,
+            },
+            max: PhysicalPoint { x: 800.0, y: 600.0 },
+        };
+        let parent = layout_menu(
+            &menu,
+            PhysicalPoint {
+                x: -500.0,
+                y: -300.0,
+            },
+            work_area,
+            ScaleFactor::new(1.5).unwrap(),
+            0.55,
+        )
+        .unwrap();
+        let candidates = cascade_candidate_centers(&parent, work_area);
+        assert!(candidates.len() >= 2);
+        assert!(candidates[0].x > parent.origin.x);
+        assert!(candidates[0].y > parent.origin.y);
+        assert!(
+            (candidates[0].x - parent.origin.x).abs()
+                < (parent.rim_extent.max.x - parent.rim_extent.min.x) as f64
+                    * parent.scale_factor.get() as f64
+        );
     }
 
     #[test]

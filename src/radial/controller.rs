@@ -12,8 +12,9 @@ use super::dynamic::{FrozenAvailability, FrozenBinding};
 use super::font_cache::{FontLayoutService, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog};
 use super::geometry::{
     CellLayout, FrozenSpatialContext, HitShape, LayoutSnapshot, LogicalPoint, PhysicalPoint,
-    PhysicalRect, ScaleFactor, cascade_layout, layout_document_menu,
-    layout_document_menu_fixed_center, layout_menu, shape_center, translate_layout,
+    PhysicalRect, ScaleFactor, cascade_candidate_centers, compose_layered_layout,
+    layout_document_menu, layout_document_menu_fixed_center, layout_menu, shape_center,
+    translate_layout,
 };
 use super::handoff::{
     DispatchEvent, DispatchIntent, InteractionRequirement, PendingRadialDispatch,
@@ -28,8 +29,8 @@ use super::model::{
 use super::native::{CloseReason, NativeCommand, NativeEvent, NativeHost};
 use super::preparation::{prepare_visual_resources, scene_resource_fingerprint};
 use super::render::{
-    InputOwner, PreparedSceneResources, build_scene, build_scene_prepared,
-    build_scene_prepared_selected, build_scene_prepared_selected_tooltip,
+    InputOwner, PreparedSceneResources, SceneLayer, build_scene, build_scene_prepared,
+    build_scene_prepared_selected, build_scene_prepared_selected_tooltip, compose_layered_scene,
 };
 use super::session::{
     CellRole, FrameId, NavigationCommand, NavigationModifiers, PointerButton, SessionEvent,
@@ -1656,6 +1657,28 @@ impl RadialController {
                     .as_mut()
                     .filter(|active| active.session_id == session_id)
                     .is_some_and(|active| active.tooltip_hover.cancel());
+                if let InputOwner::NavigateToFrame(frame_id) = owner {
+                    let pointer = self
+                        .active
+                        .as_ref()
+                        .filter(|active| active.session_id == session_id)
+                        .map(|active| active.pointer)
+                        .unwrap_or(point);
+                    self.session_event(
+                        &session_id,
+                        SessionEvent::NavigateToFrame {
+                            frame_id,
+                            geometry_generation: layout_generation,
+                            pointer_baseline: pointer,
+                        },
+                        out,
+                    );
+                    self.sync_tooltip_deadline();
+                    if had_tooltip {
+                        self.refresh_active_scene(&session_id, out);
+                    }
+                    return;
+                }
                 let role = self.role_for_button(&session_id, &owner, button);
                 self.session_event(
                     &session_id,
@@ -1681,6 +1704,24 @@ impl RadialController {
                 button,
             } => {
                 if self.layout_generation_for(&session_id) != layout_generation {
+                    return;
+                }
+                if matches!(owner, InputOwner::NavigateToFrame(_)) {
+                    // The corresponding pointer-down already popped the exact
+                    // frame and armed SessionReducer's release-consumption
+                    // latch.  Do not let this release tail enter the restored
+                    // child's actionable geometry.
+                    self.session_event(
+                        &session_id,
+                        SessionEvent::PointerUp {
+                            point,
+                            cell: None,
+                            role: CellRole::Spacer,
+                            button,
+                            geometry_generation: layout_generation,
+                        },
+                        out,
+                    );
                     return;
                 }
                 let role = self.role_for_button(&session_id, &owner, button);
@@ -1897,6 +1938,7 @@ impl RadialController {
                 | SessionEvent::TriggerReleased { .. }
                 | SessionEvent::OpenChild { .. }
                 | SessionEvent::Back { .. }
+                | SessionEvent::NavigateToFrame { .. }
                 | SessionEvent::PageChanged { .. }
                 | SessionEvent::DisplayRelayout { .. }
                 | SessionEvent::Relocated { .. }
@@ -2492,7 +2534,14 @@ impl RadialController {
         let parent_menu_id = active.menu_id.clone();
         let parent_frame_id = active.current_frame_id;
         let session_id = active.session_id.clone();
-        let parent_layout = active.layout.clone();
+        // `active.layout` may be the composite host snapshot.  Placement and
+        // anchor semantics must use the current frame's own extents so an
+        // ancestor union cannot spread later menus across the work area.
+        let parent_layout = active
+            .navigation_layouts
+            .get(&active.current_frame_id)
+            .cloned()
+            .unwrap_or_else(|| active.layout.clone());
         let spatial = active.spatial;
         let pointer = active.pointer;
         let application_always_on_top = active.application_always_on_top;
@@ -2572,39 +2621,50 @@ impl RadialController {
                     });
                     return;
                 };
-                let cascade_anchor = shape_center(&cell_layout.shape, spatial.scale_factor);
-                match layout_document_menu_fixed_center(
-                    &self.document,
-                    &child,
-                    cascade_anchor,
-                    spatial.work_area,
-                    spatial.scale_factor,
-                    0.55,
-                ) {
-                    Ok(layout) => (SubmenuPresentation::Cascade, layout),
-                    Err(cascade_error) => {
-                        match layout_document_menu_fixed_center(
-                            &self.document,
-                            &child,
-                            parent_layout.origin,
-                            spatial.work_area,
-                            spatial.scale_factor,
-                            0.55,
-                        ) {
-                            Ok(layout) => (SubmenuPresentation::SameCenter, layout),
-                            Err(fallback_error) => {
-                                out.push(ControllerEvent::SubmenuPlacementFailed {
-                                    session_id,
-                                    parent_frame_id,
-                                    parent_menu_id,
-                                    child_menu_id: menu_id,
-                                    parent_presentation,
-                                    message: format!(
-                                        "Cascade placement failed: {cascade_error:?}; SameCenter fallback failed: {fallback_error:?}"
-                                    ),
-                                });
-                                return;
-                            }
+                let _authored_anchor = shape_center(&cell_layout.shape, spatial.scale_factor);
+                let mut placement_error = None;
+                let mut placed = None;
+                for candidate in cascade_candidate_centers(&parent_layout, spatial.work_area) {
+                    match layout_document_menu_fixed_center(
+                        &self.document,
+                        &child,
+                        candidate,
+                        spatial.work_area,
+                        spatial.scale_factor,
+                        0.55,
+                    ) {
+                        Ok(layout) => {
+                            placed = Some(layout);
+                            break;
+                        }
+                        Err(error) => placement_error = Some(error),
+                    }
+                }
+                if let Some(layout) = placed {
+                    (SubmenuPresentation::Cascade, layout)
+                } else {
+                    match layout_document_menu_fixed_center(
+                        &self.document,
+                        &child,
+                        parent_layout.origin,
+                        spatial.work_area,
+                        spatial.scale_factor,
+                        0.55,
+                    ) {
+                        Ok(layout) => (SubmenuPresentation::SameCenter, layout),
+                        Err(fallback_error) => {
+                            out.push(ControllerEvent::SubmenuPlacementFailed {
+                                session_id,
+                                parent_frame_id,
+                                parent_menu_id,
+                                child_menu_id: menu_id,
+                                parent_presentation,
+                                message: format!(
+                                    "Cascade placement failed: {:?}; SameCenter fallback failed: {fallback_error:?}",
+                                    placement_error
+                                ),
+                            });
+                            return;
                         }
                     }
                 }
@@ -2624,9 +2684,6 @@ impl RadialController {
             .find(|cell| cell.cell_id.as_str() == "__center")
         {
             center.actionable = true;
-        }
-        if effective_presentation == SubmenuPresentation::Cascade {
-            layout = cascade_layout(&parent_layout, layout);
         }
         let (always_on_top, activate_on_show) =
             resolve_window_options(&self.document, &child, application_always_on_top);
@@ -2773,21 +2830,6 @@ impl RadialController {
             {
                 center.actionable = true;
             }
-            if let Some(parent_frame_id) = frame.parent_frame_id
-                && self
-                    .active
-                    .as_ref()
-                    .filter(|active| &active.session_id == id)
-                    .and_then(|active| active.navigation_presentations.get(&frame.frame_id))
-                    == Some(&SubmenuPresentation::Cascade)
-                && let Some(parent) = self
-                    .active
-                    .as_ref()
-                    .filter(|active| &active.session_id == id)
-                    .and_then(|active| active.navigation_layouts.get(&parent_frame_id))
-            {
-                layout = cascade_layout(parent, layout);
-            }
             let generation = self.layout_generation_for(id);
             let work_area = self
                 .active
@@ -2897,35 +2939,31 @@ impl RadialController {
         let generation = self.layout_generation_for(id);
         let Some(active) = self
             .active
-            .as_ref()
+            .as_mut()
             .filter(|active| &active.session_id == id)
         else {
             return;
         };
+        let selected = active.reducer.state.hovered.as_ref().or(active
+            .reducer
+            .state
+            .selected
+            .as_ref());
+        let visible_tooltip = active
+            .tooltip_hover
+            .visible()
+            .filter(|visible| {
+                visible.session_id == *id
+                    && visible.frame_id == active.current_frame_id
+                    && visible.layout_generation == generation
+            })
+            .map(|visible| visible.cell_id.clone());
+        let (scene, layout) = runtime_present_scene(active, generation, selected, visible_tooltip);
+        active.layout = layout.clone();
         let command = NativeCommand::Present {
             session_id: id.clone(),
-            scene: build_scene_prepared_selected_tooltip(
-                &active.layout,
-                generation,
-                &active.resources,
-                active
-                    .reducer
-                    .state
-                    .hovered
-                    .as_ref()
-                    .or(active.reducer.state.selected.as_ref()),
-                active
-                    .tooltip_hover
-                    .visible()
-                    .filter(|visible| {
-                        visible.session_id == *id
-                            && visible.frame_id == active.current_frame_id
-                            && visible.layout_generation == generation
-                    })
-                    .map(|visible| &visible.cell_id),
-                active.spatial.work_area,
-            ),
-            layout: active.layout.clone(),
+            scene,
+            layout,
             always_on_top: active.always_on_top,
             activate_on_show: active.activate_on_show,
         };
@@ -3266,6 +3304,74 @@ fn owner_cell(owner: InputOwner) -> Option<super::model::CellId> {
         InputOwner::Actionable(id) => Some(id),
         _ => None,
     }
+}
+
+fn runtime_present_scene(
+    active: &ActiveSession,
+    generation: u64,
+    selected: Option<&super::model::CellId>,
+    visible_tooltip: Option<super::model::CellId>,
+) -> (super::render::VectorScene, LayoutSnapshot) {
+    let current_frame = active.reducer.state.stack.last();
+    let current_id = current_frame
+        .map(|frame| frame.frame_id)
+        .unwrap_or(active.current_frame_id);
+    let own_layout = active
+        .navigation_layouts
+        .get(&current_id)
+        .cloned()
+        .unwrap_or_else(|| active.layout.clone());
+    let cascade = active.reducer.state.stack.len() > 1
+        && active.navigation_presentations.get(&current_id) == Some(&SubmenuPresentation::Cascade);
+    if !cascade {
+        return (
+            build_scene_prepared_selected_tooltip(
+                &own_layout,
+                generation,
+                &active.resources,
+                selected,
+                visible_tooltip.as_ref(),
+                active.spatial.work_area,
+            ),
+            own_layout,
+        );
+    }
+    let layers: Vec<_> = active
+        .reducer
+        .state
+        .stack
+        .iter()
+        .filter_map(|frame| {
+            Some(SceneLayer {
+                frame_id: frame.frame_id,
+                layout: active.navigation_layouts.get(&frame.frame_id)?.clone(),
+                resources: active.navigation_resources.get(&frame.frame_id)?.clone(),
+                selected: if frame.frame_id == current_id {
+                    selected.cloned()
+                } else {
+                    frame.selected.clone()
+                },
+                visible_tooltip: (frame.frame_id == current_id)
+                    .then_some(visible_tooltip.clone())
+                    .flatten(),
+            })
+        })
+        .collect();
+    compose_layered_scene(&layers, generation, active.spatial.work_area)
+        .map(|layered| (layered.scene, layered.layout))
+        .unwrap_or_else(|| {
+            (
+                build_scene_prepared_selected_tooltip(
+                    &own_layout,
+                    generation,
+                    &active.resources,
+                    selected,
+                    visible_tooltip.as_ref(),
+                    active.spatial.work_area,
+                ),
+                own_layout,
+            )
+        })
 }
 
 fn monotonic_ms() -> u64 {
@@ -5498,7 +5604,7 @@ mod tests {
     }
 
     #[test]
-    fn cascade_keeps_parent_protective_and_unions_host_extent() {
+    fn cascade_keeps_parent_frame_and_unions_host_extent() {
         let menu = RadialDocument::starter().menus.remove(0);
         let work = PhysicalRect {
             min: PhysicalPoint { x: 0.0, y: 0.0 },
@@ -5524,13 +5630,8 @@ mod tests {
             0.5,
         )
         .unwrap();
-        let parent_count = parent.cells.len();
-        let composed = cascade_layout(&parent, child);
-        assert!(
-            composed.cells[..parent_count]
-                .iter()
-                .all(|cell| !cell.actionable)
-        );
+        let composed =
+            compose_layered_layout(&[(FrameId(1), &parent), (FrameId(2), &child)]).unwrap();
         assert!(composed.input_extent.min.x <= parent.input_extent.min.x);
         assert!(composed.input_extent.max.x >= parent.input_extent.max.x);
         let HitShape::Circle { center, .. } = parent.cells[0].shape else {
@@ -5538,7 +5639,7 @@ mod tests {
         };
         assert_eq!(
             super::super::render::input_owner(&composed, center, false),
-            InputOwner::Protective
+            InputOwner::NavigateToFrame(FrameId(1))
         );
     }
 

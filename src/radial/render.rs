@@ -1,7 +1,10 @@
 use super::assets::{PreparedAssetSnapshot, PreparedImage, PreparedMedia, reference_identity};
 use super::font_cache::{FontDiagnostic, PreparedTextLayout, ScriptClass};
-use super::geometry::{HitShape, LayoutSnapshot, LogicalPoint, LogicalRect, PhysicalRect};
+use super::geometry::{
+    HitShape, LayoutSnapshot, LogicalPoint, LogicalRect, PhysicalRect, compose_layered_layout,
+};
 use super::model::{CellId, MediaReference, Override};
+use super::session::FrameId;
 use super::tooltip::{PreparedTooltip, place_tooltip};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -75,8 +78,85 @@ pub struct PreparedSceneResources {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputOwner {
     Actionable(CellId),
+    /// An exposed ancestor cell navigates to the exact retained frame.  It is
+    /// never an action owner, even when the authored ancestor cell is
+    /// actionable in its own frame.
+    NavigateToFrame(FrameId),
     Protective,
     Exterior,
+}
+
+/// One independently renderable retained frame in a shared Cascade scene.
+/// The layout and resources are intentionally kept per-frame so an ancestor's
+/// skin, media and text cannot be replaced by the active child's style.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneLayer {
+    pub frame_id: FrameId,
+    pub layout: LayoutSnapshot,
+    pub resources: PreparedSceneResources,
+    pub selected: Option<CellId>,
+    pub visible_tooltip: Option<CellId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredScene {
+    pub layout: LayoutSnapshot,
+    pub scene: VectorScene,
+    pub frame_ids: Vec<FrameId>,
+}
+
+/// Compose oldest-ancestor-first layers into one visual scene and one
+/// composite input snapshot.  This is the shared boundary used by runtime,
+/// native authoring preview and embedded preview; callers only choose which
+/// retained frames belong to the current Cascade path.
+pub fn compose_layered_scene(
+    layers: &[SceneLayer],
+    generation: u64,
+    work_area: PhysicalRect,
+) -> Option<LayeredScene> {
+    let layout_inputs: Vec<_> = layers
+        .iter()
+        .map(|layer| (layer.frame_id, &layer.layout))
+        .collect();
+    let layout = compose_layered_layout(&layout_inputs)?;
+    let mut bounds = layout.visual_extent;
+    let mut primitives = Vec::new();
+    for (index, layer) in layers.iter().enumerate() {
+        let child_scene = build_scene_prepared_selected_tooltip(
+            &layer.layout,
+            generation,
+            &layer.resources,
+            layer.selected.as_ref(),
+            (index == layers.len().saturating_sub(1))
+                .then_some(layer.visible_tooltip.as_ref())
+                .flatten(),
+            work_area,
+        );
+        bounds = union_rect(bounds, child_scene.bounds);
+        // Only the oldest scene contributes the static boundary.  Later
+        // boundaries would incorrectly split the retained compositor cache;
+        // their complete primitives still remain in oldest-to-newest order.
+        if index == 0 {
+            primitives.extend(child_scene.primitives);
+        } else {
+            primitives.extend(
+                child_scene
+                    .primitives
+                    .into_iter()
+                    .filter(|primitive| !matches!(primitive, VectorPrimitive::StaticBoundary)),
+            );
+        }
+    }
+    Some(LayeredScene {
+        layout,
+        scene: VectorScene {
+            bounds,
+            generation,
+            shape_quality: layers.last()?.layout.style.shape_quality,
+            primitives,
+        },
+        frame_ids: layers.iter().map(|layer| layer.frame_id).collect(),
+    })
 }
 
 pub fn build_scene(layout: &LayoutSnapshot, generation: u64) -> VectorScene {
@@ -559,6 +639,9 @@ fn rgba_from_style(value: super::model::ColorRgba) -> Rgba {
 
 /// Input ownership is geometric and deliberately independent from rendered alpha.
 pub fn input_owner(layout: &LayoutSnapshot, point: LogicalPoint, ancestor: bool) -> InputOwner {
+    if let Some(layered) = &layout.layered_input {
+        return layered_input_owner(layered, point);
+    }
     if !inside_rect(layout.input_extent, point) || !inside_owned_background(layout, point) {
         return InputOwner::Exterior;
     }
@@ -590,6 +673,50 @@ pub fn input_owner(layout: &LayoutSnapshot, point: LogicalPoint, ancestor: bool)
     } else {
         InputOwner::Exterior
     }
+}
+
+fn layered_input_owner(layered: &super::geometry::LayeredInput, point: LogicalPoint) -> InputOwner {
+    let active_index = layered.layers.len().saturating_sub(1);
+    for (index, layer) in layered.layers.iter().enumerate().rev() {
+        if !inside_rect(layer.input_extent, point)
+            || !layer
+                .input_regions
+                .iter()
+                .any(|shape| shape_contains(shape, point))
+        {
+            continue;
+        }
+        if index != active_index {
+            if layer
+                .cells
+                .iter()
+                .rev()
+                .any(|cell| shape_contains(&cell.shape, point))
+            {
+                return InputOwner::NavigateToFrame(layer.frame_id);
+            }
+            // Every newer layer's owned footprint, including transparent
+            // center/item gaps, protects against ancestor click-through.
+            return InputOwner::Protective;
+        }
+        if let Some(cell) = layer
+            .cells
+            .iter()
+            .rev()
+            .find(|cell| shape_contains(&cell.shape, point))
+        {
+            return if cell.actionable {
+                InputOwner::Actionable(cell.cell_id.clone())
+            } else {
+                InputOwner::Protective
+            };
+        }
+        // A Cascade child owns its entire wheel footprint for hit routing;
+        // this keeps its gaps protective even when authored fill settings are
+        // disabled and prevents an ancestor from receiving the same gesture.
+        return InputOwner::Protective;
+    }
+    InputOwner::Exterior
 }
 
 fn inside_owned_background(layout: &LayoutSnapshot, p: LogicalPoint) -> bool {
@@ -636,8 +763,11 @@ fn shape_contains(shape: &HitShape, p: LogicalPoint) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::radial::geometry::{PhysicalPoint, PhysicalRect, ScaleFactor, layout_menu};
+    use crate::radial::geometry::{
+        PhysicalPoint, PhysicalRect, ScaleFactor, layout_menu, translate_layout,
+    };
     use crate::radial::model::RadialDocument;
+    use crate::radial::session::FrameId;
 
     fn layout() -> LayoutSnapshot {
         layout_menu(
@@ -651,6 +781,56 @@ mod tests {
             0.5,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn layered_scene_preserves_frame_identity_and_frontmost_hit_priority() {
+        let parent = layout();
+        let mut child = layout();
+        translate_layout(&mut child, PhysicalPoint { x: 160.0, y: 18.0 }).unwrap();
+        let parent_resources = PreparedSceneResources::default();
+        let child_resources = PreparedSceneResources::default();
+        let layers = vec![
+            SceneLayer {
+                frame_id: FrameId(4),
+                layout: parent.clone(),
+                resources: parent_resources,
+                selected: None,
+                visible_tooltip: None,
+            },
+            SceneLayer {
+                frame_id: FrameId(9),
+                layout: child.clone(),
+                resources: child_resources,
+                selected: None,
+                visible_tooltip: None,
+            },
+        ];
+        let layered = compose_layered_scene(
+            &layers,
+            17,
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint { x: 600.0, y: 600.0 },
+            },
+        )
+        .unwrap();
+        let parent_point = match parent.cells[0].shape {
+            HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => center,
+        };
+        assert_eq!(
+            input_owner(&layered.layout, parent_point, false),
+            InputOwner::NavigateToFrame(FrameId(4))
+        );
+        let child_point = match child.cells[0].shape {
+            HitShape::Circle { center, .. } | HitShape::Wedge { center, .. } => center,
+        };
+        assert!(matches!(
+            input_owner(&layered.layout, child_point, false),
+            InputOwner::Actionable(_)
+        ));
+        assert_eq!(layered.frame_ids, vec![FrameId(4), FrameId(9)]);
+        assert!(layered.scene.primitives.len() > parent.cells.len());
     }
     #[test]
     fn transparent_pixels_inside_a_circle_still_belong_to_the_cell() {

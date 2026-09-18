@@ -8,8 +8,8 @@ use super::{AuthoringRequestId, AuthoringSessionId, DraftGeneration, NativePrevi
 use crate::radial::context::{InvocationContext, WindowIdentity};
 use crate::radial::diagnostics::RadialDiagnostic;
 use crate::radial::geometry::{
-    FrozenSpatialContext, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_layout, shape_center,
-    translate_layout,
+    FrozenSpatialContext, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_candidate_centers,
+    shape_center, translate_layout,
 };
 use crate::radial::model::{
     CellContent, CellId, InvocationId, MenuId, RadialDocument, SessionId, SubmenuPresentation,
@@ -20,7 +20,10 @@ use crate::radial::preparation::{
     PreparedPlacement, PreviewFramePreparer, PreviewPlacement, PreviewProjection,
     ensure_preview_center_back, synthetic_preview_dynamic,
 };
-use crate::radial::render::{build_scene_prepared_selected, build_scene_prepared_selected_tooltip};
+use crate::radial::render::{
+    SceneLayer, build_scene_prepared_selected, build_scene_prepared_selected_tooltip,
+    compose_layered_scene,
+};
 use crate::radial::session::{CellRole, FrameId, SessionEvent, SessionIntent, SessionReducer};
 use crate::radial::tooltip::{
     TooltipDeadlineScheduler, TooltipHoverState, TooltipIdentity, TooltipPreferences, monotonic_ms,
@@ -643,21 +646,6 @@ impl NativePreviewCoordinator {
             &projection,
         )?;
         frame.layout = layout;
-        if let Some(parent_resources) = self
-            .active
-            .as_ref()
-            .and_then(|active| active.reducer.state.stack.last())
-            .and_then(|current| current.parent_frame_id)
-            .and_then(|parent| {
-                self.active
-                    .as_ref()?
-                    .navigation_frames
-                    .get(&parent)
-                    .map(|frame| frame.frame.resources.clone())
-            })
-        {
-            frame.resources = merge_preview_resources(&parent_resources, &frame.resources);
-        }
         let current_generation = self
             .active
             .as_ref()
@@ -672,7 +660,6 @@ impl NativePreviewCoordinator {
         active.frame = frame;
         active.projection = projection;
         if let Some(frame_state) = active.navigation_frames.get_mut(&frame_id) {
-            frame_state.frame = active.frame.clone();
             frame_state.projection = active.projection.clone();
         }
         self.sync_tooltip_deadline()?;
@@ -877,43 +864,73 @@ impl NativePreviewCoordinator {
                             || previous_visible.is_some(),
                     )
                 }
-                NativeEvent::PointerDown { point, button, .. } => {
+                NativeEvent::PointerDown {
+                    point,
+                    button,
+                    owner,
+                    ..
+                } => {
                     active.tooltip_hover.cancel();
-                    let cell = active
-                        .frame
-                        .layout
-                        .hit_test(point)
-                        .map(|cell| cell.cell_id.clone());
-                    let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
-                        active_cell_role(active, cell, Some(button))
-                    });
-                    let intents = active.reducer.reduce(SessionEvent::PointerDown {
-                        point,
-                        cell,
-                        role,
-                        button,
-                        geometry_generation: generation,
-                    });
-                    (intents, previous_visible.is_some())
+                    if let crate::radial::render::InputOwner::NavigateToFrame(frame_id) = owner {
+                        let intents = active.reducer.reduce(SessionEvent::NavigateToFrame {
+                            frame_id,
+                            geometry_generation: generation,
+                            pointer_baseline: point,
+                        });
+                        (intents, previous_visible.is_some())
+                    } else {
+                        let cell = active
+                            .frame
+                            .layout
+                            .hit_test(point)
+                            .map(|cell| cell.cell_id.clone());
+                        let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
+                            active_cell_role(active, cell, Some(button))
+                        });
+                        let intents = active.reducer.reduce(SessionEvent::PointerDown {
+                            point,
+                            cell,
+                            role,
+                            button,
+                            geometry_generation: generation,
+                        });
+                        (intents, previous_visible.is_some())
+                    }
                 }
-                NativeEvent::PointerUp { point, button, .. } => {
+                NativeEvent::PointerUp {
+                    point,
+                    button,
+                    owner,
+                    ..
+                } => {
                     active.tooltip_hover.cancel();
-                    let cell = active
-                        .frame
-                        .layout
-                        .hit_test(point)
-                        .map(|cell| cell.cell_id.clone());
-                    let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
-                        active_cell_role(active, cell, Some(button))
-                    });
-                    let intents = active.reducer.reduce(SessionEvent::PointerUp {
-                        point,
-                        cell,
-                        role,
-                        button,
-                        geometry_generation: generation,
-                    });
-                    (intents, previous_visible.is_some())
+                    if matches!(owner, crate::radial::render::InputOwner::NavigateToFrame(_)) {
+                        let intents = active.reducer.reduce(SessionEvent::PointerUp {
+                            point,
+                            cell: None,
+                            role: CellRole::Spacer,
+                            button,
+                            geometry_generation: generation,
+                        });
+                        (intents, previous_visible.is_some())
+                    } else {
+                        let cell = active
+                            .frame
+                            .layout
+                            .hit_test(point)
+                            .map(|cell| cell.cell_id.clone());
+                        let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
+                            active_cell_role(active, cell, Some(button))
+                        });
+                        let intents = active.reducer.reduce(SessionEvent::PointerUp {
+                            point,
+                            cell,
+                            role,
+                            button,
+                            geometry_generation: generation,
+                        });
+                        (intents, previous_visible.is_some())
+                    }
                 }
                 NativeEvent::Navigate {
                     command, modifiers, ..
@@ -1057,28 +1074,23 @@ impl NativePreviewCoordinator {
                         && identity.frame_id == active.current_frame_id
                         && identity.layout_generation == active.layout_generation
                 })
-                .map(|identity| &identity.cell_id);
-            active.frame.scene = build_scene_prepared_selected_tooltip(
-                &active.frame.layout,
-                active.layout_generation,
-                &active.frame.resources,
-                selected.as_ref(),
-                visible_tooltip,
-                active.frame.work_area,
-            );
+                .map(|identity| identity.cell_id.clone());
             if let Some(reducer_frame) = active.reducer.state.stack.last_mut() {
                 reducer_frame.page = active.frame.page;
                 reducer_frame.page_count = active.frame.page_count;
             }
+            let (scene, layout) =
+                preview_present_scene(active, selected.as_ref(), visible_tooltip.clone());
+            active.frame.layout = layout.clone();
+            active.frame.scene = scene.clone();
             if let Some(frame_state) = active.navigation_frames.get_mut(&active.current_frame_id) {
-                frame_state.frame = active.frame.clone();
                 frame_state.projection = active.projection.clone();
                 frame_state.selected = selected;
             }
             let command = NativeCommand::Present {
                 session_id: active.native_session.clone(),
-                scene: active.frame.scene.clone(),
-                layout: active.frame.layout.clone(),
+                scene,
+                layout,
                 always_on_top: true,
                 activate_on_show: false,
             };
@@ -1118,7 +1130,11 @@ impl NativePreviewCoordinator {
                 Arc::clone(&active.document),
                 active.menu_id.clone(),
                 parent_definition,
-                active.frame.layout.clone(),
+                active
+                    .navigation_frames
+                    .get(&active.current_frame_id)
+                    .map(|state| state.frame.layout.clone())
+                    .unwrap_or_else(|| active.frame.layout.clone()),
                 active.current_frame_id,
                 active.spatial,
                 active.projection.clone(),
@@ -1149,7 +1165,15 @@ impl NativePreviewCoordinator {
                     .iter()
                     .find(|cell| &cell.cell_id == cell_id)
                     .ok_or("preview submenu cell geometry is unavailable")?;
-                let anchor = shape_center(&parent_cell.shape, spatial.scale_factor);
+                // Keep the authored cell only as the navigation trigger.  The
+                // shared Cascade placement uses a modest diagonal derived from
+                // the complete parent extents, not a selected-cell-spread
+                // offset.
+                let _authored_anchor = shape_center(&parent_cell.shape, spatial.scale_factor);
+                let anchor = cascade_candidate_centers(&parent_layout, spatial.work_area)
+                    .into_iter()
+                    .next()
+                    .unwrap_or(parent_layout.origin);
                 projection.placement = PreviewPlacement::Cascade {
                     fallback_center: parent_layout.origin,
                 };
@@ -1171,16 +1195,7 @@ impl NativePreviewCoordinator {
         )?;
         ensure_preview_center_back(&mut frame.layout, &child_menu);
         if effective_presentation == SubmenuPresentation::Cascade {
-            if frame.placement == PreparedPlacement::Cascade {
-                let parent = self
-                    .active
-                    .as_ref()
-                    .and_then(|active| active.navigation_frames.get(&parent_frame_id))
-                    .ok_or("preview parent frame was not retained")?;
-                frame.resources =
-                    merge_preview_resources(&parent.frame.resources, &frame.resources);
-                frame.layout = cascade_layout(&parent_layout, frame.layout);
-            } else {
+            if frame.placement != PreparedPlacement::Cascade {
                 effective_presentation = SubmenuPresentation::SameCenter;
             }
         }
@@ -1374,17 +1389,6 @@ impl NativePreviewCoordinator {
             .find(|menu| menu.id == frame_state.menu_id)
             .ok_or("preview frame menu is unavailable")?;
         ensure_preview_center_back(&mut frame.layout, current_menu);
-        if frame_state.effective_presentation == SubmenuPresentation::Cascade
-            && let Some(parent_frame_id) = reducer_frame.parent_frame_id
-        {
-            let parent = self
-                .active
-                .as_ref()
-                .and_then(|active| active.navigation_frames.get(&parent_frame_id))
-                .ok_or("preview Cascade parent frame is unavailable")?;
-            frame.resources = merge_preview_resources(&parent.frame.resources, &frame.resources);
-            frame.layout = cascade_layout(&parent.frame.layout, frame.layout);
-        }
         frame.scene = build_scene_prepared_selected(
             &frame.layout,
             next_generation,
@@ -1604,15 +1608,80 @@ impl Drop for NativePreviewCoordinator {
     }
 }
 
-pub(crate) fn merge_preview_resources(
-    parent: &crate::radial::render::PreparedSceneResources,
-    child: &crate::radial::render::PreparedSceneResources,
-) -> crate::radial::render::PreparedSceneResources {
-    let mut merged = parent.clone();
-    merged.media.extend(child.media.clone());
-    merged.text.extend(child.text.clone());
-    merged.tooltips.extend(child.tooltips.clone());
-    merged
+fn preview_present_scene(
+    active: &ActivePreview,
+    selected: Option<&CellId>,
+    visible_tooltip: Option<CellId>,
+) -> (
+    crate::radial::render::VectorScene,
+    crate::radial::geometry::LayoutSnapshot,
+) {
+    let current_id = active.current_frame_id;
+    let Some(current_state) = active.navigation_frames.get(&current_id) else {
+        return (
+            build_scene_prepared_selected_tooltip(
+                &active.frame.layout,
+                active.layout_generation,
+                &active.frame.resources,
+                selected,
+                visible_tooltip.as_ref(),
+                active.spatial.work_area,
+            ),
+            active.frame.layout.clone(),
+        );
+    };
+    let cascade = active.reducer.state.stack.len() > 1
+        && active.effective_presentation == SubmenuPresentation::Cascade;
+    if !cascade {
+        return (
+            build_scene_prepared_selected_tooltip(
+                &current_state.frame.layout,
+                active.layout_generation,
+                &current_state.frame.resources,
+                selected,
+                visible_tooltip.as_ref(),
+                active.spatial.work_area,
+            ),
+            current_state.frame.layout.clone(),
+        );
+    }
+    let layers: Vec<_> = active
+        .reducer
+        .state
+        .stack
+        .iter()
+        .filter_map(|frame| {
+            let state = active.navigation_frames.get(&frame.frame_id)?;
+            Some(SceneLayer {
+                frame_id: frame.frame_id,
+                layout: state.frame.layout.clone(),
+                resources: state.frame.resources.clone(),
+                selected: if frame.frame_id == current_id {
+                    selected.cloned()
+                } else {
+                    frame.selected.clone()
+                },
+                visible_tooltip: (frame.frame_id == current_id)
+                    .then_some(visible_tooltip.clone())
+                    .flatten(),
+            })
+        })
+        .collect();
+    compose_layered_scene(&layers, active.layout_generation, active.spatial.work_area)
+        .map(|layered| (layered.scene, layered.layout))
+        .unwrap_or_else(|| {
+            (
+                build_scene_prepared_selected_tooltip(
+                    &current_state.frame.layout,
+                    active.layout_generation,
+                    &current_state.frame.resources,
+                    selected,
+                    visible_tooltip.as_ref(),
+                    active.spatial.work_area,
+                ),
+                current_state.frame.layout.clone(),
+            )
+        })
 }
 
 fn active_cell_role(
@@ -2424,7 +2493,7 @@ mod tests {
     }
 
     #[test]
-    fn native_preview_cascade_that_cannot_fit_locally_falls_back_to_frozen_center() {
+    fn native_preview_cascade_uses_inward_candidate_and_preserves_fallback() {
         let (mut coordinator, _, events) = coordinator();
         let mut document = RadialDocument::starter();
         let root = document.default_menu_id.clone();
@@ -2440,8 +2509,9 @@ mod tests {
             .iter_mut()
             .find(|menu| menu.id.as_str() == "starter-favorites")
             .unwrap();
+        let favorites_id = favorites.id.clone();
         favorites.submenu_presentation = SubmenuPresentation::SameCenter;
-        favorites.rings[0].radius = 500.0;
+        favorites.rings[0].radius = 250.0;
         let document = Arc::new(document);
         let mut context = frozen_test_context();
         context.visible_center = PhysicalPoint {
@@ -2474,14 +2544,44 @@ mod tests {
                 .iter()
                 .all(|notice| matches!(notice, NativePreviewNotice::Diagnostics { .. }))
         );
-        let child = coordinator.active.as_ref().unwrap();
-        assert_eq!(child.lease, lease);
-        assert_eq!(
-            child.effective_presentation,
-            SubmenuPresentation::SameCenter
-        );
-        assert_eq!(child.frame.placement, PreparedPlacement::SameCenterFallback);
-        assert_eq!(child.frame.layout.origin, context.visible_center);
+        {
+            let child = coordinator.active.as_ref().unwrap();
+            assert_eq!(child.lease, lease);
+            assert_eq!(child.effective_presentation, SubmenuPresentation::Cascade);
+            assert_eq!(child.frame.placement, PreparedPlacement::Cascade);
+            assert_ne!(child.frame.layout.origin, context.visible_center);
+        }
+
+        // Keep the explicit fallback contract covered independently from the
+        // edge-aware candidate selected by the native preview coordinator.
+        let favorites_menu = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == favorites_id)
+            .unwrap();
+        let fallback = coordinator
+            .prepare_frame(
+                document.as_ref(),
+                &favorites_id,
+                PhysicalPoint {
+                    x: 5_000.0,
+                    y: 5_000.0,
+                },
+                context.work_area,
+                context.scale_factor,
+                99,
+                None,
+                &PreviewProjection {
+                    placement: PreviewPlacement::Cascade {
+                        fallback_center: context.visible_center,
+                    },
+                    dynamic: synthetic_preview_dynamic(favorites_menu),
+                    ..PreviewProjection::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(fallback.placement, PreparedPlacement::SameCenterFallback);
+        assert_physical_point_close(fallback.layout.origin, context.visible_center);
     }
 
     #[test]

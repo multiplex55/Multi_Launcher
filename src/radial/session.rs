@@ -108,6 +108,10 @@ pub struct SessionState {
     pub arming_baseline: ArmingBaseline,
     pub modifiers: NavigationModifiers,
     pub dwell_candidate: Option<(CellId, u64)>,
+    /// Set when an exposed Cascade ancestor consumes a complete pointer
+    /// gesture.  The following release is ignored even if the native host has
+    /// already presented the restored child frame.
+    pub consume_next_release: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -144,6 +148,11 @@ pub enum SessionEvent {
         pointer_baseline: LogicalPoint,
     },
     Back {
+        geometry_generation: u64,
+        pointer_baseline: LogicalPoint,
+    },
+    NavigateToFrame {
+        frame_id: FrameId,
         geometry_generation: u64,
         pointer_baseline: LogicalPoint,
     },
@@ -284,6 +293,7 @@ impl SessionReducer {
                 },
                 modifiers: NavigationModifiers::default(),
                 dwell_candidate: None,
+                consume_next_release: false,
             },
             invocation_id: invocation,
             next_dispatch: 1,
@@ -368,6 +378,11 @@ impl SessionReducer {
                 button,
                 geometry_generation,
             } => {
+                if self.state.consume_next_release {
+                    self.state.consume_next_release = false;
+                    self.state.pending_press = None;
+                    return vec![];
+                }
                 let Some(mut press) = self.state.pending_press.take() else {
                     return vec![];
                 };
@@ -519,6 +534,41 @@ impl SessionReducer {
                 } else {
                     vec![]
                 }
+            }
+            SessionEvent::NavigateToFrame {
+                frame_id,
+                geometry_generation,
+                pointer_baseline,
+            } => {
+                let Some(index) = self
+                    .state
+                    .stack
+                    .iter()
+                    .position(|frame| frame.frame_id == frame_id)
+                else {
+                    return vec![];
+                };
+                if index + 1 == self.state.stack.len() {
+                    self.state.consume_next_release = true;
+                    self.disarm(pointer_baseline, geometry_generation);
+                    return vec![];
+                }
+                self.state.stack.truncate(index + 1);
+                if !self.bump_generation() {
+                    return self.cancel_tree();
+                }
+                if let Some(frame) = self.state.stack.last_mut() {
+                    frame.geometry_generation = geometry_generation;
+                }
+                let restored = self
+                    .state
+                    .stack
+                    .last()
+                    .and_then(|frame| frame.selected.clone());
+                self.disarm(pointer_baseline, geometry_generation);
+                self.state.selected = restored;
+                self.state.consume_next_release = true;
+                vec![SessionIntent::Back]
             }
             SessionEvent::PageChanged {
                 mut page,
@@ -1329,6 +1379,48 @@ mod tests {
         assert_eq!(reducer.state.selected, Some(CellId::new("parent")));
         assert_eq!(reducer.state.stack[0].selected, Some(CellId::new("parent")));
         assert_eq!(reducer.state.stack[0].scale_factor, 1.5);
+    }
+
+    #[test]
+    fn exposed_ancestor_navigation_uses_frame_id_and_consumes_release_tail() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("repeated"),
+            origin: PhysicalPoint { x: 20.0, y: 10.0 },
+            geometry_generation: 11,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        let first_child = reducer.state.stack[1].frame_id;
+        reducer.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("repeated"),
+            origin: PhysicalPoint { x: 40.0, y: 20.0 },
+            geometry_generation: 12,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        let second_child = reducer.state.stack[2].frame_id;
+        assert_ne!(first_child, second_child);
+        assert_eq!(
+            reducer.reduce(SessionEvent::NavigateToFrame {
+                frame_id: first_child,
+                geometry_generation: 13,
+                pointer_baseline: p(4.0, 5.0),
+            }),
+            vec![SessionIntent::Back]
+        );
+        assert_eq!(reducer.state.stack.len(), 2);
+        assert_eq!(reducer.state.stack[1].frame_id, first_child);
+        assert_eq!(reducer.state.stack[1].menu_id, MenuId::new("repeated"));
+        assert_eq!(
+            reducer.reduce(SessionEvent::PointerUp {
+                point: p(4.0, 5.0),
+                cell: Some(CellId::new("action")),
+                role: CellRole::Action,
+                button: PointerButton::Primary,
+                geometry_generation: 13,
+            }),
+            Vec::new()
+        );
+        assert!(!reducer.state.consume_next_release);
     }
 
     #[test]
