@@ -1,0 +1,55 @@
+Implement the approved Multi Launcher radial stabilization pass.
+
+Read these handoff files completely before editing:
+1. multi_launcher_radial_stabilization_codex_plan.md
+2. multi_launcher_radial_stabilization_approved_requirements.md
+3. multi_launcher_radial_stabilization_source_notes.md
+4. multi_launcher_radial_stabilization_acceptance.md
+
+The master plan is the implementation contract. All product choices have been approved and I have said Proceed. Do not repeat the questionnaire or ask routine API/layout decisions.
+
+Read the project's AGENTS.md, current radial ledgers, and existing agent configuration. Work on the current feature branch. Preserve the already-recorded immutable feature baseline; record a separate STABILIZATION_START_HEAD and initial working-tree identity. Do not reset the branch or restart the original M0–M6/R0–R5 initiative.
+
+The inspected application snapshot is multi_launcher(20260918-003954).zip. Use the actual current checkout and preserve newer legitimate changes. The supplied RM4 source/screenshots and corresponding docs/references/ material are visual/functionality references only; do not execute reference scripts or redistribute unlicensed assets.
+
+IMPORTANT NEW OBSERVATIONS
+
+My launcher chord is Shift+Alt+Win+End, mapped to one key action. I release all keys between invocations. The mapping's precise firmware/software producer has not been established; do not assume it is AutoHotkey, Talon, or an ordinary raw physical chord.
+
+Tap-to-hide works when BOTH Designer and native desktop preview are closed. Isolate Designer-only, preview-active, and supported combined states. Preserve the working baseline. Designer X is delayed/ineffective, but the main launcher stays responsive. Holding the chord to close the runtime radial also misbehaves; diagnose that as its own runtime lifecycle. I do not think a save/import/preview was pending, but the broken UI made it unclear.
+
+CORE REPAIR REQUIREMENTS
+
+- Short tap toggles only the grid/list immediately on release before the existing threshold, including while focused and with Designer/preview open. Hold toggles only the runtime radial. No focus-away click, mouse wiggle, extra threshold delay, or duplicate listener.
+- Existing event wakeup and independent tap/hold code already exist. Trace actual decisions, viewport/HWND targets, pending generations, and later restore effects rather than blindly repeating the older missing-repaint diagnosis.
+- Designer close must be intentional and terminal: clean X closes promptly, dirty close prompts once, disposable preparation can be cancelled, accepted durable work finishes safely with visible status and remembered close intent. Failed sends/requests cannot strand disabled controls. Preserve current confirmed Save/Apply/Cancel semantics.
+- Correct tooltip milli/logical/DPI measurement at the producer. Ordinary tooltips are text-sized next to the cell, not monitor-height. Full text and safe wrapping remain. Hover must not hide/re-show unchanged input hosts, move stale menu pixels, reset its own structural generation, or resurrect old surfaces.
+- Repair the actual egui layout: bounded vertical children, sensible clipping/scrolling, one selected visual board, compact menu selector/breadcrumbs, optional tree/advanced inspector hidden initially in the visual workspace and remembered thereafter. No letter-by-letter columns or offscreen essential controls. Reset Designer layout affects UI preferences only.
+- Reuse working direct-editing pieces: click select, right-click compact properties, double-click submenu edit, center-plus/empty-slot creation, safe drag/drop, breadcrumbs/Back, undo/redo. Design clicks never run leaf actions, and dynamic entries retain their source.
+- SameCenter stays the default; no repeat mass conversion. Cascade draws complete parent/child menu skins in a close overlapping stack, active child frontmost. Clicking an exposed ancestor navigates back only; that same gesture never executes its action.
+- Preserve Screen Draw recovery/emergency priority, root geometry/query/selection, Universal Actions, stable IDs, current renderer, authoring transactions, persistence, and existing functionality.
+
+SLOW-MACHINE WORKFLOW — MANDATORY
+
+Implement coherent batches and add/refactor tests alongside them. Do not run Cargo after every control edit. Use the S0–S5 milestones in the master plan and maintain docs/plans/radial-stabilization.md as a compact persistent ledger.
+
+Only one writer and one Cargo/build/Nextest process tree may use the shared checkout/target at a time. Reviewers are read-only and do not launch their own builds. Do not mutate the source snapshot while a verification job is running.
+
+For a still-running job:
+- First observation about 10 minutes after launch (600 seconds).
+- Second observation about 15 minutes later (900 seconds).
+- Subsequent observations about every 20 minutes (1,200 seconds).
+
+Prefer actual completion notifications or blocking waits that return when done. Handle an actual completion/failure event immediately. These are observation intervals, NOT kill deadlines or application timers. Do not fall back to frequent seconds-based polling, repeated log tails, or process checks.
+
+Use a real supported persistent session/job/wait mechanism within tool limits; do not invent callbacks or unsupported wait options. Retain command, source snapshot, session/PID and start identity, durable stdout/stderr, true exit code, and next observation time. Reattach to the same job. Never start a duplicate because it is quiet, run cargo clean because compilation is slow, or change test timeouts to manufacture a pass.
+
+Collect failures together with --no-fail-fast in coherent focused gates where supported. Keep durable logs so a lost terminal summary does not force another build. Run the complete required Cargo Nextest suite near completion, and repeat it after relevant remediation invalidates the source snapshot.
+
+Tests must exercise production viewport/layout/render/close paths, not only serialization, helper enums, or AccessKit label presence. Use fake clocks/input/transport for unit tests; no real desktop input or long sleeps in default automated tests. Native acceptance must separately reproduce my actual conditions and screenshots.
+
+Continue through source audit, S1 lifecycle fixes, S2 tooltip/hover repairs, S3 visual Designer, S4 overlapping Cascade, and S5 integrated verification/review. Commit coherent verified changes and preserve unrelated user work.
+
+Do not expand feature scope during stabilization. Do not call a native gate passed without running it, cite old green tests as proof of the new repair, or invent performance numbers. If a Windows acceptance host is unavailable, finish unblocked work and report the exact native evidence gap instead of claiming the whole feature is verified.
+
+Final report: actual diagnosed causes, implemented behavior, reused architecture, tests/commands/results and source identity, native checklist evidence, measured responsiveness/resources, review findings/remediation, real commit hashes, and genuinely remaining issues.
