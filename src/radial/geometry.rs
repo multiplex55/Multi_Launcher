@@ -35,6 +35,39 @@ pub struct PhysicalRect {
     pub max: PhysicalPoint,
 }
 
+/// Stable diagonal orientation for one Cascade chain.  The signs are kept
+/// typed rather than inferred from each parent so a chain does not flip when
+/// a later parent crosses the work-area midpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CascadeDirection {
+    pub horizontal: i8,
+    pub vertical: i8,
+}
+
+impl CascadeDirection {
+    pub const fn new(horizontal: i8, vertical: i8) -> Self {
+        Self {
+            horizontal: if horizontal < 0 { -1 } else { 1 },
+            vertical: if vertical < 0 { -1 } else { 1 },
+        }
+    }
+
+    fn from_parent(parent: &LayoutSnapshot, work_area: PhysicalRect) -> Self {
+        Self::new(
+            if parent.origin.x <= (work_area.min.x + work_area.max.x) * 0.5 {
+                1
+            } else {
+                -1
+            },
+            if parent.origin.y <= (work_area.min.y + work_area.max.y) * 0.5 {
+                1
+            } else {
+                -1
+            },
+        )
+    }
+}
+
 /// Spatial inputs captured for one radial session. The requested anchor is
 /// retained for diagnostics; navigation is positioned from `visible_center`.
 /// Work area and scale stay frozen for the lifetime of this topology epoch.
@@ -804,42 +837,58 @@ pub fn cascade_candidate_centers(
     parent: &LayoutSnapshot,
     work_area: PhysicalRect,
 ) -> Vec<PhysicalPoint> {
+    cascade_candidate_centers_with_direction(parent, work_area, None)
+        .into_iter()
+        .map(|(point, _)| point)
+        .collect()
+}
+
+/// Return the same candidate order as [`cascade_candidate_centers`], while
+/// retaining the direction used for each candidate.  A supplied direction is
+/// the chain's first-edge choice and is intentionally preferred even when a
+/// later parent lies on the opposite side of the work-area midpoint.
+pub fn cascade_candidate_centers_with_direction(
+    parent: &LayoutSnapshot,
+    work_area: PhysicalRect,
+    preferred: Option<CascadeDirection>,
+) -> Vec<(PhysicalPoint, CascadeDirection)> {
     let parent_width = (parent.rim_extent.max.x - parent.rim_extent.min.x).abs()
         * parent.scale_factor.get() as f32;
     let parent_height = (parent.rim_extent.max.y - parent.rim_extent.min.y).abs()
         * parent.scale_factor.get() as f32;
     let dx = (parent_width * 0.42).max(18.0) as f64;
     let dy = (parent_height * 0.30).max(14.0) as f64;
-    let horizontal = if parent.origin.x <= (work_area.min.x + work_area.max.x) * 0.5 {
-        1.0
-    } else {
-        -1.0
-    };
-    let vertical = if parent.origin.y <= (work_area.min.y + work_area.max.y) * 0.5 {
-        1.0
-    } else {
-        -1.0
-    };
+    let first = preferred.unwrap_or_else(|| CascadeDirection::from_parent(parent, work_area));
     let candidates = [
-        (horizontal, vertical),
-        (-horizontal, vertical),
-        (horizontal, -vertical),
-        (-horizontal, -vertical),
+        first,
+        CascadeDirection::new(-first.horizontal, first.vertical),
+        CascadeDirection::new(first.horizontal, -first.vertical),
+        CascadeDirection::new(-first.horizontal, -first.vertical),
     ];
     let mut output = Vec::with_capacity(candidates.len());
-    for (x_sign, y_sign) in candidates {
+    for direction in candidates {
         let point = PhysicalPoint {
-            x: parent.origin.x + dx * x_sign,
-            y: parent.origin.y + dy * y_sign,
+            x: parent.origin.x + dx * f64::from(direction.horizontal),
+            y: parent.origin.y + dy * f64::from(direction.vertical),
         };
-        if !output.iter().any(|candidate: &PhysicalPoint| {
-            (candidate.x - point.x).abs() < f64::EPSILON
-                && (candidate.y - point.y).abs() < f64::EPSILON
-        }) {
-            output.push(point);
+        if !output
+            .iter()
+            .any(|(candidate, _): &(PhysicalPoint, CascadeDirection)| {
+                (candidate.x - point.x).abs() < f64::EPSILON
+                    && (candidate.y - point.y).abs() < f64::EPSILON
+            })
+        {
+            output.push((point, direction));
         }
     }
     output
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CascadePlacement {
+    pub presentation: SubmenuPresentation,
+    pub anchor: PhysicalPoint,
+    pub direction: Option<CascadeDirection>,
 }
 
 /// Select the same deterministic Cascade candidate for every surface.  The
@@ -854,7 +903,33 @@ pub fn cascade_placement(
     scale_factor: ScaleFactor,
     minimum_scale: f32,
 ) -> Result<(SubmenuPresentation, PhysicalPoint), LayoutError> {
-    for candidate in cascade_candidate_centers(parent, work_area) {
+    cascade_placement_with_direction(
+        document,
+        parent,
+        child,
+        work_area,
+        scale_factor,
+        minimum_scale,
+        None,
+    )
+    .map(|selection| (selection.presentation, selection.anchor))
+}
+
+/// Select a Cascade candidate using a retained chain direction when present.
+/// The explicit alternatives are still tried in deterministic order, so an
+/// edge can force a local fallback without changing the rest of the chain.
+pub fn cascade_placement_with_direction(
+    document: &RadialDocument,
+    parent: &LayoutSnapshot,
+    child: &MenuDefinition,
+    work_area: PhysicalRect,
+    scale_factor: ScaleFactor,
+    minimum_scale: f32,
+    preferred_direction: Option<CascadeDirection>,
+) -> Result<CascadePlacement, LayoutError> {
+    for (candidate, direction) in
+        cascade_candidate_centers_with_direction(parent, work_area, preferred_direction)
+    {
         if layout_document_menu_fixed_center(
             document,
             child,
@@ -865,7 +940,11 @@ pub fn cascade_placement(
         )
         .is_ok()
         {
-            return Ok((SubmenuPresentation::Cascade, candidate));
+            return Ok(CascadePlacement {
+                presentation: SubmenuPresentation::Cascade,
+                anchor: candidate,
+                direction: Some(direction),
+            });
         }
     }
     layout_document_menu_fixed_center(
@@ -876,7 +955,11 @@ pub fn cascade_placement(
         scale_factor,
         minimum_scale,
     )
-    .map(|_| (SubmenuPresentation::SameCenter, parent.origin))
+    .map(|_| CascadePlacement {
+        presentation: SubmenuPresentation::SameCenter,
+        anchor: parent.origin,
+        direction: None,
+    })
 }
 
 /// Convert an absolute desktop-logical hit-shape center to physical desktop
@@ -1353,6 +1436,66 @@ mod tests {
             assert_eq!(first, second);
             assert!(first.1.x.is_finite() && first.1.y.is_finite());
         }
+    }
+
+    #[test]
+    fn retained_cascade_direction_does_not_flip_when_parent_crosses_midpoint() {
+        let document = RadialDocument::starter();
+        let parent_menu = document.menus[0].clone();
+        let child = document.menus[0].clone();
+        let work_area = PhysicalRect {
+            min: PhysicalPoint { x: 0.0, y: 0.0 },
+            max: PhysicalPoint {
+                x: 2400.0,
+                y: 1600.0,
+            },
+        };
+        let scale = ScaleFactor::new(1.0).unwrap();
+        let preferred = CascadeDirection::new(1, 1);
+        let parent_left = layout_document_menu_fixed_center(
+            &document,
+            &parent_menu,
+            PhysicalPoint { x: 420.0, y: 520.0 },
+            work_area,
+            scale,
+            0.55,
+        )
+        .unwrap();
+        let parent_right = layout_document_menu_fixed_center(
+            &document,
+            &parent_menu,
+            PhysicalPoint {
+                x: 1980.0,
+                y: 520.0,
+            },
+            work_area,
+            scale,
+            0.55,
+        )
+        .unwrap();
+        let left = cascade_placement_with_direction(
+            &document,
+            &parent_left,
+            &child,
+            work_area,
+            scale,
+            0.55,
+            Some(preferred),
+        )
+        .unwrap();
+        let right = cascade_placement_with_direction(
+            &document,
+            &parent_right,
+            &child,
+            work_area,
+            scale,
+            0.55,
+            Some(preferred),
+        )
+        .unwrap();
+        assert_eq!(left.direction, Some(preferred));
+        assert_eq!(right.direction, Some(preferred));
+        assert!(right.anchor.x > parent_right.origin.x);
     }
 
     #[test]

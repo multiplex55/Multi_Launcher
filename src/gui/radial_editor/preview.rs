@@ -8,7 +8,7 @@ use crate::radial::authoring::{AuthoringClient, AuthoringSessionId, RadialAuthor
 use crate::radial::compositor::CompositorCache;
 use crate::radial::geometry::{
     HitShape, LogicalPoint, LogicalRect, PhysicalPoint, PhysicalRect, ScaleFactor,
-    cascade_placement, layout_document_menu,
+    cascade_placement_with_direction, layout_document_menu,
 };
 use crate::radial::model::{
     CellContent, CellId, InvocationId, MenuDefinition, MenuId, RadialDocument, RingId, SessionId,
@@ -432,22 +432,24 @@ impl EmbeddedPreview {
             session.pending_assets.preview_identity(),
             tooltip_preferences,
         );
-        if let (Some(pending_frame_id), Some(pending_token), Some(pending_generation)) = (
-            self.pending_frame_id.take(),
-            self.pending_frame_token.take(),
-            self.pending_frame_generation.take(),
-        ) && let Some(input) = session
-            .embedded_preview
-            .as_ref()
-            .filter(|(reply_token, _)| {
-                reply_token == &pending_token
-                    && pending_generation == session.generation.0
-                    && current_frame
-                        .as_ref()
-                        .is_some_and(|frame| frame.frame_id == pending_frame_id)
-                    && frame_token == pending_token
-            })
-            .map(|(_, input)| std::sync::Arc::clone(input))
+        let pending_frame = self
+            .pending_frame_id
+            .zip(self.pending_frame_token.as_ref())
+            .zip(self.pending_frame_generation)
+            .map(|((frame_id, token), generation)| (frame_id, token.clone(), generation));
+        if let Some((pending_frame_id, pending_token, pending_generation)) = pending_frame.clone()
+            && let Some(input) = session
+                .embedded_preview
+                .as_ref()
+                .filter(|(reply_token, _)| {
+                    reply_token == &pending_token
+                        && pending_generation == session.generation.0
+                        && current_frame
+                            .as_ref()
+                            .is_some_and(|frame| frame.frame_id == pending_frame_id)
+                        && frame_token == pending_token
+                })
+                .map(|(_, input)| std::sync::Arc::clone(input))
         {
             let mut input = (*input).clone();
             if pending_frame_id == FrameId(1) {
@@ -487,6 +489,15 @@ impl EmbeddedPreview {
             );
             session.embedded_preview =
                 Some((pending_token, self.composed_frame(pending_frame_id, &input)));
+            // A matching accepted reply is the only normal completion point
+            // for this local correlation.  Back/reset/dispose and transport
+            // failures call the same invalidation helper explicitly.
+            self.invalidate_pending_frame();
+        } else if pending_frame.is_some() && session.pending_request.is_none() {
+            // The service has reached a terminal state without a matching
+            // reply (for example a correlated rejection).  Do not keep a
+            // stale local correlation alive into a later UI frame.
+            self.invalidate_pending_frame();
         }
         if let Some(frame) = current_frame.as_ref()
             && let Some((cached_token, cached)) = self.navigation_frames.get(&frame.frame_id)
@@ -560,7 +571,7 @@ impl EmbeddedPreview {
             min: PhysicalPoint { x: 0.0, y: 0.0 },
             max: PhysicalPoint { x: 480.0, y: 480.0 },
         };
-        let (anchor, placement) = self.preview_placement(
+        let (anchor, placement, cascade_direction) = self.preview_placement(
             &document,
             current_frame.as_ref(),
             &menu_id,
@@ -568,6 +579,13 @@ impl EmbeddedPreview {
             scale,
             work_area,
         );
+        if let Some(frame) = self
+            .reducer
+            .as_mut()
+            .and_then(|reducer| reducer.state.stack.last_mut())
+        {
+            frame.cascade_direction = cascade_direction;
+        }
         #[cfg(test)]
         {
             self.preparation_attempts += 1;
@@ -621,15 +639,23 @@ impl EmbeddedPreview {
         same_center: PhysicalPoint,
         scale: ScaleFactor,
         work_area: PhysicalRect,
-    ) -> (PhysicalPoint, PreviewPlacement) {
+    ) -> (
+        PhysicalPoint,
+        PreviewPlacement,
+        Option<crate::radial::geometry::CascadeDirection>,
+    ) {
         let Some(frame) = frame.filter(|frame| frame.parent_frame_id.is_some()) else {
-            return (same_center, PreviewPlacement::FlexibleRoot);
+            return (same_center, PreviewPlacement::FlexibleRoot, None);
         };
         if self.navigation_frames.contains_key(&frame.frame_id) {
-            return (frame.origin, PreviewPlacement::FixedCenter);
+            return (
+                frame.origin,
+                PreviewPlacement::FixedCenter,
+                frame.cascade_direction,
+            );
         }
         let Some(parent_frame_id) = frame.parent_frame_id else {
-            return (same_center, PreviewPlacement::FixedCenter);
+            return (same_center, PreviewPlacement::FixedCenter, None);
         };
         let parent_menu = frame
             .parent_frame_id
@@ -643,7 +669,7 @@ impl EmbeddedPreview {
             })
             .and_then(|parent| document.menus.iter().find(|menu| menu.id == parent.menu_id));
         let Some(parent_menu) = parent_menu else {
-            return (same_center, PreviewPlacement::FixedCenter);
+            return (same_center, PreviewPlacement::FixedCenter, None);
         };
         let parent_layout = self
             .navigation_frames
@@ -652,18 +678,26 @@ impl EmbeddedPreview {
         let current_parent_center = parent_layout.map_or(same_center, |layout| layout.origin);
         if parent_menu.submenu_presentation == crate::radial::model::SubmenuPresentation::SameCenter
         {
-            return (current_parent_center, PreviewPlacement::FixedCenter);
+            return (current_parent_center, PreviewPlacement::FixedCenter, None);
         }
         let Some(parent_layout) = parent_layout else {
-            return (current_parent_center, PreviewPlacement::FixedCenter);
+            return (current_parent_center, PreviewPlacement::FixedCenter, None);
         };
         let Some(child) = document.menus.iter().find(|menu| &menu.id == menu_id) else {
-            return (current_parent_center, PreviewPlacement::FixedCenter);
+            return (current_parent_center, PreviewPlacement::FixedCenter, None);
         };
-        match cascade_placement(document, parent_layout, child, work_area, scale, 0.55) {
-            Ok((presentation, center)) => (
-                center,
-                match presentation {
+        match cascade_placement_with_direction(
+            document,
+            parent_layout,
+            child,
+            work_area,
+            scale,
+            0.55,
+            frame.cascade_direction,
+        ) {
+            Ok(selection) => (
+                selection.anchor,
+                match selection.presentation {
                     crate::radial::model::SubmenuPresentation::Cascade => {
                         PreviewPlacement::Cascade {
                             fallback_center: current_parent_center,
@@ -673,8 +707,9 @@ impl EmbeddedPreview {
                         PreviewPlacement::FixedCenter
                     }
                 },
+                selection.direction,
             ),
-            Err(_) => (current_parent_center, PreviewPlacement::FixedCenter),
+            Err(_) => (current_parent_center, PreviewPlacement::FixedCenter, None),
         }
     }
 
@@ -772,10 +807,11 @@ impl EmbeddedPreview {
         self.cancel_tooltip();
         self.invalidate_pending_frame();
         if let Some(reducer) = self.reducer.as_mut() {
-            let _ = reducer.reduce(SessionEvent::NavigateToFrame {
+            let _ = reducer.reduce(SessionEvent::NavigateToFrameStamped {
                 frame_id,
                 geometry_generation,
                 pointer_baseline,
+                event_time_ms: monotonic_ms(),
             });
         }
         self.prune_navigation_frames();
@@ -948,7 +984,18 @@ impl EmbeddedPreview {
         self.navigation_frames
             .get(&parent_frame_id)
             .and_then(|(_, input)| {
-                cascade_placement(
+                let preferred = self
+                    .reducer
+                    .as_ref()
+                    .and_then(|reducer| {
+                        reducer
+                            .state
+                            .stack
+                            .iter()
+                            .find(|frame| frame.frame_id == parent_frame_id)
+                    })
+                    .and_then(|frame| frame.cascade_direction);
+                cascade_placement_with_direction(
                     document,
                     &input.layout,
                     child,
@@ -958,9 +1005,10 @@ impl EmbeddedPreview {
                     },
                     input.layout.scale_factor,
                     0.55,
+                    preferred,
                 )
                 .ok()
-                .map(|(_, anchor)| anchor)
+                .map(|selection| selection.anchor)
             })
             .unwrap_or(same_center)
     }
@@ -2883,6 +2931,86 @@ mod tests {
         sync_current(&mut preview, &mut session, &client);
         assert!(!preview.navigation_frames.contains_key(&child_frame_id));
         assert_eq!(preview.current_menu(), Some(&root));
+    }
+
+    #[test]
+    fn embedded_pending_child_correlation_survives_an_intervening_sync_frame() {
+        let document = std::sync::Arc::new(RadialDocument::starter());
+        let mut session =
+            RadialAuthoringSession::new(crate::radial::authoring::AuthoringSnapshot::new(
+                std::sync::Arc::clone(&document),
+                "preview-pending-child-sync",
+            ));
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut preview = EmbeddedPreview::default();
+        let mut preparer =
+            crate::radial::preparation::PreviewFramePreparer::new(Default::default());
+
+        sync_current(&mut preview, &mut session, &client);
+        let root_request = endpoint.request_rx.try_recv().expect("root request");
+        let _root_frame = finish_preparation_request(
+            &mut preview,
+            &mut session,
+            &client,
+            root_request,
+            &mut preparer,
+        );
+        preview.activate(&document, None, &CellId::new("starter-root-favorites"));
+        let child_frame_id = preview.reducer.as_ref().unwrap().state.stack[1].frame_id;
+        sync_current(&mut preview, &mut session, &client);
+        let child_request = endpoint
+            .request_rx
+            .try_recv()
+            .expect("child request should be sent once");
+        let attempts = preview.preparation_attempts;
+        sync_current(&mut preview, &mut session, &client);
+        assert_eq!(preview.preparation_attempts, attempts);
+        assert!(endpoint.request_rx.try_recv().is_err());
+
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            id,
+            generation,
+            editor_session,
+            candidate,
+            menu_id,
+            selected,
+            anchor,
+            work_area,
+            scale,
+            token,
+            projection,
+        } = child_request
+        else {
+            panic!("expected child preparation request")
+        };
+        let input = std::sync::Arc::new(
+            preparer
+                .prepare(
+                    &candidate,
+                    &menu_id,
+                    anchor,
+                    work_area,
+                    scale,
+                    generation.0,
+                    selected.as_ref(),
+                    &projection,
+                )
+                .unwrap(),
+        );
+        assert!(session.accept_reply(
+            crate::radial::authoring::AuthoringReply::EmbeddedPreviewPrepared {
+                id,
+                generation,
+                editor_session,
+                token,
+                input,
+            }
+        ));
+        sync_current(&mut preview, &mut session, &client);
+        assert_eq!(preview.preparation_attempts, attempts);
+        assert!(preview.navigation_frames.contains_key(&child_frame_id));
+        assert_eq!(preview.reducer.as_ref().unwrap().state.stack.len(), 2);
+        assert!(preview.prepared_frame(&session).is_some());
     }
 
     #[test]

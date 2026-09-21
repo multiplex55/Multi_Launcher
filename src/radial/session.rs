@@ -1,5 +1,5 @@
 use super::dynamic::FrozenRadialEntry;
-use super::geometry::{LogicalPoint, PhysicalPoint};
+use super::geometry::{CascadeDirection, LogicalPoint, PhysicalPoint};
 use super::model::{
     CellId, ClickGesture, ConfigRevision, InteractionMode, InvocationId, MenuId, SessionId,
     SubmenuPresentation,
@@ -8,6 +8,12 @@ use std::collections::BTreeMap;
 
 const ARMING_DISTANCE_SQUARED: f32 = 16.0;
 const DRAG_DISTANCE_SQUARED: f32 = 64.0;
+/// Windows' default double-click interval is bounded and is also the useful
+/// upper bound for the release tail that can arrive after an ancestor frame
+/// is restored.  Production callers stamp native events with their message
+/// clock; direct/reducer callers retain the legacy un-stamped compatibility
+/// path below.
+pub const POINTER_TAIL_INTERVAL_MS: u64 = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyboardOwnership {
@@ -65,6 +71,10 @@ pub struct MenuFrame {
     pub page: usize,
     pub page_count: usize,
     pub selected: Option<CellId>,
+    /// Direction selected for the first edge of this Cascade chain.  It is
+    /// retained with the frame so later edges do not re-orient when their
+    /// parent crosses the work-area midpoint, and Back restores it exactly.
+    pub cascade_direction: Option<CascadeDirection>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +99,16 @@ pub struct PendingAncestorPress {
     pub geometry_generation: u64,
     pub origin: LogicalPoint,
     pub dragged: bool,
+    pub event_time_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointerTail {
+    pub button: PointerButton,
+    pub session_generation: u64,
+    pub geometry_generation: u64,
+    pub origin: LogicalPoint,
+    pub expires_at_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -127,10 +147,10 @@ pub struct SessionState {
     /// gesture.  The following release is ignored even if the native host has
     /// already presented the restored child frame.
     pub consume_next_release: bool,
-    /// Suppresses the next OS down/up pair after ancestor navigation. Windows
-    /// can deliver the remainder of a double-click against the newly restored
-    /// frame; that tail must not dispatch an action there.
-    pub suppress_next_pointer_down: bool,
+    /// Correlated, bounded suppression for the possible OS double-click tail
+    /// after ancestor navigation.  Unlike an untimed boolean this cannot
+    /// swallow a later deliberate click or a different generation/button.
+    pub pointer_tail: Option<PointerTail>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -147,6 +167,14 @@ pub enum SessionEvent {
         button: PointerButton,
         geometry_generation: u64,
     },
+    PointerDownStamped {
+        point: LogicalPoint,
+        cell: Option<CellId>,
+        role: CellRole,
+        button: PointerButton,
+        geometry_generation: u64,
+        event_time_ms: u64,
+    },
     PointerUp {
         point: LogicalPoint,
         cell: Option<CellId>,
@@ -159,6 +187,13 @@ pub enum SessionEvent {
         point: LogicalPoint,
         button: PointerButton,
         geometry_generation: u64,
+    },
+    BeginAncestorNavigationStamped {
+        frame_id: FrameId,
+        point: LogicalPoint,
+        button: PointerButton,
+        geometry_generation: u64,
+        event_time_ms: u64,
     },
     TriggerReleased {
         point: LogicalPoint,
@@ -180,6 +215,12 @@ pub enum SessionEvent {
         frame_id: FrameId,
         geometry_generation: u64,
         pointer_baseline: LogicalPoint,
+    },
+    NavigateToFrameStamped {
+        frame_id: FrameId,
+        geometry_generation: u64,
+        pointer_baseline: LogicalPoint,
+        event_time_ms: u64,
     },
     PageChanged {
         page: usize,
@@ -301,6 +342,7 @@ impl SessionReducer {
                     page: 0,
                     page_count: 1,
                     selected: None,
+                    cascade_direction: None,
                 }],
                 frozen_dynamic_results: BTreeMap::new(),
                 hovered: None,
@@ -320,7 +362,7 @@ impl SessionReducer {
                 modifiers: NavigationModifiers::default(),
                 dwell_candidate: None,
                 consume_next_release: false,
-                suppress_next_pointer_down: false,
+                pointer_tail: None,
             },
             invocation_id: invocation,
             next_dispatch: 1,
@@ -382,71 +424,45 @@ impl SessionReducer {
             }
             SessionEvent::PointerDown {
                 point,
-                cell: Some(cell_id),
+                cell,
                 role,
                 button,
                 geometry_generation,
-            } if pressable(role) && self.current_geometry() == geometry_generation => {
-                if self.state.suppress_next_pointer_down {
-                    self.state.suppress_next_pointer_down = false;
-                    self.state.consume_next_release = true;
-                    self.state.pending_press = None;
-                    self.state.pending_ancestor = None;
-                    self.state.dwell_candidate = None;
-                    return vec![];
-                }
-                self.state.dwell_candidate = None;
-                self.state.armed = true;
-                self.state.pending_press = Some(PendingPress {
-                    cell_id,
-                    button,
-                    session_generation: self.state.session_generation,
-                    geometry_generation,
-                    origin: point,
-                    dragged: false,
-                    native_drag: role == CellRole::Drag,
-                });
-                vec![]
-            }
-            SessionEvent::PointerDown { .. } => {
-                if self.state.suppress_next_pointer_down {
-                    self.state.suppress_next_pointer_down = false;
-                    self.state.consume_next_release = true;
-                }
-                self.state.pending_press = None;
-                self.state.pending_ancestor = None;
-                self.state.dwell_candidate = None;
-                vec![]
-            }
+            } => self.pointer_down(point, cell, role, button, geometry_generation, None),
+            SessionEvent::PointerDownStamped {
+                point,
+                cell,
+                role,
+                button,
+                geometry_generation,
+                event_time_ms,
+            } => self.pointer_down(
+                point,
+                cell,
+                role,
+                button,
+                geometry_generation,
+                Some(event_time_ms),
+            ),
             SessionEvent::BeginAncestorNavigation {
                 frame_id,
                 point,
                 button,
                 geometry_generation,
-            } => {
-                if self.current_geometry() != geometry_generation
-                    || !self
-                        .state
-                        .stack
-                        .iter()
-                        .any(|frame| frame.frame_id == frame_id)
-                {
-                    return vec![];
-                }
-                self.state.pending_press = None;
-                self.state.consume_next_release = false;
-                self.state.dwell_candidate = None;
-                self.state.hovered = None;
-                self.state.pending_ancestor = Some(PendingAncestorPress {
-                    frame_id,
-                    button,
-                    session_generation: self.state.session_generation,
-                    geometry_generation,
-                    origin: point,
-                    dragged: false,
-                });
-                vec![]
-            }
+            } => self.begin_ancestor_navigation(frame_id, point, button, geometry_generation, None),
+            SessionEvent::BeginAncestorNavigationStamped {
+                frame_id,
+                point,
+                button,
+                geometry_generation,
+                event_time_ms,
+            } => self.begin_ancestor_navigation(
+                frame_id,
+                point,
+                button,
+                geometry_generation,
+                Some(event_time_ms),
+            ),
             SessionEvent::PointerUp {
                 point,
                 cell,
@@ -467,11 +483,13 @@ impl SessionReducer {
                     if ancestor.dragged {
                         return vec![];
                     }
-                    let intents =
-                        self.navigate_to_frame(ancestor.frame_id, geometry_generation, point);
-                    if !intents.is_empty() || self.state.stack.len() > 1 {
-                        self.state.suppress_next_pointer_down = true;
-                    }
+                    let intents = self.navigate_to_frame(
+                        ancestor.frame_id,
+                        geometry_generation,
+                        point,
+                        Some(ancestor.button),
+                        ancestor.event_time_ms,
+                    );
                     return intents;
                 }
                 if self.state.consume_next_release {
@@ -600,6 +618,7 @@ impl SessionReducer {
                     page: 0,
                     page_count: 1,
                     selected: None,
+                    cascade_direction: None,
                 });
                 self.disarm(pointer_baseline, geometry_generation);
                 vec![]
@@ -636,7 +655,21 @@ impl SessionReducer {
                 frame_id,
                 geometry_generation,
                 pointer_baseline,
-            } => self.navigate_to_frame(frame_id, geometry_generation, pointer_baseline),
+            } => {
+                self.navigate_to_frame(frame_id, geometry_generation, pointer_baseline, None, None)
+            }
+            SessionEvent::NavigateToFrameStamped {
+                frame_id,
+                geometry_generation,
+                pointer_baseline,
+                event_time_ms,
+            } => self.navigate_to_frame(
+                frame_id,
+                geometry_generation,
+                pointer_baseline,
+                None,
+                Some(event_time_ms),
+            ),
             SessionEvent::PageChanged {
                 mut page,
                 geometry_generation,
@@ -710,6 +743,8 @@ impl SessionReducer {
                 self.state.keyboard_ownership = KeyboardOwnership::ExternalApplication;
                 self.state.pending_press = None;
                 self.state.pending_ancestor = None;
+                self.state.pointer_tail = None;
+                self.state.consume_next_release = false;
                 self.state.dwell_candidate = None;
                 self.state.hovered = None;
                 vec![]
@@ -963,10 +998,102 @@ impl SessionReducer {
             }
         }
     }
+    fn pointer_down(
+        &mut self,
+        point: LogicalPoint,
+        cell: Option<CellId>,
+        role: CellRole,
+        button: PointerButton,
+        geometry_generation: u64,
+        event_time_ms: Option<u64>,
+    ) -> Vec<SessionIntent> {
+        if self.current_geometry() != geometry_generation {
+            return vec![];
+        }
+        if let Some(tail) = self.state.pointer_tail.take() {
+            let within_time = event_time_ms.is_none_or(|now| now <= tail.expires_at_ms);
+            let correlated = within_time
+                && tail.button == button
+                && tail.session_generation == self.state.session_generation
+                && tail.geometry_generation == geometry_generation
+                && distance2(point, tail.origin) < DRAG_DISTANCE_SQUARED;
+            if correlated {
+                // Consume only the matching second down.  Its release is
+                // consumed by the existing one-release latch below.
+                self.state.consume_next_release = true;
+                self.state.pending_press = None;
+                self.state.pending_ancestor = None;
+                self.state.dwell_candidate = None;
+                return vec![];
+            }
+            // An expired or unrelated down starts a fresh gesture and must
+            // not inherit the release latch from the old frame transition.
+            self.state.consume_next_release = false;
+        }
+        if pressable(role) && self.current_geometry() == geometry_generation {
+            self.state.dwell_candidate = None;
+            if let Some(cell_id) = cell {
+                self.state.armed = true;
+                self.state.pending_press = Some(PendingPress {
+                    cell_id,
+                    button,
+                    session_generation: self.state.session_generation,
+                    geometry_generation,
+                    origin: point,
+                    dragged: false,
+                    native_drag: role == CellRole::Drag,
+                });
+            } else {
+                self.state.pending_press = None;
+            }
+        } else {
+            self.state.pending_press = None;
+            self.state.pending_ancestor = None;
+            self.state.dwell_candidate = None;
+        }
+        vec![]
+    }
+
+    fn begin_ancestor_navigation(
+        &mut self,
+        frame_id: FrameId,
+        point: LogicalPoint,
+        button: PointerButton,
+        geometry_generation: u64,
+        event_time_ms: Option<u64>,
+    ) -> Vec<SessionIntent> {
+        if self.current_geometry() != geometry_generation
+            || !self
+                .state
+                .stack
+                .iter()
+                .any(|frame| frame.frame_id == frame_id)
+        {
+            return vec![];
+        }
+        self.state.pending_press = None;
+        self.state.consume_next_release = false;
+        self.state.pointer_tail = None;
+        self.state.dwell_candidate = None;
+        self.state.hovered = None;
+        self.state.pending_ancestor = Some(PendingAncestorPress {
+            frame_id,
+            button,
+            session_generation: self.state.session_generation,
+            geometry_generation,
+            origin: point,
+            dragged: false,
+            event_time_ms,
+        });
+        vec![]
+    }
+
     fn cancel_tree(&mut self) -> Vec<SessionIntent> {
         self.closed = true;
         self.state.pending_press = None;
         self.state.pending_ancestor = None;
+        self.state.pointer_tail = None;
+        self.state.consume_next_release = false;
         self.state.dwell_candidate = None;
         vec![SessionIntent::CloseTree]
     }
@@ -975,6 +1102,8 @@ impl SessionReducer {
         frame_id: FrameId,
         geometry_generation: u64,
         pointer_baseline: LogicalPoint,
+        tail_button: Option<PointerButton>,
+        event_time_ms: Option<u64>,
     ) -> Vec<SessionIntent> {
         let Some(index) = self
             .state
@@ -987,6 +1116,15 @@ impl SessionReducer {
         if index + 1 == self.state.stack.len() {
             self.state.consume_next_release = true;
             self.disarm(pointer_baseline, geometry_generation);
+            self.state.pointer_tail = Some(PointerTail {
+                button: tail_button.unwrap_or(PointerButton::Primary),
+                session_generation: self.state.session_generation,
+                geometry_generation,
+                origin: pointer_baseline,
+                expires_at_ms: event_time_ms
+                    .and_then(|at| at.checked_add(POINTER_TAIL_INTERVAL_MS))
+                    .unwrap_or(POINTER_TAIL_INTERVAL_MS),
+            });
             return vec![];
         }
         self.state.stack.truncate(index + 1);
@@ -1004,7 +1142,15 @@ impl SessionReducer {
         self.disarm(pointer_baseline, geometry_generation);
         self.state.selected = restored;
         self.state.consume_next_release = true;
-        self.state.suppress_next_pointer_down = true;
+        self.state.pointer_tail = Some(PointerTail {
+            button: tail_button.unwrap_or(PointerButton::Primary),
+            session_generation: self.state.session_generation,
+            geometry_generation,
+            origin: pointer_baseline,
+            expires_at_ms: event_time_ms
+                .and_then(|at| at.checked_add(POINTER_TAIL_INTERVAL_MS))
+                .unwrap_or(POINTER_TAIL_INTERVAL_MS),
+        });
         self.prune_frozen_dynamic_results();
         vec![SessionIntent::Back]
     }
@@ -1027,6 +1173,7 @@ impl SessionReducer {
         self.state.selected = None;
         self.state.pending_press = None;
         self.state.pending_ancestor = None;
+        self.state.pointer_tail = None;
         self.state.dwell_candidate = None;
         self.state.arming_baseline = ArmingBaseline {
             point,
@@ -1616,6 +1763,110 @@ mod tests {
                 })
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn ancestor_pointer_tail_is_correlated_and_expires_for_a_fresh_click() {
+        let mut immediate = reducer(InteractionMode::StickyClick);
+        immediate.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("child"),
+            origin: PhysicalPoint { x: 20.0, y: 10.0 },
+            geometry_generation: 11,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        let root = immediate.state.stack[0].frame_id;
+        immediate.reduce(SessionEvent::BeginAncestorNavigationStamped {
+            frame_id: root,
+            point: p(3.0, 4.0),
+            button: PointerButton::Primary,
+            geometry_generation: 11,
+            event_time_ms: 100,
+        });
+        assert_eq!(
+            immediate.reduce(SessionEvent::PointerUp {
+                point: p(3.0, 4.0),
+                cell: None,
+                role: CellRole::Spacer,
+                button: PointerButton::Primary,
+                geometry_generation: 11,
+            }),
+            vec![SessionIntent::Back]
+        );
+        assert!(
+            immediate
+                .reduce(SessionEvent::PointerDownStamped {
+                    point: p(3.0, 4.0),
+                    cell: Some(CellId::new("root-action")),
+                    role: CellRole::Action,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                    event_time_ms: 101,
+                })
+                .is_empty()
+        );
+        assert!(
+            immediate
+                .reduce(SessionEvent::PointerUp {
+                    point: p(3.0, 4.0),
+                    cell: Some(CellId::new("root-action")),
+                    role: CellRole::Action,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                })
+                .is_empty()
+        );
+
+        let mut fresh = reducer(InteractionMode::StickyClick);
+        fresh.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("child"),
+            origin: PhysicalPoint { x: 20.0, y: 10.0 },
+            geometry_generation: 11,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        let root = fresh.state.stack[0].frame_id;
+        fresh.reduce(SessionEvent::BeginAncestorNavigationStamped {
+            frame_id: root,
+            point: p(3.0, 4.0),
+            button: PointerButton::Primary,
+            geometry_generation: 11,
+            event_time_ms: 100,
+        });
+        assert_eq!(
+            fresh
+                .reduce(SessionEvent::PointerUp {
+                    point: p(3.0, 4.0),
+                    cell: None,
+                    role: CellRole::Spacer,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                })
+                .as_slice(),
+            [SessionIntent::Back]
+        );
+        assert!(
+            fresh
+                .reduce(SessionEvent::PointerDownStamped {
+                    point: p(3.0, 4.0),
+                    cell: Some(CellId::new("root-action")),
+                    role: CellRole::Action,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                    event_time_ms: 100 + POINTER_TAIL_INTERVAL_MS + 1,
+                })
+                .is_empty()
+        );
+        assert!(matches!(
+            fresh
+                .reduce(SessionEvent::PointerUp {
+                    point: p(3.0, 4.0),
+                    cell: Some(CellId::new("root-action")),
+                    role: CellRole::Action,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                })
+                .as_slice(),
+            [SessionIntent::Dispatch { .. }]
+        ));
     }
 
     #[test]

@@ -240,7 +240,7 @@ keystrokes, or sensitive window titles.
 | S2 | `complete` | Tooltip units and stable hover/native presentation repairs and gate. |
 | S3 | `complete` | Slot-first compact Designer layout/interaction repairs and gate. |
 | S4 | `complete` | Shared unflattened Cascade layers, exact-frame ancestor navigation, and parity across runtime/native preview/embedded preview; focused gate and post-removal checks passed. |
-| S5 | `in_progress` | Review remediation batch: runtime relocation, shared visible-stack/placement policy, complete ancestor gesture, close/send-failure terminals, live-cache pruning, stale preview replies, reset epochs, and production-path coverage. Full suite/native acceptance remain deferred. |
+| S5 | `in_progress` | Review remediation batches: runtime relocation, shared visible-stack/placement policy, complete ancestor gesture, close/send-failure terminals, live-cache pruning, stale preview replies, reset epochs, prepared-definition preservation, bounded double-click tails, retained Cascade direction, and production-path coverage. Full suite/native acceptance remain deferred. |
 
 ## Slow-job policy and active-job template
 
@@ -340,6 +340,104 @@ pixel/input trace or native K/D/T matrix was claimed. S5 therefore remains
 `in_progress`, pending the separate full `cargo nextest run` and native
 acceptance/final integration review; this remediation commit does not close
 those gaps.
+
+### S5 second review-remediation batch — in_progress
+
+This batch starts from clean committed HEAD
+`ad09628d96d781b2124566f2b5d6a2b6a9c0c159` and is limited to the five
+remaining independent-review findings. It preserves the first remediation's
+shared scene, SameCenter behavior, typed navigation, and lifecycle fixes.
+
+The prepared-child regression is fixed by retaining the definition-level
+`RadialPrepareReply.frames` cache while pruning only FrameId-keyed live
+instance state; a Back/reopen test verifies a new FrameId can still install
+the prepared child and resolve its action. Ancestor double-click suppression
+is now a stamped, button/position/session/geometry-correlated tail bounded by
+the native 500 ms interval, with deterministic expiry coverage; production
+native/controller routes stamp the monotonic event time. Embedded preview
+keeps its exact FrameId/token/generation correlation through intervening sync
+frames and clears it only on accepted reply or an explicit terminal state.
+Cascade placement carries the first edge direction in each retained frame so
+later midpoint crossings do not reverse a chain; runtime, native preview, and
+embedded preview call the same placement boundary. A runtime compositor test
+rasterizes distinct parent/child background resources and asserts pixels from
+both layers, rather than only counting primitives.
+
+```text
+Job purpose / milestone: S5 second review-remediation focused Nextest gate
+Command and cwd: selector preflight, then `cargo nextest run --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'`; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; installed Nextest filterset preflight; one sequential Cargo/Nextest tree
+Source SHA + source/untracked diff fingerprint: HEAD `ad09628d96d781b2124566f2b5d6a2b6a9c0c159`; preview.rs `9DF65F8DAC9A1339FFA3F6A8AB3043D42BE1A9CA9FC216C3CBB6BE2F9413260D`; native_preview.rs `543DF717E6630F7F3FFC194B408363553D09CA25B552F53F31C2DAC20B84F6F1`; controller.rs `085C033CE750B7E001383DDC08996559F8F2BD95E8B1DC1AC98DD8DF7CB14B23`; geometry.rs `59107B12AFD887BA13BB3C9811A35AD6690638E02004879FA70A3A12D10FA176`; session.rs `C6E3F4F58F3C6808CFF0D91E9C286140349BE86B0FC186A8910AE54FC00A6ADD`; source diff fingerprint `1480EAB7C9D2DD4FAE62F6A91D5457A99CC8B3194851C4EDA1071CA77F0F003D`; no untracked source files
+Selector preflight (2026-09-21 18:14 -04:00): `cargo nextest list --cargo-quiet --message-format json -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'` exited 0 after the initial unlogged build. The parsed filterset was nonempty: 158 matching tests and 4,448 non-matches from 4,606 listed cases. The initial preflight build used Cargo PIDs 24316/7708 (started 17:52:52/17:52:54 -04:00) and rustc children; it had no durable log/exit record and is not authoritative.
+Session/PID + process start and identity: launcher rustup PID 24988 at 2026-09-21T18:17:25.3159740-04:00; observed Cargo PIDs 30136/30432 (one Nextest tree), rustc PIDs 30164/30984 at launch; durable identity `target/s5-rereview-focused.identity`
+Durable stdout/stderr log: `target/s5-rereview-focused.log` and `target/s5-rereview-focused.stderr.log`
+Exit-code record: `target/s5-rereview-focused.exit` was not created by the failed Start-Process wrapper; the corrective run's true exit is preserved at `target/s5-rereview-focused-corrective.exit`
+Launch time: 2026-09-21T18:17:25.2205583-04:00
+First observation due: 2026-09-21T18:27:25-04:00 (launch + 600 seconds)
+Second observation due: 2026-09-21T18:42:25-04:00 (first check + 900 seconds)
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+Actual result / all failures / next corrective batch: corrective gate completed exit 0 with 158/158 selected tests passed and 4,448 skipped; `target/s5-rereview-focused-corrective.log` is 22,619 bytes and `.exit` records `exit_code=0`. No test corrective batch remains; post-gate check/fmt/diff verification is still required.
+```
+
+First observation (2026-09-21T18:27:45-04:00): the same recorded Cargo
+tree (launcher rustup 24988; Cargo 30136/30432; rustc child 30984 plus the
+active test-build children) remained responsive. The durable stdout log was
+empty while stderr contained only the expected `Compiling multi_launcher`
+line; no failure or exit record existed. The second observation is due at
+18:42:25 -04:00; reattach to this tree and do not launch a duplicate.
+
+First launch completion (2026-09-21T18:42:02-04:00): the recorded build
+finished in 24m27s, but the `Start-Process -ArgumentList` wrapper flattened
+the filter expression's pipe characters. Nextest therefore selected zero
+tests, reported `0 passed, 4606 skipped`, and emitted `error: no tests to
+run`; the wrapper did not persist the child exit code. This is a gate-launch
+failure rather than a source result. A corrective authoritative invocation
+must pass the quoted expression synchronously and persist its true exit code
+before any source/check work.
+
+Corrective focused-gate record (launched 2026-09-21T18:43:03-04:00): the
+same selector is being run synchronously as `cargo nextest run --no-fail-fast
+-E "test(/radial::session/) | test(/radial::geometry/) |
+test(/radial::controller/) | test(/radial::render/) |
+test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/)
+| test(/radial_editor::preview/)"` from
+`G:\Repos\rust\Multi_Launcher`. Exec session is 45201; wrapper PID 27096,
+launcher rustup PID 31532, Cargo PIDs 26128/21176, and rustc PIDs 9724/10288
+were observed at launch. Durable identity is
+`target/s5-rereview-focused-corrective.identity`, combined stdout/stderr is
+`target/s5-rereview-focused-corrective.log`, and the true exit record is
+`target/s5-rereview-focused-corrective.exit`. First observation is due at
+18:53:03 -04:00, second at 19:08:03 -04:00, then +1,200 seconds. No source
+edits are permitted while this corrective gate runs.
+
+Corrective first observation (2026-09-21T18:53:31-04:00): exec session 45201
+and the same Cargo tree (Cargo 26128/21176; rustup launcher 31532; rustc
+9724 plus active children) remained responsive while compiling. The durable
+combined log was 67 bytes containing only the expected compile line; no
+failure or exit record existed. The second observation is due at
+19:08:03 -04:00; reattach to this session and do not launch a duplicate.
+
+Corrective completion (2026-09-21T19:06:29-04:00): the same session 45201
+completed the quoted selector with exit 0. Nextest ran 158 selected tests,
+all 158 passed, and skipped 4,448; the durable combined log is 22,619 bytes
+and `target/s5-rereview-focused-corrective.exit` preserves the true exit.
+The initial wrapper launch remains recorded as a 0-test launch failure and is
+not counted. No source was edited during either focused gate.
+
+Post-gate checks (2026-09-21): `cargo check` exited 0 after 1m07s,
+`cargo fmt --all -- --check` exited 0, and `git diff --check` exited 0 (only
+the repository's normal LF-to-CRLF warnings). No full `cargo nextest run`,
+native UI acceptance, or reference execution was performed.
+
+The narrow regressions preceding this gate passed: session ancestor-tail
+correlation and expiry (1/1), runtime prepared-definition Back/reopen (1/1),
+runtime distinct-skin compositor raster (1/1), embedded pending-child sync
+correlation (1/1), retained Cascade direction (1/1), native-preview focused
+tests (14/14), and session focused tests (23/23). These are preparatory
+results, not a substitute for the authoritative focused gate. No full suite,
+native UI acceptance, or reference script/archive execution is authorized by
+this batch.
 
 ### S4 active-job record
 

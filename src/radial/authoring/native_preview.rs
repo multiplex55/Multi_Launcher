@@ -8,8 +8,8 @@ use super::{AuthoringRequestId, AuthoringSessionId, DraftGeneration, NativePrevi
 use crate::radial::context::{InvocationContext, WindowIdentity};
 use crate::radial::diagnostics::RadialDiagnostic;
 use crate::radial::geometry::{
-    FrozenSpatialContext, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_placement,
-    shape_center, translate_layout,
+    FrozenSpatialContext, PhysicalPoint, PhysicalRect, ScaleFactor,
+    cascade_placement_with_direction, shape_center, translate_layout,
 };
 use crate::radial::model::{
     CellContent, CellId, InvocationId, MenuId, RadialDocument, SessionId, SubmenuPresentation,
@@ -877,11 +877,12 @@ impl NativePreviewCoordinator {
                         let intents =
                             active
                                 .reducer
-                                .reduce(SessionEvent::BeginAncestorNavigation {
+                                .reduce(SessionEvent::BeginAncestorNavigationStamped {
                                     frame_id,
                                     point,
                                     button,
                                     geometry_generation: generation,
+                                    event_time_ms: monotonic_ms(),
                                 });
                         (intents, previous_visible.is_some())
                     } else {
@@ -893,12 +894,13 @@ impl NativePreviewCoordinator {
                         let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
                             active_cell_role(active, cell, Some(button))
                         });
-                        let intents = active.reducer.reduce(SessionEvent::PointerDown {
+                        let intents = active.reducer.reduce(SessionEvent::PointerDownStamped {
                             point,
                             cell,
                             role,
                             button,
                             geometry_generation: generation,
+                            event_time_ms: monotonic_ms(),
                         });
                         (intents, previous_visible.is_some())
                     }
@@ -1160,30 +1162,48 @@ impl NativePreviewCoordinator {
             .cloned()
             .ok_or("preview submenu definition is unavailable")?;
 
-        let (anchor, mut effective_presentation) = match parent_definition.submenu_presentation {
-            SubmenuPresentation::SameCenter => {
-                projection.placement = PreviewPlacement::FixedCenter;
-                (parent_layout.origin, SubmenuPresentation::SameCenter)
-            }
-            SubmenuPresentation::Cascade => {
-                let (effective, anchor) = cascade_placement(
-                    &document,
-                    &parent_layout,
-                    &child_menu,
-                    spatial.work_area,
-                    spatial.scale_factor,
-                    0.55,
-                )
-                .map_err(|error| format!("{error:?}"))?;
-                projection.placement = match effective {
-                    SubmenuPresentation::Cascade => PreviewPlacement::Cascade {
-                        fallback_center: parent_layout.origin,
-                    },
-                    SubmenuPresentation::SameCenter => PreviewPlacement::FixedCenter,
-                };
-                (anchor, effective)
-            }
-        };
+        let (anchor, mut effective_presentation, cascade_direction) =
+            match parent_definition.submenu_presentation {
+                SubmenuPresentation::SameCenter => {
+                    projection.placement = PreviewPlacement::FixedCenter;
+                    (parent_layout.origin, SubmenuPresentation::SameCenter, None)
+                }
+                SubmenuPresentation::Cascade => {
+                    let parent_direction = self
+                        .active
+                        .as_ref()
+                        .and_then(|active| {
+                            active
+                                .reducer
+                                .state
+                                .stack
+                                .iter()
+                                .find(|frame| frame.frame_id == parent_frame_id)
+                        })
+                        .and_then(|frame| frame.cascade_direction);
+                    let selection = cascade_placement_with_direction(
+                        &document,
+                        &parent_layout,
+                        &child_menu,
+                        spatial.work_area,
+                        spatial.scale_factor,
+                        0.55,
+                        parent_direction,
+                    )
+                    .map_err(|error| format!("{error:?}"))?;
+                    projection.placement = match selection.presentation {
+                        SubmenuPresentation::Cascade => PreviewPlacement::Cascade {
+                            fallback_center: parent_layout.origin,
+                        },
+                        SubmenuPresentation::SameCenter => PreviewPlacement::FixedCenter,
+                    };
+                    (
+                        selection.anchor,
+                        selection.presentation,
+                        selection.direction,
+                    )
+                }
+            };
         projection.page = 0;
         projection.dynamic = synthetic_preview_dynamic(&child_menu);
         let mut frame = build_preview_frame_input_projected(
@@ -1240,6 +1260,7 @@ impl NativePreviewCoordinator {
             parent_state.selected = parent_frame.selected.clone();
         }
         if let Some(reducer_frame) = active.reducer.state.stack.last_mut() {
+            reducer_frame.cascade_direction = cascade_direction;
             reducer_frame.page = frame.page;
             reducer_frame.page_count = frame.page_count;
             reducer_frame.scale_factor = spatial.scale_factor.get();

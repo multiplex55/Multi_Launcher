@@ -4,6 +4,7 @@ use super::bindings::{
     PreparationGeneration, PreparedCell, RadialPrepareEnvelope, RadialPrepareReply,
     RadialPrepareRequest, project_menu_frame_with_style,
 };
+use super::compositor::CompositorCache;
 use super::context::{InvocationContext, WindowIdentity};
 use super::diagnostics::{
     MAX_EXPECTED_LAYOUT_DIAGNOSTICS, MAX_RADIAL_DIAGNOSTICS, RadialDiagnostic, bound_diagnostics,
@@ -12,8 +13,9 @@ use super::dynamic::{FrozenAvailability, FrozenBinding};
 use super::font_cache::{FontLayoutService, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog};
 use super::geometry::{
     CellLayout, FrozenSpatialContext, HitShape, LayoutSnapshot, LogicalPoint, PhysicalPoint,
-    PhysicalRect, ScaleFactor, cascade_placement, compose_layered_layout, layout_document_menu,
-    layout_document_menu_fixed_center, layout_menu, shape_center, translate_layout,
+    PhysicalRect, ScaleFactor, cascade_placement_with_direction, compose_layered_layout,
+    layout_document_menu, layout_document_menu_fixed_center, layout_menu, shape_center,
+    translate_layout,
 };
 use super::handoff::{
     DispatchEvent, DispatchIntent, InteractionRequirement, PendingRadialDispatch,
@@ -1659,11 +1661,12 @@ impl RadialController {
                 if let InputOwner::NavigateToFrame(frame_id) = owner {
                     self.session_event(
                         &session_id,
-                        SessionEvent::BeginAncestorNavigation {
+                        SessionEvent::BeginAncestorNavigationStamped {
                             frame_id,
                             point,
                             button,
                             geometry_generation: layout_generation,
+                            event_time_ms: monotonic_ms(),
                         },
                         out,
                     );
@@ -1676,12 +1679,13 @@ impl RadialController {
                 let role = self.role_for_button(&session_id, &owner, button);
                 self.session_event(
                     &session_id,
-                    SessionEvent::PointerDown {
+                    SessionEvent::PointerDownStamped {
                         point,
                         cell: owner_cell(owner),
                         role,
                         button,
                         geometry_generation: layout_generation,
+                        event_time_ms: monotonic_ms(),
                     },
                     out,
                 );
@@ -1946,12 +1950,15 @@ impl RadialController {
         if matches!(
             &event,
             SessionEvent::PointerDown { .. }
+                | SessionEvent::PointerDownStamped { .. }
                 | SessionEvent::PointerUp { .. }
                 | SessionEvent::BeginAncestorNavigation { .. }
+                | SessionEvent::BeginAncestorNavigationStamped { .. }
                 | SessionEvent::TriggerReleased { .. }
                 | SessionEvent::OpenChild { .. }
                 | SessionEvent::Back { .. }
                 | SessionEvent::NavigateToFrame { .. }
+                | SessionEvent::NavigateToFrameStamped { .. }
                 | SessionEvent::PageChanged { .. }
                 | SessionEvent::DisplayRelayout { .. }
                 | SessionEvent::Relocated { .. }
@@ -2564,6 +2571,13 @@ impl RadialController {
             .get(&active.current_frame_id)
             .cloned()
             .unwrap_or_else(|| active.layout.clone());
+        let parent_direction = active
+            .reducer
+            .state
+            .stack
+            .iter()
+            .find(|frame| frame.frame_id == active.current_frame_id)
+            .and_then(|frame| frame.cascade_direction);
         let spatial = active.spatial;
         let pointer = active.pointer;
         let application_always_on_top = active.application_always_on_top;
@@ -2609,7 +2623,7 @@ impl RadialController {
             return;
         };
         let parent_presentation = parent_definition.submenu_presentation;
-        let (effective_presentation, mut layout) = match parent_presentation {
+        let (effective_presentation, mut layout, cascade_direction) = match parent_presentation {
             SubmenuPresentation::SameCenter => match layout_document_menu_fixed_center(
                 &self.document,
                 &child,
@@ -2618,7 +2632,7 @@ impl RadialController {
                 spatial.scale_factor,
                 0.55,
             ) {
-                Ok(layout) => (SubmenuPresentation::SameCenter, layout),
+                Ok(layout) => (SubmenuPresentation::SameCenter, layout, None),
                 Err(error) => {
                     out.push(ControllerEvent::SubmenuPlacementFailed {
                         session_id,
@@ -2632,13 +2646,14 @@ impl RadialController {
                 }
             },
             SubmenuPresentation::Cascade => {
-                let (effective_presentation, anchor) = match cascade_placement(
+                let selection = match cascade_placement_with_direction(
                     &self.document,
                     &parent_layout,
                     &child,
                     spatial.work_area,
                     spatial.scale_factor,
                     0.55,
+                    parent_direction,
                 ) {
                     Ok(selection) => selection,
                     Err(error) => {
@@ -2656,12 +2671,12 @@ impl RadialController {
                 match layout_document_menu_fixed_center(
                     &self.document,
                     &child,
-                    anchor,
+                    selection.anchor,
                     spatial.work_area,
                     spatial.scale_factor,
                     0.55,
                 ) {
-                    Ok(layout) => (effective_presentation, layout),
+                    Ok(layout) => (selection.presentation, layout, selection.direction),
                     Err(error) => {
                         out.push(ControllerEvent::SubmenuPlacementFailed {
                             session_id,
@@ -2709,6 +2724,7 @@ impl RadialController {
                 pointer_baseline: pointer,
             });
             if let Some(current) = active.reducer.state.stack.last_mut() {
+                current.cascade_direction = cascade_direction;
                 current.scale_factor = layout.scale_factor.get();
                 current.spatial_generation = spatial.spatial_generation;
                 current.page_count = prepared_child.as_ref().map_or(1, |frame| frame.page_count);
@@ -3351,18 +3367,6 @@ fn prune_runtime_navigation(active: &mut ActiveSession) {
     active
         .navigation_sounds
         .retain(|frame_id, _| live.contains(frame_id));
-    if let Some(prepared) = active.prepared.as_mut() {
-        let live_menus: BTreeSet<_> = active
-            .reducer
-            .state
-            .stack
-            .iter()
-            .map(|frame| frame.menu_id.clone())
-            .collect();
-        prepared
-            .frames
-            .retain(|menu_id, _| live_menus.contains(menu_id));
-    }
 }
 
 fn runtime_present_scene(
@@ -5359,6 +5363,195 @@ mod tests {
         );
     }
     #[test]
+    fn runtime_cascade_raster_keeps_parent_and_child_skin_pixels_distinct() {
+        let directory = tempfile::tempdir().unwrap();
+        let write_png = |name: &str, color: [u8; 4]| {
+            let path = directory.path().join(name);
+            let mut bytes = Cursor::new(Vec::new());
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(4, 4, Rgba(color)))
+                .write_to(&mut bytes, ImageOutputFormat::Png)
+                .unwrap();
+            std::fs::write(&path, bytes.into_inner()).unwrap();
+            path
+        };
+        let parent_color = [211, 17, 29, 255];
+        let child_color = [19, 207, 43, 255];
+        let parent_path = write_png("parent.png", parent_color);
+        let child_path = write_png("child.png", child_color);
+        let mut document = RadialDocument::starter();
+        let root_id = document.default_menu_id.clone();
+        let child_id = MenuId::new("starter-favorites");
+        let grandchild_id = MenuId::new("starter-applications");
+        for menu in &mut document.menus {
+            if menu.id == root_id || menu.id == child_id {
+                menu.submenu_presentation = SubmenuPresentation::Cascade;
+            }
+        }
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == child_id)
+            .unwrap()
+            .rings[0]
+            .cells[0]
+            .content = CellContent::Submenu {
+            menu_id: grandchild_id.clone(),
+        };
+        document
+            .skins
+            .first_mut()
+            .unwrap()
+            .style
+            .values
+            .images
+            .menu_background = Override::Value(super::super::model::MediaReference::ExternalFile {
+            path: parent_path.to_string_lossy().into_owned(),
+        });
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == child_id)
+            .unwrap()
+            .style
+            .values
+            .images
+            .menu_background = Override::Value(super::super::model::MediaReference::ExternalFile {
+            path: child_path.to_string_lossy().into_owned(),
+        });
+        let root_cell = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == root_id)
+            .and_then(|menu| {
+                menu.rings
+                    .iter()
+                    .flat_map(|ring| &ring.cells)
+                    .find(|cell| {
+                        matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &child_id)
+                    })
+            })
+            .map(|cell| cell.id.clone())
+            .unwrap();
+        let child_cell = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == child_id)
+            .and_then(|menu| {
+                menu.rings
+                    .iter()
+                    .flat_map(|ring| &ring.cells)
+                    .find(|cell| {
+                        matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &grandchild_id)
+                    })
+            })
+            .map(|cell| cell.id.clone())
+            .unwrap();
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        controller.configure_resources(directory.path().to_path_buf());
+        controller.handle_intents(vec![open()], false);
+        let session_id = controller.pending.as_ref().unwrap().session_id.clone();
+        let generation = controller.pending.as_ref().unwrap().generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+        let mut out = Vec::new();
+        controller.open_submenu(&session_id, &root_cell, &mut out);
+        controller.open_submenu(&session_id, &child_cell, &mut out);
+        let active = controller.active.as_ref().unwrap();
+        let parent_frame_id = active.reducer.state.stack[0].frame_id;
+        let child_frame_id = active.reducer.state.stack[1].frame_id;
+        let (scene, _) =
+            runtime_present_scene(active, active.reducer.state.session_generation, None, None);
+        let scale = active.spatial.scale_factor;
+        let raster = CompositorCache::default()
+            .compose(&scene, scale, 0)
+            .unwrap();
+        let dpi = scale.get();
+        let background_bounds = scene
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                super::super::render::VectorPrimitive::Image { bounds, image, .. }
+                    if image.frames.first().is_some_and(|frame| {
+                        frame.rgba.get(0..4) == Some(parent_color.as_slice())
+                            || frame.rgba.get(0..4) == Some(child_color.as_slice())
+                    }) =>
+                {
+                    Some((*bounds, image.frames[0].rgba[0..4].to_vec()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(background_bounds.len() >= 2);
+        let own_pixels = |expected: &[u8], own_bounds: super::super::geometry::LogicalRect| {
+            let others = background_bounds
+                .iter()
+                .filter(|(bounds, color)| *bounds != own_bounds && color.as_slice() != expected)
+                .map(|(bounds, _)| *bounds)
+                .collect::<Vec<_>>();
+            let min_x = ((f64::from(own_bounds.min.x) - f64::from(raster.logical_bounds.min.x))
+                * dpi)
+                .floor()
+                .max(0.0) as u32;
+            let max_x = ((f64::from(own_bounds.max.x) - f64::from(raster.logical_bounds.min.x))
+                * dpi)
+                .ceil()
+                .min(f64::from(raster.image.width())) as u32;
+            let min_y = ((f64::from(own_bounds.min.y) - f64::from(raster.logical_bounds.min.y))
+                * dpi)
+                .floor()
+                .max(0.0) as u32;
+            let max_y = ((f64::from(own_bounds.max.y) - f64::from(raster.logical_bounds.min.y))
+                * dpi)
+                .ceil()
+                .min(f64::from(raster.image.height())) as u32;
+            (min_y..max_y)
+                .flat_map(|y| (min_x..max_x).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    let point = LogicalPoint {
+                        x: raster.logical_bounds.min.x + (*x as f64 + 0.5) as f32 / dpi as f32,
+                        y: raster.logical_bounds.min.y + (*y as f64 + 0.5) as f32 / dpi as f32,
+                    };
+                    !others.iter().any(|bounds| {
+                        point.x >= bounds.min.x
+                            && point.x <= bounds.max.x
+                            && point.y >= bounds.min.y
+                            && point.y <= bounds.max.y
+                    })
+                })
+                .filter(|(x, y)| raster.image.get_pixel(*x, *y).0.as_slice() == expected)
+                .count()
+        };
+        let parent_bounds = background_bounds
+            .iter()
+            .find(|(_, color)| color.as_slice() == parent_color.as_slice())
+            .map(|(bounds, _)| *bounds)
+            .expect("parent background image should be emitted");
+        let child_bounds = background_bounds
+            .iter()
+            .find(|(_, color)| color.as_slice() == child_color.as_slice())
+            .map(|(bounds, _)| *bounds)
+            .expect("child background image should be emitted");
+        assert!(own_pixels(&parent_color, parent_bounds) > 0);
+        assert!(own_pixels(&child_color, child_bounds) > 0);
+        assert!(active.navigation_resources.contains_key(&parent_frame_id));
+        assert!(active.navigation_resources.contains_key(&child_frame_id));
+    }
+
+    #[test]
     fn asynchronous_preparation_rejects_stale_reply_before_host_open() {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let made = Arc::new(Mutex::new(0));
@@ -5406,6 +5599,153 @@ mod tests {
         c.poll();
         assert_eq!(*made.lock().unwrap(), 1);
         assert!(c.pending.is_some());
+    }
+
+    #[test]
+    fn prepared_definition_frames_survive_back_and_reopen_with_new_frame_identity() {
+        let document = RadialDocument::starter();
+        let root_id = document.default_menu_id.clone();
+        let child_id = document
+            .menus
+            .iter()
+            .find(|menu| menu.id != root_id)
+            .map(|menu| menu.id.clone())
+            .expect("starter document should contain a child menu");
+        let submenu_cell = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == root_id)
+            .and_then(|menu| {
+                menu.rings
+                    .iter()
+                    .flat_map(|ring| &ring.cells)
+                    .find(|cell| {
+                        matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &child_id)
+                    })
+            })
+            .map(|cell| cell.id.clone())
+            .expect("starter root should point at a prepared child");
+        let root_menu = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == root_id)
+            .cloned()
+            .unwrap();
+        let child_menu = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == child_id)
+            .cloned()
+            .unwrap();
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document.clone()),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        let (tx, rx) = mpsc::channel();
+        let (wake, _wake_rx) = mpsc::channel();
+        controller.preparation = Some(PreparationBridge {
+            tx,
+            rx,
+            wake,
+            next_generation: 1,
+            waiting: None,
+        });
+        let requested = controller.handle_intents(vec![open()], false);
+        let ControllerEvent::PrepareRequested(envelope) = requested
+            .iter()
+            .find(|event| matches!(event, ControllerEvent::PrepareRequested(_)))
+            .expect("open should request preparation")
+        else {
+            unreachable!()
+        };
+        let root_frame = crate::radial::bindings::project_menu_frame(
+            &root_menu,
+            BTreeMap::new(),
+            &BTreeMap::new(),
+            0,
+            64,
+        );
+        let child_frame = crate::radial::bindings::project_menu_frame(
+            &child_menu,
+            BTreeMap::new(),
+            &BTreeMap::new(),
+            0,
+            64,
+        );
+        envelope
+            .reply
+            .send(RadialPrepareReply {
+                generation: envelope.request.generation,
+                invocation_id: envelope.request.invocation_id,
+                menu_id: root_id.clone(),
+                unavailable: BTreeMap::new(),
+                dynamic: BTreeMap::new(),
+                frame: root_frame.clone(),
+                static_cells: BTreeMap::new(),
+                frames: [
+                    (root_id.clone(), root_frame),
+                    (child_id.clone(), child_frame),
+                ]
+                .into(),
+            })
+            .unwrap();
+        controller.poll();
+        let session_id = controller.pending.as_ref().unwrap().session_id.clone();
+        let generation = controller.pending.as_ref().unwrap().generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+        let mut out = Vec::new();
+        controller.open_submenu(&session_id, &submenu_cell, &mut out);
+        let first_frame = controller.active.as_ref().unwrap().current_frame_id;
+        assert!(
+            controller
+                .active
+                .as_ref()
+                .unwrap()
+                .navigation_frames
+                .get(&first_frame)
+                .is_some_and(|frame| frame.menu.id == child_id)
+        );
+        let back_generation = controller.layout_generation_for(&session_id);
+        controller.session_event(
+            &session_id,
+            SessionEvent::Back {
+                geometry_generation: back_generation,
+                pointer_baseline: LogicalPoint::default(),
+            },
+            &mut out,
+        );
+        let active = controller.active.as_ref().unwrap();
+        assert!(
+            active
+                .prepared
+                .as_ref()
+                .is_some_and(|reply| reply.frames.contains_key(&child_id))
+        );
+        assert!(!active.navigation_frames.contains_key(&first_frame));
+
+        controller.open_submenu(&session_id, &submenu_cell, &mut out);
+        let reopened_frame = controller.active.as_ref().unwrap().current_frame_id;
+        assert_ne!(reopened_frame, first_frame);
+        let active = controller.active.as_ref().unwrap();
+        assert!(
+            active
+                .navigation_frames
+                .get(&reopened_frame)
+                .is_some_and(|frame| frame.menu.id == child_id)
+        );
+        assert_eq!(active.prepared.as_ref().unwrap().frame.menu.id, child_id);
     }
 
     #[test]
