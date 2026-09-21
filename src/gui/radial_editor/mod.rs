@@ -532,6 +532,7 @@ pub(crate) struct RadialEditorState {
     preferences_flush_requested: bool,
     designer_mode: DesignerMode,
     tree_visible: bool,
+    tree_widget_epoch: u64,
     inspector_visible: bool,
     tree_width: f32,
     inspector_width: f32,
@@ -586,6 +587,7 @@ impl Default for RadialEditorState {
             preferences_flush_requested: false,
             designer_mode: DesignerMode::Design,
             tree_visible: false,
+            tree_widget_epoch: 0,
             inspector_visible: false,
             tree_width: 180.0,
             inspector_width: 300.0,
@@ -705,6 +707,10 @@ impl RadialEditorState {
             crate::settings::RadialDesignerMode::PreviewTest => DesignerMode::PreviewTest,
         };
         self.tree_visible = preferences.tree_visible;
+        // Reset retained egui collapse state along with the presentation
+        // preferences.  Ordinary preference loads must preserve explicit
+        // expansion choices, so the widget namespace only changes here.
+        self.tree_widget_epoch = self.tree_widget_epoch.wrapping_add(1);
         self.inspector_visible = preferences.inspector_visible;
         self.show_resources = preferences.show_skins;
         self.tree_width = preferences.tree_width;
@@ -1530,7 +1536,7 @@ impl RadialEditorState {
                     || Err(AuthoringError::ServiceClosed),
                     |client| client.send(request),
                 );
-                if self.close_intent == CloseIntent::Requested {
+                if self.close_intent != CloseIntent::None {
                     self.close_stop_attempted = true;
                 }
                 if let Err(error) = result
@@ -1540,7 +1546,7 @@ impl RadialEditorState {
                 }
             }
             Err(error) => {
-                if self.close_intent == CloseIntent::Requested {
+                if self.close_intent != CloseIntent::None {
                     self.close_stop_attempted = true;
                 }
                 session.last_error = Some(format!("{error:?}"));
@@ -2960,7 +2966,10 @@ impl RadialEditorState {
                     // force it open.
                     .unwrap_or(false);
                 let header = egui::CollapsingHeader::new(&menu.name)
-                    .id_source(menu::widget_key("menu", menu.id.as_str(), "tree"))
+                    .id_source((
+                        self.tree_widget_epoch,
+                        menu::widget_key("menu", menu.id.as_str(), "tree"),
+                    ))
                     .default_open(default_open)
                     .show(ui, |ui| {
                         for (ring_index, ring) in menu.rings.iter().enumerate() {
@@ -5705,6 +5714,11 @@ mod tests {
         editor.inspector_width = 540.0;
         editor.preview_zoom = 1.8;
         editor.canvas_pan = CanvasPoint::new(22.0, -11.0);
+        editor
+            .preferences
+            .expanded_sections
+            .insert("menu:starter".into(), true);
+        let tree_epoch = editor.tree_widget_epoch;
         editor.reset_designer_layout();
         let session = editor.session.as_ref().unwrap();
         assert_eq!(session.draft, before_draft);
@@ -5714,6 +5728,8 @@ mod tests {
         assert!(!editor.inspector_visible);
         assert_eq!(editor.preview_zoom, 1.0);
         assert_eq!(editor.canvas_pan, CanvasPoint::default());
+        assert!(editor.preferences.expanded_sections.is_empty());
+        assert_ne!(editor.tree_widget_epoch, tree_epoch);
         assert!(editor.preferences_dirty);
     }
 
@@ -5804,6 +5820,36 @@ mod tests {
                 .map(|pending| pending.kind),
             Some(crate::radial::authoring::PendingRequestKind::StopNativePreview)
         );
+    }
+
+    #[test]
+    fn discard_close_terminalizes_disconnected_preview_stop_without_retrying() {
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.client = Some(client);
+        editor.close_intent = CloseIntent::DiscardRequested;
+        editor
+            .session
+            .as_mut()
+            .expect("session")
+            .native_preview_may_be_open = true;
+        drop(endpoint);
+
+        editor.stop_native_preview();
+        assert!(editor.close_stop_attempted);
+        assert!(
+            editor
+                .session
+                .as_ref()
+                .is_some_and(|session| !session.native_preview_may_be_open)
+        );
+        editor.maybe_finish_close();
+        assert!(!editor.open);
+        assert!(editor.session.is_none());
+        let close_requests = editor.close_stop_attempted;
+        editor.maybe_finish_close();
+        assert_eq!(editor.close_stop_attempted, close_requests);
     }
 
     #[test]

@@ -930,7 +930,10 @@ unsafe extern "system" fn wndproc(
             let point = client_physical_to_logical(state.origin, state.scale_factor, x, y);
             let owner = input_owner(&state.layout, point, false);
             let event = if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN {
-                if matches!(owner, InputOwner::Actionable(_)) {
+                if matches!(
+                    owner,
+                    InputOwner::Actionable(_) | InputOwner::NavigateToFrame(_)
+                ) {
                     if !unsafe { (*ptr).capture.acquire(hwnd) } {
                         state.events.send(NativeEvent::Failed {
                             session_id: Some(state.session_id.clone()),

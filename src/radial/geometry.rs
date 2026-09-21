@@ -1,6 +1,6 @@
 use super::model::{
     CellContent, CellId, Control, LayoutKind, MediaReference, MenuDefinition, Override,
-    RenderingQuality, RingId, TooltipMode,
+    RadialDocument, RenderingQuality, RingId, SubmenuPresentation, TooltipMode,
 };
 use super::session::FrameId;
 use super::skin::{
@@ -842,6 +842,43 @@ pub fn cascade_candidate_centers(
     output
 }
 
+/// Select the same deterministic Cascade candidate for every surface.  The
+/// fit probe uses the real child style/extents, then falls back to the parent
+/// center when no local candidate can satisfy the minimum scale.  Callers use
+/// the returned anchor for their own prepared/dynamic frame construction.
+pub fn cascade_placement(
+    document: &RadialDocument,
+    parent: &LayoutSnapshot,
+    child: &MenuDefinition,
+    work_area: PhysicalRect,
+    scale_factor: ScaleFactor,
+    minimum_scale: f32,
+) -> Result<(SubmenuPresentation, PhysicalPoint), LayoutError> {
+    for candidate in cascade_candidate_centers(parent, work_area) {
+        if layout_document_menu_fixed_center(
+            document,
+            child,
+            candidate,
+            work_area,
+            scale_factor,
+            minimum_scale,
+        )
+        .is_ok()
+        {
+            return Ok((SubmenuPresentation::Cascade, candidate));
+        }
+    }
+    layout_document_menu_fixed_center(
+        document,
+        child,
+        parent.origin,
+        work_area,
+        scale_factor,
+        minimum_scale,
+    )
+    .map(|_| (SubmenuPresentation::SameCenter, parent.origin))
+}
+
 /// Convert an absolute desktop-logical hit-shape center to physical desktop
 /// coordinates. `LayoutSnapshot::origin` is intentionally not added again.
 pub fn shape_center(shape: &HitShape, scale_factor: ScaleFactor) -> PhysicalPoint {
@@ -1272,6 +1309,50 @@ mod tests {
                 < (parent.rim_extent.max.x - parent.rim_extent.min.x) as f64
                     * parent.scale_factor.get() as f64
         );
+    }
+
+    #[test]
+    fn cascade_placement_is_shared_for_negative_fractional_and_edge_work_areas() {
+        let document = RadialDocument::starter();
+        let mut child = document.menus[0].clone();
+        child.id = MenuId::new("placement-child");
+        let parent_menu = document.menus[0].clone();
+        let scale = ScaleFactor::new(1.25).unwrap();
+        for work_area in [
+            PhysicalRect {
+                min: PhysicalPoint {
+                    x: -1920.0,
+                    y: -1080.0,
+                },
+                max: PhysicalPoint { x: 0.0, y: 0.0 },
+            },
+            PhysicalRect {
+                min: PhysicalPoint { x: 0.0, y: 0.0 },
+                max: PhysicalPoint {
+                    x: 2560.0,
+                    y: 1440.0,
+                },
+            },
+        ] {
+            let parent = layout_document_menu_fixed_center(
+                &document,
+                &parent_menu,
+                PhysicalPoint {
+                    x: work_area.min.x + 480.25,
+                    y: work_area.min.y + 420.5,
+                },
+                work_area,
+                scale,
+                0.55,
+            )
+            .unwrap();
+            let first =
+                cascade_placement(&document, &parent, &child, work_area, scale, 0.55).unwrap();
+            let second =
+                cascade_placement(&document, &parent, &child, work_area, scale, 0.55).unwrap();
+            assert_eq!(first, second);
+            assert!(first.1.x.is_finite() && first.1.y.is_finite());
+        }
     }
 
     #[test]

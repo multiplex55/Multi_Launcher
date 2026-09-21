@@ -2,6 +2,7 @@ use super::dynamic::FrozenRadialEntry;
 use super::geometry::{LogicalPoint, PhysicalPoint};
 use super::model::{
     CellId, ClickGesture, ConfigRevision, InteractionMode, InvocationId, MenuId, SessionId,
+    SubmenuPresentation,
 };
 use std::collections::BTreeMap;
 
@@ -77,6 +78,19 @@ pub struct PendingPress {
     pub native_drag: bool,
 }
 
+/// A pointer-down on an exposed Cascade ancestor is only an intent to
+/// navigate.  The reducer commits it on the matching release, after the
+/// native host has had a chance to report a move-out or capture loss.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAncestorPress {
+    pub frame_id: FrameId,
+    pub button: PointerButton,
+    pub session_generation: u64,
+    pub geometry_generation: u64,
+    pub origin: LogicalPoint,
+    pub dragged: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DynamicCacheKey {
     pub frame_id: FrameId,
@@ -100,6 +114,7 @@ pub struct SessionState {
     pub selected: Option<CellId>,
     pub keyboard_ownership: KeyboardOwnership,
     pub pending_press: Option<PendingPress>,
+    pub pending_ancestor: Option<PendingAncestorPress>,
     pub interaction: InteractionMode,
     pub consumed_invocation: Option<InvocationId>,
     pub session_generation: u64,
@@ -112,6 +127,10 @@ pub struct SessionState {
     /// gesture.  The following release is ignored even if the native host has
     /// already presented the restored child frame.
     pub consume_next_release: bool,
+    /// Suppresses the next OS down/up pair after ancestor navigation. Windows
+    /// can deliver the remainder of a double-click against the newly restored
+    /// frame; that tail must not dispatch an action there.
+    pub suppress_next_pointer_down: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,6 +151,12 @@ pub enum SessionEvent {
         point: LogicalPoint,
         cell: Option<CellId>,
         role: CellRole,
+        button: PointerButton,
+        geometry_generation: u64,
+    },
+    BeginAncestorNavigation {
+        frame_id: FrameId,
+        point: LogicalPoint,
         button: PointerButton,
         geometry_generation: u64,
     },
@@ -282,6 +307,7 @@ impl SessionReducer {
                 selected: None,
                 keyboard_ownership: KeyboardOwnership::MenuNavigation,
                 pending_press: None,
+                pending_ancestor: None,
                 interaction,
                 consumed_invocation: None,
                 session_generation: 1,
@@ -294,6 +320,7 @@ impl SessionReducer {
                 modifiers: NavigationModifiers::default(),
                 dwell_candidate: None,
                 consume_next_release: false,
+                suppress_next_pointer_down: false,
             },
             invocation_id: invocation,
             next_dispatch: 1,
@@ -333,6 +360,13 @@ impl SessionReducer {
                         begin_native_drag = press.native_drag;
                     }
                 }
+                if let Some(press) = self.state.pending_ancestor.as_mut() {
+                    if press.geometry_generation == geometry_generation
+                        && distance2(point, press.origin) >= DRAG_DISTANCE_SQUARED
+                    {
+                        press.dragged = true;
+                    }
+                }
                 if begin_native_drag {
                     self.state.pending_press = None;
                     return vec![SessionIntent::BeginNativeDrag {
@@ -353,6 +387,14 @@ impl SessionReducer {
                 button,
                 geometry_generation,
             } if pressable(role) && self.current_geometry() == geometry_generation => {
+                if self.state.suppress_next_pointer_down {
+                    self.state.suppress_next_pointer_down = false;
+                    self.state.consume_next_release = true;
+                    self.state.pending_press = None;
+                    self.state.pending_ancestor = None;
+                    self.state.dwell_candidate = None;
+                    return vec![];
+                }
                 self.state.dwell_candidate = None;
                 self.state.armed = true;
                 self.state.pending_press = Some(PendingPress {
@@ -367,8 +409,42 @@ impl SessionReducer {
                 vec![]
             }
             SessionEvent::PointerDown { .. } => {
+                if self.state.suppress_next_pointer_down {
+                    self.state.suppress_next_pointer_down = false;
+                    self.state.consume_next_release = true;
+                }
                 self.state.pending_press = None;
+                self.state.pending_ancestor = None;
                 self.state.dwell_candidate = None;
+                vec![]
+            }
+            SessionEvent::BeginAncestorNavigation {
+                frame_id,
+                point,
+                button,
+                geometry_generation,
+            } => {
+                if self.current_geometry() != geometry_generation
+                    || !self
+                        .state
+                        .stack
+                        .iter()
+                        .any(|frame| frame.frame_id == frame_id)
+                {
+                    return vec![];
+                }
+                self.state.pending_press = None;
+                self.state.consume_next_release = false;
+                self.state.dwell_candidate = None;
+                self.state.hovered = None;
+                self.state.pending_ancestor = Some(PendingAncestorPress {
+                    frame_id,
+                    button,
+                    session_generation: self.state.session_generation,
+                    geometry_generation,
+                    origin: point,
+                    dragged: false,
+                });
                 vec![]
             }
             SessionEvent::PointerUp {
@@ -378,6 +454,26 @@ impl SessionReducer {
                 button,
                 geometry_generation,
             } => {
+                if let Some(mut ancestor) = self.state.pending_ancestor.take() {
+                    if ancestor.session_generation != self.state.session_generation
+                        || ancestor.geometry_generation != geometry_generation
+                        || ancestor.button != button
+                    {
+                        return vec![];
+                    }
+                    if distance2(point, ancestor.origin) >= DRAG_DISTANCE_SQUARED {
+                        ancestor.dragged = true;
+                    }
+                    if ancestor.dragged {
+                        return vec![];
+                    }
+                    let intents =
+                        self.navigate_to_frame(ancestor.frame_id, geometry_generation, point);
+                    if !intents.is_empty() || self.state.stack.len() > 1 {
+                        self.state.suppress_next_pointer_down = true;
+                    }
+                    return intents;
+                }
                 if self.state.consume_next_release {
                     self.state.consume_next_release = false;
                     self.state.pending_press = None;
@@ -530,6 +626,7 @@ impl SessionReducer {
                 self.disarm(pointer_baseline, geometry_generation);
                 self.state.selected = restored;
                 if popped {
+                    self.prune_frozen_dynamic_results();
                     vec![SessionIntent::Back]
                 } else {
                     vec![]
@@ -539,37 +636,7 @@ impl SessionReducer {
                 frame_id,
                 geometry_generation,
                 pointer_baseline,
-            } => {
-                let Some(index) = self
-                    .state
-                    .stack
-                    .iter()
-                    .position(|frame| frame.frame_id == frame_id)
-                else {
-                    return vec![];
-                };
-                if index + 1 == self.state.stack.len() {
-                    self.state.consume_next_release = true;
-                    self.disarm(pointer_baseline, geometry_generation);
-                    return vec![];
-                }
-                self.state.stack.truncate(index + 1);
-                if !self.bump_generation() {
-                    return self.cancel_tree();
-                }
-                if let Some(frame) = self.state.stack.last_mut() {
-                    frame.geometry_generation = geometry_generation;
-                }
-                let restored = self
-                    .state
-                    .stack
-                    .last()
-                    .and_then(|frame| frame.selected.clone());
-                self.disarm(pointer_baseline, geometry_generation);
-                self.state.selected = restored;
-                self.state.consume_next_release = true;
-                vec![SessionIntent::Back]
-            }
+            } => self.navigate_to_frame(frame_id, geometry_generation, pointer_baseline),
             SessionEvent::PageChanged {
                 mut page,
                 geometry_generation,
@@ -642,6 +709,7 @@ impl SessionReducer {
             SessionEvent::OutsideInteraction => {
                 self.state.keyboard_ownership = KeyboardOwnership::ExternalApplication;
                 self.state.pending_press = None;
+                self.state.pending_ancestor = None;
                 self.state.dwell_candidate = None;
                 self.state.hovered = None;
                 vec![]
@@ -898,8 +966,47 @@ impl SessionReducer {
     fn cancel_tree(&mut self) -> Vec<SessionIntent> {
         self.closed = true;
         self.state.pending_press = None;
+        self.state.pending_ancestor = None;
         self.state.dwell_candidate = None;
         vec![SessionIntent::CloseTree]
+    }
+    fn navigate_to_frame(
+        &mut self,
+        frame_id: FrameId,
+        geometry_generation: u64,
+        pointer_baseline: LogicalPoint,
+    ) -> Vec<SessionIntent> {
+        let Some(index) = self
+            .state
+            .stack
+            .iter()
+            .position(|frame| frame.frame_id == frame_id)
+        else {
+            return vec![];
+        };
+        if index + 1 == self.state.stack.len() {
+            self.state.consume_next_release = true;
+            self.disarm(pointer_baseline, geometry_generation);
+            return vec![];
+        }
+        self.state.stack.truncate(index + 1);
+        if !self.bump_generation() {
+            return self.cancel_tree();
+        }
+        if let Some(frame) = self.state.stack.last_mut() {
+            frame.geometry_generation = geometry_generation;
+        }
+        let restored = self
+            .state
+            .stack
+            .last()
+            .and_then(|frame| frame.selected.clone());
+        self.disarm(pointer_baseline, geometry_generation);
+        self.state.selected = restored;
+        self.state.consume_next_release = true;
+        self.state.suppress_next_pointer_down = true;
+        self.prune_frozen_dynamic_results();
+        vec![SessionIntent::Back]
     }
     fn current_geometry(&self) -> u64 {
         self.state
@@ -919,12 +1026,44 @@ impl SessionReducer {
         self.state.hovered = None;
         self.state.selected = None;
         self.state.pending_press = None;
+        self.state.pending_ancestor = None;
         self.state.dwell_candidate = None;
         self.state.arming_baseline = ArmingBaseline {
             point,
             geometry_generation,
         };
     }
+    fn prune_frozen_dynamic_results(&mut self) {
+        let live: std::collections::BTreeSet<_> = self
+            .state
+            .stack
+            .iter()
+            .map(|frame| frame.frame_id)
+            .collect();
+        self.state
+            .frozen_dynamic_results
+            .retain(|key, _| live.contains(&key.frame_id));
+    }
+}
+
+/// Fold the navigation stack into the visible Cascade run.  SameCenter starts
+/// a new visible surface; Cascade appends the retained frame.  All surfaces
+/// call this policy so mixed paths cannot disagree about which ancestors are
+/// rendered or hit-tested.
+pub fn visible_frame_ids<F>(stack: &[MenuFrame], mut presentation: F) -> Vec<FrameId>
+where
+    F: FnMut(FrameId) -> SubmenuPresentation,
+{
+    let mut visible = Vec::new();
+    for frame in stack {
+        if visible.is_empty() || presentation(frame.frame_id) == SubmenuPresentation::Cascade {
+            visible.push(frame.frame_id);
+        } else {
+            visible.clear();
+            visible.push(frame.frame_id);
+        }
+    }
+    visible
 }
 
 fn actionable(role: CellRole) -> bool {
@@ -1421,6 +1560,165 @@ mod tests {
             Vec::new()
         );
         assert!(!reducer.state.consume_next_release);
+    }
+
+    #[test]
+    fn ancestor_navigation_commits_on_matching_release_and_consumes_double_click_tail() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("child"),
+            origin: PhysicalPoint { x: 20.0, y: 10.0 },
+            geometry_generation: 11,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        let root = reducer.state.stack[0].frame_id;
+
+        assert!(
+            reducer
+                .reduce(SessionEvent::BeginAncestorNavigation {
+                    frame_id: root,
+                    point: p(3.0, 4.0),
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                })
+                .is_empty()
+        );
+        assert!(reducer.state.pending_ancestor.is_some());
+        assert_eq!(
+            reducer.reduce(SessionEvent::PointerUp {
+                point: p(3.0, 4.0),
+                cell: None,
+                role: CellRole::Spacer,
+                button: PointerButton::Primary,
+                geometry_generation: 11,
+            }),
+            vec![SessionIntent::Back]
+        );
+        assert_eq!(reducer.state.stack.len(), 1);
+
+        // The remainder of a native double-click is consumed against the
+        // restored root frame rather than activating its newly exposed cell.
+        reducer.reduce(SessionEvent::PointerDown {
+            point: p(3.0, 4.0),
+            cell: Some(CellId::new("root-action")),
+            role: CellRole::Action,
+            button: PointerButton::Primary,
+            geometry_generation: 11,
+        });
+        assert!(
+            reducer
+                .reduce(SessionEvent::PointerUp {
+                    point: p(3.0, 4.0),
+                    cell: Some(CellId::new("root-action")),
+                    role: CellRole::Action,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ancestor_navigation_move_or_capture_loss_does_not_pop() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("child"),
+            origin: PhysicalPoint { x: 20.0, y: 10.0 },
+            geometry_generation: 11,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        let root = reducer.state.stack[0].frame_id;
+        reducer.reduce(SessionEvent::BeginAncestorNavigation {
+            frame_id: root,
+            point: p(0.0, 0.0),
+            button: PointerButton::Primary,
+            geometry_generation: 11,
+        });
+        reducer.reduce(SessionEvent::PointerMoved {
+            point: p(20.0, 0.0),
+            hovered: None,
+            geometry_generation: 11,
+        });
+        assert!(
+            reducer
+                .reduce(SessionEvent::PointerUp {
+                    point: p(20.0, 0.0),
+                    cell: None,
+                    role: CellRole::Spacer,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                })
+                .is_empty()
+        );
+        assert_eq!(reducer.state.stack.len(), 2);
+
+        reducer.reduce(SessionEvent::BeginAncestorNavigation {
+            frame_id: root,
+            point: p(0.0, 0.0),
+            button: PointerButton::Primary,
+            geometry_generation: 11,
+        });
+        reducer.reduce(SessionEvent::OutsideInteraction);
+        assert!(reducer.state.pending_ancestor.is_none());
+        assert!(
+            reducer
+                .reduce(SessionEvent::PointerUp {
+                    point: p(0.0, 0.0),
+                    cell: None,
+                    role: CellRole::Spacer,
+                    button: PointerButton::Primary,
+                    geometry_generation: 11,
+                })
+                .is_empty()
+        );
+        assert_eq!(reducer.state.stack.len(), 2);
+    }
+
+    #[test]
+    fn visible_frame_fold_resets_at_same_center_and_appends_cascade() {
+        let mut reducer = reducer(InteractionMode::StickyClick);
+        reducer.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("one"),
+            origin: PhysicalPoint::default(),
+            geometry_generation: 11,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        reducer.reduce(SessionEvent::OpenChild {
+            menu_id: MenuId::new("two"),
+            origin: PhysicalPoint::default(),
+            geometry_generation: 12,
+            pointer_baseline: p(0.0, 0.0),
+        });
+        let ids: Vec<_> = reducer
+            .state
+            .stack
+            .iter()
+            .map(|frame| frame.frame_id)
+            .collect();
+        assert_eq!(
+            visible_frame_ids(&reducer.state.stack, |frame_id| match frame_id {
+                FrameId(1) => SubmenuPresentation::SameCenter,
+                FrameId(2) => SubmenuPresentation::Cascade,
+                FrameId(3) => SubmenuPresentation::Cascade,
+                _ => SubmenuPresentation::SameCenter,
+            }),
+            ids
+        );
+        assert_eq!(
+            visible_frame_ids(&reducer.state.stack, |frame_id| match frame_id {
+                FrameId(2) => SubmenuPresentation::SameCenter,
+                FrameId(3) => SubmenuPresentation::Cascade,
+                _ => SubmenuPresentation::Cascade,
+            }),
+            vec![FrameId(2), FrameId(3)]
+        );
+        assert_eq!(
+            visible_frame_ids(&reducer.state.stack, |frame_id| match frame_id {
+                FrameId(3) => SubmenuPresentation::SameCenter,
+                _ => SubmenuPresentation::Cascade,
+            }),
+            vec![FrameId(3)]
+        );
     }
 
     #[test]

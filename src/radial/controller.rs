@@ -12,9 +12,8 @@ use super::dynamic::{FrozenAvailability, FrozenBinding};
 use super::font_cache::{FontLayoutService, MAX_LAYOUT_CACHE_ENTRIES, SystemFontCatalog};
 use super::geometry::{
     CellLayout, FrozenSpatialContext, HitShape, LayoutSnapshot, LogicalPoint, PhysicalPoint,
-    PhysicalRect, ScaleFactor, cascade_candidate_centers, compose_layered_layout,
-    layout_document_menu, layout_document_menu_fixed_center, layout_menu, shape_center,
-    translate_layout,
+    PhysicalRect, ScaleFactor, cascade_placement, compose_layered_layout, layout_document_menu,
+    layout_document_menu_fixed_center, layout_menu, shape_center, translate_layout,
 };
 use super::handoff::{
     DispatchEvent, DispatchIntent, InteractionRequirement, PendingRadialDispatch,
@@ -34,7 +33,7 @@ use super::render::{
 };
 use super::session::{
     CellRole, FrameId, NavigationCommand, NavigationModifiers, PointerButton, SessionEvent,
-    SessionIntent, SessionReducer,
+    SessionIntent, SessionReducer, visible_frame_ids,
 };
 use super::skin::compile_menu_tree;
 use super::tooltip::{TooltipHoverState, TooltipIdentity, TooltipPreferences};
@@ -1658,18 +1657,13 @@ impl RadialController {
                     .filter(|active| active.session_id == session_id)
                     .is_some_and(|active| active.tooltip_hover.cancel());
                 if let InputOwner::NavigateToFrame(frame_id) = owner {
-                    let pointer = self
-                        .active
-                        .as_ref()
-                        .filter(|active| active.session_id == session_id)
-                        .map(|active| active.pointer)
-                        .unwrap_or(point);
                     self.session_event(
                         &session_id,
-                        SessionEvent::NavigateToFrame {
+                        SessionEvent::BeginAncestorNavigation {
                             frame_id,
+                            point,
+                            button,
                             geometry_generation: layout_generation,
-                            pointer_baseline: pointer,
                         },
                         out,
                     );
@@ -1794,13 +1788,17 @@ impl RadialController {
                 else {
                     return;
                 };
+                let Some(current_layout) = active
+                    .navigation_layouts
+                    .get(&current_frame.frame_id)
+                    .cloned()
+                else {
+                    return;
+                };
                 if current_frame.geometry_generation != layout_generation
                     || active.reducer.state.spatial_generation != active.spatial.spatial_generation
                     || active.current_frame_id != current_frame.frame_id
-                    || active
-                        .navigation_layouts
-                        .get(&current_frame.frame_id)
-                        .is_none_or(|layout| layout != &active.layout)
+                    || current_layout.origin != current_frame.origin
                 {
                     return;
                 }
@@ -1842,7 +1840,15 @@ impl RadialController {
                     return;
                 }
 
+                let live_frames: BTreeSet<_> = active
+                    .reducer
+                    .state
+                    .stack
+                    .iter()
+                    .map(|frame| frame.frame_id)
+                    .collect();
                 let mut translated_layouts = active.navigation_layouts.clone();
+                translated_layouts.retain(|frame_id, _| live_frames.contains(frame_id));
                 for layout in translated_layouts.values_mut() {
                     if let Err(error) = translate_layout(layout, delta) {
                         out.push(ControllerEvent::Error(format!(
@@ -1850,13 +1856,6 @@ impl RadialController {
                         )));
                         return;
                     }
-                }
-                let mut translated_current = active.layout.clone();
-                if let Err(error) = translate_layout(&mut translated_current, delta) {
-                    out.push(ControllerEvent::Error(format!(
-                        "radial relocation failed: {error:?}"
-                    )));
-                    return;
                 }
                 let mut reducer = active.reducer.clone();
                 reducer.reduce(SessionEvent::Relocated {
@@ -1880,22 +1879,10 @@ impl RadialController {
                 {
                     return;
                 }
-                translated_layouts.insert(current_frame.frame_id, translated_current.clone());
-                let command = NativeCommand::Present {
-                    session_id: session_id.clone(),
-                    scene: build_scene_prepared_selected(
-                        &translated_current,
-                        generation,
-                        &active.resources,
-                        reducer
-                            .state
-                            .hovered
-                            .as_ref()
-                            .or(reducer.state.selected.as_ref()),
-                    ),
-                    layout: translated_current.clone(),
-                    always_on_top: active.always_on_top,
-                    activate_on_show: active.activate_on_show,
+                let Some(translated_current) =
+                    translated_layouts.get(&current_frame.frame_id).cloned()
+                else {
+                    return;
                 };
                 let Some(active) = self
                     .active
@@ -1909,6 +1896,31 @@ impl RadialController {
                 active.pointer = pointer_baseline;
                 active.spatial = spatial;
                 active.reducer = reducer;
+                prune_runtime_navigation(active);
+                let selected = active.reducer.state.hovered.as_ref().or(active
+                    .reducer
+                    .state
+                    .selected
+                    .as_ref());
+                let visible_tooltip = active
+                    .tooltip_hover
+                    .visible()
+                    .filter(|visible| {
+                        visible.session_id == session_id
+                            && visible.frame_id == active.current_frame_id
+                            && visible.layout_generation == generation
+                    })
+                    .map(|visible| visible.cell_id.clone());
+                let (scene, layout) =
+                    runtime_present_scene(active, generation, selected, visible_tooltip);
+                active.layout = layout.clone();
+                let command = NativeCommand::Present {
+                    session_id: session_id.clone(),
+                    scene,
+                    layout,
+                    always_on_top: active.always_on_top,
+                    activate_on_show: active.activate_on_show,
+                };
                 self.layout_generation = next_global_generation;
                 if self
                     .host
@@ -1935,6 +1947,7 @@ impl RadialController {
             &event,
             SessionEvent::PointerDown { .. }
                 | SessionEvent::PointerUp { .. }
+                | SessionEvent::BeginAncestorNavigation { .. }
                 | SessionEvent::TriggerReleased { .. }
                 | SessionEvent::OpenChild { .. }
                 | SessionEvent::Back { .. }
@@ -2253,7 +2266,16 @@ impl RadialController {
                     out.push(ControllerEvent::Error(message));
                 }
             }
-            SessionIntent::Back => self.refresh_active_scene(id, out),
+            SessionIntent::Back => {
+                if let Some(active) = self
+                    .active
+                    .as_mut()
+                    .filter(|active| &active.session_id == id)
+                {
+                    prune_runtime_navigation(active);
+                }
+                self.refresh_active_scene(id, out)
+            }
             SessionIntent::PageChanged { .. } => {
                 let pointer = self
                     .active
@@ -2610,62 +2632,46 @@ impl RadialController {
                 }
             },
             SubmenuPresentation::Cascade => {
-                let Some(cell_layout) = parent_layout
-                    .cells
-                    .iter()
-                    .find(|layout| &layout.cell_id == cell_id)
-                else {
-                    out.push(ControllerEvent::LayoutFailed {
-                        menu_id,
-                        error: super::geometry::LayoutError::InvalidStyle,
-                    });
-                    return;
-                };
-                let _authored_anchor = shape_center(&cell_layout.shape, spatial.scale_factor);
-                let mut placement_error = None;
-                let mut placed = None;
-                for candidate in cascade_candidate_centers(&parent_layout, spatial.work_area) {
-                    match layout_document_menu_fixed_center(
-                        &self.document,
-                        &child,
-                        candidate,
-                        spatial.work_area,
-                        spatial.scale_factor,
-                        0.55,
-                    ) {
-                        Ok(layout) => {
-                            placed = Some(layout);
-                            break;
-                        }
-                        Err(error) => placement_error = Some(error),
+                let (effective_presentation, anchor) = match cascade_placement(
+                    &self.document,
+                    &parent_layout,
+                    &child,
+                    spatial.work_area,
+                    spatial.scale_factor,
+                    0.55,
+                ) {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        out.push(ControllerEvent::SubmenuPlacementFailed {
+                            session_id,
+                            parent_frame_id,
+                            parent_menu_id,
+                            child_menu_id: menu_id,
+                            parent_presentation,
+                            message: format!("Cascade placement failed: {error:?}"),
+                        });
+                        return;
                     }
-                }
-                if let Some(layout) = placed {
-                    (SubmenuPresentation::Cascade, layout)
-                } else {
-                    match layout_document_menu_fixed_center(
-                        &self.document,
-                        &child,
-                        parent_layout.origin,
-                        spatial.work_area,
-                        spatial.scale_factor,
-                        0.55,
-                    ) {
-                        Ok(layout) => (SubmenuPresentation::SameCenter, layout),
-                        Err(fallback_error) => {
-                            out.push(ControllerEvent::SubmenuPlacementFailed {
-                                session_id,
-                                parent_frame_id,
-                                parent_menu_id,
-                                child_menu_id: menu_id,
-                                parent_presentation,
-                                message: format!(
-                                    "Cascade placement failed: {:?}; SameCenter fallback failed: {fallback_error:?}",
-                                    placement_error
-                                ),
-                            });
-                            return;
-                        }
+                };
+                match layout_document_menu_fixed_center(
+                    &self.document,
+                    &child,
+                    anchor,
+                    spatial.work_area,
+                    spatial.scale_factor,
+                    0.55,
+                ) {
+                    Ok(layout) => (effective_presentation, layout),
+                    Err(error) => {
+                        out.push(ControllerEvent::SubmenuPlacementFailed {
+                            session_id,
+                            parent_frame_id,
+                            parent_menu_id,
+                            child_menu_id: menu_id,
+                            parent_presentation,
+                            message: format!("Cascade placement failed: {error:?}"),
+                        });
+                        return;
                     }
                 }
             }
@@ -3175,6 +3181,19 @@ impl RadialController {
                         .map(|active| active.invocation_id)
                 });
             self.retire_host();
+            // A failed transport send still retires the native host.  Feed
+            // the same correlated terminal event into the handoff reducer so
+            // an ActionHandoff cannot remain stuck waiting for a Closed event
+            // that the retired host can no longer deliver.
+            let mut handoff_events = Vec::new();
+            self.reduce_handoff(
+                DispatchEvent::Closed {
+                    session_id: id.clone(),
+                    reason,
+                },
+                &mut handoff_events,
+            );
+            self.terminal_events.extend(handoff_events);
             if let Some(invocation_id) = invocation_id {
                 self.terminal_events.push_back(ControllerEvent::Closed {
                     invocation_id,
@@ -3306,6 +3325,46 @@ fn owner_cell(owner: InputOwner) -> Option<super::model::CellId> {
     }
 }
 
+fn prune_runtime_navigation(active: &mut ActiveSession) {
+    let live: BTreeSet<_> = active
+        .reducer
+        .state
+        .stack
+        .iter()
+        .map(|frame| frame.frame_id)
+        .collect();
+    active
+        .navigation_layouts
+        .retain(|frame_id, _| live.contains(frame_id));
+    active
+        .navigation_frames
+        .retain(|frame_id, _| live.contains(frame_id));
+    active
+        .navigation_presentations
+        .retain(|frame_id, _| live.contains(frame_id));
+    active
+        .navigation_resources
+        .retain(|frame_id, _| live.contains(frame_id));
+    active
+        .navigation_window_options
+        .retain(|frame_id, _| live.contains(frame_id));
+    active
+        .navigation_sounds
+        .retain(|frame_id, _| live.contains(frame_id));
+    if let Some(prepared) = active.prepared.as_mut() {
+        let live_menus: BTreeSet<_> = active
+            .reducer
+            .state
+            .stack
+            .iter()
+            .map(|frame| frame.menu_id.clone())
+            .collect();
+        prepared
+            .frames
+            .retain(|menu_id, _| live_menus.contains(menu_id));
+    }
+}
+
 fn runtime_present_scene(
     active: &ActiveSession,
     generation: u64,
@@ -3316,14 +3375,19 @@ fn runtime_present_scene(
     let current_id = current_frame
         .map(|frame| frame.frame_id)
         .unwrap_or(active.current_frame_id);
+    let visible_ids = visible_frame_ids(&active.reducer.state.stack, |frame_id| {
+        active
+            .navigation_presentations
+            .get(&frame_id)
+            .copied()
+            .unwrap_or(SubmenuPresentation::SameCenter)
+    });
     let own_layout = active
         .navigation_layouts
         .get(&current_id)
         .cloned()
         .unwrap_or_else(|| active.layout.clone());
-    let cascade = active.reducer.state.stack.len() > 1
-        && active.navigation_presentations.get(&current_id) == Some(&SubmenuPresentation::Cascade);
-    if !cascade {
+    if visible_ids.len() <= 1 {
         return (
             build_scene_prepared_selected_tooltip(
                 &own_layout,
@@ -3336,22 +3400,25 @@ fn runtime_present_scene(
             own_layout,
         );
     }
-    let layers: Vec<_> = active
-        .reducer
-        .state
-        .stack
-        .iter()
-        .filter_map(|frame| {
+    let layers: Vec<_> = visible_ids
+        .into_iter()
+        .filter_map(|frame_id| {
+            let frame = active
+                .reducer
+                .state
+                .stack
+                .iter()
+                .find(|frame| frame.frame_id == frame_id)?;
             Some(SceneLayer {
-                frame_id: frame.frame_id,
-                layout: active.navigation_layouts.get(&frame.frame_id)?.clone(),
-                resources: active.navigation_resources.get(&frame.frame_id)?.clone(),
-                selected: if frame.frame_id == current_id {
+                frame_id,
+                layout: active.navigation_layouts.get(&frame_id)?.clone(),
+                resources: active.navigation_resources.get(&frame_id)?.clone(),
+                selected: if frame_id == current_id {
                     selected.cloned()
                 } else {
                     frame.selected.clone()
                 },
-                visible_tooltip: (frame.frame_id == current_id)
+                visible_tooltip: (frame_id == current_id)
                     .then_some(visible_tooltip.clone())
                     .flatten(),
             })
@@ -3811,6 +3878,97 @@ mod tests {
         assert!(controller.active.is_none());
         assert!(controller.pending.is_none());
     }
+
+    #[test]
+    fn close_send_failure_completes_action_handoff_once() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let factory_events = Arc::clone(&events);
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::Persisted {
+                action: crate::universal_actions::PersistedUniversalActionRef {
+                    target: None,
+                    action_id: crate::universal_actions::ActionId::new("test"),
+                },
+            },
+        };
+        document.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                Ok(Box::new(CloseFailingFake {
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        let mut open_intent = open();
+        if let InvocationIntent::OpenRadial {
+            trigger_still_down, ..
+        } = &mut open_intent
+        {
+            *trigger_still_down = false;
+        }
+        controller.handle_intents(vec![open_intent], false);
+        let session_id = controller.pending.as_ref().unwrap().session_id.clone();
+        let generation = controller.pending.as_ref().unwrap().generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+
+        let cell_id = controller.document.menus[0].rings[0].cells[0].id.clone();
+        let activation = InvocationIntent::ActivateItem {
+            id: InvocationId(88),
+            menu_id: MenuId::new("starter"),
+            cell_id,
+            gesture: ClickGesture::Primary,
+            scope: TriggerScope::MenuLocal,
+            source: crate::commands::ActivationSource::RadialShortcut,
+            trigger_still_down: true,
+        };
+        let activation_events = controller.handle_intents(vec![activation], false);
+        assert!(
+            activation_events
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        assert!(controller.active.is_none());
+        assert!(controller.pending.is_none());
+        assert!(controller.poll().iter().any(|event| matches!(
+            event,
+            ControllerEvent::Closed {
+                reason: CloseReason::ActionHandoff,
+                ..
+            }
+        )));
+
+        let dispatched = controller.handle_intents(
+            vec![InvocationIntent::TriggerReleased {
+                id: InvocationId(88),
+            }],
+            false,
+        );
+        assert_eq!(
+            dispatched
+                .iter()
+                .filter(|event| matches!(event, ControllerEvent::DispatchRequested(_)))
+                .count(),
+            1
+        );
+        assert!(
+            controller
+                .handle_intents(
+                    vec![InvocationIntent::TriggerReleased {
+                        id: InvocationId(88),
+                    }],
+                    false,
+                )
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+    }
     fn open() -> InvocationIntent {
         InvocationIntent::OpenRadial {
             id: InvocationId(4),
@@ -4023,8 +4181,14 @@ mod tests {
         assert_eq!(after_second_drag.spatial.visible_center, moved_again);
         assert_eq!(after_second_drag.layout.origin, moved_again);
         assert_eq!(
-            after_second_drag.navigation_layouts[&applications_frame].origin, moved_again,
-            "visited layouts remain translated even when their frame is not current"
+            after_second_drag.navigation_layouts[&favorites_frame].origin, moved_again,
+            "live retained layouts remain translated after Back"
+        );
+        assert!(
+            !after_second_drag
+                .navigation_layouts
+                .contains_key(&applications_frame),
+            "popped frame layouts are pruned"
         );
 
         let root_back_generation = controller.next_layout_generation();
@@ -4160,6 +4324,155 @@ mod tests {
         assert_eq!(restored.layout.origin, favorites_center);
         assert_ne!(applications_frame, favorites_frame);
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn cascade_relocation_preserves_all_live_layers_and_back_prunes_exact_frame() {
+        let mut document = RadialDocument::starter();
+        let root_id = document.default_menu_id.clone();
+        let favorites_id = MenuId::new("starter-favorites");
+        let applications_id = MenuId::new("starter-applications");
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == root_id)
+            .unwrap()
+            .submenu_presentation = SubmenuPresentation::Cascade;
+        let favorites = document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == favorites_id)
+            .unwrap();
+        favorites.submenu_presentation = SubmenuPresentation::Cascade;
+        favorites.rings[0].cells[0].content = CellContent::Submenu {
+            menu_id: applications_id.clone(),
+        };
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let factory_events = Arc::clone(&events);
+        let factory_sent = Arc::clone(&sent);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::clone(&factory_sent),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+        let root_center = controller.active.as_ref().unwrap().spatial.visible_center;
+        let ample = 10_000.0;
+        controller.active.as_mut().unwrap().spatial.work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: root_center.x - ample,
+                y: root_center.y - ample,
+            },
+            max: PhysicalPoint {
+                x: root_center.x + ample,
+                y: root_center.y + ample,
+            },
+        };
+        let mut output = Vec::new();
+        controller.open_submenu(
+            &session_id,
+            &CellId::new("starter-root-favorites"),
+            &mut output,
+        );
+        controller.open_submenu(
+            &session_id,
+            &CellId::new("starter-favorites-source"),
+            &mut output,
+        );
+        assert!(output.is_empty());
+        let before = controller.active.as_ref().unwrap();
+        let live_ids: Vec<_> = before
+            .reducer
+            .state
+            .stack
+            .iter()
+            .map(|frame| frame.frame_id)
+            .collect();
+        let scene_ids = before
+            .layout
+            .layered_input
+            .as_ref()
+            .expect("Cascade uses a composite input scene")
+            .layers
+            .iter()
+            .map(|layer| layer.frame_id)
+            .collect::<Vec<_>>();
+        assert_eq!(live_ids, vec![FrameId(1), FrameId(2), FrameId(3)]);
+        assert_eq!(scene_ids, live_ids);
+        let origins = before
+            .navigation_layouts
+            .iter()
+            .map(|(id, layout)| (*id, layout.origin))
+            .collect::<BTreeMap<_, _>>();
+        let drag = PhysicalPoint { x: 47.0, y: -31.0 };
+        let relocation_generation = controller.layout_generation_for(&session_id);
+        events.lock().unwrap().push_back(NativeEvent::Relocated {
+            session_id: session_id.clone(),
+            layout_generation: relocation_generation,
+            from: PhysicalPoint::default(),
+            to: drag,
+        });
+        controller.poll();
+        let pointer = {
+            let moved = controller.active.as_ref().unwrap();
+            assert_eq!(
+                moved
+                    .layout
+                    .layered_input
+                    .as_ref()
+                    .unwrap()
+                    .layers
+                    .iter()
+                    .map(|layer| layer.frame_id)
+                    .collect::<Vec<_>>(),
+                live_ids
+            );
+            for (frame_id, origin) in origins {
+                let translated = moved.navigation_layouts[&frame_id].origin;
+                assert_eq!(translated.x, origin.x + drag.x);
+                assert_eq!(translated.y, origin.y + drag.y);
+            }
+            moved.pointer
+        };
+        let back_generation = controller.next_layout_generation();
+        controller.session_event(
+            &session_id,
+            SessionEvent::Back {
+                geometry_generation: back_generation,
+                pointer_baseline: pointer,
+            },
+            &mut output,
+        );
+        let backed = controller.active.as_ref().unwrap();
+        assert_eq!(backed.reducer.state.stack.len(), 2);
+        assert_eq!(
+            backed
+                .layout
+                .layered_input
+                .as_ref()
+                .unwrap()
+                .layers
+                .iter()
+                .map(|layer| layer.frame_id)
+                .collect::<Vec<_>>(),
+            vec![FrameId(1), FrameId(2)]
+        );
+        assert!(!backed.navigation_layouts.contains_key(&FrameId(3)));
     }
 
     #[test]

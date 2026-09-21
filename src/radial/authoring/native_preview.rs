@@ -8,7 +8,7 @@ use super::{AuthoringRequestId, AuthoringSessionId, DraftGeneration, NativePrevi
 use crate::radial::context::{InvocationContext, WindowIdentity};
 use crate::radial::diagnostics::RadialDiagnostic;
 use crate::radial::geometry::{
-    FrozenSpatialContext, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_candidate_centers,
+    FrozenSpatialContext, PhysicalPoint, PhysicalRect, ScaleFactor, cascade_placement,
     shape_center, translate_layout,
 };
 use crate::radial::model::{
@@ -24,7 +24,9 @@ use crate::radial::render::{
     SceneLayer, build_scene_prepared_selected, build_scene_prepared_selected_tooltip,
     compose_layered_scene,
 };
-use crate::radial::session::{CellRole, FrameId, SessionEvent, SessionIntent, SessionReducer};
+use crate::radial::session::{
+    CellRole, FrameId, SessionEvent, SessionIntent, SessionReducer, visible_frame_ids,
+};
 use crate::radial::tooltip::{
     TooltipDeadlineScheduler, TooltipHoverState, TooltipIdentity, TooltipPreferences, monotonic_ms,
 };
@@ -872,11 +874,15 @@ impl NativePreviewCoordinator {
                 } => {
                     active.tooltip_hover.cancel();
                     if let crate::radial::render::InputOwner::NavigateToFrame(frame_id) = owner {
-                        let intents = active.reducer.reduce(SessionEvent::NavigateToFrame {
-                            frame_id,
-                            geometry_generation: generation,
-                            pointer_baseline: point,
-                        });
+                        let intents =
+                            active
+                                .reducer
+                                .reduce(SessionEvent::BeginAncestorNavigation {
+                                    frame_id,
+                                    point,
+                                    button,
+                                    geometry_generation: generation,
+                                });
                         (intents, previous_visible.is_some())
                     } else {
                         let cell = active
@@ -1160,24 +1166,22 @@ impl NativePreviewCoordinator {
                 (parent_layout.origin, SubmenuPresentation::SameCenter)
             }
             SubmenuPresentation::Cascade => {
-                let parent_cell = parent_layout
-                    .cells
-                    .iter()
-                    .find(|cell| &cell.cell_id == cell_id)
-                    .ok_or("preview submenu cell geometry is unavailable")?;
-                // Keep the authored cell only as the navigation trigger.  The
-                // shared Cascade placement uses a modest diagonal derived from
-                // the complete parent extents, not a selected-cell-spread
-                // offset.
-                let _authored_anchor = shape_center(&parent_cell.shape, spatial.scale_factor);
-                let anchor = cascade_candidate_centers(&parent_layout, spatial.work_area)
-                    .into_iter()
-                    .next()
-                    .unwrap_or(parent_layout.origin);
-                projection.placement = PreviewPlacement::Cascade {
-                    fallback_center: parent_layout.origin,
+                let (effective, anchor) = cascade_placement(
+                    &document,
+                    &parent_layout,
+                    &child_menu,
+                    spatial.work_area,
+                    spatial.scale_factor,
+                    0.55,
+                )
+                .map_err(|error| format!("{error:?}"))?;
+                projection.placement = match effective {
+                    SubmenuPresentation::Cascade => PreviewPlacement::Cascade {
+                        fallback_center: parent_layout.origin,
+                    },
+                    SubmenuPresentation::SameCenter => PreviewPlacement::FixedCenter,
                 };
-                (anchor, SubmenuPresentation::Cascade)
+                (anchor, effective)
             }
         };
         projection.page = 0;
@@ -1325,6 +1329,7 @@ impl NativePreviewCoordinator {
         active.projection = restored.projection.clone();
         active.effective_presentation = restored.effective_presentation;
         active.layout_generation = next_generation;
+        prune_preview_navigation(active);
         Ok(())
     }
 
@@ -1482,7 +1487,18 @@ impl NativePreviewCoordinator {
                 return Ok(None);
             }
             (
-                active.navigation_frames.clone(),
+                {
+                    let live: std::collections::BTreeSet<_> = active
+                        .reducer
+                        .state
+                        .stack
+                        .iter()
+                        .map(|frame| frame.frame_id)
+                        .collect();
+                    let mut frames = active.navigation_frames.clone();
+                    frames.retain(|frame_id, _| live.contains(frame_id));
+                    frames
+                },
                 active.current_frame_id,
                 old_spatial_generation,
                 next_spatial_generation,
@@ -1565,6 +1581,7 @@ impl NativePreviewCoordinator {
         active.effective_presentation = current.effective_presentation;
         active.spatial = spatial;
         active.layout_generation = next_generation;
+        prune_preview_navigation(active);
         self.present_active()
     }
 
@@ -1608,6 +1625,19 @@ impl Drop for NativePreviewCoordinator {
     }
 }
 
+fn prune_preview_navigation(active: &mut ActivePreview) {
+    let live: std::collections::BTreeSet<_> = active
+        .reducer
+        .state
+        .stack
+        .iter()
+        .map(|frame| frame.frame_id)
+        .collect();
+    active
+        .navigation_frames
+        .retain(|frame_id, _| live.contains(frame_id));
+}
+
 fn preview_present_scene(
     active: &ActivePreview,
     selected: Option<&CellId>,
@@ -1630,9 +1660,15 @@ fn preview_present_scene(
             active.frame.layout.clone(),
         );
     };
-    let cascade = active.reducer.state.stack.len() > 1
-        && active.effective_presentation == SubmenuPresentation::Cascade;
-    if !cascade {
+    let visible_ids = visible_frame_ids(&active.reducer.state.stack, |frame_id| {
+        active
+            .navigation_frames
+            .get(&frame_id)
+            .map_or(SubmenuPresentation::SameCenter, |state| {
+                state.effective_presentation
+            })
+    });
+    if visible_ids.len() <= 1 {
         return (
             build_scene_prepared_selected_tooltip(
                 &current_state.frame.layout,
@@ -1645,15 +1681,18 @@ fn preview_present_scene(
             current_state.frame.layout.clone(),
         );
     }
-    let layers: Vec<_> = active
-        .reducer
-        .state
-        .stack
-        .iter()
-        .filter_map(|frame| {
-            let state = active.navigation_frames.get(&frame.frame_id)?;
+    let layers: Vec<_> = visible_ids
+        .into_iter()
+        .filter_map(|frame_id| {
+            let frame = active
+                .reducer
+                .state
+                .stack
+                .iter()
+                .find(|frame| frame.frame_id == frame_id)?;
+            let state = active.navigation_frames.get(&frame_id)?;
             Some(SceneLayer {
-                frame_id: frame.frame_id,
+                frame_id,
                 layout: state.frame.layout.clone(),
                 resources: state.frame.resources.clone(),
                 selected: if frame.frame_id == current_id {

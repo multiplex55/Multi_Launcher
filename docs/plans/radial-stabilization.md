@@ -1,7 +1,7 @@
 # Radial stabilization ledger
 
-Status: **S4 complete — shared layered Cascade scene and exact-frame Back.**
-S0–S3 remain complete; no native pass is claimed. This ledger records
+Status: **S5 in_progress — independent-review remediation batch.**
+S0–S4 remain complete; no native pass is claimed. This ledger records
 the current checkout, ownership boundaries, source-backed causes, and the
 evidence still needed for S1–S5. The current checkout is authoritative; the
 supplied source snapshot and reference archives are historical/visual inputs.
@@ -240,7 +240,7 @@ keystrokes, or sensitive window titles.
 | S2 | `complete` | Tooltip units and stable hover/native presentation repairs and gate. |
 | S3 | `complete` | Slot-first compact Designer layout/interaction repairs and gate. |
 | S4 | `complete` | Shared unflattened Cascade layers, exact-frame ancestor navigation, and parity across runtime/native preview/embedded preview; focused gate and post-removal checks passed. |
-| S5 | `pending` | Integrated full verification, native matrix, responsiveness/resource evidence, and independent review. |
+| S5 | `in_progress` | Review remediation batch: runtime relocation, shared visible-stack/placement policy, complete ancestor gesture, close/send-failure terminals, live-cache pruning, stale preview replies, reset epochs, and production-path coverage. Full suite/native acceptance remain deferred. |
 
 ## Slow-job policy and active-job template
 
@@ -266,6 +266,80 @@ Later observations due: previous check + 1,200 seconds
 Completion notification:
 Actual result / all failures / next corrective batch:
 ```
+
+### S5 review-remediation findings and active-job record
+
+S5 begins from clean committed HEAD `bb01565f5fc8585f5e3953e19b10360279382da2`.
+The independent review identified ten bounded findings being remediated in
+this batch: (P1-1) runtime Cascade relocation validates the composite against
+per-frame state and can drop layers; (P1-2) runtime/native-preview/embedded
+visible-stack folds diverge at mixed SameCenter/Cascade edges; (P1-3) ancestor
+navigation commits on pointer-down, lacks capture, and can leak a release or
+double-click tail; (P1-4) Discard close can retry Stop after delivery failure;
+(P1-5) runtime Close send failure does not feed the correlated handoff terminal;
+(P2-6) Cascade placement differs between runtime/native preview/embedded;
+(P2-7) popped frame caches are retained; (P2-8) embedded delayed replies can
+resurrect a popped child; (P2-9) Reset does not clear retained tree collapse
+state; and (P2-10) production-path Designer/layered-scene/gesture coverage is
+too weak. The remediation preserves SameCenter serialization/defaults, the
+S1/S2/S3 lifecycle and presentation contracts, exact FrameId state, and no
+per-frame native windows. Full `cargo nextest run`, native UI acceptance, and
+the final S5 integration evidence are explicitly deferred to the follow-up
+verification batch.
+
+```text
+Job purpose / milestone: S5 review-remediation focused Nextest gate (narrow tests already completed separately)
+Command and cwd: `cargo nextest run --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'`; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; preflight every selector before its single Cargo tree
+Source SHA + source/untracked diff fingerprint: bb01565f5fc8585f5e3953e19b10360279382da2; mod.rs SHA256 ED8516E87752CA4BA1B473C8B93FF665DF528E7228C1C969F51BEC797E41DDF8; preview.rs SHA256 339326964DC353BC2090D6E96EFA7015BD5B06C935FE6D64BBD3AC3CC30DCC8F; native_preview.rs SHA256 5DE598792A8AB1E8D83C337E21C64389AD7623C692E7225182C9422C619C2585; controller.rs SHA256 C2A32B289048B65BC338B0ABC2A8ECAFF5FA4D662A9476F9AF4C3E5C7479E3BA; geometry.rs SHA256 DADA4C47A1EA89BE554BAA30265655E9D37D8B9B5068ADD1E8D782F33E641806; native.rs SHA256 B987AE8EF2427CF26C833802BE5BA3BEC3A3E7B550B25A4D31E2434DC5141CFE; session.rs SHA256 DFB45B6C812EE41BF55397EC8F2331D8F7F8F1709F3FF1A42A121D42C63B3746; ledger SHA256 915E0035B1CD0DB1A34BFF557C65DDB7146CEE21560A0309754F5DAC2CFCA1B3
+Session/PID + process start and identity: exec PTY/session 45836; observed Cargo PIDs 27776 (start 2026-09-18 07:28:06 -04:00) and 29304 (start 2026-09-18 07:28:07 -04:00) in the one Nextest tree; rustc PID 30288 (start 07:28:10 -04:00); process inspection did not expose parent command lines, so these are recorded as the single Cargo/Nextest tree rather than separate jobs
+Durable stdout/stderr log: target/s5-remediation-focused.log
+Exit-code record: target/s5-remediation-focused.exit
+Launch time: 2026-09-18 07:28:06 -04:00 (PTY 45836)
+First observation due: 2026-09-18 07:38:06 -04:00
+Second observation due: 2026-09-18 07:53:06 -04:00
+Later observations due: previous check + 1,200 seconds
+Completion notification: parent agent /root
+First observation (2026-09-18 07:38:15 -04:00): PTY 45836 and Cargo PIDs 27776/29304 remained responsive; rustc children were active (latest observed PID 7436, with 18612/23356/24476/24516/27268/27552/30192); durable log length 67 bytes and still contained only the initial compile line; no failure or exit record yet. Next observation due 2026-09-18 07:53:06 -04:00. Reattach to PTY 45836; do not launch a duplicate.
+Completion (2026-09-18 07:49:14 -04:00): same PTY 45836 completed the exact selector with Nextest run ID `cbfc6bf5-9933-4966-ae96-3e67197009a3`; 153 selected tests passed, 4,448 skipped, zero failures; `target/s5-remediation-focused.exit` contains `0`; durable log is 21,877 bytes. No corrective test batch was required. The separate full suite and native UI acceptance remain deferred by this S5 packet.
+Corrective narrow batch after the gate: added the reducer guard clearing a stale release-consumption latch when a new typed ancestor press begins; `cargo test session::tests --lib -- --nocapture` passed 22/22 (3,981 filtered), `cargo check` passed, `cargo fmt --all -- --check` passed, and `git diff --check` passed. Updated source fingerprint: session.rs SHA256 05DE205A866FB417B0731E338DE028E7143DA3B5AC9CADF497D5604D190FC9B7.
+
+Corrective focused-gate record (current source after the narrow guard): command is the exact selector above, same cwd/profile and one Cargo tree; source hashes are mod.rs ED8516E87752CA4BA1B473C8B93FF665DF528E7228C1C969F51BEC797E41DDF8, preview.rs 339326964DC353BC2090D6E96EFA7015BD5B06C935FE6D64BBD3AC3CC30DCC8F, native_preview.rs 5DE598792A8AB1E8D83C337E21C64389AD7623C692E7225182C9422C619C2585, controller.rs C2A32B289048B65BC338B0ABC2A8ECAFF5FA4D662A9476F9AF4C3E5C7479E3BA, geometry.rs DADA4C47A1EA89BE554BAA30265655E9D37D8B9B5068ADD1E8D782F33E641806, native.rs B987AE8EF2427CF26C833802BE5BA3BEC3A3E7B550B25A4D31E2434DC5141CFE, session.rs 05DE205A866FB417B0731E338DE028E7143DA3B5AC9CADF497D5604D190FC9B7. Exec PTY/session 1684; Cargo PIDs 19592 and 26748 (both start 2026-09-18 07:56:23 -04:00), rustc PIDs 28500 and 29200 (start 07:56:25 -04:00); durable log `target/s5-remediation-focused-corrective.log`, exit `target/s5-remediation-focused-corrective.exit`; first observation due 2026-09-18 08:06:23 -04:00, second due 08:21:23, later +1,200 seconds.
+Completion (2026-09-18 08:17:36 -04:00, recorded from the durable exit/log): Nextest run ID `cdeb277b-3918-4d53-9532-25eb6d725c69`; 153 selected tests passed, 4,448 skipped, zero failures; exit record is `0`, log length 21,877 bytes, and no Cargo process remains.
+```
+
+Post-gate checks were already run against this exact source after the final
+narrow reducer guard and are corroborated by the corrective compilation: `cargo
+check` exit `0`, `cargo fmt --all -- --check` exit `0`, and `git diff --check`
+exit `0`. No source was edited while the corrective gate ran, and no duplicate
+Cargo job was launched.
+
+S5 remediation outcome: P1-1 now relocates only live per-frame layouts and
+rebuilds the shared layered runtime scene; P1-2 uses the same
+`visible_frame_ids` SameCenter-reset/Cascade-append fold in runtime, native
+preview, and embedded preview; P1-3 adds typed ancestor press correlation,
+Navigate-owner capture, matching-release commit, capture/move cancellation, and
+double-click-tail suppression; P1-4 terminalizes every close-intent Stop
+attempt, including Discard, after delivery failure; P1-5 feeds a correlated
+ActionHandoff Closed event when runtime Close delivery fails; P2-6 centralizes
+edge-aware Cascade candidate probing and SameCenter fallback in
+`cascade_placement`; P2-7 prunes runtime/native-preview/embedded per-frame
+caches and reducer frozen dynamic results to live FrameIds; P2-8 rejects stale
+embedded replies by request token, editor generation, current FrameId, and
+frame token; P2-9 epochs Designer tree widget IDs on Reset while preserving
+ordinary expansion persistence; and P2-10 adds production-path relocation,
+layered-scene, gesture, close, reset, and stale-reply regressions.
+
+The stale-path audit found no surface caller of `cascade_candidate_centers`
+outside the shared geometry helper/tests, no selected-cell Cascade placement
+path in runtime/native preview/embedded, and no native ancestor route bypassing
+`BeginAncestorNavigation`; `SessionEvent::NavigateToFrame` remains only for
+programmatic embedded Back/navigation. Native interactive acceptance remains
+unverified: the ignored `live_radial_host_probe` was not run, and no desktop
+pixel/input trace or native K/D/T matrix was claimed. S5 therefore remains
+`in_progress`, pending the separate full `cargo nextest run` and native
+acceptance/final integration review; this remediation commit does not close
+those gaps.
 
 ### S4 active-job record
 
