@@ -959,6 +959,14 @@ impl PendingRequestKind {
     pub fn is_durable(self) -> bool {
         matches!(self, Self::Commit(_) | Self::ReplacePackage)
     }
+
+    fn blocks_draft_generation_change(self) -> bool {
+        matches!(self, Self::Snapshot) || self.is_durable()
+    }
+
+    fn invalidated_by_draft_generation_change(self) -> bool {
+        self.is_disposable() && !matches!(self, Self::Snapshot | Self::FontCatalog)
+    }
 }
 
 fn reply_matches_pending_kind(reply: &AuthoringReply, kind: PendingRequestKind) -> bool {
@@ -1133,6 +1141,37 @@ impl RadialAuthoringSession {
         })
     }
 
+    /// Gate and advance one successful user-owned draft change.  Durable
+    /// requests stay correlated until their service reply arrives, while
+    /// disposable draft-bound work is terminalized before the new generation
+    /// becomes observable.  Font catalogs are session-stable and deliberately
+    /// survive the generation change.
+    fn ensure_draft_generation_change_allowed(&self) -> Result<(), AuthoringError> {
+        if self.pending_request.is_some_and(|pending| {
+            pending.editor_session == self.editor_session
+                && pending.kind.blocks_draft_generation_change()
+        }) {
+            return Err(AuthoringError::RequestPending);
+        }
+        Ok(())
+    }
+
+    fn advance_draft_generation(&mut self) -> Result<(), AuthoringError> {
+        self.ensure_draft_generation_change_allowed()?;
+        self.generation.0 = self.generation.0.wrapping_add(1).max(1);
+        self.invalidate_draft_bound_pending_request();
+        Ok(())
+    }
+
+    fn invalidate_draft_bound_pending_request(&mut self) {
+        if self.pending_request.is_some_and(|pending| {
+            pending.editor_session == self.editor_session
+                && pending.kind.invalidated_by_draft_generation_change()
+        }) {
+            self.pending_request = None;
+        }
+    }
+
     pub fn close_decision(&self) -> CloseDecision {
         if self.pending_request.is_some() {
             CloseDecision::AwaitingRequest
@@ -1172,9 +1211,7 @@ impl RadialAuthoringSession {
         key: Option<EditKey>,
         phase: EditPhase,
     ) -> Result<(), AuthoringError> {
-        if self.is_initial_snapshot_pending() {
-            return Err(AuthoringError::RequestPending);
-        }
+        self.ensure_draft_generation_change_allowed()?;
         let before = Arc::clone(&self.draft);
         let mut after = (*before).clone();
         mutation.apply(&mut after)?;
@@ -1187,7 +1224,7 @@ impl RadialAuthoringSession {
             }
             return Ok(());
         }
-        self.generation.0 = self.generation.0.wrapping_add(1).max(1);
+        self.advance_draft_generation()?;
         let open = matches!(phase, EditPhase::Begin | EditPhase::Update);
         let entry = HistoryEntry {
             bytes: estimate_document_bytes(&before)
@@ -1254,9 +1291,7 @@ impl RadialAuthoringSession {
         document: RadialDocument,
         assets: AssetMutations,
     ) -> Result<(), AuthoringError> {
-        if self.is_initial_snapshot_pending() {
-            return Err(AuthoringError::RequestPending);
-        }
+        self.ensure_draft_generation_change_allowed()?;
         if assets.byte_len() > MAX_PENDING_ASSET_BYTES {
             return Err(AuthoringError::AssetBudgetExceeded);
         }
@@ -1266,6 +1301,7 @@ impl RadialAuthoringSession {
         if before == after && before_assets == assets {
             return Ok(());
         }
+        self.advance_draft_generation()?;
         let entry = HistoryEntry {
             bytes: estimate_document_bytes(&before)
                 + estimate_document_bytes(&after)
@@ -1281,7 +1317,6 @@ impl RadialAuthoringSession {
         self.history.push(entry);
         self.draft = after;
         self.pending_assets = assets;
-        self.generation.0 = self.generation.0.wrapping_add(1).max(1);
         self.selection = self
             .selection
             .take()
@@ -1293,9 +1328,7 @@ impl RadialAuthoringSession {
         &mut self,
         addition: ManagedAssetAddition,
     ) -> Result<(), AuthoringError> {
-        if self.is_initial_snapshot_pending() {
-            return Err(AuthoringError::RequestPending);
-        }
+        self.ensure_draft_generation_change_allowed()?;
         let old_len = self
             .pending_assets
             .additions
@@ -1306,6 +1339,7 @@ impl RadialAuthoringSession {
         if projected > MAX_PENDING_ASSET_BYTES {
             return Err(AuthoringError::AssetBudgetExceeded);
         }
+        self.advance_draft_generation()?;
         let before_assets = self.pending_assets.clone();
         self.pending_assets
             .additions
@@ -1323,12 +1357,11 @@ impl RadialAuthoringSession {
             open: false,
             bytes: before_assets.byte_len() + self.pending_assets.byte_len(),
         });
-        self.generation.0 = self.generation.0.wrapping_add(1).max(1);
         Ok(())
     }
 
     pub fn stage_asset_delete(&mut self, id: AssetId) {
-        if self.is_initial_snapshot_pending() {
+        if self.advance_draft_generation().is_err() {
             return;
         }
         let before_assets = self.pending_assets.clone();
@@ -1347,11 +1380,10 @@ impl RadialAuthoringSession {
             open: false,
             bytes: before_assets.byte_len() + self.pending_assets.byte_len(),
         });
-        self.generation.0 = self.generation.0.wrapping_add(1).max(1);
     }
 
     pub fn undo(&mut self) -> bool {
-        if self.is_initial_snapshot_pending() {
+        if self.history.undo.is_empty() || self.advance_draft_generation().is_err() {
             return false;
         }
         let Some(entry) = self.history.undo.pop_back() else {
@@ -1361,12 +1393,11 @@ impl RadialAuthoringSession {
         self.draft = Arc::clone(&entry.before);
         self.pending_assets = entry.before_assets.clone();
         self.history.redo.push_back(entry);
-        self.generation.0 = self.generation.0.wrapping_add(1).max(1);
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        if self.is_initial_snapshot_pending() {
+        if self.history.redo.is_empty() || self.advance_draft_generation().is_err() {
             return false;
         }
         let Some(entry) = self.history.redo.pop_back() else {
@@ -1377,7 +1408,6 @@ impl RadialAuthoringSession {
         self.history.bytes = self.history.bytes.saturating_add(entry.bytes);
         self.history.undo.push_back(entry);
         self.history.trim();
-        self.generation.0 = self.generation.0.wrapping_add(1).max(1);
         true
     }
 
@@ -2023,10 +2053,24 @@ impl RadialAuthoringSession {
         let Some(pending) = self.pending_request else {
             return false;
         };
+        if pending.editor_session == self.editor_session
+            && reply.id() == pending.id
+            && reply.generation() == pending.generation
+            && reply.generation() != self.generation
+            && pending.kind.invalidated_by_draft_generation_change()
+            && reply_matches_pending_kind(&reply, pending.kind)
+        {
+            // A matching disposable operation can finish after its draft was
+            // superseded.  Retire only that exact terminal slot; do not let
+            // its draft-specific payload enter the newer generation.
+            self.pending_request = None;
+            return false;
+        }
         if pending.editor_session != self.editor_session
             || reply.id() != pending.id
             || reply.generation() != pending.generation
-            || reply.generation() != self.generation
+            || (reply.generation() != self.generation
+                && pending.kind != PendingRequestKind::FontCatalog)
             || !reply_matches_pending_kind(&reply, pending.kind)
         {
             return false;
@@ -2118,6 +2162,7 @@ impl RadialAuthoringSession {
         self.native_preview_may_be_open = false;
         self.pending_native_preview = None;
         self.generation.0 = self.generation.0.wrapping_add(1).max(1);
+        self.invalidate_draft_bound_pending_request();
         if !self.is_dirty() {
             self.baseline = snapshot.clone();
             self.draft = Arc::clone(&snapshot.document);
@@ -2151,8 +2196,10 @@ impl RadialAuthoringSession {
         resolution: ConflictResolution,
     ) -> Result<(), AuthoringError> {
         let conflict = self.conflict.clone().ok_or(AuthoringError::MissingEntity)?;
+        self.ensure_draft_generation_change_allowed()?;
         match resolution {
             ConflictResolution::Reload => {
+                self.advance_draft_generation()?;
                 self.baseline = conflict.external.clone();
                 self.draft = Arc::clone(&conflict.external.document);
                 self.clean_checkpoint = Arc::clone(&conflict.external.document);
@@ -2163,6 +2210,7 @@ impl RadialAuthoringSession {
                 self.conflict = None;
             }
             ConflictResolution::DiscardDraft => {
+                self.advance_draft_generation()?;
                 self.baseline = conflict.external.clone();
                 self.draft = Arc::clone(&conflict.external.document);
                 self.clean_checkpoint = Arc::clone(&conflict.external.document);
@@ -2179,6 +2227,7 @@ impl RadialAuthoringSession {
                     &self.draft,
                     &conflict.external.document,
                 )?;
+                self.advance_draft_generation()?;
                 self.baseline = conflict.external.clone();
                 self.clean_checkpoint = Arc::clone(&conflict.external.document);
                 self.draft = Arc::new(merged);
@@ -2186,7 +2235,6 @@ impl RadialAuthoringSession {
                 self.rollback_assets = AssetMutations::default();
                 self.history.clear();
                 self.conflict = None;
-                self.generation.0 = self.generation.0.wrapping_add(1).max(1);
             }
         }
         Ok(())
@@ -2480,6 +2528,453 @@ mod tests {
         assert_eq!(
             session.embedded_preview.as_ref(),
             Some(&("frame-token".into(), input))
+        );
+    }
+
+    #[test]
+    fn draft_edit_retires_stale_embedded_preview_and_allows_fresh_work() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let old_document = Arc::clone(&session.draft);
+        let menu_id = old_document.default_menu_id.clone();
+        let old_request = session
+            .request_embedded_preview(
+                old_document.clone(),
+                menu_id.clone(),
+                None,
+                PhysicalPoint { x: 200.0, y: 200.0 },
+                PhysicalRect {
+                    min: PhysicalPoint { x: 0.0, y: 0.0 },
+                    max: PhysicalPoint { x: 400.0, y: 400.0 },
+                },
+                ScaleFactor::new(1.0).unwrap(),
+                "old-frame".into(),
+                0,
+                None,
+            )
+            .unwrap();
+        let old_generation = old_request.generation();
+
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id.clone(),
+                    name: "Edited".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+
+        assert_eq!(session.generation, DraftGeneration(old_generation.0 + 1));
+        assert!(session.pending_request.is_none());
+
+        let mut preparer = crate::radial::preparation::PreviewFramePreparer::new(PathBuf::new());
+        let old_input = Arc::new(
+            preparer
+                .prepare(
+                    &old_document,
+                    &menu_id,
+                    PhysicalPoint { x: 200.0, y: 200.0 },
+                    PhysicalRect {
+                        min: PhysicalPoint { x: 0.0, y: 0.0 },
+                        max: PhysicalPoint { x: 400.0, y: 400.0 },
+                    },
+                    ScaleFactor::new(1.0).unwrap(),
+                    old_generation.0,
+                    None,
+                    &PreviewProjection::default(),
+                )
+                .unwrap(),
+        );
+        assert!(
+            !session.accept_reply(AuthoringReply::EmbeddedPreviewPrepared {
+                id: old_request.id(),
+                generation: old_generation,
+                editor_session: old_request.editor_session(),
+                token: "old-frame".into(),
+                input: old_input,
+            })
+        );
+        assert!(session.embedded_preview.is_none());
+
+        let fresh_request = session
+            .request_embedded_preview(
+                Arc::clone(&session.draft),
+                menu_id,
+                None,
+                PhysicalPoint { x: 200.0, y: 200.0 },
+                PhysicalRect {
+                    min: PhysicalPoint { x: 0.0, y: 0.0 },
+                    max: PhysicalPoint { x: 400.0, y: 400.0 },
+                },
+                ScaleFactor::new(1.0).unwrap(),
+                "fresh-frame".into(),
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(fresh_request.generation(), session.generation);
+        assert_ne!(fresh_request.id(), old_request.id());
+        let AuthoringRequest::PrepareEmbeddedPreview {
+            candidate,
+            menu_id,
+            selected,
+            anchor,
+            work_area,
+            scale,
+            token,
+            projection,
+            ..
+        } = fresh_request
+        else {
+            panic!("expected a fresh embedded preview request")
+        };
+        let fresh_input = Arc::new(
+            preparer
+                .prepare(
+                    &candidate,
+                    &menu_id,
+                    anchor,
+                    work_area,
+                    scale,
+                    session.generation.0,
+                    selected.as_ref(),
+                    &projection,
+                )
+                .unwrap(),
+        );
+        let fresh_pending = session.pending_request.expect("fresh pending");
+        assert!(
+            session.accept_reply(AuthoringReply::EmbeddedPreviewPrepared {
+                id: fresh_pending.id,
+                generation: session.generation,
+                editor_session: session.editor_session,
+                token,
+                input: fresh_input,
+            })
+        );
+        assert!(session.request_commit(CommitDisposition::Save).is_ok());
+    }
+
+    #[test]
+    fn two_rapid_edits_ignore_out_of_order_disposable_replies() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let menu_id = session.draft.default_menu_id.clone();
+        let first = session.request_live_preview().unwrap();
+
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id.clone(),
+                    name: "First".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        assert!(session.pending_request.is_none());
+
+        let second = session.request_live_preview().unwrap();
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: first.id(),
+            generation: first.generation(),
+            editor_session: first.editor_session(),
+        }));
+        assert_eq!(
+            session.pending_request,
+            Some(PendingAuthoringRequest {
+                id: second.id(),
+                generation: second.generation(),
+                editor_session: second.editor_session(),
+                kind: PendingRequestKind::LivePreview,
+            })
+        );
+
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id,
+                    name: "Second".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        assert!(session.pending_request.is_none());
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: second.id(),
+            generation: second.generation(),
+            editor_session: second.editor_session(),
+        }));
+
+        let fresh = session.request_live_preview().unwrap();
+        assert_eq!(fresh.generation(), session.generation);
+    }
+
+    #[test]
+    fn undo_and_redo_terminalize_disposable_work() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let menu_id = session.draft.default_menu_id.clone();
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id.clone(),
+                    name: "Edited".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+
+        let undo_request = session.request_live_preview().unwrap();
+        assert!(session.undo());
+        assert!(session.pending_request.is_none());
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: undo_request.id(),
+            generation: undo_request.generation(),
+            editor_session: undo_request.editor_session(),
+        }));
+        assert_eq!(session.draft.menus[0].name, "Starter");
+
+        let redo_request = session.request_live_preview().unwrap();
+        assert!(session.redo());
+        assert!(session.pending_request.is_none());
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: redo_request.id(),
+            generation: redo_request.generation(),
+            editor_session: redo_request.editor_session(),
+        }));
+        assert_eq!(session.draft.menus[0].name, "Edited");
+    }
+
+    #[test]
+    fn font_catalog_reply_survives_a_draft_generation_change() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let request = session.request_font_catalog().unwrap();
+        let menu_id = session.draft.default_menu_id.clone();
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id,
+                    name: "Edited".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        assert_eq!(
+            session.pending_request.map(|pending| pending.kind),
+            Some(PendingRequestKind::FontCatalog)
+        );
+        assert!(session.accept_reply(AuthoringReply::FontCatalog {
+            id: request.id(),
+            generation: request.generation(),
+            editor_session: request.editor_session(),
+            families: Arc::from(["Segoe UI".to_owned()]),
+        }));
+        assert!(session.pending_request.is_none());
+        assert!(session.font_catalog_loaded);
+        assert_eq!(session.draft.menus[0].name, "Edited");
+    }
+
+    #[test]
+    fn durable_work_rejects_all_draft_generation_changes_and_stays_correlated() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let menu_id = session.draft.default_menu_id.clone();
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id.clone(),
+                    name: "Before save".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        let before_draft = Arc::clone(&session.draft);
+        let before_generation = session.generation;
+        let request = session.request_commit(CommitDisposition::Apply).unwrap();
+        let pending = session.pending_request;
+
+        assert_eq!(
+            session.mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id,
+                    name: "Must not stick".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            ),
+            Err(AuthoringError::RequestPending)
+        );
+        assert_eq!(session.draft, before_draft);
+        assert_eq!(session.generation, before_generation);
+        assert_eq!(session.pending_request, pending);
+        assert!(!session.undo());
+        assert_eq!(session.pending_request, pending);
+
+        session.pending_request = Some(PendingAuthoringRequest {
+            id: AuthoringRequestId(request.id().0 + 1),
+            generation: request.generation(),
+            editor_session: request.editor_session(),
+            kind: PendingRequestKind::ReplacePackage,
+        });
+        let replacement = (*session.draft).clone();
+        assert_eq!(
+            session.replace_document_atomic(replacement),
+            Err(AuthoringError::RequestPending)
+        );
+        assert_eq!(session.generation, before_generation);
+        assert_eq!(
+            session.pending_request.map(|pending| pending.kind),
+            Some(PendingRequestKind::ReplacePackage)
+        );
+    }
+
+    #[test]
+    fn asset_stage_generation_changes_invalidate_disposable_work() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let addition = ManagedAssetAddition {
+            record: AssetRecord {
+                id: AssetId::new("draft-asset"),
+                kind: super::super::model::MediaKind::Image,
+                relative_path: "draft.png".into(),
+                content_sha256: "a".repeat(64),
+                byte_len: 3,
+            },
+            bytes: Arc::from([1_u8, 2, 3]),
+        };
+
+        let first = session.request_live_preview().unwrap();
+        assert!(session.stage_asset_addition(addition).is_ok());
+        assert!(session.pending_request.is_none());
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: first.id(),
+            generation: first.generation(),
+            editor_session: first.editor_session(),
+        }));
+
+        let second = session.request_live_preview().unwrap();
+        session.stage_asset_delete(AssetId::new("draft-asset"));
+        assert!(session.pending_request.is_none());
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: second.id(),
+            generation: second.generation(),
+            editor_session: second.editor_session(),
+        }));
+
+        let third = session.request_live_preview().unwrap();
+        let mut replacement = (*session.draft).clone();
+        replacement
+            .metadata
+            .insert("replacement".into(), "yes".into());
+        assert!(
+            session
+                .replace_document_and_assets_atomic(replacement, session.pending_assets.clone())
+                .is_ok()
+        );
+        assert!(session.pending_request.is_none());
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: third.id(),
+            generation: third.generation(),
+            editor_session: third.editor_session(),
+        }));
+    }
+
+    #[test]
+    fn conflict_resolution_uses_the_same_generation_transition_policy() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let menu_id = session.draft.default_menu_id.clone();
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id,
+                    name: "Local".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        let stale = session.request_live_preview().unwrap();
+        session.observe_external(snapshot("External", 2));
+        let before_resolution = session.generation;
+        assert!(session.conflict.is_some());
+        assert!(session.pending_request.is_none());
+
+        session
+            .resolve_conflict(ConflictResolution::Reload)
+            .unwrap();
+        assert!(session.generation.0 > before_resolution.0);
+        assert!(session.pending_request.is_none());
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: stale.id(),
+            generation: stale.generation(),
+            editor_session: stale.editor_session(),
+        }));
+        assert_eq!(session.draft.menus[0].name, "External");
+    }
+
+    #[test]
+    fn mismatched_disposable_replies_preserve_the_newer_pending_request() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let newer = session.request_live_preview().unwrap();
+        let pending = session.pending_request;
+
+        assert!(!session.accept_reply(AuthoringReply::PreviewCancelled {
+            id: newer.id(),
+            generation: newer.generation(),
+            editor_session: newer.editor_session(),
+        }));
+        assert_eq!(session.pending_request, pending);
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: AuthoringRequestId(newer.id().0 + 1),
+            generation: newer.generation(),
+            editor_session: newer.editor_session(),
+        }));
+        assert_eq!(session.pending_request, pending);
+    }
+
+    #[test]
+    fn exact_terminal_stale_disposable_reply_retires_only_its_slot() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let stale = session.request_live_preview().unwrap();
+        session.generation.0 += 1;
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: stale.id(),
+            generation: stale.generation(),
+            editor_session: stale.editor_session(),
+        }));
+        assert!(session.pending_request.is_none());
+
+        let newer = session.request_live_preview().unwrap();
+        assert!(!session.accept_reply(AuthoringReply::PreviewAccepted {
+            id: stale.id(),
+            generation: stale.generation(),
+            editor_session: stale.editor_session(),
+        }));
+        assert_eq!(
+            session.pending_request.map(|pending| pending.id),
+            Some(newer.id())
+        );
+    }
+
+    #[test]
+    fn stale_reply_from_a_closed_session_cannot_complete_a_reopened_editor() {
+        let mut closed = RadialAuthoringSession::new(snapshot("Closed", 1));
+        let stale = closed.request_live_preview().unwrap();
+        let mut reopened = RadialAuthoringSession::new(snapshot("Reopened", 1));
+        let current = reopened.request_live_preview().unwrap();
+        assert_eq!(stale.id(), current.id());
+        assert_ne!(stale.editor_session(), current.editor_session());
+
+        assert!(!reopened.accept_reply(AuthoringReply::PreviewAccepted {
+            id: stale.id(),
+            generation: stale.generation(),
+            editor_session: stale.editor_session(),
+        }));
+        assert_eq!(
+            reopened.pending_request.map(|pending| pending.id),
+            Some(current.id())
         );
     }
 

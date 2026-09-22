@@ -2514,6 +2514,41 @@ mod tests {
     }
 
     #[test]
+    fn draft_generation_change_releases_local_frame_and_retries_preparation() {
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut session = authoring_session();
+        let mut preview = EmbeddedPreview::default();
+
+        sync_current(&mut preview, &mut session, &client);
+        assert_eq!(preview.preparation_attempts, 1);
+        let first = endpoint
+            .request_rx
+            .try_recv()
+            .expect("first preview preparation request");
+        let menu_id = session.draft.default_menu_id.clone();
+        session
+            .mutate(
+                crate::radial::authoring::DocumentMutation::RenameMenu {
+                    id: menu_id,
+                    name: "Edited".into(),
+                },
+                None,
+                crate::radial::authoring::EditPhase::Atomic,
+            )
+            .unwrap();
+        assert!(session.pending_request.is_none());
+
+        sync_current(&mut preview, &mut session, &client);
+        assert_eq!(preview.preparation_attempts, 2);
+        let second = endpoint
+            .request_rx
+            .try_recv()
+            .expect("fresh preview preparation request");
+        assert_ne!(first.id(), second.id());
+        assert_eq!(second.generation(), session.generation);
+    }
+
+    #[test]
     fn navigation_uses_session_reducer_and_dispatch_is_only_counted() {
         let mut document = RadialDocument::starter();
         let root = document.menus[0].id.clone();
