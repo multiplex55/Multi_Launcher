@@ -147,6 +147,28 @@ impl Default for EmbeddedPreview {
 }
 
 impl EmbeddedPreview {
+    pub(super) fn candidate_is_prepared(
+        &self,
+        session: &RadialAuthoringSession,
+        candidate_token: &str,
+    ) -> bool {
+        self.selection_token.ends_with(candidate_token)
+            && self.frame_token.contains(candidate_token)
+            && self.preparation_notice.is_none()
+            && self.pending_frame_token.is_none()
+            && self.prepared_frame(session).is_some()
+    }
+
+    pub(super) fn candidate_failure(&self, candidate_token: &str) -> Option<&str> {
+        (self.selection_token.ends_with(candidate_token))
+            .then(|| {
+                self.preparation_notice
+                    .as_ref()
+                    .map(|notice| notice.message.as_str())
+            })
+            .flatten()
+    }
+
     pub(super) fn cancel_tooltip(&mut self) {
         self.tooltip_hover.cancel();
         self.hovered_cell = None;
@@ -377,6 +399,7 @@ impl EmbeddedPreview {
         preset: PreviewPreset,
         selection: Option<&StableSelection>,
         tooltip_preferences: TooltipPreferences,
+        candidate: Option<(&RadialDocument, &str)>,
     ) {
         if self.tooltip_preferences != tooltip_preferences {
             self.tooltip_preferences = tooltip_preferences;
@@ -397,9 +420,12 @@ impl EmbeddedPreview {
         let root = selected_menu
             .or_else(|| self.root.clone())
             .unwrap_or_else(|| session.draft.default_menu_id.clone());
-        let document =
-            representative_document(&session.draft, preset, &root, selected_skin.as_ref());
-        let token = format!("{root:?}:{selected_skin:?}:{preset:?}");
+        let document = candidate.map_or_else(
+            || representative_document(&session.draft, preset, &root, selected_skin.as_ref()),
+            |(document, _)| document.clone(),
+        );
+        let candidate_token = candidate.map_or("authoritative", |(_, token)| token);
+        let token = format!("{root:?}:{selected_skin:?}:{preset:?}:{candidate_token}");
         if self.reducer.is_none()
             || self.document_generation != session.generation.0
             || self.selection_token != token
@@ -427,7 +453,7 @@ impl EmbeddedPreview {
             .and_then(|reducer| reducer.state.stack.last())
             .cloned();
         let frame_token = format!(
-            "{}:{menu_id}:{selected:?}:{selected_skin:?}:{page}:{preset:?}:assets={}:tooltips={:?}",
+            "{}:{menu_id}:{selected:?}:{selected_skin:?}:{page}:{preset:?}:{candidate_token}:assets={}:tooltips={:?}",
             session.generation.0,
             session.pending_assets.preview_identity(),
             tooltip_preferences,
@@ -497,7 +523,11 @@ impl EmbeddedPreview {
             // The service has reached a terminal state without a matching
             // reply (for example a correlated rejection).  Do not keep a
             // stale local correlation alive into a later UI frame.
+            let failed_token = pending_frame.map(|(_, token, _)| token);
             self.invalidate_pending_frame();
+            if let (Some(token), Some(error)) = (failed_token, session.last_error.as_deref()) {
+                self.fail_preparation(token, format!("preview preparation failed: {error}"));
+            }
         }
         if let Some(frame) = current_frame.as_ref()
             && let Some((cached_token, cached)) = self.navigation_frames.get(&frame.frame_id)
@@ -753,7 +783,7 @@ impl EmbeddedPreview {
         }
     }
 
-    fn retry_preparation(&mut self) {
+    pub(super) fn retry_preparation(&mut self) {
         self.failed_frame_token = None;
         self.preparation_notice = None;
     }
@@ -2380,6 +2410,116 @@ mod tests {
         assert_eq!(pointer_at_wheel_center, layout.center);
     }
 
+    #[test]
+    fn proposal_preparation_uses_complete_candidate_through_normal_service_request() {
+        let mut session = authoring_session();
+        let mut candidate = (*session.draft).clone();
+        candidate.menus[0].rings[0].radius += 20.0;
+        let menu_id = candidate.default_menu_id.clone();
+        let selection = StableSelection::Menu(menu_id);
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut preview = EmbeddedPreview::default();
+        preview.sync_preparation(
+            &mut session,
+            Some(&client),
+            PreviewPreset::Current,
+            Some(&selection),
+            TooltipPreferences::default(),
+            Some((&candidate, "proposal:test")),
+        );
+        let request = endpoint.request_rx.try_recv().unwrap();
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            id,
+            generation,
+            editor_session,
+            candidate: requested,
+            menu_id,
+            selected,
+            anchor,
+            work_area,
+            scale,
+            token,
+            projection,
+        } = request
+        else {
+            panic!("expected proposal preparation request")
+        };
+        assert_eq!(&*requested, &candidate);
+        assert!(token.contains("proposal:test"));
+        assert_eq!(
+            projection.tooltip_preferences,
+            TooltipPreferences::default()
+        );
+        assert!(!preview.candidate_is_prepared(&session, "proposal:test"));
+        let mut preparer =
+            crate::radial::preparation::PreviewFramePreparer::new(Default::default());
+        let input = std::sync::Arc::new(
+            preparer
+                .prepare(
+                    &requested,
+                    &menu_id,
+                    anchor,
+                    work_area,
+                    scale,
+                    generation.0,
+                    selected.as_ref(),
+                    &projection,
+                )
+                .unwrap(),
+        );
+        assert!(session.accept_reply(
+            crate::radial::authoring::AuthoringReply::EmbeddedPreviewPrepared {
+                id,
+                generation,
+                editor_session,
+                token,
+                input,
+            }
+        ));
+        preview.sync_preparation(
+            &mut session,
+            Some(&client),
+            PreviewPreset::Current,
+            Some(&selection),
+            TooltipPreferences::default(),
+            Some((&candidate, "proposal:test")),
+        );
+        assert!(preview.candidate_is_prepared(&session, "proposal:test"));
+
+        candidate.menus[0].rings[0].radius = 8_000.0;
+        preview.sync_preparation(
+            &mut session,
+            Some(&client),
+            PreviewPreset::Current,
+            Some(&selection),
+            TooltipPreferences::default(),
+            Some((&candidate, "proposal:oversized")),
+        );
+        let failed = endpoint.request_rx.try_recv().unwrap();
+        assert!(
+            session.accept_reply(crate::radial::authoring::AuthoringReply::Failed {
+                id: failed.id(),
+                generation: failed.generation(),
+                editor_session: failed.editor_session(),
+                message: "Oversized at supported minimum scale".into(),
+            })
+        );
+        preview.sync_preparation(
+            &mut session,
+            Some(&client),
+            PreviewPreset::Current,
+            Some(&selection),
+            TooltipPreferences::default(),
+            Some((&candidate, "proposal:oversized")),
+        );
+        assert!(!preview.candidate_is_prepared(&session, "proposal:oversized"));
+        assert!(
+            preview
+                .candidate_failure("proposal:oversized")
+                .is_some_and(|message| message.contains("Oversized"))
+        );
+    }
+
     fn sync_current(
         preview: &mut EmbeddedPreview,
         session: &mut RadialAuthoringSession,
@@ -2391,6 +2531,7 @@ mod tests {
             PreviewPreset::Current,
             None,
             TooltipPreferences::default(),
+            None,
         );
     }
 
@@ -2719,6 +2860,7 @@ mod tests {
             PreviewPreset::Current,
             None,
             TooltipPreferences::default(),
+            None,
         );
         assert_eq!(preview.frozen_center, Some(visible_center));
 

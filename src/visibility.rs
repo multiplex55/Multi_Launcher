@@ -285,6 +285,12 @@ pub fn handle_visibility_trigger_with_owner<C: ViewportCtx>(
                 static_size,
                 window_size,
             );
+            if !next {
+                // A user toggle must hide a focused native root immediately.
+                // General offscreen parking also serves startup and Screen
+                // Draw, whose root HWND must remain visible to its owner.
+                c.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
             restore_flag.store(next, Ordering::SeqCst);
             *queued_visibility = None;
             tracing::debug!("Applied queued visibility: {}", next);
@@ -349,6 +355,9 @@ fn apply_visibility_owner<C: ViewportCtx>(
                 static_size,
                 window_size,
             );
+            if !next {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
             restore_flag.store(next, Ordering::SeqCst);
             *queued_visibility = None;
             tracing::debug!("Applied queued visibility: {}", next);
@@ -626,7 +635,12 @@ mod tests {
         assert!(!keyboard_suspended);
         assert!(queued_visibility.is_none());
         assert_eq!(viewport.repaint_count.load(Ordering::SeqCst), 2);
-        assert_eq!(viewport.commands.lock().unwrap().len(), 4);
+        let commands = viewport.commands.lock().unwrap();
+        assert_eq!(commands.len(), 5);
+        assert!(matches!(
+            commands.last(),
+            Some(egui::ViewportCommand::Visible(false))
+        ));
         assert!(!trigger.take());
     }
 

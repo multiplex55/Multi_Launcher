@@ -414,6 +414,32 @@ impl PropertiesDraft {
         }
     }
 
+    fn differs_from(&self, cell: &crate::radial::model::CellDefinition) -> bool {
+        self.label != cell.label
+            || self.content_kind != cell_content_kind_key(&cell.content)
+            || self.action_binding
+                != match &cell.content {
+                    CellContent::Action { binding } => Some(binding.clone()),
+                    _ => None,
+                }
+            || self.dynamic_source
+                != match &cell.content {
+                    CellContent::Dynamic { source } => dynamic_source_key(source),
+                    _ => 0,
+                }
+            || self.submenu_target
+                != match &cell.content {
+                    CellContent::Submenu { menu_id } => Some(menu_id.clone()),
+                    _ => None,
+                }
+            || self.icon_kind
+                != match &cell.icon {
+                    crate::radial::model::Override::Inherit => 0,
+                    crate::radial::model::Override::Clear => 1,
+                    crate::radial::model::Override::Value(_) => 2,
+                }
+    }
+
     #[cfg(test)]
     fn is_current(
         &self,
@@ -592,7 +618,12 @@ pub(crate) struct RadialEditorState {
     delete_message: Option<String>,
     delete_ring_prompt: Option<(MenuId, RingId)>,
     resize_prompt: Option<menu::ResizePlan>,
+    ring_proposal: Option<menu::RingEditProposal>,
+    ring_proposal_nonce: Option<u64>,
+    next_ring_proposal_nonce: u64,
     action_filter: String,
+    popup_action_filter: String,
+    properties_handoff_prompt: bool,
     submenu_name: String,
     submenu_link_target: Option<MenuId>,
     drag_source: Option<(
@@ -653,7 +684,12 @@ impl Default for RadialEditorState {
             delete_message: None,
             delete_ring_prompt: None,
             resize_prompt: None,
+            ring_proposal: None,
+            ring_proposal_nonce: None,
+            next_ring_proposal_nonce: 1,
             action_filter: String::new(),
+            popup_action_filter: String::new(),
+            properties_handoff_prompt: false,
             submenu_name: "New submenu".into(),
             submenu_link_target: None,
             drag_source: None,
@@ -1281,6 +1317,10 @@ impl RadialEditorState {
         self.pending_drop = None;
         self.properties_popup = None;
         self.properties_draft = None;
+        self.properties_handoff_prompt = false;
+        self.popup_action_filter.clear();
+        self.ring_proposal = None;
+        self.ring_proposal_nonce = None;
         self.trace_submission = None;
         self.pan_drag_start = None;
         let document = RadialDocument::starter();
@@ -1289,6 +1329,7 @@ impl RadialEditorState {
             document: std::sync::Arc::new(document),
             disk_sha256: DiskSha256(String::new()),
         });
+        session.require_authoritative_snapshot();
         self.client = super::radial_authoring_client();
         if let Some(client) = &self.client {
             client.acquire_resources(session.editor_session());
@@ -1393,8 +1434,9 @@ impl RadialEditorState {
         self.intent_bridge.clear();
         self.placement_draft = None;
         self.pending_drop = None;
-        self.properties_popup = None;
-        self.properties_draft = None;
+        // Popup edits are intentionally retained until the normal close
+        // decision resolves. They are not yet part of the document dirty bit,
+        // but closing the native viewport must not silently discard them.
         // A preview preparation has no durable side effect and can be
         // cancelled locally.  This lets an OS close finish promptly without
         // leaving a late preparation reply attached to a hidden viewport.
@@ -1470,7 +1512,7 @@ impl RadialEditorState {
         }
         if self.close_intent == CloseIntent::DiscardRequested {
             self.finish_close();
-        } else if session.is_dirty() {
+        } else if session.is_dirty() || self.properties_popup_dirty() {
             self.close_prompt = true;
         } else {
             self.finish_close();
@@ -1533,6 +1575,56 @@ impl RadialEditorState {
         }
     }
 
+    fn retry_authoritative_snapshot(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if session.pending_request.is_some() {
+            return;
+        }
+        match session.request_snapshot() {
+            Ok(request) => {
+                let pending = session.pending_request;
+                let result = self.client.as_ref().map_or_else(
+                    || Err(AuthoringError::ServiceClosed),
+                    |client| client.send(request),
+                );
+                if let Err(error) = result
+                    && let Some(pending) = pending
+                {
+                    session.reconcile_request_delivery_failure(pending, format!("{error:?}"));
+                }
+            }
+            Err(error) => session.last_error = Some(format!("{error:?}")),
+        }
+    }
+
+    fn properties_popup_dirty(&self) -> bool {
+        let Some(draft) = self.properties_draft.as_ref() else {
+            return false;
+        };
+        let StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } = &draft.target
+        else {
+            return false;
+        };
+        self.session
+            .as_ref()
+            .and_then(|session| {
+                session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| &menu.id == menu_id)
+                    .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                    .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+            })
+            .is_some_and(|cell| draft.differs_from(cell))
+    }
+
     fn poll_replies(&mut self) {
         let session_closed = {
             let Some(session) = self.session.as_mut() else {
@@ -1545,6 +1637,7 @@ impl RadialEditorState {
             }
             if self.close_intent == CloseIntent::None
                 && !session.font_catalog_loaded
+                && !session.is_initial_snapshot_pending()
                 && session.pending_request.is_none()
             {
                 match session.request_font_catalog() {
@@ -1765,21 +1858,42 @@ impl RadialEditorState {
                             .select_menu(session.draft.default_menu_id.clone(), selected_menu);
                     }
                 }
-                let preview_selection = session.selection.clone();
+                let proposal = self
+                    .ring_proposal
+                    .as_ref()
+                    .filter(|proposal| proposal.base_generation == session.generation);
+                let preview_selection = proposal.map_or_else(
+                    || session.selection.clone(),
+                    |proposal| {
+                        Some(StableSelection::Ring {
+                            menu_id: proposal.menu_id.clone(),
+                            ring_id: proposal.ring_id.clone(),
+                        })
+                    },
+                );
                 let preparation_preset = if self.designer_mode == DesignerMode::Design {
                     PreviewPreset::Current
                 } else {
                     self.preview_preset
                 };
+                let proposal_token = proposal
+                    .zip(self.ring_proposal_nonce)
+                    .map(|(proposal, nonce)| ring_proposal_token(proposal, nonce));
                 self.preview.sync_preparation(
                     session,
                     self.client.as_ref(),
                     preparation_preset,
                     preview_selection.as_ref(),
                     tooltip_preferences,
+                    proposal
+                        .zip(proposal_token.as_deref())
+                        .map(|(proposal, token)| (&proposal.document, token)),
                 );
                 let prepared_preview = self.preview.prepared_frame(session);
-                let draft = session.draft.clone();
+                let draft = proposal.map_or_else(
+                    || session.draft.clone(),
+                    |proposal| std::sync::Arc::new(proposal.document.clone()),
+                );
                 let generation = session.generation.0;
                 let editor_session = session.editor_session;
                 let initial_snapshot_pending = session.is_initial_snapshot_pending();
@@ -1827,10 +1941,30 @@ impl RadialEditorState {
             self.preview_controls(ui, show_expected_layout_diagnostics);
             ui.separator();
             if initial_snapshot_pending {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.spinner();
                     ui.label("Loading the authoritative radial configuration…");
+                    let can_retry = self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.pending_request.is_none());
+                    if ui
+                        .add_enabled(can_retry, egui::Button::new("Retry snapshot"))
+                        .clicked()
+                    {
+                        self.retry_authoritative_snapshot();
+                    }
+                    if ui.button("Close Designer").clicked() {
+                        self.request_close();
+                    }
                 });
+                if let Some(error) = self
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.last_error.as_deref())
+                {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
             }
             show_radial_diagnostics(
                 ui,
@@ -1842,6 +1976,9 @@ impl RadialEditorState {
                 !initial_snapshot_pending && conflict_reason.is_none(),
                 |ui| {
                     self.designer_controls(ui);
+                    if !self.show_resources && self.designer_mode == DesignerMode::Design {
+                        self.basic_authoring_toolbar(ui, &frame.feature_defaults);
+                    }
                     self.pending_drop_ui(ui);
                     let pane = designer_pane_layout(
                         ui.available_size(),
@@ -2089,6 +2226,8 @@ impl RadialEditorState {
             return;
         };
         let mut apply = false;
+        let mut open_inspector_after_apply = false;
+        let mut discard_and_open = false;
         let mut cancel = false;
         let mut popup_open = true;
         let invocation_context = self
@@ -2096,12 +2235,14 @@ impl RadialEditorState {
             .as_ref()
             .and_then(|session| session.sampled_preview_context.clone())
             .unwrap_or_else(|| InvocationContext::empty(0));
-        let action_rows =
+        let filtered_actions =
             crate::gui::universal_action_catalog::UniversalActionAuthoringCatalog::build(
                 &frame.action_catalog,
                 &invocation_context,
-                "",
-            )
+                &self.popup_action_filter,
+            );
+        let action_match_count = filtered_actions.rows().len();
+        let action_rows = filtered_actions
             .rows()
             .iter()
             .take(50)
@@ -2167,6 +2308,14 @@ impl RadialEditorState {
                     } else {
                         "Choose an action"
                     });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.popup_action_filter)
+                            .hint_text("Search actions"),
+                    );
+                    ui.small(format!(
+                        "{} matching action(s); showing up to 50",
+                        action_match_count
+                    ));
                     egui::ScrollArea::vertical()
                         .max_height(120.0)
                         .show(ui, |ui| {
@@ -2180,7 +2329,14 @@ impl RadialEditorState {
                                     .on_hover_text(&row.target_command)
                                     .clicked()
                                 {
-                                    draft.action_binding = row.assignment().ok();
+                                    match row.assignment() {
+                                        Ok(binding) => draft.action_binding = Some(binding),
+                                        Err(error) => {
+                                            self.resource_notice = Some(ResourceNotice::warning(
+                                                format!("Action cannot be assigned: {error:?}"),
+                                            ));
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -2226,9 +2382,31 @@ impl RadialEditorState {
                         cancel = true;
                     }
                     if ui.button("Open in Inspector").clicked() {
-                        cancel = true;
+                        if draft.differs_from(&cell) {
+                            self.properties_handoff_prompt = true;
+                        } else {
+                            discard_and_open = true;
+                        }
                     }
                 });
+                if self.properties_handoff_prompt {
+                    ui.separator();
+                    ui.label("Apply popup edits before opening Inspector?");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Apply and open").clicked() {
+                            apply = true;
+                            open_inspector_after_apply = true;
+                            self.properties_handoff_prompt = false;
+                        }
+                        if ui.button("Discard and open").clicked() {
+                            discard_and_open = true;
+                            self.properties_handoff_prompt = false;
+                        }
+                        if ui.button("Keep editing").clicked() {
+                            self.properties_handoff_prompt = false;
+                        }
+                    });
+                }
             });
         if !popup_open {
             cancel = true;
@@ -2236,6 +2414,19 @@ impl RadialEditorState {
         if cancel {
             self.properties_popup = None;
             self.properties_draft = None;
+            self.properties_handoff_prompt = false;
+            self.popup_action_filter.clear();
+            return;
+        }
+        if discard_and_open {
+            if let Some(session) = self.session.as_mut() {
+                session.select(Some(target));
+            }
+            self.inspector_visible = true;
+            self.properties_popup = None;
+            self.properties_draft = None;
+            self.popup_action_filter.clear();
+            self.mark_preferences_changed();
             return;
         }
         if apply {
@@ -2312,8 +2503,14 @@ impl RadialEditorState {
                         "Cell properties failed: {error:?}"
                     )));
                 } else {
+                    if open_inspector_after_apply {
+                        session.select(Some(target));
+                        self.inspector_visible = true;
+                        self.mark_preferences_changed();
+                    }
                     self.properties_popup = None;
                     self.properties_draft = None;
+                    self.popup_action_filter.clear();
                     self.placement_draft = None;
                 }
             }
@@ -3150,7 +3347,275 @@ impl RadialEditorState {
         }
     }
 
-    fn tree(&mut self, ui: &mut egui::Ui, defaults: &crate::radial::model::RadialFeatureSettings) {
+    fn basic_authoring_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        defaults: &crate::radial::model::RadialFeatureSettings,
+    ) {
+        let mut create_menu = false;
+        let mut propose_new_ring = false;
+        let mut preview_resize = false;
+        let mut apply_proposal = false;
+        let mut cancel_proposal = false;
+        let mut choose_ring = None;
+
+        let selected_menu = self
+            .session
+            .as_ref()
+            .and_then(selected_menu_id)
+            .or_else(|| {
+                self.session
+                    .as_ref()
+                    .map(|session| session.draft.default_menu_id.clone())
+            });
+        let selected_ring = self
+            .session
+            .as_ref()
+            .and_then(|session| match &session.selection {
+                Some(StableSelection::Ring { menu_id, ring_id })
+                | Some(StableSelection::Cell {
+                    menu_id, ring_id, ..
+                }) => Some((menu_id.clone(), ring_id.clone())),
+                _ => selected_menu.as_ref().and_then(|menu_id| {
+                    session
+                        .draft
+                        .menus
+                        .iter()
+                        .find(|menu| &menu.id == menu_id)
+                        .and_then(|menu| menu.rings.first())
+                        .map(|ring| (menu_id.clone(), ring.id.clone()))
+                }),
+            });
+        let ring_options = selected_ring.as_ref().and_then(|(menu_id, ring_id)| {
+            self.session.as_ref().and_then(|session| {
+                session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| &menu.id == menu_id)
+                    .map(|menu| {
+                        let rings = menu
+                            .rings
+                            .iter()
+                            .map(|ring| (ring.id.clone(), ring.cells.len()))
+                            .collect::<Vec<_>>();
+                        let selected = rings.iter().position(|(id, _)| id == ring_id).unwrap_or(0);
+                        (rings, selected)
+                    })
+            })
+        });
+
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                create_menu = ui.button("New Menu").clicked();
+                propose_new_ring = ui
+                    .add_enabled(selected_menu.is_some(), egui::Button::new("Add Ring"))
+                    .on_disabled_hover_text("Select a menu first")
+                    .clicked();
+
+                if let (Some((menu_id, ring_id)), Some((rings, current_index))) =
+                    (selected_ring.as_ref(), ring_options.as_ref())
+                {
+                    egui::ComboBox::from_label("Ring")
+                        .selected_text(format!(
+                            "{} · {} slots",
+                            current_index + 1,
+                            rings.get(*current_index).map_or(0, |(_, count)| *count)
+                        ))
+                        .show_ui(ui, |ui| {
+                            for (index, (candidate_id, count)) in rings.iter().enumerate() {
+                                if ui
+                                    .selectable_label(
+                                        candidate_id == ring_id,
+                                        format!("Ring {} · {} slots", index + 1, count),
+                                    )
+                                    .clicked()
+                                {
+                                    choose_ring = Some(StableSelection::Ring {
+                                        menu_id: menu_id.clone(),
+                                        ring_id: candidate_id.clone(),
+                                    });
+                                }
+                            }
+                        });
+                    if let Some((current_ring, count)) = rings.get(*current_index) {
+                        let key = (menu_id.clone(), current_ring.clone());
+                        let requested = self.ring_resize_drafts.entry(key).or_insert(*count);
+                        ui.add(
+                            egui::DragValue::new(requested)
+                                .prefix("Slots ")
+                                .clamp_range(0..=crate::radial::model::limits::MAX_CELLS_PER_RING),
+                        );
+                        preview_resize = ui.button("Preview proposal").clicked();
+                    }
+                } else {
+                    ui.label("Ring: select a menu");
+                }
+            });
+            if let Some(proposal) = &self.ring_proposal {
+                let proposal_token = self
+                    .ring_proposal_nonce
+                    .map(|nonce| ring_proposal_token(proposal, nonce))
+                    .unwrap_or_default();
+                let proposal_ready = !proposal_token.is_empty()
+                    && self.session.as_ref().is_some_and(|session| {
+                        self.preview
+                            .candidate_is_prepared(session, &proposal_token)
+                    });
+                let proposal_failure = (!proposal_token.is_empty())
+                    .then(|| self.preview.candidate_failure(&proposal_token))
+                    .flatten()
+                    .map(str::to_owned);
+                ui.horizontal_wrapped(|ui| {
+                    let change = proposal.previous_radius.map_or_else(
+                        || format!("new outer ring at radius {:.1}", proposal.proposed_radius),
+                        |previous| {
+                            format!(
+                                "{} slots; radius {:.1} → {:.1}",
+                                proposal.requested_len, previous, proposal.proposed_radius
+                            )
+                        },
+                    );
+                    ui.label(format!("Proposal: {change}"));
+                    if let Some(summary) = &proposal.resolution_summary {
+                        ui.colored_label(ui.visuals().warn_fg_color, summary);
+                    }
+                    if let Some(failure) = proposal_failure.as_deref() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            format!("Preview failed: {failure}"),
+                        );
+                    } else if !proposal_ready {
+                        ui.spinner();
+                        ui.small("Preparing candidate preview…");
+                    }
+                    apply_proposal = ui
+                        .add_enabled(proposal_ready, egui::Button::new("Apply proposal"))
+                        .on_disabled_hover_text(
+                            "Apply is available only after this exact candidate is prepared and visible",
+                        )
+                        .clicked();
+                    cancel_proposal = ui.button("Cancel proposal").clicked();
+                });
+            }
+        });
+
+        if let (Some(session), Some(selection)) = (self.session.as_mut(), choose_ring) {
+            session.select(Some(selection));
+            self.ring_proposal = None;
+            self.ring_proposal_nonce = None;
+        }
+
+        if create_menu {
+            if let Some(session) = self.session.as_mut() {
+                match menu::create_menu_with_defaults(
+                    session,
+                    "menu",
+                    "New menu",
+                    defaults.default_interaction,
+                    defaults.default_submenu_presentation,
+                ) {
+                    Ok(_) => {
+                        self.ring_proposal = None;
+                        self.ring_proposal_nonce = None;
+                    }
+                    Err(error) => session.last_error = Some(format!("New menu failed: {error:?}")),
+                }
+            }
+        }
+        if propose_new_ring {
+            if let (Some(session), Some(menu_id)) = (self.session.as_mut(), selected_menu.as_ref())
+            {
+                let ring_id = session.allocate_ring_id("ring");
+                let cell_ids = (0..8)
+                    .map(|index| session.allocate_cell_id(&format!("cell-{index}")))
+                    .collect();
+                match menu::propose_new_ring(
+                    &session.draft,
+                    session.generation,
+                    menu_id,
+                    ring_id,
+                    cell_ids,
+                ) {
+                    Ok(proposal) => self.install_ring_proposal(proposal),
+                    Err(error) => session.last_error = Some(format!("Add ring failed: {error:?}")),
+                }
+            }
+        }
+        if preview_resize {
+            if let (Some(session), Some((menu_id, ring_id))) =
+                (self.session.as_mut(), selected_ring.as_ref())
+            {
+                let count = session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| &menu.id == menu_id)
+                    .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                    .map_or(0, |ring| ring.cells.len());
+                let requested = self
+                    .ring_resize_drafts
+                    .get(&(menu_id.clone(), ring_id.clone()))
+                    .copied()
+                    .unwrap_or(count);
+                match menu::resize_plan(&session.draft, menu_id, ring_id, requested) {
+                    Ok(plan) if plan.requires_resolution() => {
+                        self.resize_prompt = Some(plan);
+                        self.ring_proposal = None;
+                        self.ring_proposal_nonce = None;
+                    }
+                    Ok(_) => {
+                        let ids = (0..requested.saturating_sub(count))
+                            .map(|_| session.allocate_cell_id("cell"))
+                            .collect();
+                        match menu::propose_ring_resize(
+                            &session.draft,
+                            session.generation,
+                            menu_id,
+                            ring_id,
+                            requested,
+                            ids,
+                        ) {
+                            Ok(proposal) => self.install_ring_proposal(proposal),
+                            Err(error) => {
+                                session.last_error =
+                                    Some(format!("Slot proposal failed: {error:?}"))
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        session.last_error = Some(format!("Slot proposal failed: {error:?}"))
+                    }
+                }
+            }
+        }
+        if apply_proposal {
+            if let (Some(session), Some(proposal)) =
+                (self.session.as_mut(), self.ring_proposal.take())
+            {
+                self.ring_proposal_nonce = None;
+                if let Err(error) = menu::apply_ring_proposal(session, proposal) {
+                    session.last_error = Some(format!("Proposal apply failed: {error:?}"));
+                } else {
+                    self.focus_restore = session.selection.clone();
+                }
+            }
+        }
+        if cancel_proposal {
+            self.ring_proposal = None;
+            self.ring_proposal_nonce = None;
+        }
+    }
+
+    fn install_ring_proposal(&mut self, proposal: menu::RingEditProposal) {
+        let nonce = self.next_ring_proposal_nonce;
+        self.next_ring_proposal_nonce = self.next_ring_proposal_nonce.wrapping_add(1).max(1);
+        self.ring_proposal = Some(proposal);
+        self.ring_proposal_nonce = Some(nonce);
+        self.preview.retry_preparation();
+    }
+
+    fn tree(&mut self, ui: &mut egui::Ui, _defaults: &crate::radial::model::RadialFeatureSettings) {
         ui.heading("Menus and rings");
         let drag_source = &mut self.drag_source;
         let post_render = &mut self.post_render;
@@ -3324,22 +3789,7 @@ impl RadialEditorState {
                 }
             }
         });
-        ui.horizontal(|ui| {
-            if ui.button("New menu").clicked() {
-                let _ = menu::create_menu_with_defaults(
-                    session,
-                    "menu",
-                    "New menu",
-                    defaults.default_interaction,
-                    defaults.default_submenu_presentation,
-                );
-            }
-            if ui.button("Add ring").clicked() {
-                if let Some(menu_id) = selected_menu_id(session) {
-                    let _ = menu::add_ring(session, &menu_id);
-                }
-            }
-        });
+        ui.small("Use the Design toolbar for New Menu, Add Ring, and slot-count proposals.");
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui, frame: &DesignerFrameContext) {
@@ -3637,35 +4087,12 @@ impl RadialEditorState {
                 }
             }
         });
-        if ui.button("Add spacer").clicked() {
-            let _ = menu::add_spacer(session, &menu_id, &ring_id);
-        }
-        let resize_key = (menu_id.clone(), ring_id.clone());
-        let requested = self
-            .ring_resize_drafts
-            .entry(resize_key.clone())
-            .or_insert(count);
-        let resize_response = ui.add(egui::DragValue::new(requested).prefix("Cells "));
-        let resize_ended = resize_response.lost_focus()
-            || resize_response.drag_stopped()
-            || (resize_response.changed()
-                && !resize_response.has_focus()
-                && !resize_response.dragged());
-        if resize_ended {
-            let requested = self.ring_resize_drafts.remove(&resize_key).unwrap_or(count);
-            if let Ok(plan) = menu::resize_plan(&session.draft, &menu_id, &ring_id, requested) {
-                if plan.requires_resolution() {
-                    self.resize_prompt = Some(plan);
-                } else {
-                    let _ = menu::apply_resize(session, plan, None);
-                }
-            }
-        } else if !resize_response.has_focus() && !resize_response.dragged() {
-            self.ring_resize_drafts.remove(&resize_key);
-        }
+        ui.small("Change authored slot count through the proposal controls above the board.");
         if ui.button("Delete ring").clicked() {
             if count == 0 {
-                let _ = menu::delete_ring(session, &menu_id, &ring_id);
+                if let Err(error) = menu::delete_ring(session, &menu_id, &ring_id) {
+                    session.last_error = Some(format!("Delete ring failed: {error:?}"));
+                }
             } else {
                 self.delete_ring_prompt = Some((menu_id, ring_id));
             }
@@ -4159,9 +4586,18 @@ impl RadialEditorState {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("Save, discard, or keep editing?");
+                    let popup_dirty = self.properties_popup_dirty();
+                    ui.label(if popup_dirty {
+                        "Cell properties still have unapplied edits. Keep editing to Apply them, or discard all changes."
+                    } else {
+                        "Save, discard, or keep editing?"
+                    });
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui
+                            .add_enabled(!popup_dirty, egui::Button::new("Save"))
+                            .on_disabled_hover_text("Apply or cancel the open cell properties first")
+                            .clicked()
+                        {
                             self.close_prompt = false;
                             self.send_commit(CommitDisposition::Save);
                         }
@@ -4258,17 +4694,25 @@ impl RadialEditorState {
                     plan.populated_removed.len()
                 ));
                 if ui.button("Move to overflow ring").clicked() {
-                    if let Some(session) = self.session.as_mut() {
-                        match menu::apply_resize(
-                            session,
-                            plan.clone(),
-                            Some(ResizeResolution::OverflowRing),
-                        ) {
-                            Ok(()) => self.resize_prompt = None,
-                            Err(error) => {
-                                self.delete_message = Some(format!("Resize failed: {error:?}"))
-                            }
+                    let proposal = self.session.as_mut().map(|session| {
+                        let overflow_id = session.allocate_ring_id("overflow");
+                        menu::propose_resolved_resize(
+                            &session.draft,
+                            session.generation,
+                            &plan,
+                            ResizeResolution::OverflowRing,
+                            Some(overflow_id),
+                        )
+                    });
+                    match proposal {
+                        Some(Ok(proposal)) => {
+                            self.resize_prompt = None;
+                            self.install_ring_proposal(proposal);
                         }
+                        Some(Err(error)) => {
+                            self.delete_message = Some(format!("Resize failed: {error:?}"))
+                        }
+                        None => {}
                     }
                 }
                 let destinations: Vec<_> = self
@@ -4283,35 +4727,49 @@ impl RadialEditorState {
                     .collect();
                 for destination in destinations {
                     if ui.button(format!("Relocate to {destination}")).clicked() {
-                        if let Some(session) = self.session.as_mut() {
-                            match menu::apply_resize(
-                                session,
-                                plan.clone(),
-                                Some(ResizeResolution::Relocate {
+                        let proposal = self.session.as_ref().map(|session| {
+                            menu::propose_resolved_resize(
+                                &session.draft,
+                                session.generation,
+                                &plan,
+                                ResizeResolution::Relocate {
                                     menu_id: plan.menu_id.clone(),
                                     ring_id: destination,
-                                }),
-                            ) {
-                                Ok(()) => self.resize_prompt = None,
-                                Err(error) => {
-                                    self.delete_message = Some(format!("Resize failed: {error:?}"))
-                                }
+                                },
+                                None,
+                            )
+                        });
+                        match proposal {
+                            Some(Ok(proposal)) => {
+                                self.resize_prompt = None;
+                                self.install_ring_proposal(proposal);
                             }
+                            Some(Err(error)) => {
+                                self.delete_message = Some(format!("Resize failed: {error:?}"))
+                            }
+                            None => {}
                         }
                     }
                 }
                 if ui.button("Discard cells").clicked() {
-                    if let Some(session) = self.session.as_mut() {
-                        match menu::apply_resize(
-                            session,
-                            plan.clone(),
-                            Some(ResizeResolution::ConfirmDiscard),
-                        ) {
-                            Ok(()) => self.resize_prompt = None,
-                            Err(error) => {
-                                self.delete_message = Some(format!("Resize failed: {error:?}"))
-                            }
+                    let proposal = self.session.as_ref().map(|session| {
+                        menu::propose_resolved_resize(
+                            &session.draft,
+                            session.generation,
+                            &plan,
+                            ResizeResolution::ConfirmDiscard,
+                            None,
+                        )
+                    });
+                    match proposal {
+                        Some(Ok(proposal)) => {
+                            self.resize_prompt = None;
+                            self.install_ring_proposal(proposal);
                         }
+                        Some(Err(error)) => {
+                            self.delete_message = Some(format!("Resize failed: {error:?}"))
+                        }
+                        None => {}
                     }
                 }
                 if ui.button("Cancel").clicked() {
@@ -4368,6 +4826,13 @@ fn cell_content_kind_key(content: &CellContent) -> u8 {
         CellContent::Dynamic { .. } => 3,
         CellContent::Control { .. } => 4,
     }
+}
+
+fn ring_proposal_token(proposal: &menu::RingEditProposal, nonce: u64) -> String {
+    format!(
+        "proposal:g{}:n{nonce}:{}:{}",
+        proposal.base_generation.0, proposal.menu_id, proposal.ring_id,
+    )
 }
 
 fn selected_menu_id(session: &RadialAuthoringSession) -> Option<MenuId> {
@@ -6278,6 +6743,90 @@ mod tests {
     }
 
     #[test]
+    fn dirty_cell_popup_survives_native_close_until_explicit_resolution() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_ref().unwrap();
+        let cell = &session.draft.menus[0].rings[0].cells[0];
+        let target = StableSelection::Cell {
+            menu_id: session.draft.menus[0].id.clone(),
+            ring_id: session.draft.menus[0].rings[0].id.clone(),
+            cell_id: cell.id.clone(),
+        };
+        let mut draft = PropertiesDraft::from_cell(target.clone(), session.generation, cell);
+        draft.label.push_str(" edited");
+        editor.properties_popup = Some(target);
+        editor.properties_draft = Some(draft);
+
+        editor.request_close();
+
+        assert!(editor.open);
+        assert!(editor.close_prompt);
+        assert!(editor.properties_popup_dirty());
+        assert!(editor.properties_draft.is_some());
+    }
+
+    #[test]
+    fn repeated_same_geometry_proposals_receive_distinct_preview_identities() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_ref().unwrap();
+        let menu_id = session.draft.menus[0].id.clone();
+        let ring_id = session.draft.menus[0].rings[0].id.clone();
+        let requested_len = session.draft.menus[0].rings[0].cells.len() + 1;
+        let generation = session.generation;
+        let first = menu::propose_ring_resize(
+            &session.draft,
+            generation,
+            &menu_id,
+            &ring_id,
+            requested_len,
+            vec![CellId::new("proposal-cell-a")],
+        )
+        .unwrap();
+        let second = menu::propose_ring_resize(
+            &session.draft,
+            generation,
+            &menu_id,
+            &ring_id,
+            requested_len,
+            vec![CellId::new("proposal-cell-b")],
+        )
+        .unwrap();
+        assert_eq!(first.requested_len, second.requested_len);
+        assert_eq!(first.proposed_radius, second.proposed_radius);
+        let first_new_id = first.document.menus[0].rings[0]
+            .cells
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        let second_new_id = second.document.menus[0].rings[0]
+            .cells
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(first_new_id, CellId::new("proposal-cell-a"));
+        assert_eq!(second_new_id, CellId::new("proposal-cell-b"));
+        assert_ne!(first_new_id, second_new_id);
+
+        editor.install_ring_proposal(first);
+        let first_nonce = editor.ring_proposal_nonce.unwrap();
+        let first_token = ring_proposal_token(editor.ring_proposal.as_ref().unwrap(), first_nonce);
+        editor.install_ring_proposal(second);
+        let second_nonce = editor.ring_proposal_nonce.unwrap();
+        let second_token =
+            ring_proposal_token(editor.ring_proposal.as_ref().unwrap(), second_nonce);
+        assert_ne!(first_token, second_token);
+        assert!(
+            !editor
+                .preview
+                .candidate_is_prepared(editor.session.as_ref().unwrap(), &second_token)
+        );
+    }
+
+    #[test]
     fn diagnostic_display_model_bounds_actionables_and_discloses_overflow() {
         let actionables = (0..=crate::radial::diagnostics::MAX_RADIAL_DIAGNOSTICS).map(|index| {
             crate::radial::diagnostics::RadialDiagnostic::new(
@@ -6419,7 +6968,7 @@ mod tests {
     }
 
     #[test]
-    fn continuous_editor_categories_use_stable_field_dispatch_and_staged_resize() {
+    fn continuous_editor_categories_use_stable_field_dispatch_and_previewed_resize() {
         let source = include_str!("mod.rs");
         let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
         for field in [
@@ -6444,7 +6993,15 @@ mod tests {
         assert!(production.contains("continuous_widget_edit"));
         assert!(production.contains("dispatch_widget_document_edit"));
         assert!(production.contains("ring_resize_drafts"));
-        assert!(production.contains("resize_ended"));
+        assert!(production.contains("Preview proposal"));
+        assert!(production.contains("install_ring_proposal"));
+        assert!(production.contains("menu::apply_ring_proposal"));
+        assert!(production.contains("ring_proposal_nonce"));
+        assert!(production.contains("candidate_is_prepared"));
+        assert!(
+            !production.contains("menu::apply_resize"),
+            "GUI slot-count paths must not bypass preview and explicit Apply"
+        );
     }
 
     #[test]

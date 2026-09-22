@@ -1150,6 +1150,7 @@ pub struct RadialAuthoringSession {
     pub pending_assets: AssetMutations,
     pub conflict: Option<AuthoringConflict>,
     pub pending_request: Option<PendingAuthoringRequest>,
+    authoritative_snapshot_required: bool,
     pub last_error: Option<String>,
     pub exported_package: Option<Arc<[u8]>>,
     pub last_backup_path: Option<PathBuf>,
@@ -1190,6 +1191,7 @@ impl RadialAuthoringSession {
             pending_assets: AssetMutations::default(),
             conflict: None,
             pending_request: None,
+            authoritative_snapshot_required: false,
             last_error: None,
             exported_package: None,
             last_backup_path: None,
@@ -1258,10 +1260,13 @@ impl RadialAuthoringSession {
     }
 
     pub fn is_initial_snapshot_pending(&self) -> bool {
-        self.pending_request.is_some_and(|pending| {
-            pending.editor_session == self.editor_session
-                && pending.kind == PendingRequestKind::Snapshot
-        })
+        self.authoritative_snapshot_required
+    }
+
+    /// A GUI session seeded from the starter document must stay read-only
+    /// until a service snapshot or publication replaces that placeholder.
+    pub fn require_authoritative_snapshot(&mut self) {
+        self.authoritative_snapshot_required = true;
     }
 
     /// Gate and advance one successful user-owned draft change.  Durable
@@ -1270,6 +1275,9 @@ impl RadialAuthoringSession {
     /// becomes observable.  Font catalogs are session-stable and deliberately
     /// survive the generation change.
     fn ensure_draft_generation_change_allowed(&self) -> Result<(), AuthoringError> {
+        if self.authoritative_snapshot_required {
+            return Err(AuthoringError::RequestPending);
+        }
         if self.pending_request.is_some_and(|pending| {
             pending.editor_session == self.editor_session
                 && pending.kind.blocks_draft_generation_change()
@@ -1579,6 +1587,7 @@ impl RadialAuthoringSession {
             return Err(AuthoringError::RequestPending);
         }
         let id = self.next_id();
+        self.authoritative_snapshot_required = true;
         self.pending_request = Some(PendingAuthoringRequest {
             id,
             generation: self.generation,
@@ -1596,6 +1605,9 @@ impl RadialAuthoringSession {
         &mut self,
         disposition: CommitDisposition,
     ) -> Result<AuthoringRequest, AuthoringError> {
+        if self.authoritative_snapshot_required {
+            return Err(AuthoringError::RequestPending);
+        }
         if self.pending_request.is_some() {
             return Err(AuthoringError::RequestPending);
         }
@@ -2177,7 +2189,8 @@ impl RadialAuthoringSession {
             return false;
         }
         if let AuthoringReply::ExternalPublished { snapshot, .. } = &reply {
-            if self.is_initial_snapshot_pending() {
+            let was_bootstrapping = self.is_initial_snapshot_pending();
+            if was_bootstrapping {
                 // This unsolicited publication is itself an authoritative
                 // current snapshot for the session. Consume the bootstrap
                 // request so its older correlated reply cannot strand the UI.
@@ -2187,6 +2200,10 @@ impl RadialAuthoringSession {
             self.pending_native_preview = None;
             self.pending_native_context_sample = false;
             self.observe_external(snapshot.clone());
+            self.authoritative_snapshot_required = false;
+            if was_bootstrapping {
+                self.last_error = None;
+            }
             return true;
         }
         if let AuthoringReply::NativePreviewFailed { lease, message, .. } = &reply {
@@ -2322,7 +2339,11 @@ impl RadialAuthoringSession {
         self.pending_request = None;
         match reply {
             AuthoringReply::ExternalPublished { .. } => unreachable!(),
-            AuthoringReply::Snapshot { snapshot, .. } => self.observe_external(snapshot),
+            AuthoringReply::Snapshot { snapshot, .. } => {
+                self.observe_external(snapshot);
+                self.authoritative_snapshot_required = false;
+                self.last_error = None;
+            }
             AuthoringReply::Published {
                 disposition,
                 snapshot,
@@ -4072,6 +4093,44 @@ mod tests {
             snapshot: snapshot("Disk", 2),
         }));
         assert_eq!(session.draft.menus[0].name, "Disk");
+    }
+
+    #[test]
+    fn failed_bootstrap_remains_read_only_until_correlated_retry_succeeds() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let first = session.request_snapshot().unwrap();
+        let first_pending = session.pending_request.unwrap();
+        assert!(session.reconcile_request_delivery_failure(first_pending, "offline"));
+        assert!(session.is_initial_snapshot_pending());
+        let menu_id = session.draft.menus[0].id.clone();
+        assert_eq!(
+            session.mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu_id,
+                    name: "Unsafe edit".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            ),
+            Err(AuthoringError::RequestPending)
+        );
+        let retry = session.request_snapshot().unwrap();
+        assert_ne!(retry.id(), first.id());
+        assert!(!session.accept_reply(AuthoringReply::Snapshot {
+            id: first.id(),
+            generation: first.generation(),
+            editor_session: session.editor_session,
+            snapshot: snapshot("Stale", 2),
+        }));
+        assert!(session.is_initial_snapshot_pending());
+        assert!(session.accept_reply(AuthoringReply::Snapshot {
+            id: retry.id(),
+            generation: retry.generation(),
+            editor_session: session.editor_session,
+            snapshot: snapshot("Authoritative", 3),
+        }));
+        assert!(!session.is_initial_snapshot_pending());
+        assert_eq!(session.draft.menus[0].name, "Authoritative");
     }
 
     #[test]

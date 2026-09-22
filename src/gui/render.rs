@@ -737,17 +737,22 @@ impl eframe::App for LauncherApp {
         let just_became_visible = !self.last_visible && should_be_visible;
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            apply_visibility(
-                should_be_visible,
-                VisiblePlacementPolicy::ApplyConfiguredPlacement,
-                &root_ctx,
-                self.offscreen_pos,
-                self.follow_mouse,
-                self.static_location_enabled,
-                self.static_pos.map(|(x, y)| (x as f32, y as f32)),
-                self.static_size.map(|(w, h)| (w as f32, h as f32)),
-                (self.window_size.0 as f32, self.window_size.1 as f32),
-            );
+            // Screen Draw owns its own exact-geometry parking transaction.
+            // Keep the root HWND alive while that capture is active; the
+            // ordinary hidden-grid path can hide its independent viewport.
+            if should_be_visible || self.screen_draw_launcher_parking.is_none() {
+                apply_visibility(
+                    should_be_visible,
+                    VisiblePlacementPolicy::ApplyConfiguredPlacement,
+                    &root_ctx,
+                    self.offscreen_pos,
+                    self.follow_mouse,
+                    self.static_location_enabled,
+                    self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                    self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                    (self.window_size.0 as f32, self.window_size.1 as f32),
+                );
+            }
             self.last_visible = should_be_visible;
         }
 

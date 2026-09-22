@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{RadialAuthoringSession, StableSelection};
+use super::{DraftGeneration, RadialAuthoringSession, StableSelection};
 use crate::radial::model::{
     AfterActionPolicy, CellContent, CellDefinition, CellId, InteractionMode, MenuDefinition,
     MenuId, RadialDocument, RingDefinition, RingId, SubmenuPresentation,
@@ -41,6 +41,30 @@ pub struct ResizePlan {
     pub populated_removed: Vec<CellId>,
 }
 
+/// A validated, side-effect-free candidate for one ring authoring operation.
+///
+/// The complete document is retained so geometry and cell changes cross the
+/// authoring boundary as one undo entry. `base_generation` prevents a preview
+/// from being applied after any unrelated draft edit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RingEditProposal {
+    pub menu_id: MenuId,
+    pub ring_id: RingId,
+    pub requested_len: usize,
+    pub base_generation: DraftGeneration,
+    pub document: RadialDocument,
+    pub previous_radius: Option<f32>,
+    pub proposed_radius: f32,
+    pub resolution_summary: Option<String>,
+}
+
+impl RingEditProposal {
+    pub fn radius_changed(&self) -> bool {
+        self.previous_radius
+            .is_none_or(|previous| (previous - self.proposed_radius).abs() > 0.001)
+    }
+}
+
 impl ResizePlan {
     pub fn requires_resolution(&self) -> bool {
         !self.populated_removed.is_empty()
@@ -67,6 +91,8 @@ pub enum MenuEditError {
     DestinationOccupied,
     DynamicCell,
     StaleGeneration,
+    LimitExceeded(&'static str),
+    InvalidGeometry(String),
 }
 
 /// Resolution chosen by the user after a drag reaches an authored slot.
@@ -205,7 +231,7 @@ pub fn create_menu_with_defaults(
     document.menus.push(menu);
     session
         .replace_document_atomic(document)
-        .map_err(|_| MenuEditError::MissingEntity)?;
+        .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
     session.select(Some(StableSelection::Menu(id.clone())));
     Ok(id)
 }
@@ -279,7 +305,7 @@ pub fn delete_menu(session: &mut RadialAuthoringSession, id: &MenuId) -> Result<
     }
     session
         .replace_document_atomic(document)
-        .map_err(|_| MenuEditError::MissingEntity)?;
+        .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
     let fallback = session.draft.default_menu_id.clone();
     session.select(Some(StableSelection::Menu(fallback)));
     Ok(())
@@ -301,7 +327,7 @@ pub fn move_menu(
     document.menus.insert(destination, menu);
     session
         .replace_document_atomic(document)
-        .map_err(|_| MenuEditError::MissingEntity)?;
+        .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
     session.select(Some(StableSelection::Menu(id.clone())));
     Ok(())
 }
@@ -311,46 +337,371 @@ pub fn add_ring(
     menu_id: &MenuId,
 ) -> Result<RingId, MenuEditError> {
     let id = session.allocate_ring_id("ring");
-    let cells = (0..8)
-        .map(|cell_index| CellDefinition {
-            id: session.allocate_cell_id(&format!("cell-{cell_index}")),
-            label: "Spacer".into(),
-            content: CellContent::Spacer,
-            alternate_clicks: Vec::new(),
-            alternate_controls: Vec::new(),
-            after_action: AfterActionPolicy::Inherit,
-            secondary_after_action: AfterActionPolicy::Inherit,
-            icon: Default::default(),
-            tooltip: Default::default(),
-            style: Default::default(),
-            shortcuts: Vec::new(),
-            hotstrings: Vec::new(),
-        })
+    let cell_ids = (0..8)
+        .map(|cell_index| session.allocate_cell_id(&format!("cell-{cell_index}")))
         .collect();
-    let mut document = (*session.draft).clone();
-    let menu = document
+    let proposal = propose_new_ring(
+        &session.draft,
+        session.generation,
+        menu_id,
+        id.clone(),
+        cell_ids,
+    )?;
+    apply_ring_proposal(session, proposal)?;
+    Ok(id)
+}
+
+/// Build a new outer ring without modifying the authoring session.
+pub fn propose_new_ring(
+    document: &RadialDocument,
+    base_generation: DraftGeneration,
+    menu_id: &MenuId,
+    ring_id: RingId,
+    cell_ids: Vec<CellId>,
+) -> Result<RingEditProposal, MenuEditError> {
+    if cell_ids.len() > crate::radial::model::limits::MAX_CELLS_PER_RING {
+        return Err(MenuEditError::LimitExceeded("slots per ring"));
+    }
+    let mut candidate = document.clone();
+    let menu = candidate
         .menus
         .iter_mut()
         .find(|menu| &menu.id == menu_id)
         .ok_or(MenuEditError::MissingEntity)?;
-    let ordinal = menu.rings.len() as f32;
-    menu.rings.push(RingDefinition {
-        id: id.clone(),
-        radius: 92.0 + ordinal * 64.0,
+    if menu.rings.len() >= crate::radial::model::limits::MAX_RINGS_PER_MENU {
+        return Err(MenuEditError::LimitExceeded("rings per menu"));
+    }
+    let mut ring = RingDefinition {
+        id: ring_id.clone(),
+        radius: 92.0,
         cell_radius: 28.0,
         rotation_degrees: -90.0,
         gap: 4.0,
-        cells,
+        cells: cell_ids.into_iter().map(spacer_cell).collect(),
         style: Default::default(),
-    });
-    session
-        .replace_document_atomic(document)
-        .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Ring {
+    };
+    ring.radius = proposed_outer_radius(document, menu_id, &ring)?;
+    let proposed_radius = ring.radius;
+    menu.rings.push(ring);
+    validate_candidate(&candidate)?;
+    Ok(RingEditProposal {
         menu_id: menu_id.clone(),
-        ring_id: id.clone(),
-    }));
-    Ok(id)
+        ring_id,
+        requested_len: candidate
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| menu.rings.last())
+            .map_or(0, |ring| ring.cells.len()),
+        base_generation,
+        document: candidate,
+        previous_radius: None,
+        proposed_radius,
+        resolution_summary: None,
+    })
+}
+
+/// Build a slot-count and geometry candidate without modifying the session.
+/// Populated shrink victims are deliberately rejected here and must continue
+/// through the explicit [`ResizePlan`] resolution flow.
+pub fn propose_ring_resize(
+    document: &RadialDocument,
+    base_generation: DraftGeneration,
+    menu_id: &MenuId,
+    ring_id: &RingId,
+    requested_len: usize,
+    new_cell_ids: Vec<CellId>,
+) -> Result<RingEditProposal, MenuEditError> {
+    if requested_len > crate::radial::model::limits::MAX_CELLS_PER_RING {
+        return Err(MenuEditError::LimitExceeded("slots per ring"));
+    }
+    let plan = resize_plan(document, menu_id, ring_id, requested_len)?;
+    if plan.requires_resolution() {
+        return Err(MenuEditError::ResolutionRequired);
+    }
+    let current = find_ring(document, menu_id, ring_id)?;
+    let growth = requested_len.saturating_sub(current.cells.len());
+    if new_cell_ids.len() < growth {
+        return Err(MenuEditError::InvalidDestination);
+    }
+    let previous_radius = current.radius;
+    let mut candidate = document.clone();
+    let ring = find_ring_mut(&mut candidate, menu_id, ring_id)?;
+    ring.cells.truncate(requested_len);
+    ring.cells
+        .extend(new_cell_ids.into_iter().take(growth).map(spacer_cell));
+    if crate::radial::validation::validate(&candidate).is_err() {
+        let proposed = find_ring(&candidate, menu_id, ring_id)?.clone();
+        let radius = proposed_outer_radius_excluding(document, menu_id, &proposed, Some(ring_id))?;
+        find_ring_mut(&mut candidate, menu_id, ring_id)?.radius = radius;
+    }
+    let proposed_radius = find_ring(&candidate, menu_id, ring_id)?.radius;
+    validate_candidate(&candidate)?;
+    Ok(RingEditProposal {
+        menu_id: menu_id.clone(),
+        ring_id: ring_id.clone(),
+        requested_len,
+        base_generation,
+        document: candidate,
+        previous_radius: Some(previous_radius),
+        proposed_radius,
+        resolution_summary: None,
+    })
+}
+
+pub fn propose_resolved_resize(
+    document: &RadialDocument,
+    base_generation: DraftGeneration,
+    plan: &ResizePlan,
+    resolution: ResizeResolution,
+    overflow_ring_id: Option<RingId>,
+) -> Result<RingEditProposal, MenuEditError> {
+    let current = find_ring(document, &plan.menu_id, &plan.ring_id)?;
+    let expected = plan
+        .retained
+        .iter()
+        .chain(plan.removed.iter())
+        .collect::<Vec<_>>();
+    if current.cells.iter().collect::<Vec<_>>() != expected {
+        return Err(MenuEditError::StaleGeneration);
+    }
+    let previous_radius = current.radius;
+    let mut candidate = document.clone();
+    find_ring_mut(&mut candidate, &plan.menu_id, &plan.ring_id)?.cells = plan.retained.clone();
+    let resolution_summary = match resolution {
+        ResizeResolution::Relocate { menu_id, ring_id } => {
+            find_ring_mut(&mut candidate, &menu_id, &ring_id)?
+                .cells
+                .extend(plan.removed.clone());
+            format!(
+                "Relocate {} removed slot(s), including {} populated slot(s), to ring {}",
+                plan.removed.len(),
+                plan.populated_removed.len(),
+                ring_id
+            )
+        }
+        ResizeResolution::OverflowRing => {
+            let id = overflow_ring_id.ok_or(MenuEditError::InvalidDestination)?;
+            let mut overflow = RingDefinition {
+                id,
+                radius: 92.0,
+                cell_radius: 28.0,
+                rotation_degrees: -90.0,
+                gap: 4.0,
+                cells: plan.removed.clone(),
+                style: Default::default(),
+            };
+            overflow.radius = proposed_outer_radius(&candidate, &plan.menu_id, &overflow)?;
+            candidate
+                .menus
+                .iter_mut()
+                .find(|menu| menu.id == plan.menu_id)
+                .ok_or(MenuEditError::MissingEntity)?
+                .rings
+                .push(overflow);
+            let overflow = candidate
+                .menus
+                .iter()
+                .find(|menu| menu.id == plan.menu_id)
+                .and_then(|menu| menu.rings.last())
+                .ok_or(MenuEditError::MissingEntity)?;
+            format!(
+                "Move {} removed slot(s), including {} populated slot(s), to new overflow ring {} at radius {:.1}",
+                plan.removed.len(),
+                plan.populated_removed.len(),
+                overflow.id,
+                overflow.radius
+            )
+        }
+        ResizeResolution::ConfirmDiscard => format!(
+            "Discard {} populated slot(s): {}",
+            plan.populated_removed.len(),
+            plan.populated_removed
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    validate_candidate(&candidate)?;
+    Ok(RingEditProposal {
+        menu_id: plan.menu_id.clone(),
+        ring_id: plan.ring_id.clone(),
+        requested_len: plan.requested_len,
+        base_generation,
+        document: candidate,
+        previous_radius: Some(previous_radius),
+        proposed_radius: previous_radius,
+        resolution_summary: Some(resolution_summary),
+    })
+}
+
+pub fn apply_ring_proposal(
+    session: &mut RadialAuthoringSession,
+    proposal: RingEditProposal,
+) -> Result<(), MenuEditError> {
+    if session.generation != proposal.base_generation {
+        return Err(MenuEditError::StaleGeneration);
+    }
+    validate_candidate(&proposal.document)?;
+    let selection = StableSelection::Ring {
+        menu_id: proposal.menu_id.clone(),
+        ring_id: proposal.ring_id.clone(),
+    };
+    session
+        .replace_document_atomic(proposal.document)
+        .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
+    session.select(Some(selection));
+    Ok(())
+}
+
+fn spacer_cell(id: CellId) -> CellDefinition {
+    CellDefinition {
+        id,
+        label: "Spacer".into(),
+        content: CellContent::Spacer,
+        alternate_clicks: Vec::new(),
+        alternate_controls: Vec::new(),
+        after_action: AfterActionPolicy::Inherit,
+        secondary_after_action: AfterActionPolicy::Inherit,
+        icon: Default::default(),
+        tooltip: Default::default(),
+        style: Default::default(),
+        shortcuts: Vec::new(),
+        hotstrings: Vec::new(),
+    }
+}
+
+fn validate_candidate(document: &RadialDocument) -> Result<(), MenuEditError> {
+    crate::radial::validation::validate(document)
+        .map_err(|errors| MenuEditError::InvalidGeometry(errors.to_string()))
+}
+
+fn proposed_outer_radius(
+    document: &RadialDocument,
+    menu_id: &MenuId,
+    ring: &RingDefinition,
+) -> Result<f32, MenuEditError> {
+    proposed_outer_radius_excluding(document, menu_id, ring, None)
+}
+
+fn proposed_outer_radius_excluding(
+    document: &RadialDocument,
+    menu_id: &MenuId,
+    ring: &RingDefinition,
+    exclude: Option<&RingId>,
+) -> Result<f32, MenuEditError> {
+    let menu = document
+        .menus
+        .iter()
+        .find(|menu| &menu.id == menu_id)
+        .ok_or(MenuEditError::MissingEntity)?;
+    let mut radius = menu.center_radius + ring.cell_radius + 1.0;
+    if menu.layout == crate::radial::model::LayoutKind::CircularCells && ring.cells.len() >= 2 {
+        let sine = (std::f32::consts::PI / ring.cells.len() as f32).sin();
+        radius = radius.max((2.0 * ring.cell_radius + ring.gap) / (2.0 * sine));
+    }
+    for other in &menu.rings {
+        if exclude.is_some_and(|excluded| &other.id == excluded) {
+            continue;
+        }
+        radius = radius.max(
+            other.radius + other.cell_radius + ring.cell_radius + other.gap.max(ring.gap) + 1.0,
+        );
+    }
+
+    // Resolve the effective style once and derive its stricter center,
+    // capacity, and inter-ring bounds. The production validator below remains
+    // authoritative; this calculation only chooses a useful candidate.
+    let mut probe = document.clone();
+    {
+        let probe_menu = probe
+            .menus
+            .iter_mut()
+            .find(|menu| &menu.id == menu_id)
+            .ok_or(MenuEditError::MissingEntity)?;
+        probe_menu
+            .rings
+            .retain(|existing| !exclude.is_some_and(|excluded| &existing.id == excluded));
+        probe_menu.rings.push(ring.clone());
+    }
+    let probe_menu = probe
+        .menus
+        .iter()
+        .find(|menu| &menu.id == menu_id)
+        .ok_or(MenuEditError::MissingEntity)?;
+    if let Ok(style) = crate::radial::skin::compile_menu_tree(&probe, probe_menu)
+        && let Some(ring_style) = style.rings.get(&ring.id)
+    {
+        let menu_scale = crate::radial::skin::resolved_f32(&ring_style.values.geometry.menu_scale);
+        let radius_scale =
+            crate::radial::skin::resolved_f32(&ring_style.values.geometry.radius_scale);
+        let denominator = (menu_scale * radius_scale).max(f32::EPSILON);
+        let item_radius = if style.menu.source(crate::radial::skin::StyleField::ItemSize)
+            != Some(&crate::radial::skin::StyleSource::ApplicationFallback)
+        {
+            crate::radial::skin::resolved_f32(&ring_style.values.geometry.item_size)
+                * menu_scale
+                * 0.5
+        } else {
+            ring.cell_radius * menu_scale
+        };
+        let center_radius = if style
+            .menu
+            .source(crate::radial::skin::StyleField::CenterSize)
+            != Some(&crate::radial::skin::StyleSource::ApplicationFallback)
+        {
+            crate::radial::skin::resolved_f32(&ring_style.values.geometry.center_size)
+                * menu_scale
+                * 0.5
+        } else {
+            menu.center_radius * menu_scale
+        };
+        radius = radius.max((center_radius + item_radius + 1.0) / denominator);
+        if menu.layout == crate::radial::model::LayoutKind::CircularCells && ring.cells.len() >= 2 {
+            let sine = (std::f32::consts::PI / ring.cells.len() as f32).sin();
+            radius = radius.max(
+                (2.0 * item_radius + ring.gap * menu_scale + 1.0) / (2.0 * sine * denominator),
+            );
+        }
+        let inter_menu_scale =
+            crate::radial::skin::resolved_f32(&style.menu.values.geometry.menu_scale);
+        let menu_radius_scale =
+            crate::radial::skin::resolved_f32(&style.menu.values.geometry.radius_scale);
+        let menu_denominator = (inter_menu_scale * menu_radius_scale).max(f32::EPSILON);
+        let common_item_radius = if style.menu.source(crate::radial::skin::StyleField::ItemSize)
+            != Some(&crate::radial::skin::StyleSource::ApplicationFallback)
+        {
+            crate::radial::skin::resolved_f32(&style.menu.values.geometry.item_size)
+                * inter_menu_scale
+                * 0.5
+        } else {
+            ring.cell_radius * inter_menu_scale
+        };
+        for other in &menu.rings {
+            if exclude.is_some_and(|excluded| &other.id == excluded) {
+                continue;
+            }
+            let other_item_radius = if style.menu.source(crate::radial::skin::StyleField::ItemSize)
+                != Some(&crate::radial::skin::StyleSource::ApplicationFallback)
+            {
+                common_item_radius
+            } else {
+                other.cell_radius * inter_menu_scale
+            };
+            let required = common_item_radius
+                + other_item_radius
+                + other.gap.max(ring.gap) * inter_menu_scale
+                + 1.0;
+            radius = radius.max(other.radius + required / menu_denominator);
+        }
+    }
+    if !radius.is_finite() || radius > 8192.0 {
+        return Err(MenuEditError::InvalidGeometry(
+            "No valid radius fits the current layout and effective style".into(),
+        ));
+    }
+    Ok(radius)
 }
 
 pub fn delete_ring(
@@ -483,7 +834,7 @@ pub fn add_spacer(
     });
     session
         .replace_document_atomic(document)
-        .map_err(|_| MenuEditError::MissingEntity)?;
+        .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
     session.select(Some(StableSelection::Cell {
         menu_id: menu_id.clone(),
         ring_id: ring_id.clone(),
@@ -738,6 +1089,15 @@ pub fn apply_resize(
         return Err(MenuEditError::ResolutionRequired);
     }
     let mut document = (*session.draft).clone();
+    let current = find_ring(&document, &plan.menu_id, &plan.ring_id)?;
+    let expected = plan
+        .retained
+        .iter()
+        .chain(plan.removed.iter())
+        .collect::<Vec<_>>();
+    if current.cells.iter().collect::<Vec<_>>() != expected {
+        return Err(MenuEditError::StaleGeneration);
+    }
     find_ring_mut(&mut document, &plan.menu_id, &plan.ring_id)?.cells = plan.retained;
     match resolution {
         Some(ResizeResolution::Relocate { menu_id, ring_id }) => {
@@ -747,20 +1107,23 @@ pub fn apply_resize(
         }
         Some(ResizeResolution::OverflowRing) => {
             let id = session.allocate_ring_id("overflow");
-            let menu = document
-                .menus
-                .iter_mut()
-                .find(|menu| menu.id == plan.menu_id)
-                .ok_or(MenuEditError::MissingEntity)?;
-            menu.rings.push(RingDefinition {
+            let mut overflow = RingDefinition {
                 id,
-                radius: menu.rings.last().map_or(92.0, |ring| ring.radius + 64.0),
+                radius: 92.0,
                 cell_radius: 28.0,
                 rotation_degrees: -90.0,
                 gap: 4.0,
                 cells: plan.removed,
                 style: Default::default(),
-            });
+            };
+            overflow.radius = proposed_outer_radius(&document, &plan.menu_id, &overflow)?;
+            document
+                .menus
+                .iter_mut()
+                .find(|menu| menu.id == plan.menu_id)
+                .ok_or(MenuEditError::MissingEntity)?
+                .rings
+                .push(overflow);
         }
         Some(ResizeResolution::ConfirmDiscard) | None => {}
     }
@@ -786,9 +1149,10 @@ pub fn apply_resize(
             hotstrings: Vec::new(),
         });
     }
+    validate_candidate(&document)?;
     session
         .replace_document_atomic(document)
-        .map_err(|_| MenuEditError::MissingEntity)
+        .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))
 }
 
 pub fn duplicate_menu(
@@ -1116,6 +1480,64 @@ mod tests {
         assert!(crate::radial::validation::validate(&session.draft).is_ok());
     }
 
+    #[test]
+    fn new_ring_proposal_uses_actual_outer_extent_and_applies_atomically() {
+        let mut session = session();
+        let menu_id = session.draft.menus[0].id.clone();
+        let mut customized = (*session.draft).clone();
+        customized.menus[0].rings[0].radius = 240.0;
+        customized.menus[0].rings[0].cell_radius = 36.0;
+        session.replace_document_atomic(customized).unwrap();
+        let before = session.draft.clone();
+        let ring_id = session.allocate_ring_id("ring");
+        let cell_ids = (0..8).map(|_| session.allocate_cell_id("cell")).collect();
+        let proposal = propose_new_ring(
+            &session.draft,
+            session.generation,
+            &menu_id,
+            ring_id.clone(),
+            cell_ids,
+        )
+        .unwrap();
+        assert!(proposal.proposed_radius > 240.0 + 36.0);
+        assert_eq!(&*session.draft, &*before, "proposal is preview-only");
+        apply_ring_proposal(&mut session, proposal).unwrap();
+        assert_eq!(
+            session.selection,
+            Some(StableSelection::Ring { menu_id, ring_id })
+        );
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*before);
+    }
+
+    #[test]
+    fn valid_inner_ring_resize_preserves_existing_radius() {
+        let mut session = session();
+        let menu_id = session.draft.menus[0].id.clone();
+        let outer = add_ring(&mut session, &menu_id).unwrap();
+        let inner = session.draft.menus[0].rings[0].id.clone();
+        let inner_radius = session.draft.menus[0].rings[0].radius;
+        let ids = vec![session.allocate_cell_id("cell")];
+        let proposal =
+            propose_ring_resize(&session.draft, session.generation, &menu_id, &inner, 9, ids)
+                .unwrap();
+        assert_eq!(proposal.proposed_radius, inner_radius);
+        assert_eq!(
+            proposal.document.menus[0]
+                .rings
+                .iter()
+                .find(|ring| ring.id == outer)
+                .unwrap()
+                .radius,
+            session.draft.menus[0]
+                .rings
+                .iter()
+                .find(|ring| ring.id == outer)
+                .unwrap()
+                .radius
+        );
+    }
+
     use crate::radial::authoring::{AuthoringSnapshot, DiskSha256};
 
     fn session() -> RadialAuthoringSession {
@@ -1342,6 +1764,67 @@ mod tests {
         assert_eq!(session.draft.menus[0].rings[0].cells.len(), 1);
         assert!(session.undo());
         assert_eq!(session.draft.menus[0].rings[0].cells, before);
+    }
+
+    #[test]
+    fn stale_resize_plan_cannot_replace_newer_cell_content() {
+        let mut session = session();
+        let menu = session.draft.menus[0].id.clone();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let plan = resize_plan(&session.draft, &menu, &ring, 4).unwrap();
+        let cell = session.draft.menus[0].rings[0].cells[0].id.clone();
+        set_cell_label(
+            &mut session,
+            &menu,
+            &ring,
+            &cell,
+            "Newer label".into(),
+            super::super::EditPhase::Atomic,
+        )
+        .unwrap();
+        assert_eq!(
+            apply_resize(&mut session, plan, Some(ResizeResolution::ConfirmDiscard)),
+            Err(MenuEditError::StaleGeneration)
+        );
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[0].label,
+            "Newer label"
+        );
+    }
+
+    #[test]
+    fn populated_shrink_resolution_is_preview_only_until_atomic_apply() {
+        let mut session = session();
+        let menu = session.draft.menus[0].id.clone();
+        let ring = session.draft.menus[0].rings[0].id.clone();
+        let before = session.draft.clone();
+        let plan = resize_plan(&session.draft, &menu, &ring, 1).unwrap();
+        let overflow_id = session.allocate_ring_id("overflow");
+        let proposal = propose_resolved_resize(
+            &session.draft,
+            session.generation,
+            &plan,
+            ResizeResolution::OverflowRing,
+            Some(overflow_id.clone()),
+        )
+        .unwrap();
+        assert_eq!(&*session.draft, &*before);
+        assert!(
+            proposal
+                .resolution_summary
+                .as_deref()
+                .unwrap()
+                .contains("overflow")
+        );
+        assert!(
+            proposal.document.menus[0]
+                .rings
+                .iter()
+                .any(|ring| { ring.id == overflow_id && ring.cells.len() == plan.removed.len() })
+        );
+        apply_ring_proposal(&mut session, proposal).unwrap();
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*before);
     }
 
     #[test]
