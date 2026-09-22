@@ -1237,16 +1237,31 @@ impl RadialAuthoringSession {
     fn advance_draft_generation(&mut self) -> Result<(), AuthoringError> {
         self.ensure_draft_generation_change_allowed()?;
         self.generation.0 = self.generation.0.wrapping_add(1).max(1);
-        self.invalidate_draft_bound_pending_request();
+        self.invalidate_draft_bound_pending_work();
         Ok(())
     }
 
-    fn invalidate_draft_bound_pending_request(&mut self) {
+    fn invalidate_draft_bound_pending_work(&mut self) {
         if self.pending_request.is_some_and(|pending| {
             pending.editor_session == self.editor_session
                 && pending.kind.invalidated_by_draft_generation_change()
         }) {
             self.pending_request = None;
+        }
+        if self.pending_native_preview.is_some_and(|pending| {
+            pending.editor_session == self.editor_session
+                && matches!(
+                    pending.kind,
+                    PendingRequestKind::StartNativePreview
+                        | PendingRequestKind::UpdateNativePreview
+                )
+        }) {
+            self.pending_native_preview = None;
+            self.pending_native_context_sample = false;
+            // A late Start reply may already have opened the native host even
+            // though its correlation is now obsolete.  Keep this flag set so
+            // the GUI can issue the terminal Stop request on its next sync.
+            self.native_preview_may_be_open = true;
         }
     }
 
@@ -2088,6 +2103,15 @@ impl RadialAuthoringSession {
                     && lease.editor_session == *editor_session
             })
         {
+            if self.pending_native_preview.is_some_and(|pending| {
+                pending.kind == PendingRequestKind::StopNativePreview
+                    && pending.id == *id
+                    && pending.generation == *generation
+                    && pending.editor_session == *editor_session
+            }) {
+                self.pending_native_preview = None;
+                self.pending_native_context_sample = false;
+            }
             self.native_preview_lease = None;
             self.native_preview_may_be_open = false;
             return true;
@@ -2096,7 +2120,8 @@ impl RadialAuthoringSession {
             pending.editor_session == self.editor_session
                 && pending.id == reply.id()
                 && pending.generation == reply.generation()
-                && reply.generation() == self.generation
+                && (reply.generation() == self.generation
+                    || pending.kind == PendingRequestKind::StopNativePreview)
                 && reply_matches_pending_kind(&reply, pending.kind)
         }) {
             let pending = self.pending_native_preview.take().unwrap();
@@ -2257,7 +2282,7 @@ impl RadialAuthoringSession {
         self.native_preview_may_be_open = false;
         self.pending_native_preview = None;
         self.generation.0 = self.generation.0.wrapping_add(1).max(1);
-        self.invalidate_draft_bound_pending_request();
+        self.invalidate_draft_bound_pending_work();
         if !self.is_dirty() {
             self.baseline = snapshot.clone();
             self.draft = Arc::clone(&snapshot.document);
@@ -3282,22 +3307,26 @@ mod tests {
         let mut session = RadialAuthoringSession::new(snapshot("A", 1));
         let menu = session.draft.default_menu_id.clone();
         let start = session
-            .request_start_native_preview(menu.clone(), false, None)
+            .request_start_native_preview(menu.clone(), true, None)
             .unwrap();
         let stale_lease = NativePreviewLease {
             editor_session: session.editor_session,
             generation: start.generation(),
             request_id: start.id(),
         };
-        let stop = session.request_stop_native_preview().unwrap();
-        assert!(matches!(stop, AuthoringRequest::StopNativePreview { .. }));
-        session.pending_native_preview = Some(PendingAuthoringRequest {
-            id: start.id(),
-            generation: start.generation(),
-            editor_session: session.editor_session,
-            kind: PendingRequestKind::StartNativePreview,
-        });
-        session.generation.0 += 1;
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu.clone(),
+                    name: "Edited while starting preview".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        assert!(session.pending_native_preview.is_none());
+        assert!(!session.pending_native_context_sample);
+        assert!(session.native_preview_may_be_open);
         assert!(!session.accept_reply(AuthoringReply::NativePreviewStarted {
             id: start.id(),
             generation: start.generation(),
@@ -3307,9 +3336,17 @@ mod tests {
             diagnostics: Vec::new(),
         }));
         assert!(session.native_preview_lease.is_none());
-        // The test advanced generation by direct field access, bypassing the
-        // production mutation boundary that invalidates pending preview work.
-        session.pending_native_preview = None;
+        assert!(session.pending_native_preview.is_none());
+
+        let stop = session.request_stop_native_preview().unwrap();
+        assert!(matches!(stop, AuthoringRequest::StopNativePreview { .. }));
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStopped {
+            id: stop.id(),
+            generation: stop.generation(),
+            editor_session: stop.editor_session(),
+        }));
+        assert!(session.pending_native_preview.is_none());
+        assert!(!session.native_preview_may_be_open);
 
         let start = session
             .request_start_native_preview(menu, false, None)
@@ -3332,6 +3369,58 @@ mod tests {
             session.native_preview_diagnostics,
             [preview_resource_diagnostic("draft image fallback")]
         );
+
+        let update_menu = session.draft.default_menu_id.clone();
+        let update = session
+            .request_update_native_preview(update_menu.clone(), true, None)
+            .unwrap();
+        let stale_update_lease = NativePreviewLease {
+            editor_session: session.editor_session,
+            generation: update.generation(),
+            request_id: update.id(),
+        };
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: update_menu.clone(),
+                    name: "Edited while updating preview".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        assert!(session.pending_native_preview.is_none());
+        assert!(!session.pending_native_context_sample);
+        assert!(session.native_preview_may_be_open);
+
+        let recovery = session
+            .request_update_native_preview(update_menu.clone(), false, None)
+            .unwrap();
+        let recovery_lease = NativePreviewLease {
+            editor_session: session.editor_session,
+            generation: recovery.generation(),
+            request_id: recovery.id(),
+        };
+        let recovery_pending = session.pending_native_preview;
+        assert!(!session.accept_reply(AuthoringReply::NativePreviewUpdated {
+            id: update.id(),
+            generation: update.generation(),
+            editor_session: update.editor_session(),
+            lease: stale_update_lease,
+            sampled_context: super::super::context::InvocationContext::empty(20),
+            diagnostics: Vec::new(),
+        }));
+        assert_eq!(session.pending_native_preview, recovery_pending);
+        assert!(session.accept_reply(AuthoringReply::NativePreviewUpdated {
+            id: recovery.id(),
+            generation: recovery.generation(),
+            editor_session: recovery.editor_session(),
+            lease: recovery_lease.clone(),
+            sampled_context: super::super::context::InvocationContext::empty(21),
+            diagnostics: Vec::new(),
+        }));
+        assert_eq!(session.native_preview_lease, Some(recovery_lease));
+
         let active_lease = session.native_preview_lease.clone().unwrap();
         assert!(
             session.accept_reply(AuthoringReply::NativePreviewDiagnostics {
@@ -3399,6 +3488,55 @@ mod tests {
             rollback_assets: AssetMutations::default(),
         }));
         assert!(session.native_preview_lease.is_none());
+    }
+
+    #[test]
+    fn pending_native_stop_survives_generation_change_and_terminates() {
+        let mut session = RadialAuthoringSession::new(snapshot("A", 1));
+        let menu = session.draft.default_menu_id.clone();
+        let start = session
+            .request_start_native_preview(menu.clone(), false, None)
+            .unwrap();
+        let lease = NativePreviewLease {
+            editor_session: session.editor_session,
+            generation: start.generation(),
+            request_id: start.id(),
+        };
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStarted {
+            id: start.id(),
+            generation: start.generation(),
+            editor_session: session.editor_session,
+            lease,
+            sampled_context: super::super::context::InvocationContext::empty(30),
+            diagnostics: Vec::new(),
+        }));
+
+        let stop = session.request_stop_native_preview().unwrap();
+        let stop_pending = session.pending_native_preview;
+        session
+            .mutate(
+                DocumentMutation::RenameMenu {
+                    id: menu,
+                    name: "Edited while stopping preview".into(),
+                },
+                None,
+                EditPhase::Atomic,
+            )
+            .unwrap();
+        assert_eq!(session.pending_native_preview, stop_pending);
+        assert_eq!(
+            session.pending_native_preview.map(|pending| pending.kind),
+            Some(PendingRequestKind::StopNativePreview)
+        );
+
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStopped {
+            id: stop.id(),
+            generation: stop.generation(),
+            editor_session: stop.editor_session(),
+        }));
+        assert!(session.pending_native_preview.is_none());
+        assert!(session.native_preview_lease.is_none());
+        assert!(!session.native_preview_may_be_open);
     }
 
     #[test]
