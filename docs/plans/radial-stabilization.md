@@ -1,6 +1,6 @@
 # Radial stabilization ledger
 
-Status: **S5 in_progress — independent-review remediation batch.**
+Status: **S5 automated verification complete; native acceptance remains unverified.**
 S0–S4 remain complete; no native pass is claimed. This ledger records
 the current checkout, ownership boundaries, source-backed causes, and the
 evidence still needed for S1–S5. The current checkout is authoritative; the
@@ -240,7 +240,7 @@ keystrokes, or sensitive window titles.
 | S2 | `complete` | Tooltip units and stable hover/native presentation repairs and gate. |
 | S3 | `complete` | Slot-first compact Designer layout/interaction repairs and gate. |
 | S4 | `complete` | Shared unflattened Cascade layers, exact-frame ancestor navigation, and parity across runtime/native preview/embedded preview; focused gate and post-removal checks passed. |
-| S5 | `in_progress` | Review remediation batches: runtime relocation, shared visible-stack/placement policy, complete ancestor gesture, close/send-failure terminals, live-cache pruning, stale preview replies, reset epochs, prepared-definition preservation, bounded double-click tails, retained Cascade direction, and production-path coverage. Full suite/native acceptance remain deferred. |
+| S5 | `in_progress` | Review remediation and deterministic watcher-fixture correction are complete; final automated fmt/check/diff/full-Nextest verification passed. Native UI acceptance remains unverified. |
 
 ## Slow-job policy and active-job template
 
@@ -523,7 +523,27 @@ Durable artifacts: `target/s5-bookmarks-corrective.identity`, `target/s5-bookmar
 Observation policy: first observation at launch +600 seconds; second at first observation +900 seconds; subsequent observations +1,200 seconds; reattach to this tree and never launch a duplicate
 Prior failure being corrected: full suite exit 100, 4,599 run / 4,598 passed / 1 failed / 8 skipped; exact failure `plugins::bookmarks::tests::native_watcher_retains_invalid_and_removed_then_recovers_valid_snapshot` at `src/plugins/bookmarks.rs:684`.
 Targeted-gate result: all four ordered commands exited 0; the exact watcher test passed 1, with 4,008 filtered, in 1.34s after a 23m01s test-profile build. The log records all filtered binaries and zero failures.
-Status / completion: corrective evidence is green and ready for its source/test+ledger commit; the required final full-suite rerun remains pending on that committed source. Native UI acceptance remains unverified.
+Status / completion: corrective source/test evidence is committed in `c865cf37`; the final full-suite rerun below passed on that committed source. Native UI acceptance remains unverified.
+```
+
+### S5 final automated verification rerun — complete
+
+The atomic watcher-fixture correction is committed as
+`c865cf37d2ff1cb98be706450b8bb24b36cff984`. This is the final automated
+verification record for that exact source; it makes no native UI acceptance
+claim. The working tree was clean before this ledger record, and no source or
+ledger edits are permitted while the single sequential Cargo job runs.
+
+```text
+Job purpose / milestone: S5 final automated verification rerun (full Nextest suite)
+Command and cwd (ordered): `cargo fmt --all -- --check`; `cargo check`; `git diff --check`; `cargo nextest run --no-fail-fast`; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target and default features; one sequential Cargo/Nextest process tree
+Final source SHA + fingerprints: HEAD `c865cf37d2ff1cb98be706450b8bb24b36cff984`; src/plugins/bookmarks.rs SHA-256 `1BCD12E8603B6A60E20821B131AF0123145BD140B86E415A4F5519DB1DD4138C`; src/gui/radial_editor/preview.rs SHA-256 `824489990B8C42CF2D35C2CE08186ED6F752C1CD6E20B254C447915BB87B077A`; docs/plans/radial-stabilization.md SHA-256 before this record `BE7B44D30304502CB8A0CBD4570288D36636B66524D17C1B1E8EE40099DEFC32`
+Durable artifacts: `target/s5-final-full-rerun.identity`, `target/s5-final-full-rerun.log`, `target/s5-final-full-rerun.exit`; wrapper PID 7256 started `2026-09-21T23:48:16.2788631-04:00` and completed `2026-09-22T00:14:31.2786050-04:00`; identity and exit records preserve the true command exits
+Observation policy: first observation at launch +600 seconds; second at first observation +900 seconds; subsequent observations +1,200 seconds; reattach to this tree and never launch a duplicate
+Command exits: `cargo fmt --all -- --check` 0; `cargo check` 0; `git diff --check` 0; `cargo nextest run --no-fail-fast` 0
+Full-suite result: 4,599 tests run, 4,599 passed, 8 skipped, 0 failures; Nextest summary duration 77.280s. The previously failing watcher regression passed on the committed atomic fixture.
+Status / completion: automated final verification complete on exact committed source; native UI acceptance remains unverified and no native-pass claim is made.
 ```
 
 ### S4 active-job record
