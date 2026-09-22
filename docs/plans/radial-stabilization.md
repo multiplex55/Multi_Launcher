@@ -546,6 +546,31 @@ Full-suite result: 4,599 tests run, 4,599 passed, 8 skipped, 0 failures; Nextest
 Status / completion: automated final verification complete on exact committed source; native UI acceptance remains unverified and no native-pass claim is made.
 ```
 
+### S5 bounded native HWND probe — complete (bounded evidence only)
+
+This is one explicitly bounded native observation, not broader UI acceptance.
+It starts from clean ledger-only HEAD
+`c5d1e03507638ef872aec6d5a65fd94b8169e811`; the production source is the
+unchanged commit `c865cf37d2ff1cb98be706450b8bb24b36cff984`. The probe is the
+existing ignored `radial::native::tests::live_radial_host_probe`; it must be
+run with the explicit environment gate and exact ignored selector below. No
+source edits, synthetic Win-key input, reference execution, or second Cargo
+tree are allowed while it runs.
+
+```text
+Job purpose / milestone: S5 bounded native Windows HWND probe
+Command and cwd (exact): `$env:MULTI_LAUNCHER_RADIAL_LIVE_PROBE='1'; cargo test radial::native::tests::live_radial_host_probe -- --ignored --exact --nocapture`; G:\Repos\rust\Multi_Launcher
+Profile / test binary: Cargo default test profile; exact unit test `radial::native::tests::live_radial_host_probe`; expected unit binary under `target/debug/deps/multi_launcher-*.exe` resolved in the durable log
+Source SHA + fingerprints: ledger HEAD `c5d1e03507638ef872aec6d5a65fd94b8169e811`; production source `c865cf37d2ff1cb98be706450b8bb24b36cff984`; src/radial/native.rs SHA-256 `B987AE8EF2427CF26C833802BE5BA3BEC3A3E7B550B25A4D31E2434DC5141CFE`; docs/plans/radial-stabilization.md SHA-256 before this record `B01F73410EEAB051F3F8BFD1688719ACA878554749D4443F47F6163535F26DAA`; clean staged/unstaged/untracked state before this record
+Windows/session evidence from safe commands: `[Environment]::OSVersion` `Microsoft Windows NT 10.0.19045.0`; PowerShell `7.6.5`; `OS=Windows_NT`; `[Environment]::UserInteractive=True`; `SESSIONNAME` and `DESKTOP_SESSION` unset; Win32_OperatingSystem WMI query denied by access policy. No synthetic key input is used.
+Durable artifacts: `target/s5-native-hwnd-probe.identity`, `target/s5-native-hwnd-probe.log`, `target/s5-native-hwnd-probe.exit`; wrapper PID 9680 started `2026-09-22T00:21:43.6074124-04:00` and completed `2026-09-22T00:45:40.9197318-04:00`; resolved test binary and true exit are recorded
+Observation policy: first observation at launch +600 seconds; second at first observation +900 seconds; subsequent observations +1,200 seconds; reattach to this tree and never launch a duplicate
+Existing target/debug/multi_launcher.exe: present (SHA-256 observed `A8C145F8EE68E539113BF41A3C1E69FCAF8AA3182BB4939D3B34C480A73E838C`), but no content-to-source provenance is available beyond build timing, so it is not claimed as derived from final source and is excluded from probe identity.
+Probe acceptance boundary: if green, evidence is limited to a real interactive desktop creating separate visible visual/input HWNDs, preserving foreground/nonactivation, making the wheel center hit-testable, allowing exterior-corner pass-through, and tearing down. It does not prove user chord behavior, Designer, tooltip metrics, Cascade pixels, monitor/DPI coverage, or the lifecycle matrix. Native acceptance remains unverified outside these exact observations.
+Probe result: `test_exit=0`; resolved unit binary `target\\debug\\deps\\multi_launcher-1f9830ae616d843b.exe`; exact test passed 1, with 4,008 filtered and 1.23s test time after a 23m06s test-profile build. The tested assertions observed separate visible visual/input HWNDs, unchanged foreground, center hit-testing on the input HWND, exterior-corner pass-through, and teardown.
+Status / completion: this bounded native probe is complete and green; no broader native UI acceptance is claimed, and user chord, Designer, tooltip, Cascade pixels, monitor/DPI, and lifecycle-matrix evidence remain unverified.
+```
+
 ### S4 active-job record
 
 The S4 implementation is being verified from committed source HEAD
