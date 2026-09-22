@@ -93,6 +93,29 @@ fn trace_correlation(session: Option<&RadialAuthoringSession>) -> Correlation {
     )
 }
 
+fn trace_pointer_release_response(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    category: WidgetCategory,
+    accepted: bool,
+    correlation: Correlation,
+) {
+    if acceptance_trace::enabled()
+        && ui.input(|input| input.pointer.any_released())
+        && response.hovered()
+    {
+        acceptance_trace::emit(Event::DesignerWidget {
+            category,
+            response: if accepted {
+                WidgetResponse::Accepted
+            } else {
+                WidgetResponse::Rejected
+            },
+            correlation,
+        });
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum DesignerUiIntent {
     TestAction {
@@ -1672,6 +1695,7 @@ impl RadialEditorState {
             acceptance_trace::emit(Event::DesignerPointer {
                 down: pointer_down,
                 up: pointer_up,
+                window_under_cursor: crate::window_manager::window_under_cursor(),
                 correlation: trace_correlation(self.session.as_ref()),
             });
         }
@@ -1883,17 +1907,6 @@ impl RadialEditorState {
         if viewport_class != egui::ViewportClass::Embedded {
             egui::CentralPanel::default().show(ctx, designer_body);
         }
-        if pointer_down || pointer_up {
-            acceptance_trace::emit(Event::DesignerWidget {
-                category: WidgetCategory::DesignerBody,
-                response: if matches!(body_state, BodyBlock::Enabled) {
-                    WidgetResponse::Accepted
-                } else {
-                    WidgetResponse::Rejected
-                },
-                correlation: trace_correlation(self.session.as_ref()),
-            });
-        }
         if self.preferences.expanded_sections != expanded_sections_before {
             self.mark_preferences_changed();
         }
@@ -1909,6 +1922,11 @@ impl RadialEditorState {
             .is_some_and(RadialAuthoringSession::is_initial_snapshot_pending)
         {
             self.apply_post_render();
+        }
+        if pointer_down || pointer_up {
+            acceptance_trace::emit(Event::DesignerPresented {
+                correlation: trace_correlation(self.session.as_ref()),
+            });
         }
         self.prompts(ctx);
         self.keyboard_shortcuts(ctx);
@@ -2305,7 +2323,15 @@ impl RadialEditorState {
                 self.mark_preferences_changed();
             }
             ui.separator();
-            if ui.button("Fit").clicked() {
+            let fit = ui.button("Fit");
+            trace_pointer_release_response(
+                ui,
+                &fit,
+                WidgetCategory::Zoom,
+                fit.clicked(),
+                trace_correlation(self.session.as_ref()),
+            );
+            if fit.clicked() {
                 self.preview_zoom = 1.0;
                 self.canvas_pan = CanvasPoint::default();
                 self.pan_drag_start = None;
@@ -2313,48 +2339,56 @@ impl RadialEditorState {
                 self.mark_preferences_changed();
             }
             let menus = ui.selectable_label(!self.show_resources, "Menus");
+            trace_pointer_release_response(
+                ui,
+                &menus,
+                WidgetCategory::Menus,
+                menus.clicked(),
+                trace_correlation(self.session.as_ref()),
+            );
             if menus.clicked() {
                 self.show_resources = false;
                 self.mark_preferences_changed();
-                acceptance_trace::emit(Event::DesignerWidget {
-                    category: WidgetCategory::Menus,
-                    response: WidgetResponse::Accepted,
-                    correlation: trace_correlation(self.session.as_ref()),
-                });
             }
             let skins = ui.selectable_label(self.show_resources, "Skins");
+            trace_pointer_release_response(
+                ui,
+                &skins,
+                WidgetCategory::Skins,
+                skins.clicked(),
+                trace_correlation(self.session.as_ref()),
+            );
             if skins.clicked() {
                 self.show_resources = true;
                 self.mark_preferences_changed();
-                acceptance_trace::emit(Event::DesignerWidget {
-                    category: WidgetCategory::Skins,
-                    response: WidgetResponse::Accepted,
-                    correlation: trace_correlation(self.session.as_ref()),
-                });
             }
             let tree = ui
                 .selectable_label(self.tree_visible, "Tree")
                 .on_hover_text("Show or hide the menu tree");
+            trace_pointer_release_response(
+                ui,
+                &tree,
+                WidgetCategory::Tree,
+                tree.clicked(),
+                trace_correlation(self.session.as_ref()),
+            );
             if tree.clicked() {
                 self.tree_visible = !self.tree_visible;
                 self.mark_preferences_changed();
-                acceptance_trace::emit(Event::DesignerWidget {
-                    category: WidgetCategory::Tree,
-                    response: WidgetResponse::Accepted,
-                    correlation: trace_correlation(self.session.as_ref()),
-                });
             }
             let inspector = ui
                 .selectable_label(self.inspector_visible, "Inspector")
                 .on_hover_text("Show or hide the inspector");
+            trace_pointer_release_response(
+                ui,
+                &inspector,
+                WidgetCategory::Inspector,
+                inspector.clicked(),
+                trace_correlation(self.session.as_ref()),
+            );
             if inspector.clicked() {
                 self.inspector_visible = !self.inspector_visible;
                 self.mark_preferences_changed();
-                acceptance_trace::emit(Event::DesignerWidget {
-                    category: WidgetCategory::Inspector,
-                    response: WidgetResponse::Accepted,
-                    correlation: trace_correlation(self.session.as_ref()),
-                });
             }
             ui.menu_button("Layout", |ui| {
                 ui.label("Presentation only");
@@ -2594,13 +2628,16 @@ impl RadialEditorState {
                     .text("Zoom")
                     .logarithmic(true),
             );
-            if zoom_response.changed() {
+            let zoom_changed = zoom_response.changed();
+            trace_pointer_release_response(
+                ui,
+                &zoom_response,
+                WidgetCategory::Zoom,
+                zoom_changed,
+                trace_correlation(self.session.as_ref()),
+            );
+            if zoom_changed {
                 self.mark_preferences_changed();
-                acceptance_trace::emit(Event::DesignerWidget {
-                    category: WidgetCategory::Zoom,
-                    response: WidgetResponse::Accepted,
-                    correlation: trace_correlation(self.session.as_ref()),
-                });
             }
             if ui
                 .selectable_label(self.show_resources, "Skins, assets & packages")

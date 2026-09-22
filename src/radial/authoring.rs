@@ -824,11 +824,11 @@ impl AuthoringReplySender {
             request_kind: reply.trace_kind(),
             session_id: reply.editor_session().0,
             generation: reply.generation().0,
-            terminal: true,
+            terminal: false,
         };
         self.tx.send(reply)?;
         acceptance_trace::emit(Event::Authoring {
-            edge: AuthoringEdge::ReplyTerminal,
+            edge: AuthoringEdge::ReplyEnqueued,
             correlation,
         });
         if let Some(wake) = &self.root_wake {
@@ -1070,6 +1070,51 @@ fn reply_matches_pending_kind(reply: &AuthoringReply, kind: PendingRequestKind) 
         }
         _ => false,
     }
+}
+
+fn trace_kind_for_pending(kind: PendingRequestKind) -> RequestKind {
+    match kind {
+        PendingRequestKind::Snapshot => RequestKind::Snapshot,
+        PendingRequestKind::Commit(CommitDisposition::Apply) => RequestKind::CommitApply,
+        PendingRequestKind::Commit(CommitDisposition::Save) => RequestKind::CommitSave,
+        PendingRequestKind::Commit(CommitDisposition::RevertAppliedAndClose) => {
+            RequestKind::CommitRevertAndClose
+        }
+        PendingRequestKind::LivePreview => RequestKind::LivePreview,
+        PendingRequestKind::CancelPreview => RequestKind::CancelPreview,
+        PendingRequestKind::ExportPackage => RequestKind::ExportPackage,
+        PendingRequestKind::ExportSkin => RequestKind::ExportSkin,
+        PendingRequestKind::AuditionManagedAsset => RequestKind::AuditionManagedAsset,
+        PendingRequestKind::FontCatalog => RequestKind::FontCatalog,
+        PendingRequestKind::PrepareEmbeddedPreview => RequestKind::PrepareEmbeddedPreview,
+        PendingRequestKind::ReplacePackage => RequestKind::ReplacePackage,
+        PendingRequestKind::StartNativePreview => RequestKind::StartNativePreview,
+        PendingRequestKind::UpdateNativePreview => RequestKind::UpdateNativePreview,
+        PendingRequestKind::StopNativePreview => RequestKind::StopNativePreview,
+    }
+}
+
+fn reply_trace_is_terminal(reply: &AuthoringReply) -> bool {
+    !matches!(reply, AuthoringReply::NativePreviewDiagnostics { .. })
+}
+
+fn reply_trace_edges(
+    accepted: bool,
+    retired: bool,
+    reply_terminal: bool,
+) -> Vec<(AuthoringEdge, bool)> {
+    let mut edges = vec![(
+        if accepted {
+            AuthoringEdge::ReplyAccepted
+        } else {
+            AuthoringEdge::ReplyRejected
+        },
+        accepted && reply_terminal,
+    )];
+    if !accepted && retired {
+        edges.push((AuthoringEdge::PendingRetired, true));
+    }
+    edges
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2013,9 +2058,86 @@ impl RadialAuthoringSession {
         })
     }
 
+    /// Record the reply boundary separately from the main-owner acceptance
+    /// decision.  The inner method remains the sole owner of reply semantics;
+    /// this wrapper only snapshots the exact pending correlation and emits
+    /// payload-free lifecycle edges.
+    pub fn accept_reply(&mut self, reply: AuthoringReply) -> bool {
+        if !acceptance_trace::enabled() {
+            return self.accept_reply_inner(reply);
+        }
+        let reply_id = reply.id();
+        let reply_generation = reply.generation();
+        let reply_session = reply.editor_session();
+        let reply_kind = reply.trace_kind();
+        let before_request = self.pending_request;
+        let before_native = self.pending_native_preview;
+        let reply_terminal = reply_trace_is_terminal(&reply);
+
+        let matches_reply = |pending: PendingAuthoringRequest| {
+            pending.editor_session == reply_session
+                && pending.id == reply_id
+                && pending.generation == reply_generation
+                && reply_matches_pending_kind(&reply, pending.kind)
+        };
+        let correlated = if matches!(&reply, AuthoringReply::ExternalPublished { .. }) {
+            before_request.filter(|pending| {
+                pending.editor_session == reply_session
+                    && pending.kind == PendingRequestKind::Snapshot
+            })
+        } else {
+            let native_failed_correlated =
+                if matches!(&reply, AuthoringReply::NativePreviewFailed { .. }) {
+                    before_native.filter(|pending| {
+                        pending.editor_session == reply_session
+                            && pending.id == reply_id
+                            && pending.generation == reply_generation
+                    })
+                } else {
+                    None
+                };
+            before_native
+                .filter(|pending| matches_reply(*pending))
+                .or(native_failed_correlated)
+                .or_else(|| before_request.filter(|pending| matches_reply(*pending)))
+        };
+        let (request_id, request_kind, session_id, generation) = correlated
+            .map(|pending| {
+                (
+                    pending.id.0,
+                    trace_kind_for_pending(pending.kind),
+                    pending.editor_session.0,
+                    pending.generation.0,
+                )
+            })
+            .unwrap_or((reply_id.0, reply_kind, reply_session.0, reply_generation.0));
+
+        let accepted = self.accept_reply_inner(reply);
+        let correlation = Correlation {
+            request_id,
+            request_kind,
+            session_id,
+            generation,
+            terminal: accepted && reply_terminal,
+        };
+        let retired = correlated.is_some_and(|pending| {
+            self.pending_request != Some(pending) && self.pending_native_preview != Some(pending)
+        });
+        for (edge, terminal) in reply_trace_edges(accepted, retired, reply_terminal) {
+            acceptance_trace::emit(Event::Authoring {
+                edge,
+                correlation: Correlation {
+                    terminal,
+                    ..correlation
+                },
+            });
+        }
+        accepted
+    }
+
     /// Returns false for stale request IDs or generations; such replies are
     /// intentionally ignored without perturbing the current draft.
-    pub fn accept_reply(&mut self, reply: AuthoringReply) -> bool {
+    fn accept_reply_inner(&mut self, reply: AuthoringReply) -> bool {
         if reply.editor_session() != self.editor_session {
             return false;
         }
@@ -2418,6 +2540,29 @@ fn three_way_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reply_trace_distinguishes_enqueue_accept_reject_and_retire_terminality() {
+        assert_eq!(
+            reply_trace_edges(true, false, true),
+            vec![(AuthoringEdge::ReplyAccepted, true)]
+        );
+        assert_eq!(
+            reply_trace_edges(true, false, false),
+            vec![(AuthoringEdge::ReplyAccepted, false)]
+        );
+        assert_eq!(
+            reply_trace_edges(false, false, true),
+            vec![(AuthoringEdge::ReplyRejected, false)]
+        );
+        assert_eq!(
+            reply_trace_edges(false, true, true),
+            vec![
+                (AuthoringEdge::ReplyRejected, false),
+                (AuthoringEdge::PendingRetired, true),
+            ]
+        );
+    }
 
     fn preview_resource_diagnostic(identity: &str) -> super::super::diagnostics::RadialDiagnostic {
         super::super::diagnostics::RadialDiagnostic::new(

@@ -3,6 +3,11 @@ pub use crate::platform::windows_api::{
     set_mock_mouse_position,
 };
 
+use crate::radial::acceptance_trace::{self, Correlation, Event, NativeActivationEdge};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_RESTORE_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
     match key.to_uppercase().as_str() {
@@ -150,13 +155,123 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
 pub fn restore_launcher_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
     let request =
         crate::window_activation::WindowActivationRequest::move_to_current_desktop(hwnd.0 as usize);
+    let trace_enabled = acceptance_trace::enabled();
+    let trace_hwnd_value = hwnd.0 as usize;
+    let trace_hwnd = trace_hwnd_value as u64;
+    let correlation = if trace_enabled {
+        let trace_id = NEXT_RESTORE_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+        Correlation {
+            request_id: trace_id,
+            request_kind: Default::default(),
+            session_id: 0,
+            generation: trace_id,
+            terminal: false,
+        }
+    } else {
+        Correlation::default()
+    };
+    if trace_enabled {
+        acceptance_trace::emit(Event::NativeActivation {
+            edge: NativeActivationEdge::RestoreRequested,
+            hwnd: trace_hwnd,
+            correlation,
+        });
+    }
     // Desktop transitions and foreground verification use bounded backoff. Keep that work off
     // egui's render path so a slow or policy-blocked target cannot stall a frame.
     std::thread::spawn(move || {
         if let Err(error) = crate::window_activation::activate_window(request) {
+            if trace_enabled {
+                let terminal_correlation = Correlation {
+                    terminal: true,
+                    ..correlation
+                };
+                acceptance_trace::emit(Event::NativeActivation {
+                    edge: NativeActivationEdge::RestoreFailed,
+                    hwnd: trace_hwnd,
+                    correlation: terminal_correlation,
+                });
+                emit_window_snapshot(
+                    windows::Win32::Foundation::HWND(trace_hwnd_value as *mut _),
+                    terminal_correlation,
+                );
+            }
             tracing::warn!(error = %error, "failed to restore launcher window");
+        } else if trace_enabled {
+            let terminal_correlation = Correlation {
+                terminal: true,
+                ..correlation
+            };
+            acceptance_trace::emit(Event::NativeActivation {
+                edge: NativeActivationEdge::RestoreCompleted,
+                hwnd: trace_hwnd,
+                correlation: terminal_correlation,
+            });
+            emit_window_snapshot(
+                windows::Win32::Foundation::HWND(trace_hwnd_value as *mut _),
+                terminal_correlation,
+            );
         }
     });
+}
+
+/// Return the native window currently under the pointer for the opt-in trace.
+/// This stays behind the trace switch so disabled runs do not add a native query.
+#[cfg(windows)]
+pub(crate) fn window_under_cursor() -> Option<u64> {
+    if !acceptance_trace::enabled() {
+        return None;
+    }
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, WindowFromPoint};
+
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return None;
+    }
+    let hwnd = unsafe { WindowFromPoint(point) };
+    (!hwnd.0.is_null()).then_some(hwnd.0 as usize as u64)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn window_under_cursor() -> Option<u64> {
+    None
+}
+
+/// Emit an actual native root window snapshot at a visibility boundary.
+/// Only scalar handle, geometry, and state are exposed.
+#[cfg(windows)]
+pub(crate) fn emit_window_snapshot(
+    hwnd: windows::Win32::Foundation::HWND,
+    correlation: Correlation,
+) {
+    if !acceptance_trace::enabled() || hwnd.0.is_null() {
+        return;
+    }
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return;
+    }
+    acceptance_trace::emit(Event::NativeWindowSnapshot {
+        hwnd: hwnd.0 as usize as u64,
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
+        minimized: unsafe { IsIconic(hwnd) }.as_bool(),
+        correlation,
+    });
+}
+
+#[cfg(not(windows))]
+pub(crate) fn emit_window_snapshot(
+    _hwnd: windows::Win32::Foundation::HWND,
+    _correlation: Correlation,
+) {
 }
 
 /// Extract the HWND from an eframe [`Frame`].

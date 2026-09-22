@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::radial::acceptance_trace::{self, RestoreEdge};
+use crate::radial::acceptance_trace::{self, Correlation, RestoreEdge};
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeferredActivation {
@@ -556,6 +556,12 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
+        if let Some(correlation) = acceptance_trace::take_window_sample_request()
+            && let Some(hwnd) = crate::window_manager::get_hwnd(_frame)
+        {
+            crate::window_manager::emit_window_snapshot(hwnd, correlation);
+        }
+
         let plugin_search_generation = self.plugins.search_generation();
         if plugin_search_generation != self.last_plugin_search_generation {
             self.last_plugin_search_generation = plugin_search_generation;
@@ -697,6 +703,7 @@ impl eframe::App for LauncherApp {
         if do_restore && self.visible_flag.load(Ordering::SeqCst) {
             acceptance_trace::emit(acceptance_trace::Event::Restore {
                 edge: RestoreEdge::RestoreFlag,
+                correlation: Correlation::default(),
             });
             tracing::debug!("Restoring window on restore_flag");
             apply_visibility(

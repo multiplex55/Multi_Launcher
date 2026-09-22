@@ -5,7 +5,9 @@ use std::sync::{
 };
 
 use crate::hotkey::HotkeyTrigger;
-use crate::radial::acceptance_trace::{self, Event, RootCommandKind, VisibilitySource};
+use crate::radial::acceptance_trace::{
+    self, Correlation, Event, RootCommandKind, VisibilitySource,
+};
 
 /// A small, explicit wake boundary for work owned by one egui viewport.
 /// Keeping the viewport id with the callback prevents background producers
@@ -119,18 +121,39 @@ impl RootViewportCtx {
     }
 }
 
+fn trace_root_command(cmd: &egui::ViewportCommand) -> Option<RootCommandKind> {
+    Some(match cmd {
+        egui::ViewportCommand::OuterPosition(position) => RootCommandKind::Position {
+            x: position.x.round() as i32,
+            y: position.y.round() as i32,
+        },
+        egui::ViewportCommand::InnerSize(size) => RootCommandKind::Size {
+            width: size.x.round() as i32,
+            height: size.y.round() as i32,
+        },
+        egui::ViewportCommand::Visible(true) => RootCommandKind::Show,
+        egui::ViewportCommand::Visible(false) => RootCommandKind::ParkingBoundary,
+        egui::ViewportCommand::Minimized(_) => RootCommandKind::Minimize,
+        egui::ViewportCommand::Focus => RootCommandKind::Focus,
+        _ => return None,
+    })
+}
+
 impl ViewportCtx for RootViewportCtx {
     fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
-        let command = match &cmd {
-            egui::ViewportCommand::OuterPosition(_) => RootCommandKind::Position,
-            egui::ViewportCommand::InnerSize(_) => RootCommandKind::Size,
-            egui::ViewportCommand::Visible(true) => RootCommandKind::Show,
-            egui::ViewportCommand::Visible(false) => RootCommandKind::ParkingBoundary,
-            egui::ViewportCommand::Minimized(_) => RootCommandKind::Minimize,
-            egui::ViewportCommand::Focus => RootCommandKind::Focus,
-            _ => return self.ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, cmd),
+        let Some(command) = trace_root_command(&cmd) else {
+            return self.ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, cmd);
         };
-        acceptance_trace::emit(Event::RootCommand { command });
+        let correlation = if acceptance_trace::enabled() {
+            acceptance_trace::root_command_correlation()
+        } else {
+            Correlation::default()
+        };
+        acceptance_trace::emit(Event::RootCommand {
+            command,
+            correlation,
+        });
+        acceptance_trace::request_window_sample(correlation);
         self.ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, cmd);
     }
 
@@ -376,6 +399,11 @@ pub fn apply_visibility<C: ViewportCtx>(
     } else {
         acceptance_trace::emit(Event::RootCommand {
             command: RootCommandKind::ParkingBoundary,
+            correlation: if acceptance_trace::enabled() {
+                acceptance_trace::root_command_correlation()
+            } else {
+                Correlation::default()
+            },
         });
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             offscreen.0,
@@ -464,6 +492,23 @@ mod tests {
             assert!(child.has_requested_repaint_for(&egui::ViewportId::ROOT));
             root.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         });
+    }
+
+    #[test]
+    fn root_command_trace_retains_requested_coordinates() {
+        assert_eq!(
+            trace_root_command(&egui::ViewportCommand::OuterPosition(
+                egui::pos2(1.6, -2.4,)
+            )),
+            Some(RootCommandKind::Position { x: 2, y: -2 })
+        );
+        assert_eq!(
+            trace_root_command(&egui::ViewportCommand::InnerSize(egui::vec2(640.4, 479.6,))),
+            Some(RootCommandKind::Size {
+                width: 640,
+                height: 480,
+            })
+        );
     }
 
     #[test]

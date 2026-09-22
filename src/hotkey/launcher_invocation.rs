@@ -373,12 +373,11 @@ impl LauncherInvocationAdapter {
         let configured_primary = self
             .owned_primary
             .or_else(|| vk_from_key(self.config.hotkey.key));
-        if configured_primary == Some(event.vk) {
+        if configured_primary == Some(event.vk)
+            && let Some(transition) = acceptance_trace_primary_transition(event.transition)
+        {
             acceptance_trace::emit(Event::InvocationPrimary {
-                transition: match event.transition {
-                    KeyTransition::Up => PrimaryTransition::Release,
-                    KeyTransition::Down | KeyTransition::Repeat => PrimaryTransition::Press,
-                },
+                transition,
                 provenance: event.provenance,
                 modifiers_match: self.modifiers.matches(&self.config.hotkey),
                 invocation_id: self.owned.map_or(self.next_id, |id| id.0),
@@ -537,6 +536,14 @@ impl LauncherInvocationAdapter {
                 event.provenance,
             ),
         }
+    }
+}
+
+fn acceptance_trace_primary_transition(transition: KeyTransition) -> Option<PrimaryTransition> {
+    match transition {
+        KeyTransition::Down => Some(PrimaryTransition::Press),
+        KeyTransition::Up => Some(PrimaryTransition::Release),
+        KeyTransition::Repeat => None,
     }
 }
 
@@ -2218,6 +2225,23 @@ mod tests {
             provenance: InputProvenance::ExternalInjected,
         }
     }
+
+    #[test]
+    fn acceptance_trace_omits_primary_repeat_edges() {
+        assert_eq!(
+            acceptance_trace_primary_transition(KeyTransition::Down),
+            Some(PrimaryTransition::Press)
+        );
+        assert_eq!(
+            acceptance_trace_primary_transition(KeyTransition::Up),
+            Some(PrimaryTransition::Release)
+        );
+        assert_eq!(
+            acceptance_trace_primary_transition(KeyTransition::Repeat),
+            None
+        );
+    }
+
     fn active_lifecycle(id: InvocationId, session_id: SessionId) -> RadialLifecycle {
         RadialLifecycle::Active {
             id,
