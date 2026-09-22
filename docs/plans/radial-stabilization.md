@@ -1,6 +1,6 @@
 # Radial stabilization ledger
 
-Status: **S5 automated verification complete; native acceptance remains unverified.**
+Status: **S5 native_unverified — automated verification complete; native release gate incomplete.**
 S0–S4 remain complete; no native pass is claimed. This ledger records
 the current checkout, ownership boundaries, source-backed causes, and the
 evidence still needed for S1–S5. The current checkout is authoritative; the
@@ -240,7 +240,7 @@ keystrokes, or sensitive window titles.
 | S2 | `complete` | Tooltip units and stable hover/native presentation repairs and gate. |
 | S3 | `complete` | Slot-first compact Designer layout/interaction repairs and gate. |
 | S4 | `complete` | Shared unflattened Cascade layers, exact-frame ancestor navigation, and parity across runtime/native preview/embedded preview; focused gate and post-removal checks passed. |
-| S5 | `in_progress` | Review remediation and deterministic watcher-fixture correction are complete; final automated fmt/check/diff/full-Nextest verification passed. Native UI acceptance remains unverified. |
+| S5 | `native_unverified` | Review remediation, deterministic watcher-fixture correction, and automated fmt/check/diff/full-Nextest verification are complete; bounded HWND properties were observed, but the native release gate remains incomplete. |
 
 ## Slow-job policy and active-job template
 
@@ -594,6 +594,27 @@ Observation policy: first observation at launch +600 seconds; second at first ob
 Prebuild target/debug/multi_launcher.exe: present but not used as evidence; observed SHA-256 `B9A33A7BEFD6BCBC2DBC2806D9D217804C219D1723FC5934FD87A8D217EFC6C0` before this build. No timestamp-only provenance inference is made.
 Build result: `cargo_build_exit=0`; `target/debug/multi_launcher.exe` is present at 85,108,224 bytes, last write `2026-09-22T00:52:42.9386257-04:00`, SHA-256 `4AF12CF54F6FA251E24871561E0A720E0C062452C73CE339B204923388169EA0`. This identity was captured by the same durable wrapper after the successful build, not inferred from timestamp alone.
 Status / completion: build-only job complete and source-matched through the recorded production-source/no-source-diff proof; the app was not launched, configuration was not edited, and no native UI acceptance is claimed.
+```
+
+### S5 candidate launch attempt — native_unverified
+
+This records the bounded launch attempt after the source-matched build; it is
+not a native UI acceptance pass. The candidate copied from the prior build
+record had SHA-256
+`4AF12CF54F6FA251E24871561E0A720E0C062452C73CE339B204923388169EA0` and was
+launched at `2026-09-22 00:54:32 -04:00` with the isolated working directory
+`G:\Repos\rust\Multi_Launcher\target\native-acceptance-profile`; PID was
+`14412`. The isolated profile created only `settings.json`,
+`clipboard_modifiers.json`, and `notes\` within that directory. The process
+reported `Responding=True`, but `MainWindowHandle=0` and `MainWindowTitle` was
+empty.
+
+```text
+Launch evidence: candidate executable SHA-256 `4AF12CF54F6FA251E24871561E0A720E0C062452C73CE339B204923388169EA0`; launch `2026-09-22 00:54:32 -04:00`; cwd/profile `G:\Repos\rust\Multi_Launcher\target\native-acceptance-profile`; PID `14412`; Responding=True; MainWindowHandle=0; MainWindowTitle empty
+CUA evidence: `cua.getState` returned no native apps; native `listWindows`/`listApps` were unavailable; trusted sky RPC service was not configured. Therefore no targetable window existed and no UI input was attempted.
+Input safety: no Windows-key shortcut was synthesized; F2/global input was not sent outside CUA. No chord, latency, visibility, Designer, tooltip, Cascade, monitor/DPI, or lifecycle evidence was collected.
+Teardown: process stopped with approved elevated `Stop-Process`; the exact resolved profile was verified equal to `G:\Repos\rust\Multi_Launcher\target\native-acceptance-profile` and recursively removed afterward.
+Status / completion: launch attempt ended without a targetable window; no UI acceptance claim is made. H0–H9, C1–C10, D1–D13, T1–T9, and K1–K8 remain native-unverified except for the precise visual/input HWND, foreground, center hit-test, exterior pass-through, and teardown properties established by `live_radial_host_probe`.
 ```
 
 ### S4 active-job record
