@@ -571,6 +571,31 @@ Probe result: `test_exit=0`; resolved unit binary `target\\debug\\deps\\multi_la
 Status / completion: this bounded native probe is complete and green; no broader native UI acceptance is claimed, and user chord, Designer, tooltip, Cascade pixels, monitor/DPI, and lifecycle-matrix evidence remain unverified.
 ```
 
+### S5 source-matched native candidate build — complete (build-only)
+
+This record prepares one build-only job for a later bounded native inspection;
+the application must not be launched and no configuration may be edited. The
+working tree is clean at ledger-only HEAD
+`9c4c0e4be019a5db2d4b0c46abd3293db2803824`. Production source remains exactly
+`c865cf37d2ff1cb98be706450b8bb24b36cff984`: `git diff --name-status
+c865cf37..HEAD` contains only `docs/plans/radial-stabilization.md`, and
+`git diff --exit-code c865cf37..HEAD -- src` reports no source changes. The
+ledger-only commits since production source therefore do not change binary
+inputs.
+
+```text
+Job purpose / milestone: S5 source-matched native candidate executable build
+Command and cwd (exact): `cargo build --bin multi_launcher`; G:\Repos\rust\Multi_Launcher
+Profile / target: Cargo default dev profile; binary target `target/debug/multi_launcher.exe`; one sequential Cargo tree
+Source SHA + fingerprints: HEAD `9c4c0e4be019a5db2d4b0c46abd3293db2803824`; production source `c865cf37d2ff1cb98be706450b8bb24b36cff984`; src/radial/native.rs SHA-256 `B987AE8EF2427CF26C833802BE5BA3BEC3A3E7B550B25A4D31E2434DC5141CFE`; docs/plans/radial-stabilization.md SHA-256 before this record `C8328CC0807EA74594DD1C2ECF8704E62BFDDC31CC975FD88FE3CFFFD8A2D905`; clean staged/unstaged/untracked state before this record
+Windows/session evidence from safe commands: `[Environment]::OSVersion` `Microsoft Windows NT 10.0.19045.0`; PowerShell `7.6.5`; `OS=Windows_NT`; `[Environment]::UserInteractive=True`; `SESSIONNAME` and `DESKTOP_SESSION` unset. No app launch, config edit, native UI action, or synthetic input is part of this job.
+Durable artifacts: `target/s5-native-candidate-build.identity`, `target/s5-native-candidate-build.log`, `target/s5-native-candidate-build.exit`; wrapper PID 15768 started `2026-09-22T00:49:04.1632076-04:00` and completed `2026-09-22T00:52:46.7967160-04:00`; exact source identity and true exit are recorded
+Observation policy: first observation at launch +600 seconds; second at first observation +900 seconds; subsequent observations +1,200 seconds; reattach to this tree and never launch a duplicate
+Prebuild target/debug/multi_launcher.exe: present but not used as evidence; observed SHA-256 `B9A33A7BEFD6BCBC2DBC2806D9D217804C219D1723FC5934FD87A8D217EFC6C0` before this build. No timestamp-only provenance inference is made.
+Build result: `cargo_build_exit=0`; `target/debug/multi_launcher.exe` is present at 85,108,224 bytes, last write `2026-09-22T00:52:42.9386257-04:00`, SHA-256 `4AF12CF54F6FA251E24871561E0A720E0C062452C73CE339B204923388169EA0`. This identity was captured by the same durable wrapper after the successful build, not inferred from timestamp alone.
+Status / completion: build-only job complete and source-matched through the recorded production-source/no-source-diff proof; the app was not launched, configuration was not edited, and no native UI acceptance is claimed.
+```
+
 ### S4 active-job record
 
 The S4 implementation is being verified from committed source HEAD
