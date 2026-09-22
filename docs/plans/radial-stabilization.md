@@ -478,6 +478,54 @@ Focused-gate result: `target/s5-final-embedded-direction-focused.exit` records e
 Post-gate checks (2026-09-21): `cargo check` exited 0 in 49.95s before formatting and again exited 0 in 10.49s on the exact formatted source; the first `cargo fmt --all -- --check` identified mechanical formatting in the new test, `cargo fmt --all` applied it, and the rerun exited 0; `git diff --check` exited 0 with only normal LF-to-CRLF warnings. S5 remains `in_progress` pending final full-suite/native acceptance; no full `cargo nextest run`, native UI acceptance, or reference script/archive execution was performed.
 ```
 
+### S5 final automated verification — in_progress
+
+Final independent source review is clear on committed HEAD
+`152a394a4bfc75a68555af45a19610d27ed68388`. This record covers only the
+ordered automated gate on that exact source; it makes no native UI acceptance
+claim. The working tree is clean before launch, and no source or ledger edits
+are permitted while the single sequential Cargo job runs.
+
+```text
+Job purpose / milestone: S5 final automated verification (full Nextest suite)
+Command and cwd (ordered): `cargo fmt --all -- --check`; `cargo check`; `git diff --check`; `cargo nextest run --no-fail-fast`; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target and default features; one sequential Cargo/Nextest process tree
+Final source SHA + fingerprints: HEAD `152a394a4bfc75a68555af45a19610d27ed68388`; src/gui/radial_editor/preview.rs SHA-256 `824489990B8C42CF2D35C2CE08186ED6F752C1CD6E20B254C447915BB87B077A`; docs/plans/radial-stabilization.md SHA-256 before this record `1CE1482B5D730DEF7E15E05BC84B549A2461332BCA9B24A40949C5D9E1730F7E`; clean initial staged/unstaged/untracked state
+Durable artifacts: `target/s5-final-full.identity`, `target/s5-final-full.log`, `target/s5-final-full.exit`; wrapper PID 1984 started `2026-09-21T22:48:06.6575288-04:00` and completed `2026-09-21T23:13:49.5320329-04:00`; corrected exit record preserves each command's true status
+Observation policy: first observation at launch +600 seconds; second at first observation +900 seconds; subsequent observations +1,200 seconds; reattach to this tree and never launch a duplicate
+Command exits: `cargo fmt --all -- --check` 0; `cargo check` 0; `git diff --check` 0; `cargo nextest run --no-fail-fast` 100
+Full-suite result: failed without source edits; 4,599 tests run, 4,598 passed, 1 failed, 8 skipped. Exact failure: `plugins::bookmarks::tests::native_watcher_retains_invalid_and_removed_then_recovers_valid_snapshot`, panic at `src/plugins/bookmarks.rs:684` because `plugin.search("bm Initial").iter().any(|a| a.label == "Initial")` was false. No diagnosis or corrective source change is claimed.
+Status / completion: automated final verification remains `in_progress`/failed pending parent decision on the observed unrelated test failure; no false completion commit is made. Native UI acceptance remains unverified, and no full-suite rerun or native acceptance was launched.
+```
+
+### S5 corrective watcher fixture — in_progress
+
+The first final full-suite run above exposed one nondeterministic test-fixture
+failure, not a production watcher failure. The test used `std::fs::write` to
+replace the snapshot with malformed bytes; that truncates in place, so the
+watcher can legitimately observe a transient zero-byte file and publish
+`Empty` before the invalid bytes arrive. The narrow correction is test-only:
+write the malformed fixture with the existing
+`crate::common::atomic_file::save_atomic(&path, b"invalid")`, preserving the
+production watcher and all assertions. The known test-generated untracked
+`clipboard_modifiers.json` was verified untracked and removed; no other
+untracked file was removed.
+
+This record is prepared before the single sequential targeted gate. No source
+or ledger edits are permitted while it runs.
+
+```text
+Job purpose / milestone: S5 corrective watcher fixture and targeted regression
+Command and cwd (ordered): `cargo fmt --all -- --check`; `cargo check`; `git diff --check`; `cargo test plugins::bookmarks::tests::native_watcher_retains_invalid_and_removed_then_recovers_valid_snapshot -- --nocapture`; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target and default features; one sequential Cargo process tree
+Source SHA + fingerprints: HEAD `152a394a4bfc75a68555af45a19610d27ed68388`; src/plugins/bookmarks.rs SHA-256 `1BCD12E8603B6A60E20821B131AF0123145BD140B86E415A4F5519DB1DD4138C`; docs/plans/radial-stabilization.md SHA-256 before this record `1B49F2563BE3AA29F7335FCC4DB0E8FB2B3566EC1603F04CAA12D141230DE529`
+Durable artifacts: `target/s5-bookmarks-corrective.identity`, `target/s5-bookmarks-corrective.log`, `target/s5-bookmarks-corrective.exit`; wrapper PID 3548 started `2026-09-21T23:21:16.1817784-04:00` and completed `2026-09-21T23:45:58.4024147-04:00`; identity and exit records preserve the true command exits
+Observation policy: first observation at launch +600 seconds; second at first observation +900 seconds; subsequent observations +1,200 seconds; reattach to this tree and never launch a duplicate
+Prior failure being corrected: full suite exit 100, 4,599 run / 4,598 passed / 1 failed / 8 skipped; exact failure `plugins::bookmarks::tests::native_watcher_retains_invalid_and_removed_then_recovers_valid_snapshot` at `src/plugins/bookmarks.rs:684`.
+Targeted-gate result: all four ordered commands exited 0; the exact watcher test passed 1, with 4,008 filtered, in 1.34s after a 23m01s test-profile build. The log records all filtered binaries and zero failures.
+Status / completion: corrective evidence is green and ready for its source/test+ledger commit; the required final full-suite rerun remains pending on that committed source. Native UI acceptance remains unverified.
+```
+
 ### S4 active-job record
 
 The S4 implementation is being verified from committed source HEAD
