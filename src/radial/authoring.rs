@@ -1303,9 +1303,11 @@ impl RadialAuthoringSession {
         }) {
             self.pending_native_preview = None;
             self.pending_native_context_sample = false;
+            self.native_preview_lease = None;
             // A late Start reply may already have opened the native host even
-            // though its correlation is now obsolete.  Keep this flag set so
-            // the GUI can issue the terminal Stop request on its next sync.
+            // though its correlation and any local lease are now obsolete.
+            // Keep this flag set so the GUI can issue the terminal Stop
+            // request on its next sync.
             self.native_preview_may_be_open = true;
         }
     }
@@ -3536,17 +3538,11 @@ mod tests {
             .unwrap();
         assert!(session.pending_native_preview.is_none());
         assert!(!session.pending_native_context_sample);
+        assert!(session.native_preview_lease.is_none());
         assert!(session.native_preview_may_be_open);
 
-        let recovery = session
-            .request_update_native_preview(update_menu.clone(), false, None)
-            .unwrap();
-        let recovery_lease = NativePreviewLease {
-            editor_session: session.editor_session,
-            generation: recovery.generation(),
-            request_id: recovery.id(),
-        };
-        let recovery_pending = session.pending_native_preview;
+        let stop = session.request_stop_native_preview().unwrap();
+        let stop_pending = session.pending_native_preview;
         assert!(!session.accept_reply(AuthoringReply::NativePreviewUpdated {
             id: update.id(),
             generation: update.generation(),
@@ -3555,16 +3551,33 @@ mod tests {
             sampled_context: super::super::context::InvocationContext::empty(20),
             diagnostics: Vec::new(),
         }));
-        assert_eq!(session.pending_native_preview, recovery_pending);
-        assert!(session.accept_reply(AuthoringReply::NativePreviewUpdated {
-            id: recovery.id(),
-            generation: recovery.generation(),
-            editor_session: recovery.editor_session(),
-            lease: recovery_lease.clone(),
+        assert_eq!(session.pending_native_preview, stop_pending);
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStopped {
+            id: stop.id(),
+            generation: stop.generation(),
+            editor_session: stop.editor_session(),
+        }));
+        assert!(session.pending_native_preview.is_none());
+        assert!(session.native_preview_lease.is_none());
+        assert!(!session.native_preview_may_be_open);
+
+        let fresh_start = session
+            .request_start_native_preview(update_menu, false, None)
+            .unwrap();
+        let fresh_lease = NativePreviewLease {
+            editor_session: session.editor_session,
+            generation: fresh_start.generation(),
+            request_id: fresh_start.id(),
+        };
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStarted {
+            id: fresh_start.id(),
+            generation: fresh_start.generation(),
+            editor_session: fresh_start.editor_session(),
+            lease: fresh_lease.clone(),
             sampled_context: super::super::context::InvocationContext::empty(21),
             diagnostics: Vec::new(),
         }));
-        assert_eq!(session.native_preview_lease, Some(recovery_lease));
+        assert_eq!(session.native_preview_lease, Some(fresh_lease));
 
         let active_lease = session.native_preview_lease.clone().unwrap();
         assert!(

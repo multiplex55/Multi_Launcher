@@ -6016,6 +6016,86 @@ mod tests {
     }
 
     #[test]
+    fn invalidated_native_update_syncs_terminal_stop_before_recovery_update() {
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.client = Some(client);
+
+        editor.send_native_preview(false);
+        let start = endpoint.request_rx.try_recv().expect("start request");
+        let start_lease = crate::radial::authoring::NativePreviewLease {
+            editor_session: start.editor_session(),
+            generation: start.generation(),
+            request_id: start.id(),
+        };
+        assert!(matches!(
+            &start,
+            crate::radial::authoring::AuthoringRequest::StartNativePreview { .. }
+        ));
+        assert!(editor.session.as_mut().unwrap().accept_reply(
+            crate::radial::authoring::AuthoringReply::NativePreviewStarted {
+                id: start.id(),
+                generation: start.generation(),
+                editor_session: start.editor_session(),
+                lease: start_lease,
+                sampled_context: crate::radial::context::InvocationContext::empty(1),
+                diagnostics: Vec::new(),
+            }
+        ));
+
+        editor.send_native_preview(true);
+        let update = endpoint.request_rx.try_recv().expect("update request");
+        assert!(matches!(
+            &update,
+            crate::radial::authoring::AuthoringRequest::UpdateNativePreview { .. }
+        ));
+        let menu_id = editor
+            .session
+            .as_ref()
+            .expect("session")
+            .draft
+            .default_menu_id
+            .clone();
+        editor
+            .session
+            .as_mut()
+            .expect("session")
+            .mutate(
+                crate::radial::authoring::DocumentMutation::RenameMenu {
+                    id: menu_id,
+                    name: "Edited while update is in flight".into(),
+                },
+                None,
+                crate::radial::authoring::EditPhase::Atomic,
+            )
+            .unwrap();
+        let session = editor.session.as_ref().unwrap();
+        assert!(session.pending_native_preview.is_none());
+        assert!(session.native_preview_lease.is_none());
+        assert!(session.native_preview_may_be_open);
+
+        editor.sync_native_preview_generation();
+        let queued_stop = endpoint.request_rx.try_recv().expect("stop request");
+        assert!(matches!(
+            queued_stop,
+            crate::radial::authoring::AuthoringRequest::StopNativePreview { .. }
+        ));
+        assert!(matches!(
+            endpoint.request_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            editor
+                .session
+                .as_ref()
+                .and_then(|session| session.pending_native_preview)
+                .map(|pending| pending.kind),
+            Some(crate::radial::authoring::PendingRequestKind::StopNativePreview)
+        );
+    }
+
+    #[test]
     fn discard_close_terminalizes_disconnected_preview_stop_without_retrying() {
         let (client, endpoint) = crate::radial::authoring::authoring_control_service();
         let mut editor = RadialEditorState::default();

@@ -1877,6 +1877,10 @@ fn submenu_target(document: &RadialDocument, menu_id: &MenuId, cell_id: &CellId)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radial::authoring::{
+        AuthoringReply, AuthoringRequest, AuthoringSnapshot, PendingRequestKind,
+        RadialAuthoringSession,
+    };
     use crate::radial::diagnostics::{RadialDiagnosticKind, RadialDiagnosticSource};
     use crate::radial::model::{ActionBinding, TargetSelector};
     use crate::radial::session::{NavigationCommand, NavigationModifiers};
@@ -2027,6 +2031,220 @@ mod tests {
             )
             .unwrap()
             .lease
+    }
+
+    #[test]
+    fn fifo_update_then_terminal_stop_precedes_fresh_authoring_start() {
+        let (mut coordinator, _commands, _events) = coordinator();
+        let document = Arc::new(RadialDocument::starter());
+        let mut session =
+            RadialAuthoringSession::new(AuthoringSnapshot::new(Arc::clone(&document), "test"));
+        let menu_id = session.draft.default_menu_id.clone();
+
+        let start_request = session
+            .request_start_native_preview(menu_id.clone(), false, None)
+            .unwrap();
+        let (start_id, start_generation, start_session, start_candidate, start_menu, start_sample) =
+            match start_request {
+                AuthoringRequest::StartNativePreview {
+                    id,
+                    generation,
+                    editor_session,
+                    candidate,
+                    menu_id,
+                    sample_external_context,
+                    ..
+                } => (
+                    id,
+                    generation,
+                    editor_session,
+                    candidate,
+                    menu_id,
+                    sample_external_context,
+                ),
+                _ => panic!("expected native preview start request"),
+            };
+        let start_result = coordinator
+            .start(
+                start_session,
+                start_generation,
+                start_id,
+                start_candidate,
+                start_menu,
+                start_sample,
+            )
+            .unwrap();
+        let start_lease = start_result.lease.clone();
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStarted {
+            id: start_id,
+            generation: start_generation,
+            editor_session: start_session,
+            lease: start_result.lease,
+            sampled_context: start_result.sampled_context,
+            diagnostics: start_result.diagnostics,
+        }));
+        assert_eq!(session.native_preview_lease, Some(start_lease.clone()));
+        assert_eq!(coordinator.active_lease(), Some(start_lease.clone()));
+
+        let update_request = session
+            .request_update_native_preview(menu_id.clone(), false, None)
+            .unwrap();
+        let (
+            update_id,
+            update_generation,
+            update_session,
+            update_previous,
+            update_candidate,
+            update_menu,
+            update_sample,
+        ) = match update_request {
+            AuthoringRequest::UpdateNativePreview {
+                id,
+                generation,
+                editor_session,
+                previous,
+                candidate,
+                menu_id,
+                sample_external_context,
+                ..
+            } => (
+                id,
+                generation,
+                editor_session,
+                previous,
+                candidate,
+                menu_id,
+                sample_external_context,
+            ),
+            _ => panic!("expected native preview update request"),
+        };
+        session
+            .mutate(
+                crate::radial::authoring::DocumentMutation::RenameMenu {
+                    id: menu_id.clone(),
+                    name: "Edited while update is in flight".into(),
+                },
+                None,
+                crate::radial::authoring::EditPhase::Atomic,
+            )
+            .unwrap();
+        assert!(session.pending_native_preview.is_none());
+        assert!(session.native_preview_lease.is_none());
+        assert!(session.native_preview_may_be_open);
+
+        let stop_request = session.request_stop_native_preview().unwrap();
+        let stop_pending = session.pending_native_preview;
+        let (stop_id, stop_generation, stop_session, stop_lease) = match stop_request {
+            AuthoringRequest::StopNativePreview {
+                id,
+                generation,
+                editor_session,
+                lease,
+                ..
+            } => (id, generation, editor_session, lease),
+            _ => panic!("expected native preview stop request"),
+        };
+        assert!(stop_lease.is_none());
+        assert_eq!(
+            stop_pending.map(|pending| pending.kind),
+            Some(PendingRequestKind::StopNativePreview)
+        );
+
+        // The service receives the already-sent update before the terminal
+        // stop.  Its coordinator lease validation accepts the old lease, so
+        // this is the FIFO ordering that would otherwise orphan the host.
+        let update_result = coordinator
+            .update(
+                &update_previous,
+                update_candidate,
+                update_menu,
+                update_generation,
+                update_id,
+                update_sample,
+            )
+            .unwrap();
+        let stale_update_lease = update_result.lease.clone();
+        assert_eq!(
+            coordinator.active_lease(),
+            Some(update_result.lease.clone())
+        );
+        assert!(!session.accept_reply(AuthoringReply::NativePreviewUpdated {
+            id: update_id,
+            generation: update_generation,
+            editor_session: update_session,
+            lease: update_result.lease,
+            sampled_context: InvocationContext::empty(update_id.0),
+            diagnostics: Vec::new(),
+        }));
+        assert_eq!(session.pending_native_preview, stop_pending);
+        assert!(session.native_preview_lease.is_none());
+
+        coordinator.stop(stop_session, stop_generation, stop_id);
+        assert!(coordinator.active_lease().is_none());
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStopped {
+            id: stop_id,
+            generation: stop_generation,
+            editor_session: stop_session,
+        }));
+        assert!(session.pending_native_preview.is_none());
+        assert!(session.native_preview_lease.is_none());
+        assert!(!session.native_preview_may_be_open);
+        assert!(!session.accept_reply(AuthoringReply::NativePreviewUpdated {
+            id: update_id,
+            generation: update_generation,
+            editor_session: update_session,
+            lease: stale_update_lease,
+            sampled_context: InvocationContext::empty(update_id.0),
+            diagnostics: Vec::new(),
+        }));
+        assert!(session.native_preview_lease.is_none());
+
+        let fresh_request = session
+            .request_start_native_preview(menu_id, false, None)
+            .unwrap();
+        let (fresh_id, fresh_generation, fresh_session, fresh_candidate, fresh_menu, fresh_sample) =
+            match fresh_request {
+                AuthoringRequest::StartNativePreview {
+                    id,
+                    generation,
+                    editor_session,
+                    candidate,
+                    menu_id,
+                    sample_external_context,
+                    ..
+                } => (
+                    id,
+                    generation,
+                    editor_session,
+                    candidate,
+                    menu_id,
+                    sample_external_context,
+                ),
+                _ => panic!("expected fresh native preview start request"),
+            };
+        let fresh_result = coordinator
+            .start(
+                fresh_session,
+                fresh_generation,
+                fresh_id,
+                fresh_candidate,
+                fresh_menu,
+                fresh_sample,
+            )
+            .unwrap();
+        assert!(session.accept_reply(AuthoringReply::NativePreviewStarted {
+            id: fresh_id,
+            generation: fresh_generation,
+            editor_session: fresh_session,
+            lease: fresh_result.lease.clone(),
+            sampled_context: fresh_result.sampled_context,
+            diagnostics: fresh_result.diagnostics,
+        }));
+        assert_eq!(
+            session.native_preview_lease,
+            Some(fresh_result.lease.clone())
+        );
+        assert_eq!(coordinator.active_lease(), Some(fresh_result.lease));
     }
 
     #[test]
