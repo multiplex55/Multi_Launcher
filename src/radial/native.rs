@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use super::acceptance_trace;
 use super::geometry::{LayoutSnapshot, LogicalPoint, PhysicalPoint};
 use super::model::{CellId, SessionId};
 use super::render::{InputOwner, VectorScene, input_owner};
@@ -828,6 +830,37 @@ impl Drop for OwnedWindowTimer {
 }
 
 #[cfg(windows)]
+fn native_pointer_trace_message(
+    msg: u32,
+) -> Option<(
+    acceptance_trace::NativePointerTransition,
+    acceptance_trace::NativePointerButton,
+)> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    };
+    Some(match msg {
+        WM_LBUTTONDOWN => (
+            acceptance_trace::NativePointerTransition::Down,
+            acceptance_trace::NativePointerButton::Primary,
+        ),
+        WM_LBUTTONUP => (
+            acceptance_trace::NativePointerTransition::Up,
+            acceptance_trace::NativePointerButton::Primary,
+        ),
+        WM_RBUTTONDOWN => (
+            acceptance_trace::NativePointerTransition::Down,
+            acceptance_trace::NativePointerButton::Secondary,
+        ),
+        WM_RBUTTONUP => (
+            acceptance_trace::NativePointerTransition::Up,
+            acceptance_trace::NativePointerButton::Secondary,
+        ),
+        _ => return None,
+    })
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn wndproc(
     hwnd: windows::Win32::Foundation::HWND,
     msg: u32,
@@ -929,6 +962,17 @@ unsafe extern "system" fn wndproc(
             }
             let point = client_physical_to_logical(state.origin, state.scale_factor, x, y);
             let owner = input_owner(&state.layout, point, false);
+            if acceptance_trace::enabled()
+                && let Some((transition, button)) = native_pointer_trace_message(msg)
+            {
+                acceptance_trace::emit(acceptance_trace::Event::NativePointer {
+                    transition,
+                    button,
+                    owner: acceptance_trace::NativeWindowOwner::PreviewInput,
+                    hwnd: hwnd.0 as usize as u64,
+                    generation: state.scene.generation,
+                });
+            }
             let event = if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN {
                 if matches!(
                     owner,
@@ -1814,6 +1858,10 @@ impl SystemPlatformSurface {
         if !presented.load(Ordering::Acquire) {
             return Err("initial radial presentation produced no frame".into());
         }
+        acceptance_trace::register_preview_hwnds(
+            input_hwnd.0 as usize as u64,
+            visual_hwnd.0 as usize as u64,
+        );
         let input_hwnd = input_window.transfer();
         let visual_hwnd = visual_window.transfer();
         Ok(Self {
@@ -2141,6 +2189,10 @@ fn present_layered(
 #[cfg(windows)]
 impl Drop for SystemPlatformSurface {
     fn drop(&mut self) {
+        acceptance_trace::unregister_preview_hwnds(
+            self.input_hwnd.0 as usize as u64,
+            self.visual_hwnd.0 as usize as u64,
+        );
         let ptr = unsafe {
             windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(
                 self.input_hwnd,
@@ -2820,6 +2872,37 @@ mod tests {
         assert!(!radial_arrow_owned_client(false, 1));
         assert!(!radial_arrow_owned_client(true, 2));
         assert!(!radial_arrow_owned_client(true, -1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_pointer_trace_message_classifies_only_button_edges() {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP,
+        };
+
+        assert_eq!(
+            native_pointer_trace_message(WM_LBUTTONDOWN),
+            Some((
+                acceptance_trace::NativePointerTransition::Down,
+                acceptance_trace::NativePointerButton::Primary,
+            ))
+        );
+        assert_eq!(
+            native_pointer_trace_message(WM_RBUTTONUP),
+            Some((
+                acceptance_trace::NativePointerTransition::Up,
+                acceptance_trace::NativePointerButton::Secondary,
+            ))
+        );
+        assert_eq!(
+            native_pointer_trace_message(WM_LBUTTONUP),
+            Some((
+                acceptance_trace::NativePointerTransition::Up,
+                acceptance_trace::NativePointerButton::Primary,
+            ))
+        );
+        assert_eq!(native_pointer_trace_message(WM_MOUSEMOVE), None);
     }
 
     #[test]

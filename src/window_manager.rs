@@ -3,7 +3,9 @@ pub use crate::platform::windows_api::{
     set_mock_mouse_position,
 };
 
-use crate::radial::acceptance_trace::{self, Correlation, Event, NativeActivationEdge};
+use crate::radial::acceptance_trace::{
+    self, Correlation, Event, NativeActivationEdge, NativeWindowIdentity,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_RESTORE_TRACE_ID: AtomicU64 = AtomicU64::new(1);
@@ -218,7 +220,7 @@ pub fn restore_launcher_to_current_desktop(hwnd: windows::Win32::Foundation::HWN
 /// Return the native window currently under the pointer for the opt-in trace.
 /// This stays behind the trace switch so disabled runs do not add a native query.
 #[cfg(windows)]
-pub(crate) fn window_under_cursor() -> Option<u64> {
+pub(crate) fn window_under_cursor() -> Option<NativeWindowIdentity> {
     if !acceptance_trace::enabled() {
         return None;
     }
@@ -230,13 +232,31 @@ pub(crate) fn window_under_cursor() -> Option<u64> {
         return None;
     }
     let hwnd = unsafe { WindowFromPoint(point) };
-    (!hwnd.0.is_null()).then_some(hwnd.0 as usize as u64)
+    (!hwnd.0.is_null()).then(|| {
+        let hwnd = hwnd.0 as usize as u64;
+        NativeWindowIdentity {
+            hwnd,
+            owner: acceptance_trace::classify_window(hwnd),
+        }
+    })
 }
 
 #[cfg(not(windows))]
-pub(crate) fn window_under_cursor() -> Option<u64> {
+pub(crate) fn window_under_cursor() -> Option<NativeWindowIdentity> {
     None
 }
+
+/// Register the actual launcher root HWND for trace-only owner classification.
+/// The disabled path does not inspect or retain the handle.
+#[cfg(windows)]
+pub(crate) fn register_root_hwnd(hwnd: windows::Win32::Foundation::HWND) {
+    if acceptance_trace::enabled() && !hwnd.0.is_null() {
+        acceptance_trace::register_root_hwnd(hwnd.0 as usize as u64);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn register_root_hwnd(_hwnd: windows::Win32::Foundation::HWND) {}
 
 /// Emit an actual native root window snapshot at a visibility boundary.
 /// Only scalar handle, geometry, and state are exposed.
@@ -250,6 +270,8 @@ pub(crate) fn emit_window_snapshot(
     }
     use windows::Win32::Foundation::RECT;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+
+    acceptance_trace::register_root_hwnd(hwnd.0 as usize as u64);
 
     let mut rect = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {

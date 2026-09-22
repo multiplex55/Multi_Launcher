@@ -116,6 +116,14 @@ fn trace_pointer_release_response(
     }
 }
 
+fn mark_trace_submission(previous: &mut Option<(u64, u64)>, current: Option<(u64, u64)>) -> bool {
+    if *previous == current {
+        return false;
+    }
+    *previous = current;
+    current.is_some()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum DesignerUiIntent {
     TestAction {
@@ -625,6 +633,7 @@ pub(crate) struct RadialEditorState {
     pending_drop: Option<PendingCellDrop>,
     properties_popup: Option<StableSelection>,
     properties_draft: Option<PropertiesDraft>,
+    trace_submission: Option<(u64, u64)>,
     intent_bridge: Arc<DesignerIntentBridge>,
 }
 
@@ -680,6 +689,7 @@ impl Default for RadialEditorState {
             pending_drop: None,
             properties_popup: None,
             properties_draft: None,
+            trace_submission: None,
             intent_bridge: Arc::new(DesignerIntentBridge::default()),
         }
     }
@@ -1271,6 +1281,7 @@ impl RadialEditorState {
         self.pending_drop = None;
         self.properties_popup = None;
         self.properties_draft = None;
+        self.trace_submission = None;
         self.pan_drag_start = None;
         let document = RadialDocument::starter();
         let mut session = RadialAuthoringSession::new(AuthoringSnapshot {
@@ -1355,6 +1366,7 @@ impl RadialEditorState {
         self.close_intent = CloseIntent::None;
         self.close_stop_attempted = false;
         self.client = None;
+        self.trace_submission = None;
         self.properties_popup = None;
         self.properties_draft = None;
         self.session = Some(RadialAuthoringSession::new(AuthoringSnapshot::new(
@@ -1421,6 +1433,7 @@ impl RadialEditorState {
         self.open = false;
         self.viewport_close_pending = true;
         self.session = None;
+        self.trace_submission = None;
         self.close_prompt = false;
         self.close_intent = CloseIntent::None;
         self.close_stop_attempted = false;
@@ -1477,6 +1490,7 @@ impl RadialEditorState {
         self.viewport_restore_pending = true;
         self.viewport_focus_pending = false;
         self.session = None;
+        self.trace_submission = None;
         self.close_intent = CloseIntent::None;
         self.close_stop_attempted = false;
         self.close_prompt = false;
@@ -1923,13 +1937,9 @@ impl RadialEditorState {
         {
             self.apply_post_render();
         }
-        if pointer_down || pointer_up {
-            acceptance_trace::emit(Event::DesignerPresented {
-                correlation: trace_correlation(self.session.as_ref()),
-            });
-        }
         self.prompts(ctx);
         self.keyboard_shortcuts(ctx);
+        self.trace_designer_submission();
         if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
             let size = (rect.width(), rect.height());
             if size.0.is_finite() && size.1.is_finite() && size.0 > 0.0 && size.1 > 0.0 {
@@ -1976,6 +1986,29 @@ impl RadialEditorState {
         if self.preferences_dirty && !self.preferences_flush_requested {
             ctx.request_repaint_after(Duration::from_millis(300));
         }
+    }
+
+    /// Record the bounded scalar edge at which the Designer submits a changed
+    /// session/generation to its normal render/update path.  This is not a
+    /// backend presentation acknowledgement, so the event is intentionally
+    /// named `DesignerSubmitted` and is emitted for keyboard/programmatic
+    /// mutations as well as pointer-driven changes.
+    fn trace_designer_submission(&mut self) {
+        if !acceptance_trace::enabled() {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            mark_trace_submission(&mut self.trace_submission, None);
+            return;
+        };
+        let key = (session.editor_session.0, session.generation.0);
+        if !mark_trace_submission(&mut self.trace_submission, Some(key)) {
+            return;
+        }
+        let mut correlation = trace_correlation(Some(session));
+        correlation.session_id = key.0;
+        correlation.generation = key.1;
+        acceptance_trace::emit(Event::DesignerSubmitted { correlation });
     }
 
     fn conflict_ui(&mut self, ui: &mut egui::Ui, reason: &str) {
@@ -6658,6 +6691,19 @@ mod tests {
                 .any(|name| name.starts_with("Warning: External path"))
         );
         assert!(names.iter().any(|name| *name == "Error: Decode failed"));
+    }
+
+    #[test]
+    fn designer_submission_edge_is_bounded_to_session_and_generation_changes() {
+        let mut previous = None;
+        assert!(mark_trace_submission(&mut previous, Some((4, 1))));
+        assert!(!mark_trace_submission(&mut previous, Some((4, 1))));
+        assert!(mark_trace_submission(&mut previous, Some((4, 2))));
+        assert!(mark_trace_submission(&mut previous, Some((5, 1))));
+        assert!(!mark_trace_submission(&mut previous, Some((5, 1))));
+        assert!(!mark_trace_submission(&mut previous, None));
+        assert!(!mark_trace_submission(&mut previous, None));
+        assert!(mark_trace_submission(&mut previous, Some((5, 2))));
     }
 
     #[test]

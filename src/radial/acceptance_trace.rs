@@ -4,6 +4,7 @@
 //! particular, it must never carry menu names, notes, clipboard contents,
 //! arbitrary key values, window titles, or other user payload.
 
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -137,6 +138,32 @@ pub(crate) enum NativeActivationEdge {
     RestoreFailed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeWindowOwner {
+    Root,
+    PreviewInput,
+    PreviewVisual,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeWindowIdentity {
+    pub(crate) hwnd: u64,
+    pub(crate) owner: NativeWindowOwner,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativePointerTransition {
+    Down,
+    Up,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativePointerButton {
+    Primary,
+    Secondary,
+}
+
 // The closed, typed `Event` enum is the privacy boundary for this diagnostic.
 // The exhaustive schema test below covers every variant and rejects sensitive
 // field labels and representative content.
@@ -155,10 +182,10 @@ pub(crate) enum Event {
     DesignerPointer {
         down: bool,
         up: bool,
-        window_under_cursor: Option<u64>,
+        window_under_cursor: Option<NativeWindowIdentity>,
         correlation: Correlation,
     },
-    DesignerPresented {
+    DesignerSubmitted {
         correlation: Correlation,
     },
     DesignerBody {
@@ -197,6 +224,9 @@ pub(crate) enum Event {
         command: RootCommandKind,
         correlation: Correlation,
     },
+    WindowSampleTruncated {
+        correlation: Correlation,
+    },
     Restore {
         edge: RestoreEdge,
         correlation: Correlation,
@@ -215,6 +245,13 @@ pub(crate) enum Event {
         edge: NativeActivationEdge,
         hwnd: u64,
         correlation: Correlation,
+    },
+    NativePointer {
+        transition: NativePointerTransition,
+        button: NativePointerButton,
+        owner: NativeWindowOwner,
+        hwnd: u64,
+        generation: u64,
     },
 }
 
@@ -268,9 +305,106 @@ struct Runtime {
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static TRACE_STARTED_AT: OnceLock<Instant> = OnceLock::new();
-static WINDOW_SAMPLE_PENDING: AtomicBool = AtomicBool::new(false);
-static WINDOW_SAMPLE_CORRELATION: OnceLock<Mutex<Correlation>> = OnceLock::new();
 static NEXT_BOUNDARY_ID: AtomicU64 = AtomicU64::new(1);
+const WINDOW_SAMPLE_CAPACITY: usize = 32;
+const WINDOW_SAMPLE_DELAY_FRAMES: u64 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingWindowSample {
+    correlation: Correlation,
+    ready_frame: u64,
+}
+
+#[derive(Debug, Default)]
+struct WindowSampleQueue {
+    frame: u64,
+    pending: VecDeque<PendingWindowSample>,
+}
+
+impl WindowSampleQueue {
+    fn enqueue(&mut self, correlation: Correlation) -> Option<Correlation> {
+        let dropped = if self.pending.len() >= WINDOW_SAMPLE_CAPACITY {
+            self.pending.pop_front().map(|sample| sample.correlation)
+        } else {
+            None
+        };
+        self.pending.push_back(PendingWindowSample {
+            correlation,
+            ready_frame: self.frame.saturating_add(WINDOW_SAMPLE_DELAY_FRAMES),
+        });
+        dropped
+    }
+
+    fn advance_frame(&mut self) {
+        self.frame = self.frame.saturating_add(1);
+    }
+
+    fn pop_ready(&mut self) -> Option<Correlation> {
+        self.pending
+            .front()
+            .filter(|sample| sample.ready_frame <= self.frame)
+            .copied()
+            .map(|sample| {
+                self.pending.pop_front();
+                sample.correlation
+            })
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
+#[derive(Debug, Default)]
+struct NativeOwnerRegistry {
+    root: Option<u64>,
+    preview_inputs: [u64; 8],
+    preview_visuals: [u64; 8],
+}
+
+impl NativeOwnerRegistry {
+    fn register_preview(&mut self, input: u64, visual: u64) {
+        register_bounded(&mut self.preview_inputs, input);
+        register_bounded(&mut self.preview_visuals, visual);
+    }
+
+    fn unregister_preview(&mut self, input: u64, visual: u64) {
+        unregister_bounded(&mut self.preview_inputs, input);
+        unregister_bounded(&mut self.preview_visuals, visual);
+    }
+
+    fn classify(&self, hwnd: u64) -> NativeWindowOwner {
+        if hwnd == 0 {
+            NativeWindowOwner::Other
+        } else if self.root == Some(hwnd) {
+            NativeWindowOwner::Root
+        } else if self.preview_inputs.contains(&hwnd) {
+            NativeWindowOwner::PreviewInput
+        } else if self.preview_visuals.contains(&hwnd) {
+            NativeWindowOwner::PreviewVisual
+        } else {
+            NativeWindowOwner::Other
+        }
+    }
+}
+
+fn register_bounded(slots: &mut [u64], value: u64) {
+    if value == 0 || slots.contains(&value) {
+        return;
+    }
+    if let Some(slot) = slots.iter_mut().find(|slot| **slot == 0) {
+        *slot = value;
+    }
+}
+
+fn unregister_bounded(slots: &mut [u64], value: u64) {
+    if let Some(slot) = slots.iter_mut().find(|slot| **slot == value) {
+        *slot = 0;
+    }
+}
+
+static WINDOW_SAMPLE_QUEUE: OnceLock<Mutex<WindowSampleQueue>> = OnceLock::new();
+static NATIVE_OWNER_REGISTRY: OnceLock<Mutex<NativeOwnerRegistry>> = OnceLock::new();
 
 fn enabled_from_value(value: Option<&str>) -> bool {
     matches!(
@@ -303,26 +437,99 @@ pub(crate) fn root_command_correlation() -> Correlation {
 }
 
 pub(crate) fn request_window_sample(correlation: Correlation) {
-    if enabled() {
-        if let Ok(mut pending) = WINDOW_SAMPLE_CORRELATION
-            .get_or_init(|| Mutex::new(Correlation::default()))
-            .lock()
-        {
-            *pending = correlation;
-        }
-        WINDOW_SAMPLE_PENDING.store(true, Ordering::Release);
+    if !enabled() {
+        return;
+    }
+    let dropped = WINDOW_SAMPLE_QUEUE
+        .get_or_init(|| Mutex::new(WindowSampleQueue::default()))
+        .lock()
+        .ok()
+        .and_then(|mut queue| queue.enqueue(correlation));
+    if let Some(correlation) = dropped {
+        emit(Event::WindowSampleTruncated { correlation });
     }
 }
 
-pub(crate) fn take_window_sample_request() -> Option<Correlation> {
-    if !enabled() || !WINDOW_SAMPLE_PENDING.swap(false, Ordering::AcqRel) {
-        return None;
+pub(crate) fn advance_window_sample_frame() -> bool {
+    if !enabled() {
+        return false;
     }
-    WINDOW_SAMPLE_CORRELATION
-        .get_or_init(|| Mutex::new(Correlation::default()))
+    WINDOW_SAMPLE_QUEUE
+        .get_or_init(|| Mutex::new(WindowSampleQueue::default()))
         .lock()
         .ok()
-        .map(|mut pending| std::mem::take(&mut *pending))
+        .map(|mut queue| {
+            queue.advance_frame();
+            queue.has_pending()
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn take_window_sample_request() -> Option<Correlation> {
+    if !enabled() {
+        return None;
+    }
+    WINDOW_SAMPLE_QUEUE
+        .get_or_init(|| Mutex::new(WindowSampleQueue::default()))
+        .lock()
+        .ok()
+        .and_then(|mut queue| queue.pop_ready())
+}
+
+pub(crate) fn window_sample_pending() -> bool {
+    enabled()
+        && WINDOW_SAMPLE_QUEUE
+            .get_or_init(|| Mutex::new(WindowSampleQueue::default()))
+            .lock()
+            .ok()
+            .is_some_and(|queue| queue.has_pending())
+}
+
+pub(crate) fn register_root_hwnd(hwnd: u64) {
+    if !enabled() || hwnd == 0 {
+        return;
+    }
+    if let Ok(mut registry) = NATIVE_OWNER_REGISTRY
+        .get_or_init(|| Mutex::new(NativeOwnerRegistry::default()))
+        .lock()
+    {
+        registry.root = Some(hwnd);
+    }
+}
+
+pub(crate) fn register_preview_hwnds(input: u64, visual: u64) {
+    if !enabled() {
+        return;
+    }
+    if let Ok(mut registry) = NATIVE_OWNER_REGISTRY
+        .get_or_init(|| Mutex::new(NativeOwnerRegistry::default()))
+        .lock()
+    {
+        registry.register_preview(input, visual);
+    }
+}
+
+pub(crate) fn unregister_preview_hwnds(input: u64, visual: u64) {
+    if !enabled() {
+        return;
+    }
+    if let Ok(mut registry) = NATIVE_OWNER_REGISTRY
+        .get_or_init(|| Mutex::new(NativeOwnerRegistry::default()))
+        .lock()
+    {
+        registry.unregister_preview(input, visual);
+    }
+}
+
+pub(crate) fn classify_window(hwnd: u64) -> NativeWindowOwner {
+    if !enabled() {
+        return NativeWindowOwner::Other;
+    }
+    NATIVE_OWNER_REGISTRY
+        .get_or_init(|| Mutex::new(NativeOwnerRegistry::default()))
+        .lock()
+        .map(|registry| registry.classify(hwnd))
+        .unwrap_or(NativeWindowOwner::Other)
 }
 
 pub(crate) fn enabled() -> bool {
@@ -384,13 +591,18 @@ pub(crate) fn emit(event: Event) {
             window_under_cursor,
             correlation,
         } => {
+            let (window_under_cursor_hwnd, window_under_cursor_owner) = window_under_cursor
+                .map_or((0, NativeWindowOwner::Other), |identity| {
+                    (identity.hwnd, identity.owner)
+                });
             tracing::info!(
                 target: TRACE_TARGET,
                 trace_event = "designer_pointer",
                 elapsed_ms,
                 pointer_down = down,
                 pointer_up = up,
-                window_under_cursor,
+                window_under_cursor_hwnd,
+                window_under_cursor_owner = ?window_under_cursor_owner,
                 request_id = correlation.request_id,
                 request_kind = ?correlation.request_kind,
                 session_id = correlation.session_id,
@@ -399,10 +611,10 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
-        Event::DesignerPresented { correlation } => {
+        Event::DesignerSubmitted { correlation } => {
             tracing::info!(
                 target: TRACE_TARGET,
-                trace_event = "designer_presented",
+                trace_event = "designer_submitted",
                 elapsed_ms,
                 request_id = correlation.request_id,
                 request_kind = ?correlation.request_kind,
@@ -563,6 +775,19 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             ),
         },
+        Event::WindowSampleTruncated { correlation } => {
+            tracing::info!(
+                target: TRACE_TARGET,
+                trace_event = "window_sample_truncated",
+                elapsed_ms,
+                request_id = correlation.request_id,
+                request_kind = ?correlation.request_kind,
+                session_id = correlation.session_id,
+                generation = correlation.generation,
+                terminal = correlation.terminal,
+                "radial acceptance trace"
+            );
+        }
         Event::Restore { edge, correlation } => {
             tracing::info!(
                 target: TRACE_TARGET,
@@ -625,6 +850,25 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
+        Event::NativePointer {
+            transition,
+            button,
+            owner,
+            hwnd,
+            generation,
+        } => {
+            tracing::info!(
+                target: TRACE_TARGET,
+                trace_event = "native_pointer",
+                elapsed_ms,
+                ?transition,
+                ?button,
+                ?owner,
+                hwnd,
+                generation,
+                "radial acceptance trace"
+            );
+        }
     }
 }
 
@@ -660,7 +904,7 @@ mod tests {
             Event::DesignerCallback { .. } => &["phase", "viewport"],
             Event::DesignerFocus { .. } => &["edge", "viewport", "correlation"],
             Event::DesignerPointer { .. } => &["down", "up", "window_under_cursor", "correlation"],
-            Event::DesignerPresented { .. } => &["correlation"],
+            Event::DesignerSubmitted { .. } => &["correlation"],
             Event::DesignerBody { .. } => &["state", "correlation"],
             Event::DesignerWidget { .. } => &["category", "response", "correlation"],
             Event::DesignerMutation { .. } => &["result", "correlation"],
@@ -675,6 +919,7 @@ mod tests {
             Event::ShortTap { .. } => &["invocation_id", "terminal"],
             Event::DesiredVisibility { .. } => &["visible", "source"],
             Event::RootCommand { .. } => &["command", "correlation"],
+            Event::WindowSampleTruncated { .. } => &["correlation"],
             Event::Restore { .. } => &["edge", "correlation"],
             Event::NativeWindowSnapshot { .. } => &[
                 "hwnd",
@@ -687,6 +932,7 @@ mod tests {
                 "correlation",
             ],
             Event::NativeActivation { .. } => &["edge", "hwnd", "correlation"],
+            Event::NativePointer { .. } => &["transition", "button", "owner", "hwnd", "generation"],
         }
     }
 
@@ -739,10 +985,13 @@ mod tests {
             Event::DesignerPointer {
                 down: true,
                 up: true,
-                window_under_cursor: Some(101),
+                window_under_cursor: Some(NativeWindowIdentity {
+                    hwnd: 101,
+                    owner: NativeWindowOwner::Root,
+                }),
                 correlation,
             },
-            Event::DesignerPresented { correlation },
+            Event::DesignerSubmitted { correlation },
             Event::DesignerBody {
                 state: BodyBlock::Conflict,
                 correlation,
@@ -779,6 +1028,7 @@ mod tests {
                 command: RootCommandKind::Position { x: -101, y: 202 },
                 correlation,
             },
+            Event::WindowSampleTruncated { correlation },
             Event::Restore {
                 edge: RestoreEdge::RestoreFlag,
                 correlation,
@@ -798,12 +1048,27 @@ mod tests {
                 hwnd: 303,
                 correlation,
             },
+            Event::NativePointer {
+                transition: NativePointerTransition::Down,
+                button: NativePointerButton::Primary,
+                owner: NativeWindowOwner::PreviewInput,
+                hwnd: 303,
+                generation: 19,
+            },
         ];
         let rendered = format!("{events:?}").to_ascii_lowercase();
         let forbidden = [
             "payload",
             "clipboard",
             "title",
+            "class",
+            "pid",
+            "process",
+            "path",
+            "name",
+            "text",
+            "key",
+            "value",
             "notes",
             "content",
             "entered_name",
@@ -826,5 +1091,56 @@ mod tests {
                 "diagnostic schema contains forbidden field/content: {forbidden}"
             );
         }
+    }
+
+    fn correlation(request_id: u64) -> Correlation {
+        Correlation {
+            request_id,
+            ..Correlation::default()
+        }
+    }
+
+    #[test]
+    fn window_sample_queue_preserves_fifo_after_two_boundaries() {
+        let mut queue = WindowSampleQueue::default();
+        assert!(queue.enqueue(correlation(1)).is_none());
+        assert!(queue.enqueue(correlation(2)).is_none());
+        assert!(queue.pop_ready().is_none());
+
+        queue.advance_frame();
+        assert!(queue.pop_ready().is_none());
+        queue.advance_frame();
+        assert_eq!(queue.pop_ready(), Some(correlation(1)));
+        assert_eq!(queue.pop_ready(), Some(correlation(2)));
+        assert!(queue.pop_ready().is_none());
+    }
+
+    #[test]
+    fn window_sample_queue_reports_oldest_bounded_overflow() {
+        let mut queue = WindowSampleQueue::default();
+        for request_id in 0..WINDOW_SAMPLE_CAPACITY as u64 {
+            assert!(queue.enqueue(correlation(request_id)).is_none());
+        }
+        assert_eq!(queue.enqueue(correlation(99)), Some(correlation(0)));
+
+        queue.advance_frame();
+        queue.advance_frame();
+        assert_eq!(queue.pop_ready(), Some(correlation(1)));
+        assert_eq!(queue.pop_ready(), Some(correlation(2)));
+    }
+
+    #[test]
+    fn native_owner_registry_classifies_and_unregisters_known_windows() {
+        let mut registry = NativeOwnerRegistry::default();
+        registry.root = Some(10);
+        registry.register_preview(20, 30);
+        assert_eq!(registry.classify(10), NativeWindowOwner::Root);
+        assert_eq!(registry.classify(20), NativeWindowOwner::PreviewInput);
+        assert_eq!(registry.classify(30), NativeWindowOwner::PreviewVisual);
+        assert_eq!(registry.classify(40), NativeWindowOwner::Other);
+
+        registry.unregister_preview(20, 30);
+        assert_eq!(registry.classify(20), NativeWindowOwner::Other);
+        assert_eq!(registry.classify(30), NativeWindowOwner::Other);
     }
 }

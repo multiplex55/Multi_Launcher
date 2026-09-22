@@ -556,10 +556,21 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         use egui::*;
 
-        if let Some(correlation) = acceptance_trace::take_window_sample_request()
-            && let Some(hwnd) = crate::window_manager::get_hwnd(_frame)
-        {
-            crate::window_manager::emit_window_snapshot(hwnd, correlation);
+        let trace_root_hwnd = acceptance_trace::enabled()
+            .then(|| crate::window_manager::get_hwnd(_frame))
+            .flatten();
+        if let Some(hwnd) = trace_root_hwnd {
+            crate::window_manager::register_root_hwnd(hwnd);
+        }
+        if acceptance_trace::advance_window_sample_frame() {
+            if let Some(hwnd) = trace_root_hwnd {
+                while let Some(correlation) = acceptance_trace::take_window_sample_request() {
+                    crate::window_manager::emit_window_snapshot(hwnd, correlation);
+                }
+            }
+            if acceptance_trace::window_sample_pending() {
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
         }
 
         let plugin_search_generation = self.plugins.search_generation();
