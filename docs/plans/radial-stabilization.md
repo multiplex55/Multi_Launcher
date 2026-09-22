@@ -1074,3 +1074,120 @@ git diff --check -- docs/plans/radial-stabilization.md
 
 S0 does not run Cargo, build, Nextest, native acceptance, reference scripts, or
 real user automation. The ledger is the sole intended S0 file change.
+
+## Remaining native blockers corrective pass (2026-09-22)
+
+This pass follows the bounded assignment in the attached
+`multi_launcher_radial_remaining_blockers_codex.md`. It does not reopen S0–S5
+or convert historical automated/native evidence into a current acceptance
+pass.
+
+### Deterministic corrections
+
+- `041a9b2a fix(radial): deliver designer focus once`
+  - The live deferred Designer callback consumes one pending focus request.
+  - Pinned maintenance uses an idempotent keep-open path; explicit user focus
+    requests still re-arm one focus delivery.
+- `767ca362 fix(radial): retire stale authoring work`
+  - Draft-generation changes retire disposable draft-bound work without
+    accepting stale payloads. Session-stable font catalog work remains valid,
+    and durable operations retain their existing gate.
+- `dbdc53e9 fix(radial): retire stale native preview work`
+  - Native Start/Update requests are invalidated by draft generation changes.
+    The possible-late-open state is retained so synchronization can issue a
+    terminal Stop. A pending Stop survives generation changes and accepts its
+    exact older-generation acknowledgement.
+- `957ed067 fix(radial): stop invalidated native previews first`
+  - Invalidation also drops the obsolete local lease, forcing GUI sync to
+    enqueue Stop before any fresh Start/Update. Coordinator-level FIFO coverage
+    proves old Update, terminal Stop, then fresh Start leaves no orphan host.
+- `7cca2c44 feat(radial): add bounded acceptance tracing` and
+  `609ad877 fix(radial): strengthen acceptance trace evidence`, followed by
+  `23838711 fix(radial): correlate native acceptance boundaries`
+  - The opt-in trace is capped at 256 ordinary events plus one explicit
+    exhaustion marker. It records monotonic time, correlation/terminal edges,
+    Designer pointer/widget/submission edges, requested ROOT geometry,
+    actual root HWND bounds/state, and asynchronous activation completion.
+    Root samples use a bounded FIFO and two-update backend boundary. Native
+    preview input HWNDs emit their own pointer edges and typed owner identity
+    even when the Designer receives no egui input. The generation edge is
+    truthfully labeled Designer submission rather than native presentation.
+    Its closed typed schema carries no user text, titles, arbitrary keys,
+    clipboard data, notes, or paths.
+
+### Automated verification
+
+Focused verification completed successfully on the final code commit
+`2383871142e457b49e1f04023f1953225a80df40`:
+
+```text
+Retained Designer focus/pinned/refocus batch: 4 passed
+Disposable authoring batch: 35 passed
+Native preview production mutation regression: 1 passed
+Pending Stop cross-generation regression: 1 passed
+Stop-first coordinator FIFO regression: 1 passed
+Stop-first GUI sync regression: 1 passed
+Acceptance trace tests: 7 passed
+Authoring trace/regression batch: 65 passed
+Visibility trace/regression batch: 6 passed
+Configured-primary Repeat omission: 1 passed
+Designer submission edge: 1 passed
+Visibility sampling boundary: 1 passed
+Native cursor policy: 1 passed
+cargo check: passed
+Windows target cargo check: passed
+cargo fmt -- --check: passed
+git diff --check: passed
+cargo build --bin multi_launcher: passed (3m18s)
+Independent final blocker audit: no P0/P1/P2 source findings
+```
+
+The complete Nextest suite was not rerun during this bounded pass. The current
+native symptoms have not been reproduced on the user's actual profile, so the
+assignment's stop condition calls for the single diagnostic candidate and a
+short user-operated run rather than another unbounded broad run.
+
+### Diagnostic candidate identity
+
+```text
+Code commit: 2383871142e457b49e1f04023f1953225a80df40
+Build profile: Cargo dev, binary target multi_launcher
+Executable: G:\Repos\rust\Multi_Launcher\target\debug\multi_launcher.exe
+SHA-256: B044A7893BE283A99D6D95D9CCB11450A0EF8EA777C5D5126DED5C366BF55DB2
+Size: 85,214,208 bytes
+LastWriteTimeUtc: 2026-09-22T16:57:16Z
+```
+
+No `multi_launcher` process was running when this identity was recorded. The
+repository-local `settings.json` uses F2 and has no pinned panels, so it is not
+evidence for the user's reported `Shift+Alt+Win+End` mapping or actual data
+directory. No user process was killed and no user profile was changed.
+
+### Exact user-operated trace sequence
+
+1. Close the currently running launcher normally so its real data directory no
+   longer owns the single-instance mutex. Preserve that directory and its
+   `settings.json`; do not replace the configured mapped hotkey.
+2. In that same `settings.json`, temporarily set `"log_file": true`. For this
+   candidate the durable log is
+   `G:\Repos\rust\Multi_Launcher\target\debug\launcher.log`.
+3. In PowerShell, set the working directory to the real data directory, then
+   launch exactly:
+
+   ```powershell
+   $env:MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE = '1'
+   & 'G:\Repos\rust\Multi_Launcher\target\debug\multi_launcher.exe'
+   ```
+
+4. With native preview stopped, open Edit Radial Menus and try Menus, Skins,
+   Tree, Inspector, and Zoom once each. Then focus the normal launcher grid and
+   physically perform one short `Shift+Alt+Win+End` mapped tap to hide and one
+   to show, releasing every key between taps. If supported, repeat only the
+   focused tap with the Designer open and then with native preview active.
+5. Close the candidate normally and retain `launcher.log`. Reset `log_file`
+   only if it was disabled before the run. The run remains unpassed until the
+   log and visible results establish ordinary Designer interaction and the
+   focused hide/show behavior.
+
+Current native acceptance status: **NOT RUN on the user's actual profile**.
+The candidate is diagnostic; absence of a local reproduction is not success.
