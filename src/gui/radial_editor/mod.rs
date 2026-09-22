@@ -1020,7 +1020,6 @@ impl RadialEditorState {
             open,
             viewport_close_pending,
             viewport_restore_pending,
-            viewport_focus_pending,
             preferences,
             action_catalog,
             feature_defaults,
@@ -1031,7 +1030,6 @@ impl RadialEditorState {
                 editor.open,
                 editor.viewport_close_pending,
                 editor.viewport_restore_pending,
-                editor.viewport_focus_pending,
                 editor.preferences.clone().normalized(),
                 app.universal_action_catalog_snapshot(),
                 app.radial_feature_settings.clone(),
@@ -1087,11 +1085,6 @@ impl RadialEditorState {
             builder = builder.with_inner_size([saved_geometry.size.x, saved_geometry.size.y]);
         }
         let shared = Arc::clone(shared);
-        if viewport_focus_pending {
-            if let Ok(mut editor) = shared.lock() {
-                editor.viewport_focus_pending = false;
-            }
-        }
         ctx.show_viewport_deferred(viewport_id, builder, move |child, class| {
             let Ok(mut editor) = shared.lock() else {
                 return;
@@ -1128,6 +1121,7 @@ impl RadialEditorState {
                     });
                 return;
             }
+            let focus_requested = std::mem::take(&mut editor.viewport_focus_pending);
             if editor.viewport_restore_pending {
                 let restored = work_area::restore_geometry(
                     child,
@@ -1146,7 +1140,7 @@ impl RadialEditorState {
                 }
                 editor.viewport_restore_pending = false;
             }
-            if viewport_focus_pending && class != egui::ViewportClass::Embedded {
+            if focus_requested {
                 child.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             editor.viewport_ui(child, &frame, class);
@@ -1195,6 +1189,14 @@ impl RadialEditorState {
             }
         }
         self.session = Some(session);
+    }
+
+    /// Keep a pinned Designer open without treating each maintenance pass as
+    /// an explicit user focus request.
+    pub(crate) fn ensure_open(&mut self) {
+        if !self.open {
+            self.open();
+        }
     }
 
     pub(crate) fn open_skins(&mut self) {
