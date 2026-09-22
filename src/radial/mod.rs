@@ -1,5 +1,6 @@
 //! Typed, side-effect-free core for radial menus.
 
+pub(crate) mod acceptance_trace;
 pub mod assets;
 pub mod audio;
 pub mod authoring;

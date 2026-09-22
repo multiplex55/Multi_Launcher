@@ -5,6 +5,7 @@ use std::sync::{
 };
 
 use crate::hotkey::HotkeyTrigger;
+use crate::radial::acceptance_trace::{self, Event, RootCommandKind, VisibilitySource};
 
 /// A small, explicit wake boundary for work owned by one egui viewport.
 /// Keeping the viewport id with the callback prevents background producers
@@ -85,6 +86,10 @@ impl VisibilityToggleBatch {
         let next_visible = !was_visible;
         self.targets.push(next_visible);
         visibility.store(next_visible, Ordering::SeqCst);
+        acceptance_trace::emit(Event::DesiredVisibility {
+            visible: next_visible,
+            source: VisibilitySource::ToggleBatch,
+        });
         was_visible
     }
 
@@ -116,6 +121,16 @@ impl RootViewportCtx {
 
 impl ViewportCtx for RootViewportCtx {
     fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
+        let command = match &cmd {
+            egui::ViewportCommand::OuterPosition(_) => RootCommandKind::Position,
+            egui::ViewportCommand::InnerSize(_) => RootCommandKind::Size,
+            egui::ViewportCommand::Visible(true) => RootCommandKind::Show,
+            egui::ViewportCommand::Visible(false) => RootCommandKind::ParkingBoundary,
+            egui::ViewportCommand::Minimized(_) => RootCommandKind::Minimize,
+            egui::ViewportCommand::Focus => RootCommandKind::Focus,
+            _ => return self.ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, cmd),
+        };
+        acceptance_trace::emit(Event::RootCommand { command });
         self.ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, cmd);
     }
 
@@ -205,6 +220,10 @@ pub fn handle_visibility_trigger_with_owner<C: ViewportCtx>(
     if trigger.take() {
         let old = visibility.load(Ordering::SeqCst);
         let next = !old;
+        acceptance_trace::emit(Event::DesiredVisibility {
+            visible: next,
+            source: VisibilitySource::LegacyTrigger,
+        });
         on_grid_toggle(old);
         changed = apply_visibility_target(
             next,
@@ -220,6 +239,10 @@ pub fn handle_visibility_trigger_with_owner<C: ViewportCtx>(
             window_size,
         );
     } else if let Some(next) = *queued_visibility {
+        acceptance_trace::emit(Event::DesiredVisibility {
+            visible: next,
+            source: VisibilitySource::Queued,
+        });
         tracing::debug!("Processing previously queued visibility: {}", next);
         if let Ok(guard) = ctx_handle.lock()
             && let Some(c) = &*guard
@@ -351,6 +374,9 @@ pub fn apply_visibility<C: ViewportCtx>(
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     } else {
+        acceptance_trace::emit(Event::RootCommand {
+            command: RootCommandKind::ParkingBoundary,
+        });
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             offscreen.0,
             offscreen.1,

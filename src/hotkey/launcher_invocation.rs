@@ -1,6 +1,7 @@
 //! Complete, timestamped lifecycle adapter for the launcher chord.
 //! The pure adapter is also the synchronous decision core used by the native hook.
 use super::{Hotkey, Key};
+use crate::radial::acceptance_trace::{self, Event, PrimaryTransition};
 pub use crate::radial::invocation::InputProvenance;
 use crate::radial::invocation::{
     ContextToken, InvocationEvent, InvocationIntent, InvocationReducer, LifecycleCancellation,
@@ -369,6 +370,21 @@ impl LauncherInvocationAdapter {
                 intents: Vec::new(),
             };
         }
+        let configured_primary = self
+            .owned_primary
+            .or_else(|| vk_from_key(self.config.hotkey.key));
+        if configured_primary == Some(event.vk) {
+            acceptance_trace::emit(Event::InvocationPrimary {
+                transition: match event.transition {
+                    KeyTransition::Up => PrimaryTransition::Release,
+                    KeyTransition::Down | KeyTransition::Repeat => PrimaryTransition::Press,
+                },
+                provenance: event.provenance,
+                modifiers_match: self.modifiers.matches(&self.config.hotkey),
+                invocation_id: self.owned.map_or(self.next_id, |id| id.0),
+                generation: self.config.generation,
+            });
+        }
         if self.owned.is_some() && self.owned_primary == Some(event.vk) {
             return if self.owned_provenance == Some(event.provenance) {
                 self.process_owned_primary(event)
@@ -483,12 +499,24 @@ impl LauncherInvocationAdapter {
             self.owned_provenance = None;
             self.owned_primary_down_suppressed = false;
             self.candidate_primary_down = None;
+            let intents = self
+                .reducer
+                .reduce(InvocationEvent::PrimaryReleased { id, at: event.at });
+            if intents.iter().any(|intent| {
+                matches!(
+                    intent,
+                    crate::radial::invocation::InvocationIntent::ToggleLegacyLauncher { .. }
+                )
+            }) {
+                acceptance_trace::emit(Event::ShortTap {
+                    invocation_id: id.0,
+                    terminal: true,
+                });
+            }
             return AdapterOutcome {
                 consume,
                 recovery: false,
-                intents: self
-                    .reducer
-                    .reduce(InvocationEvent::PrimaryReleased { id, at: event.at }),
+                intents,
             };
         }
         AdapterOutcome {

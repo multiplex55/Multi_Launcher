@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::radial::acceptance_trace::{self, RestoreEdge};
+
 #[derive(Clone, Debug)]
 pub(crate) struct DeferredActivation {
     pub(crate) action: Action,
@@ -693,6 +695,9 @@ impl eframe::App for LauncherApp {
             self.help_flag.store(false, Ordering::SeqCst);
         }
         if do_restore && self.visible_flag.load(Ordering::SeqCst) {
+            acceptance_trace::emit(acceptance_trace::Event::Restore {
+                edge: RestoreEdge::RestoreFlag,
+            });
             tracing::debug!("Restoring window on restore_flag");
             apply_visibility(
                 true,

@@ -6,6 +6,9 @@
 //! the optional [`native_preview::NativePreviewCoordinator`], and is the only
 //! component allowed to execute persistence requests or create preview surfaces.
 
+use super::acceptance_trace::{
+    self, AuthoringEdge, Correlation, Event, MutationResult, RequestKind,
+};
 use super::diagnostics::{
     MAX_EXPECTED_LAYOUT_DIAGNOSTICS, MAX_RADIAL_DIAGNOSTICS, bound_diagnostics,
 };
@@ -567,6 +570,28 @@ impl AuthoringRequest {
             | Self::StopNativePreview { editor_session, .. } => *editor_session,
         }
     }
+
+    fn trace_kind(&self) -> RequestKind {
+        match self {
+            Self::Snapshot { .. } => RequestKind::Snapshot,
+            Self::Commit { disposition, .. } => match disposition {
+                CommitDisposition::Apply => RequestKind::CommitApply,
+                CommitDisposition::Save => RequestKind::CommitSave,
+                CommitDisposition::RevertAppliedAndClose => RequestKind::CommitRevertAndClose,
+            },
+            Self::LivePreview { .. } => RequestKind::LivePreview,
+            Self::CancelPreview { .. } => RequestKind::CancelPreview,
+            Self::ExportPackage { .. } => RequestKind::ExportPackage,
+            Self::ExportSkin { .. } => RequestKind::ExportSkin,
+            Self::AuditionManagedAsset { .. } => RequestKind::AuditionManagedAsset,
+            Self::FontCatalog { .. } => RequestKind::FontCatalog,
+            Self::PrepareEmbeddedPreview { .. } => RequestKind::PrepareEmbeddedPreview,
+            Self::ReplacePackage { .. } => RequestKind::ReplacePackage,
+            Self::StartNativePreview { .. } => RequestKind::StartNativePreview,
+            Self::UpdateNativePreview { .. } => RequestKind::UpdateNativePreview,
+            Self::StopNativePreview { .. } => RequestKind::StopNativePreview,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -732,6 +757,37 @@ impl AuthoringReply {
             | Self::Failed { editor_session, .. } => *editor_session,
         }
     }
+
+    fn trace_kind(&self) -> RequestKind {
+        match self {
+            Self::ExternalPublished { .. } => RequestKind::None,
+            Self::Snapshot { .. } => RequestKind::Snapshot,
+            Self::Published { disposition, .. } => match disposition {
+                CommitDisposition::Apply => RequestKind::CommitApply,
+                CommitDisposition::Save => RequestKind::CommitSave,
+                CommitDisposition::RevertAppliedAndClose => RequestKind::CommitRevertAndClose,
+            },
+            Self::PreviewAccepted { .. } => RequestKind::LivePreview,
+            Self::PreviewCancelled { .. } => RequestKind::CancelPreview,
+            Self::PackageExported { .. } => RequestKind::ExportPackage,
+            Self::AssetAuditioned { .. } => RequestKind::AuditionManagedAsset,
+            Self::FontCatalog { .. } => RequestKind::FontCatalog,
+            Self::EmbeddedPreviewPrepared { .. } => RequestKind::PrepareEmbeddedPreview,
+            Self::PackageReplaced { .. } => RequestKind::ReplacePackage,
+            Self::NativePreviewStarted { .. } => RequestKind::StartNativePreview,
+            Self::NativePreviewUpdated { .. } => RequestKind::UpdateNativePreview,
+            Self::NativePreviewDiagnostics { lease, .. }
+            | Self::NativePreviewFailed { lease, .. } => {
+                if lease.request_id.0 == 0 {
+                    RequestKind::None
+                } else {
+                    RequestKind::UpdateNativePreview
+                }
+            }
+            Self::NativePreviewStopped { .. } => RequestKind::StopNativePreview,
+            Self::Failed { .. } => RequestKind::None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -763,7 +819,18 @@ pub struct AuthoringReplySender {
 
 impl AuthoringReplySender {
     pub fn send(&self, reply: AuthoringReply) -> Result<(), mpsc::SendError<AuthoringReply>> {
+        let correlation = Correlation {
+            request_id: reply.id().0,
+            request_kind: reply.trace_kind(),
+            session_id: reply.editor_session().0,
+            generation: reply.generation().0,
+            terminal: true,
+        };
         self.tx.send(reply)?;
+        acceptance_trace::emit(Event::Authoring {
+            edge: AuthoringEdge::ReplyTerminal,
+            correlation,
+        });
         if let Some(wake) = &self.root_wake {
             wake();
         }
@@ -859,9 +926,20 @@ impl AuthoringClient {
     }
 
     pub fn send(&self, request: AuthoringRequest) -> Result<(), AuthoringError> {
+        let correlation = Correlation {
+            request_id: request.id().0,
+            request_kind: request.trace_kind(),
+            session_id: request.editor_session().0,
+            generation: request.generation().0,
+            terminal: false,
+        };
         self.request_tx
             .send(request)
             .map_err(|_| AuthoringError::ServiceClosed)?;
+        acceptance_trace::emit(Event::Authoring {
+            edge: AuthoringEdge::RequestSent,
+            correlation,
+        });
         if let Some(wake) = &self.wake {
             wake();
         }
@@ -1211,47 +1289,64 @@ impl RadialAuthoringSession {
         key: Option<EditKey>,
         phase: EditPhase,
     ) -> Result<(), AuthoringError> {
-        self.ensure_draft_generation_change_allowed()?;
-        let before = Arc::clone(&self.draft);
-        let mut after = (*before).clone();
-        mutation.apply(&mut after)?;
-        let after = Arc::new(after);
-        if after == before {
+        let result = (|| {
+            self.ensure_draft_generation_change_allowed()?;
+            let before = Arc::clone(&self.draft);
+            let mut after = (*before).clone();
+            mutation.apply(&mut after)?;
+            let after = Arc::new(after);
+            if after == before {
+                if phase == EditPhase::End
+                    && let Some(key) = &key
+                {
+                    self.history.close_group(key);
+                }
+                return Ok(());
+            }
+            self.advance_draft_generation()?;
+            let open = matches!(phase, EditPhase::Begin | EditPhase::Update);
+            let entry = HistoryEntry {
+                bytes: estimate_document_bytes(&before)
+                    + estimate_document_bytes(&after)
+                    + self.pending_assets.byte_len() * 2,
+                before,
+                after: Arc::clone(&after),
+                before_assets: self.pending_assets.clone(),
+                after_assets: self.pending_assets.clone(),
+                key: key.clone(),
+                open,
+            };
+            self.history.push(entry);
             if phase == EditPhase::End
                 && let Some(key) = &key
             {
                 self.history.close_group(key);
             }
-            return Ok(());
-        }
-        self.advance_draft_generation()?;
-        let open = matches!(phase, EditPhase::Begin | EditPhase::Update);
-        let entry = HistoryEntry {
-            bytes: estimate_document_bytes(&before)
-                + estimate_document_bytes(&after)
-                + self.pending_assets.byte_len() * 2,
-            before,
-            after: Arc::clone(&after),
-            before_assets: self.pending_assets.clone(),
-            after_assets: self.pending_assets.clone(),
-            key: key.clone(),
-            open,
-        };
-        self.history.push(entry);
-        if phase == EditPhase::End
-            && let Some(key) = &key
-        {
-            self.history.close_group(key);
-        }
-        self.draft = after;
-        if self
-            .selection
-            .as_ref()
-            .is_some_and(|selected| !selected.exists_in(&self.draft))
-        {
-            self.selection = None;
-        }
-        Ok(())
+            self.draft = after;
+            if self
+                .selection
+                .as_ref()
+                .is_some_and(|selected| !selected.exists_in(&self.draft))
+            {
+                self.selection = None;
+            }
+            Ok(())
+        })();
+        acceptance_trace::emit(Event::DesignerMutation {
+            result: if result.is_ok() {
+                MutationResult::Accepted
+            } else {
+                MutationResult::Rejected
+            },
+            correlation: Correlation {
+                request_id: 0,
+                request_kind: RequestKind::None,
+                session_id: self.editor_session.0,
+                generation: self.generation.0,
+                terminal: true,
+            },
+        });
+        result
     }
 
     /// Imports, duplication graphs, and relocation/count previews commit to the

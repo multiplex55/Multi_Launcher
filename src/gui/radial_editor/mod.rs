@@ -9,6 +9,10 @@ mod skin_editor;
 mod work_area;
 
 use crate::gui::LauncherApp;
+use crate::radial::acceptance_trace::{
+    self, BodyBlock, Correlation, Event, FocusEdge, RequestKind, ViewportClass, WidgetCategory,
+    WidgetResponse,
+};
 use crate::radial::authoring::menu::{self, ResizeResolution, SubmenuDuplication};
 use crate::radial::authoring::{
     AuthoringClient, AuthoringError, AuthoringSnapshot, CloseIntent, CommitDisposition,
@@ -34,6 +38,59 @@ use std::time::{Duration, Instant};
 
 pub(crate) fn radial_designer_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("radial-designer")
+}
+
+fn trace_viewport_class(class: egui::ViewportClass) -> ViewportClass {
+    match class {
+        egui::ViewportClass::Root => ViewportClass::Root,
+        egui::ViewportClass::Deferred => ViewportClass::Deferred,
+        egui::ViewportClass::Immediate => ViewportClass::Immediate,
+        egui::ViewportClass::Embedded => ViewportClass::Embedded,
+    }
+}
+
+fn trace_request_kind(kind: PendingRequestKind) -> RequestKind {
+    match kind {
+        PendingRequestKind::Snapshot => RequestKind::Snapshot,
+        PendingRequestKind::Commit(CommitDisposition::Apply) => RequestKind::CommitApply,
+        PendingRequestKind::Commit(CommitDisposition::Save) => RequestKind::CommitSave,
+        PendingRequestKind::Commit(CommitDisposition::RevertAppliedAndClose) => {
+            RequestKind::CommitRevertAndClose
+        }
+        PendingRequestKind::LivePreview => RequestKind::LivePreview,
+        PendingRequestKind::CancelPreview => RequestKind::CancelPreview,
+        PendingRequestKind::ExportPackage => RequestKind::ExportPackage,
+        PendingRequestKind::ExportSkin => RequestKind::ExportSkin,
+        PendingRequestKind::AuditionManagedAsset => RequestKind::AuditionManagedAsset,
+        PendingRequestKind::FontCatalog => RequestKind::FontCatalog,
+        PendingRequestKind::PrepareEmbeddedPreview => RequestKind::PrepareEmbeddedPreview,
+        PendingRequestKind::ReplacePackage => RequestKind::ReplacePackage,
+        PendingRequestKind::StartNativePreview => RequestKind::StartNativePreview,
+        PendingRequestKind::UpdateNativePreview => RequestKind::UpdateNativePreview,
+        PendingRequestKind::StopNativePreview => RequestKind::StopNativePreview,
+    }
+}
+
+fn trace_correlation(session: Option<&RadialAuthoringSession>) -> Correlation {
+    let Some(session) = session else {
+        return Correlation::default();
+    };
+    let pending = session.pending_request.or(session.pending_native_preview);
+    pending.map_or(
+        Correlation {
+            session_id: session.editor_session.0,
+            generation: session.generation.0,
+            terminal: false,
+            ..Correlation::default()
+        },
+        |pending| Correlation {
+            request_id: pending.id.0,
+            request_kind: trace_request_kind(pending.kind),
+            session_id: pending.editor_session.0,
+            generation: pending.generation.0,
+            terminal: false,
+        },
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1086,11 +1143,21 @@ impl RadialEditorState {
         }
         let shared = Arc::clone(shared);
         ctx.show_viewport_deferred(viewport_id, builder, move |child, class| {
+            let trace_viewport = trace_viewport_class(class);
+            let (pointer_down, pointer_up) =
+                child.input(|input| (input.pointer.any_pressed(), input.pointer.any_released()));
             let Ok(mut editor) = shared.lock() else {
                 return;
             };
+            let correlation = trace_correlation(editor.session.as_ref());
             let close_requested = class != egui::ViewportClass::Embedded
                 && child.input(|input| input.viewport().close_requested());
+            // Retained deferred callbacks can execute every frame.  Trace
+            // only interaction/focus/close edges so the bounded diagnostic
+            // budget remains useful for the complete manual sequence.
+            let _callback_trace =
+                (pointer_down || pointer_up || close_requested || editor.viewport_focus_pending)
+                    .then(|| acceptance_trace::DesignerCallbackGuard::enter(trace_viewport));
             if close_requested {
                 editor.request_close();
                 // A dirty designer must keep its deferred viewport alive long
@@ -1122,6 +1189,13 @@ impl RadialEditorState {
                 return;
             }
             let focus_requested = std::mem::take(&mut editor.viewport_focus_pending);
+            if focus_requested {
+                acceptance_trace::emit(Event::DesignerFocus {
+                    edge: FocusEdge::Requested,
+                    viewport: trace_viewport,
+                    correlation,
+                });
+            }
             if editor.viewport_restore_pending {
                 let restored = work_area::restore_geometry(
                     child,
@@ -1142,6 +1216,11 @@ impl RadialEditorState {
             }
             if focus_requested {
                 child.send_viewport_cmd(egui::ViewportCommand::Focus);
+                acceptance_trace::emit(Event::DesignerFocus {
+                    edge: FocusEdge::Consumed,
+                    viewport: trace_viewport,
+                    correlation,
+                });
             }
             editor.viewport_ui(child, &frame, class);
         });
@@ -1587,6 +1666,15 @@ impl RadialEditorState {
         if viewport_class == egui::ViewportClass::Embedded {
             return;
         }
+        let (pointer_down, pointer_up) =
+            ctx.input(|input| (input.pointer.any_pressed(), input.pointer.any_released()));
+        if pointer_down || pointer_up {
+            acceptance_trace::emit(Event::DesignerPointer {
+                down: pointer_down,
+                up: pointer_up,
+                correlation: trace_correlation(self.session.as_ref()),
+            });
+        }
         self.poll_replies();
         if self.close_intent == CloseIntent::None {
             self.sync_native_preview_generation();
@@ -1675,6 +1763,20 @@ impl RadialEditorState {
                 return;
             }
         };
+
+        let body_state = if initial_snapshot_pending {
+            BodyBlock::InitialSnapshot
+        } else if conflict_reason.is_some() {
+            BodyBlock::Conflict
+        } else {
+            BodyBlock::Enabled
+        };
+        if pointer_down || pointer_up {
+            acceptance_trace::emit(Event::DesignerBody {
+                state: body_state,
+                correlation: trace_correlation(self.session.as_ref()),
+            });
+        }
 
         let expanded_sections_before = self.preferences.expanded_sections.clone();
         let designer_body = |ui: &mut egui::Ui| {
@@ -1780,6 +1882,17 @@ impl RadialEditorState {
         // is therefore rendered only by the independent native viewport.
         if viewport_class != egui::ViewportClass::Embedded {
             egui::CentralPanel::default().show(ctx, designer_body);
+        }
+        if pointer_down || pointer_up {
+            acceptance_trace::emit(Event::DesignerWidget {
+                category: WidgetCategory::DesignerBody,
+                response: if matches!(body_state, BodyBlock::Enabled) {
+                    WidgetResponse::Accepted
+                } else {
+                    WidgetResponse::Rejected
+                },
+                correlation: trace_correlation(self.session.as_ref()),
+            });
         }
         if self.preferences.expanded_sections != expanded_sections_before {
             self.mark_preferences_changed();
@@ -2199,29 +2312,49 @@ impl RadialEditorState {
                 self.preview.cancel_tooltip();
                 self.mark_preferences_changed();
             }
-            if ui.selectable_label(!self.show_resources, "Menus").clicked() {
+            let menus = ui.selectable_label(!self.show_resources, "Menus");
+            if menus.clicked() {
                 self.show_resources = false;
                 self.mark_preferences_changed();
+                acceptance_trace::emit(Event::DesignerWidget {
+                    category: WidgetCategory::Menus,
+                    response: WidgetResponse::Accepted,
+                    correlation: trace_correlation(self.session.as_ref()),
+                });
             }
-            if ui.selectable_label(self.show_resources, "Skins").clicked() {
+            let skins = ui.selectable_label(self.show_resources, "Skins");
+            if skins.clicked() {
                 self.show_resources = true;
                 self.mark_preferences_changed();
+                acceptance_trace::emit(Event::DesignerWidget {
+                    category: WidgetCategory::Skins,
+                    response: WidgetResponse::Accepted,
+                    correlation: trace_correlation(self.session.as_ref()),
+                });
             }
-            if ui
+            let tree = ui
                 .selectable_label(self.tree_visible, "Tree")
-                .on_hover_text("Show or hide the menu tree")
-                .clicked()
-            {
+                .on_hover_text("Show or hide the menu tree");
+            if tree.clicked() {
                 self.tree_visible = !self.tree_visible;
                 self.mark_preferences_changed();
+                acceptance_trace::emit(Event::DesignerWidget {
+                    category: WidgetCategory::Tree,
+                    response: WidgetResponse::Accepted,
+                    correlation: trace_correlation(self.session.as_ref()),
+                });
             }
-            if ui
+            let inspector = ui
                 .selectable_label(self.inspector_visible, "Inspector")
-                .on_hover_text("Show or hide the inspector")
-                .clicked()
-            {
+                .on_hover_text("Show or hide the inspector");
+            if inspector.clicked() {
                 self.inspector_visible = !self.inspector_visible;
                 self.mark_preferences_changed();
+                acceptance_trace::emit(Event::DesignerWidget {
+                    category: WidgetCategory::Inspector,
+                    response: WidgetResponse::Accepted,
+                    correlation: trace_correlation(self.session.as_ref()),
+                });
             }
             ui.menu_button("Layout", |ui| {
                 ui.label("Presentation only");
@@ -2463,6 +2596,11 @@ impl RadialEditorState {
             );
             if zoom_response.changed() {
                 self.mark_preferences_changed();
+                acceptance_trace::emit(Event::DesignerWidget {
+                    category: WidgetCategory::Zoom,
+                    response: WidgetResponse::Accepted,
+                    correlation: trace_correlation(self.session.as_ref()),
+                });
             }
             if ui
                 .selectable_label(self.show_resources, "Skins, assets & packages")
@@ -3863,8 +4001,20 @@ impl RadialEditorState {
                         menu::CellDropResolution::MoveIntoSpacer,
                         expected_generation,
                     ) {
-                        Ok(()) => self.focus_restore = session.selection.clone(),
+                        Ok(()) => {
+                            self.focus_restore = session.selection.clone();
+                            acceptance_trace::emit(Event::DesignerWidget {
+                                category: WidgetCategory::Canvas,
+                                response: WidgetResponse::Accepted,
+                                correlation: trace_correlation(Some(session)),
+                            });
+                        }
                         Err(menu::MenuEditError::DestinationOccupied) => {
+                            acceptance_trace::emit(Event::DesignerWidget {
+                                category: WidgetCategory::Canvas,
+                                response: WidgetResponse::Rejected,
+                                correlation: trace_correlation(Some(session)),
+                            });
                             if let Some(destination_cell) = destination_cell {
                                 self.pending_drop = Some(PendingCellDrop {
                                     source_menu,
@@ -3878,7 +4028,11 @@ impl RadialEditorState {
                                 });
                             }
                         }
-                        Err(_) => {}
+                        Err(_) => acceptance_trace::emit(Event::DesignerWidget {
+                            category: WidgetCategory::Canvas,
+                            response: WidgetResponse::Rejected,
+                            correlation: trace_correlation(Some(session)),
+                        }),
                     }
                 }
             }
