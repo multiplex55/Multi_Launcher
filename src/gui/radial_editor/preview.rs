@@ -686,6 +686,22 @@ impl EmbeddedPreview {
         let Some(child) = document.menus.iter().find(|menu| &menu.id == menu_id) else {
             return (current_parent_center, PreviewPlacement::FixedCenter, None);
         };
+        // A newly pushed frame has not been placed yet, so its own direction is
+        // still empty while the asynchronous preparation request is in flight.
+        // The parent frame owns the chain direction; retain it before probing
+        // the child or a midpoint crossing can reverse the next Cascade edge.
+        let preferred_direction = self
+            .reducer
+            .as_ref()
+            .and_then(|reducer| {
+                reducer
+                    .state
+                    .stack
+                    .iter()
+                    .find(|candidate| candidate.frame_id == parent_frame_id)
+            })
+            .and_then(|parent| parent.cascade_direction)
+            .or(frame.cascade_direction);
         match cascade_placement_with_direction(
             document,
             parent_layout,
@@ -693,7 +709,7 @@ impl EmbeddedPreview {
             work_area,
             scale,
             0.55,
-            frame.cascade_direction,
+            preferred_direction,
         ) {
             Ok(selection) => (
                 selection.anchor,
@@ -2853,6 +2869,142 @@ mod tests {
             preview.prepared_frame(&session).unwrap().as_ref(),
             root_frame.as_ref()
         );
+    }
+
+    #[test]
+    fn embedded_preview_async_cascade_chain_retains_direction_after_midpoint_crossing() {
+        let mut document = RadialDocument::starter();
+        let root = document.default_menu_id.clone();
+        let favorites = MenuId::new("starter-favorites");
+        let applications = MenuId::new("starter-applications");
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == root)
+            .unwrap()
+            .submenu_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+        let favorites_menu = document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == favorites)
+            .unwrap();
+        favorites_menu.submenu_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+        favorites_menu.rings[0].cells[0].content = CellContent::Submenu {
+            menu_id: applications.clone(),
+        };
+        for menu_id in [root.clone(), favorites.clone(), applications] {
+            let menu = document
+                .menus
+                .iter_mut()
+                .find(|menu| menu.id == menu_id)
+                .unwrap();
+            menu.rings[0].radius = 48.0;
+            menu.rings[0].cell_radius = 18.0;
+            menu.rings[0].gap = 2.0;
+        }
+        let document = std::sync::Arc::new(document);
+        let mut session =
+            RadialAuthoringSession::new(crate::radial::authoring::AuthoringSnapshot::new(
+                std::sync::Arc::clone(&document),
+                "preview-cascade-direction",
+            ));
+        let (client, endpoint) = crate::radial::authoring::authoring_control_service();
+        let mut preview = EmbeddedPreview::default();
+        let mut preparer =
+            crate::radial::preparation::PreviewFramePreparer::new(Default::default());
+
+        sync_current(&mut preview, &mut session, &client);
+        let root_frame = finish_pending_preparation(
+            &mut preview,
+            &mut session,
+            &client,
+            &endpoint,
+            &mut preparer,
+        );
+        let root_center = root_frame.layout.origin;
+
+        preview.activate(&document, None, &CellId::new("starter-root-favorites"));
+        sync_current(&mut preview, &mut session, &client);
+        let child_request = endpoint
+            .request_rx
+            .try_recv()
+            .expect("Cascade child preparation should be requested");
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            anchor: child_anchor,
+            projection,
+            ..
+        } = &child_request
+        else {
+            panic!("expected Cascade child preparation")
+        };
+        let child_anchor = *child_anchor;
+        assert!(matches!(
+            projection.placement,
+            PreviewPlacement::Cascade { .. }
+        ));
+        let child_frame = finish_preparation_request(
+            &mut preview,
+            &mut session,
+            &client,
+            child_request,
+            &mut preparer,
+        );
+        let child_center = child_frame.layout.origin;
+        assert!((child_center.x - child_anchor.x).abs() < 0.001);
+        assert!((child_center.y - child_anchor.y).abs() < 0.001);
+        let child_direction = preview
+            .reducer
+            .as_ref()
+            .unwrap()
+            .state
+            .stack
+            .get(1)
+            .and_then(|frame| frame.cascade_direction)
+            .expect("the first Cascade edge should retain its direction");
+        assert!(child_center.x > root_center.x);
+        assert!(child_direction.horizontal > 0);
+
+        preview.activate(&document, None, &CellId::new("starter-favorites-source"));
+        sync_current(&mut preview, &mut session, &client);
+        let grandchild_request = endpoint
+            .request_rx
+            .try_recv()
+            .expect("grandchild Cascade preparation should be requested");
+        let crate::radial::authoring::AuthoringRequest::PrepareEmbeddedPreview {
+            anchor,
+            projection,
+            ..
+        } = &grandchild_request
+        else {
+            panic!("expected Cascade grandchild preparation")
+        };
+        let grandchild_anchor = *anchor;
+        assert!(matches!(
+            projection.placement,
+            PreviewPlacement::Cascade { .. }
+        ));
+        let grandchild_frame = finish_preparation_request(
+            &mut preview,
+            &mut session,
+            &client,
+            grandchild_request,
+            &mut preparer,
+        );
+        let grandchild_center = grandchild_frame.layout.origin;
+        assert!((grandchild_center.x - grandchild_anchor.x).abs() < 0.001);
+        assert!((grandchild_center.y - grandchild_anchor.y).abs() < 0.001);
+        let grandchild_direction = preview
+            .reducer
+            .as_ref()
+            .unwrap()
+            .state
+            .stack
+            .get(2)
+            .and_then(|frame| frame.cascade_direction);
+        assert_eq!(grandchild_direction, Some(child_direction));
+        assert!(grandchild_center.x > child_center.x);
+        assert!((child_center.x - root_center.x).abs() > f64::EPSILON);
+        assert!((grandchild_center.x - child_center.x).abs() > f64::EPSILON);
     }
 
     #[test]

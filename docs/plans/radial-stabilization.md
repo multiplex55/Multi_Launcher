@@ -439,6 +439,45 @@ results, not a substitute for the authoritative focused gate. No full suite,
 native UI acceptance, or reference script/archive execution is authorized by
 this batch.
 
+### S5 final-review embedded Cascade direction fix — in_progress
+
+This final-review batch is limited to the remaining embedded-preview Cascade
+direction finding on clean committed HEAD
+`a915cc797256586412dff43170f0775a5c4beda8`. During asynchronous preparation,
+`EmbeddedPreview::preview_placement` passed the newly pushed child frame's
+still-empty `cascade_direction`; when the first child crossed the work-area
+midpoint, the next edge could therefore recompute the opposite direction. The
+preview session already retains the parent `FrameId` and its placement state,
+so the fix derives the preferred direction from that retained parent before
+probing the child, with the child's stored direction retained only as a
+fallback. SameCenter continues to return a fixed center and clears the
+direction as before.
+
+The production-path regression
+`embedded_preview_async_cascade_chain_retains_direction_after_midpoint_crossing`
+opens a real root-to-child-to-grandchild EmbeddedPreview chain through
+asynchronous preparation, uses compact unequal frames so the first child
+crosses the midpoint, asserts each request anchor is installed by preparation,
+and requires the grandchild to retain the exact parent direction and anchor
+delta. Existing
+`embedded_preview_cascade_same_center_chain_keeps_ancestors_inert_and_back_exact`
+and `embedded_preview_uses_frozen_synthetic_center_and_current_parent_scope`
+remain the SameCenter regressions.
+
+```text
+Job purpose / milestone: S5 final-review embedded Cascade direction focused Nextest gate
+Command and cwd: selector preflight, then `cargo nextest run --no-fail-fast -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'`; then `cargo check`, `cargo fmt --all -- --check`, and `git diff --check`; G:\Repos\rust\Multi_Launcher
+Profile / features / target: default target; installed Nextest filterset preflight; one sequential Cargo/Nextest tree
+Source SHA + source/untracked diff fingerprint: HEAD `a915cc797256586412dff43170f0775a5c4beda8`; modified `src/gui/radial_editor/preview.rs` SHA-256 after formatting `824489990B8C42CF2D35C2CE08186ED6F752C1CD6E20B254C447915BB87B077A`; source diff `154 additions/1 deletion`; no untracked source files
+Narrow test evidence (2026-09-21): `cargo test embedded_preview_async_cascade_chain_retains_direction_after_midpoint_crossing -- --nocapture` exited 0; 1 passed, 0 failed, 4,008 filtered out. The final corrected run compiled in 24m11s and completed the test body in 0.03s. Earlier attempts are retained as diagnostics: an incorrect parent-anchor assertion, a request-borrow compile error, and f64/f32 round-trip noise were corrected without changing production behavior.
+Durable focused-gate identity: `target/s5-final-embedded-direction-focused.identity`; combined stdout/stderr `target/s5-final-embedded-direction-focused.log`; true exit `target/s5-final-embedded-direction-focused.exit`; the wrapper writes its PID/start identity before spawning Cargo and preserves the child exit code
+Selector preflight (2026-09-21): `cargo nextest list --cargo-quiet --message-format json -E 'test(/radial::session/) | test(/radial::geometry/) | test(/radial::controller/) | test(/radial::render/) | test(/radial::compositor/) | test(/radial::native/) | test(/native_preview/) | test(/radial_editor::preview/)'` exited 0 with 159 selected tests, 4,448 nonmatches, 4,607 listed cases.
+Session/PID + process start and identity: synchronous wrapper PID 280, started `2026-09-21T22:39:20.8104601-04:00`, completed `2026-09-21T22:39:28.7371626-04:00`; identity records `target/s5-final-embedded-direction-focused.identity`; one sequential Cargo/Nextest tree
+Launch / observations: first observation due `2026-09-21T22:49:20.8342280-04:00` (+600s), second due `2026-09-21T23:04:20.8562099-04:00` (+900s after first), later observations +1,200s; no source edits while the gate ran
+Focused-gate result: `target/s5-final-embedded-direction-focused.exit` records exit 0; `target/s5-final-embedded-direction-focused.log` (22,716 bytes) reports 159/159 selected tests passed, 4,448 skipped, 4.057s test time, zero failures.
+Post-gate checks (2026-09-21): `cargo check` exited 0 in 49.95s before formatting and again exited 0 in 10.49s on the exact formatted source; the first `cargo fmt --all -- --check` identified mechanical formatting in the new test, `cargo fmt --all` applied it, and the rerun exited 0; `git diff --check` exited 0 with only normal LF-to-CRLF warnings. S5 remains `in_progress` pending final full-suite/native acceptance; no full `cargo nextest run`, native UI acceptance, or reference script/archive execution was performed.
+```
+
 ### S4 active-job record
 
 The S4 implementation is being verified from committed source HEAD
