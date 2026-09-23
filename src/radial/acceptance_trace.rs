@@ -11,8 +11,12 @@ use std::time::Instant;
 use std::{sync::Mutex, sync::atomic::AtomicU64};
 
 pub(crate) const ENVIRONMENT_VARIABLE: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
-pub(crate) const EVENT_BUDGET: usize = 512;
+// The native acceptance pass opens Designer twice and drives geometry proposals
+// after the ROOT/Designer recovery matrix. Keep that full trace bounded while
+// leaving room for both windows' semantic transitions and native input edges.
+pub(crate) const EVENT_BUDGET: usize = 4_096;
 const TRACE_TARGET: &str = "multi_launcher.radial_acceptance";
+const AUTHORING_CONTROL_REFRESH_MS: u128 = 500;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RequestKind {
@@ -259,6 +263,95 @@ impl DesignerSemanticRole {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DesignerAuthoringTarget {
+    NewMenu,
+    AddRing,
+    MenuRow,
+    RingSelector,
+    RingOption,
+    Slots,
+    PreviewProposal,
+    ApplyProposal,
+    CancelProposal,
+    MoveToOverflow,
+    CancelResolution,
+    DiscardCells,
+    Canvas,
+    DiscardDraft,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DesignerAuthoringRole {
+    Button,
+    Selectable,
+    ComboBox,
+    DragValue,
+    Region,
+}
+
+impl DesignerAuthoringRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Button => "Button",
+            Self::Selectable => "Selectable",
+            Self::ComboBox => "ComboBox",
+            Self::DragValue => "DragValue",
+            Self::Region => "Region",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DesignerProposalKind {
+    None,
+    NewRing,
+    Resize,
+    ResolvedResize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesignerGeometryState {
+    pub session_id: u64,
+    pub menu_count: usize,
+    pub selected_menu_index: Option<usize>,
+    pub ring_count: usize,
+    pub selected_ring_index: Option<usize>,
+    pub selected_ring_slots: usize,
+    pub requested_slots: usize,
+    pub selected_ring_populated: usize,
+    pub menu_populated: usize,
+    pub draft_cell_ids_digest: u64,
+    pub proposal_cell_ids_digest: u64,
+    pub proposal_cell_ids_digest_available: bool,
+    pub proposal_kind: DesignerProposalKind,
+    pub proposal_active: bool,
+    pub proposal_ready: bool,
+    pub proposal_slots: usize,
+    pub proposal_candidate_rings: usize,
+    pub proposal_resolution_populated: usize,
+    pub proposal_cell_ids_preserved: bool,
+    pub resize_prompt_open: bool,
+    pub resize_prompt_populated: usize,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DesignerAuthoringControlSnapshot {
+    target: DesignerAuthoringTarget,
+    role: DesignerAuthoringRole,
+    viewport: ViewportClass,
+    session_id: u64,
+    index: Option<usize>,
+    bounds: [i32; 4],
+    client_size: [i32; 2],
+    enabled: bool,
+    selected: bool,
+    clicked: bool,
+    generation: u64,
+    last_emitted_ms: u128,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DesignerCloseState {
     pub open: bool,
@@ -427,6 +520,26 @@ pub(crate) enum Event {
         selected: bool,
         focused: bool,
         correlation: Correlation,
+    },
+    DesignerAuthoringControl {
+        target: DesignerAuthoringTarget,
+        role: DesignerAuthoringRole,
+        viewport: ViewportClass,
+        index: Option<usize>,
+        left_px: i32,
+        top_px: i32,
+        right_px: i32,
+        bottom_px: i32,
+        client_width_px: i32,
+        client_height_px: i32,
+        enabled: bool,
+        selected: bool,
+        clicked: bool,
+        session_id: u64,
+        generation: u64,
+    },
+    DesignerGeometryState {
+        state: DesignerGeometryState,
     },
     DesignerEditState {
         widget_changed: bool,
@@ -640,6 +753,9 @@ static WINDOW_SAMPLE_QUEUE: OnceLock<Mutex<WindowSampleQueue>> = OnceLock::new()
 static NATIVE_OWNER_REGISTRY: OnceLock<Mutex<NativeOwnerRegistry>> = OnceLock::new();
 static ROOT_MENU_INTERACTIONS: OnceLock<Mutex<[Option<RootMenuInteractionState>; 2]>> =
     OnceLock::new();
+static DESIGNER_AUTHORING_CONTROLS: OnceLock<Mutex<Vec<DesignerAuthoringControlSnapshot>>> =
+    OnceLock::new();
+static DESIGNER_GEOMETRY_STATE: OnceLock<Mutex<Option<DesignerGeometryState>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DesignerSemanticSnapshot {
@@ -1279,6 +1395,75 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
+        Event::DesignerAuthoringControl {
+            target,
+            role,
+            viewport,
+            index,
+            left_px,
+            top_px,
+            right_px,
+            bottom_px,
+            client_width_px,
+            client_height_px,
+            enabled,
+            selected,
+            clicked,
+            session_id,
+            generation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_authoring_control",
+                elapsed_ms,
+                ?target,
+                role = role.as_str(),
+                ?viewport,
+                control_index = index.map_or(-1, |index| index as i64),
+                left_px,
+                top_px,
+                right_px,
+                bottom_px,
+                client_width_px,
+                client_height_px,
+                enabled,
+                selected,
+                clicked,
+                session_id,
+                generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerGeometryState { state } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_geometry_state",
+                elapsed_ms,
+                session_id = state.session_id,
+                menu_count = state.menu_count,
+                selected_menu_index = state.selected_menu_index.map_or(-1, |index| index as i64),
+                ring_count = state.ring_count,
+                selected_ring_index = state.selected_ring_index.map_or(-1, |index| index as i64),
+                selected_ring_slots = state.selected_ring_slots,
+                requested_slots = state.requested_slots,
+                selected_ring_populated = state.selected_ring_populated,
+                menu_populated = state.menu_populated,
+                draft_cell_ids_digest = state.draft_cell_ids_digest,
+                proposal_cell_ids_digest = state.proposal_cell_ids_digest,
+                proposal_cell_ids_digest_available = state.proposal_cell_ids_digest_available,
+                proposal_kind = ?state.proposal_kind,
+                proposal_active = state.proposal_active,
+                proposal_ready = state.proposal_ready,
+                proposal_slots = state.proposal_slots,
+                proposal_candidate_rings = state.proposal_candidate_rings,
+                proposal_resolution_populated = state.proposal_resolution_populated,
+                proposal_cell_ids_preserved = state.proposal_cell_ids_preserved,
+                resize_prompt_open = state.resize_prompt_open,
+                resize_prompt_populated = state.resize_prompt_populated,
+                generation = state.generation,
+                "radial acceptance trace"
+            );
+        }
         Event::DesignerEditState {
             widget_changed,
             model_changed,
@@ -1600,6 +1785,129 @@ pub(crate) fn emit_designer_semantic_target(
     }
 }
 
+pub(crate) fn emit_designer_authoring_control(
+    target: DesignerAuthoringTarget,
+    role: DesignerAuthoringRole,
+    viewport: ViewportClass,
+    index: Option<usize>,
+    bounds: [i32; 4],
+    client_size: [i32; 2],
+    is_enabled: bool,
+    selected: bool,
+    clicked: bool,
+    session_id: u64,
+    generation: u64,
+) {
+    if !enabled()
+        || bounds[2] <= bounds[0]
+        || bounds[3] <= bounds[1]
+        || client_size[0] <= 0
+        || client_size[1] <= 0
+    {
+        return;
+    }
+    let now_ms = elapsed_ms();
+    let mut snapshot = DesignerAuthoringControlSnapshot {
+        target,
+        role,
+        viewport,
+        session_id,
+        index,
+        bounds,
+        client_size,
+        enabled: is_enabled,
+        selected,
+        clicked,
+        generation,
+        last_emitted_ms: now_ms,
+    };
+    let changed = DESIGNER_AUTHORING_CONTROLS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut previous| {
+            if let Some(existing) = previous.iter_mut().find(|item| {
+                item.target == target
+                    && item.role == role
+                    && item.viewport == viewport
+                    && item.session_id == session_id
+                    && item.index == index
+            }) {
+                if !authoring_control_snapshot_should_emit(existing, &snapshot, now_ms) {
+                    false
+                } else {
+                    snapshot.last_emitted_ms = now_ms;
+                    *existing = snapshot;
+                    true
+                }
+            } else if previous.len() < 256 {
+                previous.push(snapshot);
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+    if changed {
+        emit(Event::DesignerAuthoringControl {
+            target,
+            role,
+            viewport,
+            index,
+            left_px: bounds[0],
+            top_px: bounds[1],
+            right_px: bounds[2],
+            bottom_px: bounds[3],
+            client_width_px: client_size[0],
+            client_height_px: client_size[1],
+            enabled: is_enabled,
+            selected,
+            clicked,
+            session_id,
+            generation,
+        });
+    }
+}
+
+fn authoring_control_snapshot_should_emit(
+    left: &DesignerAuthoringControlSnapshot,
+    right: &DesignerAuthoringControlSnapshot,
+    now_ms: u128,
+) -> bool {
+    let unchanged = left.target == right.target
+        && left.role == right.role
+        && left.viewport == right.viewport
+        && left.session_id == right.session_id
+        && left.index == right.index
+        && left.bounds == right.bounds
+        && left.client_size == right.client_size
+        && left.enabled == right.enabled
+        && left.selected == right.selected
+        && left.clicked == right.clicked
+        && left.generation == right.generation;
+    !unchanged || now_ms.saturating_sub(left.last_emitted_ms) >= AUTHORING_CONTROL_REFRESH_MS
+}
+
+pub(crate) fn emit_designer_geometry_state(state: DesignerGeometryState) {
+    if !enabled() {
+        return;
+    }
+    let changed = DESIGNER_GEOMETRY_STATE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map(|mut previous| {
+            if *previous == Some(state) {
+                false
+            } else {
+                *previous = Some(state);
+                true
+            }
+        })
+        .unwrap_or(false);
+    if changed {
+        emit(Event::DesignerGeometryState { state });
+    }
+}
+
 pub(crate) fn emit_designer_edit_state(
     widget_changed: bool,
     model_changed: bool,
@@ -1642,6 +1950,47 @@ impl Drop for DesignerCallbackGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn authoring_control_snapshot(last_emitted_ms: u128) -> DesignerAuthoringControlSnapshot {
+        DesignerAuthoringControlSnapshot {
+            target: DesignerAuthoringTarget::Canvas,
+            role: DesignerAuthoringRole::Region,
+            viewport: ViewportClass::Deferred,
+            session_id: 9,
+            index: None,
+            bounds: [10, 20, 520, 390],
+            client_size: [624, 441],
+            enabled: true,
+            selected: false,
+            clicked: false,
+            generation: 4,
+            last_emitted_ms,
+        }
+    }
+
+    #[test]
+    fn unchanged_authoring_controls_refresh_for_post_resize_render_proof() {
+        let prior = authoring_control_snapshot(1_000);
+        let unchanged = authoring_control_snapshot(1_000);
+        assert!(!authoring_control_snapshot_should_emit(
+            &prior, &unchanged, 1_499
+        ));
+        assert!(authoring_control_snapshot_should_emit(
+            &prior, &unchanged, 1_500
+        ));
+
+        let mut moved = unchanged;
+        moved.bounds[2] += 1;
+        assert!(authoring_control_snapshot_should_emit(
+            &prior, &moved, 1_001
+        ));
+
+        let mut resized = unchanged;
+        resized.client_size = [520, 380];
+        assert!(authoring_control_snapshot_should_emit(
+            &prior, &resized, 1_001
+        ));
+    }
 
     fn schema_labels(event: Event) -> &'static [&'static str] {
         match event {
@@ -1739,6 +2088,47 @@ mod tests {
                 "focused",
                 "correlation",
             ],
+            Event::DesignerAuthoringControl { .. } => &[
+                "target",
+                "role",
+                "viewport",
+                "control_index",
+                "left_px",
+                "top_px",
+                "right_px",
+                "bottom_px",
+                "client_width_px",
+                "client_height_px",
+                "enabled",
+                "selected",
+                "clicked",
+                "session_id",
+                "generation",
+            ],
+            Event::DesignerGeometryState { .. } => &[
+                "session_id",
+                "menu_count",
+                "selected_menu_index",
+                "ring_count",
+                "selected_ring_index",
+                "selected_ring_slots",
+                "requested_slots",
+                "selected_ring_populated",
+                "menu_populated",
+                "draft_cell_ids_digest",
+                "proposal_cell_ids_digest",
+                "proposal_cell_ids_digest_available",
+                "proposal_kind",
+                "proposal_active",
+                "proposal_ready",
+                "proposal_slots",
+                "proposal_candidate_rings",
+                "proposal_resolution_populated",
+                "proposal_cell_ids_preserved",
+                "resize_prompt_open",
+                "resize_prompt_populated",
+                "generation",
+            ],
             Event::DesignerEditState { .. } => &[
                 "widget_changed",
                 "model_changed",
@@ -1792,13 +2182,15 @@ mod tests {
 
     #[test]
     fn event_budget_is_hard_bounded() {
-        let budget = EventBudget::new(2);
-        assert!(budget.reserve());
-        assert!(budget.reserve());
+        assert_eq!(EVENT_BUDGET, 4_096);
+        let budget = EventBudget::new(EVENT_BUDGET);
+        for _ in 0..EVENT_BUDGET {
+            assert!(budget.reserve());
+        }
         assert!(!budget.reserve());
         assert!(budget.mark_exhausted_once());
         assert!(!budget.mark_exhausted_once());
-        assert_eq!(budget.emitted(), 2);
+        assert_eq!(budget.emitted(), EVENT_BUDGET);
     }
 
     #[test]
@@ -1987,6 +2379,49 @@ mod tests {
                 selected: false,
                 focused: true,
                 correlation,
+            },
+            Event::DesignerAuthoringControl {
+                target: DesignerAuthoringTarget::RingOption,
+                role: DesignerAuthoringRole::Selectable,
+                viewport: ViewportClass::Deferred,
+                index: Some(1),
+                left_px: 10,
+                top_px: 20,
+                right_px: 40,
+                bottom_px: 44,
+                client_width_px: 624,
+                client_height_px: 441,
+                enabled: true,
+                selected: false,
+                clicked: true,
+                session_id: 77,
+                generation: 19,
+            },
+            Event::DesignerGeometryState {
+                state: DesignerGeometryState {
+                    session_id: 77,
+                    menu_count: 10,
+                    selected_menu_index: Some(9),
+                    ring_count: 2,
+                    selected_ring_index: Some(1),
+                    selected_ring_slots: 10,
+                    requested_slots: 10,
+                    selected_ring_populated: 0,
+                    menu_populated: 0,
+                    draft_cell_ids_digest: 101,
+                    proposal_cell_ids_digest: 202,
+                    proposal_cell_ids_digest_available: true,
+                    proposal_kind: DesignerProposalKind::Resize,
+                    proposal_active: true,
+                    proposal_ready: true,
+                    proposal_slots: 10,
+                    proposal_candidate_rings: 2,
+                    proposal_resolution_populated: 0,
+                    proposal_cell_ids_preserved: true,
+                    resize_prompt_open: false,
+                    resize_prompt_populated: 0,
+                    generation: 19,
+                },
             },
             Event::DesignerEditState {
                 widget_changed: true,

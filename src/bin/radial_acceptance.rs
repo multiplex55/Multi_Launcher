@@ -449,13 +449,15 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
                         &driver_trace,
                         hold_threshold_ms,
                         arguments.h6_repeat_mode,
+                        before_cursor.as_ref().ok().copied(),
                         &desktop_attachment,
                         &mut report,
                         &mut log,
                     );
 
-                    match before_cursor {
+                    match &before_cursor {
                         Ok(point) => {
+                            let point = *point;
                             let already_restored = native::cursor_position().is_ok_and(|current| {
                                 current.x == point.x && current.y == point.y
                             });
@@ -463,7 +465,15 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
                                 report.cleanup.cursor_restored = true;
                             } else {
                                 match native::set_cursor_position(point) {
-                                    Ok(()) => report.cleanup.cursor_restored = true,
+                                    Ok(()) => {
+                                        report.cleanup.cursor_restored = true;
+                                        let _ = writeln!(
+                                            log,
+                                            "cursor restoration before foreground reached ({},{})",
+                                            point.x,
+                                            point.y
+                                        );
+                                    }
                                     Err(error) => {
                                         let _ = writeln!(log, "cursor restoration failed: {error}");
                                     }
@@ -503,6 +513,34 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
                             }
                         }
                     };
+                    if let Ok(point) = &before_cursor {
+                        let point = *point;
+                        let restored_after_foreground = native::cursor_position().is_ok_and(|current| {
+                            current.x.abs_diff(point.x) <= 1 && current.y.abs_diff(point.y) <= 1
+                        });
+                        report.cleanup.cursor_restored = restored_after_foreground;
+                        if !restored_after_foreground {
+                            let observed = native::cursor_position()
+                                .map(|current| format!("({}, {})", current.x, current.y))
+                                .unwrap_or_else(|error| format!("unavailable: {error}"));
+                            let _ = writeln!(
+                                log,
+                                "cursor changed during foreground restoration: expected=({},{}), observed={observed}",
+                                point.x,
+                                point.y
+                            );
+                            report.cleanup.cursor_restored = match native::set_cursor_position(point) {
+                                Ok(()) => native::cursor_position().is_ok_and(|current| {
+                                    current.x.abs_diff(point.x) <= 1
+                                        && current.y.abs_diff(point.y) <= 1
+                                }),
+                                Err(error) => {
+                                    let _ = writeln!(log, "post-foreground cursor restoration failed: {error}");
+                                    false
+                                }
+                            };
+                        }
+                    }
                     let handle = desktop_attachment.release_for_thread_exit();
                     let _ = writeln!(
                         log,

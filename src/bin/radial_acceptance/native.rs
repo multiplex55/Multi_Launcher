@@ -48,11 +48,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, GetClassNameW,
-    GetClientRect, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsChild, IsIconic,
-    IsWindowVisible, KBDLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos,
-    SetForegroundWindow, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    GetClientRect, GetClipCursor, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsChild,
+    IsIconic, IsWindowVisible, KBDLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW,
+    PostThreadMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow,
+    SetWindowPos, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
     WINDOW_STYLE, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
     WS_CAPTION, WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE, WindowFromPoint,
 };
@@ -78,6 +79,8 @@ const WINDOW_POLL: Duration = Duration::from_millis(25);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const CASE_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_ENUMERATED_WINDOWS: usize = 256;
+const MAX_POINTER_CORRECTIONS: usize = 4;
+const MAX_POINTER_CORRECTION_PIXELS: u32 = 8;
 const ACCEPTANCE_HOTKEY_ID: i32 = 0x4D4C;
 // Keep this acceptance-only pump probe message aligned with
 // native_service::WM_HOOK_PUMP_PROBE in hotkey/launcher_invocation.rs.
@@ -519,6 +522,7 @@ unsafe extern "system" fn runner_hook_proc(
 pub(super) struct PointerClickEvidence {
     pub nudge_movement: NativeInputEdgeEvidence,
     pub movement: NativeInputEdgeEvidence,
+    pub pointer_correction_events: usize,
     pub pointer_position_preexisting_ack: bool,
     pub pointer_move_acknowledged: bool,
     pub down: NativeInputEdgeEvidence,
@@ -538,7 +542,7 @@ pub(super) struct PointerClickEvidence {
 impl PointerClickEvidence {
     pub fn describe(&self) -> String {
         format!(
-            "screen_point=({},{}), target_hwnd={}, nudge_under_cursor_hwnd={}, under_cursor_hwnd={}, foreground_hwnd={}, preexisting_egui_pointer_ack={}, fresh_egui_pointer_move_ack={}, nudge_move=[{}], move=[{}], down=[{}], root_or_designer_down_ack={}, left_button_async_after_down=0x{:04x}, left_button_async_before_up=0x{:04x}, up=[{}], root_or_designer_up_ack={}, left_button_async_after_up=0x{:04x}",
+            "screen_point=({},{}), target_hwnd={}, nudge_under_cursor_hwnd={}, under_cursor_hwnd={}, foreground_hwnd={}, preexisting_egui_pointer_ack={}, fresh_egui_pointer_move_ack={}, nudge_move=[{}], move=[{}], pointer_correction_events={}, down=[{}], root_or_designer_down_ack={}, left_button_async_after_down=0x{:04x}, left_button_async_before_up=0x{:04x}, up=[{}], root_or_designer_up_ack={}, left_button_async_after_up=0x{:04x}",
             self.screen_point.0,
             self.screen_point.1,
             hwnd_id(self.target_hwnd),
@@ -549,6 +553,7 @@ impl PointerClickEvidence {
             self.pointer_move_acknowledged,
             self.nudge_movement.describe(),
             self.movement.describe(),
+            self.pointer_correction_events,
             self.down.describe(),
             self.down_acknowledged,
             self.left_button_state_after_down as u16,
@@ -981,6 +986,38 @@ impl NativeChild {
         focus_owned_window(window.hwnd, self.process_id)
     }
 
+    pub fn client_bounds(&self, window: &WindowSnapshot) -> Result<[i32; 4], String> {
+        self.validate_window(window.hwnd)?;
+        let mut bounds = RECT::default();
+        unsafe { GetClientRect(window.hwnd, &mut bounds) }
+            .map_err(|error| format!("read child-owned client bounds: {error}"))?;
+        Ok([bounds.left, bounds.top, bounds.right, bounds.bottom])
+    }
+
+    pub fn resize_window(
+        &self,
+        window: &WindowSnapshot,
+        width: i32,
+        height: i32,
+    ) -> Result<(), String> {
+        self.validate_window(window.hwnd)?;
+        if width < 520 || height < 380 {
+            return Err("refused Designer size below its declared minimum viewport".into());
+        }
+        unsafe {
+            SetWindowPos(
+                window.hwnd,
+                None,
+                window.bounds[0],
+                window.bounds[1],
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| format!("resize child-owned Designer window: {error}"))
+    }
+
     pub fn validate_window(&self, hwnd: HWND) -> Result<(), String> {
         if hwnd.is_invalid() || window_process_id(hwnd) != self.process_id {
             return Err("refused input to a window not owned by the acceptance child".to_string());
@@ -1046,7 +1083,7 @@ impl NativeChild {
         send_validated_input(foreground, process_id, &up, "F11 release")
     }
 
-    pub fn try_wait(&mut self) -> Result<Option<NativeExitStatus>, String> {
+    pub fn try_wait(&self) -> Result<Option<NativeExitStatus>, String> {
         self.process.try_wait()
     }
 
@@ -1708,8 +1745,79 @@ pub(super) fn cursor_position() -> Result<POINT, String> {
 
 pub(super) fn set_cursor_position(point: POINT) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
-    unsafe { SetCursorPos(point.x, point.y) }
-        .map_err(|error| format!("restore cursor position: {error}"))
+    let clip_bounds = cursor_clip_bounds();
+    let input_target = cursor_restore_input_target(point, virtual_screen_bounds())?;
+    let direct_error = unsafe { SetCursorPos(input_target.x, input_target.y) }
+        .err()
+        .map(|error| error.to_string());
+    if cursor_position().is_ok_and(|current| cursor_points_match(current, point)) {
+        return Ok(());
+    }
+
+    let input_desktop = input_desktop_evidence()
+        .map_err(|error| format!("restore cursor position after {direct_error:?}: {error}"))?;
+    let movement = mouse_move_input(input_target)?;
+    let absolute_inserted = send_input_checked(&[movement], "absolute cursor restoration")?;
+    let mut current = cursor_position()?;
+    if cursor_points_match(current, point) {
+        return Ok(());
+    }
+
+    let mut relative_inserted = 0;
+    for _ in 0..4 {
+        let correction = relative_mouse_move_input(
+            input_target.x.saturating_sub(current.x),
+            input_target.y.saturating_sub(current.y),
+        );
+        relative_inserted += send_input_checked(&[correction], "relative cursor restoration")?;
+        current = cursor_position()?;
+        if cursor_points_match(current, point) {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "cursor restoration did not reach ({},{}): input target=({},{}), SetCursorPos={direct_error:?}, absolute SendInput inserted {absolute_inserted} event, relative SendInput inserted {relative_inserted} events on {input_desktop}, observed=({}, {}), clip_bounds={clip_bounds:?}, virtual_screen_bounds={:?}",
+        point.x,
+        point.y,
+        input_target.x,
+        input_target.y,
+        current.x,
+        current.y,
+        virtual_screen_bounds()
+    ))
+}
+
+fn cursor_clip_bounds() -> Result<[i32; 4], String> {
+    let mut bounds = RECT::default();
+    unsafe { GetClipCursor(&mut bounds) }
+        .map_err(|error| format!("read cursor clip bounds: {error}"))?;
+    Ok([bounds.left, bounds.top, bounds.right, bounds.bottom])
+}
+
+fn cursor_points_match(current: POINT, expected: POINT) -> bool {
+    current.x.abs_diff(expected.x) <= 1 && current.y.abs_diff(expected.y) <= 1
+}
+
+fn cursor_restore_input_target(
+    expected: POINT,
+    (left, top, width, height): (i32, i32, i32, i32),
+) -> Result<POINT, String> {
+    if width <= 0 || height <= 0 {
+        return Err("virtual desktop has invalid bounds for cursor restoration".into());
+    }
+    let clamp_inside = |position: i32, origin: i32, extent: i32| {
+        let last = origin.saturating_add(extent.saturating_sub(1));
+        if extent >= 3 {
+            position.clamp(origin.saturating_add(1), last.saturating_sub(1))
+        } else {
+            position.clamp(origin, last)
+        }
+    };
+    Ok(POINT {
+        x: clamp_inside(expected.x, left, width),
+        y: clamp_inside(expected.y, top, height),
+    })
 }
 
 pub(super) fn input_modifiers_clear() -> Result<(), String> {
@@ -1744,6 +1852,81 @@ pub(super) struct SemanticControl {
     pub process_id: u32,
     pub enabled: bool,
     pub button: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AuthoringControlTarget {
+    NewMenu,
+    AddRing,
+    MenuRow,
+    RingSelector,
+    RingOption,
+    Slots,
+    PreviewProposal,
+    ApplyProposal,
+    CancelProposal,
+    MoveToOverflow,
+    CancelResolution,
+    DiscardCells,
+    Canvas,
+    DiscardDraft,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AuthoringControlRole {
+    Button,
+    Selectable,
+    ComboBox,
+    DragValue,
+    Region,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AuthoringControlSnapshot {
+    pub target: AuthoringControlTarget,
+    pub role: AuthoringControlRole,
+    pub index: Option<usize>,
+    pub bounds: [i32; 4],
+    pub client_size: [i32; 2],
+    pub enabled: bool,
+    pub selected: bool,
+    pub clicked: bool,
+    pub session_id: u64,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AuthoringProposalKind {
+    None,
+    NewRing,
+    Resize,
+    ResolvedResize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GeometryStateSnapshot {
+    pub session_id: u64,
+    pub menu_count: usize,
+    pub selected_menu_index: Option<usize>,
+    pub ring_count: usize,
+    pub selected_ring_index: Option<usize>,
+    pub selected_ring_slots: usize,
+    pub requested_slots: usize,
+    pub selected_ring_populated: usize,
+    pub menu_populated: usize,
+    pub draft_cell_ids_digest: u64,
+    pub proposal_cell_ids_digest: u64,
+    pub proposal_cell_ids_digest_available: bool,
+    pub proposal_kind: AuthoringProposalKind,
+    pub proposal_active: bool,
+    pub proposal_ready: bool,
+    pub proposal_slots: usize,
+    pub proposal_candidate_rings: usize,
+    pub proposal_resolution_populated: usize,
+    pub proposal_cell_ids_preserved: bool,
+    pub resize_prompt_open: bool,
+    pub resize_prompt_populated: usize,
+    pub generation: u64,
 }
 
 impl UiAutomation {
@@ -2197,42 +2380,27 @@ pub(super) fn click_designer_client_bounds(
     trace_path: &Path,
 ) -> Result<PointerClickEvidence, String> {
     child.validate_window(target.hwnd)?;
-    if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
-        return Err("Designer semantic target has empty client bounds".into());
-    }
-    let mut point = POINT {
-        x: bounds[0] + (bounds[2] - bounds[0]) / 2,
-        y: bounds[1] + (bounds[3] - bounds[1]) / 2,
-    };
-    let client_point = (point.x, point.y);
-    let nudge_client = adjacent_pointer_point(
-        POINT {
-            x: client_point.0,
-            y: client_point.1,
-        },
+    let mut client = RECT::default();
+    unsafe { GetClientRect(target.hwnd, &mut client) }
+        .map_err(|error| format!("read Designer client bounds: {error}"))?;
+    let point = semantic_client_center(
         bounds,
+        [client.left, client.top, client.right, client.bottom],
     )?;
+    let client_point = (point.x, point.y);
+    let nudge_client = adjacent_pointer_point(point, bounds)?;
     let mut nudge_screen = nudge_client;
     if !unsafe { ClientToScreen(target.hwnd, &mut nudge_screen) }.as_bool() {
         return Err("could not convert Designer pointer nudge to screen coordinates".into());
     }
-    let mut client = RECT::default();
-    unsafe { GetClientRect(target.hwnd, &mut client) }
-        .map_err(|error| format!("read Designer client bounds: {error}"))?;
-    if point.x < client.left
-        || point.y < client.top
-        || point.x >= client.right
-        || point.y >= client.bottom
-    {
-        return Err("Designer semantic point lies outside its client area".into());
-    }
-    if !unsafe { ClientToScreen(target.hwnd, &mut point) }.as_bool() {
+    let mut screen_point = point;
+    if !unsafe { ClientToScreen(target.hwnd, &mut screen_point) }.as_bool() {
         return Err("could not convert Designer semantic point to screen coordinates".into());
     }
     click_screen_point(
         child,
         target,
-        point,
+        screen_point,
         "Designer semantic click",
         PointerMoveAcknowledgement {
             trace_path,
@@ -2323,7 +2491,10 @@ fn click_screen_point(
         &nudge_movement,
         &format!("{operation} pointer nudge"),
     )?;
-    wait_for_pointer_move_ack(
+    let nudge_correction_events = wait_for_pointer_move_ack(
+        child,
+        target,
+        operation,
         &pointer_move_ack,
         trace_cursor,
         pointer_move_ack.nudge_trace_point,
@@ -2343,7 +2514,10 @@ fn click_screen_point(
         &movement,
         &format!("{operation} pointer move"),
     )?;
-    wait_for_pointer_move_ack(
+    let target_correction_events = wait_for_pointer_move_ack(
+        child,
+        target,
+        operation,
         &pointer_move_ack,
         target_move_cursor,
         pointer_move_ack.target_trace_point,
@@ -2398,6 +2572,7 @@ fn click_screen_point(
     Ok(PointerClickEvidence {
         nudge_movement,
         movement,
+        pointer_correction_events: nudge_correction_events + target_correction_events,
         pointer_position_preexisting_ack,
         pointer_move_acknowledged: true,
         down,
@@ -2415,48 +2590,101 @@ fn click_screen_point(
     })
 }
 
-fn wait_for_root_pointer_move(
-    trace_path: &Path,
+fn wait_for_pointer_move_ack(
+    child: &NativeChild,
+    target_window: &WindowSnapshot,
+    operation: &str,
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
     cursor: usize,
-    target: (i32, i32),
+    expected_point: (i32, i32),
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let deadline = Instant::now() + timeout;
+    let mut event_cursor = cursor;
+    let mut correction_events = 0;
+    let mut last_observed = None;
     loop {
-        let trace = std::fs::read_to_string(trace_path)
-            .map_err(|error| format!("read ROOT pointer-move trace: {error}"))?;
-        let acknowledged = trace.lines().skip(cursor).any(|line| {
-            line.contains("trace_event=\"root_pointer_moved\"")
-                && trace_i32_field(line, "screen_x=").is_some_and(|x| x.abs_diff(target.0) <= 1)
-                && trace_i32_field(line, "screen_y=").is_some_and(|y| y.abs_diff(target.1) <= 1)
-        });
-        if acknowledged {
-            return Ok(());
+        if let Some(observed) = latest_pointer_move_after(
+            acknowledgement.trace_path,
+            event_cursor,
+            acknowledgement.kind,
+        )? {
+            last_observed = Some(observed);
+            let Some((dx, dy)) = pointer_correction_delta(observed, expected_point)? else {
+                return Ok(correction_events);
+            };
+            if correction_events >= MAX_POINTER_CORRECTIONS {
+                return Err(format!(
+                    "{operation} pointer move remained inexact after {correction_events} bounded corrections: expected={expected_point:?} observed={observed:?}"
+                ));
+            }
+            event_cursor = trace_line_count(acknowledgement.trace_path)?;
+            let correction = relative_mouse_move_input(dx, dy);
+            let evidence = send_validated_input(
+                target_window.hwnd,
+                child.process_id(),
+                &[correction],
+                &format!("{operation} exact pointer correction"),
+            )?;
+            correction_events = correction_events.saturating_add(evidence.inserted);
         }
         if Instant::now() >= deadline {
+            let surface = match acknowledgement.kind {
+                PointerTraceKind::RootScreen => "ROOT screen point",
+                PointerTraceKind::DesignerClient => "Designer client point",
+            };
             return Err(format!(
-                "production ROOT did not acknowledge pointer move at screen point {:?} before click",
-                target
+                "production {surface} pointer move did not reach exact point {expected_point:?} before click; last observed={last_observed:?}, bounded correction events={correction_events}"
             ));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn wait_for_pointer_move_ack(
-    acknowledgement: &PointerMoveAcknowledgement<'_>,
+fn latest_pointer_move_after(
+    trace_path: &Path,
     cursor: usize,
+    kind: PointerTraceKind,
+) -> Result<Option<(i32, i32)>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read production pointer-move trace: {error}"))?;
+    let events = trace.lines().skip(cursor).collect::<Vec<_>>();
+    Ok(events.iter().rev().find_map(|line| match kind {
+        PointerTraceKind::RootScreen if line.contains("trace_event=\"root_pointer_moved\"") => {
+            Some((
+                trace_i32_field(line, "screen_x=")?,
+                trace_i32_field(line, "screen_y=")?,
+            ))
+        }
+        PointerTraceKind::DesignerClient
+            if line.contains("trace_event=\"designer_pointer_moved\"") =>
+        {
+            Some((
+                trace_i32_field(line, "client_x=")?,
+                trace_i32_field(line, "client_y=")?,
+            ))
+        }
+        _ => None,
+    }))
+}
+
+fn pointer_correction_delta(
+    observed: (i32, i32),
     target: (i32, i32),
-    timeout: Duration,
-) -> Result<(), String> {
-    match acknowledgement.kind {
-        PointerTraceKind::RootScreen => {
-            wait_for_root_pointer_move(acknowledgement.trace_path, cursor, target, timeout)
-        }
-        PointerTraceKind::DesignerClient => {
-            wait_for_designer_pointer_move(acknowledgement.trace_path, cursor, target, timeout)
-        }
+) -> Result<Option<(i32, i32)>, String> {
+    let dx = target.0.saturating_sub(observed.0);
+    let dy = target.1.saturating_sub(observed.1);
+    if dx == 0 && dy == 0 {
+        return Ok(None);
     }
+    if dx.unsigned_abs() > MAX_POINTER_CORRECTION_PIXELS
+        || dy.unsigned_abs() > MAX_POINTER_CORRECTION_PIXELS
+    {
+        return Err(format!(
+            "refused pointer correction outside the bounded rounding envelope: expected={target:?} observed={observed:?}"
+        ));
+    }
+    Ok(Some((dx, dy)))
 }
 
 fn wait_for_pointer_button_ack(
@@ -2595,34 +2823,6 @@ fn latest_root_pointer_acknowledged(trace_path: &Path, target: (i32, i32)) -> Re
     }))
 }
 
-fn wait_for_designer_pointer_move(
-    trace_path: &Path,
-    cursor: usize,
-    target: (i32, i32),
-    timeout: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let trace = std::fs::read_to_string(trace_path)
-            .map_err(|error| format!("read Designer pointer-move trace: {error}"))?;
-        let acknowledged = trace.lines().skip(cursor).any(|line| {
-            line.contains("trace_event=\"designer_pointer_moved\"")
-                && trace_i32_field(line, "client_x=") == Some(target.0)
-                && trace_i32_field(line, "client_y=") == Some(target.1)
-        });
-        if acknowledged {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "production Designer did not acknowledge pointer move at client point {:?} before click",
-                target
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 fn trace_i32_field(line: &str, marker: &str) -> Option<i32> {
     let start = line.find(marker)?.saturating_add(marker.len());
     let remainder = &line[start..];
@@ -2630,6 +2830,271 @@ fn trace_i32_field(line: &str, marker: &str) -> Option<i32> {
         .find(char::is_whitespace)
         .unwrap_or(remainder.len());
     remainder[..end].parse().ok()
+}
+
+fn trace_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.split_ascii_whitespace()
+        .find_map(|part| part.strip_prefix(&format!("{name}=")))
+}
+
+fn trace_bool_field(line: &str, name: &str) -> Option<bool> {
+    match trace_field(line, name)? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
+    if !line.contains("trace_event=\"designer_authoring_control\"")
+        || trace_field(line, "viewport")? != "Deferred"
+    {
+        return None;
+    }
+    let target = match trace_field(line, "target")? {
+        "NewMenu" => AuthoringControlTarget::NewMenu,
+        "AddRing" => AuthoringControlTarget::AddRing,
+        "MenuRow" => AuthoringControlTarget::MenuRow,
+        "RingSelector" => AuthoringControlTarget::RingSelector,
+        "RingOption" => AuthoringControlTarget::RingOption,
+        "Slots" => AuthoringControlTarget::Slots,
+        "PreviewProposal" => AuthoringControlTarget::PreviewProposal,
+        "ApplyProposal" => AuthoringControlTarget::ApplyProposal,
+        "CancelProposal" => AuthoringControlTarget::CancelProposal,
+        "MoveToOverflow" => AuthoringControlTarget::MoveToOverflow,
+        "CancelResolution" => AuthoringControlTarget::CancelResolution,
+        "DiscardCells" => AuthoringControlTarget::DiscardCells,
+        "Canvas" => AuthoringControlTarget::Canvas,
+        "DiscardDraft" => AuthoringControlTarget::DiscardDraft,
+        _ => return None,
+    };
+    let role = match trace_field(line, "role")?.trim_matches('"') {
+        "Button" => AuthoringControlRole::Button,
+        "Selectable" => AuthoringControlRole::Selectable,
+        "ComboBox" => AuthoringControlRole::ComboBox,
+        "DragValue" => AuthoringControlRole::DragValue,
+        "Region" => AuthoringControlRole::Region,
+        _ => return None,
+    };
+    let control_index = trace_i32_field(line, "control_index=")?;
+    Some(AuthoringControlSnapshot {
+        target,
+        role,
+        index: usize::try_from(control_index).ok(),
+        bounds: [
+            trace_i32_field(line, "left_px=")?,
+            trace_i32_field(line, "top_px=")?,
+            trace_i32_field(line, "right_px=")?,
+            trace_i32_field(line, "bottom_px=")?,
+        ],
+        client_size: [
+            trace_i32_field(line, "client_width_px=")?,
+            trace_i32_field(line, "client_height_px=")?,
+        ],
+        enabled: trace_bool_field(line, "enabled")?,
+        selected: trace_bool_field(line, "selected")?,
+        clicked: trace_bool_field(line, "clicked")?,
+        session_id: trace_field(line, "session_id")?.parse().ok()?,
+        generation: trace_field(line, "generation")?.parse().ok()?,
+    })
+}
+
+pub(super) fn latest_geometry_state(
+    trace_path: &Path,
+) -> Result<Option<GeometryStateSnapshot>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read Designer geometry trace: {error}"))?;
+    Ok(trace.lines().rev().find_map(|line| {
+        if !line.contains("trace_event=\"designer_geometry_state\"") {
+            return None;
+        }
+        let optional_index = |name: &str| {
+            let value = trace_i32_field(line, &format!("{name}="))?;
+            usize::try_from(value).ok()
+        };
+        Some(GeometryStateSnapshot {
+            session_id: trace_field(line, "session_id")?.parse().ok()?,
+            menu_count: trace_field(line, "menu_count")?.parse().ok()?,
+            selected_menu_index: optional_index("selected_menu_index"),
+            ring_count: trace_field(line, "ring_count")?.parse().ok()?,
+            selected_ring_index: optional_index("selected_ring_index"),
+            selected_ring_slots: trace_field(line, "selected_ring_slots")?.parse().ok()?,
+            requested_slots: trace_field(line, "requested_slots")?.parse().ok()?,
+            selected_ring_populated: trace_field(line, "selected_ring_populated")?.parse().ok()?,
+            menu_populated: trace_field(line, "menu_populated")?.parse().ok()?,
+            draft_cell_ids_digest: trace_field(line, "draft_cell_ids_digest")?.parse().ok()?,
+            proposal_cell_ids_digest: trace_field(line, "proposal_cell_ids_digest")?
+                .parse()
+                .ok()?,
+            proposal_cell_ids_digest_available: trace_bool_field(
+                line,
+                "proposal_cell_ids_digest_available",
+            )?,
+            proposal_kind: match trace_field(line, "proposal_kind")? {
+                "None" => AuthoringProposalKind::None,
+                "NewRing" => AuthoringProposalKind::NewRing,
+                "Resize" => AuthoringProposalKind::Resize,
+                "ResolvedResize" => AuthoringProposalKind::ResolvedResize,
+                _ => return None,
+            },
+            proposal_active: trace_bool_field(line, "proposal_active")?,
+            proposal_ready: trace_bool_field(line, "proposal_ready")?,
+            proposal_slots: trace_field(line, "proposal_slots")?.parse().ok()?,
+            proposal_candidate_rings: trace_field(line, "proposal_candidate_rings")?
+                .parse()
+                .ok()?,
+            proposal_resolution_populated: trace_field(line, "proposal_resolution_populated")?
+                .parse()
+                .ok()?,
+            proposal_cell_ids_preserved: trace_bool_field(line, "proposal_cell_ids_preserved")?,
+            resize_prompt_open: trace_bool_field(line, "resize_prompt_open")?,
+            resize_prompt_populated: trace_field(line, "resize_prompt_populated")?.parse().ok()?,
+            generation: trace_field(line, "generation")?.parse().ok()?,
+        })
+    }))
+}
+
+fn latest_authoring_controls_after(
+    lines: &[String],
+    first_line: usize,
+    session_id: u64,
+) -> Vec<AuthoringControlSnapshot> {
+    let mut controls = Vec::<AuthoringControlSnapshot>::new();
+    for control in lines
+        .iter()
+        .skip(first_line)
+        .filter_map(|line| parse_authoring_control(line))
+    {
+        if control.session_id != session_id {
+            continue;
+        }
+        if let Some(existing) = controls.iter_mut().find(|item| {
+            item.target == control.target
+                && item.role == control.role
+                && item.index == control.index
+        }) {
+            *existing = control;
+        } else {
+            controls.push(control);
+        }
+    }
+    controls
+}
+
+fn trace_event_lines(trace: &str) -> Vec<String> {
+    trace
+        .lines()
+        .filter(|line| line.contains("trace_event=\""))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn unique_authoring_control(
+    controls: &[AuthoringControlSnapshot],
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+) -> Result<Option<AuthoringControlSnapshot>, String> {
+    let mut matches = controls.iter().copied().filter(|control| {
+        control.target == target && control.index == index && control.role == role
+    });
+    let Some(control) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "ambiguous Designer semantic target {target:?} index={index:?} role={role:?}"
+        ));
+    }
+    Ok(Some(control))
+}
+
+pub(super) fn find_authoring_control(
+    trace_path: &Path,
+    session_id: u64,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+) -> Result<Option<AuthoringControlSnapshot>, String> {
+    find_authoring_control_after(trace_path, 0, session_id, target, index, role)
+}
+
+pub(super) fn find_authoring_control_after(
+    trace_path: &Path,
+    first_line: usize,
+    session_id: u64,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+) -> Result<Option<AuthoringControlSnapshot>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read Designer control trace: {error}"))?;
+    // Suite cursors count trace records, not every logger line in the app log. Filter
+    // first so the same cursor always denotes the same render epoch in both modules.
+    let controls =
+        latest_authoring_controls_after(&trace_event_lines(&trace), first_line, session_id);
+    unique_authoring_control(&controls, target, index, role)
+}
+
+pub(super) fn authoring_control_click_finished(
+    lines: &[String],
+    session_id: u64,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+) -> bool {
+    let mut click_seen = false;
+    for control in lines
+        .iter()
+        .filter_map(|line| parse_authoring_control(line))
+        .filter(|control| {
+            control.session_id == session_id
+                && control.target == target
+                && control.index == index
+                && control.role == role
+        })
+    {
+        if control.clicked {
+            click_seen = true;
+        } else if click_seen {
+            return true;
+        }
+    }
+    false
+}
+
+pub(super) fn semantic_client_center(
+    bounds: [i32; 4],
+    client_bounds: [i32; 4],
+) -> Result<POINT, String> {
+    let [left, top, right, bottom] = bounds;
+    let [client_left, client_top, client_right, client_bottom] = client_bounds;
+    if right <= left || bottom <= top || client_right <= client_left || client_bottom <= client_top
+    {
+        return Err("Designer semantic target has empty client bounds".into());
+    }
+    if left < client_left || top < client_top || right > client_right || bottom > client_bottom {
+        return Err("Designer semantic target bounds extend outside its client area".into());
+    }
+    let center_x = i64::from(left) + (i64::from(right) - i64::from(left)) / 2;
+    let center_y = i64::from(top) + (i64::from(bottom) - i64::from(top)) / 2;
+    let x = i32::try_from(center_x)
+        .map_err(|_| "Designer semantic center cannot be represented as a client point")?;
+    let y = i32::try_from(center_y)
+        .map_err(|_| "Designer semantic center cannot be represented as a client point")?;
+    let point = POINT { x, y };
+    if point.x < left
+        || point.y < top
+        || point.x >= right
+        || point.y >= bottom
+        || point.x < client_left
+        || point.y < client_top
+        || point.x >= client_right
+        || point.y >= client_bottom
+    {
+        return Err("Designer semantic center lies outside its target client area".into());
+    }
+    Ok(point)
 }
 
 pub(super) fn send_text(
@@ -2781,6 +3246,22 @@ fn mouse_move_input(point: POINT) -> Result<INPUT, String> {
     })
 }
 
+fn relative_mouse_move_input(dx: i32, dy: i32) -> INPUT {
+    INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
 struct MouseButtonGuard {
     target_hwnd: HWND,
     target_process_id: u32,
@@ -2876,9 +3357,140 @@ fn bounded_label(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, POINT, adjacent_pointer_point,
-        format_uia_element_snapshot, normalized_absolute_coordinate,
+        AuthoringControlRole, AuthoringControlSnapshot, AuthoringControlTarget, INPUT_MOUSE,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+        MOUSEEVENTF_MOVE_NOCOALESCE, POINT, adjacent_pointer_point,
+        authoring_control_click_finished, cursor_points_match, cursor_restore_input_target,
+        format_uia_element_snapshot, latest_authoring_controls_after,
+        normalized_absolute_coordinate, parse_authoring_control, pointer_correction_delta,
+        relative_mouse_move_input, semantic_client_center, trace_event_lines,
+        unique_authoring_control,
     };
+
+    fn authoring_control() -> AuthoringControlSnapshot {
+        AuthoringControlSnapshot {
+            target: AuthoringControlTarget::MenuRow,
+            role: AuthoringControlRole::Selectable,
+            index: Some(0),
+            bounds: [20, 30, 60, 50],
+            client_size: [640, 480],
+            enabled: true,
+            selected: false,
+            clicked: false,
+            session_id: 9,
+            generation: 4,
+        }
+    }
+
+    #[test]
+    fn authoring_lookup_rejects_ambiguous_scoped_targets() {
+        let duplicate = authoring_control();
+        let error = unique_authoring_control(
+            &[duplicate, duplicate],
+            AuthoringControlTarget::MenuRow,
+            Some(0),
+            AuthoringControlRole::Selectable,
+        )
+        .unwrap_err();
+        assert!(error.contains("ambiguous Designer semantic target"));
+
+        assert!(
+            unique_authoring_control(
+                &[authoring_control()],
+                AuthoringControlTarget::MenuRow,
+                Some(1),
+                AuthoringControlRole::Selectable,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn authoring_parser_accepts_quoted_roles_and_unindexed_targets() {
+        let control = parse_authoring_control(
+            "trace_event=\"designer_authoring_control\" target=NewMenu role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 enabled=true selected=false clicked=false session_id=2 generation=2",
+        )
+        .expect("serialized New Menu control should parse");
+
+        assert_eq!(control.target, AuthoringControlTarget::NewMenu);
+        assert_eq!(control.role, AuthoringControlRole::Button);
+        assert_eq!(control.index, None);
+        assert_eq!(control.session_id, 2);
+        assert_eq!(control.bounds, [14, 116, 83, 134]);
+        assert_eq!(control.client_size, [640, 480]);
+    }
+
+    #[test]
+    fn post_resize_authoring_lookup_does_not_reuse_a_disappeared_control() {
+        let stale = "trace_event=\"designer_authoring_control\" target=Canvas role=\"Region\" viewport=Deferred control_index=-1 left_px=20 top_px=30 right_px=620 bottom_px=430 client_width_px=640 client_height_px=480 enabled=true selected=false clicked=false session_id=9 generation=4".to_owned();
+        let fresh = "trace_event=\"designer_authoring_control\" target=Canvas role=\"Region\" viewport=Deferred control_index=-1 left_px=20 top_px=30 right_px=520 bottom_px=390 client_width_px=520 client_height_px=380 enabled=true selected=false clicked=false session_id=9 generation=4".to_owned();
+        let post_resize_cursor = 1;
+        let stale_trace = format!("logger startup line\n{stale}\n");
+        let stale_events = trace_event_lines(&stale_trace);
+        assert!(latest_authoring_controls_after(&stale_events, post_resize_cursor, 9).is_empty());
+
+        let trace = format!("logger startup line\n{stale}\nlogger resize line\n{fresh}\n");
+        let events = trace_event_lines(&trace);
+        let controls = latest_authoring_controls_after(&events, post_resize_cursor, 9);
+        let current = unique_authoring_control(
+            &controls,
+            AuthoringControlTarget::Canvas,
+            None,
+            AuthoringControlRole::Region,
+        )
+        .expect("fresh canvas should not be ambiguous")
+        .expect("post-resize render should publish a current canvas");
+        assert_eq!(current.bounds, [20, 30, 520, 390]);
+    }
+
+    #[test]
+    fn authoring_control_click_requires_a_later_frame_after_activation() {
+        let click = "trace_event=\"designer_authoring_control\" target=Slots role=\"DragValue\" viewport=Deferred control_index=-1 left_px=298 top_px=116 right_px=342 bottom_px=134 client_width_px=640 client_height_px=480 enabled=true selected=false clicked=true session_id=2 generation=4".to_owned();
+        let after_click = "trace_event=\"designer_authoring_control\" target=Slots role=\"DragValue\" viewport=Deferred control_index=-1 left_px=298 top_px=116 right_px=342 bottom_px=134 client_width_px=640 client_height_px=480 enabled=true selected=false clicked=false session_id=2 generation=4".to_owned();
+
+        assert!(!authoring_control_click_finished(
+            std::slice::from_ref(&click),
+            2,
+            AuthoringControlTarget::Slots,
+            None,
+            AuthoringControlRole::DragValue,
+        ));
+        assert!(!authoring_control_click_finished(
+            &[click.clone(), after_click.clone()],
+            1,
+            AuthoringControlTarget::Slots,
+            None,
+            AuthoringControlRole::DragValue,
+        ));
+        assert!(authoring_control_click_finished(
+            &[click, after_click],
+            2,
+            AuthoringControlTarget::Slots,
+            None,
+            AuthoringControlRole::DragValue,
+        ));
+    }
+
+    #[test]
+    fn pointer_ack_correction_is_exact_and_bounded() {
+        assert_eq!(
+            pointer_correction_delta((90, 79), (88, 81)).unwrap(),
+            Some((-2, 2))
+        );
+        assert_eq!(pointer_correction_delta((88, 81), (88, 81)).unwrap(), None);
+        assert!(pointer_correction_delta((100, 81), (88, 81)).is_err());
+    }
+
+    #[test]
+    fn semantic_client_center_requires_an_in_client_target_rectangle() {
+        let point = semantic_client_center([20, 30, 60, 50], [0, 0, 100, 80]).unwrap();
+        assert_eq!((point.x, point.y), (40, 40));
+
+        assert!(semantic_client_center([80, 10, 120, 30], [0, 0, 100, 80]).is_err());
+        assert!(semantic_client_center([10, 20, 10, 30], [0, 0, 100, 80]).is_err());
+        assert!(semantic_client_center([i32::MIN, 0, i32::MAX, 20], [0, 0, 100, 80]).is_err());
+    }
 
     #[test]
     fn absolute_mouse_coordinates_cover_a_negative_origin_virtual_desktop() {
@@ -2893,6 +3505,41 @@ mod tests {
             normalized_absolute_coordinate(4000, -1920, 5760),
             i32::from(u16::MAX)
         );
+    }
+
+    #[test]
+    fn cursor_restore_verification_allows_one_pixel_of_absolute_input_rounding() {
+        let target = POINT { x: 408, y: 424 };
+        assert!(cursor_points_match(target, target));
+        assert!(cursor_points_match(POINT { x: 409, y: 423 }, target));
+        assert!(!cursor_points_match(POINT { x: 410, y: 424 }, target));
+    }
+
+    #[test]
+    fn cursor_restore_input_uses_an_interior_coordinate_for_desktop_edges() {
+        let edge = POINT { x: 0, y: 535 };
+        let input_target = cursor_restore_input_target(edge, (0, 0, 2560, 1440)).unwrap();
+        assert_eq!((input_target.x, input_target.y), (1, 535));
+        assert!(cursor_points_match(input_target, edge));
+
+        let inside = POINT { x: 1200, y: 700 };
+        let input_target = cursor_restore_input_target(inside, (0, 0, 2560, 1440)).unwrap();
+        assert_eq!((input_target.x, input_target.y), (1200, 700));
+
+        assert!(cursor_restore_input_target(edge, (0, 0, 0, 1440)).is_err());
+    }
+
+    #[test]
+    fn cursor_restore_correction_is_a_relative_move_without_button_input() {
+        let movement = relative_mouse_move_input(-104, 208);
+        assert_eq!(movement.r#type, INPUT_MOUSE);
+        let mouse = unsafe { movement.Anonymous.mi };
+        assert_eq!((mouse.dx, mouse.dy), (-104, 208));
+        assert_eq!(
+            mouse.dwFlags,
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE
+        );
+        assert!(!mouse.dwFlags.contains(MOUSEEVENTF_ABSOLUTE));
     }
 
     #[test]

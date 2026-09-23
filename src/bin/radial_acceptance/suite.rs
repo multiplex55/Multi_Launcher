@@ -18,15 +18,32 @@ const MAX_TRACE_EXCERPT: usize = 512;
 const DESIGNER_TEXT_PROBE: &str = "Native Edit Probe";
 const DESIGNER_STARTER_NAME: &str = "Starter";
 static NEXT_HOOK_PUMP_PROBE_ID: AtomicU64 = AtomicU64::new(1);
-const CASE_IDS: [&str; 13] = [
-    "H0", "H1", "H2", "H3", "H4", "H5", "H6", "D0", "D1", "D2", "D4", "D5", "CLEANUP",
+const CASE_IDS: [&str; 19] = [
+    "H0", "H1", "H2", "H3", "H4", "H5", "H6", "D0", "D1", "D2", "D4", "D5", "A0", "A1", "G0", "A2",
+    "G1", "G2", "CLEANUP",
 ];
+const BLOCKED_DESIGNER_CASE_IDS: [&str; 11] = [
+    "H3", "D1", "D2", "D4", "D5", "A0", "A1", "G0", "A2", "G1", "G2",
+];
+
+fn missing_case_ids(existing_ids: &[&str]) -> Vec<&'static str> {
+    CASE_IDS
+        .iter()
+        .copied()
+        .filter(|id| !existing_ids.contains(id))
+        .collect()
+}
 
 struct HoldReleaseHandoff {
     release_at_unix_ms: Option<u128>,
     sentinel_at_unix_ms: Option<u128>,
     quiescent_acknowledged: bool,
     observer: Option<RunnerHookObserver>,
+}
+
+struct DesignerEntry {
+    window: WindowSnapshot,
+    session_id: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +106,7 @@ pub fn run_suite(
     trace_path: &Path,
     hold_threshold_ms: u64,
     h6_repeat_mode: H6RepeatMode,
+    cursor_restore: Option<POINT>,
     _desktop: &InputDesktopAttachment,
     report: &mut AcceptanceReport,
     runner_log: &mut File,
@@ -183,6 +201,7 @@ pub fn run_suite(
                     trace_path,
                 );
             }
+            restore_cursor_before_shutdown(cursor_restore, runner_log);
             stop_child(&mut child, report, runner_log, output, trace_path);
             return;
         }
@@ -277,8 +296,8 @@ pub fn run_suite(
 
     if let Some(automation) = uia.as_ref() {
         match run_designer_entry(&mut child, automation, trace_path) {
-            Ok(window) => {
-                designer_window = Some(window);
+            Ok(entry) => {
+                designer_window = Some(entry.window);
                 append_case(
                     report,
                     "D0",
@@ -318,26 +337,44 @@ pub fn run_suite(
         run_tab_case(report, &mut child, automation, designer, output, trace_path);
         run_skins_command_case(report, &mut child, automation, designer, trace_path, output);
         run_designer_close_case(report, &mut child, designer, output, trace_path);
-    }
-
-    stop_child(&mut child, report, runner_log, output, trace_path);
-    drop(anchor);
-    if report.cases.len() < CASE_IDS.len() {
-        for id in CASE_IDS.iter().skip(report.cases.len()) {
-            append_case(
+        match run_designer_entry(&mut child, automation, trace_path) {
+            Ok(entry) => run_authoring_geometry_cases(
                 report,
-                id,
-                expected(id),
-                started_now(),
-                Err(CaseFailure::new(
-                    FailureStage::Cleanup,
-                    "runner omitted a required case result".into(),
-                )),
-                None,
+                &mut child,
+                automation,
+                &entry.window,
+                entry.session_id,
                 output,
                 trace_path,
-            );
+            ),
+            Err(failure) => {
+                append_blocked_authoring_cases(report, &failure, Some(&child), output, trace_path)
+            }
         }
+    }
+
+    restore_cursor_before_shutdown(cursor_restore, runner_log);
+    stop_child(&mut child, report, runner_log, output, trace_path);
+    drop(anchor);
+    let existing_case_ids = report
+        .cases
+        .iter()
+        .map(|case| case.id.as_str())
+        .collect::<Vec<_>>();
+    for id in missing_case_ids(&existing_case_ids) {
+        append_case(
+            report,
+            id,
+            expected(id),
+            started_now(),
+            Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "runner omitted a required case result".into(),
+            )),
+            None,
+            output,
+            trace_path,
+        );
     }
     let _ = writeln!(
         runner_log,
@@ -367,6 +404,28 @@ pub fn record_environment_failure(
         );
     }
     let _ = writeln!(runner_log, "native environment setup failed: {failure}");
+}
+
+fn restore_cursor_before_shutdown(cursor_restore: Option<POINT>, runner_log: &mut File) {
+    let Some(point) = cursor_restore else {
+        return;
+    };
+
+    match set_cursor_position(point) {
+        Ok(()) => {
+            let _ = writeln!(
+                runner_log,
+                "cursor restored to captured position ({},{}) before candidate shutdown",
+                point.x, point.y
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(
+                runner_log,
+                "cursor restoration before candidate shutdown failed: {error}"
+            );
+        }
+    }
 }
 
 fn run_tap_case(
@@ -1670,7 +1729,7 @@ fn run_designer_entry(
     child: &mut NativeChild,
     uia: &UiAutomation,
     trace_path: &Path,
-) -> Result<WindowSnapshot, CaseFailure> {
+) -> Result<DesignerEntry, CaseFailure> {
     let root = child
         .refresh_root()
         .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
@@ -1775,6 +1834,16 @@ fn run_designer_entry(
             )
         },
     );
+    let Some(snapshot_event) = snapshot_accepted.iter().rev().find(|line| {
+        line.contains("trace_event=\"authoring\"")
+            && line.contains("edge=ReplyAccepted")
+            && line.contains("request_kind=Snapshot")
+    }) else {
+        return Err(CaseFailure::new(
+            FailureStage::DesignerReadiness,
+            "Designer did not emit an accepted InitialSnapshot reply; UIA enabled state alone is not sufficient readiness evidence".into(),
+        ));
+    };
     if !has_trace(
         &snapshot_accepted,
         "authoring",
@@ -1788,7 +1857,18 @@ fn run_designer_entry(
     // The accepted InitialSnapshot is the entry-readiness signal. D1 separately proves
     // readiness through a real semantic Tree click, production Enabled body trace, and
     // changed widget state; AccessKit's enabled bit alone is not a reliable loading signal.
-    Ok(designer)
+    let session_id = trace_field(snapshot_event, "session_id")
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "accepted InitialSnapshot reply omitted its Designer session identity".into(),
+            )
+        })?;
+    Ok(DesignerEntry {
+        window: designer,
+        session_id,
+    })
 }
 
 fn run_designer_focus_case(
@@ -2441,6 +2521,1093 @@ fn run_designer_close_case(
     );
 }
 
+fn wait_for_geometry_state(
+    trace_path: &Path,
+    session_id: u64,
+    timeout: Duration,
+    mut predicate: impl FnMut(&GeometryStateSnapshot) -> bool,
+) -> Result<GeometryStateSnapshot, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(state) = latest_geometry_state(trace_path)?
+            && state.session_id == session_id
+            && predicate(&state)
+        {
+            return Ok(state);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Designer geometry state for session {session_id} did not reach the required state"
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn wait_for_authoring_control(
+    trace_path: &Path,
+    session_id: u64,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+    timeout: Duration,
+) -> Result<AuthoringControlSnapshot, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(control) = find_authoring_control(trace_path, session_id, target, index, role)?
+        {
+            return Ok(control);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Designer did not publish target {target:?} index={index:?} role={role:?} for session {session_id}"
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn wait_for_authoring_control_after(
+    trace_path: &Path,
+    first_line: usize,
+    session_id: u64,
+    expected_client_size: [i32; 2],
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+    timeout: Duration,
+) -> Result<AuthoringControlSnapshot, String> {
+    let deadline = Instant::now() + timeout;
+    let mut latest_client_size = None;
+    loop {
+        if let Some(control) =
+            find_authoring_control_after(trace_path, first_line, session_id, target, index, role)?
+        {
+            latest_client_size = Some(control.client_size);
+            if client_size_matches(control.client_size, expected_client_size) {
+                return Ok(control);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Designer did not render target {target:?} index={index:?} role={role:?} for session {session_id} at compact client size {expected_client_size:?} after trace line {first_line}; last frame size={latest_client_size:?}"
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn client_size_matches(rendered: [i32; 2], native: [i32; 2]) -> bool {
+    rendered[0].abs_diff(native[0]) <= 1 && rendered[1].abs_diff(native[1]) <= 1
+}
+
+fn committed_cell_ids_match(
+    candidate_digest_available: bool,
+    candidate_digest: u64,
+    committed_digest: u64,
+) -> bool {
+    candidate_digest_available && candidate_digest == committed_digest
+}
+
+fn click_authoring_target(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+) -> Result<(AuthoringControlSnapshot, PointerClickEvidence), String> {
+    let control =
+        wait_for_authoring_control(trace_path, session_id, target, index, role, UIA_TIMEOUT)?;
+    if !control.enabled {
+        return Err(format!(
+            "refused native click on disabled Designer target {target:?} index={index:?}"
+        ));
+    }
+    let evidence = click_designer_client_bounds(child, designer, control.bounds, trace_path)?;
+    Ok((control, evidence))
+}
+
+fn set_requested_slots(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+    value: usize,
+) -> Result<String, String> {
+    let click_cursor = trace_lines(trace_path).len();
+    let (control, click) = click_authoring_target(
+        child,
+        designer,
+        trace_path,
+        session_id,
+        AuthoringControlTarget::Slots,
+        None,
+        AuthoringControlRole::DragValue,
+    )?;
+    let click_cycle = wait_trace(trace_path, click_cursor, TRACE_TIMEOUT, |events| {
+        authoring_control_click_finished(
+            events,
+            session_id,
+            AuthoringControlTarget::Slots,
+            None,
+            AuthoringControlRole::DragValue,
+        )
+    });
+    if !authoring_control_click_finished(
+        &click_cycle,
+        session_id,
+        AuthoringControlTarget::Slots,
+        None,
+        AuthoringControlRole::DragValue,
+    ) {
+        return Err(
+            "native Slots click was not followed by a fresh Designer frame before text entry"
+                .into(),
+        );
+    }
+    let select_all = send_select_all_to_focused_window(child, designer)?;
+    let text_edges = send_text_to_focused_window(child, designer, &value.to_string())?;
+    let enter_commit = send_enter_current(child, designer)?;
+    let state = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+        state.requested_slots == value
+    })?;
+    Ok(format!(
+        "semantic Slots {:?}, native click=[{}], waited for its next rendered frame, Ctrl+A events={select_all}, checked text events={text_edges}, Enter commit={enter_commit}; requested slots={} observed while committed ring slots remained {}",
+        control.bounds,
+        click.describe(),
+        state.requested_slots,
+        state.selected_ring_slots
+    ))
+}
+
+fn append_authoring_case(
+    report: &mut AcceptanceReport,
+    child: &NativeChild,
+    output: &Path,
+    trace_path: &Path,
+    id: &str,
+    operation: impl FnOnce() -> Result<String, CaseFailure>,
+) {
+    let started = Instant::now();
+    append_case(
+        report,
+        id,
+        expected(id),
+        started,
+        operation(),
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn authoring_case_failure(stage: FailureStage, error: impl std::fmt::Display) -> CaseFailure {
+    CaseFailure::new(stage, error.to_string())
+}
+
+fn run_authoring_geometry_cases(
+    report: &mut AcceptanceReport,
+    child: &mut NativeChild,
+    _uia: &UiAutomation,
+    designer: &WindowSnapshot,
+    session_id: u64,
+    output: &Path,
+    trace_path: &Path,
+) {
+    append_authoring_case(report, child, output, trace_path, "A0", || {
+        let menus = wait_for_designer_semantic_target_in_session(
+            trace_path,
+            DesignerSemanticTarget::Menus,
+            session_id,
+            UIA_TIMEOUT,
+            |_| true,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                format!(
+                    "the reopened Designer session {session_id} did not publish its Menus mode target"
+                ),
+            )
+        })?;
+        let mode_evidence = if menus.selected {
+            "reopened Designer already selected Menus".to_string()
+        } else {
+            let mode_click =
+                click_designer_client_bounds(child, designer, menus.bounds, trace_path).map_err(
+                    |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
+                )?;
+            let selected = wait_for_designer_semantic_target_in_session(
+                trace_path,
+                DesignerSemanticTarget::Menus,
+                session_id,
+                TRACE_TIMEOUT,
+                |state| state.selected,
+            )
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::DesignerMutation,
+                    format!(
+                        "checked native Menus mode click did not select Menus in session {session_id}"
+                    ),
+                )
+            })?;
+            format!(
+                "reopened Designer switched from Skins to Menus by checked click [{}], selected target bounds={:?}",
+                mode_click.describe(),
+                selected.bounds
+            )
+        };
+        let before = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |_| true)
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        let (control, click) = click_authoring_target(
+            child,
+            designer,
+            trace_path,
+            session_id,
+            AuthoringControlTarget::NewMenu,
+            None,
+            AuthoringControlRole::Button,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        let after = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            state.menu_count == before.menu_count + 1
+                && state.selected_menu_index == Some(before.menu_count)
+                && !state.proposal_active
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        Ok(format!(
+            "{mode_evidence}; New Menu target role={:?} client_bounds={:?}; checked click=[{}]; menu count {} -> {}, selected menu index {:?}, generation {}",
+            control.role,
+            control.bounds,
+            click.describe(),
+            before.menu_count,
+            after.menu_count,
+            after.selected_menu_index,
+            after.generation
+        ))
+    });
+
+    append_authoring_case(report, child, output, trace_path, "A1", || {
+        let before = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            !state.proposal_active && state.selected_menu_index.is_some()
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        if before.selected_menu_index != Some(before.menu_count.saturating_sub(1))
+            || before.ring_count == 0
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "New Menu selection was not retained before Add Ring: menus={}, selected={:?}, rings={}",
+                    before.menu_count, before.selected_menu_index, before.ring_count
+                ),
+            ));
+        }
+        let (control, click) = click_authoring_target(
+            child,
+            designer,
+            trace_path,
+            session_id,
+            AuthoringControlTarget::AddRing,
+            None,
+            AuthoringControlRole::Button,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        let preview = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            state.proposal_active && state.proposal_kind == AuthoringProposalKind::NewRing
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        if preview.ring_count != before.ring_count
+            || preview.selected_ring_slots != before.selected_ring_slots
+            || preview.generation != before.generation
+            || preview.proposal_candidate_rings != before.ring_count + 1
+            || preview.proposal_slots != 8
+            || !preview.proposal_cell_ids_preserved
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "Add Ring preview changed the draft or proposed an unexpected candidate: rings={} -> {}, slots={} -> {}, candidate_rings={}, proposal_slots={}, existing_cell_ids_preserved={}",
+                    before.ring_count,
+                    preview.ring_count,
+                    before.selected_ring_slots,
+                    preview.selected_ring_slots,
+                    preview.proposal_candidate_rings,
+                    preview.proposal_slots,
+                    preview.proposal_cell_ids_preserved
+                ),
+            ));
+        }
+        let ready = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            state.proposal_active && state.proposal_ready
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerPresentation, error))?;
+        let apply = wait_for_authoring_control(
+            trace_path,
+            session_id,
+            AuthoringControlTarget::ApplyProposal,
+            None,
+            AuthoringControlRole::Button,
+            UIA_TIMEOUT,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        if !apply.enabled || !ready.proposal_ready {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                "Apply proposal did not become enabled for the exact prepared candidate".into(),
+            ));
+        }
+        Ok(format!(
+            "Add Ring role={:?} checked click=[{}]; proposal remains uncommitted at generation {} with committed rings/slots {}/{}, candidate rings={} and slots={} are previewed; candidate preserves existing cell IDs={}; Apply control enabled={} and is reserved for G0",
+            control.role,
+            click.describe(),
+            preview.generation,
+            preview.ring_count,
+            preview.selected_ring_slots,
+            ready.proposal_candidate_rings,
+            ready.proposal_slots,
+            ready.proposal_cell_ids_preserved,
+            apply.enabled
+        ))
+    });
+
+    append_authoring_case(report, child, output, trace_path, "G0", || {
+        let prepared = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            state.proposal_active
+                && state.proposal_kind == AuthoringProposalKind::NewRing
+                && state.proposal_ready
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        if prepared.proposal_candidate_rings != prepared.ring_count + 1
+            || prepared.proposal_slots != 8
+            || !prepared.proposal_cell_ids_preserved
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "outer-ring proposal was not the exact safe candidate to apply: committed rings={}, candidate rings={}, slots={}, existing cell IDs preserved={}",
+                    prepared.ring_count,
+                    prepared.proposal_candidate_rings,
+                    prepared.proposal_slots,
+                    prepared.proposal_cell_ids_preserved
+                ),
+            ));
+        }
+        let apply = wait_for_authoring_control(
+            trace_path,
+            session_id,
+            AuthoringControlTarget::ApplyProposal,
+            None,
+            AuthoringControlRole::Button,
+            UIA_TIMEOUT,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        if !apply.enabled {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                "Apply proposal was disabled for the ready outer-ring candidate".into(),
+            ));
+        }
+        let apply_click = click_designer_client_bounds(child, designer, apply.bounds, trace_path)
+            .map_err(|error| {
+            authoring_case_failure(FailureStage::DesignerNativeTarget, error)
+        })?;
+        let applied = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            !state.proposal_active
+                && state.ring_count == prepared.proposal_candidate_rings
+                && state.selected_menu_index == prepared.selected_menu_index
+                && state.selected_ring_index == Some(prepared.ring_count)
+                && state.selected_ring_slots == prepared.proposal_slots
+                && state.generation > prepared.generation
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        let post_apply_ids_preserved = committed_cell_ids_match(
+            prepared.proposal_cell_ids_digest_available,
+            prepared.proposal_cell_ids_digest,
+            applied.draft_cell_ids_digest,
+        );
+        if !post_apply_ids_preserved {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "committed outer-ring draft did not match the prepared candidate cell IDs after Apply".into(),
+            ));
+        }
+        if applied.menu_populated != prepared.menu_populated {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "applying an empty outer ring changed existing menu contents: populated cells {} -> {}",
+                    prepared.menu_populated, applied.menu_populated
+                ),
+            ));
+        }
+        Ok(format!(
+            "ready outer-ring candidate with {} committed and {} proposed rings, {} proposed slots, and existing cell IDs preserved=true; Apply enabled={}; checked click=[{}]; committed state has {} rings, selects new ring {:?}, {} slots, unchanged populated cells={}, post-Apply stable cell IDs match candidate={}, generation {} -> {}",
+            prepared.ring_count,
+            prepared.proposal_candidate_rings,
+            prepared.proposal_slots,
+            apply.enabled,
+            apply_click.describe(),
+            applied.ring_count,
+            applied.selected_ring_index,
+            applied.selected_ring_slots,
+            applied.menu_populated,
+            post_apply_ids_preserved,
+            prepared.generation,
+            applied.generation
+        ))
+    });
+
+    append_authoring_case(report, child, output, trace_path, "A2", || {
+        let start = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            !state.proposal_active && state.ring_count >= 2 && state.selected_ring_index == Some(1)
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        if start.selected_ring_slots != 8 {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "new ring has unexpected slot count {}",
+                    start.selected_ring_slots
+                ),
+            ));
+        }
+        let (_, selector_click) = click_authoring_target(
+            child,
+            designer,
+            trace_path,
+            session_id,
+            AuthoringControlTarget::RingSelector,
+            None,
+            AuthoringControlRole::ComboBox,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        let ring_zero = wait_for_authoring_control(
+            trace_path,
+            session_id,
+            AuthoringControlTarget::RingOption,
+            Some(0),
+            AuthoringControlRole::Selectable,
+            UIA_TIMEOUT,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        if ring_zero.selected {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "Ring selector unexpectedly reported its first option as selected".into(),
+            ));
+        }
+        let ring_zero_click =
+            click_designer_client_bounds(child, designer, ring_zero.bounds, trace_path).map_err(
+                |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
+            )?;
+        let selected_zero =
+            wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+                !state.proposal_active && state.selected_ring_index == Some(0)
+            })
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        if selected_zero.selected_ring_slots == 0 {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "selecting Ring 1 unexpectedly produced an empty ring".into(),
+            ));
+        }
+        let (_, selector_reopen) = click_authoring_target(
+            child,
+            designer,
+            trace_path,
+            session_id,
+            AuthoringControlTarget::RingSelector,
+            None,
+            AuthoringControlRole::ComboBox,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        let ring_one = wait_for_authoring_control(
+            trace_path,
+            session_id,
+            AuthoringControlTarget::RingOption,
+            Some(1),
+            AuthoringControlRole::Selectable,
+            UIA_TIMEOUT,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        if ring_one.selected {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "Ring selector unexpectedly reported its second option selected after choosing Ring 1".into(),
+            ));
+        }
+        let ring_one_click =
+            click_designer_client_bounds(child, designer, ring_one.bounds, trace_path).map_err(
+                |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
+            )?;
+        let selected_one =
+            wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+                !state.proposal_active && state.selected_ring_index == Some(1)
+            })
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        if selected_one.selected_ring_slots != 8 {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "selecting Ring 2 changed its committed slot count to {}",
+                    selected_one.selected_ring_slots
+                ),
+            ));
+        }
+        let slots_evidence = set_requested_slots(child, designer, trace_path, session_id, 10)
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerFrameworkInput, error))?;
+        let (_, preview_click) = click_authoring_target(
+            child,
+            designer,
+            trace_path,
+            session_id,
+            AuthoringControlTarget::PreviewProposal,
+            None,
+            AuthoringControlRole::Button,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        let prepared = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            state.proposal_active
+                && state.proposal_kind == AuthoringProposalKind::Resize
+                && state.proposal_ready
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerPresentation, error))?;
+        if prepared.selected_ring_slots != 8
+            || prepared.requested_slots != 10
+            || prepared.proposal_slots != 10
+            || prepared.proposal_candidate_rings != 2
+            || !prepared.proposal_cell_ids_preserved
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "slot growth preview did not preserve draft geometry and original cell IDs: slots={} requested={} candidate={} rings={} IDs_preserved={}",
+                    prepared.selected_ring_slots,
+                    prepared.requested_slots,
+                    prepared.proposal_slots,
+                    prepared.proposal_candidate_rings,
+                    prepared.proposal_cell_ids_preserved
+                ),
+            ));
+        }
+        let apply = wait_for_authoring_control(
+            trace_path,
+            session_id,
+            AuthoringControlTarget::ApplyProposal,
+            None,
+            AuthoringControlRole::Button,
+            UIA_TIMEOUT,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        if !apply.enabled {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                "Apply proposal remained disabled after the exact slot-growth candidate was prepared".into(),
+            ));
+        }
+        let apply_click = click_designer_client_bounds(child, designer, apply.bounds, trace_path)
+            .map_err(|error| {
+            authoring_case_failure(FailureStage::DesignerNativeTarget, error)
+        })?;
+        let applied = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+            !state.proposal_active
+                && state.selected_ring_index == Some(1)
+                && state.selected_ring_slots == 10
+                && state.generation > prepared.generation
+        })
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        let post_apply_ids_preserved = committed_cell_ids_match(
+            prepared.proposal_cell_ids_digest_available,
+            prepared.proposal_cell_ids_digest,
+            applied.draft_cell_ids_digest,
+        );
+        if !post_apply_ids_preserved {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "committed grown-ring draft did not match the prepared candidate cell IDs after Apply".into(),
+            ));
+        }
+        Ok(format!(
+            "Ring selector opened=[{}], Ring 1 select=[{}], reopened=[{}], Ring 2 select=[{}]; {slots_evidence}; Preview proposal=[{}]; prepared candidate slots={}, ring count={}, old cell IDs preserved={}; Apply enabled={}, click=[{}]; applied slots={} with stable cell IDs matching the candidate={} at generation {}",
+            selector_click.describe(),
+            ring_zero_click.describe(),
+            selector_reopen.describe(),
+            ring_one_click.describe(),
+            preview_click.describe(),
+            prepared.proposal_slots,
+            prepared.proposal_candidate_rings,
+            prepared.proposal_cell_ids_preserved,
+            apply.enabled,
+            apply_click.describe(),
+            applied.selected_ring_slots,
+            post_apply_ids_preserved,
+            applied.generation
+        ))
+    });
+
+    append_authoring_case(report, child, output, trace_path, "G1", || {
+        run_populated_shrink_resolution(child, designer, trace_path, session_id)
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))
+    });
+
+    append_authoring_case(report, child, output, trace_path, "G2", || {
+        let geometry = run_compact_geometry_case(child, designer, trace_path, session_id)
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerPresentation, error));
+        let close = discard_dirty_designer(child, designer, trace_path, session_id);
+        match (geometry, close) {
+            (Ok(geometry), Ok(close)) => Ok(format!(
+                "{geometry}; temporary authoring draft cleanup: {close}"
+            )),
+            (Err(error), Ok(close)) => Err(CaseFailure::new(
+                error.stage,
+                format!(
+                    "{}; temporary authoring draft cleanup: {close}",
+                    error.message
+                ),
+            )),
+            (Ok(geometry), Err(close)) => Err(authoring_case_failure(
+                FailureStage::Cleanup,
+                format!("{geometry}; temporary authoring draft cleanup failed: {close}"),
+            )),
+            (Err(error), Err(close)) => Err(CaseFailure::new(
+                error.stage,
+                format!(
+                    "{}; temporary authoring draft cleanup failed: {close}",
+                    error.message
+                ),
+            )),
+        }
+    });
+}
+
+fn run_populated_shrink_resolution(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+) -> Result<String, String> {
+    let root_row = wait_for_authoring_control(
+        trace_path,
+        session_id,
+        AuthoringControlTarget::MenuRow,
+        Some(0),
+        AuthoringControlRole::Selectable,
+        UIA_TIMEOUT,
+    )?;
+    let root_select = click_designer_client_bounds(child, designer, root_row.bounds, trace_path)?;
+    let root = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+        !state.proposal_active
+            && !state.resize_prompt_open
+            && state.selected_menu_index == Some(0)
+            && state.selected_ring_index == Some(0)
+            && state.ring_count > 0
+    })?;
+    if root.selected_ring_slots <= 1 || root.selected_ring_populated == 0 {
+        return Err(format!(
+            "starter root ring is not suitable for a populated shrink: rings={} slots={} populated={}",
+            root.ring_count, root.selected_ring_slots, root.selected_ring_populated
+        ));
+    }
+
+    let requested = root.selected_ring_slots - 1;
+    let slots_input = set_requested_slots(child, designer, trace_path, session_id, requested)?;
+    let (_, preview_click) = click_authoring_target(
+        child,
+        designer,
+        trace_path,
+        session_id,
+        AuthoringControlTarget::PreviewProposal,
+        None,
+        AuthoringControlRole::Button,
+    )?;
+    let prompted = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+        state.resize_prompt_open && state.resize_prompt_populated > 0
+    })?;
+    if prompted.selected_menu_index != Some(0)
+        || prompted.selected_ring_index != Some(0)
+        || prompted.selected_ring_slots != root.selected_ring_slots
+        || prompted.selected_ring_populated != root.selected_ring_populated
+        || prompted.menu_populated != root.menu_populated
+        || prompted.requested_slots != requested
+        || prompted.proposal_active
+        || prompted.resize_prompt_populated > root.selected_ring_populated
+    {
+        return Err(format!(
+            "populated shrink prompt changed committed state or described an impossible number of overflow cells: root slots/population/menu={}/{}/{}, prompt slots/population/menu={}/{}/{}, requested={}, prompt overflow cells={}",
+            root.selected_ring_slots,
+            root.selected_ring_populated,
+            root.menu_populated,
+            prompted.selected_ring_slots,
+            prompted.selected_ring_populated,
+            prompted.menu_populated,
+            prompted.requested_slots,
+            prompted.resize_prompt_populated
+        ));
+    }
+    let (_, cancel_click) = click_authoring_target(
+        child,
+        designer,
+        trace_path,
+        session_id,
+        AuthoringControlTarget::CancelResolution,
+        None,
+        AuthoringControlRole::Button,
+    )?;
+    let cancelled = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+        !state.resize_prompt_open && !state.proposal_active && state.requested_slots == requested
+    })?;
+    if cancelled.selected_ring_slots != root.selected_ring_slots
+        || cancelled.selected_ring_populated != root.selected_ring_populated
+        || cancelled.menu_populated != root.menu_populated
+        || cancelled.ring_count != root.ring_count
+    {
+        return Err(format!(
+            "Cancel changed committed geometry or removed content: slots {}/{} population {}/{} menu population {}/{} rings {}/{}",
+            root.selected_ring_slots,
+            cancelled.selected_ring_slots,
+            root.selected_ring_populated,
+            cancelled.selected_ring_populated,
+            root.menu_populated,
+            cancelled.menu_populated,
+            root.ring_count,
+            cancelled.ring_count
+        ));
+    }
+
+    let slots_again = set_requested_slots(child, designer, trace_path, session_id, requested)?;
+    let (_, preview_again) = click_authoring_target(
+        child,
+        designer,
+        trace_path,
+        session_id,
+        AuthoringControlTarget::PreviewProposal,
+        None,
+        AuthoringControlRole::Button,
+    )?;
+    let prompted_again = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+        state.resize_prompt_open && state.resize_prompt_populated > 0
+    })?;
+    if prompted_again.menu_populated != root.menu_populated
+        || prompted_again.selected_ring_slots != root.selected_ring_slots
+        || prompted_again.resize_prompt_populated != prompted.resize_prompt_populated
+    {
+        return Err("reopening populated shrink resolution changed committed content".into());
+    }
+    let (_, overflow_click) = click_authoring_target(
+        child,
+        designer,
+        trace_path,
+        session_id,
+        AuthoringControlTarget::MoveToOverflow,
+        None,
+        AuthoringControlRole::Button,
+    )?;
+    let resolved = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+        state.proposal_active
+            && state.proposal_kind == AuthoringProposalKind::ResolvedResize
+            && state.proposal_ready
+    })?;
+    if resolved.resize_prompt_open
+        || resolved.ring_count != root.ring_count
+        || resolved.selected_ring_slots != root.selected_ring_slots
+        || resolved.menu_populated != root.menu_populated
+        || resolved.proposal_candidate_rings != root.ring_count + 1
+        || resolved.proposal_slots != requested
+        || resolved.proposal_resolution_populated != prompted.resize_prompt_populated
+        || !resolved.proposal_cell_ids_preserved
+    {
+        return Err(format!(
+            "overflow resolution did not prepare a preserving candidate: rings={} committed_slots={} menu_populated={} candidate_rings={} proposal_slots={} resolved_populated={} original_populated={} stable_ids_preserved={} ready={}",
+            resolved.ring_count,
+            resolved.selected_ring_slots,
+            resolved.menu_populated,
+            resolved.proposal_candidate_rings,
+            resolved.proposal_slots,
+            resolved.proposal_resolution_populated,
+            prompted.resize_prompt_populated,
+            resolved.proposal_cell_ids_preserved,
+            resolved.proposal_ready
+        ));
+    }
+    let apply = wait_for_authoring_control(
+        trace_path,
+        session_id,
+        AuthoringControlTarget::ApplyProposal,
+        None,
+        AuthoringControlRole::Button,
+        UIA_TIMEOUT,
+    )?;
+    if !apply.enabled {
+        return Err(
+            "Apply proposal remained disabled after overflow resolution was prepared".into(),
+        );
+    }
+    let apply_click = click_designer_client_bounds(child, designer, apply.bounds, trace_path)?;
+    let applied = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+        !state.proposal_active
+            && state.ring_count == root.ring_count + 1
+            && state.selected_menu_index == Some(0)
+            && state.selected_ring_index == Some(0)
+            && state.selected_ring_slots == requested
+            && state.generation > resolved.generation
+    })?;
+    let post_apply_ids_preserved = committed_cell_ids_match(
+        resolved.proposal_cell_ids_digest_available,
+        resolved.proposal_cell_ids_digest,
+        applied.draft_cell_ids_digest,
+    );
+    if applied.menu_populated != root.menu_populated
+        || applied.selected_ring_populated >= root.selected_ring_populated
+        || !post_apply_ids_preserved
+    {
+        return Err(format!(
+            "overflow Apply did not preserve menu content and prepared stable cell IDs while shrinking the selected ring: menu populated {} -> {}, selected ring populated {} -> {}, stable cell IDs match candidate={}",
+            root.menu_populated,
+            applied.menu_populated,
+            root.selected_ring_populated,
+            applied.selected_ring_populated,
+            post_apply_ids_preserved
+        ));
+    }
+    Ok(format!(
+        "selected starter root through MenuRow 0 {:?} with checked click=[{}]; {slots_input}; Preview=[{}] retained {} slots, {} populated cells, menu population {} while showing a {}-cell resolution prompt; Cancel=[{}] preserved all counts; {slots_again}; reopened Preview=[{}], Move to overflow=[{}] prepared {} slots and {} rings with {} populated cells resolved and all prior cell IDs preserved; Apply enabled={}, checked click=[{}] yielded {} rings, {} slots, {} selected-ring populated cells and unchanged menu population {}; committed stable cell IDs match the prepared candidate={}",
+        root_row.bounds,
+        root_select.describe(),
+        preview_click.describe(),
+        root.selected_ring_slots,
+        root.selected_ring_populated,
+        root.menu_populated,
+        prompted.resize_prompt_populated,
+        cancel_click.describe(),
+        preview_again.describe(),
+        overflow_click.describe(),
+        resolved.proposal_slots,
+        resolved.proposal_candidate_rings,
+        resolved.proposal_resolution_populated,
+        apply.enabled,
+        apply_click.describe(),
+        applied.ring_count,
+        applied.selected_ring_slots,
+        applied.selected_ring_populated,
+        applied.menu_populated,
+        post_apply_ids_preserved
+    ))
+}
+
+fn run_compact_geometry_case(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+) -> Result<String, String> {
+    let post_resize_trace_cursor = trace_lines(trace_path).len();
+    child.resize_window(designer, 640, 480)?;
+    let deadline = Instant::now() + TRACE_TIMEOUT;
+    let (compact, client) = loop {
+        let compact = child
+            .designer()
+            .ok_or_else(|| "Designer HWND disappeared during compact resize".to_string())?;
+        if compact.hwnd != designer.hwnd {
+            return Err("Designer HWND changed during compact resize".into());
+        }
+        let client = child.client_bounds(&compact)?;
+        let outer_width = compact.bounds[2] - compact.bounds[0];
+        let outer_height = compact.bounds[3] - compact.bounds[1];
+        if compact.visible
+            && !compact.minimized
+            && compact.is_nonzero()
+            && outer_width <= 700
+            && outer_height <= 540
+            && client[2] - client[0] >= 520
+            && client[3] - client[1] >= 380
+        {
+            break (compact, client);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "compact Designer did not reach visible bounded outer/client geometry: outer={:?} client={client:?}",
+                compact.bounds
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    };
+    // Authoring-control events carry the client size seen by that egui frame. The
+    // pre-resize cursor retains the resize-triggered frame even if it is rendered
+    // before USER's refreshed HWND snapshot becomes observable; only a frame matching
+    // the compact native client size can satisfy the check.
+    let targets = [
+        (
+            AuthoringControlTarget::NewMenu,
+            None,
+            AuthoringControlRole::Button,
+        ),
+        (
+            AuthoringControlTarget::AddRing,
+            None,
+            AuthoringControlRole::Button,
+        ),
+        (
+            AuthoringControlTarget::RingSelector,
+            None,
+            AuthoringControlRole::ComboBox,
+        ),
+        (
+            AuthoringControlTarget::Slots,
+            None,
+            AuthoringControlRole::DragValue,
+        ),
+        (
+            AuthoringControlTarget::PreviewProposal,
+            None,
+            AuthoringControlRole::Button,
+        ),
+        (
+            AuthoringControlTarget::Canvas,
+            None,
+            AuthoringControlRole::Region,
+        ),
+    ];
+    let mut controls = Vec::with_capacity(targets.len());
+    for (target, index, role) in targets {
+        let control = wait_for_authoring_control_after(
+            trace_path,
+            post_resize_trace_cursor,
+            session_id,
+            [client[2] - client[0], client[3] - client[1]],
+            target,
+            index,
+            role,
+            TRACE_TIMEOUT,
+        )?;
+        let [left, top, right, bottom] = control.bounds;
+        if left < client[0] || top < client[1] || right > client[2] || bottom > client[3] {
+            return Err(format!(
+                "compact Designer target {target:?} bounds {:?} exceed client bounds {client:?}",
+                control.bounds
+            ));
+        }
+        if right <= left || bottom <= top {
+            return Err(format!(
+                "compact Designer target {target:?} has empty bounds {:?}",
+                control.bounds
+            ));
+        }
+        controls.push((target, control.bounds));
+    }
+    let canvas = controls
+        .iter()
+        .find_map(|(target, bounds)| (*target == AuthoringControlTarget::Canvas).then_some(*bounds))
+        .ok_or_else(|| "compact Designer did not publish its canvas target".to_string())?;
+    if canvas[2] - canvas[0] < 100 || canvas[3] - canvas[1] < 100 {
+        return Err(format!(
+            "compact Designer left too little usable canvas area: {canvas:?}"
+        ));
+    }
+    let current = child
+        .designer()
+        .ok_or_else(|| "Designer HWND disappeared while validating compact geometry".to_string())?;
+    let current_client = child.client_bounds(&current)?;
+    if current.hwnd != compact.hwnd
+        || !current.visible
+        || current.minimized
+        || !current.is_nonzero()
+        || !client_size_matches(
+            [
+                current_client[2] - current_client[0],
+                current_client[3] - current_client[1],
+            ],
+            [client[2] - client[0], client[3] - client[1]],
+        )
+        || current.bounds[2] - current.bounds[0] > 700
+        || current.bounds[3] - current.bounds[1] > 540
+    {
+        return Err(format!(
+            "compact Designer window changed after fresh controls were rendered: {:?}",
+            current.bounds,
+        ));
+    }
+    Ok(format!(
+        "resized the checked child Designer HWND to compact outer bounds {:?}; client={client:?}; all authoring controls and canvas stayed inside the client; canvas={canvas:?} ({}x{}); inspected {} semantic targets",
+        compact.bounds,
+        canvas[2] - canvas[0],
+        canvas[3] - canvas[1],
+        controls.len()
+    ))
+}
+
+fn discard_dirty_designer(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+) -> Result<String, String> {
+    child.validate_window(designer.hwnd)?;
+    let cursor = trace_lines(trace_path).len();
+    let key_events = send_alt_f4(child, designer)?;
+    let prompt_trace = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+        events.iter().any(|line| {
+            line.contains("trace_event=\"designer_close\"")
+                && line.contains("close_prompt=true")
+                && line.contains("dirty=true")
+        })
+    })
+    .into_iter()
+    .rev()
+    .find(|line| {
+        line.contains("trace_event=\"designer_close\"")
+            && line.contains("close_prompt=true")
+            && line.contains("dirty=true")
+    })
+    .ok_or_else(|| {
+        format!("Alt+F4 did not present a dirty close prompt after {key_events} input events")
+    })?;
+    let (discard, click) = click_authoring_target(
+        child,
+        designer,
+        trace_path,
+        session_id,
+        AuthoringControlTarget::DiscardDraft,
+        None,
+        AuthoringControlRole::Button,
+    )?;
+    let stop_reply = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+        events.iter().any(|line| {
+            line.contains("trace_event=\"authoring\"")
+                && line.contains("edge=ReplyAccepted")
+                && line.contains("request_kind=StopNativePreview")
+                && line.contains("terminal=true")
+        })
+    })
+    .into_iter()
+    .rev()
+    .find(|line| {
+        line.contains("trace_event=\"authoring\"")
+            && line.contains("edge=ReplyAccepted")
+            && line.contains("request_kind=StopNativePreview")
+            && line.contains("terminal=true")
+    })
+    .ok_or_else(|| {
+        format!("Discard did not receive its terminal preview-stop reply: {prompt_trace}")
+    })?;
+    if !wait_until(Duration::from_secs(4), || child.designer().is_none()) {
+        return Err(format!(
+            "child-owned Designer HWND remained after production Discard; terminal reply={stop_reply}"
+        ));
+    }
+    if child.refresh_root().is_err() || child.try_wait()?.is_some() {
+        return Err("production Discard also removed ROOT or terminated its child process".into());
+    }
+    Ok(format!(
+        "checked Alt+F4={key_events} events reached the dirty close prompt ({prompt_trace}); production Discard target {:?} click=[{}] received terminal stop reply ({stop_reply}) and closed its child-owned Designer HWND while ROOT and candidate remained alive",
+        discard.bounds,
+        click.describe()
+    ))
+}
+
 fn activate_named(
     uia: &UiAutomation,
     child: &NativeChild,
@@ -2472,7 +3639,7 @@ fn append_blocked_designer_cases(
     output: &Path,
     trace_path: &Path,
 ) {
-    for id in ["H3", "D1", "D2", "D4", "D5"] {
+    for id in BLOCKED_DESIGNER_CASE_IDS {
         if report.cases.iter().any(|case| case.id == id) {
             continue;
         }
@@ -2484,6 +3651,36 @@ fn append_blocked_designer_cases(
             Err(CaseFailure::new(
                 cause.stage,
                 format!("not run because D0 failed first: {}", cause.message),
+            )),
+            child,
+            output,
+            trace_path,
+        );
+    }
+}
+
+fn append_blocked_authoring_cases(
+    report: &mut AcceptanceReport,
+    cause: &CaseFailure,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+) {
+    for id in ["A0", "A1", "G0", "A2", "G1", "G2"] {
+        if report.cases.iter().any(|case| case.id == id) {
+            continue;
+        }
+        append_case(
+            report,
+            id,
+            expected(id),
+            started_now(),
+            Err(CaseFailure::new(
+                cause.stage,
+                format!(
+                    "not run because authoring Designer entry failed: {}",
+                    cause.message
+                ),
             )),
             child,
             output,
@@ -2807,6 +4004,20 @@ fn expected(id: &str) -> &'static str {
         }
         "D4" => "production radial skins command selects the same Designer Skins semantic target",
         "D5" => "checked close closes Designer while ROOT and candidate remain alive",
+        "A0" => "New Menu creates one stable menu and selects it through the production toolbar",
+        "A1" => {
+            "Menus mode creates a menu and Add Ring publishes a ready proposal without changing committed geometry"
+        }
+        "G0" => {
+            "explicitly applying the prepared outer-ring proposal commits the candidate and preserves existing cell IDs"
+        }
+        "A2" => {
+            "Ring selector and Slots grow apply a prepared candidate while preserving prior cell IDs"
+        }
+        "G1" => {
+            "populated shrink cancels without loss, then moves cells to overflow and applies safely"
+        }
+        "G2" => "compact Designer keeps authoring controls and canvas inside client bounds",
         _ => "candidate exits normally through production close path",
     }
 }
@@ -2929,6 +4140,7 @@ struct DesignerSemanticTargetState {
     bounds: [i32; 4],
     selected: bool,
     focused: bool,
+    session_id: u64,
 }
 
 fn parse_designer_semantic_target(
@@ -2965,6 +4177,7 @@ fn parse_designer_semantic_target(
         ],
         selected: field("selected")?.parse().ok()?,
         focused: field("focused")?.parse().ok()?,
+        session_id: field("session_id")?.parse().ok()?,
     })
 }
 
@@ -2976,10 +4189,7 @@ fn wait_for_designer_semantic_target(
 ) -> Option<DesignerSemanticTargetState> {
     let deadline = Instant::now() + timeout;
     loop {
-        let state = trace_lines(trace_path)
-            .into_iter()
-            .rev()
-            .find_map(|line| parse_designer_semantic_target(&line, target));
+        let state = latest_designer_semantic_target(&trace_lines(trace_path), target, None);
         if state.as_ref().is_some_and(&predicate) {
             return state;
         }
@@ -2988,6 +4198,39 @@ fn wait_for_designer_semantic_target(
         }
         std::thread::sleep(WINDOW_POLL);
     }
+}
+
+fn wait_for_designer_semantic_target_in_session(
+    trace_path: &Path,
+    target: DesignerSemanticTarget,
+    session_id: u64,
+    timeout: Duration,
+    predicate: impl Fn(&DesignerSemanticTargetState) -> bool,
+) -> Option<DesignerSemanticTargetState> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state =
+            latest_designer_semantic_target(&trace_lines(trace_path), target, Some(session_id));
+        if state.as_ref().is_some_and(&predicate) {
+            return state;
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn latest_designer_semantic_target(
+    lines: &[String],
+    target: DesignerSemanticTarget,
+    session_id: Option<u64>,
+) -> Option<DesignerSemanticTargetState> {
+    lines
+        .iter()
+        .rev()
+        .filter_map(|line| parse_designer_semantic_target(line, target))
+        .find(|state| session_id.is_none_or(|session_id| state.session_id == session_id))
 }
 
 fn trace_lines(path: &Path) -> Vec<String> {
@@ -3318,6 +4561,44 @@ fn bounded_text(text: &str, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_apply_cell_id_check_requires_available_equal_candidate_digest() {
+        assert!(committed_cell_ids_match(true, 41, 41));
+        assert!(!committed_cell_ids_match(true, 41, 42));
+        assert!(!committed_cell_ids_match(false, 41, 41));
+    }
+
+    #[test]
+    fn blocked_designer_and_tail_fill_preserve_g0_by_case_id() {
+        assert!(BLOCKED_DESIGNER_CASE_IDS.contains(&"G0"));
+        let prior_results = CASE_IDS
+            .into_iter()
+            .filter(|id| *id != "G0")
+            .collect::<Vec<_>>();
+        assert_eq!(prior_results.len(), CASE_IDS.len() - 1);
+        assert_eq!(missing_case_ids(&prior_results), vec!["G0"]);
+    }
+
+    #[test]
+    fn designer_semantic_targets_are_scoped_to_the_reopened_session() {
+        let lines = vec![
+            "trace_event=\"designer_semantic_target\" target=Menus role=\"SelectableLabel\" viewport=Deferred left_px=10 top_px=20 right_px=40 bottom_px=44 selected=true focused=false session_id=1 generation=7".to_string(),
+            "trace_event=\"designer_semantic_target\" target=Menus role=\"SelectableLabel\" viewport=Deferred left_px=10 top_px=20 right_px=40 bottom_px=44 selected=false focused=false session_id=2 generation=2".to_string(),
+        ];
+
+        let reopened =
+            latest_designer_semantic_target(&lines, DesignerSemanticTarget::Menus, Some(2))
+                .expect("reopened Designer Menus target should be present");
+        assert_eq!(reopened.session_id, 2);
+        assert!(!reopened.selected);
+
+        let earlier =
+            latest_designer_semantic_target(&lines, DesignerSemanticTarget::Menus, Some(1))
+                .expect("earlier Designer Menus target should remain addressable");
+        assert_eq!(earlier.session_id, 1);
+        assert!(earlier.selected);
+    }
 
     fn window(hwnd: usize, process_id: u32, role: WindowRole, active: bool) -> WindowSnapshot {
         let class_name = match role {

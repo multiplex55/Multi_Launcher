@@ -10,8 +10,10 @@ mod work_area;
 
 use crate::gui::LauncherApp;
 use crate::radial::acceptance_trace::{
-    self, BodyBlock, Correlation, DesignerCloseState, DesignerSemanticRole, DesignerSemanticTarget,
-    Event, FocusEdge, RequestKind, ViewportClass, WidgetCategory, WidgetResponse,
+    self, BodyBlock, Correlation, DesignerAuthoringRole, DesignerAuthoringTarget,
+    DesignerCloseState, DesignerGeometryState, DesignerProposalKind, DesignerSemanticRole,
+    DesignerSemanticTarget, Event, FocusEdge, RequestKind, ViewportClass, WidgetCategory,
+    WidgetResponse,
 };
 use crate::radial::authoring::menu::{self, ResizeResolution, SubmenuDuplication};
 use crate::radial::authoring::{
@@ -22,7 +24,7 @@ use crate::radial::authoring::{
 use crate::radial::context::InvocationContext;
 use crate::radial::model::{
     AfterActionPolicy, CellContent, CellId, Control, DynamicSource, InteractionMode, LayoutKind,
-    MenuId, RadialDocument, RingId, SubmenuPresentation,
+    MenuDefinition, MenuId, RadialDocument, RingId, SubmenuPresentation,
 };
 use canvas::{
     CanvasPoint, CanvasTransform, DesignerMode, DragPayload, PlacementDraft, PreferenceDebounce,
@@ -32,8 +34,10 @@ use eframe::egui;
 use import_export::PendingImport;
 use preview::{EmbeddedPreview, PreviewPreset};
 use std::collections::VecDeque;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(crate) fn radial_designer_viewport_id() -> egui::ViewportId {
@@ -196,6 +200,83 @@ fn trace_designer_semantic_target(
         response.has_focus(),
         correlation,
     );
+}
+
+fn trace_designer_authoring_control(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    target: DesignerAuthoringTarget,
+    role: DesignerAuthoringRole,
+    index: Option<usize>,
+    enabled: bool,
+    selected: bool,
+    viewport: ViewportClass,
+    correlation: Correlation,
+) {
+    if !acceptance_trace::enabled() {
+        return;
+    }
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return;
+    }
+    let rect = response.rect;
+    let scale = |coordinate: f32| {
+        let scaled = coordinate * pixels_per_point;
+        (scaled.is_finite() && scaled >= i32::MIN as f32 && scaled <= i32::MAX as f32)
+            .then(|| scaled.round() as i32)
+    };
+    let Some(viewport_rect) = ui.ctx().input(|input| input.viewport().inner_rect) else {
+        return;
+    };
+    let Some(client_width_px) = scale(viewport_rect.width()) else {
+        return;
+    };
+    let Some(client_height_px) = scale(viewport_rect.height()) else {
+        return;
+    };
+    let Some(left) = scale(rect.left()) else {
+        return;
+    };
+    let Some(top) = scale(rect.top()) else {
+        return;
+    };
+    let Some(right) = scale(rect.right()) else {
+        return;
+    };
+    let Some(bottom) = scale(rect.bottom()) else {
+        return;
+    };
+    if right <= left || bottom <= top {
+        return;
+    }
+    acceptance_trace::emit_designer_authoring_control(
+        target,
+        role,
+        viewport,
+        index,
+        [left, top, right, bottom],
+        [client_width_px, client_height_px],
+        enabled,
+        selected,
+        response.clicked(),
+        correlation.session_id,
+        correlation.generation,
+    );
+}
+
+fn menu_cell_ids_digest(menu: &MenuDefinition) -> u64 {
+    static HASH_STATE: OnceLock<RandomState> = OnceLock::new();
+    let mut hasher = HASH_STATE.get_or_init(RandomState::new).build_hasher();
+    menu.rings.len().hash(&mut hasher);
+    for ring in &menu.rings {
+        ring.id.as_str().hash(&mut hasher);
+        ring.cells.len().hash(&mut hasher);
+        for cell in &ring.cells {
+            cell.id.as_str().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn designer_viewport_builder(open: bool, launcher_always_on_top: bool) -> egui::ViewportBuilder {
@@ -839,9 +920,12 @@ struct DesignerPaneLayout {
 
 /// Allocate every Designer pane from the actual remaining viewport.  Side
 /// panes yield width before the canvas does, and the final widths always fit
-/// within the caller's bounded rect (including compact 720px windows).
+/// within the caller's bounded rect (including compact 720px windows). Reserve
+/// trailing egui item spacing below the row so its response rect stays inside
+/// the native client at compact heights.
 fn designer_pane_layout(
     available: egui::Vec2,
+    trailing_item_spacing: f32,
     tree_visible: bool,
     inspector_visible: bool,
     tree_width: f32,
@@ -857,8 +941,8 @@ fn designer_pane_layout(
     } else {
         1.0
     };
-    let height = if available.y.is_finite() {
-        available.y.clamp(1.0, 10_000.0)
+    let height = if available.y.is_finite() && trailing_item_spacing.is_finite() {
+        (available.y - trailing_item_spacing.max(0.0)).clamp(1.0, 10_000.0)
     } else {
         1.0
     };
@@ -2144,11 +2228,16 @@ impl RadialEditorState {
                 |ui| {
                     self.designer_controls(ui, trace_viewport_class(viewport_class));
                     if !self.show_resources && self.designer_mode == DesignerMode::Design {
-                        self.basic_authoring_toolbar(ui, &frame.feature_defaults);
+                        self.basic_authoring_toolbar(
+                            ui,
+                            &frame.feature_defaults,
+                            trace_viewport_class(viewport_class),
+                        );
                     }
                     self.pending_drop_ui(ui);
                     let pane = designer_pane_layout(
                         ui.available_size(),
+                        ui.spacing().item_spacing.y,
                         self.tree_visible,
                         self.inspector_visible,
                         self.tree_width,
@@ -2164,6 +2253,7 @@ impl RadialEditorState {
                             .id_source("radial-designer-resources")
                             .show(ui, |ui| self.resources_ui(ui));
                     } else {
+                        let correlation = trace_correlation(self.session.as_ref());
                         ui.horizontal(|ui| {
                             if pane.tree_width > 0.0 {
                                 ui.allocate_ui_with_layout(
@@ -2179,7 +2269,7 @@ impl RadialEditorState {
                                 );
                                 ui.add_space(6.0);
                             }
-                            ui.allocate_ui_with_layout(
+                            let canvas_response = ui.allocate_ui_with_layout(
                                 egui::vec2(pane.canvas_width, pane.height),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
@@ -2205,6 +2295,17 @@ impl RadialEditorState {
                                         &mut self.pan_drag_start,
                                     );
                                 },
+                            );
+                            trace_designer_authoring_control(
+                                ui,
+                                &canvas_response.response,
+                                DesignerAuthoringTarget::Canvas,
+                                DesignerAuthoringRole::Region,
+                                None,
+                                true,
+                                false,
+                                trace_viewport_class(viewport_class),
+                                correlation,
                             );
                             if pane.inspector_width > 0.0 {
                                 ui.add_space(6.0);
@@ -3564,6 +3665,7 @@ impl RadialEditorState {
         &mut self,
         ui: &mut egui::Ui,
         defaults: &crate::radial::model::RadialFeatureSettings,
+        viewport: ViewportClass,
     ) {
         let mut create_menu = false;
         let mut propose_new_ring = false;
@@ -3617,19 +3719,45 @@ impl RadialEditorState {
                     })
             })
         });
+        let correlation = trace_correlation(self.session.as_ref());
 
         ui.group(|ui| {
             ui.horizontal_wrapped(|ui| {
-                create_menu = ui.button("New Menu").clicked();
-                propose_new_ring = ui
+                let response = ui.button("New Menu");
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::NewMenu,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    true,
+                    false,
+                    viewport,
+                    correlation,
+                );
+                create_menu = response.clicked();
+
+                let response = ui
                     .add_enabled(selected_menu.is_some(), egui::Button::new("Add Ring"))
                     .on_disabled_hover_text("Select a menu first")
-                    .clicked();
+                    ;
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::AddRing,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    response.enabled(),
+                    false,
+                    viewport,
+                    correlation,
+                );
+                propose_new_ring = response.clicked();
 
                 if let (Some((menu_id, ring_id)), Some((rings, current_index))) =
                     (selected_ring.as_ref(), ring_options.as_ref())
                 {
-                    egui::ComboBox::from_label("Ring")
+                    let combo = egui::ComboBox::from_label("Ring")
                         .selected_text(format!(
                             "{} · {} slots",
                             current_index + 1,
@@ -3637,13 +3765,22 @@ impl RadialEditorState {
                         ))
                         .show_ui(ui, |ui| {
                             for (index, (candidate_id, count)) in rings.iter().enumerate() {
-                                if ui
-                                    .selectable_label(
-                                        candidate_id == ring_id,
-                                        format!("Ring {} · {} slots", index + 1, count),
-                                    )
-                                    .clicked()
-                                {
+                                let response = ui.selectable_label(
+                                    candidate_id == ring_id,
+                                    format!("Ring {} · {} slots", index + 1, count),
+                                );
+                                trace_designer_authoring_control(
+                                    ui,
+                                    &response,
+                                    DesignerAuthoringTarget::RingOption,
+                                    DesignerAuthoringRole::Selectable,
+                                    Some(index),
+                                    true,
+                                    candidate_id == ring_id,
+                                    viewport,
+                                    correlation,
+                                );
+                                if response.clicked() {
                                     choose_ring = Some(StableSelection::Ring {
                                         menu_id: menu_id.clone(),
                                         ring_id: candidate_id.clone(),
@@ -3651,15 +3788,49 @@ impl RadialEditorState {
                                 }
                             }
                         });
+                    trace_designer_authoring_control(
+                        ui,
+                        &combo.response,
+                        DesignerAuthoringTarget::RingSelector,
+                        DesignerAuthoringRole::ComboBox,
+                        None,
+                        true,
+                        true,
+                        viewport,
+                        correlation,
+                    );
                     if let Some((current_ring, count)) = rings.get(*current_index) {
                         let key = (menu_id.clone(), current_ring.clone());
                         let requested = self.ring_resize_drafts.entry(key).or_insert(*count);
-                        ui.add(
+                        let response = ui.add(
                             egui::DragValue::new(requested)
                                 .prefix("Slots ")
                                 .clamp_range(0..=crate::radial::model::limits::MAX_CELLS_PER_RING),
                         );
-                        preview_resize = ui.button("Preview proposal").clicked();
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::Slots,
+                            DesignerAuthoringRole::DragValue,
+                            None,
+                            true,
+                            false,
+                            viewport,
+                            correlation,
+                        );
+                        let response = ui.button("Preview proposal");
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::PreviewProposal,
+                            DesignerAuthoringRole::Button,
+                            None,
+                            true,
+                            false,
+                            viewport,
+                            correlation,
+                        );
+                        preview_resize = response.clicked();
                     }
                 } else {
                     ui.label("Ring: select a menu");
@@ -3702,13 +3873,36 @@ impl RadialEditorState {
                         ui.spinner();
                         ui.small("Preparing candidate preview…");
                     }
-                    apply_proposal = ui
+                    let response = ui
                         .add_enabled(proposal_ready, egui::Button::new("Apply proposal"))
                         .on_disabled_hover_text(
                             "Apply is available only after this exact candidate is prepared and visible",
-                        )
-                        .clicked();
-                    cancel_proposal = ui.button("Cancel proposal").clicked();
+                        );
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::ApplyProposal,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        proposal_ready,
+                        false,
+                        viewport,
+                        correlation,
+                    );
+                    apply_proposal = response.clicked();
+                    let response = ui.button("Cancel proposal");
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::CancelProposal,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        viewport,
+                        correlation,
+                    );
+                    cancel_proposal = response.clicked();
                 });
             }
         });
@@ -3818,6 +4012,7 @@ impl RadialEditorState {
             self.ring_proposal = None;
             self.ring_proposal_nonce = None;
         }
+        self.trace_authoring_geometry();
     }
 
     fn install_ring_proposal(&mut self, proposal: menu::RingEditProposal) {
@@ -3826,6 +4021,197 @@ impl RadialEditorState {
         self.ring_proposal = Some(proposal);
         self.ring_proposal_nonce = Some(nonce);
         self.preview.retry_preparation();
+    }
+
+    fn trace_authoring_geometry(&self) {
+        if !acceptance_trace::enabled() {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let selected_menu_id = session
+            .selection
+            .as_ref()
+            .and_then(|selection| match selection {
+                StableSelection::Menu(menu_id)
+                | StableSelection::Ring { menu_id, .. }
+                | StableSelection::Cell { menu_id, .. } => Some(menu_id),
+                _ => None,
+            });
+        let selected_menu_index = selected_menu_id.and_then(|menu_id| {
+            session
+                .draft
+                .menus
+                .iter()
+                .position(|menu| &menu.id == menu_id)
+        });
+        let selected_menu = selected_menu_id
+            .and_then(|menu_id| session.draft.menus.iter().find(|menu| &menu.id == menu_id));
+        let selected_ring_id = session
+            .selection
+            .as_ref()
+            .and_then(|selection| match selection {
+                StableSelection::Ring { ring_id, .. } | StableSelection::Cell { ring_id, .. } => {
+                    Some(ring_id)
+                }
+                _ => None,
+            });
+        let selected_ring_index = selected_menu.and_then(|menu| {
+            selected_ring_id
+                .and_then(|ring_id| menu.rings.iter().position(|ring| &ring.id == ring_id))
+                .or_else(|| (!menu.rings.is_empty()).then_some(0))
+        });
+        let selected_ring = selected_menu
+            .and_then(|menu| selected_ring_index.and_then(|index| menu.rings.get(index)));
+        let requested_slots = selected_menu.zip(selected_ring).map_or(0, |(menu, ring)| {
+            self.ring_resize_drafts
+                .get(&(menu.id.clone(), ring.id.clone()))
+                .copied()
+                .unwrap_or(ring.cells.len())
+        });
+        let menu_populated = selected_menu.map_or(0, |menu| {
+            menu.rings
+                .iter()
+                .flat_map(|ring| &ring.cells)
+                .filter(|cell| !matches!(&cell.content, CellContent::Spacer))
+                .count()
+        });
+        let proposal = self.ring_proposal.as_ref();
+        let proposal_token = self
+            .ring_proposal
+            .as_ref()
+            .zip(self.ring_proposal_nonce)
+            .map(|(proposal, nonce)| ring_proposal_token(proposal, nonce));
+        let proposal_ready = proposal_token
+            .as_deref()
+            .is_some_and(|token| self.preview.candidate_is_prepared(session, token));
+        let proposal_kind = proposal.map_or(DesignerProposalKind::None, |proposal| {
+            if proposal.resolution_summary.is_some() {
+                DesignerProposalKind::ResolvedResize
+            } else if proposal.previous_radius.is_some() {
+                DesignerProposalKind::Resize
+            } else {
+                DesignerProposalKind::NewRing
+            }
+        });
+        let draft_cell_ids_digest = selected_menu.map_or(0, menu_cell_ids_digest);
+        let proposal_cell_ids_digest = proposal.and_then(|proposal| {
+            proposal
+                .document
+                .menus
+                .iter()
+                .find(|menu| menu.id == proposal.menu_id)
+                .map(menu_cell_ids_digest)
+        });
+        let (proposal_candidate_rings, proposal_cell_ids_preserved, proposal_resolution_populated) =
+            proposal.map_or((0, true, 0), |proposal| {
+                let original_menu = session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == proposal.menu_id);
+                let candidate_menu = proposal
+                    .document
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == proposal.menu_id);
+                let candidate_rings = candidate_menu.map_or(0, |menu| menu.rings.len());
+                let ids_preserved = match (original_menu, candidate_menu) {
+                    (Some(original), Some(candidate)) if proposal.resolution_summary.is_some() => {
+                        original
+                            .rings
+                            .iter()
+                            .flat_map(|ring| &ring.cells)
+                            .all(|cell| {
+                                candidate.rings.iter().any(|ring| {
+                                    ring.cells.iter().any(|candidate| candidate.id == cell.id)
+                                })
+                            })
+                    }
+                    (Some(original), Some(candidate)) if proposal.previous_radius.is_some() => {
+                        original
+                            .rings
+                            .iter()
+                            .find(|ring| ring.id == proposal.ring_id)
+                            .zip(
+                                candidate
+                                    .rings
+                                    .iter()
+                                    .find(|ring| ring.id == proposal.ring_id),
+                            )
+                            .is_some_and(|(before, after)| {
+                                before
+                                    .cells
+                                    .iter()
+                                    .take(proposal.requested_len)
+                                    .zip(after.cells.iter())
+                                    .all(|(before, after)| before.id == after.id)
+                            })
+                    }
+                    (Some(original), Some(candidate)) => original
+                        .rings
+                        .iter()
+                        .flat_map(|ring| &ring.cells)
+                        .all(|cell| {
+                            candidate.rings.iter().any(|ring| {
+                                ring.cells.iter().any(|candidate| candidate.id == cell.id)
+                            })
+                        }),
+                    _ => false,
+                };
+                let resolution_populated = proposal
+                    .resolution_summary
+                    .as_ref()
+                    .and_then(|_| {
+                        original_menu
+                            .and_then(|menu| {
+                                menu.rings.iter().find(|ring| ring.id == proposal.ring_id)
+                            })
+                            .map(|ring| {
+                                ring.cells
+                                    .iter()
+                                    .skip(proposal.requested_len)
+                                    .filter(|cell| !matches!(&cell.content, CellContent::Spacer))
+                                    .count()
+                            })
+                    })
+                    .unwrap_or(0);
+                (candidate_rings, ids_preserved, resolution_populated)
+            });
+        let resize_prompt_populated = self
+            .resize_prompt
+            .as_ref()
+            .map_or(0, |plan| plan.populated_removed.len());
+        acceptance_trace::emit_designer_geometry_state(DesignerGeometryState {
+            session_id: session.editor_session.0,
+            menu_count: session.draft.menus.len(),
+            selected_menu_index,
+            ring_count: selected_menu.map_or(0, |menu| menu.rings.len()),
+            selected_ring_index,
+            selected_ring_slots: selected_ring.map_or(0, |ring| ring.cells.len()),
+            requested_slots,
+            selected_ring_populated: selected_ring.map_or(0, |ring| {
+                ring.cells
+                    .iter()
+                    .filter(|cell| !matches!(&cell.content, CellContent::Spacer))
+                    .count()
+            }),
+            menu_populated,
+            draft_cell_ids_digest,
+            proposal_cell_ids_digest: proposal_cell_ids_digest.unwrap_or_default(),
+            proposal_cell_ids_digest_available: proposal_cell_ids_digest.is_some(),
+            proposal_kind,
+            proposal_active: proposal.is_some(),
+            proposal_ready,
+            proposal_slots: proposal.map_or(0, |proposal| proposal.requested_len),
+            proposal_candidate_rings,
+            proposal_resolution_populated,
+            proposal_cell_ids_preserved,
+            resize_prompt_open: self.resize_prompt.is_some(),
+            resize_prompt_populated,
+            generation: session.generation.0,
+        });
     }
 
     fn tree(
@@ -3846,7 +4232,7 @@ impl RadialEditorState {
         };
         let menus = session.draft.menus.clone();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for menu in &menus {
+            for (menu_index, menu) in menus.iter().enumerate() {
                 let menu_selected =
                     session.selection == Some(StableSelection::Menu(menu.id.clone()));
                 let expansion_key = format!("menu:{}", menu.id);
@@ -3983,6 +4369,17 @@ impl RadialEditorState {
                             );
                         }
                     });
+                trace_designer_authoring_control(
+                    ui,
+                    &header.header_response,
+                    DesignerAuthoringTarget::MenuRow,
+                    DesignerAuthoringRole::Selectable,
+                    Some(menu_index),
+                    true,
+                    menu_selected,
+                    viewport,
+                    trace_correlation(Some(session)),
+                );
                 if menu.id == session.draft.default_menu_id {
                     trace_designer_semantic_target(
                         ui,
@@ -4856,6 +5253,7 @@ impl RadialEditorState {
 
     fn prompts(&mut self, ctx: &egui::Context) {
         if self.close_prompt {
+            let correlation = trace_correlation(self.session.as_ref());
             egui::Window::new("Unsaved radial changes")
                 .collapsible(false)
                 .resizable(false)
@@ -4875,7 +5273,19 @@ impl RadialEditorState {
                             self.close_prompt = false;
                             self.send_commit(CommitDisposition::Save);
                         }
-                        if ui.button("Discard").clicked() {
+                        let response = ui.button("Discard");
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::DiscardDraft,
+                            DesignerAuthoringRole::Button,
+                            None,
+                            true,
+                            false,
+                            ViewportClass::Deferred,
+                            correlation,
+                        );
+                        if response.clicked() {
                             self.close_intent = CloseIntent::DiscardRequested;
                             if let Some(session) = self.session.as_mut() {
                                 session.request_discard_close_intent();
@@ -4962,12 +5372,25 @@ impl RadialEditorState {
             });
         }
         if let Some(plan) = self.resize_prompt.clone() {
+            let correlation = trace_correlation(self.session.as_ref());
             egui::Window::new("Resolve populated cells").show(ctx, |ui| {
                 ui.label(format!(
                     "{} populated cells would be removed.",
                     plan.populated_removed.len()
                 ));
-                if ui.button("Move to overflow ring").clicked() {
+                let response = ui.button("Move to overflow ring");
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::MoveToOverflow,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    true,
+                    false,
+                    ViewportClass::Deferred,
+                    correlation,
+                );
+                if response.clicked() {
                     let proposal = self.session.as_mut().map(|session| {
                         let overflow_id = session.allocate_ring_id("overflow");
                         menu::propose_resolved_resize(
@@ -5025,7 +5448,19 @@ impl RadialEditorState {
                         }
                     }
                 }
-                if ui.button("Discard cells").clicked() {
+                let response = ui.button("Discard cells");
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::DiscardCells,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    true,
+                    false,
+                    ViewportClass::Deferred,
+                    correlation,
+                );
+                if response.clicked() {
                     let proposal = self.session.as_ref().map(|session| {
                         menu::propose_resolved_resize(
                             &session.draft,
@@ -5046,7 +5481,19 @@ impl RadialEditorState {
                         None => {}
                     }
                 }
-                if ui.button("Cancel").clicked() {
+                let response = ui.button("Cancel");
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::CancelResolution,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    true,
+                    false,
+                    ViewportClass::Deferred,
+                    correlation,
+                );
+                if response.clicked() {
                     self.resize_prompt = None;
                 }
             });
@@ -6635,6 +7082,7 @@ mod tests {
     impl RetainedDesignerDriver {
         fn new(editor: RadialEditorState) -> Self {
             let context = egui::Context::default();
+            context.enable_accesskit();
             context.set_pixels_per_point(1.0);
             let frame = DesignerFrameContext {
                 feature_defaults: crate::radial::model::RadialFeatureSettings::default(),
@@ -6744,6 +7192,7 @@ mod tests {
         assert!(!preferences.inspector_visible);
         let canvas_only = designer_pane_layout(
             egui::vec2(900.0, 650.0),
+            4.0,
             preferences.tree_visible,
             preferences.inspector_visible,
             preferences.tree_width,
@@ -6752,24 +7201,42 @@ mod tests {
         assert!(canvas_only.canvas_width >= 899.0);
         let compact = designer_pane_layout(
             egui::vec2(700.0, 470.0),
+            4.0,
             true,
             true,
             preferences.tree_width,
             preferences.inspector_width,
         );
         assert!(compact.canvas_width > 0.0);
-        assert!(compact.height <= 470.0);
+        assert!(compact.height + 4.0 <= 470.0);
         assert!(
             compact.tree_width + compact.canvas_width + compact.inspector_width + 12.0 <= 700.01
         );
         let one_pane = designer_pane_layout(
             egui::vec2(700.0, 470.0),
+            4.0,
             true,
             false,
             preferences.tree_width,
             preferences.inspector_width,
         );
         assert!(one_pane.tree_width + one_pane.canvas_width + 6.0 <= 700.01);
+    }
+
+    #[test]
+    fn compact_designer_pane_reserves_the_trailing_item_spacing() {
+        let preferences = crate::settings::RadialDesignerPreferences::default();
+        let layout = designer_pane_layout(
+            egui::vec2(624.0, 299.0),
+            4.0,
+            true,
+            true,
+            preferences.tree_width,
+            preferences.inspector_width,
+        );
+
+        assert_eq!(layout.height, 295.0);
+        assert!(layout.height + 4.0 <= 299.0);
     }
 
     #[test]

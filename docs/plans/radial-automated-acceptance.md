@@ -17,7 +17,7 @@ Approved specification: [automated acceptance plan](../multi_launcher_radial_aut
 | A. Deterministic input and headless Designer acceptance; native runner foundation | complete | Exact fake-time chord regression and retained `viewport_ui` driver passed the focused two-test gate. The opt-in runner currently reports preflight only; native acceptance is pending B. |
 | B. Isolated native runner and failure evidence | complete | Source-matched Win32 run produced case reports, checked per-edge input evidence, trace/window artifacts and screenshots; the failed cases now identify hook admission and Designer semantic discovery rather than relying on manual interaction. |
 | C. Focused ROOT and Designer root-cause remediation | complete | Native immediate and quiescent runs each passed all 13 current cases, including H2/H3/H6, Designer interaction, and cleanup. H6 observes both radial HWNDs and rejects any newly active radial-class HWND. |
-| D. Basic authoring and copied-profile acceptance | pending | |
+| D. Basic authoring and copied-profile acceptance | in_progress | D1 native geometry authoring passed 19/19 cases with cleanup and independent review. Action/style/persistence/lifecycle and copied-profile passes remain. |
 | Final verification and independent review | pending | |
 
 ## Milestone A verification
@@ -50,3 +50,11 @@ Approved specification: [automated acceptance plan](../multi_launcher_radial_aut
 - Source-matched native immediate report: `C:\Users\Jay\AppData\Local\Temp\multi-launcher-radial-acceptance-c-hook-final2-immediate-20260923-01\report.json`; all 13 cases passed, H5-to-H6 interval 9 ms, no trace-budget exhaustion.
 - Source-matched native quiescent report: `C:\Users\Jay\AppData\Local\Temp\multi-launcher-radial-acceptance-c-hook-final2-quiescent-20260923-01\report.json`; all 13 cases passed with a checked F24 between holds, no trace-budget exhaustion.
 - Both reports identify candidate SHA256 `e74be2fced49cb2e46dd4cf77d82ea6587d6578d1c8b4587b0962195b419790a` and runner SHA256 `4ae464e84ebe792a22f3a8e2b0f1b0825de7531d547094304621d592c62808de` against base commit `140474fa93f9a2b6d05a8dffad113b0622282875`.
+
+## Milestone D1 completion: native geometry authoring
+
+- The runner uses session-scoped, typed production Designer controls and geometry trace, then performs process/client-validated native input. A0 New Menu, A1 ready nonmutating Add Ring proposal, G0 explicit Apply, A2 Slots growth with committed stable cell IDs, G1 populated shrink Cancel and Move to overflow, and G2 compact controls/canvas bounds all passed. The native report also retained the H/D cases and verified production Discard plus terminal Designer HWND close.
+- Review found and resolved three oracle gaps: G2 now requires fresh controls rendered at the checked compact client size; G0/A2/G1 compare privacy-safe committed cell-ID fingerprints after Apply; and blocked case reporting fills missing IDs including G0. The compact Designer pane now reserves actual trailing egui item spacing. The retained headless AccessKit driver enables accessibility before its initial frame.
+- `cargo test --bin radial_acceptance`: 22/22 passed. `cargo test --lib gui::radial_editor::tests::`: 31/31 passed. `cargo fmt --all -- --check`, `git diff --check`, and `cargo build --bin multi_launcher --bin radial_acceptance`: passed. The complete Nextest gate remains for final verification.
+- Source-matched native report: `C:\Users\Jay\AppData\Local\Temp\multi-launcher-radial-acceptance-d1-review-20260923-08\report.json`, 19/19 cases passed with normal child close, temporary profile removal, foreground and cursor restoration, and input desktop release. Bounded 4096-event trace did not exhaust. Candidate SHA256 `5c9568d56e035888ee62611003f818de752ee1c2c381ff3d6f316b61104af638`; runner SHA256 `d67e855ce2a2ac491fe751b7f192fc34bc7740d02294beb231ea8145e5d02b6a`; report SHA256 `04e4cf554ace4d99f1d32063473e8821ec0dec65803ad6230eac51e2d8eb9a5d`.
+- Independent read-only review closed all three D1 findings and identified no remaining actionable issue in this milestone.
