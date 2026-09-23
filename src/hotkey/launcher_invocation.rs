@@ -2324,55 +2324,116 @@ mod tests {
     }
 
     #[test]
-    fn configured_chord_accepts_admitted_external_tap_with_full_release() {
-        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
-        for vk in [0xA0, 0xA4, 0x5B] {
-            adapter.process(
-                external_e(vk, KeyTransition::Down, 0),
+    fn exact_shift_alt_win_end_chord_uses_fake_time_for_tap_and_hold() {
+        for provenance in [InputProvenance::Physical, InputProvenance::ExternalInjected] {
+            let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+            let event = |vk, transition, at| KeyEvent {
+                vk,
+                transition,
+                at,
+                provenance,
+            };
+            let modifiers = [0xA0, 0xA4, 0x5B]; // Shift, Alt, Windows.
+
+            for (index, vk) in modifiers.iter().copied().enumerate() {
+                assert!(
+                    !adapter
+                        .process(
+                            event(vk, KeyTransition::Down, index as u64),
+                            PriorityOwner::Launcher,
+                        )
+                        .consume
+                );
+            }
+            let down_at = modifiers.len() as u64;
+            let tap_down = adapter.process(
+                event(0x23, KeyTransition::Down, down_at), // End.
                 PriorityOwner::Launcher,
             );
-        }
-        let down = adapter.process(
-            external_e(0x23, KeyTransition::Down, 10),
-            PriorityOwner::Launcher,
-        );
-        let id = match down.intents.as_slice() {
-            [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
-            other => panic!("unexpected tap intents: {other:?}"),
-        };
-        let repeat = adapter.process(
-            external_e(0x23, KeyTransition::Repeat, 20),
-            PriorityOwner::Launcher,
-        );
-        assert!(repeat.consume && repeat.intents.is_empty());
-        let release = adapter.process(
-            external_e(0x23, KeyTransition::Up, 100),
-            PriorityOwner::Launcher,
-        );
-        assert!(matches!(
-            release.intents.as_slice(),
-            [InvocationIntent::CancelDeadline { id: cancelled }, InvocationIntent::ToggleLegacyLauncher { id: toggled }]
-                if *cancelled == id && *toggled == id
-        ));
-        for vk in [0xA0, 0xA4, 0x5B] {
-            assert!(
-                !adapter
-                    .process(
-                        external_e(vk, KeyTransition::Up, 110),
-                        PriorityOwner::Launcher,
-                    )
-                    .consume
+            let tap_id = match tap_down.intents.as_slice() {
+                [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
+                other => panic!("unexpected exact-chord tap intents: {other:?}"),
+            };
+            let repeat = adapter.process(
+                event(0x23, KeyTransition::Repeat, down_at + 1),
+                PriorityOwner::Launcher,
             );
-        }
-        assert!(
-            adapter
-                .process(
-                    external_e(0x23, KeyTransition::Up, 120),
+            assert!(repeat.consume && repeat.intents.is_empty());
+
+            let threshold = adapter.config().threshold_ms;
+            let tap_release_at = down_at + threshold - 1;
+            let tap_release = adapter.process(
+                event(0x23, KeyTransition::Up, tap_release_at),
+                PriorityOwner::Launcher,
+            );
+            assert!(matches!(
+                tap_release.intents.as_slice(),
+                [InvocationIntent::CancelDeadline { id: cancelled }, InvocationIntent::ToggleLegacyLauncher { id: toggled }]
+                    if *cancelled == tap_id && *toggled == tap_id
+            ));
+            for (index, vk) in modifiers.iter().copied().rev().enumerate() {
+                let release = adapter.process(
+                    event(vk, KeyTransition::Up, tap_release_at + index as u64 + 1),
                     PriorityOwner::Launcher,
-                )
-                .intents
-                .is_empty()
-        );
+                );
+                assert!(!release.consume && release.intents.is_empty());
+            }
+            assert!(!adapter.has_owned_cycle());
+
+            // A full release immediately admits a new exact chord cycle. At
+            // the configured deadline, the held End key produces one radial
+            // open and its later release cannot turn into a grid tap.
+            let hold_start = tap_release_at + 10;
+            for (index, vk) in modifiers.iter().copied().enumerate() {
+                adapter.process(
+                    event(vk, KeyTransition::Down, hold_start + index as u64),
+                    PriorityOwner::Launcher,
+                );
+            }
+            let hold_down_at = hold_start + modifiers.len() as u64;
+            let hold_down = adapter.process(
+                event(0x23, KeyTransition::Down, hold_down_at),
+                PriorityOwner::Launcher,
+            );
+            let hold_id = match hold_down.intents.as_slice() {
+                [InvocationIntent::ScheduleDeadline { id, .. }] => *id,
+                other => panic!("unexpected exact-chord hold intents: {other:?}"),
+            };
+            let hold = adapter.deadline(hold_id, hold_down_at + threshold, 4);
+            assert!(matches!(
+                hold.as_slice(),
+                [InvocationIntent::OpenRadial { id, .. }] if *id == hold_id
+            ));
+            adapter.feedback(InvocationEvent::RadialSessionOpened {
+                id: hold_id,
+                session_id: SessionId::new("acceptance-session"),
+            });
+            let hold_release = adapter.process(
+                event(0x23, KeyTransition::Up, hold_down_at + threshold + 1),
+                PriorityOwner::Launcher,
+            );
+            assert!(matches!(
+                hold_release.intents.as_slice(),
+                [InvocationIntent::TriggerReleased { id }] if *id == hold_id
+            ));
+            assert!(
+                !hold_release
+                    .intents
+                    .iter()
+                    .any(|intent| matches!(intent, InvocationIntent::ToggleLegacyLauncher { .. }))
+            );
+            for (index, vk) in modifiers.iter().copied().rev().enumerate() {
+                adapter.process(
+                    event(
+                        vk,
+                        KeyTransition::Up,
+                        hold_down_at + threshold + index as u64 + 2,
+                    ),
+                    PriorityOwner::Launcher,
+                );
+            }
+            assert!(!adapter.has_owned_cycle());
+        }
     }
     #[test]
     fn delayed_release_to_select_cancels_without_opening_a_late_surface() {

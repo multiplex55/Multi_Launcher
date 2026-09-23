@@ -6343,6 +6343,118 @@ fn open_designer_file_dialog(request: &DesignerFileDialogRequest) -> DesignerFil
 mod tests {
     use super::*;
 
+    struct RetainedDesignerDriver {
+        context: egui::Context,
+        editor: RadialEditorState,
+        frame: DesignerFrameContext,
+    }
+
+    impl RetainedDesignerDriver {
+        fn new(editor: RadialEditorState) -> Self {
+            let context = egui::Context::default();
+            context.enable_accesskit();
+            context.set_pixels_per_point(1.0);
+            let frame = DesignerFrameContext {
+                feature_defaults: crate::radial::model::RadialFeatureSettings::default(),
+                expected_diagnostics: Vec::new(),
+                action_catalog:
+                    crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot {
+                        entries: Vec::new(),
+                        recent_entries: Vec::new(),
+                        dashboard: std::sync::Arc::new(
+                            crate::dashboard::DashboardDataSnapshot::default(),
+                        ),
+                    },
+                require_confirm_destructive: false,
+                intent_bridge: std::sync::Arc::clone(&editor.intent_bridge),
+            };
+            Self {
+                context,
+                editor,
+                frame,
+            }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 720.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let frame = &self.frame;
+            let editor = &mut self.editor;
+            self.context.run(input, |ctx| {
+                editor.viewport_ui(ctx, frame, egui::ViewportClass::Deferred);
+            })
+        }
+    }
+
+    fn accesskit_named_bounds(
+        output: &egui::FullOutput,
+        name: &str,
+        role: egui::accesskit::Role,
+    ) -> egui::Rect {
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("AccessKit tree update");
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == role && node.name() == Some(name))
+            .unwrap_or_else(|| panic!("missing {role:?} named {name:?} in AccessKit tree"));
+        let bounds = node.bounds().expect("semantic control bounds");
+        egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+        )
+    }
+
+    fn accesskit_value_bounds(
+        output: &egui::FullOutput,
+        role: egui::accesskit::Role,
+        value: &str,
+    ) -> egui::Rect {
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("AccessKit tree update");
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == role && node.value() == Some(value))
+            .unwrap_or_else(|| panic!("missing {role:?} with value {value:?} in AccessKit tree"));
+        let bounds = node.bounds().expect("semantic control bounds");
+        egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+        )
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers, pressed: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn pointer_button_event(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
     #[test]
     fn default_designer_layout_is_canvas_first_and_panes_fit_compact_windows() {
         let preferences = crate::settings::RadialDesignerPreferences::default();
@@ -7168,6 +7280,165 @@ mod tests {
                 && node.name() == Some("text.visible")
                 && node.checked() == Some(egui::accesskit::Checked::False)
         }));
+    }
+
+    #[test]
+    fn retained_headless_viewport_accepts_semantic_click_after_snapshot_and_tabs() {
+        use crate::radial::authoring::{
+            AuthoringReply, AuthoringSnapshot, RadialAuthoringSession, authoring_control_service,
+        };
+
+        let (client, endpoint) = authoring_control_service();
+        let placeholder = std::sync::Arc::new(RadialDocument::starter());
+        let mut session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::clone(&placeholder),
+            "headless-placeholder",
+        ));
+        session.require_authoritative_snapshot();
+        let request = session
+            .request_snapshot()
+            .expect("initial snapshot request");
+        let (request_id, generation, editor_session) =
+            (request.id(), request.generation(), request.editor_session());
+        client.send(request).expect("enqueue snapshot request");
+        assert!(matches!(
+            endpoint.request_rx.try_recv(),
+            Ok(crate::radial::authoring::AuthoringRequest::Snapshot { .. })
+        ));
+
+        let mut editor = RadialEditorState::default();
+        editor.open = true;
+        editor.client = Some(client);
+        editor.session = Some(session);
+        let mut driver = RetainedDesignerDriver::new(editor);
+
+        let initial = driver.frame(Vec::new());
+        assert!(
+            driver
+                .editor
+                .session
+                .as_ref()
+                .is_some_and(RadialAuthoringSession::is_initial_snapshot_pending)
+        );
+        assert!(
+            initial
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("initial AccessKit tree")
+                .nodes
+                .iter()
+                .any(|(_, node)| node.name().is_some_and(
+                    |name| name.contains("Loading the authoritative radial configuration")
+                ))
+        );
+        let pending_click =
+            accesskit_named_bounds(&initial, "New Menu", egui::accesskit::Role::Button).center();
+        let (pending_menu_count, pending_generation) = {
+            let session = driver.editor.session.as_ref().expect("authoring session");
+            (session.draft.menus.len(), session.generation)
+        };
+        let _ = driver.frame(vec![egui::Event::PointerMoved(pending_click)]);
+        let _ = driver.frame(vec![pointer_button_event(pending_click, true)]);
+        let _ = driver.frame(vec![pointer_button_event(pending_click, false)]);
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert!(session.is_initial_snapshot_pending());
+        assert_eq!(session.draft.menus.len(), pending_menu_count);
+        assert_eq!(session.generation, pending_generation);
+        assert!(!session.is_dirty());
+
+        let mut authoritative = RadialDocument::starter();
+        authoritative.menus[0].name = "Authoritative fixture".to_string();
+        endpoint
+            .reply_tx
+            .send(AuthoringReply::Snapshot {
+                id: request_id,
+                generation,
+                editor_session,
+                snapshot: AuthoringSnapshot::new(
+                    std::sync::Arc::new(authoritative),
+                    "headless-authoritative",
+                ),
+            })
+            .expect("enqueue matching snapshot reply");
+
+        let enabled = driver.frame(Vec::new());
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert!(!session.is_initial_snapshot_pending());
+        assert_eq!(session.draft.menus[0].name, "Authoritative fixture");
+        let mut menus_before = session.draft.menus.len();
+        let mut generation_before = session.generation;
+        let add_menu = accesskit_named_bounds(&enabled, "New Menu", egui::accesskit::Role::Button);
+        let click_at = add_menu.center();
+
+        let _ = driver.frame(vec![egui::Event::PointerMoved(click_at)]);
+        let _ = driver.frame(vec![pointer_button_event(click_at, true)]);
+        let _ = driver.frame(vec![pointer_button_event(click_at, false)]);
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert_eq!(session.draft.menus.len(), menus_before + 1);
+        assert!(session.is_dirty());
+        assert!(session.generation > generation_before);
+        menus_before = session.draft.menus.len();
+        generation_before = session.generation;
+
+        let after_click = driver.frame(Vec::new());
+        assert!(
+            after_click
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .is_some_and(|update| !update.nodes.is_empty())
+        );
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().draft.menus.len(),
+            menus_before
+        );
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().generation,
+            generation_before
+        );
+
+        let inspector_button = accesskit_named_bounds(
+            &after_click,
+            "Inspector",
+            egui::accesskit::Role::ToggleButton,
+        );
+        let inspector_click = inspector_button.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(inspector_click)]);
+        let _ = driver.frame(vec![pointer_button_event(inspector_click, true)]);
+        let inspector_toggled = driver.frame(vec![pointer_button_event(inspector_click, false)]);
+        assert!(driver.editor.inspector_visible);
+        let menu_name = accesskit_value_bounds(
+            &inspector_toggled,
+            egui::accesskit::Role::TextInput,
+            "New menu",
+        );
+        let menu_name_click = menu_name.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(menu_name_click)]);
+        let _ = driver.frame(vec![pointer_button_event(menu_name_click, true)]);
+        let _ = driver.frame(vec![pointer_button_event(menu_name_click, false)]);
+
+        let before_tab = driver.context.memory(|memory| memory.focused());
+        assert!(
+            before_tab.is_some(),
+            "clicking the semantic menu-name TextInput gives it egui focus"
+        );
+        let _ = driver.frame(vec![key_event(
+            egui::Key::Tab,
+            egui::Modifiers::default(),
+            true,
+        )]);
+        let after_tab_press = driver.context.memory(|memory| memory.focused());
+        assert!(
+            after_tab_press.is_some(),
+            "Tab keeps an eligible control focused"
+        );
+        assert_ne!(after_tab_press, before_tab, "Tab moves egui keyboard focus");
+        let _ = driver.frame(vec![key_event(
+            egui::Key::Tab,
+            egui::Modifiers::default(),
+            false,
+        )]);
     }
 
     #[test]
