@@ -28,8 +28,9 @@ use windows::Win32::System::StationsAndDesktops::{
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetCurrentThreadId,
-    GetExitCodeProcess, GetExitCodeThread, OpenThread, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOW, THREAD_QUERY_LIMITED_INFORMATION, TerminateProcess, WaitForSingleObject,
+    GetExitCodeProcess, GetExitCodeThread, GetProcessIdOfThread, OpenThread, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOW, THREAD_QUERY_LIMITED_INFORMATION, TerminateProcess,
+    WaitForSingleObject,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
@@ -42,18 +43,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_VIRTUALDESK,
     MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_F4,
-    VK_F11, VK_F24, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU,
-    VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+    VK_F11, VK_F24, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
+    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, GetClientRect,
-    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsChild, IsIconic, IsWindowVisible, KBDLLHOOKSTRUCT,
-    PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos, SetForegroundWindow,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINDOW_STYLE,
-    WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_CAPTION,
-    WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE, WindowFromPoint,
+    CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, GetClassNameW,
+    GetClientRect, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsChild, IsIconic,
+    IsWindowVisible, KBDLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos,
+    SetForegroundWindow, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WS_CAPTION, WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::w;
 use windows::core::{Interface, PCWSTR, PWSTR, VARIANT};
@@ -72,11 +73,15 @@ struct RunnerHookEdge {
 const TRACE_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
 const ROOT_TITLE: &str = "Multi Lnchr";
 const DESIGNER_TITLE: &str = "Radial Designer";
+pub(super) const RADIAL_HOST_WINDOW_CLASS: &str = "MultiLauncherRadialHost";
 const WINDOW_POLL: Duration = Duration::from_millis(25);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const CASE_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_ENUMERATED_WINDOWS: usize = 256;
 const ACCEPTANCE_HOTKEY_ID: i32 = 0x4D4C;
+// Keep this acceptance-only pump probe message aligned with
+// native_service::WM_HOOK_PUMP_PROBE in hotkey/launcher_invocation.rs.
+const HOOK_PUMP_PROBE_MESSAGE: u32 = WM_APP + 0x54;
 
 pub(super) struct InputDesktopAttachment {
     previous: HDESK,
@@ -169,7 +174,10 @@ impl RunnerHookObservation {
 
 pub(super) struct RunnerHookObserver {
     events: std::sync::mpsc::Receiver<RunnerHookEdge>,
+    probe_acks: std::sync::mpsc::Receiver<u64>,
+    unhook_result: std::sync::mpsc::Receiver<Result<(), String>>,
     thread_id: u32,
+    hook_id: usize,
     join: Option<std::thread::JoinHandle<()>>,
     desktop: String,
 }
@@ -177,6 +185,8 @@ pub(super) struct RunnerHookObserver {
 impl RunnerHookObserver {
     pub fn start() -> Result<Self, String> {
         let (event_tx, events) = std::sync::mpsc::channel();
+        let (probe_ack_tx, probe_acks) = std::sync::mpsc::channel();
+        let (unhook_result_tx, unhook_result) = std::sync::mpsc::sync_channel(1);
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let join = std::thread::Builder::new()
             .name("radial-acceptance-hook-observer".into())
@@ -211,21 +221,30 @@ impl RunnerHookObserver {
                         return;
                     }
                 };
-                if ready_tx.send(Ok((thread_id, desktop))).is_err() {
+                if ready_tx
+                    .send(Ok((thread_id, desktop, hook.0 as usize)))
+                    .is_err()
+                {
                     let _ = unsafe { UnhookWindowsHookEx(hook) };
                     RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = None);
                     return;
                 }
                 let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
                 while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+                    if message.message == HOOK_PUMP_PROBE_MESSAGE {
+                        let _ = probe_ack_tx.send(message.wParam.0 as u64);
+                        continue;
+                    }
                     let _ = unsafe { TranslateMessage(&message) };
                     unsafe { DispatchMessageW(&message) };
                 }
-                let _ = unsafe { UnhookWindowsHookEx(hook) };
+                let unhook_result = unsafe { UnhookWindowsHookEx(hook) }
+                    .map_err(|error| format!("unhook acceptance observer HHOOK: {error}"));
+                let _ = unhook_result_tx.send(unhook_result);
                 RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = None);
             })
             .map_err(|error| format!("start acceptance hook observer: {error}"))?;
-        let (thread_id, desktop) = match ready_rx.recv_timeout(Duration::from_secs(2)) {
+        let (thread_id, desktop, hook_id) = match ready_rx.recv_timeout(Duration::from_secs(2)) {
             Ok(Ok(ready)) => ready,
             Ok(Err(error)) => {
                 let _ = join.join();
@@ -237,7 +256,10 @@ impl RunnerHookObserver {
         };
         Ok(Self {
             events,
+            probe_acks,
+            unhook_result,
             thread_id,
+            hook_id,
             join: Some(join),
             desktop,
         })
@@ -280,23 +302,130 @@ impl RunnerHookObserver {
         }
     }
 
+    pub fn drain_pending(&mut self) -> usize {
+        let mut drained = 0;
+        while self.events.try_recv().is_ok() {
+            drained += 1;
+        }
+        drained
+    }
+
+    pub fn wait_for_vk_edge(
+        &mut self,
+        vk: u32,
+        down: bool,
+        timeout: Duration,
+    ) -> RunnerHookObservation {
+        let deadline = Instant::now() + timeout;
+        let mut observed = false;
+        let mut injected = false;
+        while !observed {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match self
+                .events
+                .recv_timeout(deadline.saturating_duration_since(now))
+            {
+                Ok(edge) if edge.vk == vk && edge.down == down => {
+                    observed = true;
+                    injected = edge.injected;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        RunnerHookObservation {
+            desktop: self.desktop.clone(),
+            down_seen: observed && down,
+            up_seen: observed && !down,
+            down_injected: observed && down && injected,
+            up_injected: observed && !down && injected,
+        }
+    }
+
     pub fn thread_id(&self) -> u32 {
         self.thread_id
     }
 
-    fn stop(&mut self) {
+    pub fn hook_id(&self) -> usize {
+        self.hook_id
+    }
+
+    pub fn pump_roundtrip(&self, probe_id: u64, timeout: Duration) -> Result<(), String> {
+        unsafe {
+            PostThreadMessageW(
+                self.thread_id,
+                HOOK_PUMP_PROBE_MESSAGE,
+                WPARAM(probe_id as usize),
+                LPARAM(0),
+            )
+        }
+        .map_err(|error| format!("post runner hook-pump probe: {error}"))?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(format!(
+                    "runner hook thread {} did not acknowledge pump probe {probe_id}",
+                    self.thread_id
+                ));
+            }
+            match self
+                .probe_acks
+                .recv_timeout(deadline.saturating_duration_since(now))
+            {
+                Ok(acknowledged) if acknowledged == probe_id => return Ok(()),
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(format!(
+                        "runner hook thread {} pump probe {probe_id} acknowledgement failed: {error}",
+                        self.thread_id
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn stop_and_report(&mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
         if self.thread_id != 0 && self.join.is_some() {
-            let _ = unsafe {
+            if let Err(error) = unsafe {
                 PostThreadMessageW(
                     self.thread_id,
                     WM_QUIT,
                     windows::Win32::Foundation::WPARAM(0),
                     windows::Win32::Foundation::LPARAM(0),
                 )
-            };
+            } {
+                errors.push(format!(
+                    "post WM_QUIT to acceptance observer thread {}: {error}",
+                    self.thread_id
+                ));
+            }
         }
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            if join.join().is_err() {
+                errors.push(format!(
+                    "acceptance observer thread {} panicked while stopping",
+                    self.thread_id
+                ));
+            }
+        }
+        match self.unhook_result.recv_timeout(Duration::from_secs(1)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => errors.push(error),
+            Err(error) => errors.push(format!(
+                "acceptance observer thread {} did not report UnhookWindowsHookEx: {error}",
+                self.thread_id
+            )),
+        }
+        self.thread_id = 0;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
         }
     }
 }
@@ -319,9 +448,37 @@ pub(super) fn thread_liveness(thread_id: u32) -> String {
     }
 }
 
+pub(super) fn post_validated_hook_pump_probe(
+    thread_id: u32,
+    expected_process_id: u32,
+    probe_id: u64,
+) -> Result<(), String> {
+    if thread_id == 0 {
+        return Err("refused hook-pump probe to thread id 0".into());
+    }
+    let handle = unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, thread_id) }
+        .map_err(|error| format!("open hook thread {thread_id} for validation: {error}"))?;
+    let process_id = unsafe { GetProcessIdOfThread(handle) };
+    let _ = unsafe { CloseHandle(handle) };
+    if process_id != expected_process_id {
+        return Err(format!(
+            "refused hook-pump probe: thread {thread_id} belongs to PID {process_id}, expected PID {expected_process_id}"
+        ));
+    }
+    unsafe {
+        PostThreadMessageW(
+            thread_id,
+            HOOK_PUMP_PROBE_MESSAGE,
+            WPARAM(probe_id as usize),
+            LPARAM(0),
+        )
+    }
+    .map_err(|error| format!("post production hook-pump probe: {error}"))
+}
+
 impl Drop for RunnerHookObserver {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop_and_report();
     }
 }
 
@@ -360,10 +517,19 @@ unsafe extern "system" fn runner_hook_proc(
 
 #[derive(Clone, Debug)]
 pub(super) struct PointerClickEvidence {
+    pub nudge_movement: NativeInputEdgeEvidence,
     pub movement: NativeInputEdgeEvidence,
+    pub pointer_position_preexisting_ack: bool,
+    pub pointer_move_acknowledged: bool,
     pub down: NativeInputEdgeEvidence,
+    pub down_acknowledged: bool,
+    pub left_button_state_after_down: i16,
+    pub left_button_state_before_up: i16,
     pub up: NativeInputEdgeEvidence,
+    pub up_acknowledged: bool,
+    pub left_button_state_after_up: i16,
     pub target_hwnd: HWND,
+    pub nudge_under_cursor_hwnd: HWND,
     pub under_cursor_hwnd: HWND,
     pub foreground_hwnd: HWND,
     pub screen_point: (i32, i32),
@@ -372,15 +538,24 @@ pub(super) struct PointerClickEvidence {
 impl PointerClickEvidence {
     pub fn describe(&self) -> String {
         format!(
-            "screen_point=({},{}), target_hwnd={}, under_cursor_hwnd={}, foreground_hwnd={}, move=[{}], down=[{}], up=[{}]",
+            "screen_point=({},{}), target_hwnd={}, nudge_under_cursor_hwnd={}, under_cursor_hwnd={}, foreground_hwnd={}, preexisting_egui_pointer_ack={}, fresh_egui_pointer_move_ack={}, nudge_move=[{}], move=[{}], down=[{}], root_or_designer_down_ack={}, left_button_async_after_down=0x{:04x}, left_button_async_before_up=0x{:04x}, up=[{}], root_or_designer_up_ack={}, left_button_async_after_up=0x{:04x}",
             self.screen_point.0,
             self.screen_point.1,
             hwnd_id(self.target_hwnd),
+            hwnd_id(self.nudge_under_cursor_hwnd),
             hwnd_id(self.under_cursor_hwnd),
             hwnd_id(self.foreground_hwnd),
+            self.pointer_position_preexisting_ack,
+            self.pointer_move_acknowledged,
+            self.nudge_movement.describe(),
             self.movement.describe(),
             self.down.describe(),
-            self.up.describe()
+            self.down_acknowledged,
+            self.left_button_state_after_down as u16,
+            self.left_button_state_before_up as u16,
+            self.up.describe(),
+            self.up_acknowledged,
+            self.left_button_state_after_up as u16
         )
     }
 }
@@ -520,6 +695,7 @@ pub(super) struct WindowSnapshot {
     pub hwnd: HWND,
     pub process_id: u32,
     pub role: WindowRole,
+    pub class_name: String,
     pub visible: bool,
     pub minimized: bool,
     pub bounds: [i32; 4],
@@ -680,6 +856,7 @@ impl FocusAnchor {
             hwnd: self.hwnd,
             process_id: self.process_id,
             role: WindowRole::OtherChild,
+            class_name: window_class_name(self.hwnd),
             visible: unsafe { IsWindowVisible(self.hwnd) }.as_bool(),
             minimized: unsafe { IsIconic(self.hwnd) }.as_bool(),
             bounds: [rect.left, rect.top, rect.right, rect.bottom],
@@ -1308,6 +1485,7 @@ unsafe extern "system" fn enum_window(hwnd: HWND, parameter: LPARAM) -> BOOL {
         hwnd,
         process_id: state.process_id,
         role,
+        class_name: window_class_name(hwnd),
         visible: unsafe { IsWindowVisible(hwnd) }.as_bool(),
         minimized: unsafe { IsIconic(hwnd) }.as_bool(),
         bounds,
@@ -1331,6 +1509,15 @@ fn window_title(hwnd: HWND) -> String {
     }
     let mut buffer = vec![0_u16; length.saturating_add(1)];
     let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) }.max(0) as usize;
+    String::from_utf16_lossy(&buffer[..copied.min(buffer.len())])
+}
+
+fn window_class_name(hwnd: HWND) -> String {
+    if hwnd.is_invalid() {
+        return String::new();
+    }
+    let mut buffer = [0_u16; 256];
+    let copied = unsafe { GetClassNameW(hwnd, &mut buffer) }.max(0) as usize;
     String::from_utf16_lossy(&buffer[..copied.min(buffer.len())])
 }
 
@@ -1966,6 +2153,7 @@ pub(super) fn click_semantic_control(
     child: &NativeChild,
     target: &WindowSnapshot,
     control: &SemanticControl,
+    trace_path: &Path,
 ) -> Result<PointerClickEvidence, String> {
     child.validate_window(target.hwnd)?;
     if control.process_id != child.process_id || !control.enabled {
@@ -1978,7 +2166,28 @@ pub(super) fn click_semantic_control(
         x: control.bounds[0] + (control.bounds[2] - control.bounds[0]) / 2,
         y: control.bounds[1] + (control.bounds[3] - control.bounds[1]) / 2,
     };
-    click_screen_point(child, target, point, "semantic click", None)
+    let nudge = adjacent_pointer_point(
+        point,
+        [
+            control.bounds[0],
+            control.bounds[1],
+            control.bounds[2],
+            control.bounds[3],
+        ],
+    )?;
+    click_screen_point(
+        child,
+        target,
+        point,
+        "semantic click",
+        PointerMoveAcknowledgement {
+            trace_path,
+            kind: PointerTraceKind::RootScreen,
+            nudge_screen_point: nudge,
+            nudge_trace_point: (nudge.x, nudge.y),
+            target_trace_point: (point.x, point.y),
+        },
+    )
 }
 
 pub(super) fn click_designer_client_bounds(
@@ -1996,6 +2205,17 @@ pub(super) fn click_designer_client_bounds(
         y: bounds[1] + (bounds[3] - bounds[1]) / 2,
     };
     let client_point = (point.x, point.y);
+    let nudge_client = adjacent_pointer_point(
+        POINT {
+            x: client_point.0,
+            y: client_point.1,
+        },
+        bounds,
+    )?;
+    let mut nudge_screen = nudge_client;
+    if !unsafe { ClientToScreen(target.hwnd, &mut nudge_screen) }.as_bool() {
+        return Err("could not convert Designer pointer nudge to screen coordinates".into());
+    }
     let mut client = RECT::default();
     unsafe { GetClientRect(target.hwnd, &mut client) }
         .map_err(|error| format!("read Designer client bounds: {error}"))?;
@@ -2014,8 +2234,28 @@ pub(super) fn click_designer_client_bounds(
         target,
         point,
         "Designer semantic click",
-        Some((trace_path, client_point)),
+        PointerMoveAcknowledgement {
+            trace_path,
+            kind: PointerTraceKind::DesignerClient,
+            nudge_screen_point: nudge_screen,
+            nudge_trace_point: (nudge_client.x, nudge_client.y),
+            target_trace_point: client_point,
+        },
     )
+}
+
+#[derive(Clone, Copy)]
+enum PointerTraceKind {
+    RootScreen,
+    DesignerClient,
+}
+
+struct PointerMoveAcknowledgement<'a> {
+    trace_path: &'a Path,
+    kind: PointerTraceKind,
+    nudge_screen_point: POINT,
+    nudge_trace_point: (i32, i32),
+    target_trace_point: (i32, i32),
 }
 
 fn click_screen_point(
@@ -2023,7 +2263,7 @@ fn click_screen_point(
     target: &WindowSnapshot,
     point: POINT,
     operation: &str,
-    pointer_move_ack: Option<(&Path, (i32, i32))>,
+    pointer_move_ack: PointerMoveAcknowledgement<'_>,
 ) -> Result<PointerClickEvidence, String> {
     child.validate_window(target.hwnd)?;
     child.focus_window(target)?;
@@ -2047,19 +2287,68 @@ fn click_screen_point(
     {
         return Err("semantic click point lies outside the target client area".into());
     }
+    let cursor_before_move = cursor_position()?;
+    let pointer_position_preexisting_ack = cursor_before_move.x == point.x
+        && cursor_before_move.y == point.y
+        && matches!(pointer_move_ack.kind, PointerTraceKind::RootScreen)
+        && latest_root_pointer_acknowledged(
+            pointer_move_ack.trace_path,
+            pointer_move_ack.target_trace_point,
+        )?;
+    let nudge_screen_point = pointer_move_ack.nudge_screen_point;
+    if nudge_screen_point.x < top_left.x
+        || nudge_screen_point.y < top_left.y
+        || nudge_screen_point.x >= bottom_right.x
+        || nudge_screen_point.y >= bottom_right.y
+    {
+        return Err(format!(
+            "{operation} pointer nudge {:?} lies outside the target client area",
+            (nudge_screen_point.x, nudge_screen_point.y)
+        ));
+    }
+    let trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
+    if !unsafe { SetCursorPos(nudge_screen_point.x, nudge_screen_point.y) }.is_ok() {
+        return Err("could not move cursor to the semantic control nudge point".into());
+    }
+    let nudge_under_cursor = validate_pointer_coverage(
+        target.hwnd,
+        child.process_id(),
+        nudge_screen_point,
+        operation,
+    )?;
+    let nudge_movement = [mouse_move_input(nudge_screen_point)?];
+    let nudge_movement = send_validated_input(
+        target.hwnd,
+        child.process_id(),
+        &nudge_movement,
+        &format!("{operation} pointer nudge"),
+    )?;
+    wait_for_pointer_move_ack(
+        &pointer_move_ack,
+        trace_cursor,
+        pointer_move_ack.nudge_trace_point,
+        Duration::from_secs(3),
+    )?;
+
+    let target_move_cursor = trace_line_count(pointer_move_ack.trace_path)?;
     if !unsafe { SetCursorPos(point.x, point.y) }.is_ok() {
         return Err("could not move cursor to the validated semantic point".into());
     }
-    let under_cursor = unsafe { WindowFromPoint(point) };
-    if under_cursor.is_invalid() || window_process_id(under_cursor) != child.process_id {
-        return Err(format!(
-            "{operation} point {:?} targeting HWND={} is covered by HWND={} PID={} outside the child process",
-            (point.x, point.y),
-            hwnd_id(target.hwnd),
-            hwnd_id(under_cursor),
-            window_process_id(under_cursor)
-        ));
-    }
+    let under_cursor =
+        validate_pointer_coverage(target.hwnd, child.process_id(), point, operation)?;
+    let movement = [mouse_move_input(point)?];
+    let movement = send_validated_input(
+        target.hwnd,
+        child.process_id(),
+        &movement,
+        &format!("{operation} pointer move"),
+    )?;
+    wait_for_pointer_move_ack(
+        &pointer_move_ack,
+        target_move_cursor,
+        pointer_move_ack.target_trace_point,
+        Duration::from_secs(3),
+    )?;
     let foreground_hwnd = unsafe { GetForegroundWindow() };
     if foreground_hwnd != target.hwnd {
         return Err(format!(
@@ -2068,56 +2357,242 @@ fn click_screen_point(
             hwnd_id(foreground_hwnd)
         ));
     }
-    if under_cursor != target.hwnd && !unsafe { IsChild(target.hwnd, under_cursor) }.as_bool() {
+    let down = [mouse_input(true)];
+    let down_trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
+    let down = send_validated_input(target.hwnd, child.process_id(), &down, operation)?;
+    let left_button_state_after_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+    let mut button_guard = MouseButtonGuard::new(target.hwnd, child.process_id());
+    button_guard.armed = true;
+    wait_for_pointer_button_ack(
+        &pointer_move_ack,
+        down_trace_cursor,
+        (point.x, point.y),
+        true,
+        Duration::from_secs(3),
+    )
+    .map_err(|error| {
+        format!(
+            "{error}; checked down=[{}], VK_LBUTTON async=0x{:04x}",
+            down.describe(),
+            left_button_state_after_down as u16
+        )
+    })?;
+    let left_button_state_before_up = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+    let up_trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
+    let up = button_guard.release()?;
+    let left_button_state_after_up = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+    wait_for_pointer_button_ack(
+        &pointer_move_ack,
+        up_trace_cursor,
+        (point.x, point.y),
+        false,
+        Duration::from_secs(3),
+    )
+    .map_err(|error| {
+        format!(
+            "{error}; checked up=[{}], VK_LBUTTON async after up=0x{:04x}",
+            up.describe(),
+            left_button_state_after_up as u16
+        )
+    })?;
+    Ok(PointerClickEvidence {
+        nudge_movement,
+        movement,
+        pointer_position_preexisting_ack,
+        pointer_move_acknowledged: true,
+        down,
+        down_acknowledged: true,
+        left_button_state_after_down,
+        left_button_state_before_up,
+        up,
+        up_acknowledged: true,
+        left_button_state_after_up,
+        target_hwnd: target.hwnd,
+        nudge_under_cursor_hwnd: nudge_under_cursor,
+        under_cursor_hwnd: under_cursor,
+        foreground_hwnd,
+        screen_point: (point.x, point.y),
+    })
+}
+
+fn wait_for_root_pointer_move(
+    trace_path: &Path,
+    cursor: usize,
+    target: (i32, i32),
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let trace = std::fs::read_to_string(trace_path)
+            .map_err(|error| format!("read ROOT pointer-move trace: {error}"))?;
+        let acknowledged = trace.lines().skip(cursor).any(|line| {
+            line.contains("trace_event=\"root_pointer_moved\"")
+                && trace_i32_field(line, "screen_x=").is_some_and(|x| x.abs_diff(target.0) <= 1)
+                && trace_i32_field(line, "screen_y=").is_some_and(|y| y.abs_diff(target.1) <= 1)
+        });
+        if acknowledged {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "production ROOT did not acknowledge pointer move at screen point {:?} before click",
+                target
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_pointer_move_ack(
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
+    cursor: usize,
+    target: (i32, i32),
+    timeout: Duration,
+) -> Result<(), String> {
+    match acknowledgement.kind {
+        PointerTraceKind::RootScreen => {
+            wait_for_root_pointer_move(acknowledgement.trace_path, cursor, target, timeout)
+        }
+        PointerTraceKind::DesignerClient => {
+            wait_for_designer_pointer_move(acknowledgement.trace_path, cursor, target, timeout)
+        }
+    }
+}
+
+fn wait_for_pointer_button_ack(
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
+    cursor: usize,
+    screen_point: (i32, i32),
+    pressed: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let trace = std::fs::read_to_string(acknowledgement.trace_path)
+            .map_err(|error| format!("read production pointer-button trace: {error}"))?;
+        let acknowledged = trace
+            .lines()
+            .skip(cursor)
+            .any(|line| match acknowledgement.kind {
+                PointerTraceKind::RootScreen => {
+                    line.contains("trace_event=\"root_pointer_button\"")
+                        && if pressed {
+                            line.contains("pressed=true")
+                        } else {
+                            line.contains("released=true")
+                        }
+                        && trace_i32_field(line, "screen_x=")
+                            .is_some_and(|x| x.abs_diff(screen_point.0) <= 1)
+                        && trace_i32_field(line, "screen_y=")
+                            .is_some_and(|y| y.abs_diff(screen_point.1) <= 1)
+                }
+                PointerTraceKind::DesignerClient => {
+                    line.contains("trace_event=\"designer_pointer\"")
+                        && if pressed {
+                            line.contains("pointer_down=true")
+                        } else {
+                            line.contains("pointer_up=true")
+                        }
+                        && trace_i32_field(line, "cursor_screen_x=")
+                            .is_some_and(|x| x.abs_diff(screen_point.0) <= 1)
+                        && trace_i32_field(line, "cursor_screen_y=")
+                            .is_some_and(|y| y.abs_diff(screen_point.1) <= 1)
+                }
+            });
+        if acknowledged {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let edge = if pressed { "down" } else { "up" };
+            let surface = match acknowledgement.kind {
+                PointerTraceKind::RootScreen => "production ROOT",
+                PointerTraceKind::DesignerClient => "production Designer",
+            };
+            return Err(format!(
+                "{surface} did not acknowledge pointer-button {edge} at screen point {screen_point:?}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn trace_line_count(trace_path: &Path) -> Result<usize, String> {
+    std::fs::read_to_string(trace_path)
+        .map(|trace| trace.lines().count())
+        .map_err(|error| format!("read acceptance trace before native pointer edge: {error}"))
+}
+
+fn validate_pointer_coverage(
+    target_hwnd: HWND,
+    target_process_id: u32,
+    point: POINT,
+    operation: &str,
+) -> Result<HWND, String> {
+    let under_cursor = unsafe { WindowFromPoint(point) };
+    if under_cursor.is_invalid() || window_process_id(under_cursor) != target_process_id {
+        return Err(format!(
+            "{operation} point ({},{}) targeting HWND={} is covered by HWND={} PID={} outside the child process",
+            point.x,
+            point.y,
+            hwnd_id(target_hwnd),
+            hwnd_id(under_cursor),
+            window_process_id(under_cursor)
+        ));
+    }
+    if under_cursor != target_hwnd && !unsafe { IsChild(target_hwnd, under_cursor) }.as_bool() {
         return Err(format!(
             "blocked precondition: {operation} target HWND={} is covered at screen point ({},{}) by HWND={} PID={} (same-process coverage is not target delivery)",
-            hwnd_id(target.hwnd),
+            hwnd_id(target_hwnd),
             point.x,
             point.y,
             hwnd_id(under_cursor),
             window_process_id(under_cursor)
         ));
     }
-    let trace_cursor = pointer_move_ack
-        .map(|(path, _)| {
-            std::fs::read_to_string(path)
-                .map(|trace| trace.lines().count())
-                .map_err(|error| format!("read Designer trace before pointer move: {error}"))
-        })
-        .transpose()?;
-    let movement = [mouse_move_input(point)?];
-    let movement = send_validated_input(
-        target.hwnd,
-        child.process_id(),
-        &movement,
-        &format!("{operation} pointer move"),
-    )?;
-    if let (Some((trace_path, client_point)), Some(trace_cursor)) = (pointer_move_ack, trace_cursor)
+    Ok(under_cursor)
+}
+
+fn adjacent_pointer_point(point: POINT, bounds: [i32; 4]) -> Result<POINT, String> {
+    let [left, top, right, bottom] = bounds;
+    if right <= left
+        || bottom <= top
+        || point.x < left
+        || point.y < top
+        || point.x >= right
+        || point.y >= bottom
     {
-        wait_for_designer_pointer_move(
-            trace_path,
-            trace_cursor,
-            client_point,
-            Duration::from_secs(3),
-        )?;
+        return Err("cannot choose a pointer nudge outside empty semantic bounds".into());
     }
-    let down = [mouse_input(true)];
-    let down = send_validated_input(target.hwnd, child.process_id(), &down, operation)?;
-    let mut button_guard = MouseButtonGuard::new(target.hwnd, child.process_id());
-    button_guard.armed = true;
-    // Allow the target's native message loop to observe the pressed state before release.
-    // This remains a real pointer click and is well below the fixture's hold threshold.
-    std::thread::sleep(Duration::from_millis(120));
-    let up = button_guard.release()?;
-    Ok(PointerClickEvidence {
-        movement,
-        down,
-        up,
-        target_hwnd: target.hwnd,
-        under_cursor_hwnd: under_cursor,
-        foreground_hwnd,
-        screen_point: (point.x, point.y),
-    })
+    if right - left > 1 {
+        let x = if point.x + 1 < right {
+            point.x + 1
+        } else {
+            point.x - 1
+        };
+        return Ok(POINT { x, y: point.y });
+    }
+    if bottom - top > 1 {
+        let y = if point.y + 1 < bottom {
+            point.y + 1
+        } else {
+            point.y - 1
+        };
+        return Ok(POINT { x: point.x, y });
+    }
+    Err("semantic bounds have no adjacent in-control point for a fresh pointer move".into())
+}
+
+fn latest_root_pointer_acknowledged(trace_path: &Path, target: (i32, i32)) -> Result<bool, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read ROOT pointer-move trace: {error}"))?;
+    let latest = trace
+        .lines()
+        .rev()
+        .find(|line| line.contains("trace_event=\"root_pointer_moved\""));
+    Ok(latest.is_some_and(|line| {
+        trace_i32_field(line, "screen_x=").is_some_and(|x| x.abs_diff(target.0) <= 1)
+            && trace_i32_field(line, "screen_y=").is_some_and(|y| y.abs_diff(target.1) <= 1)
+    }))
 }
 
 fn wait_for_designer_pointer_move(
@@ -2401,8 +2876,8 @@ fn bounded_label(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, format_uia_element_snapshot,
-        normalized_absolute_coordinate,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, POINT, adjacent_pointer_point,
+        format_uia_element_snapshot, normalized_absolute_coordinate,
     };
 
     #[test]
@@ -2418,6 +2893,23 @@ mod tests {
             normalized_absolute_coordinate(4000, -1920, 5760),
             i32::from(u16::MAX)
         );
+    }
+
+    #[test]
+    fn pointer_nudge_stays_inside_semantic_bounds_and_differs_from_target() {
+        let target = POINT { x: 20, y: 30 };
+        let bounds = [10, 20, 31, 41];
+        let nudge = adjacent_pointer_point(target, bounds).unwrap();
+        assert_ne!((nudge.x, nudge.y), (target.x, target.y));
+        assert!(nudge.x >= bounds[0] && nudge.x < bounds[2]);
+        assert!(nudge.y >= bounds[1] && nudge.y < bounds[3]);
+
+        let narrow_target = POINT { x: 5, y: 8 };
+        let narrow_bounds = [5, 2, 6, 15];
+        let nudge = adjacent_pointer_point(narrow_target, narrow_bounds).unwrap();
+        assert_eq!(nudge.x, narrow_target.x);
+        assert_ne!(nudge.y, narrow_target.y);
+        assert!(nudge.y >= narrow_bounds[1] && nudge.y < narrow_bounds[3]);
     }
 
     #[test]

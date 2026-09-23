@@ -1,6 +1,8 @@
 use super::*;
 
-use crate::radial::acceptance_trace::{self, Correlation, RestoreEdge, RootResultKind};
+use crate::radial::acceptance_trace::{
+    self, Correlation, RestoreEdge, RootMenuControl, RootResultKind,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeferredActivation {
@@ -81,6 +83,61 @@ fn root_result_kind(action: &str) -> RootResultKind {
         "radial edit" => RootResultKind::RadialEdit,
         "radial skins" => RootResultKind::RadialSkins,
         _ => RootResultKind::Other,
+    }
+}
+
+#[cfg(windows)]
+fn trace_root_pointer_moves(ctx: &egui::Context, hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::{Foundation::POINT, Graphics::Gdi::ClientToScreen};
+
+    if !acceptance_trace::enabled() {
+        return;
+    }
+    let pointer_moves = ctx.input(|input| {
+        input
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::PointerMoved(position) => Some(*position),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    let pixels_per_point = ctx.pixels_per_point();
+    for position in pointer_moves {
+        let mut screen = POINT {
+            x: (position.x * pixels_per_point).round() as i32,
+            y: (position.y * pixels_per_point).round() as i32,
+        };
+        if unsafe { ClientToScreen(hwnd, &mut screen) }.as_bool() {
+            acceptance_trace::emit(acceptance_trace::Event::RootPointerMoved {
+                screen_x: screen.x,
+                screen_y: screen.y,
+            });
+        }
+    }
+    let pointer_button_state = ctx.input(|input| {
+        (
+            input.pointer.any_pressed(),
+            input.pointer.any_released(),
+            input.pointer.interact_pos(),
+        )
+    });
+    if let (pressed, released, Some(position)) = pointer_button_state
+        && (pressed || released)
+    {
+        let mut screen = POINT {
+            x: (position.x * pixels_per_point).round() as i32,
+            y: (position.y * pixels_per_point).round() as i32,
+        };
+        if unsafe { ClientToScreen(hwnd, &mut screen) }.as_bool() {
+            acceptance_trace::emit(acceptance_trace::Event::RootPointerButton {
+                pressed,
+                released,
+                screen_x: screen.x,
+                screen_y: screen.y,
+            });
+        }
     }
 }
 
@@ -629,6 +686,10 @@ impl eframe::App for LauncherApp {
         if let Some(hwnd) = trace_root_hwnd {
             crate::window_manager::register_root_hwnd(hwnd);
         }
+        #[cfg(windows)]
+        if let Some(hwnd) = trace_root_hwnd {
+            trace_root_pointer_moves(ctx, hwnd);
+        }
         if acceptance_trace::advance_window_sample_frame() {
             if let Some(hwnd) = trace_root_hwnd {
                 while let Some(correlation) = acceptance_trace::take_window_sample_request() {
@@ -825,8 +886,9 @@ impl eframe::App for LauncherApp {
 
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    ui.menu_button("Apps", |ui| {
+                let mut apps_menu_state = (false, false, false);
+                let file_menu = ui.menu_button("File", |ui| {
+                    let apps_menu = ui.menu_button("Apps", |ui| {
                         if ui.button("Edit Apps").clicked() {
                             self.show_editor = !self.show_editor;
                         }
@@ -837,12 +899,29 @@ impl eframe::App for LauncherApp {
                             self.focus_panel(crate::gui::Panel::RadialEditor);
                         }
                     });
+                    apps_menu_state = (
+                        apps_menu.response.hovered(),
+                        apps_menu.response.clicked(),
+                        apps_menu.inner.is_some(),
+                    );
                     if ui.button("Close Application").clicked() {
                         // eframe's `on_exit` is the single shutdown boundary. It
                         // tears down Screen Draw before flushing preferences.
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
+                acceptance_trace::trace_root_menu_interaction(
+                    RootMenuControl::Apps,
+                    apps_menu_state.0,
+                    apps_menu_state.1,
+                    apps_menu_state.2,
+                );
+                acceptance_trace::trace_root_menu_interaction(
+                    RootMenuControl::File,
+                    file_menu.response.hovered(),
+                    file_menu.response.clicked(),
+                    file_menu.inner.is_some(),
+                );
                 ui.menu_button("Settings", |ui| {
                     if ui.button("Edit Settings").clicked() {
                         self.show_settings = !self.show_settings;

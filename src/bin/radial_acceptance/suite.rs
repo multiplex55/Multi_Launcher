@@ -1,5 +1,5 @@
 use super::super::{
-    AcceptanceCaseResult, AcceptanceReport, CaseStatus, FailureStage, MAX_PATH_BYTES,
+    AcceptanceCaseResult, AcceptanceReport, CaseStatus, FailureStage, H6RepeatMode, MAX_PATH_BYTES,
     MAX_RESULT_BYTES,
 };
 use super::*;
@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const TAP_TIME: Duration = Duration::from_millis(135);
@@ -16,9 +17,17 @@ const TRACE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_TRACE_EXCERPT: usize = 512;
 const DESIGNER_TEXT_PROBE: &str = "Native Edit Probe";
 const DESIGNER_STARTER_NAME: &str = "Starter";
+static NEXT_HOOK_PUMP_PROBE_ID: AtomicU64 = AtomicU64::new(1);
 const CASE_IDS: [&str; 13] = [
     "H0", "H1", "H2", "H3", "H4", "H5", "H6", "D0", "D1", "D2", "D4", "D5", "CLEANUP",
 ];
+
+struct HoldReleaseHandoff {
+    release_at_unix_ms: Option<u128>,
+    sentinel_at_unix_ms: Option<u128>,
+    quiescent_acknowledged: bool,
+    observer: Option<RunnerHookObserver>,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum DesignerSemanticTarget {
@@ -79,6 +88,7 @@ pub fn run_suite(
     output: &Path,
     trace_path: &Path,
     hold_threshold_ms: u64,
+    h6_repeat_mode: H6RepeatMode,
     _desktop: &InputDesktopAttachment,
     report: &mut AcceptanceReport,
     runner_log: &mut File,
@@ -179,7 +189,7 @@ pub fn run_suite(
     };
     let mut uia: Option<UiAutomation> = None;
     let mut designer_window: Option<WindowSnapshot> = None;
-    let mut hold_window: Option<WindowSnapshot> = None;
+    let mut hold_windows: Option<Vec<WindowSnapshot>> = None;
 
     run_tap_case(
         report,
@@ -211,7 +221,7 @@ pub fn run_suite(
         &anchor,
         trace_path,
         hold_threshold_ms,
-        &mut hold_window,
+        &mut hold_windows,
     );
     append_case(
         report,
@@ -223,16 +233,17 @@ pub fn run_suite(
         output,
         trace_path,
     );
-    run_hold_release_case(
+    let h5_handoff = run_hold_release_case(
         report,
         &child,
         &anchor,
         trace_path,
         output,
-        hold_window.as_ref(),
+        hold_windows.as_deref(),
         hold_guard,
         hold_observer,
         hold_observer_error,
+        h6_repeat_mode,
     );
     run_second_hold_case(
         report,
@@ -241,7 +252,9 @@ pub fn run_suite(
         trace_path,
         output,
         hold_threshold_ms,
-        hold_window.as_ref(),
+        hold_windows.as_deref(),
+        h6_repeat_mode,
+        h5_handoff,
     );
 
     let ui_result = UiAutomation::new();
@@ -586,17 +599,31 @@ fn run_other_focus_case(
             .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
         require_visible(&root)
             .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        let restore_request = wait_for_latest_root_restore(trace_path, ROOT_TIMEOUT).ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::RootCommand,
+                "ROOT did not produce a matching native restore-completion edge after H1; H2 anchor input was not sent".into(),
+            )
+        })?;
         anchor
             .focus()
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         let mut cursor = trace_lines(trace_path).len();
+        let mut inputs = Vec::with_capacity(2);
         for visible in [false, true] {
             anchor
                 .focus()
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
-            child
+            focus_is_validated(anchor.hwnd(), anchor.process_id()).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!("runner-owned H2 anchor was not foreground immediately before input: {error}"),
+                )
+            })?;
+            let input = child
                 .send_f11(anchor.hwnd(), anchor.process_id(), TAP_TIME)
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            inputs.push(input.describe());
             if !wait_root_visibility(child, visible, ROOT_TIMEOUT) {
                 return Err(CaseFailure::new(
                     FailureStage::NativeRootState,
@@ -612,8 +639,8 @@ fn run_other_focus_case(
             cursor = trace_lines(trace_path).len();
         }
         Ok(format!(
-            "runner-owned anchor HWND={} toggled ROOT offscreen and back on-screen",
-            hwnd_id(anchor.hwnd())
+            "H1 ROOT restore request {restore_request} completed before runner-owned anchor HWND={} focus; both checked F11 taps targeted the exact runner HWND/PID and toggled ROOT offscreen/back on-screen: {inputs:?}",
+            hwnd_id(anchor.hwnd()),
         ))
     })();
     append_case(
@@ -633,7 +660,7 @@ fn run_hold_open_case<'a>(
     anchor: &'a FocusAnchor,
     trace_path: &Path,
     hold_threshold_ms: u64,
-    held_window: &mut Option<WindowSnapshot>,
+    held_windows: &mut Option<Vec<WindowSnapshot>>,
 ) -> (
     Result<String, CaseFailure>,
     Option<F11HoldGuard<'a>>,
@@ -665,7 +692,8 @@ fn run_hold_open_case<'a>(
         std::thread::sleep(Duration::from_millis(
             hold_threshold_ms.saturating_add(250).min(5_000),
         ));
-        let after = wait_runtime_window(child, &before, Duration::from_secs(2));
+        let after = wait_runtime_windows(child, &before, Duration::from_secs(2))
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
         let traces = trace_lines(trace_path)
             .into_iter()
             .skip(cursor)
@@ -713,12 +741,17 @@ fn run_hold_open_case<'a>(
                 "hold incorrectly emitted short-tap or ROOT visibility work".into(),
             ));
         }
-        let window = after.into_iter().next().ok_or_else(|| {
-            CaseFailure::new(
+        if after.len() < 2 {
+            return Err(CaseFailure::new(
                 FailureStage::NativeRootState,
-                "hold produced no new visible child-owned radial HWND".into(),
-            )
-        })?;
+                format!(
+                    "hold produced {} stable new visible child-owned radial HWND(s); expected the input and visual surfaces",
+                    after.len()
+                ),
+            ));
+        }
+        validate_radial_surfaces(child, &after)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
         let current_root = child
             .refresh_root()
             .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
@@ -728,11 +761,20 @@ fn run_hold_open_case<'a>(
                 format!("ROOT changed while opening radial: {error}"),
             )
         })?;
-        *held_window = Some(window.clone());
+        if !same_window_state(&root, &current_root) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "opening the radial changed ROOT HWND/state/bounds: before={}; after={}",
+                    describe_root_snapshot(&root),
+                    describe_root_snapshot(&current_root)
+                ),
+            ));
+        }
+        *held_windows = Some(after.clone());
         Ok(format!(
-            "held F11 opened visible child HWND={} bounds={:?}; ROOT stayed on-screen; down edge=[{}]",
-            hwnd_id(window.hwnd),
-            window.bounds,
+            "held F11 opened stable visible child radial surfaces [{}]; ROOT stayed on-screen; down edge=[{}]",
+            describe_radial_surfaces(&after),
             input.describe()
         ))
     })();
@@ -750,12 +792,16 @@ fn run_hold_release_case(
     _anchor: &FocusAnchor,
     trace_path: &Path,
     output: &Path,
-    held_window: Option<&WindowSnapshot>,
+    held_windows: Option<&[WindowSnapshot]>,
     hold_guard: Option<F11HoldGuard<'_>>,
     mut hook_observer: Option<RunnerHookObserver>,
     hook_observer_error: Option<String>,
-) {
+    h6_repeat_mode: H6RepeatMode,
+) -> HoldReleaseHandoff {
     let started = Instant::now();
+    let mut release_at_unix_ms = None;
+    let mut sentinel_at_unix_ms = None;
+    let mut quiescent_acknowledged = false;
     let result = (|| {
         let mut hold_guard = hold_guard.ok_or_else(|| {
             CaseFailure::new(
@@ -763,17 +809,25 @@ fn run_hold_release_case(
                 "H4 did not leave F11 held for a checked release".into(),
             )
         })?;
+        let runner_edges_drained = hook_observer
+            .as_mut()
+            .map_or(0, RunnerHookObserver::drain_pending);
         let cursor = trace_lines(trace_path).len();
         let release = hold_guard
             .release()
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        release_at_unix_ms = Some(release.at_unix_ms);
         let runner_observation = hook_observer
             .as_mut()
-            .map(|observer| observer.wait_for_vk(0x7A, Duration::from_secs(1)));
+            .map(|observer| observer.wait_for_vk_edge(0x7A, false, Duration::from_secs(1)));
         let runner_observation_text = runner_observation
             .as_ref()
             .map(|observation| observation.describe())
-            .or_else(|| hook_observer_error.map(|error| format!("observer unavailable: {error}")))
+            .or_else(|| {
+                hook_observer_error
+                    .as_ref()
+                    .map(|error| format!("observer unavailable: {error}"))
+            })
             .unwrap_or_else(|| "observer unavailable".into());
         let lines = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
             has_trace(
@@ -811,6 +865,18 @@ fn run_hold_release_case(
                 ),
             ));
         }
+        let runner_release_observed = runner_observation
+            .as_ref()
+            .is_some_and(|observation| observation.up_seen && observation.up_injected);
+        if !runner_release_observed {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "held F11 release was not acknowledged by the independent observer; release edge [{}]; {runner_observation_text}",
+                    release.describe()
+                ),
+            ));
+        }
         if has_trace(&lines, "short_tap", &[]) || has_trace(&lines, "desired_visibility", &[]) {
             return Err(CaseFailure::new(
                 FailureStage::GestureDecision,
@@ -820,24 +886,108 @@ fn run_hold_release_case(
                 ),
             ));
         }
-        let held_window = held_window.ok_or_else(|| {
+        let held_windows = held_windows.ok_or_else(|| {
             CaseFailure::new(
                 FailureStage::NativeRootState,
-                "H4 did not identify a radial HWND to check after release".into(),
+                "H4 did not identify the radial surface set to check after release".into(),
             )
         })?;
-        if !window_still_active(child, held_window) {
+        if !radial_surfaces_are_active(child, held_windows) {
             return Err(CaseFailure::new(
                 FailureStage::NativeRootState,
                 format!(
-                    "radial HWND did not remain active after releasing held F11; release edge [{}]",
+                    "one or more radial surfaces did not remain active after releasing held F11; surfaces=[{}]; release edge [{}]",
+                    describe_radial_surfaces(held_windows),
                     release.describe()
                 ),
             ));
         }
+        let mut handoff_text = String::new();
+        if h6_repeat_mode != H6RepeatMode::Immediate {
+            let root = child
+                .refresh_root()
+                .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+            require_visible(&root).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    format!("ROOT changed visibility before the repeat handoff: {error}"),
+                )
+            })?;
+            focus_is_validated(root.hwnd, child.process_id()).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!(
+                        "H5 release did not leave ROOT foreground for the repeat handoff: {error}"
+                    ),
+                )
+            })?;
+
+            let sentinel_cursor = trace_lines(trace_path).len();
+            let sentinel = child
+                .press_hook_sentinel(root.hwnd, child.process_id())
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            sentinel_at_unix_ms = Some(sentinel.at_unix_ms);
+            let runner_sentinel = hook_observer
+                .as_mut()
+                .map(|observer| observer.wait_for_vk(0x87, Duration::from_secs(1)));
+            let sentinel_trace = wait_trace(
+                trace_path,
+                sentinel_cursor,
+                Duration::from_secs(1),
+                |events| {
+                    has_trace(
+                        events,
+                        "hook_observed",
+                        &["vk=135", "down=true", "injected=true"],
+                    ) && has_trace(
+                        events,
+                        "hook_observed",
+                        &["vk=135", "down=false", "injected=true"],
+                    )
+                },
+            );
+            let production_sentinel = has_trace(
+                &sentinel_trace,
+                "hook_observed",
+                &["vk=135", "down=true", "injected=true"],
+            ) && has_trace(
+                &sentinel_trace,
+                "hook_observed",
+                &["vk=135", "down=false", "injected=true"],
+            );
+            let observer_sentinel = runner_sentinel.as_ref().is_some_and(|observation| {
+                observation.down_seen
+                    && observation.up_seen
+                    && observation.down_injected
+                    && observation.up_injected
+            });
+            let sentinel_text = runner_sentinel
+                .as_ref()
+                .map(RunnerHookObservation::describe)
+                .or_else(|| {
+                    hook_observer_error
+                        .as_ref()
+                        .map(|error| format!("observer unavailable: {error}"))
+                })
+                .unwrap_or_else(|| "observer unavailable".into());
+            if !production_sentinel || !observer_sentinel {
+                return Err(CaseFailure::new(
+                    FailureStage::HookAdmission,
+                    format!(
+                        "quiescent H5→H6 handoff sentinel did not reach both hooks; production_down_up={production_sentinel}; {sentinel_text}; checked F24=[{}]",
+                        sentinel.describe()
+                    ),
+                ));
+            }
+            quiescent_acknowledged = true;
+            handoff_text = format!(
+                "; quiescent F24 handoff reached both hooks before H6: production down/up=true/true, {sentinel_text}, checked input=[{}]",
+                sentinel.describe()
+            );
+        }
         Ok(format!(
-            "checked F11 release generated no tap or ROOT visibility edge; radial HWND={} remains visible; release edge=[{}]; {runner_observation_text}",
-            hwnd_id(held_window.hwnd),
+            "checked F11 release generated no tap or ROOT visibility edge; radial surfaces [{}] remain visible; release edge=[{}]; discarded {runner_edges_drained} pre-release observer edge(s) before correlating this F11 up; {runner_observation_text}{handoff_text}",
+            describe_radial_surfaces(held_windows),
             release.describe()
         ))
     })();
@@ -851,6 +1001,16 @@ fn run_hold_release_case(
         output,
         trace_path,
     );
+    HoldReleaseHandoff {
+        release_at_unix_ms,
+        sentinel_at_unix_ms,
+        quiescent_acknowledged,
+        observer: if h6_repeat_mode != H6RepeatMode::Immediate {
+            hook_observer
+        } else {
+            None
+        },
+    }
 }
 
 fn run_second_hold_case(
@@ -860,26 +1020,91 @@ fn run_second_hold_case(
     trace_path: &Path,
     output: &Path,
     hold_threshold_ms: u64,
-    held_window: Option<&WindowSnapshot>,
+    held_windows: Option<&[WindowSnapshot]>,
+    h6_repeat_mode: H6RepeatMode,
+    mut h5_handoff: HoldReleaseHandoff,
 ) {
     let started = Instant::now();
     let result = (|| {
-        let held_window = held_window.ok_or_else(|| {
+        let held_windows = held_windows.ok_or_else(|| {
             CaseFailure::new(
                 FailureStage::NativeRootState,
-                "H4 did not identify a radial HWND to toggle closed".into(),
+                "H4 did not identify the radial surface set to toggle closed".into(),
             )
         })?;
-        let root = child
+        validate_radial_surfaces(child, held_windows)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        let root_before = child
             .refresh_root()
             .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
-        child
-            .focus_window(&root)
-            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        require_visible(&root_before)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        let root = &root_before;
+        if h6_repeat_mode != H6RepeatMode::Immediate {
+            if !h5_handoff.quiescent_acknowledged {
+                return Err(CaseFailure::new(
+                    FailureStage::HookAdmission,
+                    "H5 did not complete the production/independent F24 quiescence handoff; H6 input was not sent".into(),
+                ));
+            }
+            focus_is_validated(root.hwnd, child.process_id()).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!("foreground changed after the acknowledged H5 handoff: {error}"),
+                )
+            })?;
+        } else {
+            child
+                .focus_window(&root)
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        }
         let cursor = trace_lines(trace_path).len();
-        let (mut hook_observer, hook_observer_error) = match RunnerHookObserver::start() {
-            Ok(observer) => (Some(observer), None),
-            Err(error) => (None, Some(error)),
+        let mut observer_drop_probe = None;
+        let (mut hook_observer, hook_observer_error) = match h6_repeat_mode {
+            H6RepeatMode::Immediate => match RunnerHookObserver::start() {
+                Ok(observer) => (Some(observer), None),
+                Err(error) => (None, Some(error)),
+            },
+            H6RepeatMode::Quiescent => {
+                let observer = h5_handoff.observer.take();
+                let error = observer
+                    .is_none()
+                    .then(|| "H5 observer was not retained through the quiescent handoff".into());
+                (observer, error)
+            }
+            H6RepeatMode::ProductionOnlyDiagnostic => {
+                let mut previous_observer = h5_handoff.observer.take();
+                let previous_thread = previous_observer
+                    .as_ref()
+                    .map(RunnerHookObserver::thread_id);
+                let previous_hook = previous_observer.as_ref().map(RunnerHookObserver::hook_id);
+                let unhook_result = match previous_observer.as_mut() {
+                    Some(observer) => observer
+                        .stop_and_report()
+                        .map(|()| {
+                            format!(
+                                "UnhookWindowsHookEx succeeded for runner PID {} owned HHOOK=0x{:x}",
+                                std::process::id(),
+                                observer.hook_id()
+                            )
+                        })
+                        .unwrap_or_else(|error| format!("observer stop failed: {error}")),
+                    None => "H5 observer was unavailable to stop".into(),
+                };
+                drop(previous_observer);
+                let post_unhook_probe =
+                    checked_production_f24_without_runner_observer(child, root.hwnd, trace_path);
+                observer_drop_probe = Some(format!(
+                    "stopped runner observer thread {previous_thread:?} HHOOK={previous_hook:?}: {unhook_result}; immediate checked F24 probe: {post_unhook_probe}"
+                ));
+                (
+                    None,
+                    Some(
+                        "runner observer intentionally absent for production-only H6 diagnostic"
+                            .into(),
+                    ),
+                )
+            }
         };
         let app_hook_thread = hook_service_thread_id(trace_path);
         let runner_thread_before = hook_observer
@@ -891,10 +1116,76 @@ fn run_second_hold_case(
         let down = child
             .press_f11(root.hwnd, child.process_id())
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let handoff_description = match h6_repeat_mode {
+            H6RepeatMode::Immediate => format!(
+                "mode=immediate; H5-release-to-H6-down={}ms",
+                h5_handoff
+                    .release_at_unix_ms
+                    .map_or(0, |released| down.at_unix_ms.saturating_sub(released))
+            ),
+            H6RepeatMode::Quiescent => format!(
+                "mode=quiescent; H5-release-to-F24={}ms; F24-to-H6-down={}ms; both hooks acknowledged H5/F24 before H6",
+                h5_handoff
+                    .release_at_unix_ms
+                    .zip(h5_handoff.sentinel_at_unix_ms)
+                    .map_or(0, |(released, sentinel)| sentinel.saturating_sub(released)),
+                h5_handoff
+                    .sentinel_at_unix_ms
+                    .map_or(0, |sentinel| down.at_unix_ms.saturating_sub(sentinel))
+            ),
+            H6RepeatMode::ProductionOnlyDiagnostic => {
+                format!(
+                    "mode=production_only_diagnostic; H5 quiescence acknowledged; {}; no runner LL hook installed during H6 down, hold, release, or initial post-release F24",
+                    observer_drop_probe
+                        .as_deref()
+                        .unwrap_or("observer-drop probe unavailable")
+                )
+            }
+        };
         let mut hold_guard = F11HoldGuard::new(child, anchor);
         std::thread::sleep(Duration::from_millis(
             hold_threshold_ms.saturating_add(250).min(5_000),
         ));
+        let deadline_events =
+            wait_trace(trace_path, cursor, Duration::from_millis(250), |events| {
+                has_trace(
+                    events,
+                    "hook_deadline",
+                    &["edge=Fired", "radial_intent=true"],
+                )
+            });
+        let deadline_fired = has_trace(
+            &deadline_events,
+            "hook_deadline",
+            &["edge=Fired", "radial_intent=true"],
+        );
+        let production_pre_release_pump = app_hook_thread.map_or_else(
+            || "production pump probe unavailable: service thread id missing".into(),
+            |thread_id| {
+                probe_production_hook_pump(
+                    thread_id,
+                    child.process_id(),
+                    trace_path,
+                    Duration::from_millis(500),
+                )
+            },
+        );
+        let runner_pre_release_pump = hook_observer.as_ref().map_or_else(
+            || "runner pump probe unavailable: observer intentionally absent".into(),
+            |observer| {
+                let probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+                match observer.pump_roundtrip(probe_id, Duration::from_millis(500)) {
+                    Ok(()) => format!(
+                        "runner thread {} acknowledged pre-release probe {probe_id}",
+                        observer.thread_id()
+                    ),
+                    Err(error) => error,
+                }
+            },
+        );
+        let handoff_description = format!(
+            "{handoff_description}; after hold deadline fired={deadline_fired}, before F11 up: {production_pre_release_pump}; {runner_pre_release_pump}"
+        );
         let down_observation = hook_observer
             .as_mut()
             .map(|observer| observer.wait_for_vk(0x7A, Duration::from_millis(50)));
@@ -991,19 +1282,6 @@ fn run_second_hold_case(
         let runner_observation_text = format!(
             "{runner_observation_text}; foreground framework received F24 WM_KEYDOWN={frontend_key_observed}; {thread_liveness_text}"
         );
-        let closed = wait_until(Duration::from_secs(2), || {
-            !window_still_active(child, held_window)
-        });
-        if !closed {
-            return Err(CaseFailure::new(
-                FailureStage::NativeRootState,
-                format!(
-                    "second full hold did not remove, hide, or park the radial HWND; down=[{}] up=[{}]; {runner_observation_text}",
-                    down.describe(),
-                    up.describe()
-                ),
-            ));
-        }
         let lines = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
             has_trace(
                 events,
@@ -1053,11 +1331,42 @@ fn run_second_hold_case(
             "hook_observed",
             &["vk=135", "down=false", "injected=true"],
         );
+        let recovery_diagnostic =
+            if !release_traced || !release_observed || !sentinel_observed || !sentinel_traced {
+                Some(diagnose_hook_delivery_after_hold(
+                    child,
+                    root.hwnd,
+                    app_hook_thread,
+                    &mut hook_observer,
+                    trace_path,
+                ))
+            } else {
+                None
+            };
+        let closed = wait_until(Duration::from_secs(2), || {
+            radial_surfaces_are_inactive(child, held_windows)
+        });
+        if !closed {
+            let current = child.windows();
+            let active_radial = active_radial_surfaces(&current, child.process_id());
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "second full hold did not remove, hide, or park every radial surface [{}]; final active class-matched surfaces=[{}]; production_release={release_traced}; after_hold_production_sentinel={sentinel_traced}; down=[{}] up=[{}]; {runner_observation_text}; {handoff_description}; recovery diagnostic=[{}]",
+                    describe_radial_surfaces(held_windows),
+                    describe_radial_surfaces(&active_radial),
+                    down.describe(),
+                    up.describe(),
+                    recovery_diagnostic.as_deref().unwrap_or("not run")
+                ),
+            ));
+        }
         if !release_traced || !release_observed || !sentinel_observed || !sentinel_traced {
             return Err(CaseFailure::new(
                 FailureStage::HookAdmission,
                 format!(
-                    "second hold release was not proven by both production hook and independent observer; production_release={release_traced}; after_hold_observer_sentinel={sentinel_observed}; after_hold_production_sentinel={sentinel_traced}; {runner_observation_text}; down=[{}] up=[{}]",
+                    "second hold release was not proven by both production hook and independent observer; production_release={release_traced}; after_hold_observer_sentinel={sentinel_observed}; after_hold_production_sentinel={sentinel_traced}; {runner_observation_text}; {handoff_description}; recovery diagnostic=[{}]; down=[{}] up=[{}]",
+                    recovery_diagnostic.as_deref().unwrap_or("not run"),
                     down.describe(),
                     up.describe()
                 ),
@@ -1082,9 +1391,35 @@ fn run_second_hold_case(
                 format!("ROOT visibility changed during second hold: {error}"),
             )
         })?;
+        if !same_window_state(&root_before, &root) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "second hold changed ROOT HWND/state/bounds: before={}; after={}",
+                    describe_root_snapshot(&root_before),
+                    describe_root_snapshot(&root)
+                ),
+            ));
+        }
+        let final_windows = child.windows();
+        let active_radial = active_radial_surfaces(&final_windows, child.process_id());
+        if !radial_surface_set_and_owner_are_inactive(
+            held_windows,
+            &final_windows,
+            child.process_id(),
+        ) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "H6 left candidate-owned radial surfaces active after closing the captured pair [{}]; final active class-matched surfaces=[{}]",
+                    describe_radial_surfaces(held_windows),
+                    describe_radial_surfaces(&active_radial)
+                ),
+            ));
+        }
         Ok(format!(
-            "second threshold hold closed radial HWND={} while ROOT stayed visible; down=[{}] up=[{}]; {runner_observation_text}",
-            hwnd_id(held_window.hwnd),
+            "second threshold hold closed radial surfaces [{}] while ROOT stayed unchanged; down=[{}] up=[{}]; {runner_observation_text}; {handoff_description}",
+            describe_radial_surfaces(held_windows),
             down.describe(),
             up.describe()
         ))
@@ -1099,6 +1434,236 @@ fn run_second_hold_case(
         output,
         trace_path,
     );
+}
+
+fn diagnose_hook_delivery_after_hold(
+    child: &NativeChild,
+    expected_root_hwnd: windows::Win32::Foundation::HWND,
+    app_hook_thread: Option<u32>,
+    old_observer: &mut Option<RunnerHookObserver>,
+    trace_path: &Path,
+) -> String {
+    let mut evidence = Vec::new();
+    let app_probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    let app_probe_cursor = trace_lines(trace_path).len();
+    let app_pump_acknowledged = if let Some(thread_id) = app_hook_thread {
+        match post_validated_hook_pump_probe(thread_id, child.process_id(), app_probe_id) {
+            Ok(()) => {
+                let events = wait_trace(
+                    trace_path,
+                    app_probe_cursor,
+                    Duration::from_secs(1),
+                    |events| {
+                        has_trace(
+                            events,
+                            "hook_pump_probe",
+                            &[&format!("probe_id={app_probe_id}")],
+                        )
+                    },
+                );
+                let acknowledged = has_trace(
+                    &events,
+                    "hook_pump_probe",
+                    &[&format!("probe_id={app_probe_id}")],
+                );
+                evidence.push(format!(
+                    "production thread {thread_id} belongs to child PID {}; posted probe {app_probe_id}; pump_ack={acknowledged}",
+                    child.process_id()
+                ));
+                acknowledged
+            }
+            Err(error) => {
+                evidence.push(format!("production pump probe failed: {error}"));
+                false
+            }
+        }
+    } else {
+        evidence.push("production hook thread id unavailable".into());
+        false
+    };
+
+    let old_thread_id = old_observer.as_ref().map(RunnerHookObserver::thread_id);
+    let runner_probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    let old_runner_pump_acknowledged = if let Some(observer) = old_observer.as_ref() {
+        match observer.pump_roundtrip(runner_probe_id, Duration::from_secs(1)) {
+            Ok(()) => {
+                evidence.push(format!(
+                    "existing runner observer thread {} acknowledged pump probe {runner_probe_id}",
+                    observer.thread_id()
+                ));
+                true
+            }
+            Err(error) => {
+                evidence.push(error);
+                false
+            }
+        }
+    } else {
+        evidence.push("existing runner observer unavailable for pump probe".into());
+        false
+    };
+
+    // Remove the original independent hook before installing a new observer, so
+    // this diagnostic can distinguish a stale hook registration from input loss.
+    drop(old_observer.take());
+    let mut fresh_observer = match RunnerHookObserver::start() {
+        Ok(observer) => observer,
+        Err(error) => {
+            evidence.push(format!("fresh runner observer install failed: {error}"));
+            return format!(
+                "{}; no fresh observer could be installed",
+                evidence.join("; ")
+            );
+        }
+    };
+    let fresh_thread_id = fresh_observer.thread_id();
+    let fresh_desktop = fresh_observer.desktop.clone();
+    let fresh_desktop_is_default = fresh_desktop == "Default";
+    let fresh_probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    let fresh_pump_acknowledged =
+        match fresh_observer.pump_roundtrip(fresh_probe_id, Duration::from_secs(1)) {
+            Ok(()) => true,
+            Err(error) => {
+                evidence.push(error);
+                false
+            }
+        };
+    evidence.push(format!(
+        "fresh runner observer thread {fresh_thread_id} replaced {:?}; desktop={fresh_desktop:?} default={fresh_desktop_is_default}; pump_ack={fresh_pump_acknowledged}",
+        old_thread_id
+    ));
+
+    let fresh_sentinel = (|| {
+        if !fresh_desktop_is_default {
+            return Err(format!(
+                "refused fresh-observer F24 because its desktop was {fresh_desktop:?}, expected Default"
+            ));
+        }
+        let root = child.refresh_root()?;
+        if root.hwnd != expected_root_hwnd {
+            return Err(format!(
+                "refused fresh-observer F24 because ROOT HWND changed from {} to {}",
+                hwnd_id(expected_root_hwnd),
+                hwnd_id(root.hwnd)
+            ));
+        }
+        focus_is_validated(expected_root_hwnd, child.process_id())?;
+        let cursor = trace_lines(trace_path).len();
+        let input = child.press_hook_sentinel(expected_root_hwnd, child.process_id())?;
+        let runner = fresh_observer.wait_for_vk(0x87, Duration::from_secs(1));
+        let events = wait_trace(trace_path, cursor, Duration::from_secs(1), |events| {
+            has_trace(
+                events,
+                "hook_observed",
+                &["vk=135", "down=true", "injected=true"],
+            ) && has_trace(
+                events,
+                "hook_observed",
+                &["vk=135", "down=false", "injected=true"],
+            )
+        });
+        let production_pair = has_trace(
+            &events,
+            "hook_observed",
+            &["vk=135", "down=true", "injected=true"],
+        ) && has_trace(
+            &events,
+            "hook_observed",
+            &["vk=135", "down=false", "injected=true"],
+        );
+        let runner_pair =
+            runner.down_seen && runner.up_seen && runner.down_injected && runner.up_injected;
+        Ok(format!(
+            "checked F24 targeted foreground ROOT HWND={} PID={}; fresh observer desktop={} runner_pair={runner_pair}; production_pair={production_pair}; input=[{}]",
+            hwnd_id(expected_root_hwnd),
+            child.process_id(),
+            fresh_desktop,
+            input.describe()
+        ))
+    })();
+    match fresh_sentinel {
+        Ok(result) => evidence.push(result),
+        Err(error) => evidence.push(format!("fresh checked F24 diagnostic failed: {error}")),
+    }
+
+    evidence.push(format!(
+        "classification: production_pump_ack={app_pump_acknowledged}, old_runner_pump_ack={old_runner_pump_acknowledged}, fresh_runner_pump_ack={fresh_pump_acknowledged}"
+    ));
+    evidence.join("; ")
+}
+
+fn checked_production_f24_without_runner_observer(
+    child: &NativeChild,
+    expected_root_hwnd: windows::Win32::Foundation::HWND,
+    trace_path: &Path,
+) -> String {
+    if let Err(error) = focus_is_validated(expected_root_hwnd, child.process_id()) {
+        return format!(
+            "refused F24 because ROOT HWND={} PID={} was not foreground: {error}",
+            hwnd_id(expected_root_hwnd),
+            child.process_id()
+        );
+    }
+    let cursor = trace_lines(trace_path).len();
+    let input = match child.press_hook_sentinel(expected_root_hwnd, child.process_id()) {
+        Ok(input) => input,
+        Err(error) => return format!("checked production-only F24 insertion failed: {error}"),
+    };
+    let events = wait_trace(trace_path, cursor, Duration::from_secs(1), |events| {
+        (has_trace(
+            events,
+            "hook_observed",
+            &["vk=135", "down=true", "injected=true"],
+        ) && has_trace(
+            events,
+            "hook_observed",
+            &["vk=135", "down=false", "injected=true"],
+        )) || has_trace(events, "frontend_key", &["key=F24"])
+    });
+    let production_pair = has_trace(
+        &events,
+        "hook_observed",
+        &["vk=135", "down=true", "injected=true"],
+    ) && has_trace(
+        &events,
+        "hook_observed",
+        &["vk=135", "down=false", "injected=true"],
+    );
+    let frontend_received = has_trace(&events, "frontend_key", &["key=F24"]);
+    format!(
+        "checked F24 targeted foreground ROOT HWND={} PID={} with no runner observer; production_pair={production_pair}; frontend_received={frontend_received}; input=[{}]",
+        hwnd_id(expected_root_hwnd),
+        child.process_id(),
+        input.describe()
+    )
+}
+
+fn probe_production_hook_pump(
+    thread_id: u32,
+    child_process_id: u32,
+    trace_path: &Path,
+    timeout: Duration,
+) -> String {
+    let probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    let cursor = trace_lines(trace_path).len();
+    if let Err(error) = post_validated_hook_pump_probe(thread_id, child_process_id, probe_id) {
+        return format!("production pre-release pump probe {probe_id} failed: {error}");
+    }
+    let events = wait_trace(trace_path, cursor, timeout, |events| {
+        has_trace(
+            events,
+            "hook_pump_probe",
+            &[&format!("probe_id={probe_id}")],
+        )
+    });
+    let acknowledged = has_trace(
+        &events,
+        "hook_pump_probe",
+        &[&format!("probe_id={probe_id}")],
+    );
+    format!(
+        "production thread {thread_id} acknowledged pre-release pump probe {probe_id}={acknowledged}"
+    )
 }
 
 fn run_designer_entry(
@@ -1118,8 +1683,32 @@ fn run_designer_entry(
         ));
     }
     let trace_cursor = trace_lines(trace_path).len();
-    let file_click = activate_named(uia, child, &root, "File", FailureStage::DesignerEntry)?;
-    let apps_click = activate_named(uia, child, &root, "Apps", FailureStage::DesignerEntry)?;
+    let file_click = activate_named(
+        uia,
+        child,
+        &root,
+        "File",
+        FailureStage::DesignerEntry,
+        trace_path,
+    )?;
+    let apps_click = activate_named(
+        uia,
+        child,
+        &root,
+        "Apps",
+        FailureStage::DesignerEntry,
+        trace_path,
+    )
+    .map_err(|error| {
+        CaseFailure::new(
+            error.stage,
+            format!(
+                "{}; preceding checked File menu click=[{}]",
+                error.message,
+                file_click.describe()
+            ),
+        )
+    })?;
     let edit_control = uia
         .wait_named(
             root.hwnd,
@@ -1128,7 +1717,7 @@ fn run_designer_entry(
             UIA_TIMEOUT,
         )
         .map_err(|error| CaseFailure::new(FailureStage::DesignerEntry, error))?;
-    let edit_click = click_semantic_control(child, &root, &edit_control)
+    let edit_click = click_semantic_control(child, &root, &edit_control, trace_path)
         .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
     let mut enter_events = None;
     if !wait_until(Duration::from_millis(750), || {
@@ -1703,7 +2292,7 @@ fn run_skins_command_case(
             )
             .map_err(|error| CaseFailure::new(FailureStage::DesignerEntry, error))?;
         let semantic_cursor = trace_lines(trace_path).len();
-        let click = click_semantic_control(child, &root, &result_control)
+        let click = click_semantic_control(child, &root, &result_control, trace_path)
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         let same = wait_until(Duration::from_secs(4), || {
             find_child_window(child, WindowRole::Designer)
@@ -1858,6 +2447,7 @@ fn activate_named(
     target: &WindowSnapshot,
     name: &str,
     stage: FailureStage,
+    trace_path: &Path,
 ) -> Result<PointerClickEvidence, CaseFailure> {
     let control = uia
         .wait_named(target.hwnd, child.process_id(), name, UIA_TIMEOUT)
@@ -1871,7 +2461,7 @@ fn activate_named(
     // Menu controls in the egui UIA provider may advertise Invoke without actually
     // expanding the corresponding menu. Use their process-validated client bounds so the
     // same native interaction the user performs advances each menu level.
-    click_semantic_control(child, target, &control)
+    click_semantic_control(child, target, &control, &trace_path)
         .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))
 }
 
@@ -2441,6 +3031,34 @@ where
     }
 }
 
+fn wait_for_latest_root_restore(path: &Path, timeout: Duration) -> Option<String> {
+    let mut request_id = None;
+    let completed = wait_until(timeout, || {
+        let events = trace_lines(path);
+        let Some(request) = events.iter().rev().find(|line| {
+            line.contains("trace_event=\"native_activation\"")
+                && line.contains("edge=RestoreRequested")
+        }) else {
+            return false;
+        };
+        let Some(id) = request
+            .split("request_id=")
+            .nth(1)
+            .and_then(|value| value.split_ascii_whitespace().next())
+        else {
+            return false;
+        };
+        request_id = Some(id.to_owned());
+        events.iter().any(|line| {
+            line.contains("trace_event=\"native_activation\"")
+                && line.contains("edge=RestoreCompleted")
+                && line.contains("terminal=true")
+                && line.contains(&format!("request_id={id}"))
+        })
+    });
+    if completed { request_id } else { None }
+}
+
 fn wait_root_visibility(child: &mut NativeChild, visible: bool, timeout: Duration) -> bool {
     wait_until(timeout, || {
         child.refresh_root().is_ok_and(|root| {
@@ -2480,7 +3098,7 @@ fn runtime_windows(child: &NativeChild) -> Vec<WindowSnapshot> {
         .windows()
         .into_iter()
         .filter(|window| {
-            window.role == WindowRole::OtherChild
+            is_radial_surface(window, child.process_id())
                 && window.visible
                 && !window.minimized
                 && window.intersects_virtual_screen()
@@ -2488,29 +3106,181 @@ fn runtime_windows(child: &NativeChild) -> Vec<WindowSnapshot> {
         .collect()
 }
 
-fn wait_runtime_window(
+fn wait_runtime_windows(
     child: &NativeChild,
     before: &[WindowSnapshot],
     timeout: Duration,
-) -> Vec<WindowSnapshot> {
-    let mut found = Vec::new();
-    let _ = wait_until(timeout, || {
-        found = runtime_windows(child)
+) -> Result<Vec<WindowSnapshot>, String> {
+    let deadline = Instant::now() + timeout;
+    let mut previous_ids: Option<Vec<u64>> = None;
+    loop {
+        let found: Vec<WindowSnapshot> = runtime_windows(child)
             .into_iter()
-            .filter(|window| !before.iter().any(|previous| previous.hwnd == window.hwnd))
+            .filter(|window| {
+                !before.iter().any(|previous| {
+                    previous.process_id == window.process_id
+                        && hwnd_id(previous.hwnd) == hwnd_id(window.hwnd)
+                })
+            })
             .collect();
-        !found.is_empty()
-    });
-    found
+        let mut ids = found
+            .iter()
+            .map(|window| hwnd_id(window.hwnd))
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        if ids.len() >= 2 && previous_ids.as_ref() == Some(&ids) {
+            return Ok(found);
+        }
+        previous_ids = (ids.len() >= 2).then_some(ids);
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "hold did not produce a stable set of at least two new visible child-owned radial HWNDs; observed [{}]",
+                describe_radial_surfaces(&found)
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
 }
 
-fn window_still_active(child: &NativeChild, previous: &WindowSnapshot) -> bool {
-    child.windows().into_iter().any(|window| {
-        window.hwnd == previous.hwnd
-            && window.visible
-            && !window.minimized
-            && window.intersects_virtual_screen()
+fn validate_radial_surfaces(
+    child: &NativeChild,
+    surfaces: &[WindowSnapshot],
+) -> Result<(), String> {
+    if surfaces.len() < 2 {
+        return Err(format!(
+            "radial surface set must contain input and visual HWNDs, got [{}]",
+            describe_radial_surfaces(surfaces)
+        ));
+    }
+    for (index, surface) in surfaces.iter().enumerate() {
+        if !is_radial_surface(surface, child.process_id()) {
+            return Err(format!(
+                "radial HWND={} is not a {} surface owned by exact candidate PID {}; observed PID={} role={:?} class={:?}",
+                hwnd_id(surface.hwnd),
+                RADIAL_HOST_WINDOW_CLASS,
+                child.process_id(),
+                surface.process_id,
+                surface.role,
+                surface.class_name
+            ));
+        }
+        if hwnd_id(surface.hwnd) == 0
+            || surfaces[..index]
+                .iter()
+                .any(|previous| hwnd_id(previous.hwnd) == hwnd_id(surface.hwnd))
+        {
+            return Err("radial surface set contains a null or duplicate HWND".into());
+        }
+    }
+    Ok(())
+}
+
+fn radial_surfaces_are_active(child: &NativeChild, surfaces: &[WindowSnapshot]) -> bool {
+    let current = child.windows();
+    radial_surface_set_matches_active_state(surfaces, &current, child.process_id(), true)
+}
+
+fn radial_surfaces_are_inactive(child: &NativeChild, surfaces: &[WindowSnapshot]) -> bool {
+    let current = child.windows();
+    radial_surface_set_and_owner_are_inactive(surfaces, &current, child.process_id())
+}
+
+fn radial_surface_set_and_owner_are_inactive(
+    surfaces: &[WindowSnapshot],
+    current: &[WindowSnapshot],
+    process_id: u32,
+) -> bool {
+    radial_surface_set_matches_active_state(surfaces, current, process_id, false)
+        && active_radial_surfaces(current, process_id).is_empty()
+}
+
+fn active_radial_surfaces(windows: &[WindowSnapshot], process_id: u32) -> Vec<WindowSnapshot> {
+    windows
+        .iter()
+        .filter(|window| {
+            is_radial_surface(window, process_id)
+                && window.visible
+                && !window.minimized
+                && window.intersects_virtual_screen()
+        })
+        .cloned()
+        .collect()
+}
+
+fn radial_surface_set_matches_active_state(
+    surfaces: &[WindowSnapshot],
+    current: &[WindowSnapshot],
+    process_id: u32,
+    expected_active: bool,
+) -> bool {
+    if surfaces.len() < 2
+        || surfaces
+            .iter()
+            .any(|surface| !is_radial_surface(surface, process_id))
+    {
+        return false;
+    }
+    surfaces.iter().all(|surface| {
+        let active = current.iter().any(|window| {
+            is_radial_surface(window, process_id)
+                && hwnd_id(window.hwnd) == hwnd_id(surface.hwnd)
+                && window.visible
+                && !window.minimized
+                && window.intersects_virtual_screen()
+        });
+        active == expected_active
     })
+}
+
+fn is_radial_surface(window: &WindowSnapshot, process_id: u32) -> bool {
+    window.process_id == process_id
+        && window.role == WindowRole::OtherChild
+        && window.class_name == RADIAL_HOST_WINDOW_CLASS
+}
+
+fn describe_radial_surfaces(surfaces: &[WindowSnapshot]) -> String {
+    if surfaces.is_empty() {
+        return "none".into();
+    }
+    surfaces
+        .iter()
+        .map(|surface| {
+            format!(
+                "HWND:{} PID:{} role={:?} class={:?} visible={} minimized={} bounds={:?}",
+                hwnd_id(surface.hwnd),
+                surface.process_id,
+                surface.role,
+                surface.class_name,
+                surface.visible,
+                surface.minimized,
+                surface.bounds
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn same_window_state(before: &WindowSnapshot, after: &WindowSnapshot) -> bool {
+    hwnd_id(before.hwnd) == hwnd_id(after.hwnd)
+        && before.process_id == after.process_id
+        && before.role == after.role
+        && before.class_name == after.class_name
+        && before.visible == after.visible
+        && before.minimized == after.minimized
+        && before.bounds == after.bounds
+}
+
+fn describe_root_snapshot(root: &WindowSnapshot) -> String {
+    format!(
+        "HWND:{} PID:{} role={:?} class={:?} visible={} minimized={} bounds={:?}",
+        hwnd_id(root.hwnd),
+        root.process_id,
+        root.role,
+        root.class_name,
+        root.visible,
+        root.minimized,
+        root.bounds
+    )
 }
 
 fn wait_child(child: &mut NativeChild, timeout: Duration) -> Option<NativeExitStatus> {
@@ -2543,4 +3313,150 @@ fn bounded_text(text: &str, maximum: usize) -> String {
         end -= 1;
     }
     text[..end].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(hwnd: usize, process_id: u32, role: WindowRole, active: bool) -> WindowSnapshot {
+        let class_name = match role {
+            WindowRole::OtherChild => RADIAL_HOST_WINDOW_CLASS,
+            WindowRole::Root => "MultiLauncherRoot",
+            WindowRole::Designer => "RadialDesigner",
+        };
+        window_with_class(hwnd, process_id, role, class_name, active)
+    }
+
+    fn window_with_class(
+        hwnd: usize,
+        process_id: u32,
+        role: WindowRole,
+        class_name: &str,
+        active: bool,
+    ) -> WindowSnapshot {
+        let (left, top, width, height) = super::super::virtual_screen_bounds();
+        WindowSnapshot {
+            hwnd: windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void),
+            process_id,
+            role,
+            class_name: class_name.into(),
+            visible: active,
+            minimized: false,
+            bounds: [
+                left,
+                top,
+                left.saturating_add(width),
+                top.saturating_add(height),
+            ],
+        }
+    }
+
+    #[test]
+    fn radial_surface_set_requires_all_exact_child_surfaces_to_transition() {
+        let radial = [
+            window(101, 44, WindowRole::OtherChild, true),
+            window(102, 44, WindowRole::OtherChild, true),
+        ];
+        let both_active = radial.to_vec();
+        assert!(radial_surface_set_matches_active_state(
+            &radial,
+            &both_active,
+            44,
+            true
+        ));
+        let with_auxiliary = vec![
+            radial[0].clone(),
+            radial[1].clone(),
+            window_with_class(103, 44, WindowRole::OtherChild, "ApplicationDialog", true),
+        ];
+        assert!(!is_radial_surface(&with_auxiliary[2], 44));
+        assert!(radial_surface_set_matches_active_state(
+            &radial,
+            &with_auxiliary,
+            44,
+            true
+        ));
+        assert!(!radial_surface_set_matches_active_state(
+            &radial,
+            &both_active,
+            44,
+            false
+        ));
+
+        let one_active = vec![
+            radial[0].clone(),
+            window(102, 44, WindowRole::OtherChild, false),
+        ];
+        assert!(!radial_surface_set_matches_active_state(
+            &radial,
+            &one_active,
+            44,
+            true
+        ));
+        assert!(!radial_surface_set_matches_active_state(
+            &radial,
+            &one_active,
+            44,
+            false
+        ));
+
+        let both_closed = vec![window(102, 44, WindowRole::OtherChild, false)];
+        assert!(radial_surface_set_matches_active_state(
+            &radial,
+            &both_closed,
+            44,
+            false
+        ));
+        assert!(radial_surface_set_and_owner_are_inactive(
+            &radial,
+            &both_closed,
+            44
+        ));
+        let untracked_radial_open = vec![
+            window(102, 44, WindowRole::OtherChild, false),
+            window(103, 44, WindowRole::OtherChild, true),
+        ];
+        assert!(!radial_surface_set_and_owner_are_inactive(
+            &radial,
+            &untracked_radial_open,
+            44
+        ));
+
+        let reused_by_other_process = vec![window(101, 55, WindowRole::OtherChild, true)];
+        assert!(radial_surface_set_matches_active_state(
+            &radial,
+            &reused_by_other_process,
+            44,
+            false
+        ));
+    }
+
+    #[test]
+    fn radial_surface_state_keeps_root_identity_and_bounds_separate() {
+        let radial = [
+            window(101, 44, WindowRole::OtherChild, true),
+            window(102, 44, WindowRole::OtherChild, true),
+        ];
+        let with_root = vec![
+            radial[0].clone(),
+            radial[1].clone(),
+            window(100, 44, WindowRole::Root, true),
+        ];
+        assert!(radial_surface_set_matches_active_state(
+            &radial, &with_root, 44, true
+        ));
+        assert!(!radial_surface_set_matches_active_state(
+            &[radial[0].clone(), window(100, 44, WindowRole::Root, true)],
+            &with_root,
+            44,
+            true
+        ));
+
+        let root_before = window(100, 44, WindowRole::Root, true);
+        let mut root_after = root_before.clone();
+        assert!(same_window_state(&root_before, &root_after));
+        root_after.bounds[0] = root_after.bounds[0].saturating_add(1);
+        assert!(!same_window_state(&root_before, &root_after));
+    }
 }

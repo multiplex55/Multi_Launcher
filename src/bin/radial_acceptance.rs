@@ -30,6 +30,42 @@ struct Arguments {
     report_file: Option<PathBuf>,
     source_revision: Option<String>,
     keep_profile_on_failure: bool,
+    h6_repeat_mode: H6RepeatMode,
+    mouse_gesture_mode: MouseGestureMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum H6RepeatMode {
+    Immediate,
+    Quiescent,
+    ProductionOnlyDiagnostic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MouseGestureMode {
+    Enabled,
+    DisabledDiagnostic,
+}
+
+impl MouseGestureMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::DisabledDiagnostic => "disabled_diagnostic",
+        }
+    }
+}
+
+impl H6RepeatMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::Quiescent => "quiescent",
+            Self::ProductionOnlyDiagnostic => "production_only_diagnostic",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -127,6 +163,8 @@ struct AcceptanceReport {
     schema_version: u16,
     run_id: String,
     mode: &'static str,
+    h6_repeat_mode: H6RepeatMode,
+    mouse_gesture_mode: MouseGestureMode,
     outcome: &'static str,
     candidate: CandidateIdentity,
     environment: EnvironmentIdentity,
@@ -212,6 +250,8 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
     let mut report_file = None;
     let mut source_revision = None;
     let mut keep_profile_on_failure = false;
+    let mut h6_repeat_mode = H6RepeatMode::Quiescent;
+    let mut mouse_gesture_mode = MouseGestureMode::Enabled;
     let mut args = args.into_iter();
 
     while let Some(argument) = args.next() {
@@ -233,6 +273,34 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
                         .map_err(|_| "--source-revision must be valid UTF-8".to_string())?,
                 );
             }
+            Some("--h6-repeat") => {
+                let value = args.next().ok_or_else(|| {
+                    "--h6-repeat requires immediate, quiescent, or production-only-diagnostic"
+                        .to_string()
+                })?;
+                h6_repeat_mode = match value.to_str() {
+                    Some("immediate") => H6RepeatMode::Immediate,
+                    Some("quiescent") => H6RepeatMode::Quiescent,
+                    Some("production-only-diagnostic") => H6RepeatMode::ProductionOnlyDiagnostic,
+                    _ => {
+                        return Err("--h6-repeat must be immediate, quiescent, or production-only-diagnostic".into());
+                    }
+                };
+            }
+            Some("--mouse-gestures") => {
+                let value = args.next().ok_or_else(|| {
+                    "--mouse-gestures requires enabled or disabled-diagnostic".to_string()
+                })?;
+                mouse_gesture_mode = match value.to_str() {
+                    Some("enabled") => MouseGestureMode::Enabled,
+                    Some("disabled-diagnostic") => MouseGestureMode::DisabledDiagnostic,
+                    _ => {
+                        return Err(
+                            "--mouse-gestures must be enabled or disabled-diagnostic".into()
+                        );
+                    }
+                };
+            }
             Some("--profile-copy") => {
                 return Err(
                     "copied-profile execution is reserved for the authoring acceptance milestone"
@@ -253,6 +321,8 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
         report_file,
         source_revision: source_revision.map(|value| bounded_text(&value, 160)),
         keep_profile_on_failure,
+        h6_repeat_mode,
+        mouse_gesture_mode,
     }))
 }
 
@@ -295,7 +365,7 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
             .as_millis()
     );
     let log_path = output.join("acceptance.log");
-    let fixture = deterministic_fixture(&log_path)?;
+    let fixture = deterministic_fixture(&log_path, arguments.mouse_gesture_mode)?;
     let profile = tempfile::Builder::new()
         .prefix("multi-launcher-radial-acceptance-")
         .tempdir()
@@ -307,9 +377,11 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
     let radial_sha256 = sha256_bytes(&fixture.radial_json);
 
     let mut report = AcceptanceReport {
-        schema_version: 2,
+        schema_version: 4,
         run_id,
         mode: "native_windows",
+        h6_repeat_mode: arguments.h6_repeat_mode,
+        mouse_gesture_mode: arguments.mouse_gesture_mode,
         outcome: "running",
         candidate,
         environment: EnvironmentIdentity {
@@ -342,6 +414,12 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
         .create_new(true)
         .open(&runner_log)
         .map_err(|error| format!("create runner log: {error}"))?;
+    let _ = writeln!(log, "H6 repeat mode: {}", arguments.h6_repeat_mode.as_str());
+    let _ = writeln!(
+        log,
+        "mouse gesture mode: {}",
+        arguments.mouse_gesture_mode.as_str()
+    );
     report.push_artifact(runner_log.to_string_lossy());
     report.push_artifact(log_path.to_string_lossy());
     for filename in ["child.stdout.log", "child.stderr.log"] {
@@ -370,6 +448,7 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
                         &driver_output,
                         &driver_trace,
                         hold_threshold_ms,
+                        arguments.h6_repeat_mode,
                         &desktop_attachment,
                         &mut report,
                         &mut log,
@@ -516,7 +595,10 @@ fn prepare_output_directory(arguments: &Arguments) -> Result<PathBuf, String> {
     Ok(output)
 }
 
-fn deterministic_fixture(log_path: &Path) -> Result<DeterministicFixture, String> {
+fn deterministic_fixture(
+    log_path: &Path,
+    mouse_gesture_mode: MouseGestureMode,
+) -> Result<DeterministicFixture, String> {
     let mut settings = Settings::default();
     settings.hotkey = Some(ACCEPTANCE_HOTKEY.to_string());
     settings.help_hotkey = None;
@@ -530,6 +612,12 @@ fn deterministic_fixture(log_path: &Path) -> Result<DeterministicFixture, String
     settings.window_size = Some((900, 650));
     settings.radial.enabled = true;
     settings.radial.shared_tap_hold = true;
+    if mouse_gesture_mode == MouseGestureMode::DisabledDiagnostic {
+        settings.plugin_settings.insert(
+            "mouse_gestures".into(),
+            serde_json::json!({ "enabled": false }),
+        );
+    }
     let document = RadialDocument::starter();
     validate_radial_document(&document)
         .map_err(|error| format!("starter radial document is invalid: {error:?}"))?;
@@ -715,6 +803,78 @@ fn is_reparse_point(metadata: &Metadata) -> bool {
 
 fn print_usage() {
     println!(
-        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--source-revision <id>] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json>"
+        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json>"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Arguments, String> {
+        let parsed = parse_arguments(args.iter().map(OsString::from))?;
+        match parsed {
+            ParseResult::Run(arguments) => Ok(arguments),
+            ParseResult::Help => Err("unexpected help result".into()),
+        }
+    }
+
+    #[test]
+    fn h6_repeat_mode_defaults_to_quiescent_and_accepts_immediate_probe() {
+        let default = parse(&["--output", "run-default"]).unwrap();
+        assert_eq!(default.h6_repeat_mode, H6RepeatMode::Quiescent);
+        assert_eq!(default.mouse_gesture_mode, MouseGestureMode::Enabled);
+
+        let immediate = parse(&["--output", "run-immediate", "--h6-repeat", "immediate"]).unwrap();
+        assert_eq!(immediate.h6_repeat_mode, H6RepeatMode::Immediate);
+        let gestures_disabled = parse(&[
+            "--output",
+            "run-no-gestures",
+            "--mouse-gestures",
+            "disabled-diagnostic",
+        ])
+        .unwrap();
+        assert_eq!(
+            gestures_disabled.mouse_gesture_mode,
+            MouseGestureMode::DisabledDiagnostic
+        );
+
+        let production_only = parse(&[
+            "--output",
+            "run-production-only",
+            "--h6-repeat",
+            "production-only-diagnostic",
+        ])
+        .unwrap();
+        assert_eq!(
+            production_only.h6_repeat_mode,
+            H6RepeatMode::ProductionOnlyDiagnostic
+        );
+    }
+
+    #[test]
+    fn h6_repeat_mode_rejects_unknown_values() {
+        let error = parse(&["--output", "run", "--h6-repeat", "retry"]).unwrap_err();
+        assert!(error.contains("production-only-diagnostic"));
+    }
+
+    #[test]
+    fn disabled_mouse_gesture_diagnostic_is_written_to_isolated_profile() {
+        let fixture = deterministic_fixture(
+            Path::new("acceptance.log"),
+            MouseGestureMode::DisabledDiagnostic,
+        )
+        .unwrap();
+        let settings: Settings = serde_json::from_slice(&fixture.settings_json).unwrap();
+        assert_eq!(
+            settings.plugin_settings["mouse_gestures"]["enabled"],
+            serde_json::Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn mouse_gesture_mode_rejects_unknown_values() {
+        let error = parse(&["--output", "run", "--mouse-gestures", "off"]).unwrap_err();
+        assert!(error.contains("--mouse-gestures must be"));
+    }
 }

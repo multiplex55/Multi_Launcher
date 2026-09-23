@@ -11,9 +11,7 @@ use anyhow::anyhow;
 use chrono::Local;
 use once_cell::sync::OnceCell;
 use std::collections::{HashMap, HashSet};
-#[cfg(windows)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -138,6 +136,18 @@ pub enum HookEvent {
 
 pub trait HookBackend: Send {
     fn install(&mut self, sender: Sender<HookEvent>) -> anyhow::Result<()>;
+    fn set_enabled(&mut self, _enabled: bool) {}
+
+    /// Disables dispatch while keeping an installed process-wide hook alive.
+    ///
+    /// Backends may return `true` only when they can guarantee that callbacks
+    /// stay inert until re-enabled. The default preserves the legacy lifecycle:
+    /// disable best-effort, then let the service uninstall the hook.
+    fn suspend_without_uninstall(&mut self) -> bool {
+        self.set_enabled(false);
+        false
+    }
+
     fn uninstall(&mut self) -> anyhow::Result<()>;
     fn is_installed(&self) -> bool;
 }
@@ -313,8 +323,13 @@ impl MouseGestureService {
     }
 
     fn reconcile_running_state(&mut self, restart_if_running: bool) {
-        if !self.should_run() {
+        if !self.config.enabled {
             self.stop_running();
+            return;
+        }
+
+        if !self.runtime_suppressions.is_empty() {
+            self.suspend_running();
             return;
         }
 
@@ -338,7 +353,9 @@ impl MouseGestureService {
         let (event_tx, event_rx) = mpsc::channel();
         let (stop_tx, stop_rx) = mpsc::channel();
 
+        self.backend.set_enabled(false);
         if let Err(err) = self.backend.install(event_tx) {
+            self.backend.set_enabled(false);
             tracing::error!(?err, "failed to install mouse hook");
             return;
         }
@@ -360,6 +377,19 @@ impl MouseGestureService {
             )
         });
         self.worker = Some(WorkerHandle { stop_tx, join });
+        self.backend.set_enabled(true);
+    }
+
+    fn suspend_running(&mut self) {
+        if self.backend.suspend_without_uninstall() {
+            // Capable backends keep the process-wide hook chain alive and
+            // forward callbacks inertly while the gesture worker is retired.
+            self.stop_worker();
+        } else {
+            // Legacy backends have no in-place suppression guarantee. Preserve
+            // their prior contract by removing the hook for the lease duration.
+            self.stop_running();
+        }
     }
 
     fn stop_running(&mut self) {
@@ -371,6 +401,10 @@ impl MouseGestureService {
             tracing::error!(?err, "failed to uninstall mouse hook");
         }
 
+        self.stop_worker();
+    }
+
+    fn stop_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
             let _ = worker.stop_tx.send(());
             let _ = worker.join.join();
@@ -1434,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn suppression_guard_drop_restores_enabled_service() {
+    fn suppression_guard_reuses_installed_hook_and_restores_enabled_service() {
         fn assert_send<T: Send>() {}
         assert_send::<GestureSuppressionGuard>();
 
@@ -1443,14 +1477,95 @@ mod tests {
             backend,
         ))));
         service.lock().unwrap().start();
+        assert!(handle.emit(HookEvent::SelectBinding(0)));
+
+        let first_guard = GestureSuppressionGuard::acquire(Arc::clone(&service));
+        let second_guard = GestureSuppressionGuard::acquire(Arc::clone(&service));
+        assert!(!service.lock().unwrap().is_running());
+        assert!(!handle.emit(HookEvent::SelectBinding(0)));
+        assert_eq!(handle.install_count(), 1);
+        assert_eq!(handle.uninstall_count(), 0);
+        drop(first_guard);
+        assert!(!service.lock().unwrap().is_running());
+        assert!(!handle.emit(HookEvent::SelectBinding(0)));
+        drop(second_guard);
+
+        assert!(service.lock().unwrap().is_running());
+        assert!(handle.emit(HookEvent::SelectBinding(0)));
+        assert_eq!(handle.install_count(), 1);
+        assert_eq!(handle.uninstall_count(), 0);
 
         let guard = GestureSuppressionGuard::acquire(Arc::clone(&service));
         assert!(!service.lock().unwrap().is_running());
-        drop(guard);
-
-        assert!(service.lock().unwrap().is_running());
-        assert_eq!(handle.install_count(), 2);
         service.lock().unwrap().stop();
+        assert_eq!(handle.uninstall_count(), 1);
+        drop(guard);
+        assert!(!service.lock().unwrap().is_running());
+        assert_eq!(handle.install_count(), 1);
+        service.lock().unwrap().stop();
+    }
+
+    #[test]
+    fn legacy_hook_backend_is_uninstalled_during_suppression() {
+        #[derive(Clone)]
+        struct LegacyHookCounts {
+            installs: Arc<AtomicUsize>,
+            uninstalls: Arc<AtomicUsize>,
+        }
+
+        struct LegacyHookBackend {
+            counts: LegacyHookCounts,
+            installed: bool,
+        }
+
+        impl HookBackend for LegacyHookBackend {
+            fn install(&mut self, _sender: Sender<HookEvent>) -> anyhow::Result<()> {
+                self.counts.installs.fetch_add(1, Ordering::SeqCst);
+                self.installed = true;
+                Ok(())
+            }
+
+            fn uninstall(&mut self) -> anyhow::Result<()> {
+                if self.installed {
+                    self.counts.uninstalls.fetch_add(1, Ordering::SeqCst);
+                }
+                self.installed = false;
+                Ok(())
+            }
+
+            fn is_installed(&self) -> bool {
+                self.installed
+            }
+        }
+
+        let counts = LegacyHookCounts {
+            installs: Arc::new(AtomicUsize::new(0)),
+            uninstalls: Arc::new(AtomicUsize::new(0)),
+        };
+        let service = Arc::new(Mutex::new(MouseGestureService::new_with_backend(Box::new(
+            LegacyHookBackend {
+                counts: counts.clone(),
+                installed: false,
+            },
+        ))));
+
+        service.lock().unwrap().start();
+        assert_eq!(counts.installs.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.uninstalls.load(Ordering::SeqCst), 0);
+
+        let suppression = GestureSuppressionGuard::acquire(Arc::clone(&service));
+        assert!(!service.lock().unwrap().is_running());
+        assert_eq!(counts.uninstalls.load(Ordering::SeqCst), 1);
+        assert!(!service.lock().unwrap().backend.is_installed());
+
+        drop(suppression);
+        assert!(service.lock().unwrap().is_running());
+        assert!(service.lock().unwrap().backend.is_installed());
+        assert_eq!(counts.installs.load(Ordering::SeqCst), 2);
+        assert_eq!(counts.uninstalls.load(Ordering::SeqCst), 1);
+
+        service.lock().unwrap().stop();
+        assert_eq!(counts.uninstalls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -1465,13 +1580,16 @@ mod tests {
         let service_lock = service.lock().unwrap();
         drop(guard);
         assert_eq!(handle.install_count(), 1);
+        assert_eq!(handle.uninstall_count(), 0);
         drop(service_lock);
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        while handle.install_count() != 2 && Instant::now() < deadline {
+        while !service.lock().unwrap().is_running() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(handle.install_count(), 2);
+        assert!(service.lock().unwrap().is_running());
+        assert_eq!(handle.install_count(), 1);
+        assert_eq!(handle.uninstall_count(), 0);
         service.lock().unwrap().stop();
     }
 }
@@ -1584,15 +1702,13 @@ unsafe impl Send for DefaultHookBackend {}
 #[cfg(windows)]
 impl HookBackend for DefaultHookBackend {
     fn install(&mut self, sender: Sender<HookEvent>) -> anyhow::Result<()> {
+        hook_dispatch().set_enabled(false);
+        hook_dispatch().set_tracking(false);
+        hook_dispatch().set_active(false);
+        hook_dispatch().set_sender(Some(sender));
         if self.hook_thread.is_some() {
             return Ok(());
         }
-
-        // Put the sender where the hook proc can see it.
-        hook_dispatch().set_sender(Some(sender));
-        hook_dispatch().set_tracking(false);
-        hook_dispatch().set_active(false);
-        hook_dispatch().set_enabled(true);
 
         use std::time::Duration;
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -1712,6 +1828,19 @@ impl HookBackend for DefaultHookBackend {
     fn is_installed(&self) -> bool {
         self.hook_thread.is_some()
     }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        hook_dispatch().set_enabled(enabled);
+        if !enabled {
+            hook_dispatch().set_tracking(false);
+            hook_dispatch().set_active(false);
+        }
+    }
+
+    fn suspend_without_uninstall(&mut self) -> bool {
+        self.set_enabled(false);
+        self.is_installed()
+    }
 }
 
 #[cfg(not(windows))]
@@ -1723,6 +1852,8 @@ impl HookBackend for DefaultHookBackend {
     fn install(&mut self, _sender: Sender<HookEvent>) -> anyhow::Result<()> {
         Err(anyhow!("mouse hooks are not supported on this platform"))
     }
+
+    fn set_enabled(&mut self, _enabled: bool) {}
 
     fn uninstall(&mut self) -> anyhow::Result<()> {
         Ok(())
@@ -1742,6 +1873,7 @@ pub struct MockHookBackend {
 struct MockHookState {
     install_count: AtomicUsize,
     uninstall_count: AtomicUsize,
+    enabled: AtomicBool,
     sender: Mutex<Option<Sender<HookEvent>>>,
 }
 
@@ -1762,12 +1894,22 @@ impl HookBackend for MockHookBackend {
         let mut guard = self.state.sender.lock().map_err(|_| anyhow!("lock"))?;
         if guard.is_none() {
             self.state.install_count.fetch_add(1, Ordering::SeqCst);
-            *guard = Some(sender);
         }
+        *guard = Some(sender);
         Ok(())
     }
 
+    fn set_enabled(&mut self, enabled: bool) {
+        self.state.enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    fn suspend_without_uninstall(&mut self) -> bool {
+        self.set_enabled(false);
+        self.is_installed()
+    }
+
     fn uninstall(&mut self) -> anyhow::Result<()> {
+        self.state.enabled.store(false, Ordering::SeqCst);
         let mut guard = self.state.sender.lock().map_err(|_| anyhow!("lock"))?;
         if guard.is_some() {
             self.state.uninstall_count.fetch_add(1, Ordering::SeqCst);
@@ -1798,6 +1940,9 @@ impl MockHookHandle {
     }
 
     pub fn emit(&self, event: HookEvent) -> bool {
+        if !self.state.enabled.load(Ordering::SeqCst) {
+            return false;
+        }
         match self.state.sender.lock() {
             Ok(guard) => guard
                 .as_ref()

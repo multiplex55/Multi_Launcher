@@ -200,6 +200,25 @@ pub(crate) enum RootResultKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RootMenuControl {
+    File,
+    Apps,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RootMenuInteractionState {
+    hovered: bool,
+    clicked: bool,
+    open: bool,
+}
+
+impl RootMenuInteractionState {
+    fn is_active(self) -> bool {
+        self.hovered || self.clicked || self.open
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RadialActionStage {
     Activated,
     Parsed,
@@ -274,6 +293,22 @@ pub(crate) enum Event {
     DesignerPointerMoved {
         client_x: i32,
         client_y: i32,
+    },
+    RootPointerMoved {
+        screen_x: i32,
+        screen_y: i32,
+    },
+    RootPointerButton {
+        pressed: bool,
+        released: bool,
+        screen_x: i32,
+        screen_y: i32,
+    },
+    RootMenuInteraction {
+        menu: RootMenuControl,
+        hovered: bool,
+        clicked: bool,
+        open: bool,
     },
     DesignerSubmitted {
         correlation: Correlation,
@@ -354,6 +389,9 @@ pub(crate) enum Event {
         thread_id: u32,
         desktop: HookDesktop,
         primary_vk: u32,
+    },
+    HookPumpProbe {
+        probe_id: u64,
     },
     HookServiceExit {
         message_result: i32,
@@ -600,6 +638,8 @@ fn unregister_bounded(slots: &mut [u64], value: u64) {
 
 static WINDOW_SAMPLE_QUEUE: OnceLock<Mutex<WindowSampleQueue>> = OnceLock::new();
 static NATIVE_OWNER_REGISTRY: OnceLock<Mutex<NativeOwnerRegistry>> = OnceLock::new();
+static ROOT_MENU_INTERACTIONS: OnceLock<Mutex<[Option<RootMenuInteractionState>; 2]>> =
+    OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DesignerSemanticSnapshot {
@@ -858,6 +898,50 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
+        Event::RootPointerMoved { screen_x, screen_y } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "root_pointer_moved",
+                elapsed_ms,
+                screen_x,
+                screen_y,
+                "radial acceptance trace"
+            );
+        }
+        Event::RootPointerButton {
+            pressed,
+            released,
+            screen_x,
+            screen_y,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "root_pointer_button",
+                elapsed_ms,
+                pressed,
+                released,
+                screen_x,
+                screen_y,
+                "radial acceptance trace"
+            );
+        }
+        Event::RootMenuInteraction {
+            menu,
+            hovered,
+            clicked,
+            open,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "root_menu_interaction",
+                elapsed_ms,
+                ?menu,
+                hovered,
+                clicked,
+                open,
+                "radial acceptance trace"
+            );
+        }
         Event::DesignerSubmitted { correlation } => {
             tracing::warn!(
                 target: TRACE_TARGET,
@@ -1091,6 +1175,15 @@ pub(crate) fn emit(event: Event) {
                 thread_id,
                 ?desktop,
                 primary_vk,
+                "radial acceptance trace"
+            );
+        }
+        Event::HookPumpProbe { probe_id } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_pump_probe",
+                elapsed_ms,
+                probe_id,
                 "radial acceptance trace"
             );
         }
@@ -1404,6 +1497,50 @@ pub(crate) fn emit(event: Event) {
     }
 }
 
+pub(crate) fn trace_root_menu_interaction(
+    menu: RootMenuControl,
+    hovered: bool,
+    clicked: bool,
+    open: bool,
+) {
+    if !enabled() {
+        return;
+    }
+
+    let current = RootMenuInteractionState {
+        hovered,
+        clicked,
+        open,
+    };
+    let index = match menu {
+        RootMenuControl::File => 0,
+        RootMenuControl::Apps => 1,
+    };
+    let should_emit = ROOT_MENU_INTERACTIONS
+        .get_or_init(|| Mutex::new([None; 2]))
+        .lock()
+        .map(|mut states| should_emit_root_menu_state(&mut states[index], current))
+        .unwrap_or(false);
+
+    if should_emit {
+        emit(Event::RootMenuInteraction {
+            menu,
+            hovered,
+            clicked,
+            open,
+        });
+    }
+}
+
+fn should_emit_root_menu_state(
+    previous: &mut Option<RootMenuInteractionState>,
+    current: RootMenuInteractionState,
+) -> bool {
+    let changed = *previous != Some(current);
+    *previous = Some(current);
+    changed && current.is_active()
+}
+
 pub(crate) fn emit_designer_semantic_target(
     target: DesignerSemanticTarget,
     role: DesignerSemanticRole,
@@ -1519,6 +1656,9 @@ mod tests {
                 "correlation",
             ],
             Event::DesignerPointerMoved { .. } => &["client_x", "client_y"],
+            Event::RootPointerMoved { .. } => &["screen_x", "screen_y"],
+            Event::RootPointerButton { .. } => &["pressed", "released", "screen_x", "screen_y"],
+            Event::RootMenuInteraction { .. } => &["menu", "hovered", "clicked", "open"],
             Event::DesignerSubmitted { .. } => &["correlation"],
             Event::DesignerBody { .. } => &["state", "correlation"],
             Event::DesignerWidget { .. } => &["category", "response", "correlation"],
@@ -1576,6 +1716,7 @@ mod tests {
                 "global_exclusive_owners",
             ],
             Event::HookServiceReady { .. } => &["thread_id", "desktop", "primary_vk"],
+            Event::HookPumpProbe { .. } => &["probe_id"],
             Event::HookServiceExit { .. } => &[
                 "message_result",
                 "shutdown_requested",
@@ -1668,6 +1809,33 @@ mod tests {
     }
 
     #[test]
+    fn root_menu_trace_emits_state_changes_and_resets_on_close() {
+        let mut previous = None;
+        let inactive = RootMenuInteractionState::default();
+        let hovered = RootMenuInteractionState {
+            hovered: true,
+            ..inactive
+        };
+        let open = RootMenuInteractionState {
+            open: true,
+            ..hovered
+        };
+        let clicked = RootMenuInteractionState {
+            clicked: true,
+            ..open
+        };
+
+        assert!(!should_emit_root_menu_state(&mut previous, inactive));
+        assert!(should_emit_root_menu_state(&mut previous, hovered));
+        assert!(!should_emit_root_menu_state(&mut previous, hovered));
+        assert!(should_emit_root_menu_state(&mut previous, open));
+        assert!(should_emit_root_menu_state(&mut previous, clicked));
+        assert!(should_emit_root_menu_state(&mut previous, open));
+        assert!(!should_emit_root_menu_state(&mut previous, inactive));
+        assert!(should_emit_root_menu_state(&mut previous, open));
+    }
+
+    #[test]
     fn event_schema_has_no_payload_surface() {
         let correlation = Correlation {
             request_id: 7,
@@ -1700,6 +1868,16 @@ mod tests {
             Event::DesignerPointerMoved {
                 client_x: 101,
                 client_y: 102,
+            },
+            Event::RootPointerMoved {
+                screen_x: 201,
+                screen_y: 202,
+            },
+            Event::RootMenuInteraction {
+                menu: RootMenuControl::File,
+                hovered: true,
+                clicked: true,
+                open: true,
             },
             Event::DesignerSubmitted { correlation },
             Event::DesignerBody {
@@ -1779,6 +1957,7 @@ mod tests {
                 desktop: HookDesktop::Default,
                 primary_vk: 0x7A,
             },
+            Event::HookPumpProbe { probe_id: 41 },
             Event::HookServiceExit {
                 message_result: 0,
                 shutdown_requested: false,

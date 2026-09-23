@@ -1224,6 +1224,7 @@ mod native_service {
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::core::{PCWSTR, w};
     pub(super) const WM_SERVICE_COMMAND: u32 = WM_APP + 0x53;
+    pub(super) const WM_HOOK_PUMP_PROBE: u32 = WM_APP + 0x54;
     const LIFECYCLE_WINDOW_CLASS: PCWSTR = w!("MultiLauncherInvocationLifecycle");
 
     unsafe extern "system" fn lifecycle_window_proc(
@@ -2089,7 +2090,11 @@ mod native_service {
                     if result <= 0 {
                         break result;
                     }
-                    if msg.message == WM_SERVICE_COMMAND {
+                    if msg.message == WM_HOOK_PUMP_PROBE {
+                        acceptance_trace::emit(Event::HookPumpProbe {
+                            probe_id: msg.wParam.0 as u64,
+                        });
+                    } else if msg.message == WM_SERVICE_COMMAND {
                         if let Ok(mut s) = lock.lock()
                             && let Some(state) = s.as_mut()
                         {
