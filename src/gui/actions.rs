@@ -117,6 +117,22 @@ impl LauncherApp {
         query_override: Option<String>,
         source: ActivationSource,
     ) {
+        let radial_skins = match a.action.as_str() {
+            "radial edit" => Some(false),
+            "radial skins" => Some(true),
+            _ => None,
+        };
+        if let Some(skins) = radial_skins {
+            crate::radial::acceptance_trace::emit(
+                crate::radial::acceptance_trace::Event::RadialAction {
+                    stage: crate::radial::acceptance_trace::RadialActionStage::Activated,
+                    skins,
+                    editor_open: None,
+                    skins_selected: None,
+                    panel_registered: None,
+                },
+            );
+        }
         self.query_history.reset();
         if let Ok(guard) = ACTIVATION_HOOK.lock()
             && let Some(ref hook) = *guard
@@ -131,11 +147,43 @@ impl LauncherApp {
         let before = self.launcher_interaction_snapshot();
         match crate::commands::parse_command(a, query_override, source) {
             Ok(invocation) => {
+                if let crate::commands::Command::Radial(command) = &invocation.command {
+                    let skins = match command {
+                        crate::commands::RadialCommand::Edit => Some(false),
+                        crate::commands::RadialCommand::Skins => Some(true),
+                        _ => None,
+                    };
+                    if let Some(skins) = skins {
+                        crate::radial::acceptance_trace::emit(
+                            crate::radial::acceptance_trace::Event::RadialAction {
+                                stage: crate::radial::acceptance_trace::RadialActionStage::Parsed,
+                                skins,
+                                editor_open: None,
+                                skins_selected: None,
+                                panel_registered: None,
+                            },
+                        );
+                    }
+                }
                 if !self.maybe_confirm_destructive_action(&invocation) {
                     self.dispatch_command_invocation(invocation);
                 }
             }
-            Err(error) => self.report_error_message(error.domain, error.message),
+            Err(error) => {
+                if let Some(skins) = radial_skins {
+                    crate::radial::acceptance_trace::emit(
+                        crate::radial::acceptance_trace::Event::RadialAction {
+                            stage:
+                                crate::radial::acceptance_trace::RadialActionStage::ParseRejected,
+                            skins,
+                            editor_open: None,
+                            skins_selected: None,
+                            panel_registered: None,
+                        },
+                    );
+                }
+                self.report_error_message(error.domain, error.message)
+            }
         }
         self.restore_for_new_launcher_interaction(&before);
     }

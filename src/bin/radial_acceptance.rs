@@ -20,7 +20,7 @@ mod native;
 const MAX_CASES: usize = 32;
 const MAX_ARTIFACTS: usize = 48;
 const MAX_PATH_BYTES: usize = 2_048;
-const MAX_RESULT_BYTES: usize = 1_024;
+const MAX_RESULT_BYTES: usize = 2_048;
 const ACCEPTANCE_HOTKEY: &str = "F11";
 
 #[derive(Debug)]
@@ -530,7 +530,6 @@ fn deterministic_fixture(log_path: &Path) -> Result<DeterministicFixture, String
     settings.window_size = Some((900, 650));
     settings.radial.enabled = true;
     settings.radial.shared_tap_hold = true;
-
     let document = RadialDocument::starter();
     validate_radial_document(&document)
         .map_err(|error| format!("starter radial document is invalid: {error:?}"))?;

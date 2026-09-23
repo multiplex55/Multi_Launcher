@@ -10,8 +10,8 @@ mod work_area;
 
 use crate::gui::LauncherApp;
 use crate::radial::acceptance_trace::{
-    self, BodyBlock, Correlation, Event, FocusEdge, RequestKind, ViewportClass, WidgetCategory,
-    WidgetResponse,
+    self, BodyBlock, Correlation, DesignerCloseState, DesignerSemanticRole, DesignerSemanticTarget,
+    Event, FocusEdge, RequestKind, ViewportClass, WidgetCategory, WidgetResponse,
 };
 use crate::radial::authoring::menu::{self, ResizeResolution, SubmenuDuplication};
 use crate::radial::authoring::{
@@ -100,10 +100,44 @@ fn trace_pointer_release_response(
     accepted: bool,
     correlation: Correlation,
 ) {
-    if acceptance_trace::enabled()
-        && ui.input(|input| input.pointer.any_released())
-        && response.hovered()
-    {
+    if !acceptance_trace::enabled() {
+        return;
+    }
+
+    let (pressed, released, pointer_position) = ui.input(|input| {
+        (
+            input.pointer.any_pressed(),
+            input.pointer.any_released(),
+            input.pointer.interact_pos(),
+        )
+    });
+    let hovered = response.hovered();
+    let button_down_on = response.is_pointer_button_down_on();
+    let pointer_inside = pointer_position.is_some_and(|position| response.rect.contains(position));
+    if (pressed || released) && (hovered || button_down_on || pointer_inside) {
+        let (has_position, pointer_x, pointer_y) = pointer_position
+            .map_or((false, i32::MIN, i32::MIN), |position| {
+                (true, position.x.round() as i32, position.y.round() as i32)
+            });
+        let layer_is_topmost = pointer_position
+            .is_some_and(|position| ui.ctx().layer_id_at(position) == Some(response.layer_id));
+        acceptance_trace::emit(Event::DesignerWidgetPointer {
+            category,
+            pressed,
+            released,
+            hovered,
+            button_down_on,
+            pointer_inside,
+            layer_is_topmost,
+            clicked: accepted,
+            has_position,
+            pointer_x,
+            pointer_y,
+            correlation,
+        });
+    }
+
+    if released && hovered {
         acceptance_trace::emit(Event::DesignerWidget {
             category,
             response: if accepted {
@@ -113,6 +147,70 @@ fn trace_pointer_release_response(
             },
             correlation,
         });
+    }
+}
+
+fn trace_designer_semantic_target(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    target: DesignerSemanticTarget,
+    role: DesignerSemanticRole,
+    viewport: ViewportClass,
+    selected: bool,
+    correlation: Correlation,
+) {
+    if !acceptance_trace::enabled() {
+        return;
+    }
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return;
+    }
+    let rect = response.rect;
+    let scale = |coordinate: f32| {
+        let scaled = coordinate * pixels_per_point;
+        (scaled.is_finite() && scaled >= i32::MIN as f32 && scaled <= i32::MAX as f32)
+            .then(|| scaled.round() as i32)
+    };
+    let Some(left) = scale(rect.left()) else {
+        return;
+    };
+    let Some(top) = scale(rect.top()) else {
+        return;
+    };
+    let Some(right) = scale(rect.right()) else {
+        return;
+    };
+    let Some(bottom) = scale(rect.bottom()) else {
+        return;
+    };
+    if right <= left || bottom <= top {
+        return;
+    }
+    acceptance_trace::emit_designer_semantic_target(
+        target,
+        role,
+        viewport,
+        [left, top, right, bottom],
+        selected,
+        response.has_focus(),
+        correlation,
+    );
+}
+
+fn designer_viewport_builder(open: bool, launcher_always_on_top: bool) -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default()
+        .with_title("Radial Designer")
+        .with_min_inner_size([520.0, 380.0])
+        .with_resizable(true)
+        .with_visible(open);
+    if launcher_always_on_top {
+        // The Designer is an independent top-level viewport. Keep it in the
+        // same z-order band as ROOT so ROOT's configured topmost state cannot
+        // cover the editor's native input surface.
+        builder.with_always_on_top()
+    } else {
+        builder
     }
 }
 
@@ -1146,21 +1244,25 @@ impl RadialEditorState {
             open,
             viewport_close_pending,
             viewport_restore_pending,
+            viewport_focus_pending,
             preferences,
             action_catalog,
             feature_defaults,
             diagnostics,
             require_confirm,
+            launcher_always_on_top,
         ) = match shared.lock() {
             Ok(editor) => (
                 editor.open,
                 editor.viewport_close_pending,
                 editor.viewport_restore_pending,
+                editor.viewport_focus_pending,
                 editor.preferences.clone().normalized(),
                 app.universal_action_catalog_snapshot(),
                 app.radial_feature_settings.clone(),
                 app.radial_expected_diagnostics.iter().cloned().collect(),
                 app.require_confirm_destructive,
+                app.always_on_top,
             ),
             Err(_) => return,
         };
@@ -1199,11 +1301,7 @@ impl RadialEditorState {
             size: CanvasPoint::new(preferences.window_size.0, preferences.window_size.1),
         };
         let saved_position_scale_factor = preferences.window_scale_factor;
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title("Radial Designer")
-            .with_min_inner_size([520.0, 380.0])
-            .with_resizable(true)
-            .with_visible(open);
+        let mut builder = designer_viewport_builder(open, launcher_always_on_top);
         if viewport_restore_pending {
             // The initial builder only supplies a bounded size.  Desktop
             // position and mixed-DPI normalization belong to the child
@@ -1237,9 +1335,9 @@ impl RadialEditorState {
                 }
             }
             if !editor.open {
-                if class != egui::ViewportClass::Embedded {
-                    child.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+                // The deferred viewport is removed when ROOT stops registering it.
+                // Sending Close here would only enqueue another close-request event
+                // in eframe 0.27, which keeps this callback alive and repainting.
                 editor.viewport_close_pending = false;
                 return;
             }
@@ -1284,7 +1382,6 @@ impl RadialEditorState {
                 editor.viewport_restore_pending = false;
             }
             if focus_requested {
-                child.send_viewport_cmd(egui::ViewportCommand::Focus);
                 acceptance_trace::emit(Event::DesignerFocus {
                     edge: FocusEdge::Consumed,
                     viewport: trace_viewport,
@@ -1293,6 +1390,13 @@ impl RadialEditorState {
             }
             editor.viewport_ui(child, &frame, class);
         });
+        if viewport_focus_pending {
+            // The root command can queue focus after the child last rendered.
+            // Register the child first, then send Focus through its parent so
+            // eframe wakes and focuses a deferred viewport whose callback is
+            // currently idle.  The callback records consumption when it runs.
+            ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Focus);
+        }
     }
 
     pub(crate) fn open(&mut self) {
@@ -1357,12 +1461,26 @@ impl RadialEditorState {
         self.open();
         self.show_resources = true;
         self.mark_preferences_changed();
+        acceptance_trace::emit(Event::RadialAction {
+            stage: crate::radial::acceptance_trace::RadialActionStage::EditorModeApplied,
+            skins: true,
+            editor_open: Some(self.open),
+            skins_selected: Some(self.show_resources),
+            panel_registered: None,
+        });
     }
 
     pub(crate) fn open_menus(&mut self) {
         self.open();
         self.show_resources = false;
         self.mark_preferences_changed();
+        acceptance_trace::emit(Event::RadialAction {
+            stage: crate::radial::acceptance_trace::RadialActionStage::EditorModeApplied,
+            skins: false,
+            editor_open: Some(self.open),
+            skins_selected: Some(self.show_resources),
+            panel_registered: None,
+        });
     }
 
     #[cfg(test)]
@@ -1467,6 +1585,33 @@ impl RadialEditorState {
             self.stop_native_preview();
         }
         self.maybe_finish_close();
+        let Some(session) = self.session.as_ref() else {
+            acceptance_trace::emit(Event::DesignerClose {
+                state: DesignerCloseState {
+                    open: self.open,
+                    close_prompt: self.close_prompt,
+                    dirty: self.properties_popup_dirty(),
+                    pending_disposable: false,
+                    pending_durable: false,
+                    pending_native_preview: false,
+                },
+            });
+            return;
+        };
+        acceptance_trace::emit(Event::DesignerClose {
+            state: DesignerCloseState {
+                open: self.open,
+                close_prompt: self.close_prompt,
+                dirty: session.is_dirty() || self.properties_popup_dirty(),
+                pending_disposable: session
+                    .pending_request
+                    .is_some_and(|pending| pending.kind.is_disposable()),
+                pending_durable: session
+                    .pending_request
+                    .is_some_and(|pending| !pending.kind.is_disposable()),
+                pending_native_preview: session.pending_native_preview.is_some(),
+            },
+        });
     }
 
     fn finish_close(&mut self) {
@@ -1796,6 +1941,28 @@ impl RadialEditorState {
         if viewport_class == egui::ViewportClass::Embedded {
             return;
         }
+        // Eframe initializes native AccessKit on the root viewport only. The
+        // deferred Designer still needs to publish its semantic widget tree.
+        ctx.enable_accesskit();
+        if acceptance_trace::enabled() {
+            let pointer_move = ctx.input(|input| {
+                input.events.iter().rev().find_map(|event| match event {
+                    egui::Event::PointerMoved(position) => Some(*position),
+                    _ => None,
+                })
+            });
+            if let Some(position) = pointer_move {
+                let scale = ctx.pixels_per_point();
+                let to_pixel = |coordinate: f32| {
+                    let pixel = coordinate * scale;
+                    (pixel.is_finite() && pixel >= i32::MIN as f32 && pixel <= i32::MAX as f32)
+                        .then(|| pixel.round() as i32)
+                };
+                if let Some((client_x, client_y)) = to_pixel(position.x).zip(to_pixel(position.y)) {
+                    acceptance_trace::emit(Event::DesignerPointerMoved { client_x, client_y });
+                }
+            }
+        }
         let (pointer_down, pointer_up) =
             ctx.input(|input| (input.pointer.any_pressed(), input.pointer.any_released()));
         if pointer_down || pointer_up {
@@ -1975,7 +2142,7 @@ impl RadialEditorState {
             ui.add_enabled_ui(
                 !initial_snapshot_pending && conflict_reason.is_none(),
                 |ui| {
-                    self.designer_controls(ui);
+                    self.designer_controls(ui, trace_viewport_class(viewport_class));
                     if !self.show_resources && self.designer_mode == DesignerMode::Design {
                         self.basic_authoring_toolbar(ui, &frame.feature_defaults);
                     }
@@ -2003,7 +2170,11 @@ impl RadialEditorState {
                                     egui::vec2(pane.tree_width, pane.height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        self.tree(ui, &frame.feature_defaults);
+                                        self.tree(
+                                            ui,
+                                            &frame.feature_defaults,
+                                            trace_viewport_class(viewport_class),
+                                        );
                                     },
                                 );
                                 ui.add_space(6.0);
@@ -2043,7 +2214,13 @@ impl RadialEditorState {
                                     |ui| {
                                         egui::ScrollArea::vertical()
                                             .id_source("radial-designer-inspector")
-                                            .show(ui, |ui| self.inspector(ui, frame));
+                                            .show(ui, |ui| {
+                                                self.inspector(
+                                                    ui,
+                                                    frame,
+                                                    trace_viewport_class(viewport_class),
+                                                )
+                                            });
                                     },
                                 );
                             }
@@ -2530,7 +2707,7 @@ impl RadialEditorState {
         }
     }
 
-    fn designer_controls(&mut self, ui: &mut egui::Ui) {
+    fn designer_controls(&mut self, ui: &mut egui::Ui, viewport: ViewportClass) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Mode:");
             if ui
@@ -2569,6 +2746,15 @@ impl RadialEditorState {
                 self.mark_preferences_changed();
             }
             let menus = ui.selectable_label(!self.show_resources, "Menus");
+            trace_designer_semantic_target(
+                ui,
+                &menus,
+                DesignerSemanticTarget::Menus,
+                DesignerSemanticRole::SelectableLabel,
+                viewport,
+                !self.show_resources,
+                trace_correlation(self.session.as_ref()),
+            );
             trace_pointer_release_response(
                 ui,
                 &menus,
@@ -2581,6 +2767,15 @@ impl RadialEditorState {
                 self.mark_preferences_changed();
             }
             let skins = ui.selectable_label(self.show_resources, "Skins");
+            trace_designer_semantic_target(
+                ui,
+                &skins,
+                DesignerSemanticTarget::Skins,
+                DesignerSemanticRole::SelectableLabel,
+                viewport,
+                self.show_resources,
+                trace_correlation(self.session.as_ref()),
+            );
             trace_pointer_release_response(
                 ui,
                 &skins,
@@ -2595,6 +2790,15 @@ impl RadialEditorState {
             let tree = ui
                 .selectable_label(self.tree_visible, "Tree")
                 .on_hover_text("Show or hide the menu tree");
+            trace_designer_semantic_target(
+                ui,
+                &tree,
+                DesignerSemanticTarget::Tree,
+                DesignerSemanticRole::SelectableLabel,
+                viewport,
+                self.tree_visible,
+                trace_correlation(self.session.as_ref()),
+            );
             trace_pointer_release_response(
                 ui,
                 &tree,
@@ -2609,6 +2813,15 @@ impl RadialEditorState {
             let inspector = ui
                 .selectable_label(self.inspector_visible, "Inspector")
                 .on_hover_text("Show or hide the inspector");
+            trace_designer_semantic_target(
+                ui,
+                &inspector,
+                DesignerSemanticTarget::Inspector,
+                DesignerSemanticRole::SelectableLabel,
+                viewport,
+                self.inspector_visible,
+                trace_correlation(self.session.as_ref()),
+            );
             trace_pointer_release_response(
                 ui,
                 &inspector,
@@ -3615,7 +3828,12 @@ impl RadialEditorState {
         self.preview.retry_preparation();
     }
 
-    fn tree(&mut self, ui: &mut egui::Ui, _defaults: &crate::radial::model::RadialFeatureSettings) {
+    fn tree(
+        &mut self,
+        ui: &mut egui::Ui,
+        _defaults: &crate::radial::model::RadialFeatureSettings,
+        viewport: ViewportClass,
+    ) {
         ui.heading("Menus and rings");
         let drag_source = &mut self.drag_source;
         let post_render = &mut self.post_render;
@@ -3765,6 +3983,17 @@ impl RadialEditorState {
                             );
                         }
                     });
+                if menu.id == session.draft.default_menu_id {
+                    trace_designer_semantic_target(
+                        ui,
+                        &header.header_response,
+                        DesignerSemanticTarget::DefaultMenu,
+                        DesignerSemanticRole::Button,
+                        viewport,
+                        menu_selected,
+                        trace_correlation(Some(session)),
+                    );
+                }
                 let is_open = header.body_returned.is_some();
                 header
                     .header_response
@@ -3792,7 +4021,12 @@ impl RadialEditorState {
         ui.small("Use the Design toolbar for New Menu, Add Ring, and slot-count proposals.");
     }
 
-    fn inspector(&mut self, ui: &mut egui::Ui, frame: &DesignerFrameContext) {
+    fn inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &DesignerFrameContext,
+        viewport: ViewportClass,
+    ) {
         ui.heading("Inspector");
         if let Some(selection) = self.projected_selection.clone() {
             self.projected_selection_ui(ui, &selection);
@@ -3807,9 +4041,12 @@ impl RadialEditorState {
             return;
         };
         match selection {
-            StableSelection::Menu(menu_id) => {
-                self.menu_inspector(ui, menu_id, frame.feature_defaults.default_menu_id.as_ref())
-            }
+            StableSelection::Menu(menu_id) => self.menu_inspector(
+                ui,
+                menu_id,
+                frame.feature_defaults.default_menu_id.as_ref(),
+                viewport,
+            ),
             StableSelection::Ring { menu_id, ring_id } => self.ring_inspector(ui, menu_id, ring_id),
             StableSelection::Cell {
                 menu_id,
@@ -3827,6 +4064,7 @@ impl RadialEditorState {
         ui: &mut egui::Ui,
         menu_id: MenuId,
         configured_default: Option<&MenuId>,
+        viewport: ViewportClass,
     ) {
         let Some(session) = self.session.as_mut() else {
             return;
@@ -3834,16 +4072,43 @@ impl RadialEditorState {
         let Some(found) = session.draft.menus.iter().find(|menu| menu.id == menu_id) else {
             return;
         };
-        let mut name = found.name.clone();
+        let previous_name = found.name.clone();
+        let mut name = previous_name.clone();
         ui.label(format!("ID: {}", menu_id));
         let response = ui
             .push_id(menu::widget_key("menu", menu_id.as_str(), "name"), |ui| {
                 ui.text_edit_singleline(&mut name)
             })
             .inner;
-        if response.changed() || response.lost_focus() || response.drag_stopped() {
+        trace_designer_semantic_target(
+            ui,
+            &response,
+            DesignerSemanticTarget::MenuName,
+            DesignerSemanticRole::TextEdit,
+            viewport,
+            false,
+            trace_correlation(Some(session)),
+        );
+        let widget_changed = response.changed();
+        let submitted_name = (widget_changed && acceptance_trace::enabled()).then(|| name.clone());
+        if widget_changed || response.lost_focus() || response.drag_stopped() {
             let phase = widget_edit_phase(&response);
             let _ = menu::rename_menu(session, menu_id.clone(), name, phase);
+        }
+        if let Some(submitted_name) = submitted_name {
+            let current_name = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == menu_id)
+                .map(|menu| menu.name.as_str());
+            acceptance_trace::emit_designer_edit_state(
+                true,
+                current_name.is_some_and(|name| name != previous_name),
+                current_name == Some(submitted_name.as_str()),
+                session.is_dirty(),
+                trace_correlation(Some(session)),
+            );
         }
         let menu_index = session
             .draft
@@ -3858,7 +4123,7 @@ impl RadialEditorState {
             .find(|menu| menu.id == menu_id)
             .map(|menu| menu.skin_id.clone());
         if let Some(mut selected_skin) = current_skin {
-            egui::ComboBox::from_id_source(menu::widget_key(
+            let default_skin = egui::ComboBox::from_id_source(menu::widget_key(
                 "menu",
                 menu_id.as_str(),
                 "default-skin",
@@ -3869,6 +4134,15 @@ impl RadialEditorState {
                     ui.selectable_value(&mut selected_skin, skin.id.clone(), &skin.name);
                 }
             });
+            trace_designer_semantic_target(
+                ui,
+                &default_skin.response,
+                DesignerSemanticTarget::MenuDefaultSkin,
+                DesignerSemanticRole::ComboBox,
+                viewport,
+                false,
+                trace_correlation(Some(session)),
+            );
             let differs = session
                 .draft
                 .menus
@@ -6343,6 +6617,15 @@ fn open_designer_file_dialog(request: &DesignerFileDialogRequest) -> DesignerFil
 mod tests {
     use super::*;
 
+    #[test]
+    fn designer_viewport_matches_launcher_topmost_policy() {
+        assert_eq!(
+            designer_viewport_builder(true, true).window_level,
+            Some(egui::viewport::WindowLevel::AlwaysOnTop)
+        );
+        assert_eq!(designer_viewport_builder(true, false).window_level, None);
+    }
+
     struct RetainedDesignerDriver {
         context: egui::Context,
         editor: RadialEditorState,
@@ -6352,7 +6635,6 @@ mod tests {
     impl RetainedDesignerDriver {
         fn new(editor: RadialEditorState) -> Self {
             let context = egui::Context::default();
-            context.enable_accesskit();
             context.set_pixels_per_point(1.0);
             let frame = DesignerFrameContext {
                 feature_defaults: crate::radial::model::RadialFeatureSettings::default(),
@@ -7398,8 +7680,18 @@ mod tests {
             generation_before
         );
 
+        assert!(!driver.editor.tree_visible);
+        let tree_button =
+            accesskit_named_bounds(&after_click, "Tree", egui::accesskit::Role::ToggleButton);
+        let tree_click = tree_button.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(tree_click)]);
+        let _ = driver.frame(vec![pointer_button_event(tree_click, true)]);
+        let _ = driver.frame(vec![pointer_button_event(tree_click, false)]);
+        assert!(driver.editor.tree_visible);
+
+        let after_tree_click = driver.frame(Vec::new());
         let inspector_button = accesskit_named_bounds(
-            &after_click,
+            &after_tree_click,
             "Inspector",
             egui::accesskit::Role::ToggleButton,
         );
@@ -7463,7 +7755,11 @@ mod tests {
         ctx.enable_accesskit();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                editor.tree(ui, &crate::radial::model::RadialFeatureSettings::default());
+                editor.tree(
+                    ui,
+                    &crate::radial::model::RadialFeatureSettings::default(),
+                    ViewportClass::Deferred,
+                );
             });
         });
         let update = output

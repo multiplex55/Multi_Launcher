@@ -1,7 +1,9 @@
 //! Complete, timestamped lifecycle adapter for the launcher chord.
 //! The pure adapter is also the synchronous decision core used by the native hook.
 use super::{Hotkey, Key};
-use crate::radial::acceptance_trace::{self, Event, PrimaryTransition};
+use crate::radial::acceptance_trace::{
+    self, Event, HookDeadlineEdge, HookPriorityOwner, PrimaryTransition,
+};
 pub use crate::radial::invocation::InputProvenance;
 use crate::radial::invocation::{
     ContextToken, InvocationEvent, InvocationIntent, InvocationReducer, LifecycleCancellation,
@@ -260,6 +262,9 @@ impl LauncherInvocationAdapter {
     }
     fn has_owned_cycle(&self) -> bool {
         self.owned.is_some() || self.recovery_primary.is_some()
+    }
+    fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
     pub fn reload(
         &mut self,
@@ -1202,12 +1207,17 @@ impl Drop for LauncherInvocationService {
 #[cfg(all(windows, not(test)))]
 mod native_service {
     use super::*;
+    use crate::radial::acceptance_trace::HookDesktop;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock, mpsc};
     use std::time::Instant;
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::RemoteDesktop::{
         NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+    };
+    use windows::Win32::System::StationsAndDesktops::{
+        GetThreadDesktop, GetUserObjectInformationW, UOI_NAME,
     };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
@@ -1296,6 +1306,35 @@ mod native_service {
                 kill_timer(self.0, true, "service timer guard drop");
                 self.0 = 0;
             }
+        }
+    }
+
+    struct HookCallbackTiming {
+        started: Instant,
+        primary: bool,
+        down: bool,
+        injected: bool,
+    }
+
+    impl HookCallbackTiming {
+        fn new(transition: KeyTransition, injected: bool) -> Self {
+            Self {
+                started: Instant::now(),
+                primary: false,
+                down: transition != KeyTransition::Up,
+                injected,
+            }
+        }
+    }
+
+    impl Drop for HookCallbackTiming {
+        fn drop(&mut self) {
+            acceptance_trace::emit(Event::HookCallback {
+                primary: self.primary,
+                down: self.down,
+                injected: self.injected,
+                elapsed_us: self.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            });
         }
     }
 
@@ -1481,6 +1520,15 @@ mod native_service {
             WM_KEYDOWN | WM_SYSKEYDOWN => KeyTransition::Down,
             _ => return unsafe { CallNextHookEx(None, code, w, l) },
         };
+        let injected = data.flags.contains(LLKHF_INJECTED);
+        let mut callback_timing = HookCallbackTiming::new(transition, injected);
+        if data.vkCode == 0x7A || data.vkCode == 0x87 {
+            acceptance_trace::emit(Event::HookObserved {
+                vk: data.vkCode,
+                down: transition == KeyTransition::Down,
+                injected: data.flags.contains(LLKHF_INJECTED),
+            });
+        }
         let Some(lock) = STATE.get() else {
             return unsafe { CallNextHookEx(None, code, w, l) };
         };
@@ -1491,6 +1539,7 @@ mod native_service {
             return unsafe { CallNextHookEx(None, code, w, l) };
         };
         let primary = vk_from_key(state.adapter.config().hotkey.key);
+        callback_timing.primary = Some(data.vkCode) == primary;
         let transition = if Some(data.vkCode) == primary
             && transition == KeyTransition::Down
             && state.primary_down
@@ -1502,7 +1551,6 @@ mod native_service {
         if Some(data.vkCode) == primary {
             state.primary_down = transition != KeyTransition::Up
         }
-        let injected = data.flags.contains(LLKHF_INJECTED);
         let provenance = classify_provenance(injected, data.dwExtraInfo);
         if Some(data.vkCode) == primary
             && let Some(transition) = acceptance_trace_primary_transition(transition)
@@ -1764,6 +1812,34 @@ mod native_service {
             },
             owner,
         );
+        if callback_timing.primary
+            && let Some(primary_transition) = acceptance_trace_primary_transition(transition)
+        {
+            let deadline_scheduled = out
+                .intents
+                .iter()
+                .any(|intent| matches!(intent, InvocationIntent::ScheduleDeadline { .. }));
+            let radial_intent = out.intents.iter().any(|intent| {
+                matches!(
+                    intent,
+                    InvocationIntent::OpenRadial { .. } | InvocationIntent::CloseRadial { .. }
+                )
+            });
+            acceptance_trace::emit(Event::HookAdmission {
+                transition: primary_transition,
+                provenance,
+                owner: match current_owner {
+                    PriorityOwner::Launcher => HookPriorityOwner::Launcher,
+                    PriorityOwner::ScreenDrawRecovery => HookPriorityOwner::ScreenDrawRecovery,
+                    PriorityOwner::ExclusiveTool => HookPriorityOwner::ExclusiveTool,
+                },
+                global_exclusive_owners: super::exclusive_owners(),
+                adapter_exclusive: state.adapter.is_exclusive(),
+                recovery: out.recovery,
+                deadline_scheduled,
+                radial_intent,
+            });
+        }
         let timer_error = update_timers(state, &out.intents);
         if let Some(error) = timer_error {
             state.shutdown_requested = true;
@@ -1805,10 +1881,27 @@ mod native_service {
                         return Some(format!("failed to schedule radial deadline for {}", id.0));
                     }
                     state.timers.insert(id, ServiceTimer(timer));
+                    acceptance_trace::emit(Event::HookDeadline {
+                        edge: HookDeadlineEdge::Scheduled,
+                        invocation_id: id.0,
+                        timer_id: timer as u64,
+                        delay_ms: delay as u64,
+                        radial_intent: false,
+                        global_exclusive_owners: super::exclusive_owners(),
+                    });
                 }
                 InvocationIntent::CancelDeadline { id } => {
                     if let Some(timer) = state.timers.remove(&id) {
+                        let timer_id = timer.0 as u64;
                         timer.cancel(true, "deadline cancellation");
+                        acceptance_trace::emit(Event::HookDeadline {
+                            edge: HookDeadlineEdge::Cancelled,
+                            invocation_id: id.0,
+                            timer_id,
+                            delay_ms: 0,
+                            radial_intent: false,
+                            global_exclusive_owners: super::exclusive_owners(),
+                        });
                     }
                 }
                 _ => {}
@@ -1890,7 +1983,7 @@ mod native_service {
                     return;
                 }
                 let lock = STATE.get_or_init(|| Mutex::new(None));
-                {
+                let primary_vk = {
                     let Ok(mut slot) = lock.lock() else {
                         let _ = setup_tx.send(Err("launcher hook state poisoned".into()));
                         return;
@@ -1900,6 +1993,7 @@ mod native_service {
                         return;
                     }
                     let item_inputs = config.item_inputs.clone();
+                    let primary_vk = vk_from_key(config.hotkey.key).unwrap_or_default();
                     let adapter = match LauncherInvocationAdapter::new(config) {
                         Ok(a) => a,
                         Err(e) => {
@@ -1931,7 +2025,8 @@ mod native_service {
                         active_frame: None,
                         session_epoch: 0,
                     });
-                }
+                    primary_vk
+                };
                 if worker_startup.is_cancelled() {
                     if let Ok(mut slot) = lock.lock() {
                         *slot = None;
@@ -1948,11 +2043,20 @@ mod native_service {
                         return;
                     }
                 };
+                let hook_module = match unsafe { GetModuleHandleW(None) } {
+                    Ok(module) => module,
+                    Err(error) => {
+                        if let Ok(mut slot) = lock.lock() {
+                            *slot = None;
+                        }
+                        let _ = setup_tx
+                            .send(Err(format!("launcher hook module lookup failed: {error}")));
+                        return;
+                    }
+                };
                 let hook = match cancellable_startup_install(
                     &worker_startup,
-                    || unsafe {
-                        SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), HINSTANCE::default(), 0)
-                    },
+                    || unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), hook_module, 0) },
                     |hook| {
                         let _ = unsafe { UnhookWindowsHookEx(hook) };
                     },
@@ -1973,9 +2077,18 @@ mod native_service {
                     }
                 };
                 let _hook = KeyboardHook(hook);
+                acceptance_trace::emit(Event::HookServiceReady {
+                    thread_id: id,
+                    desktop: hook_thread_desktop(),
+                    primary_vk,
+                });
                 let _ = setup_tx.send(Ok(id));
                 let mut msg = MSG::default();
-                while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+                let message_result = loop {
+                    let result = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
+                    if result <= 0 {
+                        break result;
+                    }
                     if msg.message == WM_SERVICE_COMMAND {
                         if let Ok(mut s) = lock.lock()
                             && let Some(state) = s.as_mut()
@@ -2122,6 +2235,20 @@ mod native_service {
                                     let at = state.epoch.elapsed().as_millis() as u64;
                                     let generation = state.adapter.config().generation;
                                     let intents = state.adapter.deadline(id, at, generation);
+                                    acceptance_trace::emit(Event::HookDeadline {
+                                        edge: HookDeadlineEdge::Fired,
+                                        invocation_id: id.0,
+                                        timer_id: timer as u64,
+                                        delay_ms: 0,
+                                        radial_intent: intents.iter().any(|intent| {
+                                            matches!(
+                                                intent,
+                                                InvocationIntent::OpenRadial { .. }
+                                                    | InvocationIntent::CloseRadial { .. }
+                                            )
+                                        }),
+                                        global_exclusive_owners: super::exclusive_owners(),
+                                    });
                                     let _ = state.notices.send(ServiceNotice {
                                         recovery: false,
                                         intents,
@@ -2141,7 +2268,28 @@ mod native_service {
                         let _ = unsafe { TranslateMessage(&msg) };
                         unsafe { DispatchMessageW(&msg) };
                     }
-                }
+                };
+                let (shutdown_requested, primary_down, owned_input, pending_deadlines) = lock
+                    .lock()
+                    .ok()
+                    .and_then(|slot| {
+                        slot.as_ref().map(|state| {
+                            (
+                                state.shutdown_requested,
+                                state.primary_down,
+                                has_owned_input(state),
+                                state.timers.len(),
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                acceptance_trace::emit(Event::HookServiceExit {
+                    message_result,
+                    shutdown_requested,
+                    primary_down,
+                    owned_input,
+                    pending_deadlines,
+                });
                 let unexpected_exit = lock
                     .lock()
                     .ok()
@@ -2197,6 +2345,37 @@ mod native_service {
                 };
                 Err(reaper_error.map_or(message.clone(), |error| format!("{message}; {error}")))
             }
+        }
+    }
+
+    fn hook_thread_desktop() -> HookDesktop {
+        let thread_id = unsafe { GetCurrentThreadId() };
+        let Ok(desktop) = (unsafe { GetThreadDesktop(thread_id) }) else {
+            return HookDesktop::Unknown;
+        };
+        let mut name = [0u16; 64];
+        let mut needed = 0u32;
+        if unsafe {
+            GetUserObjectInformationW(
+                windows::Win32::Foundation::HANDLE(desktop.0),
+                UOI_NAME,
+                Some(name.as_mut_ptr().cast()),
+                std::mem::size_of_val(&name) as u32,
+                Some(&mut needed),
+            )
+        }
+        .is_err()
+        {
+            return HookDesktop::Unknown;
+        }
+        let length = name
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(name.len());
+        if String::from_utf16_lossy(&name[..length]).eq_ignore_ascii_case("Default") {
+            HookDesktop::Default
+        } else {
+            HookDesktop::Other
         }
     }
 }

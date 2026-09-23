@@ -5,6 +5,7 @@
 mod suite;
 pub(super) use suite::{record_environment_failure, run_suite};
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
@@ -19,6 +20,7 @@ use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CREATEWINDOW, DESKTOP_READOBJECTS,
     DESKTOP_WRITEOBJECTS, GetThreadDesktop, GetUserObjectInformationW, HDESK, OpenInputDesktop,
@@ -26,31 +28,46 @@ use windows::Win32::System::StationsAndDesktops::{
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetCurrentThreadId,
-    GetExitCodeProcess, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW, TerminateProcess,
-    WaitForSingleObject,
+    GetExitCodeProcess, GetExitCodeThread, OpenThread, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOW, THREAD_QUERY_LIMITED_INFORMATION, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-    IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, ToggleState,
-    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_EditControlTypeId, UIA_InvokePatternId,
-    UIA_NamePropertyId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
+    IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern, IUIAutomationTreeWalker,
+    ToggleState, TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_EditControlTypeId,
+    UIA_InvokePatternId, UIA_NamePropertyId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
-    RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_F4, VK_F11,
-    VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
-    VK_SHIFT, VK_TAB,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_F4,
+    VK_F11, VK_F24, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU,
+    VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, EnumWindows, GetClientRect, GetForegroundWindow,
-    GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SM_CXVIRTUALSCREEN,
+    CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW, EnumWindows, GetClientRect,
+    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsChild, IsIconic, IsWindowVisible, KBDLLHOOKSTRUCT,
+    PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW, SM_CXVIRTUALSCREEN,
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos, SetForegroundWindow,
-    WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE, WindowFromPoint,
+    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINDOW_STYLE,
+    WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_CAPTION,
+    WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::w;
 use windows::core::{Interface, PCWSTR, PWSTR, VARIANT};
+
+thread_local! {
+    static RUNNER_HOOK_EVENTS: std::cell::RefCell<Option<std::sync::mpsc::Sender<RunnerHookEdge>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+struct RunnerHookEdge {
+    vk: u32,
+    down: bool,
+    injected: bool,
+}
 
 const TRACE_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
 const ROOT_TITLE: &str = "Multi Lnchr";
@@ -74,17 +91,35 @@ pub(super) struct NativeInputEdgeEvidence {
     pub foreground_hwnd: u64,
     pub foreground_pid: u32,
     pub input_desktop: String,
+    keyboard_input: Option<KeyboardInputEvidence>,
+}
+
+#[derive(Clone, Debug)]
+struct KeyboardInputEvidence {
+    vk: u16,
+    scan: u16,
+    flags: u32,
+    async_state_before: i16,
+    async_state_after: i16,
 }
 
 impl NativeInputEdgeEvidence {
     pub fn describe(&self) -> String {
         format!(
-            "inserted={} at_unix_ms={} foreground=HWND:{} PID:{} desktop={}",
+            "inserted={} at_unix_ms={} foreground=HWND:{} PID:{} desktop={}{}",
             self.inserted,
             self.at_unix_ms,
             self.foreground_hwnd,
             self.foreground_pid,
-            self.input_desktop
+            self.input_desktop,
+            self.keyboard_input.as_ref().map_or_else(String::new, |key| format!(
+                " keyboard(vk=0x{:04x},scan=0x{:04x},flags=0x{:04x},async_state_before=0x{:04x},async_state_after=0x{:04x})",
+                key.vk,
+                key.scan,
+                key.flags,
+                key.async_state_before as u16,
+                key.async_state_after as u16
+            ))
         )
     }
 }
@@ -105,16 +140,245 @@ impl F11TapEvidence {
     }
 }
 
+pub(super) struct RunnerHookObservation {
+    pub desktop: String,
+    pub down_seen: bool,
+    pub up_seen: bool,
+    pub down_injected: bool,
+    pub up_injected: bool,
+}
+
+impl RunnerHookObservation {
+    pub fn describe(&self) -> String {
+        format!(
+            "runner observer desktop={} saw down/up={}/{} injected down/up={}/{}",
+            self.desktop, self.down_seen, self.up_seen, self.down_injected, self.up_injected
+        )
+    }
+
+    pub fn merge(&self, other: &Self) -> Self {
+        Self {
+            desktop: self.desktop.clone(),
+            down_seen: self.down_seen || other.down_seen,
+            up_seen: self.up_seen || other.up_seen,
+            down_injected: self.down_injected || other.down_injected,
+            up_injected: self.up_injected || other.up_injected,
+        }
+    }
+}
+
+pub(super) struct RunnerHookObserver {
+    events: std::sync::mpsc::Receiver<RunnerHookEdge>,
+    thread_id: u32,
+    join: Option<std::thread::JoinHandle<()>>,
+    desktop: String,
+}
+
+impl RunnerHookObserver {
+    pub fn start() -> Result<Self, String> {
+        let (event_tx, events) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let join = std::thread::Builder::new()
+            .name("radial-acceptance-hook-observer".into())
+            .spawn(move || {
+                let thread_id = unsafe { GetCurrentThreadId() };
+                let mut queue_probe = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+                let _ = unsafe { PeekMessageW(&mut queue_probe, None, 0, 0, PM_NOREMOVE) };
+                RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = Some(event_tx));
+                let desktop = match unsafe { GetThreadDesktop(thread_id) } {
+                    Ok(desktop) => {
+                        desktop_name(desktop).unwrap_or_else(|error| format!("unknown ({error})"))
+                    }
+                    Err(error) => format!("unknown ({error})"),
+                };
+                let module = match unsafe { GetModuleHandleW(None) } {
+                    Ok(module) => module,
+                    Err(error) => {
+                        let _ = ready_tx
+                            .send(Err(format!("read acceptance hook module handle: {error}")));
+                        RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = None);
+                        return;
+                    }
+                };
+                let hook = match unsafe {
+                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(runner_hook_proc), module, 0)
+                } {
+                    Ok(hook) => hook,
+                    Err(error) => {
+                        let _ = ready_tx
+                            .send(Err(format!("install acceptance observer hook: {error}")));
+                        RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = None);
+                        return;
+                    }
+                };
+                if ready_tx.send(Ok((thread_id, desktop))).is_err() {
+                    let _ = unsafe { UnhookWindowsHookEx(hook) };
+                    RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = None);
+                    return;
+                }
+                let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+                while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+                    let _ = unsafe { TranslateMessage(&message) };
+                    unsafe { DispatchMessageW(&message) };
+                }
+                let _ = unsafe { UnhookWindowsHookEx(hook) };
+                RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = None);
+            })
+            .map_err(|error| format!("start acceptance hook observer: {error}"))?;
+        let (thread_id, desktop) = match ready_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(ready)) => ready,
+            Ok(Err(error)) => {
+                let _ = join.join();
+                return Err(error);
+            }
+            Err(error) => {
+                return Err(format!("acceptance hook observer did not start: {error}"));
+            }
+        };
+        Ok(Self {
+            events,
+            thread_id,
+            join: Some(join),
+            desktop,
+        })
+    }
+
+    pub fn wait_for_vk(&mut self, vk: u32, timeout: Duration) -> RunnerHookObservation {
+        let deadline = Instant::now() + timeout;
+        let mut down_seen = false;
+        let mut up_seen = false;
+        let mut down_injected = false;
+        let mut up_injected = false;
+        while !down_seen || !up_seen {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match self
+                .events
+                .recv_timeout(deadline.saturating_duration_since(now))
+            {
+                Ok(edge) if edge.vk == vk => {
+                    if edge.down {
+                        down_seen = true;
+                        down_injected |= edge.injected;
+                    } else {
+                        up_seen = true;
+                        up_injected |= edge.injected;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        RunnerHookObservation {
+            desktop: self.desktop.clone(),
+            down_seen,
+            up_seen,
+            down_injected: down_seen && down_injected,
+            up_injected: up_seen && up_injected,
+        }
+    }
+
+    pub fn thread_id(&self) -> u32 {
+        self.thread_id
+    }
+
+    fn stop(&mut self) {
+        if self.thread_id != 0 && self.join.is_some() {
+            let _ = unsafe {
+                PostThreadMessageW(
+                    self.thread_id,
+                    WM_QUIT,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                )
+            };
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+pub(super) fn thread_liveness(thread_id: u32) -> String {
+    if thread_id == 0 {
+        return "thread id unavailable".into();
+    }
+    let handle = match unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, thread_id) } {
+        Ok(handle) => handle,
+        Err(error) => return format!("thread={thread_id} liveness unavailable ({error})"),
+    };
+    let mut exit_code = 0;
+    let result = unsafe { GetExitCodeThread(handle, &mut exit_code) };
+    let _ = unsafe { CloseHandle(handle) };
+    match result {
+        Ok(()) if exit_code == 259 => format!("thread={thread_id} alive=true"),
+        Ok(()) => format!("thread={thread_id} alive=false exit_code={exit_code}"),
+        Err(error) => format!("thread={thread_id} liveness unavailable ({error})"),
+    }
+}
+
+impl Drop for RunnerHookObserver {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+unsafe extern "system" fn runner_hook_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    if code >= 0 {
+        let transition = match wparam.0 as u32 {
+            WM_KEYDOWN | WM_SYSKEYDOWN => Some(true),
+            WM_KEYUP | WM_SYSKEYUP => Some(false),
+            _ => None,
+        };
+        if let Some(down) = transition {
+            let data = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+            if data.vkCode == VK_F24.0 as u32 || data.vkCode == VK_F11.0 as u32 {
+                RUNNER_HOOK_EVENTS.with(|slot| {
+                    if let Ok(sender) = slot.try_borrow()
+                        && let Some(sender) = sender.as_ref()
+                    {
+                        let _ = sender.send(RunnerHookEdge {
+                            vk: data.vkCode,
+                            down,
+                            injected: data
+                                .flags
+                                .contains(windows::Win32::UI::WindowsAndMessaging::LLKHF_INJECTED),
+                        });
+                    }
+                });
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct PointerClickEvidence {
+    pub movement: NativeInputEdgeEvidence,
     pub down: NativeInputEdgeEvidence,
     pub up: NativeInputEdgeEvidence,
+    pub target_hwnd: HWND,
+    pub under_cursor_hwnd: HWND,
+    pub foreground_hwnd: HWND,
+    pub screen_point: (i32, i32),
 }
 
 impl PointerClickEvidence {
     pub fn describe(&self) -> String {
         format!(
-            "down=[{}], up=[{}]",
+            "screen_point=({},{}), target_hwnd={}, under_cursor_hwnd={}, foreground_hwnd={}, move=[{}], down=[{}], up=[{}]",
+            self.screen_point.0,
+            self.screen_point.1,
+            hwnd_id(self.target_hwnd),
+            hwnd_id(self.under_cursor_hwnd),
+            hwnd_id(self.foreground_hwnd),
+            self.movement.describe(),
             self.down.describe(),
             self.up.describe()
         )
@@ -565,6 +829,18 @@ impl NativeChild {
         Ok(F11TapEvidence { down, up })
     }
 
+    pub fn press_hook_sentinel(
+        &self,
+        target_hwnd: HWND,
+        target_process_id: u32,
+    ) -> Result<NativeInputEdgeEvidence, String> {
+        if target_process_id != self.process_id {
+            return Err("F24 hook sentinel target must be owned by the acceptance child".into());
+        }
+        let events = [key_input(VK_F24, false), key_input(VK_F24, true)];
+        send_validated_input(target_hwnd, target_process_id, &events, "F24 hook sentinel")
+    }
+
     pub fn press_f11(
         &self,
         target_hwnd: HWND,
@@ -834,13 +1110,29 @@ fn send_validated_input(
         ));
     }
     let at_unix_ms = unix_time_ms();
+    let mut keyboard_input = events.first().and_then(|event| {
+        (event.r#type == INPUT_KEYBOARD).then(|| {
+            let keyboard = unsafe { event.Anonymous.ki };
+            KeyboardInputEvidence {
+                vk: keyboard.wVk.0,
+                scan: keyboard.wScan,
+                flags: keyboard.dwFlags.0,
+                async_state_before: unsafe { GetAsyncKeyState(i32::from(keyboard.wVk.0)) },
+                async_state_after: 0,
+            }
+        })
+    });
     let inserted = send_input_checked(events, operation)?;
+    if let Some(keyboard) = keyboard_input.as_mut() {
+        keyboard.async_state_after = unsafe { GetAsyncKeyState(i32::from(keyboard.vk)) };
+    }
     Ok(NativeInputEdgeEvidence {
         inserted,
         at_unix_ms,
         foreground_hwnd: hwnd_id(foreground),
         foreground_pid,
         input_desktop,
+        keyboard_input,
     })
 }
 
@@ -1297,6 +1589,37 @@ impl UiAutomation {
             .is_some_and(|pid| pid == expected_pid as i32)
     }
 
+    pub fn describe_tree(&self, hwnd: HWND) -> Result<String, String> {
+        let root = unsafe { self.automation.ElementFromHandle(hwnd) }
+            .map_err(|error| format!("query UI Automation root for diagnostic: {error}"))?;
+        let mut snapshot = String::new();
+        writeln!(snapshot, "root {}", describe_uia_element(&root))
+            .map_err(|error| format!("format UI Automation root diagnostic: {error}"))?;
+
+        for (view, walker) in [
+            (
+                "raw",
+                unsafe { self.automation.RawViewWalker() }
+                    .map_err(|error| format!("create raw UIA diagnostic walker: {error}"))?,
+            ),
+            (
+                "control",
+                unsafe { self.automation.ControlViewWalker() }
+                    .map_err(|error| format!("create control UIA diagnostic walker: {error}"))?,
+            ),
+        ] {
+            writeln!(snapshot, "{view} view")
+                .map_err(|error| format!("format UI Automation view diagnostic: {error}"))?;
+            let mut visited = 0;
+            append_uia_tree(&walker, &root, view, 1, &mut visited, &mut snapshot);
+            if visited == 0 {
+                writeln!(snapshot, "  <no descendant elements>")
+                    .map_err(|error| format!("format empty UI Automation view: {error}"))?;
+            }
+        }
+        Ok(snapshot)
+    }
+
     pub fn find_named(
         &self,
         hwnd: HWND,
@@ -1411,6 +1734,50 @@ impl UiAutomation {
         Ok(None)
     }
 
+    pub fn edit_focus_at_screen_point(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        point: (i32, i32),
+    ) -> Result<Option<bool>, String> {
+        let root = unsafe { self.automation.ElementFromHandle(hwnd) }
+            .map_err(|error| format!("query UI Automation root for edit focus: {error}"))?;
+        let condition = unsafe {
+            self.automation.CreatePropertyCondition(
+                windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
+                &VARIANT::from(UIA_EditControlTypeId.0),
+            )
+        }
+        .map_err(|error| format!("create UIA edit-focus condition: {error}"))?;
+        let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
+            .map_err(|error| format!("find UIA edit-focus target: {error}"))?;
+        let count = unsafe { matches.Length() }
+            .map_err(|error| format!("read UIA edit-focus count: {error}"))?
+            .min(2_048);
+        for index in 0..count {
+            let element = unsafe { matches.GetElement(index) }
+                .map_err(|error| format!("read UIA edit-focus element: {error}"))?;
+            let process_id = unsafe { element.CurrentProcessId() }
+                .map_err(|error| format!("read UIA edit-focus process: {error}"))?;
+            if process_id != expected_pid as i32 {
+                continue;
+            }
+            let bounds = unsafe { element.CurrentBoundingRectangle() }
+                .map_err(|error| format!("read UIA edit-focus bounds: {error}"))?;
+            if point.0 >= bounds.left
+                && point.0 < bounds.right
+                && point.1 >= bounds.top
+                && point.1 < bounds.bottom
+            {
+                let focused = unsafe { element.CurrentHasKeyboardFocus() }
+                    .map_err(|error| format!("read UIA edit-focus state: {error}"))?
+                    .as_bool();
+                return Ok(Some(focused));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn invoke(&self, control: &SemanticControl) -> Result<bool, String> {
         if !control.enabled {
             return Err(format!(
@@ -1499,6 +1866,102 @@ impl UiAutomation {
     }
 }
 
+fn describe_uia_element(element: &IUIAutomationElement) -> String {
+    let process_id = unsafe { element.CurrentProcessId() }.unwrap_or_default();
+    let control_type = unsafe { element.CurrentControlType() }
+        .map(|value| value.0)
+        .unwrap_or_default();
+    let bounds = unsafe { element.CurrentBoundingRectangle() }
+        .map(|value| [value.left, value.top, value.right, value.bottom])
+        .unwrap_or_default();
+    let focusable =
+        unsafe { element.CurrentIsKeyboardFocusable() }.is_ok_and(|value| value.as_bool());
+    let focused = unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(|value| value.as_bool());
+    let control = unsafe { element.CurrentIsControlElement() }.is_ok_and(|value| value.as_bool());
+    let content = unsafe { element.CurrentIsContentElement() }.is_ok_and(|value| value.as_bool());
+    let name = unsafe { element.CurrentName() }
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let class = unsafe { element.CurrentClassName() }
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let framework = unsafe { element.CurrentFrameworkId() }
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let automation_id = unsafe { element.CurrentAutomationId() }
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    format_uia_element_snapshot(
+        process_id,
+        control_type,
+        bounds,
+        focusable,
+        focused,
+        control,
+        content,
+        &name,
+        &class,
+        &framework,
+        &automation_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_uia_element_snapshot(
+    process_id: i32,
+    control_type: i32,
+    bounds: [i32; 4],
+    focusable: bool,
+    focused: bool,
+    control: bool,
+    content: bool,
+    _name: &str,
+    _class: &str,
+    _framework: &str,
+    _automation_id: &str,
+) -> String {
+    // UIA names, class names and automation IDs can contain user-authored
+    // labels. Keep their structural presence visible without persisting them.
+    format!(
+        "pid={process_id} type={control_type} bounds={bounds:?} focusable={focusable} focused={focused} control={control} content={content} name=<redacted> class=<redacted> framework=<redacted> automation_id=<redacted>"
+    )
+}
+
+fn append_uia_tree(
+    walker: &IUIAutomationTreeWalker,
+    parent: &IUIAutomationElement,
+    view: &str,
+    depth: usize,
+    visited: &mut usize,
+    snapshot: &mut String,
+) {
+    const MAX_UIA_NODES: usize = 256;
+    const MAX_UIA_DEPTH: usize = 12;
+    if *visited >= MAX_UIA_NODES || depth > MAX_UIA_DEPTH {
+        return;
+    }
+    let Ok(mut element) = (unsafe { walker.GetFirstChildElement(parent) }) else {
+        return;
+    };
+    loop {
+        *visited += 1;
+        let indent = "  ".repeat(depth);
+        let _ = writeln!(
+            snapshot,
+            "{indent}{view}: {}",
+            describe_uia_element(&element)
+        );
+        append_uia_tree(walker, &element, view, depth + 1, visited, snapshot);
+        if *visited >= MAX_UIA_NODES {
+            break;
+        }
+        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&element) }) else {
+            break;
+        };
+        element = next;
+    }
+}
+
 pub(super) fn click_semantic_control(
     child: &NativeChild,
     target: &WindowSnapshot,
@@ -1511,12 +1974,59 @@ pub(super) fn click_semantic_control(
     if control.bounds[2] <= control.bounds[0] || control.bounds[3] <= control.bounds[1] {
         return Err("semantic control has empty screen bounds".into());
     }
-    child.focus_window(target)?;
-
     let point = POINT {
         x: control.bounds[0] + (control.bounds[2] - control.bounds[0]) / 2,
         y: control.bounds[1] + (control.bounds[3] - control.bounds[1]) / 2,
     };
+    click_screen_point(child, target, point, "semantic click", None)
+}
+
+pub(super) fn click_designer_client_bounds(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+) -> Result<PointerClickEvidence, String> {
+    child.validate_window(target.hwnd)?;
+    if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+        return Err("Designer semantic target has empty client bounds".into());
+    }
+    let mut point = POINT {
+        x: bounds[0] + (bounds[2] - bounds[0]) / 2,
+        y: bounds[1] + (bounds[3] - bounds[1]) / 2,
+    };
+    let client_point = (point.x, point.y);
+    let mut client = RECT::default();
+    unsafe { GetClientRect(target.hwnd, &mut client) }
+        .map_err(|error| format!("read Designer client bounds: {error}"))?;
+    if point.x < client.left
+        || point.y < client.top
+        || point.x >= client.right
+        || point.y >= client.bottom
+    {
+        return Err("Designer semantic point lies outside its client area".into());
+    }
+    if !unsafe { ClientToScreen(target.hwnd, &mut point) }.as_bool() {
+        return Err("could not convert Designer semantic point to screen coordinates".into());
+    }
+    click_screen_point(
+        child,
+        target,
+        point,
+        "Designer semantic click",
+        Some((trace_path, client_point)),
+    )
+}
+
+fn click_screen_point(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    point: POINT,
+    operation: &str,
+    pointer_move_ack: Option<(&Path, (i32, i32))>,
+) -> Result<PointerClickEvidence, String> {
+    child.validate_window(target.hwnd)?;
+    child.focus_window(target)?;
     let mut client = RECT::default();
     unsafe { GetClientRect(target.hwnd, &mut client) }
         .map_err(|error| format!("read target client bounds: {error}"))?;
@@ -1542,24 +2052,109 @@ pub(super) fn click_semantic_control(
     }
     let under_cursor = unsafe { WindowFromPoint(point) };
     if under_cursor.is_invalid() || window_process_id(under_cursor) != child.process_id {
-        return Err(
-            "validated click point is covered by a window outside the child process".into(),
-        );
+        return Err(format!(
+            "{operation} point {:?} targeting HWND={} is covered by HWND={} PID={} outside the child process",
+            (point.x, point.y),
+            hwnd_id(target.hwnd),
+            hwnd_id(under_cursor),
+            window_process_id(under_cursor)
+        ));
     }
-    let down = [mouse_input(true)];
-    let down = send_validated_input(
+    let foreground_hwnd = unsafe { GetForegroundWindow() };
+    if foreground_hwnd != target.hwnd {
+        return Err(format!(
+            "blocked precondition: target HWND={} is not foreground before {operation} (foreground HWND={})",
+            hwnd_id(target.hwnd),
+            hwnd_id(foreground_hwnd)
+        ));
+    }
+    if under_cursor != target.hwnd && !unsafe { IsChild(target.hwnd, under_cursor) }.as_bool() {
+        return Err(format!(
+            "blocked precondition: {operation} target HWND={} is covered at screen point ({},{}) by HWND={} PID={} (same-process coverage is not target delivery)",
+            hwnd_id(target.hwnd),
+            point.x,
+            point.y,
+            hwnd_id(under_cursor),
+            window_process_id(under_cursor)
+        ));
+    }
+    let trace_cursor = pointer_move_ack
+        .map(|(path, _)| {
+            std::fs::read_to_string(path)
+                .map(|trace| trace.lines().count())
+                .map_err(|error| format!("read Designer trace before pointer move: {error}"))
+        })
+        .transpose()?;
+    let movement = [mouse_move_input(point)?];
+    let movement = send_validated_input(
         target.hwnd,
         child.process_id(),
-        &down,
-        "semantic click down",
+        &movement,
+        &format!("{operation} pointer move"),
     )?;
+    if let (Some((trace_path, client_point)), Some(trace_cursor)) = (pointer_move_ack, trace_cursor)
+    {
+        wait_for_designer_pointer_move(
+            trace_path,
+            trace_cursor,
+            client_point,
+            Duration::from_secs(3),
+        )?;
+    }
+    let down = [mouse_input(true)];
+    let down = send_validated_input(target.hwnd, child.process_id(), &down, operation)?;
     let mut button_guard = MouseButtonGuard::new(target.hwnd, child.process_id());
     button_guard.armed = true;
     // Allow the target's native message loop to observe the pressed state before release.
     // This remains a real pointer click and is well below the fixture's hold threshold.
     std::thread::sleep(Duration::from_millis(120));
     let up = button_guard.release()?;
-    Ok(PointerClickEvidence { down, up })
+    Ok(PointerClickEvidence {
+        movement,
+        down,
+        up,
+        target_hwnd: target.hwnd,
+        under_cursor_hwnd: under_cursor,
+        foreground_hwnd,
+        screen_point: (point.x, point.y),
+    })
+}
+
+fn wait_for_designer_pointer_move(
+    trace_path: &Path,
+    cursor: usize,
+    target: (i32, i32),
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let trace = std::fs::read_to_string(trace_path)
+            .map_err(|error| format!("read Designer pointer-move trace: {error}"))?;
+        let acknowledged = trace.lines().skip(cursor).any(|line| {
+            line.contains("trace_event=\"designer_pointer_moved\"")
+                && trace_i32_field(line, "client_x=") == Some(target.0)
+                && trace_i32_field(line, "client_y=") == Some(target.1)
+        });
+        if acknowledged {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "production Designer did not acknowledge pointer move at client point {:?} before click",
+                target
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn trace_i32_field(line: &str, marker: &str) -> Option<i32> {
+    let start = line.find(marker)?.saturating_add(marker.len());
+    let remainder = &line[start..];
+    let end = remainder
+        .find(char::is_whitespace)
+        .unwrap_or(remainder.len());
+    remainder[..end].parse().ok()
 }
 
 pub(super) fn send_text(
@@ -1577,16 +2172,56 @@ pub(super) fn send_text(
     uia.focus(control)?;
     focus_is_validated(target.hwnd, child.process_id)?;
     input_modifiers_clear()?;
-    let mut events = Vec::with_capacity(text.encode_utf16().count().saturating_mul(2));
-    for code_unit in text.encode_utf16() {
-        events.push(unicode_input(code_unit, false));
-        events.push(unicode_input(code_unit, true));
-    }
+    let events = unicode_text_events(text);
     let expected = events.len();
     if expected == 0 {
         return Ok(0);
     }
     send_input_checked(&events, "Unicode text")
+}
+
+pub(super) fn send_text_to_focused_window(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    text: &str,
+) -> Result<usize, String> {
+    child.validate_window(target.hwnd)?;
+    let events = unicode_text_events(text);
+    if events.is_empty() {
+        return Ok(0);
+    }
+    send_validated_input(
+        target.hwnd,
+        child.process_id,
+        &events,
+        "focused Unicode text",
+    )
+    .map(|evidence| evidence.inserted)
+}
+
+pub(super) fn send_select_all_to_focused_window(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+) -> Result<usize, String> {
+    child.validate_window(target.hwnd)?;
+    let select_all = VIRTUAL_KEY(b'A' as u16);
+    let events = [
+        key_input(VK_CONTROL, false),
+        key_input(select_all, false),
+        key_input(select_all, true),
+        key_input(VK_CONTROL, true),
+    ];
+    send_validated_input(target.hwnd, child.process_id, &events, "focused Ctrl+A")
+        .map(|evidence| evidence.inserted)
+}
+
+fn unicode_text_events(text: &str) -> Vec<INPUT> {
+    let mut events = Vec::with_capacity(text.encode_utf16().count().saturating_mul(2));
+    for code_unit in text.encode_utf16() {
+        events.push(unicode_input(code_unit, false));
+        events.push(unicode_input(code_unit, true));
+    }
+    events
 }
 
 pub(super) fn send_enter_current(
@@ -1640,6 +2275,35 @@ fn mouse_input(down: bool) -> INPUT {
             },
         },
     }
+}
+
+fn normalized_absolute_coordinate(position: i32, origin: i32, extent: i32) -> i32 {
+    let span = i64::from(extent.saturating_sub(1).max(1));
+    let offset = (i64::from(position) - i64::from(origin)).clamp(0, span);
+    ((offset * i64::from(u16::MAX) + span / 2) / span) as i32
+}
+
+fn mouse_move_input(point: POINT) -> Result<INPUT, String> {
+    let (left, top, width, height) = virtual_screen_bounds();
+    if width <= 0 || height <= 0 {
+        return Err("virtual desktop has invalid bounds for a native pointer move".into());
+    }
+    Ok(INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: normalized_absolute_coordinate(point.x, left, width),
+                dy: normalized_absolute_coordinate(point.y, top, height),
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE
+                    | MOUSEEVENTF_ABSOLUTE
+                    | MOUSEEVENTF_VIRTUALDESK
+                    | MOUSEEVENTF_MOVE_NOCOALESCE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    })
 }
 
 struct MouseButtonGuard {
@@ -1732,4 +2396,83 @@ fn bounded_label(text: &str) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, format_uia_element_snapshot,
+        normalized_absolute_coordinate,
+    };
+
+    #[test]
+    fn absolute_mouse_coordinates_cover_a_negative_origin_virtual_desktop() {
+        assert_eq!(normalized_absolute_coordinate(-1920, -1920, 5760), 0);
+        assert_eq!(normalized_absolute_coordinate(959, -1920, 5760), 32762);
+        assert_eq!(
+            normalized_absolute_coordinate(3839, -1920, 5760),
+            i32::from(u16::MAX)
+        );
+        assert_eq!(normalized_absolute_coordinate(-2500, -1920, 5760), 0);
+        assert_eq!(
+            normalized_absolute_coordinate(4000, -1920, 5760),
+            i32::from(u16::MAX)
+        );
+    }
+
+    #[test]
+    fn durable_uia_snapshot_redacts_free_form_properties_and_keeps_structure() {
+        let snapshot = format_uia_element_snapshot(
+            41,
+            50004,
+            [10, 20, 110, 44],
+            true,
+            true,
+            true,
+            true,
+            "Private result label",
+            "UserDefinedClass",
+            "PrivateFrameworkMarker",
+            "MenuName.PrivateAutomationId",
+        );
+
+        assert!(snapshot.contains("pid=41"));
+        assert!(snapshot.contains("type=50004"));
+        assert!(snapshot.contains("bounds=[10, 20, 110, 44]"));
+        assert!(snapshot.contains("focusable=true focused=true control=true content=true"));
+        assert!(snapshot.contains("name=<redacted>"));
+        assert!(snapshot.contains("class=<redacted>"));
+        assert!(snapshot.contains("framework=<redacted>"));
+        assert!(snapshot.contains("automation_id=<redacted>"));
+        for private_value in [
+            "Private result label",
+            "UserDefinedClass",
+            "PrivateFrameworkMarker",
+            "MenuName.PrivateAutomationId",
+        ] {
+            assert!(
+                !snapshot.contains(private_value),
+                "durable UIA snapshot exposed {private_value:?}: {snapshot}"
+            );
+        }
+    }
+
+    #[test]
+    fn focused_unicode_input_is_generated_as_balanced_unicode_edges() {
+        let events = super::unicode_text_events("Aé");
+        assert_eq!(events.len(), 4);
+        let keys = events
+            .iter()
+            .map(|event| unsafe { event.Anonymous.ki })
+            .collect::<Vec<_>>();
+        assert!(keys.iter().all(|key| key.wVk.0 == 0));
+        assert_eq!(
+            keys.iter().map(|key| key.wScan).collect::<Vec<_>>(),
+            [b'A' as u16, b'A' as u16, 'é' as u16, 'é' as u16,]
+        );
+        assert_eq!(keys[0].dwFlags, KEYEVENTF_UNICODE);
+        assert_eq!(keys[1].dwFlags, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+        assert_eq!(keys[2].dwFlags, KEYEVENTF_UNICODE);
+        assert_eq!(keys[3].dwFlags, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+    }
 }

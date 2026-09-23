@@ -3929,16 +3929,17 @@ mod tests {
     fn register_radial_deferred_callback(
         ctx: &egui::Context,
         app: &LauncherApp,
-    ) -> Arc<egui::DeferredViewportUiCallback> {
+    ) -> (egui::FullOutput, Arc<egui::DeferredViewportUiCallback>) {
         ctx.set_embed_viewports(false);
         let output = ctx.run(egui::RawInput::default(), |root| {
             radial_editor::RadialEditorState::show_deferred(&app.radial_editor, root, app);
         });
-        output
+        let callback = output
             .viewport_output
             .get(&radial_editor::radial_designer_viewport_id())
             .and_then(|viewport| viewport.viewport_ui_cb.clone())
-            .expect("radial deferred callback registered")
+            .expect("radial deferred callback registered");
+        (output, callback)
     }
 
     #[test]
@@ -5306,12 +5307,14 @@ mod tests {
     }
 
     #[test]
-    fn retained_radial_deferred_callback_delivers_focus_once() {
+    fn root_rearms_retained_radial_deferred_viewport_focus_once() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.focus_panel(Panel::RadialEditor);
         let viewport_id = radial_editor::radial_designer_viewport_id();
-        let callback = register_radial_deferred_callback(&ctx, &app);
+        let (root_output, callback) = register_radial_deferred_callback(&ctx, &app);
+        assert_eq!(focus_commands(&root_output, viewport_id), 1);
+        assert!(ctx.has_requested_repaint_for(&viewport_id));
 
         let first = ctx.run(deferred_child_input(viewport_id), |child| {
             callback(child);
@@ -5320,7 +5323,7 @@ mod tests {
             callback(child);
         });
 
-        assert_eq!(focus_commands(&first, viewport_id), 1);
+        assert_eq!(focus_commands(&first, viewport_id), 0);
         assert_eq!(focus_commands(&second, viewport_id), 0);
     }
 
@@ -5331,25 +5334,30 @@ mod tests {
         app.pinned_panels.push(Panel::RadialEditor);
         app.enforce_pinned();
         let viewport_id = radial_editor::radial_designer_viewport_id();
-        let callback = register_radial_deferred_callback(&ctx, &app);
-
-        let initial = ctx.run(deferred_child_input(viewport_id), |child| {
-            callback(child);
-        });
+        let (initial, callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&initial, viewport_id), 1);
 
-        app.enforce_pinned();
-        app.enforce_pinned();
-        let maintained = ctx.run(deferred_child_input(viewport_id), |child| {
+        let initial_child = ctx.run(deferred_child_input(viewport_id), |child| {
             callback(child);
         });
+        assert_eq!(focus_commands(&initial_child, viewport_id), 0);
+
+        app.enforce_pinned();
+        app.enforce_pinned();
+        let (maintained, maintained_callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&maintained, viewport_id), 0);
+        let maintained_child = ctx.run(deferred_child_input(viewport_id), |child| {
+            maintained_callback(child);
+        });
+        assert_eq!(focus_commands(&maintained_child, viewport_id), 0);
 
         app.focus_panel(Panel::RadialEditor);
-        let explicit = ctx.run(deferred_child_input(viewport_id), |child| {
-            callback(child);
-        });
+        let (explicit, explicit_callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&explicit, viewport_id), 1);
+        let explicit_child = ctx.run(deferred_child_input(viewport_id), |child| {
+            explicit_callback(child);
+        });
+        assert_eq!(focus_commands(&explicit_child, viewport_id), 0);
     }
 
     #[test]

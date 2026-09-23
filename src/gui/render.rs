@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::radial::acceptance_trace::{self, Correlation, RestoreEdge};
+use crate::radial::acceptance_trace::{self, Correlation, RestoreEdge, RootResultKind};
 
 #[derive(Clone, Debug)]
 pub(crate) struct DeferredActivation {
@@ -37,6 +37,51 @@ pub(crate) fn deferred_activation_from_results(
         query_override: None,
         source,
     })
+}
+
+fn trace_root_result_pointer(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    kind: RootResultKind,
+    index: usize,
+    clicked: bool,
+) {
+    if !acceptance_trace::enabled() {
+        return;
+    }
+    let (pressed, released, pointer_position) = ui.input(|input| {
+        (
+            input.pointer.any_pressed(),
+            input.pointer.any_released(),
+            input.pointer.interact_pos(),
+        )
+    });
+    if !(pressed || released) || !(response.hovered() || response.is_pointer_button_down_on()) {
+        return;
+    }
+    let (has_position, pointer_x, pointer_y) = pointer_position
+        .map_or((false, i32::MIN, i32::MIN), |position| {
+            (true, position.x.round() as i32, position.y.round() as i32)
+        });
+    acceptance_trace::emit(acceptance_trace::Event::RootResultPointer {
+        kind,
+        index,
+        pressed,
+        released,
+        hovered: response.hovered(),
+        clicked,
+        has_position,
+        pointer_x,
+        pointer_y,
+    });
+}
+
+fn root_result_kind(action: &str) -> RootResultKind {
+    match action {
+        "radial edit" => RootResultKind::RadialEdit,
+        "radial skins" => RootResultKind::RadialSkins,
+        _ => RootResultKind::Other,
+    }
 }
 
 fn render_universal_context_menu(
@@ -555,6 +600,27 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         use egui::*;
+
+        if acceptance_trace::enabled()
+            && ctx.input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        Event::Key {
+                            key: Key::F24,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                })
+            })
+        {
+            acceptance_trace::emit(acceptance_trace::Event::FrontendKey {
+                key: acceptance_trace::AcceptanceKey::F24,
+                focused: ctx.input(|input| input.viewport().focused).unwrap_or(false),
+                foreground_owner: acceptance_trace::foreground_owner(),
+            });
+        }
 
         self.root_window_bridge.capture_frame(frame);
         let trace_root_hwnd = acceptance_trace::enabled()
@@ -1139,6 +1205,13 @@ impl eframe::App for LauncherApp {
                                                 &mut set_focus,
                                                 &mut deferred_universal_action,
                                             );
+                                            trace_root_result_pointer(
+                                                ui,
+                                                &menu_resp,
+                                                root_result_kind(&action.action),
+                                                idx,
+                                                menu_resp.clicked(),
+                                            );
                                             if self.selected == Some(idx) {
                                                 menu_resp.scroll_to_me(Some(egui::Align::Center));
                                             }
@@ -1185,6 +1258,13 @@ impl eframe::App for LauncherApp {
                                     };
                                     let menu_resp =
                                         self.attach_result_context_menu(&a, resp.on_hover_text(tooltip), &mut refresh, &mut set_focus, &mut deferred_universal_action);
+                                    trace_root_result_pointer(
+                                        ui,
+                                        &menu_resp,
+                                        root_result_kind(&a.action),
+                                        idx,
+                                        menu_resp.clicked(),
+                                    );
                                     if self.selected == Some(idx) {
                                         menu_resp.scroll_to_me(Some(egui::Align::Center));
                                     }

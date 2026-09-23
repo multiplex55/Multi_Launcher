@@ -237,6 +237,8 @@ pub(crate) fn window_under_cursor() -> Option<NativeWindowIdentity> {
         NativeWindowIdentity {
             hwnd,
             owner: acceptance_trace::classify_window(hwnd),
+            screen_x: point.x,
+            screen_y: point.y,
         }
     })
 }

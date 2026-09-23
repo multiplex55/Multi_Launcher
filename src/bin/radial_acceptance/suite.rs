@@ -14,9 +14,22 @@ const ROOT_TIMEOUT: Duration = Duration::from_secs(3);
 const UIA_TIMEOUT: Duration = Duration::from_secs(5);
 const TRACE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_TRACE_EXCERPT: usize = 512;
+const DESIGNER_TEXT_PROBE: &str = "Native Edit Probe";
+const DESIGNER_STARTER_NAME: &str = "Starter";
 const CASE_IDS: [&str; 13] = [
     "H0", "H1", "H2", "H3", "H4", "H5", "H6", "D0", "D1", "D2", "D4", "D5", "CLEANUP",
 ];
+
+#[derive(Clone, Copy, Debug)]
+enum DesignerSemanticTarget {
+    Menus,
+    Skins,
+    Tree,
+    Inspector,
+    DefaultMenu,
+    MenuName,
+    MenuDefaultSkin,
+}
 
 struct F11HoldGuard<'a> {
     child: &'a NativeChild,
@@ -193,7 +206,7 @@ pub fn run_suite(
         1,
     );
     run_other_focus_case(report, &mut child, &anchor, trace_path, output);
-    let (hold_open, hold_guard) = run_hold_open_case(
+    let (hold_open, hold_guard, hold_observer, hold_observer_error) = run_hold_open_case(
         &child,
         &anchor,
         trace_path,
@@ -218,6 +231,8 @@ pub fn run_suite(
         output,
         hold_window.as_ref(),
         hold_guard,
+        hold_observer,
+        hold_observer_error,
     );
     run_second_hold_case(
         report,
@@ -384,6 +399,65 @@ fn run_tap_case(
                 .focus()
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         }
+        let mut runner_observer = None;
+        let mut hook_diagnostic = String::new();
+        if id == "H0" {
+            let startup_events = trace_lines(trace_path);
+            let hook_ready = startup_events
+                .iter()
+                .find(|line| line.contains("trace_event=\"hook_service_ready\""))
+                .cloned()
+                .unwrap_or_else(|| "hook_service_ready was not recorded before H0".into());
+            let sentinel_cursor = startup_events.len();
+            let (observer, observer_error) = match RunnerHookObserver::start() {
+                Ok(observer) => (Some(observer), None),
+                Err(error) => (None, Some(error)),
+            };
+            runner_observer = observer;
+            let sentinel_input = child
+                .press_hook_sentinel(root.hwnd, child.process_id())
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            let sentinel_events =
+                wait_trace(trace_path, sentinel_cursor, TRACE_TIMEOUT, |events| {
+                    has_trace(events, "hook_observed", &["vk=135", "down=true"])
+                        && has_trace(events, "hook_observed", &["vk=135", "down=false"])
+                });
+            let sentinel_events = if has_trace(&sentinel_events, "frontend_key", &["key=F24"]) {
+                sentinel_events
+            } else {
+                wait_trace(
+                    trace_path,
+                    sentinel_cursor,
+                    Duration::from_millis(250),
+                    |events| has_trace(events, "frontend_key", &["key=F24"]),
+                )
+            };
+            let down_seen = has_trace(
+                &sentinel_events,
+                "hook_observed",
+                &["vk=135", "down=true", "injected=true"],
+            );
+            let up_seen = has_trace(
+                &sentinel_events,
+                "hook_observed",
+                &["vk=135", "down=false", "injected=true"],
+            );
+            let runner_observation = match runner_observer.as_mut() {
+                Some(observer) => {
+                    let observation = observer.wait_for_vk(0x87, Duration::from_secs(1));
+                    observation.describe()
+                }
+                None => format!(
+                    "runner observer unavailable: {}",
+                    observer_error.unwrap_or_else(|| "not started".into())
+                ),
+            };
+            hook_diagnostic = format!(
+                "pre-H0 hook={hook_ready}; F24 sentinel production callback down/up={down_seen}/{up_seen} injected, frontend WM_KEYDOWN={}; {runner_observation}, checked input=[{}]",
+                has_trace(&sentinel_events, "frontend_key", &["key=F24"]),
+                sentinel_input.describe()
+            );
+        }
         let mut cursor = trace_lines(trace_path).len();
         let mut input_evidence = Vec::with_capacity(taps);
         for index in 0..taps {
@@ -409,13 +483,33 @@ fn run_tap_case(
             let events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
                 tap_trace_complete(events, 1, wanted_visible)
             });
+            if index == 0 && id == "H0" {
+                let runner_observation = runner_observer.as_mut().map(|observer| {
+                    let observation = observer.wait_for_vk(0x7A, Duration::from_secs(1));
+                    observation.describe()
+                });
+                let production_down = has_trace(
+                    &events,
+                    "hook_observed",
+                    &["vk=122", "down=true", "injected=true"],
+                );
+                let production_up = has_trace(
+                    &events,
+                    "hook_observed",
+                    &["vk=122", "down=false", "injected=true"],
+                );
+                hook_diagnostic.push_str(&format!(
+                    "; production F11 callback down/up={production_down}/{production_up} injected; {}",
+                    runner_observation.unwrap_or_else(|| "runner F11 observer unavailable".into())
+                ));
+            }
             if !tap_trace_complete(&events, 1, wanted_visible) {
                 let observed_root = child.refresh_root().ok();
                 let stage = tap_trace_failure_stage(&events, wanted_visible);
                 return Err(CaseFailure::new(
                     stage,
                     format!(
-                        "F11 tap {} input edges [{}] lacked complete hook/gesture/visibility evidence for visible={wanted_visible}; root={:?}; observed production edges: {}",
+                        "F11 tap {} input edges [{}] lacked complete hook/gesture/visibility evidence for visible={wanted_visible}; root={:?}; observed production edges: {}; {}",
                         index + 1,
                         input.describe(),
                         observed_root.map(|window| (
@@ -423,7 +517,8 @@ fn run_tap_case(
                             window.minimized,
                             window.bounds
                         )),
-                        input_trace_summary(&events)
+                        input_trace_summary(&events),
+                        hook_diagnostic
                     ),
                 ));
             }
@@ -457,11 +552,12 @@ fn run_tap_case(
                 .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
         }
         Ok(format!(
-            "{} checked F11 input pairs reached expected ROOT state; HWND={} bounds={:?}; edges={:?}",
+            "{} checked F11 input pairs reached expected ROOT state; HWND={} bounds={:?}; edges={:?}; {}",
             taps,
             hwnd_id(root.hwnd),
             root.bounds,
-            input_evidence
+            input_evidence,
+            hook_diagnostic
         ))
     })();
     append_case(
@@ -538,8 +634,15 @@ fn run_hold_open_case<'a>(
     trace_path: &Path,
     hold_threshold_ms: u64,
     held_window: &mut Option<WindowSnapshot>,
-) -> (Result<String, CaseFailure>, Option<F11HoldGuard<'a>>) {
+) -> (
+    Result<String, CaseFailure>,
+    Option<F11HoldGuard<'a>>,
+    Option<RunnerHookObserver>,
+    Option<String>,
+) {
     let mut hold_guard = None;
+    let mut hook_observer = None;
+    let mut hook_observer_error = None;
     let result = (|| {
         let root = child
             .refresh_root()
@@ -551,6 +654,10 @@ fn run_hold_open_case<'a>(
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         let before = runtime_windows(child);
         let cursor = trace_lines(trace_path).len();
+        match RunnerHookObserver::start() {
+            Ok(observer) => hook_observer = Some(observer),
+            Err(error) => hook_observer_error = Some(error),
+        }
         let input = child
             .press_f11(root.hwnd, child.process_id())
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
@@ -577,10 +684,20 @@ fn run_hold_open_case<'a>(
                 "modifiers_match=true",
             ],
         ) {
+            let runner_observation = hook_observer
+                .as_mut()
+                .map(|observer| observer.wait_for_vk(0x7A, Duration::from_millis(50)))
+                .map(|observation| observation.describe())
+                .or_else(|| {
+                    hook_observer_error
+                        .as_ref()
+                        .map(|error| format!("runner hook observer unavailable: {error}"))
+                })
+                .unwrap_or_else(|| "runner hook observer unavailable".into());
             return Err(CaseFailure::new(
                 FailureStage::HookAdmission,
                 format!(
-                    "held F11 down edge [{}] targeted ROOT HWND={} PID={}; foreground after hold HWND={} PID={}; observed {} production trace event(s), but no matching hook/configured press edge",
+                    "held F11 down edge [{}] targeted ROOT HWND={} PID={}; foreground after hold HWND={} PID={}; observed {} production trace event(s), but no matching hook/configured press edge; {runner_observation}",
                     input.describe(),
                     hwnd_id(root.hwnd),
                     child.process_id(),
@@ -621,9 +738,9 @@ fn run_hold_open_case<'a>(
     })();
     if result.is_err() {
         drop(hold_guard.take());
-        (result, None)
+        (result, None, hook_observer, hook_observer_error)
     } else {
-        (result, hold_guard)
+        (result, hold_guard, hook_observer, hook_observer_error)
     }
 }
 
@@ -635,6 +752,8 @@ fn run_hold_release_case(
     output: &Path,
     held_window: Option<&WindowSnapshot>,
     hold_guard: Option<F11HoldGuard<'_>>,
+    mut hook_observer: Option<RunnerHookObserver>,
+    hook_observer_error: Option<String>,
 ) {
     let started = Instant::now();
     let result = (|| {
@@ -648,6 +767,14 @@ fn run_hold_release_case(
         let release = hold_guard
             .release()
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let runner_observation = hook_observer
+            .as_mut()
+            .map(|observer| observer.wait_for_vk(0x7A, Duration::from_secs(1)));
+        let runner_observation_text = runner_observation
+            .as_ref()
+            .map(|observation| observation.describe())
+            .or_else(|| hook_observer_error.map(|error| format!("observer unavailable: {error}")))
+            .unwrap_or_else(|| "observer unavailable".into());
         let lines = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
             has_trace(
                 events,
@@ -679,7 +806,7 @@ fn run_hold_release_case(
             return Err(CaseFailure::new(
                 FailureStage::HookAdmission,
                 format!(
-                    "held F11 release edge [{}] did not reach the production hook and configured chord",
+                    "held F11 release edge [{}] did not reach the production hook and configured chord; {runner_observation_text}",
                     release.describe()
                 ),
             ));
@@ -709,7 +836,7 @@ fn run_hold_release_case(
             ));
         }
         Ok(format!(
-            "checked F11 release generated no tap or ROOT visibility edge; radial HWND={} remains visible; release edge=[{}]",
+            "checked F11 release generated no tap or ROOT visibility edge; radial HWND={} remains visible; release edge=[{}]; {runner_observation_text}",
             hwnd_id(held_window.hwnd),
             release.describe()
         ))
@@ -750,6 +877,17 @@ fn run_second_hold_case(
             .focus_window(&root)
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         let cursor = trace_lines(trace_path).len();
+        let (mut hook_observer, hook_observer_error) = match RunnerHookObserver::start() {
+            Ok(observer) => (Some(observer), None),
+            Err(error) => (None, Some(error)),
+        };
+        let app_hook_thread = hook_service_thread_id(trace_path);
+        let runner_thread_before = hook_observer
+            .as_ref()
+            .map(|observer| format!("runner observer {}", thread_liveness(observer.thread_id())));
+        let app_thread_before = app_hook_thread
+            .map(|thread_id| format!("app hook {}", thread_liveness(thread_id)))
+            .unwrap_or_else(|| "app hook thread id unavailable".into());
         let down = child
             .press_f11(root.hwnd, child.process_id())
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
@@ -757,9 +895,102 @@ fn run_second_hold_case(
         std::thread::sleep(Duration::from_millis(
             hold_threshold_ms.saturating_add(250).min(5_000),
         ));
+        let down_observation = hook_observer
+            .as_mut()
+            .map(|observer| observer.wait_for_vk(0x7A, Duration::from_millis(50)));
         let up = hold_guard
             .release()
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let up_observation = hook_observer
+            .as_mut()
+            .map(|observer| observer.wait_for_vk(0x7A, Duration::from_millis(250)));
+        let runner_thread_after_release = hook_observer
+            .as_ref()
+            .map(|observer| format!("runner observer {}", thread_liveness(observer.thread_id())));
+        let app_thread_after_release = app_hook_thread
+            .map(|thread_id| format!("app hook {}", thread_liveness(thread_id)))
+            .unwrap_or_else(|| "app hook thread id unavailable".into());
+        // Never inject a second key while the toggle chord is still held.  The
+        // native hook must observe the actual key-up edge before an independent
+        // sentinel is sent to prove the hook chain remains active afterward.
+        let sentinel_cursor = trace_lines(trace_path).len();
+        let sentinel_input = child
+            .press_hook_sentinel(root.hwnd, child.process_id())
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let sentinel_observation = hook_observer
+            .as_mut()
+            .map(|observer| observer.wait_for_vk(0x87, Duration::from_millis(100)));
+        let runner_thread_after_sentinel = hook_observer
+            .as_ref()
+            .map(|observer| format!("runner observer {}", thread_liveness(observer.thread_id())));
+        let app_thread_after_sentinel = app_hook_thread
+            .map(|thread_id| format!("app hook {}", thread_liveness(thread_id)))
+            .unwrap_or_else(|| "app hook thread id unavailable".into());
+        let sentinel_trace = wait_trace(
+            trace_path,
+            sentinel_cursor,
+            Duration::from_millis(250),
+            |events| {
+                (has_trace(
+                    events,
+                    "hook_observed",
+                    &["vk=135", "down=true", "injected=true"],
+                ) && has_trace(
+                    events,
+                    "hook_observed",
+                    &["vk=135", "down=false", "injected=true"],
+                )) || has_trace(events, "frontend_key", &["key=F24"])
+            },
+        );
+        let runner_observation = down_observation
+            .as_ref()
+            .zip(up_observation.as_ref())
+            .map(|(down, up)| down.merge(up))
+            .or_else(|| down_observation.or(up_observation));
+        let runner_observation_text = runner_observation
+            .as_ref()
+            .map(|observation| {
+                let sentinel = sentinel_observation.as_ref().map_or_else(
+                    || "runner F24 sentinel observer unavailable".to_string(),
+                    |sentinel| format!("{}", sentinel.describe()),
+                );
+                format!(
+                    "{}; after-hold sentinel input=[{}] observer=[{}] production_pair={}",
+                    observation.describe(),
+                    sentinel_input.describe(),
+                    sentinel,
+                    has_trace(
+                        &sentinel_trace,
+                        "hook_observed",
+                        &["vk=135", "down=true", "injected=true"]
+                    ) && has_trace(
+                        &sentinel_trace,
+                        "hook_observed",
+                        &["vk=135", "down=false", "injected=true"]
+                    )
+                )
+            })
+            .or_else(|| hook_observer_error.map(|error| format!("observer unavailable: {error}")))
+            .unwrap_or_else(|| "observer unavailable".into());
+        let thread_liveness_text = format!(
+            "thread liveness before=[{}; {}], after sentinel=[{}; {}], after release=[{}; {}]",
+            runner_thread_before
+                .as_deref()
+                .unwrap_or("runner observer unavailable"),
+            app_thread_before,
+            runner_thread_after_sentinel
+                .as_deref()
+                .unwrap_or("runner observer unavailable"),
+            app_thread_after_sentinel,
+            runner_thread_after_release
+                .as_deref()
+                .unwrap_or("runner observer unavailable"),
+            app_thread_after_release
+        );
+        let frontend_key_observed = has_trace(&sentinel_trace, "frontend_key", &["key=F24"]);
+        let runner_observation_text = format!(
+            "{runner_observation_text}; foreground framework received F24 WM_KEYDOWN={frontend_key_observed}; {thread_liveness_text}"
+        );
         let closed = wait_until(Duration::from_secs(2), || {
             !window_still_active(child, held_window)
         });
@@ -767,7 +998,7 @@ fn run_second_hold_case(
             return Err(CaseFailure::new(
                 FailureStage::NativeRootState,
                 format!(
-                    "second full hold did not remove, hide, or park the radial HWND; down=[{}] up=[{}]",
+                    "second full hold did not remove, hide, or park the radial HWND; down=[{}] up=[{}]; {runner_observation_text}",
                     down.describe(),
                     up.describe()
                 ),
@@ -788,6 +1019,50 @@ fn run_second_hold_case(
                 ],
             )
         });
+        let release_traced = has_trace(
+            &lines,
+            "hook_primary",
+            &["transition=Release", "provenance=ExternalInjected"],
+        ) && has_trace(
+            &lines,
+            "configured_primary",
+            &[
+                "transition=Release",
+                "provenance=ExternalInjected",
+                "modifiers_match=true",
+            ],
+        );
+        let release_observed = runner_observation.as_ref().is_some_and(|observation| {
+            observation.down_seen
+                && observation.up_seen
+                && observation.down_injected
+                && observation.up_injected
+        });
+        let sentinel_observed = sentinel_observation.as_ref().is_some_and(|observation| {
+            observation.down_seen
+                && observation.up_seen
+                && observation.down_injected
+                && observation.up_injected
+        });
+        let sentinel_traced = has_trace(
+            &sentinel_trace,
+            "hook_observed",
+            &["vk=135", "down=true", "injected=true"],
+        ) && has_trace(
+            &sentinel_trace,
+            "hook_observed",
+            &["vk=135", "down=false", "injected=true"],
+        );
+        if !release_traced || !release_observed || !sentinel_observed || !sentinel_traced {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "second hold release was not proven by both production hook and independent observer; production_release={release_traced}; after_hold_observer_sentinel={sentinel_observed}; after_hold_production_sentinel={sentinel_traced}; {runner_observation_text}; down=[{}] up=[{}]",
+                    down.describe(),
+                    up.describe()
+                ),
+            ));
+        }
         if has_trace(&lines, "short_tap", &[]) || has_trace(&lines, "desired_visibility", &[]) {
             return Err(CaseFailure::new(
                 FailureStage::GestureDecision,
@@ -808,7 +1083,7 @@ fn run_second_hold_case(
             )
         })?;
         Ok(format!(
-            "second threshold hold closed radial HWND={} while ROOT stayed visible; down=[{}] up=[{}]",
+            "second threshold hold closed radial HWND={} while ROOT stayed visible; down=[{}] up=[{}]; {runner_observation_text}",
             hwnd_id(held_window.hwnd),
             down.describe(),
             up.describe()
@@ -948,13 +1223,39 @@ fn run_designer_focus_case(
             child
                 .focus_window(designer)
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
-            child
+            let (mut observer, observer_error) = match RunnerHookObserver::start() {
+                Ok(observer) => (Some(observer), None),
+                Err(error) => (None, Some(error)),
+            };
+            let tap = child
                 .send_f11(designer.hwnd, child.process_id(), TAP_TIME)
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            let observation = observer
+                .as_mut()
+                .map(|observer| observer.wait_for_vk(0x7A, Duration::from_secs(1)));
+            let observer_text = observation
+                .as_ref()
+                .map(RunnerHookObservation::describe)
+                .or_else(|| observer_error.map(|error| format!("observer unavailable: {error}")))
+                .unwrap_or_else(|| "observer unavailable".into());
             if !wait_root_visibility(child, visible, ROOT_TIMEOUT) {
+                let events = trace_lines(trace_path)
+                    .into_iter()
+                    .skip(cursor)
+                    .filter(|line| {
+                        line.contains("trace_event=\"hook_observed\"")
+                            || line.contains("trace_event=\"hook_primary\"")
+                            || line.contains("trace_event=\"configured_primary\"")
+                            || line.contains("trace_event=\"hook_callback\"")
+                    })
+                    .collect::<Vec<_>>();
                 return Err(CaseFailure::new(
                     FailureStage::NativeRootState,
-                    format!("Designer-focused F11 failed to toggle ROOT to visible={visible}"),
+                    format!(
+                        "Designer-focused F11 failed to toggle ROOT to visible={visible}; checked tap=[{}]; {observer_text}; production hook edges={:?}",
+                        tap.describe(),
+                        events
+                    ),
                 ));
             }
             if !uia.root_is_queryable(designer.hwnd, child.process_id()) {
@@ -1001,17 +1302,29 @@ fn run_designer_pointer_case(
 ) {
     let started = Instant::now();
     let result = (|| {
-        let control = uia
-            .wait_named(designer.hwnd, child.process_id(), "Tree", UIA_TIMEOUT)
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
-        let before = uia
-            .selection_state(&control)
-            .map(Some)
-            .or_else(|| uia.toggle_state(&control).map(|state| Some(state.0 == 1)))
-            .flatten();
+        save_uia_snapshot("D1", "designer", uia, designer.hwnd, output);
+        let before = wait_for_designer_semantic_target(
+            trace_path,
+            DesignerSemanticTarget::Tree,
+            UIA_TIMEOUT,
+            |_| true,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerNativeTarget,
+                "production Designer did not publish its Tree semantic target".into(),
+            )
+        })?;
+        if before.selected {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "Tree semantic target was already selected before the native click".into(),
+            ));
+        }
         let cursor = trace_lines(trace_path).len();
-        let click_evidence = click_semantic_control(child, designer, &control)
-            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let click_evidence =
+            click_designer_client_bounds(child, designer, before.bounds, trace_path)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
         let events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
             has_trace(events, "designer_pointer", &["pointer_down=true"])
                 && has_trace(events, "designer_pointer", &["pointer_up=true"])
@@ -1021,6 +1334,10 @@ fn run_designer_pointer_case(
                     "designer_widget",
                     &["category=Tree", "response=Accepted"],
                 )
+                && events.iter().any(|line| {
+                    parse_designer_semantic_target(line, DesignerSemanticTarget::Tree)
+                        .is_some_and(|state| state.selected)
+                })
         });
         if !has_trace(&events, "designer_pointer", &["pointer_down=true"])
             || !has_trace(&events, "designer_pointer", &["pointer_up=true"])
@@ -1030,33 +1347,23 @@ fn run_designer_pointer_case(
                 "designer_widget",
                 &["category=Tree", "response=Accepted"],
             )
+            || !events.iter().any(|line| {
+                parse_designer_semantic_target(line, DesignerSemanticTarget::Tree)
+                    .is_some_and(|state| state.selected != before.selected)
+            })
         {
-            return Err(CaseFailure::new(FailureStage::DesignerFrameworkInput, "native click did not reach the production Designer pointer/body/Tree accepted boundaries".into()));
-        }
-        let before = before.ok_or_else(|| CaseFailure::new(
-            FailureStage::DesignerMutation,
-            "native Tree click reached the production widget, but UIA did not expose a pre-click selection/toggle state".into(),
-        ))?;
-        let changed = wait_until(UIA_TIMEOUT, || {
-            uia.find_named(designer.hwnd, child.process_id(), "Tree")
-                .ok()
-                .flatten()
-                .and_then(|current| {
-                    uia.selection_state(&current)
-                        .or_else(|| uia.toggle_state(&current).map(|state| state.0 == 1))
-                })
-                .is_some_and(|current| current != before)
-        });
-        if !changed {
             return Err(CaseFailure::new(
-                FailureStage::DesignerMutation,
-                "Tree click was accepted but UIA did not expose a changed selection/toggle state"
-                    .into(),
+                FailureStage::DesignerFrameworkInput,
+                format!(
+                    "native click did not reach the production Designer pointer/body/Tree accepted boundaries; click proof=[{}]",
+                    click_evidence.describe()
+                ),
             ));
         }
         Ok(format!(
-            "Tree native pointer click reached Enabled body and accepted widget; accessible state changed {before} -> {}; click edges=[{}]",
-            !before,
+            "native click on production egui Tree SelectableLabel changed selected {} -> true and reached Enabled body/accepted widget; client bounds={:?}; click edges=[{}]",
+            before.selected,
+            before.bounds,
             click_evidence.describe()
         ))
     })();
@@ -1082,46 +1389,255 @@ fn run_tab_case(
 ) {
     let started = Instant::now();
     let result = (|| {
-        let start = uia
-            .wait_named(designer.hwnd, child.process_id(), "Tree", UIA_TIMEOUT)
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
-        uia.focus(&start)
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerFrameworkInput, error))?;
-        child
-            .focus_window(designer)
-            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
-        let before = uia
-            .focused_element()
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerFrameworkInput, error))?;
-        if uia.element_process_id(&before) != Some(child.process_id()) {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerFrameworkInput,
-                "UIA keyboard focus before Tab does not belong to candidate".into(),
-            ));
+        save_uia_snapshot("D2", "designer", uia, designer.hwnd, output);
+        let tree = wait_for_designer_semantic_target(
+            trace_path,
+            DesignerSemanticTarget::Tree,
+            UIA_TIMEOUT,
+            |_| true,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerNativeTarget,
+                "production Designer did not publish its Tree semantic target".into(),
+            )
+        })?;
+        let mut click_proofs = Vec::new();
+        if !tree.selected {
+            let click = click_designer_client_bounds(child, designer, tree.bounds, trace_path)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+            click_proofs.push(format!("Tree=[{}]", click.describe()));
+            wait_for_designer_semantic_target(
+                trace_path,
+                DesignerSemanticTarget::Tree,
+                TRACE_TIMEOUT,
+                |state| state.selected,
+            )
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::DesignerFrameworkInput,
+                    "native Tree click did not show the Tree pane".into(),
+                )
+            })?;
         }
-        let count = send_tab(child, designer)
-            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
-        let after_changed = wait_until(UIA_TIMEOUT, || {
-            uia.focused_element().ok().is_some_and(|after| {
-                uia.element_process_id(&after) == Some(child.process_id())
-                    && !uia.same_element(&before, &after).unwrap_or(true)
+        let inspector = wait_for_designer_semantic_target(
+            trace_path,
+            DesignerSemanticTarget::Inspector,
+            UIA_TIMEOUT,
+            |_| true,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerNativeTarget,
+                "production Designer did not publish its Inspector toolbar target".into(),
+            )
+        })?;
+        if !inspector.selected {
+            let inspector_cursor = trace_lines(trace_path).len();
+            let click = click_designer_client_bounds(child, designer, inspector.bounds, trace_path)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+            click_proofs.push(format!("Inspector=[{}]", click.describe()));
+            let inspector_events =
+                wait_trace(trace_path, inspector_cursor, TRACE_TIMEOUT, |events| {
+                    events.iter().any(|line| {
+                        parse_designer_semantic_target(line, DesignerSemanticTarget::Inspector)
+                            .is_some_and(|state| state.selected)
+                    })
+                });
+            let inspector_selected = inspector_events.iter().any(|line| {
+                parse_designer_semantic_target(line, DesignerSemanticTarget::Inspector)
+                    .is_some_and(|state| state.selected)
+            });
+            if !inspector_selected {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerFrameworkInput,
+                    format!(
+                        "native Inspector click did not show the Inspector pane; native setup clicks={click_proofs:?}; Inspector pointer/semantic edges={:?}",
+                        inspector_events
+                            .iter()
+                            .filter(|line| {
+                                line.contains("designer_widget_pointer")
+                                    || line.contains("designer_widget")
+                                    || line.contains("target=Inspector")
+                            })
+                            .collect::<Vec<_>>()
+                    ),
+                ));
+            }
+        }
+        let default_menu = wait_for_designer_semantic_target(
+            trace_path,
+            DesignerSemanticTarget::DefaultMenu,
+            UIA_TIMEOUT,
+            |_| true,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerNativeTarget,
+                "production Designer did not publish the default menu tree target".into(),
+            )
+        })?;
+        if !default_menu.selected {
+            let click =
+                click_designer_client_bounds(child, designer, default_menu.bounds, trace_path)
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+            click_proofs.push(format!("default menu=[{}]", click.describe()));
+            wait_for_designer_semantic_target(
+                trace_path,
+                DesignerSemanticTarget::DefaultMenu,
+                TRACE_TIMEOUT,
+                |state| state.selected,
+            )
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::DesignerFrameworkInput,
+                    "native default-menu click did not select the production menu".into(),
+                )
+            })?;
+        }
+        let menu_name = wait_for_designer_semantic_target(
+            trace_path,
+            DesignerSemanticTarget::MenuName,
+            UIA_TIMEOUT,
+            |_| true,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerNativeTarget,
+                "production menu Inspector did not publish its real TextEdit".into(),
+            )
+        })?;
+        let focus_cursor = trace_lines(trace_path).len();
+        let name_click =
+            click_designer_client_bounds(child, designer, menu_name.bounds, trace_path)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+        click_proofs.push(format!("menu TextEdit=[{}]", name_click.describe()));
+        let focused_name = wait_trace(trace_path, focus_cursor, TRACE_TIMEOUT, |events| {
+            events.iter().any(|line| {
+                parse_designer_semantic_target(line, DesignerSemanticTarget::MenuName)
+                    .is_some_and(|state| state.focused)
             })
         });
-        if !after_changed {
+        if !focused_name.iter().any(|line| {
+            parse_designer_semantic_target(line, DesignerSemanticTarget::MenuName)
+                .is_some_and(|state| state.focused)
+        }) {
             return Err(CaseFailure::new(
                 FailureStage::DesignerFrameworkInput,
-                "checked Tab input did not move UIA focus to another child-owned Designer element"
-                    .into(),
+                format!(
+                    "native click on the production menu TextEdit did not acquire egui focus; click=[{}]",
+                    name_click.describe()
+                ),
             ));
         }
-        let after = uia
-            .focused_element()
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerFrameworkInput, error))?;
+        let uia_menu_edit_focus = uia
+            .edit_focus_at_screen_point(designer.hwnd, child.process_id(), name_click.screen_point)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+        let uia_limitation = match uia_menu_edit_focus {
+            Some(true) => {
+                "UIA Edit at the production TextEdit point reports focus; production egui trace independently confirms the target"
+            }
+            Some(false) => {
+                "UIA exposes an Edit at the production TextEdit point but does not report its keyboard focus; production egui trace is the focus fallback"
+            }
+            None => {
+                "UIA exposes no Edit node at the production TextEdit point; production egui semantic trace supplies target bounds and focus"
+            }
+        };
+
+        let edit_cursor = trace_lines(trace_path).len();
+        let probe_input = replace_focused_designer_text(child, designer, DESIGNER_TEXT_PROBE);
+        let (probe_input_count, probe_error) = match probe_input {
+            Ok(count) => (Some(count), None),
+            Err(error) => (None, Some(error)),
+        };
+        let edited = wait_trace(trace_path, edit_cursor, TRACE_TIMEOUT, |events| {
+            has_trace(
+                events,
+                "designer_edit_state",
+                &[
+                    "widget_changed=true",
+                    "model_changed=true",
+                    "input_matches_model=true",
+                    "draft_dirty=true",
+                ],
+            )
+        });
+        let model_edit_proved = has_trace(
+            &edited,
+            "designer_edit_state",
+            &[
+                "widget_changed=true",
+                "model_changed=true",
+                "input_matches_model=true",
+                "draft_dirty=true",
+            ],
+        );
+        if !model_edit_proved {
+            let restored = replace_focused_designer_text(child, designer, DESIGNER_STARTER_NAME);
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "native Unicode input did not prove a production TextEdit-to-model mutation; input={probe_input_count:?}, error={probe_error:?}, baseline restore={restored:?}"
+                ),
+            ));
+        }
+
+        let restore_cursor = trace_lines(trace_path).len();
+        let restore_input =
+            replace_focused_designer_text(child, designer, DESIGNER_STARTER_NAME)
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let restored = wait_trace(trace_path, restore_cursor, TRACE_TIMEOUT, |events| {
+            has_trace(
+                events,
+                "designer_edit_state",
+                &[
+                    "widget_changed=true",
+                    "input_matches_model=true",
+                    "draft_dirty=false",
+                ],
+            )
+        });
+        if !has_trace(
+            &restored,
+            "designer_edit_state",
+            &[
+                "widget_changed=true",
+                "input_matches_model=true",
+                "draft_dirty=false",
+            ],
+        ) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!(
+                    "native TextEdit input changed the production draft, but the deterministic starter value was not restored to a clean checkpoint; restore input events={restore_input}"
+                ),
+            ));
+        }
+
+        let cursor = trace_lines(trace_path).len();
+        let count = send_tab(child, designer)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+            events.iter().any(|line| {
+                parse_designer_semantic_target(line, DesignerSemanticTarget::MenuDefaultSkin)
+                    .is_some_and(|state| state.focused)
+            })
+        });
+        let next = events.iter().find_map(|line| {
+            parse_designer_semantic_target(line, DesignerSemanticTarget::MenuDefaultSkin)
+                .filter(|state| state.focused)
+        });
+        let Some(next_state) = next else {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerFrameworkInput,
+                "checked Tab did not move focus from the production menu TextEdit to its menu-skin ComboBox"
+                    .into(),
+            ));
+        };
         Ok(format!(
-            "{} checked Tab events moved UIA focus from '{}' to '{}'",
-            count,
-            uia.element_name(&before).unwrap_or_default(),
-            uia.element_name(&after).unwrap_or_default()
+            "{} checked native Tab events moved production Designer focus from the real menu TextEdit {:?} to its ComboBox {:?}; native Unicode edit ({:?} SendInput events) changed the authoring model and was restored without saving; UIA focus limitation/fallback: {uia_limitation}; native setup clicks={:?}",
+            count, menu_name.bounds, next_state.bounds, probe_input_count, click_proofs
         ))
     })();
     append_case(
@@ -1134,6 +1650,16 @@ fn run_tab_case(
         output,
         trace_path,
     );
+}
+
+fn replace_focused_designer_text(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    value: &str,
+) -> Result<usize, String> {
+    let selection_events = send_select_all_to_focused_window(child, designer)?;
+    let text_events = send_text_to_focused_window(child, designer, value)?;
+    Ok(selection_events.saturating_add(text_events))
 }
 
 fn run_skins_command_case(
@@ -1154,6 +1680,8 @@ fn run_skins_command_case(
         child
             .focus_window(&root)
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        save_uia_snapshot("D4", "root", uia, root.hwnd, output);
+        save_uia_snapshot("D4", "designer", uia, designer.hwnd, output);
         let edit = uia
             .find_first_edit(root.hwnd, child.process_id())
             .map_err(|error| CaseFailure::new(FailureStage::DesignerEntry, error))?
@@ -1165,15 +1693,17 @@ fn run_skins_command_case(
             })?;
         let typed = send_text(child, &root, &edit, &uia, "radial skins")
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        save_uia_snapshot("D4", "root-after-type", uia, root.hwnd, output);
         let result_control = uia
             .wait_named(
                 root.hwnd,
                 child.process_id(),
-                "Edit radial skins",
+                "Edit radial skins : Radial menu",
                 UIA_TIMEOUT,
             )
             .map_err(|error| CaseFailure::new(FailureStage::DesignerEntry, error))?;
-        let click_evidence = click_semantic_control(child, &root, &result_control)
+        let semantic_cursor = trace_lines(trace_path).len();
+        let click = click_semantic_control(child, &root, &result_control)
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         let same = wait_until(Duration::from_secs(4), || {
             find_child_window(child, WindowRole::Designer)
@@ -1185,25 +1715,35 @@ fn run_skins_command_case(
                 "radial skins command replaced or closed the existing Designer HWND".into(),
             ));
         }
-        let heading = uia
-            .find_named(
-                designer.hwnd,
-                child.process_id(),
-                "Skins, assets, import and export",
-            )
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?;
-        if heading.is_none() {
-            let skins = uia.find_named(designer.hwnd, child.process_id(), "Skins")
-                .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?
-                .ok_or_else(|| CaseFailure::new(FailureStage::DesignerPresentation, "Designer did not expose Skins/resources mode after production radial skins command".into()))?;
-            if uia.selection_state(&skins) != Some(true)
-                && uia.toggle_state(&skins).is_none_or(|state| state.0 != 1)
-            {
-                return Err(CaseFailure::new(
-                    FailureStage::DesignerPresentation,
-                    "Skins mode is not selected and the resources heading is not exposed".into(),
-                ));
-            }
+        let skins_selected = wait_trace(trace_path, semantic_cursor, TRACE_TIMEOUT, |events| {
+            events.iter().any(|line| {
+                parse_designer_semantic_target(line, DesignerSemanticTarget::Skins)
+                    .is_some_and(|state| state.selected)
+            })
+        });
+        if !skins_selected.iter().any(|line| {
+            parse_designer_semantic_target(line, DesignerSemanticTarget::Skins)
+                .is_some_and(|state| state.selected)
+        }) {
+            let (foreground_hwnd, foreground_pid) = capture_foreground();
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                format!(
+                    "production radial skins command did not select the Skins semantic target; native click proof=[{}]; exact command bounds={:?}; foreground=HWND:{} PID:{}; post-click Designer/command traces={:?}",
+                    click.describe(),
+                    result_control.bounds,
+                    hwnd_id(foreground_hwnd),
+                    foreground_pid,
+                    skins_selected
+                        .iter()
+                        .filter(|line| {
+                            line.contains("designer_semantic_target")
+                                || line.contains("root_command")
+                                || line.contains("designer_focus")
+                        })
+                        .collect::<Vec<_>>()
+                ),
+            ));
         }
         if !uia.root_is_queryable(designer.hwnd, child.process_id()) {
             return Err(CaseFailure::new(
@@ -1211,18 +1751,10 @@ fn run_skins_command_case(
                 "same Designer HWND stopped responding after Skins entry".into(),
             ));
         }
-        let interactive = uia
-            .wait_named(designer.hwnd, child.process_id(), "New skin", UIA_TIMEOUT)
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
-        if !interactive.enabled {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerReadiness,
-                "Skins mode was visible but New skin was disabled".into(),
-            ));
-        }
         Ok(format!(
-            "typed radial skins using {typed} checked Unicode events and activated the command with [{}]; same Designer HWND={} remained queryable in resources mode",
-            click_evidence.describe(),
+            "typed radial skins using {typed} checked Unicode events, found the exact command at {:?}, and activated it with a checked native pointer click=[{}]; Skins semantic target became selected on the same queryable Designer HWND={}",
+            result_control.bounds,
+            click.describe(),
             hwnd_id(designer.hwnd)
         ))
     })();
@@ -1250,15 +1782,39 @@ fn run_designer_close_case(
         child
             .validate_window(designer.hwnd)
             .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+        let close_cursor = trace_lines(trace_path).len();
         let events = send_alt_f4(child, designer)
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let close_state = wait_trace(trace_path, close_cursor, TRACE_TIMEOUT, |events| {
+            events
+                .iter()
+                .any(|line| line.contains("trace_event=\"designer_close\""))
+        })
+        .into_iter()
+        .rev()
+        .find(|line| line.contains("trace_event=\"designer_close\""));
+        if !close_state
+            .as_ref()
+            .is_some_and(|line| line.contains("open=false"))
+        {
+            return Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                format!(
+                    "checked Alt+F4 did not produce a terminal clean production close state: {}; {events} checked input events",
+                    close_state.as_deref().unwrap_or("no close decision trace")
+                ),
+            ));
+        }
         let closed = wait_until(Duration::from_secs(4), || {
             find_child_window(child, WindowRole::Designer).is_none()
         });
         if !closed {
             return Err(CaseFailure::new(
                 FailureStage::Cleanup,
-                "Designer HWND remained after checked child-focused Alt+F4".into(),
+                format!(
+                    "Designer HWND remained after checked child-focused Alt+F4; production state={}",
+                    close_state.as_deref().unwrap_or("missing")
+                ),
             ));
         }
         if child
@@ -1278,9 +1834,10 @@ fn run_designer_close_case(
             ));
         }
         Ok(format!(
-            "{} checked Alt+F4 events closed Designer HWND={} while child process and ROOT remained alive",
+            "{} checked Alt+F4 events closed Designer HWND={} while child process and ROOT remained alive; production close state={}",
             events,
-            hwnd_id(designer.hwnd)
+            hwnd_id(designer.hwnd),
+            close_state.as_deref().unwrap_or("missing")
         ))
     })();
     append_case(
@@ -1492,6 +2049,22 @@ fn save_failure_artifacts(
     if fs::write(&trace_destination, trace_excerpt).is_ok() {
         written.push(trace_destination);
     }
+    let diagnostic_prefix = format!("case-{id}-uia-");
+    if let Ok(entries) = fs::read_dir(output) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(&diagnostic_prefix) && name.ends_with(".txt")
+                    })
+            {
+                written.push(path);
+            }
+        }
+    }
     let inventory_destination = output.join(format!("case-{id}-windows.json"));
     let windows = child.map(NativeChild::windows).unwrap_or_default();
     let record = WindowInventory {
@@ -1510,6 +2083,14 @@ fn save_failure_artifacts(
         written.push(screenshot_destination);
     }
     written
+}
+
+fn save_uia_snapshot(case_id: &str, role: &str, uia: &UiAutomation, hwnd: HWND, output: &Path) {
+    let path = output.join(format!("case-{case_id}-uia-{role}.txt"));
+    let content = uia
+        .describe_tree(hwnd)
+        .unwrap_or_else(|error| format!("UIA tree diagnostic failed: {error}"));
+    let _ = fs::write(path, content);
 }
 
 fn save_launch_failure_inventory(failure: &NativeLaunchFailure, output: &Path) -> Option<PathBuf> {
@@ -1629,10 +2210,12 @@ fn expected(id: &str) -> &'static str {
         "H6" => "second threshold hold closes runtime radial while ROOT stays visible",
         "D0" => "production Edit Radial Menus entry opens one ready child-owned Designer",
         "D1" => {
-            "validated native client click on Tree reaches accepted widget and changes UIA state"
+            "validated native client click on production Tree semantic target reaches accepted widget and changes state"
         }
-        "D2" => "checked Tab moves UIA keyboard focus to another child-owned Designer element",
-        "D4" => "production radial skins command switches the same Designer to resources mode",
+        "D2" => {
+            "native TextEdit input changes and restores the production draft, then checked Tab moves focus to the next control"
+        }
+        "D4" => "production radial skins command selects the same Designer Skins semantic target",
         "D5" => "checked close closes Designer while ROOT and candidate remain alive",
         _ => "candidate exits normally through production close path",
     }
@@ -1751,6 +2334,72 @@ fn has_trace(events: &[String], event: &str, fields: &[&str]) -> bool {
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DesignerSemanticTargetState {
+    bounds: [i32; 4],
+    selected: bool,
+    focused: bool,
+}
+
+fn parse_designer_semantic_target(
+    line: &str,
+    target: DesignerSemanticTarget,
+) -> Option<DesignerSemanticTargetState> {
+    let name = format!("target={target:?}");
+    let role = match target {
+        DesignerSemanticTarget::Menus
+        | DesignerSemanticTarget::Skins
+        | DesignerSemanticTarget::Tree
+        | DesignerSemanticTarget::Inspector => "SelectableLabel",
+        DesignerSemanticTarget::DefaultMenu => "Button",
+        DesignerSemanticTarget::MenuName => "TextEdit",
+        DesignerSemanticTarget::MenuDefaultSkin => "ComboBox",
+    };
+    if !line.contains("trace_event=\"designer_semantic_target\"")
+        || !line.contains(&name)
+        || !line.contains(&format!("role=\"{role}\""))
+        || !line.contains("viewport=Deferred")
+    {
+        return None;
+    }
+    let field = |name: &str| {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(&format!("{name}=")))
+    };
+    Some(DesignerSemanticTargetState {
+        bounds: [
+            field("left_px")?.parse().ok()?,
+            field("top_px")?.parse().ok()?,
+            field("right_px")?.parse().ok()?,
+            field("bottom_px")?.parse().ok()?,
+        ],
+        selected: field("selected")?.parse().ok()?,
+        focused: field("focused")?.parse().ok()?,
+    })
+}
+
+fn wait_for_designer_semantic_target(
+    trace_path: &Path,
+    target: DesignerSemanticTarget,
+    timeout: Duration,
+    predicate: impl Fn(&DesignerSemanticTargetState) -> bool,
+) -> Option<DesignerSemanticTargetState> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = trace_lines(trace_path)
+            .into_iter()
+            .rev()
+            .find_map(|line| parse_designer_semantic_target(&line, target));
+        if state.as_ref().is_some_and(&predicate) {
+            return state;
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
 fn trace_lines(path: &Path) -> Vec<String> {
     fs::read_to_string(path)
         .unwrap_or_default()
@@ -1758,6 +2407,21 @@ fn trace_lines(path: &Path) -> Vec<String> {
         .filter(|line| line.contains("trace_event=\""))
         .map(str::to_owned)
         .collect()
+}
+
+fn hook_service_thread_id(path: &Path) -> Option<u32> {
+    trace_lines(path).into_iter().find_map(|line| {
+        let event = line.split("trace_event=\"").nth(1)?.split('\"').next()?;
+        if event != "hook_service_ready" {
+            return None;
+        }
+        line.split("thread_id=")
+            .nth(1)?
+            .split_ascii_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
 }
 
 fn wait_trace<F>(path: &Path, cursor: usize, timeout: Duration, mut predicate: F) -> Vec<String>

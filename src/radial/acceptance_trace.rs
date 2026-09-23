@@ -150,6 +150,8 @@ pub(crate) enum NativeWindowOwner {
 pub(crate) struct NativeWindowIdentity {
     pub(crate) hwnd: u64,
     pub(crate) owner: NativeWindowOwner,
+    pub(crate) screen_x: i32,
+    pub(crate) screen_y: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +164,90 @@ pub(crate) enum NativePointerTransition {
 pub(crate) enum NativePointerButton {
     Primary,
     Secondary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookDesktop {
+    Default,
+    Other,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AcceptanceKey {
+    F24,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookPriorityOwner {
+    Launcher,
+    ScreenDrawRecovery,
+    ExclusiveTool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HookDeadlineEdge {
+    Scheduled,
+    Fired,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RootResultKind {
+    RadialEdit,
+    RadialSkins,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RadialActionStage {
+    Activated,
+    Parsed,
+    ParseRejected,
+    Dispatched,
+    HostEntered,
+    EditorModeApplied,
+    HostCompleted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DesignerSemanticTarget {
+    Menus,
+    Skins,
+    Tree,
+    Inspector,
+    DefaultMenu,
+    MenuName,
+    MenuDefaultSkin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DesignerSemanticRole {
+    SelectableLabel,
+    Button,
+    TextEdit,
+    ComboBox,
+}
+
+impl DesignerSemanticRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SelectableLabel => "SelectableLabel",
+            Self::Button => "Button",
+            Self::TextEdit => "TextEdit",
+            Self::ComboBox => "ComboBox",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesignerCloseState {
+    pub open: bool,
+    pub close_prompt: bool,
+    pub dirty: bool,
+    pub pending_disposable: bool,
+    pub pending_durable: bool,
+    pub pending_native_preview: bool,
 }
 
 // The closed, typed `Event` enum is the privacy boundary for this diagnostic.
@@ -185,6 +271,10 @@ pub(crate) enum Event {
         window_under_cursor: Option<NativeWindowIdentity>,
         correlation: Correlation,
     },
+    DesignerPointerMoved {
+        client_x: i32,
+        client_y: i32,
+    },
     DesignerSubmitted {
         correlation: Correlation,
     },
@@ -196,6 +286,38 @@ pub(crate) enum Event {
         category: WidgetCategory,
         response: WidgetResponse,
         correlation: Correlation,
+    },
+    DesignerWidgetPointer {
+        category: WidgetCategory,
+        pressed: bool,
+        released: bool,
+        hovered: bool,
+        button_down_on: bool,
+        pointer_inside: bool,
+        layer_is_topmost: bool,
+        clicked: bool,
+        has_position: bool,
+        pointer_x: i32,
+        pointer_y: i32,
+        correlation: Correlation,
+    },
+    RootResultPointer {
+        kind: RootResultKind,
+        index: usize,
+        pressed: bool,
+        released: bool,
+        hovered: bool,
+        clicked: bool,
+        has_position: bool,
+        pointer_x: i32,
+        pointer_y: i32,
+    },
+    RadialAction {
+        stage: RadialActionStage,
+        skins: bool,
+        editor_open: Option<bool>,
+        skins_selected: Option<bool>,
+        panel_registered: Option<bool>,
     },
     DesignerMutation {
         result: MutationResult,
@@ -209,6 +331,74 @@ pub(crate) enum Event {
         transition: PrimaryTransition,
         provenance: crate::radial::invocation::InputProvenance,
         foreground_owner: NativeWindowOwner,
+    },
+    HookAdmission {
+        transition: PrimaryTransition,
+        provenance: crate::radial::invocation::InputProvenance,
+        owner: HookPriorityOwner,
+        global_exclusive_owners: u32,
+        adapter_exclusive: bool,
+        recovery: bool,
+        deadline_scheduled: bool,
+        radial_intent: bool,
+    },
+    HookDeadline {
+        edge: HookDeadlineEdge,
+        invocation_id: u64,
+        timer_id: u64,
+        delay_ms: u64,
+        radial_intent: bool,
+        global_exclusive_owners: u32,
+    },
+    HookServiceReady {
+        thread_id: u32,
+        desktop: HookDesktop,
+        primary_vk: u32,
+    },
+    HookServiceExit {
+        message_result: i32,
+        shutdown_requested: bool,
+        primary_down: bool,
+        owned_input: bool,
+        pending_deadlines: usize,
+    },
+    HookObserved {
+        vk: u32,
+        down: bool,
+        injected: bool,
+    },
+    HookCallback {
+        primary: bool,
+        down: bool,
+        injected: bool,
+        elapsed_us: u64,
+    },
+    FrontendKey {
+        key: AcceptanceKey,
+        focused: bool,
+        foreground_owner: NativeWindowOwner,
+    },
+    DesignerSemanticTarget {
+        target: DesignerSemanticTarget,
+        role: DesignerSemanticRole,
+        viewport: ViewportClass,
+        left_px: i32,
+        top_px: i32,
+        right_px: i32,
+        bottom_px: i32,
+        selected: bool,
+        focused: bool,
+        correlation: Correlation,
+    },
+    DesignerEditState {
+        widget_changed: bool,
+        model_changed: bool,
+        input_matches_model: bool,
+        draft_dirty: bool,
+        correlation: Correlation,
+    },
+    DesignerClose {
+        state: DesignerCloseState,
     },
     InvocationPrimary {
         transition: PrimaryTransition,
@@ -410,6 +600,21 @@ fn unregister_bounded(slots: &mut [u64], value: u64) {
 
 static WINDOW_SAMPLE_QUEUE: OnceLock<Mutex<WindowSampleQueue>> = OnceLock::new();
 static NATIVE_OWNER_REGISTRY: OnceLock<Mutex<NativeOwnerRegistry>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DesignerSemanticSnapshot {
+    target: DesignerSemanticTarget,
+    role: DesignerSemanticRole,
+    viewport: ViewportClass,
+    bounds: [i32; 4],
+    selected: bool,
+    focused: bool,
+    session_id: u64,
+    generation: u64,
+}
+
+static DESIGNER_SEMANTIC_TARGETS: OnceLock<Mutex<[Option<DesignerSemanticSnapshot>; 7]>> =
+    OnceLock::new();
 
 fn enabled_from_value(value: Option<&str>) -> bool {
     matches!(
@@ -613,10 +818,18 @@ pub(crate) fn emit(event: Event) {
             window_under_cursor,
             correlation,
         } => {
-            let (window_under_cursor_hwnd, window_under_cursor_owner) = window_under_cursor
-                .map_or((0, NativeWindowOwner::Other), |identity| {
-                    (identity.hwnd, identity.owner)
-                });
+            let (window_under_cursor_hwnd, window_under_cursor_owner, screen_x, screen_y) =
+                window_under_cursor.map_or(
+                    (0, NativeWindowOwner::Other, i32::MIN, i32::MIN),
+                    |identity| {
+                        (
+                            identity.hwnd,
+                            identity.owner,
+                            identity.screen_x,
+                            identity.screen_y,
+                        )
+                    },
+                );
             tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_pointer",
@@ -625,11 +838,23 @@ pub(crate) fn emit(event: Event) {
                 pointer_up = up,
                 window_under_cursor_hwnd,
                 window_under_cursor_owner = ?window_under_cursor_owner,
+                cursor_screen_x = screen_x,
+                cursor_screen_y = screen_y,
                 request_id = correlation.request_id,
                 request_kind = ?correlation.request_kind,
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerPointerMoved { client_x, client_y } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_pointer_moved",
+                elapsed_ms,
+                client_x,
+                client_y,
                 "radial acceptance trace"
             );
         }
@@ -679,6 +904,89 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
+        Event::DesignerWidgetPointer {
+            category,
+            pressed,
+            released,
+            hovered,
+            button_down_on,
+            pointer_inside,
+            layer_is_topmost,
+            clicked,
+            has_position,
+            pointer_x,
+            pointer_y,
+            correlation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_widget_pointer",
+                elapsed_ms,
+                ?category,
+                pointer_pressed = pressed,
+                pointer_released = released,
+                hovered,
+                button_down_on,
+                pointer_inside,
+                layer_is_topmost,
+                clicked,
+                has_position,
+                pointer_x,
+                pointer_y,
+                request_id = correlation.request_id,
+                request_kind = ?correlation.request_kind,
+                session_id = correlation.session_id,
+                generation = correlation.generation,
+                terminal = correlation.terminal,
+                "radial acceptance trace"
+            );
+        }
+        Event::RootResultPointer {
+            kind,
+            index,
+            pressed,
+            released,
+            hovered,
+            clicked,
+            has_position,
+            pointer_x,
+            pointer_y,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "root_result_pointer",
+                elapsed_ms,
+                ?kind,
+                result_index = index,
+                pointer_pressed = pressed,
+                pointer_released = released,
+                hovered,
+                clicked,
+                has_position,
+                pointer_x,
+                pointer_y,
+                "radial acceptance trace"
+            );
+        }
+        Event::RadialAction {
+            stage,
+            skins,
+            editor_open,
+            skins_selected,
+            panel_registered,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "radial_action",
+                elapsed_ms,
+                ?stage,
+                skins,
+                editor_open = ?editor_open,
+                skins_selected = ?skins_selected,
+                panel_registered = ?panel_registered,
+                "radial acceptance trace"
+            );
+        }
         Event::DesignerMutation {
             result,
             correlation,
@@ -722,6 +1030,193 @@ pub(crate) fn emit(event: Event) {
                 ?transition,
                 ?provenance,
                 ?foreground_owner,
+                "radial acceptance trace"
+            );
+        }
+        Event::HookAdmission {
+            transition,
+            provenance,
+            owner,
+            global_exclusive_owners,
+            adapter_exclusive,
+            recovery,
+            deadline_scheduled,
+            radial_intent,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_admission",
+                elapsed_ms,
+                ?transition,
+                ?provenance,
+                ?owner,
+                global_exclusive_owners,
+                adapter_exclusive,
+                recovery,
+                deadline_scheduled,
+                radial_intent,
+                "radial acceptance trace"
+            );
+        }
+        Event::HookDeadline {
+            edge,
+            invocation_id,
+            timer_id,
+            delay_ms,
+            radial_intent,
+            global_exclusive_owners,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_deadline",
+                elapsed_ms,
+                ?edge,
+                invocation_id,
+                timer_id,
+                delay_ms,
+                radial_intent,
+                global_exclusive_owners,
+                "radial acceptance trace"
+            );
+        }
+        Event::HookServiceReady {
+            thread_id,
+            desktop,
+            primary_vk,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_service_ready",
+                elapsed_ms,
+                thread_id,
+                ?desktop,
+                primary_vk,
+                "radial acceptance trace"
+            );
+        }
+        Event::HookServiceExit {
+            message_result,
+            shutdown_requested,
+            primary_down,
+            owned_input,
+            pending_deadlines,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_service_exit",
+                elapsed_ms,
+                message_result,
+                shutdown_requested,
+                primary_down,
+                owned_input,
+                pending_deadlines,
+                "radial acceptance trace"
+            );
+        }
+        Event::HookObserved { vk, down, injected } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_observed",
+                elapsed_ms,
+                vk,
+                down,
+                injected,
+                "radial acceptance trace"
+            );
+        }
+        Event::HookCallback {
+            primary,
+            down,
+            injected,
+            elapsed_us,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_callback",
+                elapsed_ms,
+                primary,
+                down,
+                injected,
+                callback_elapsed_us = elapsed_us,
+                "radial acceptance trace"
+            );
+        }
+        Event::FrontendKey {
+            key,
+            focused,
+            foreground_owner,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "frontend_key",
+                elapsed_ms,
+                ?key,
+                focused,
+                ?foreground_owner,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerSemanticTarget {
+            target,
+            role,
+            viewport,
+            left_px,
+            top_px,
+            right_px,
+            bottom_px,
+            selected,
+            focused,
+            correlation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_semantic_target",
+                elapsed_ms,
+                ?target,
+                role = role.as_str(),
+                ?viewport,
+                left_px,
+                top_px,
+                right_px,
+                bottom_px,
+                selected,
+                focused,
+                session_id = correlation.session_id,
+                generation = correlation.generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerEditState {
+            widget_changed,
+            model_changed,
+            input_matches_model,
+            draft_dirty,
+            correlation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_edit_state",
+                elapsed_ms,
+                widget_changed,
+                model_changed,
+                input_matches_model,
+                draft_dirty,
+                session_id = correlation.session_id,
+                generation = correlation.generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerClose { state } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_close",
+                elapsed_ms,
+                open = state.open,
+                close_prompt = state.close_prompt,
+                dirty = state.dirty,
+                pending_disposable = state.pending_disposable,
+                pending_durable = state.pending_durable,
+                pending_native_preview = state.pending_native_preview,
                 "radial acceptance trace"
             );
         }
@@ -909,6 +1404,81 @@ pub(crate) fn emit(event: Event) {
     }
 }
 
+pub(crate) fn emit_designer_semantic_target(
+    target: DesignerSemanticTarget,
+    role: DesignerSemanticRole,
+    viewport: ViewportClass,
+    bounds: [i32; 4],
+    selected: bool,
+    focused: bool,
+    correlation: Correlation,
+) {
+    if !enabled() {
+        return;
+    }
+    let index = match target {
+        DesignerSemanticTarget::Menus => 0,
+        DesignerSemanticTarget::Skins => 1,
+        DesignerSemanticTarget::Tree => 2,
+        DesignerSemanticTarget::Inspector => 3,
+        DesignerSemanticTarget::DefaultMenu => 4,
+        DesignerSemanticTarget::MenuName => 5,
+        DesignerSemanticTarget::MenuDefaultSkin => 6,
+    };
+    let snapshot = DesignerSemanticSnapshot {
+        target,
+        role,
+        viewport,
+        bounds,
+        selected,
+        focused,
+        session_id: correlation.session_id,
+        generation: correlation.generation,
+    };
+    let changed = DESIGNER_SEMANTIC_TARGETS
+        .get_or_init(|| Mutex::new([None; 7]))
+        .lock()
+        .map(|mut previous| {
+            if previous[index] == Some(snapshot) {
+                false
+            } else {
+                previous[index] = Some(snapshot);
+                true
+            }
+        })
+        .unwrap_or(false);
+    if changed {
+        emit(Event::DesignerSemanticTarget {
+            target,
+            role,
+            viewport,
+            left_px: bounds[0],
+            top_px: bounds[1],
+            right_px: bounds[2],
+            bottom_px: bounds[3],
+            selected,
+            focused,
+            correlation,
+        });
+    }
+}
+
+pub(crate) fn emit_designer_edit_state(
+    widget_changed: bool,
+    model_changed: bool,
+    input_matches_model: bool,
+    draft_dirty: bool,
+    correlation: Correlation,
+) {
+    emit(Event::DesignerEditState {
+        widget_changed,
+        model_changed,
+        input_matches_model,
+        draft_dirty,
+        correlation,
+    });
+}
+
 pub(crate) struct DesignerCallbackGuard {
     viewport: ViewportClass,
 }
@@ -940,13 +1510,109 @@ mod tests {
         match event {
             Event::DesignerCallback { .. } => &["phase", "viewport"],
             Event::DesignerFocus { .. } => &["edge", "viewport", "correlation"],
-            Event::DesignerPointer { .. } => &["down", "up", "window_under_cursor", "correlation"],
+            Event::DesignerPointer { .. } => &[
+                "down",
+                "up",
+                "window_under_cursor",
+                "screen_x",
+                "screen_y",
+                "correlation",
+            ],
+            Event::DesignerPointerMoved { .. } => &["client_x", "client_y"],
             Event::DesignerSubmitted { .. } => &["correlation"],
             Event::DesignerBody { .. } => &["state", "correlation"],
             Event::DesignerWidget { .. } => &["category", "response", "correlation"],
+            Event::DesignerWidgetPointer { .. } => &[
+                "category",
+                "pressed",
+                "released",
+                "hovered",
+                "button_down_on",
+                "pointer_inside",
+                "layer_is_topmost",
+                "clicked",
+                "has_position",
+                "pointer_x",
+                "pointer_y",
+                "correlation",
+            ],
+            Event::RootResultPointer { .. } => &[
+                "kind",
+                "index",
+                "pressed",
+                "released",
+                "hovered",
+                "clicked",
+                "has_position",
+                "pointer_x",
+                "pointer_y",
+            ],
+            Event::RadialAction { .. } => &[
+                "stage",
+                "skins",
+                "editor_open",
+                "skins_selected",
+                "panel_registered",
+            ],
             Event::DesignerMutation { .. } => &["result", "correlation"],
             Event::Authoring { .. } => &["edge", "correlation"],
             Event::HookPrimary { .. } => &["transition", "provenance", "foreground_owner"],
+            Event::HookAdmission { .. } => &[
+                "transition",
+                "provenance",
+                "owner",
+                "global_exclusive_owners",
+                "adapter_exclusive",
+                "recovery",
+                "deadline_scheduled",
+                "radial_intent",
+            ],
+            Event::HookDeadline { .. } => &[
+                "edge",
+                "invocation_id",
+                "timer_id",
+                "delay_ms",
+                "radial_intent",
+                "global_exclusive_owners",
+            ],
+            Event::HookServiceReady { .. } => &["thread_id", "desktop", "primary_vk"],
+            Event::HookServiceExit { .. } => &[
+                "message_result",
+                "shutdown_requested",
+                "primary_down",
+                "owned_input",
+                "pending_deadlines",
+            ],
+            Event::HookObserved { .. } => &["vk", "down", "injected"],
+            Event::HookCallback { .. } => &["primary", "down", "injected", "elapsed_us"],
+            Event::FrontendKey { .. } => &["key", "focused", "foreground_owner"],
+            Event::DesignerSemanticTarget { .. } => &[
+                "target",
+                "role",
+                "viewport",
+                "left_px",
+                "top_px",
+                "right_px",
+                "bottom_px",
+                "selected",
+                "focused",
+                "correlation",
+            ],
+            Event::DesignerEditState { .. } => &[
+                "widget_changed",
+                "model_changed",
+                "input_matches_model",
+                "draft_dirty",
+                "correlation",
+            ],
+            Event::DesignerClose { .. } => &[
+                "open",
+                "close_prompt",
+                "dirty",
+                "pending_disposable",
+                "pending_durable",
+                "pending_native_preview",
+            ],
             Event::InvocationPrimary { .. } => &[
                 "transition",
                 "provenance",
@@ -1026,8 +1692,14 @@ mod tests {
                 window_under_cursor: Some(NativeWindowIdentity {
                     hwnd: 101,
                     owner: NativeWindowOwner::Root,
+                    screen_x: 101,
+                    screen_y: 102,
                 }),
                 correlation,
+            },
+            Event::DesignerPointerMoved {
+                client_x: 101,
+                client_y: 102,
             },
             Event::DesignerSubmitted { correlation },
             Event::DesignerBody {
@@ -1038,6 +1710,38 @@ mod tests {
                 category: WidgetCategory::Inspector,
                 response: WidgetResponse::Rejected,
                 correlation,
+            },
+            Event::DesignerWidgetPointer {
+                category: WidgetCategory::Inspector,
+                pressed: true,
+                released: false,
+                hovered: true,
+                button_down_on: true,
+                pointer_inside: true,
+                layer_is_topmost: true,
+                clicked: false,
+                has_position: true,
+                pointer_x: 10,
+                pointer_y: 20,
+                correlation,
+            },
+            Event::RootResultPointer {
+                kind: RootResultKind::RadialSkins,
+                index: 0,
+                pressed: true,
+                released: false,
+                hovered: true,
+                clicked: false,
+                has_position: true,
+                pointer_x: 12,
+                pointer_y: 24,
+            },
+            Event::RadialAction {
+                stage: RadialActionStage::EditorModeApplied,
+                skins: true,
+                editor_open: Some(true),
+                skins_selected: Some(true),
+                panel_registered: None,
             },
             Event::DesignerMutation {
                 result: MutationResult::Accepted,
@@ -1051,6 +1755,76 @@ mod tests {
                 transition: PrimaryTransition::Press,
                 provenance: crate::radial::invocation::InputProvenance::Physical,
                 foreground_owner: NativeWindowOwner::Root,
+            },
+            Event::HookAdmission {
+                transition: PrimaryTransition::Press,
+                provenance: crate::radial::invocation::InputProvenance::ExternalInjected,
+                owner: HookPriorityOwner::Launcher,
+                global_exclusive_owners: 0,
+                adapter_exclusive: false,
+                recovery: false,
+                deadline_scheduled: true,
+                radial_intent: false,
+            },
+            Event::HookDeadline {
+                edge: HookDeadlineEdge::Scheduled,
+                invocation_id: 17,
+                timer_id: 31,
+                delay_ms: 350,
+                radial_intent: false,
+                global_exclusive_owners: 0,
+            },
+            Event::HookServiceReady {
+                thread_id: 31,
+                desktop: HookDesktop::Default,
+                primary_vk: 0x7A,
+            },
+            Event::HookServiceExit {
+                message_result: 0,
+                shutdown_requested: false,
+                primary_down: true,
+                owned_input: true,
+                pending_deadlines: 1,
+            },
+            Event::HookObserved {
+                vk: 0x87,
+                down: true,
+                injected: true,
+            },
+            Event::HookCallback {
+                primary: true,
+                down: true,
+                injected: true,
+                elapsed_us: 10,
+            },
+            Event::DesignerSemanticTarget {
+                target: DesignerSemanticTarget::Tree,
+                role: DesignerSemanticRole::SelectableLabel,
+                viewport: ViewportClass::Deferred,
+                left_px: 10,
+                top_px: 20,
+                right_px: 40,
+                bottom_px: 44,
+                selected: false,
+                focused: true,
+                correlation,
+            },
+            Event::DesignerEditState {
+                widget_changed: true,
+                model_changed: true,
+                input_matches_model: true,
+                draft_dirty: true,
+                correlation,
+            },
+            Event::DesignerClose {
+                state: DesignerCloseState {
+                    open: true,
+                    close_prompt: false,
+                    dirty: false,
+                    pending_disposable: false,
+                    pending_durable: false,
+                    pending_native_preview: false,
+                },
             },
             Event::InvocationPrimary {
                 transition: PrimaryTransition::Press,

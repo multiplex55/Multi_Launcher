@@ -35,6 +35,15 @@ impl RadialCommandHost for LauncherApp {
     }
 
     fn open_radial_editor(&mut self, skins: bool) {
+        crate::radial::acceptance_trace::emit(
+            crate::radial::acceptance_trace::Event::RadialAction {
+                stage: crate::radial::acceptance_trace::RadialActionStage::HostEntered,
+                skins,
+                editor_open: None,
+                skins_selected: None,
+                panel_registered: None,
+            },
+        );
         self.focus_panel(super::Panel::RadialEditor);
         if let Ok(mut editor) = self.radial_editor.lock() {
             if skins {
@@ -44,6 +53,15 @@ impl RadialCommandHost for LauncherApp {
             }
         }
         self.panel_states.radial_editor = true;
+        crate::radial::acceptance_trace::emit(
+            crate::radial::acceptance_trace::Event::RadialAction {
+                stage: crate::radial::acceptance_trace::RadialActionStage::HostCompleted,
+                skins,
+                editor_open: None,
+                skins_selected: None,
+                panel_registered: Some(self.panel_states.radial_editor),
+            },
+        );
     }
 }
 
@@ -754,6 +772,24 @@ impl LauncherApp {
         }
 
         let bus = std::sync::Arc::clone(&self.command_bus);
+        if let Command::Radial(command) = &invocation.command {
+            let skins = match command {
+                crate::commands::RadialCommand::Edit => Some(false),
+                crate::commands::RadialCommand::Skins => Some(true),
+                _ => None,
+            };
+            if let Some(skins) = skins {
+                crate::radial::acceptance_trace::emit(
+                    crate::radial::acceptance_trace::Event::RadialAction {
+                        stage: crate::radial::acceptance_trace::RadialActionStage::Dispatched,
+                        skins,
+                        editor_open: None,
+                        skins_selected: None,
+                        panel_registered: None,
+                    },
+                );
+            }
+        }
         match bus.dispatch(&invocation, self) {
             Ok(outcome) => self.apply_command_outcome_with_history_query(
                 outcome,
