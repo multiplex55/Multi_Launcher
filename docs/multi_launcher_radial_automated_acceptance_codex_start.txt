@@ -1,0 +1,114 @@
+Implement the approved Multi Launcher automated radial acceptance and recovery goal.
+
+Read completely before editing:
+1. multi_launcher_radial_automated_acceptance_codex_plan.md
+2. multi_launcher_radial_automated_acceptance_source_notes.md
+3. AGENTS.md
+4. docs/plans/radial-input-recovery.md
+5. docs/plans/radial-stabilization.md
+
+All product/testing choices are approved. Do not repeat the questionnaire or ask me to manually test the launcher while implementation can continue.
+
+SOURCE AUTHORITY
+
+The inspected archive is launcher.zip, SHA-256:
+b5e1df91f2dcab48618f0f9e29ae827c4048eb3404c5892fce92008e2e085f5a
+
+Use the actual current checkout as authority and preserve legitimate newer changes. Preserve the existing immutable radial baseline. Record a separate AUTOMATED_ACCEPTANCE_START_HEAD and initial staged/unstaged/untracked state in docs/plans/radial-automated-acceptance.md.
+
+CURRENT STATE
+
+The archive's input-recovery ledger says Packages A/B/C are implemented and reports a final automated candidate with 4,635 passed, 0 failed, 8 skipped, but the actual focused hotkey and Designer client interaction remain native-unverified. Do not redo already-present ROOT targeting, tap/hold reducer, stale-request cleanup, toolbar, geometry proposal, etc. merely because they exist in older plans. The next missing boundary is automated native acceptance.
+
+GOAL
+
+Build a first-class automated acceptance harness and use it to fix the real production failures:
+
+- Focused Multi Lnchr: safe native short tap through the real low-level hook must hide ROOT; another tap must show it.
+- Designer focused/open: tap still toggles ROOT only.
+- Hold toggles runtime radial only; release cannot co-fire grid.
+- Edit Radial Menus and Edit Radial Skins must accept real mouse and keyboard input.
+- Automatically execute New Menu -> Add Ring -> Slots -> geometry proposal -> Apply -> action search/assignment -> Open in Inspector -> skin/style edit -> preview -> Save -> close -> reopen -> verify persistence -> undo/redo.
+- No manual key pressing/clicking is required for functional sign-off.
+
+THREE AUTOMATION LAYERS
+
+1. Exact Shift+Alt+Win+End is tested deterministically through the production invocation adapter with fake time. Do NOT globally synthesize the real Win-key chord by default.
+2. Headless Designer tests feed egui RawInput/pointer/key events into the ACTUAL production Designer viewport_ui and use AccessKit semantic bounds/state.
+3. Add an opt-in Windows `radial_acceptance` runner. It launches a source-matched multi_launcher.exe in an isolated temp profile, uses a harmless configured native test chord through SendInput, uses UI Automation where available, and validates at least one real pointer click plus Tab through the native Designer client path.
+
+Do not create test-only “set final state to success” bypasses. Test input may enter at explicit real boundaries and reports may read state, but the behavior under test must traverse production owners.
+
+ISOLATION
+
+Default acceptance creates a deterministic temp profile. The application already resolves settings.json/data root from CWD, so launch the child with CWD=temp profile; do not disable single-instance globally. Serialize current Settings/default radial types and configure a safe acceptance chord such as F12 after conflict validation. Set MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE=1 for the child.
+
+Support an optional `--profile-copy <dir>` pass: copy the supplied test profile to another temp directory, run only against the copy, never modify the source. Record executable/settings/radial hashes and environment in the report.
+
+NATIVE RUNNER
+
+- Candidate path must be explicit or an unambiguous sibling; never use a stale PATH executable.
+- Identify windows by child PID + semantic title/role, not global title alone.
+- Use existing Win32 UIA support (`windows` already enables Win32_UI_Accessibility); avoid a new dependency unless necessary.
+- UIA semantic interaction is preferred for control discovery/invoke.
+- At least one harmless Designer control must be clicked with actual SendInput mouse events at UIA-resolved bounds, proving native -> eframe/egui -> Response.clicked -> mutation -> next UI state.
+- Send real Tab and prove focus changes inside Designer.
+- Native hotkey acceptance uses the safe profile chord as ExternalInjected input. Do not use Multi Launcher's self-injection tag.
+- Use condition deadlines/state waits rather than long arbitrary sleeps. Hold testing legitimately waits threshold + margin.
+- On failure automatically save report JSON/text, child/runner logs, acceptance-trace excerpt, window inventory, and a screenshot/crop when possible.
+- Restore cursor/foreground where practical, close the isolated child, and remove temp profile on success.
+
+REMEDIATION
+
+Do not stop after instrumentation. Run the acceptance harness and fix the FIRST broken production boundary:
+
+Focused tap:
+SendInput -> hook -> modifier/chord admission -> ShortTap -> desired visibility -> ROOT command -> actual HWND -> later restore.
+
+Designer click:
+native target -> DesignerPointer -> DesignerBody Enabled -> DesignerWidget Accepted -> DesignerMutation -> next frame/UIA state.
+
+Fix whichever boundary first fails. Do not add a second focused hotkey listener, fake unfocus, permanent repaint/polling, arbitrary sleeps, or disable readiness/conflict safety.
+
+CODE-FIRST / LIGHT TESTING
+
+Implement coherent code first.
+Use this compile checkpoint only at meaningful integration points:
+
+cargo check --lib --bin multi_launcher --bin radial_acceptance
+
+Do not run Nextest after each helper/fix/work package.
+Write tests with the code, but defer execution.
+Optionally run one small combined focused batch after architecture integration if useful.
+Build launcher + runner when native acceptance is ready:
+
+cargo build --bin multi_launcher --bin radial_acceptance
+
+Use the native acceptance runner as the main remediation loop.
+Near completion run ONE complete:
+
+cargo nextest run --no-fail-fast
+
+Relevant source remediation after that final run requires a replacement final gate.
+
+SLOW MACHINE
+
+One Cargo/check/build/test process tree at a time.
+Durable stdout/stderr and real exit code.
+Reattach; never duplicate a quiet job.
+Observe a still-running job after about 10 minutes, then 15 minutes later, then every 20 minutes. Handle actual completion immediately. These are observation intervals, not kill deadlines or app/test timers.
+Do not cargo clean or change toolchain/profile because compilation is slow.
+
+DONE
+
+Functional sign-off must be automatic:
+- deterministic exact-chord tests pass;
+- headless production Designer interaction tests pass;
+- deterministic isolated native acceptance PASS report;
+- copied-profile high-value pass when a profile is supplied;
+- focused root toggle, hold/radial separation, Designer real click/Tab, Menus/Skins, close, authoring, save/reopen all pass;
+- cargo fmt/check/diff/build pass;
+- final full Nextest passes;
+- independent review clears test bypass/input safety/profile isolation/root-cause fixes.
+
+Manual visual review is optional for aesthetics only. If one exact OS boundary truly cannot be automated, document the exact technical reason and smallest remaining manual observation; do not casually fall back to “ask the user to press/click and describe what happens.”
