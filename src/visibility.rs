@@ -1,12 +1,16 @@
 use eframe::egui;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicIsize, Ordering},
 };
 
 use crate::hotkey::HotkeyTrigger;
+use crate::mkmacro::screen::ScreenRect;
 use crate::radial::acceptance_trace::{
     self, Correlation, Event, RootCommandKind, VisibilitySource,
+};
+use crate::screen_draw::launcher_parking::{
+    CAPTURE_PARKING_MARGIN, compute_capture_safe_parking_position,
 };
 
 /// A small, explicit wake boundary for work owned by one egui viewport.
@@ -50,17 +54,103 @@ impl ViewportWake {
 
 /// Trait abstracting over an `egui::Context` for viewport commands.
 pub trait ViewportCtx {
+    /// Make the native viewport eligible to process the commands that follow.
+    ///
+    /// Most contexts need no special handling. The root Windows viewport uses
+    /// this hook to break the hidden-window redraw cycle before egui queues its
+    /// normal placement, visibility, and focus commands.
+    fn wake_for_show(&self) {}
+
+    fn pixels_per_point(&self) -> f32 {
+        1.0
+    }
+
     fn send_viewport_cmd(&self, cmd: egui::ViewportCommand);
     fn request_repaint(&self);
 }
 
 impl ViewportCtx for egui::Context {
+    fn pixels_per_point(&self) -> f32 {
+        egui::Context::pixels_per_point(self)
+    }
+
     fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
         egui::Context::send_viewport_cmd(self, cmd);
     }
 
     fn request_repaint(&self) {
         egui::Context::request_repaint(self);
+    }
+}
+
+/// The native ROOT HWND captured by the GUI owner.
+///
+/// The handle is stored as an integer so the bridge can cross from eframe's
+/// GUI thread to the main hotkey thread without extending a borrowed raw
+/// window handle. Every use revalidates both the HWND and its owning process.
+#[derive(Clone, Default)]
+pub struct RootWindowBridge {
+    hwnd: Arc<AtomicIsize>,
+}
+
+impl RootWindowBridge {
+    pub fn capture_frame(&self, frame: &eframe::Frame) {
+        #[cfg(target_os = "windows")]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+            let Ok(handle) = frame.window_handle() else {
+                return;
+            };
+            if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+                self.hwnd.store(handle.hwnd.get(), Ordering::Release);
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        let _ = frame;
+    }
+
+    pub fn clear(&self) {
+        self.hwnd.store(0, Ordering::Release);
+    }
+
+    fn wake_for_show(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::System::Threading::GetCurrentProcessId;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowThreadProcessId, IsWindow, IsWindowVisible, SW_SHOWNOACTIVATE,
+                ShowWindowAsync,
+            };
+
+            let raw = self.hwnd.load(Ordering::Acquire);
+            if raw == 0 {
+                return;
+            }
+            let hwnd = HWND(raw as *mut _);
+            let mut owner_process_id = 0;
+            let valid = unsafe { IsWindow(hwnd) }.as_bool()
+                && unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_process_id)) } != 0
+                && owner_process_id == unsafe { GetCurrentProcessId() };
+            if !valid {
+                let _ = self
+                    .hwnd
+                    .compare_exchange(raw, 0, Ordering::AcqRel, Ordering::Acquire);
+                return;
+            }
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                if !unsafe { ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE) }.as_bool() {
+                    let error = windows::core::Error::from_win32();
+                    tracing::warn!(
+                        %error,
+                        hwnd = raw,
+                        "failed to wake hidden root window before queued viewport commands"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -108,11 +198,22 @@ impl VisibilityToggleBatch {
 #[derive(Clone)]
 pub struct RootViewportCtx {
     ctx: egui::Context,
+    window: RootWindowBridge,
 }
 
 impl RootViewportCtx {
     pub fn new(ctx: &egui::Context) -> Self {
-        Self { ctx: ctx.clone() }
+        Self {
+            ctx: ctx.clone(),
+            window: RootWindowBridge::default(),
+        }
+    }
+
+    pub fn with_window_bridge(ctx: &egui::Context, window: RootWindowBridge) -> Self {
+        Self {
+            ctx: ctx.clone(),
+            window,
+        }
     }
 
     #[cfg(test)]
@@ -139,7 +240,79 @@ fn trace_root_command(cmd: &egui::ViewportCommand) -> Option<RootCommandKind> {
     })
 }
 
+/// A configured parking point can fall on another monitor. Keep the stored
+/// preference unchanged, but move the live root outside the virtual desktop
+/// whenever its configured rectangle would still be visible there.
+fn parking_position_for_desktop(
+    configured: (f32, f32),
+    window_size: (f32, f32),
+    pixels_per_point: f32,
+    desktop: ScreenRect,
+) -> (f32, f32) {
+    if desktop.is_empty() || !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return configured;
+    }
+    let x = (configured.0 * pixels_per_point).round() as i64;
+    let y = (configured.1 * pixels_per_point).round() as i64;
+    let width = (window_size.0 * pixels_per_point).ceil().max(1.0) as u32;
+    let height = (window_size.1 * pixels_per_point).ceil().max(1.0) as u32;
+    let intersects = x < desktop.right()
+        && x + i64::from(width) > i64::from(desktop.x)
+        && y < desktop.bottom()
+        && y + i64::from(height) > i64::from(desktop.y);
+    if !intersects {
+        return configured;
+    }
+    match compute_capture_safe_parking_position(desktop, width, height, CAPTURE_PARKING_MARGIN) {
+        Ok((x, y)) => (x as f32 / pixels_per_point, y as f32 / pixels_per_point),
+        Err(error) => {
+            tracing::warn!(%error, "failed to choose offscreen launcher parking position");
+            configured
+        }
+    }
+}
+
+fn safe_parking_position<C: ViewportCtx>(
+    ctx: &C,
+    configured: (f32, f32),
+    window_size: (f32, f32),
+) -> (f32, f32) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
+        };
+        let (x, y, width, height) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        if width > 0 && height > 0 {
+            return parking_position_for_desktop(
+                configured,
+                window_size,
+                ctx.pixels_per_point(),
+                ScreenRect::new(x, y, width as u32, height as u32),
+            );
+        }
+    }
+    let _ = (ctx, window_size);
+    configured
+}
+
 impl ViewportCtx for RootViewportCtx {
+    fn wake_for_show(&self) {
+        self.window.wake_for_show();
+    }
+
+    fn pixels_per_point(&self) -> f32 {
+        self.ctx.pixels_per_point()
+    }
+
     fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
         let Some(command) = trace_root_command(&cmd) else {
             return self.ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, cmd);
@@ -285,12 +458,10 @@ pub fn handle_visibility_trigger_with_owner<C: ViewportCtx>(
                 static_size,
                 window_size,
             );
-            if !next {
-                // A user toggle must hide a focused native root immediately.
-                // General offscreen parking also serves startup and Screen
-                // Draw, whose root HWND must remain visible to its owner.
-                c.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
+            // The root remains drawable while parked. Radial preparation and
+            // action handoff are processed by its frame even when the grid is
+            // logically hidden; hiding the HWND stalls that work until a tap
+            // shows the grid again.
             restore_flag.store(next, Ordering::SeqCst);
             *queued_visibility = None;
             tracing::debug!("Applied queued visibility: {}", next);
@@ -355,9 +526,6 @@ fn apply_visibility_owner<C: ViewportCtx>(
                 static_size,
                 window_size,
             );
-            if !next {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
             restore_flag.store(next, Ordering::SeqCst);
             *queued_visibility = None;
             tracing::debug!("Applied queued visibility: {}", next);
@@ -384,6 +552,7 @@ pub fn apply_visibility<C: ViewportCtx>(
     window_size: (f32, f32),
 ) {
     if visible {
+        ctx.wake_for_show();
         if placement_policy == VisiblePlacementPolicy::ApplyConfiguredPlacement {
             if static_enabled {
                 if let Some((x, y)) = static_pos {
@@ -414,9 +583,9 @@ pub fn apply_visibility<C: ViewportCtx>(
                 Correlation::default()
             },
         });
+        let parked = safe_parking_position(ctx, offscreen, window_size);
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-            offscreen.0,
-            offscreen.1,
+            parked.0, parked.1,
         )));
     }
     ctx.request_repaint();
@@ -432,14 +601,23 @@ mod tests {
     struct RecordingViewport {
         commands: Arc<Mutex<Vec<egui::ViewportCommand>>>,
         repaint_count: Arc<AtomicUsize>,
+        wake_count: Arc<AtomicUsize>,
+        order: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl ViewportCtx for RecordingViewport {
+        fn wake_for_show(&self) {
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+            self.order.lock().unwrap().push("wake");
+        }
+
         fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
+            self.order.lock().unwrap().push("command");
             self.commands.lock().unwrap().push(cmd);
         }
 
         fn request_repaint(&self) {
+            self.order.lock().unwrap().push("repaint");
             self.repaint_count.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -518,6 +696,99 @@ mod tests {
                 height: 480,
             })
         );
+    }
+
+    #[test]
+    fn show_wakes_native_root_before_queuing_viewport_commands() {
+        let viewport = RecordingViewport::default();
+
+        apply_visibility(
+            true,
+            VisiblePlacementPolicy::ApplyConfiguredPlacement,
+            &viewport,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+
+        assert_eq!(viewport.wake_count.load(Ordering::SeqCst), 1);
+        assert_eq!(viewport.order.lock().unwrap().first(), Some(&"wake"));
+        assert!(matches!(
+            viewport.commands.lock().unwrap().first(),
+            Some(egui::ViewportCommand::Visible(true))
+        ));
+    }
+
+    #[test]
+    fn hide_does_not_wake_native_root() {
+        let viewport = RecordingViewport::default();
+
+        apply_visibility(
+            false,
+            VisiblePlacementPolicy::ApplyConfiguredPlacement,
+            &viewport,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+
+        assert_eq!(viewport.wake_count.load(Ordering::SeqCst), 0);
+        assert_eq!(viewport.order.lock().unwrap().first(), Some(&"command"));
+    }
+
+    #[test]
+    fn parking_moves_a_configured_point_outside_the_virtual_desktop() {
+        let desktop = ScreenRect::new(-1920, 0, 7680, 3240);
+        assert_eq!(
+            parking_position_for_desktop((3000.0, 3000.0), (1779.0, 1070.0), 1.0, desktop),
+            (5856.0, 0.0)
+        );
+        assert_eq!(
+            parking_position_for_desktop((1500.0, 1500.0), (1779.0, 1070.0), 2.0, desktop),
+            (2928.0, 0.0)
+        );
+        assert_eq!(
+            parking_position_for_desktop(
+                (3000.0, 3000.0),
+                (1779.0, 1070.0),
+                1.0,
+                ScreenRect::new(0, 0, 1920, 1080)
+            ),
+            (3000.0, 3000.0)
+        );
+    }
+
+    #[test]
+    fn hidden_grid_keeps_the_root_drawable_for_radial_preparation() {
+        let trigger = trigger();
+        let visibility = Arc::new(AtomicBool::new(true));
+        let restore_flag = Arc::new(AtomicBool::new(true));
+        let viewport = RecordingViewport::default();
+        let ctx = Arc::new(Mutex::new(Some(viewport.clone())));
+        let mut queued_visibility = None;
+
+        toggle(&trigger);
+        handle(
+            &trigger,
+            &visibility,
+            &restore_flag,
+            &ctx,
+            &mut queued_visibility,
+        );
+        assert!(!visibility.load(Ordering::SeqCst));
+        let commands = viewport.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands.first(),
+            Some(egui::ViewportCommand::OuterPosition(position))
+                if *position == egui::pos2(-10_000.0, -10_000.0)
+        ));
     }
 
     #[test]
@@ -635,11 +906,14 @@ mod tests {
         assert!(!keyboard_suspended);
         assert!(queued_visibility.is_none());
         assert_eq!(viewport.repaint_count.load(Ordering::SeqCst), 2);
+        assert_eq!(viewport.wake_count.load(Ordering::SeqCst), 1);
+        assert_eq!(viewport.order.lock().unwrap().first(), Some(&"wake"));
         let commands = viewport.commands.lock().unwrap();
-        assert_eq!(commands.len(), 5);
+        assert_eq!(commands.len(), 4);
         assert!(matches!(
             commands.last(),
-            Some(egui::ViewportCommand::Visible(false))
+            Some(egui::ViewportCommand::OuterPosition(position))
+                if *position == egui::pos2(-10_000.0, -10_000.0)
         ));
         assert!(!trigger.take());
     }

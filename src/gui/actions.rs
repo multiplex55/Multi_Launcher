@@ -9,8 +9,6 @@ use crate::persistence::RecoveryTarget;
 pub(crate) struct LauncherInteractionSnapshot {
     panel_instances: Vec<usize>,
     confirmation_open: bool,
-    radial_editor_open: bool,
-    root_visible: bool,
 }
 
 fn pluralize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
@@ -91,8 +89,6 @@ impl LauncherApp {
             panel_instances,
             confirmation_open: self.pending_confirm.is_some()
                 || self.pending_universal_confirm.is_some(),
-            radial_editor_open: self.is_panel_open(Panel::RadialEditor),
-            root_visible: self.visible_flag.load(std::sync::atomic::Ordering::SeqCst),
         }
     }
 
@@ -101,19 +97,15 @@ impl LauncherApp {
         before: &LauncherInteractionSnapshot,
     ) {
         let after = self.launcher_interaction_snapshot();
-        let opened_panel = after
-            .panel_instances
+        // The Designer owns an independent viewport and its own focus. A
+        // delayed root restore would take focus back after it opens, even if
+        // the launcher grid was already visible when the action ran.
+        let opened_root_panel = Self::TRACKED_PANELS
             .iter()
+            .zip(&after.panel_instances)
             .zip(&before.panel_instances)
-            .any(|(after, before)| after > before);
-        // The Designer is an independent deferred viewport.  Opening it must
-        // not make a hidden launcher grid visible just because the generic
-        // interaction restore path observed a newly-opened panel.
-        let opened_hidden_designer =
-            !before.radial_editor_open && after.radial_editor_open && !before.root_visible;
-        if (opened_panel && !opened_hidden_designer)
-            || (after.confirmation_open && !before.confirmation_open)
-        {
+            .any(|((panel, after), before)| *panel != Panel::RadialEditor && after > before);
+        if opened_root_panel || (after.confirmation_open && !before.confirmation_open) {
             self.visible_flag.store(true, Ordering::SeqCst);
             self.restore_flag.store(true, Ordering::SeqCst);
         }
@@ -1352,6 +1344,23 @@ pub(super) mod tests {
         );
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn opening_designer_never_queues_a_root_focus_restore() {
+        for root_visible in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.visible_flag.store(root_visible, Ordering::SeqCst);
+            app.restore_flag.store(false, Ordering::SeqCst);
+
+            let before = app.launcher_interaction_snapshot();
+            app.focus_panel(Panel::RadialEditor);
+            app.restore_for_new_launcher_interaction(&before);
+
+            assert_eq!(app.visible_flag.load(Ordering::SeqCst), root_visible);
+            assert!(!app.restore_flag.load(Ordering::SeqCst));
+        }
     }
 
     #[test]

@@ -151,7 +151,8 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::{
-    RootViewportCtx, ViewportCtx, ViewportWake, VisiblePlacementPolicy, apply_visibility,
+    RootViewportCtx, RootWindowBridge, ViewportCtx, ViewportWake, VisiblePlacementPolicy,
+    apply_visibility,
 };
 use action_sheet::ActionSheetState;
 use chrono::NaiveDate;
@@ -732,6 +733,7 @@ pub struct LauncherApp {
     max_indexed_items: Option<usize>,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
+    root_window_bridge: RootWindowBridge,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     last_visible: bool,
@@ -2077,6 +2079,7 @@ impl LauncherApp {
             max_indexed_items: settings.max_indexed_items,
             enabled_plugins,
             enabled_capabilities,
+            root_window_bridge: RootWindowBridge::default(),
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             last_visible: initial_visible,
@@ -3460,6 +3463,10 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
+    pub fn install_root_window_bridge(&mut self, bridge: RootWindowBridge) {
+        self.root_window_bridge = bridge;
+    }
+
     pub fn install_screen_draw_recovery_bridge(
         &mut self,
         bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,

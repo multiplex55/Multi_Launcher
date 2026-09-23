@@ -34,8 +34,8 @@ use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::{
-    RootViewportCtx, ViewportCtx, VisibilityToggleBatch, handle_visibility_toggle_batch,
-    handle_visibility_trigger_with_owner,
+    RootViewportCtx, RootWindowBridge, ViewportCtx, VisibilityToggleBatch,
+    handle_visibility_toggle_batch, handle_visibility_trigger_with_owner,
 };
 use multi_launcher::{indexer, logging};
 
@@ -843,6 +843,8 @@ fn spawn_gui(
     let help_clone = help_flag.clone();
     let ctx_handle = Arc::new(Mutex::new(None));
     let ctx_clone = ctx_handle.clone();
+    let root_window_bridge = RootWindowBridge::default();
+    let root_window_bridge_for_gui = root_window_bridge.clone();
     let actions_for_window = Arc::clone(&actions);
 
     let handle = thread::spawn(move || {
@@ -864,7 +866,10 @@ fn spawn_gui(
             native_options,
             Box::new(move |cc| {
                 if let Ok(mut guard) = ctx_clone.lock() {
-                    *guard = Some(RootViewportCtx::new(&cc.egui_ctx));
+                    *guard = Some(RootViewportCtx::with_window_bridge(
+                        &cc.egui_ctx,
+                        root_window_bridge_for_gui.clone(),
+                    ));
                 } else {
                     tracing::error!("failed to lock ctx_clone");
                 }
@@ -886,6 +891,7 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                app.install_root_window_bridge(root_window_bridge_for_gui.clone());
                 app.install_screen_draw_recovery_bridge(screen_draw_recovery_bridge);
                 app.startup_settings_diagnostic = startup_settings_diagnostic;
                 app.actions_persistence_diagnostic = startup_actions_diagnostic;

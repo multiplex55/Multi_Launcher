@@ -553,11 +553,12 @@ impl LauncherApp {
 }
 
 impl eframe::App for LauncherApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         use egui::*;
 
+        self.root_window_bridge.capture_frame(frame);
         let trace_root_hwnd = acceptance_trace::enabled()
-            .then(|| crate::window_manager::get_hwnd(_frame))
+            .then(|| crate::window_manager::get_hwnd(frame))
             .flatten();
         if let Some(hwnd) = trace_root_hwnd {
             crate::window_manager::register_root_hwnd(hwnd);
@@ -610,7 +611,7 @@ impl eframe::App for LauncherApp {
         self.macro_parameter_prompt.show(ctx);
 
         // tracing::debug!("LauncherApp::update called");
-        if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
+        if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.cancel_screen_draw_startup_on_escape(ctx);
@@ -728,7 +729,7 @@ impl eframe::App for LauncherApp {
                 self.static_size.map(|(w, h)| (w as f32, h as f32)),
                 (self.window_size.0 as f32, self.window_size.1 as f32),
             );
-            if let Some(hwnd) = crate::window_manager::get_hwnd(_frame) {
+            if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
                 crate::window_manager::restore_launcher_to_current_desktop(hwnd);
             }
         }
@@ -738,8 +739,8 @@ impl eframe::App for LauncherApp {
         if self.last_visible != should_be_visible {
             tracing::debug!("gui thread -> visible: {}", should_be_visible);
             // Screen Draw owns its own exact-geometry parking transaction.
-            // Keep the root HWND alive while that capture is active; the
-            // ordinary hidden-grid path can hide its independent viewport.
+            // Ordinary grid hiding keeps ROOT drawable at its parked position
+            // so radial preparation can continue in the GUI frame.
             if should_be_visible || self.screen_draw_launcher_parking.is_none() {
                 apply_visibility(
                     should_be_visible,
@@ -1533,6 +1534,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.root_window_bridge.clear();
         self.close_screen_draw_for_exit();
         self.macro_parameter_prompt.shutdown();
         self.data_recovery_dialog.shutdown();

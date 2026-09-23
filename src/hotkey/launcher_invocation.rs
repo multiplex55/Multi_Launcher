@@ -1504,6 +1504,15 @@ mod native_service {
         }
         let injected = data.flags.contains(LLKHF_INJECTED);
         let provenance = classify_provenance(injected, data.dwExtraInfo);
+        if Some(data.vkCode) == primary
+            && let Some(transition) = acceptance_trace_primary_transition(transition)
+        {
+            acceptance_trace::emit(Event::HookPrimary {
+                transition,
+                provenance,
+                foreground_owner: acceptance_trace::foreground_owner(),
+            });
+        }
         let at = state.epoch.elapsed().as_millis() as u64;
         if state.item_owned.is_some() {
             state.item_recognizer.observe_owned_cycle_event(KeyEvent {

@@ -11,7 +11,7 @@ use std::time::Instant;
 use std::{sync::Mutex, sync::atomic::AtomicU64};
 
 pub(crate) const ENVIRONMENT_VARIABLE: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
-pub(crate) const EVENT_BUDGET: usize = 256;
+pub(crate) const EVENT_BUDGET: usize = 512;
 const TRACE_TARGET: &str = "multi_launcher.radial_acceptance";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -204,6 +204,11 @@ pub(crate) enum Event {
     Authoring {
         edge: AuthoringEdge,
         correlation: Correlation,
+    },
+    HookPrimary {
+        transition: PrimaryTransition,
+        provenance: crate::radial::invocation::InputProvenance,
+        foreground_owner: NativeWindowOwner,
     },
     InvocationPrimary {
         transition: PrimaryTransition,
@@ -415,7 +420,13 @@ fn enabled_from_value(value: Option<&str>) -> bool {
 
 fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime {
-        enabled: enabled_from_value(std::env::var(ENVIRONMENT_VARIABLE).ok().as_deref()),
+        enabled: {
+            let enabled = enabled_from_value(std::env::var(ENVIRONMENT_VARIABLE).ok().as_deref());
+            if enabled {
+                tracing::warn!(target: TRACE_TARGET, trace_event = "trace_ready", "radial acceptance trace");
+            }
+            enabled
+        },
         budget: EventBudget::new(EVENT_BUDGET),
     })
 }
@@ -532,6 +543,15 @@ pub(crate) fn classify_window(hwnd: u64) -> NativeWindowOwner {
         .unwrap_or(NativeWindowOwner::Other)
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_owner() -> NativeWindowOwner {
+    if !enabled() {
+        return NativeWindowOwner::Other;
+    }
+    let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    classify_window(hwnd.0 as usize as u64)
+}
+
 pub(crate) fn enabled() -> bool {
     runtime().enabled
 }
@@ -541,9 +561,11 @@ pub(crate) fn emit(event: Event) {
     if !runtime.enabled {
         return;
     }
+    // Acceptance runs commonly inherit a warn-only filter. Keep this
+    // explicitly enabled, bounded trace visible without changing that filter.
     if !runtime.budget.reserve() {
         if runtime.budget.mark_exhausted_once() {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "budget_exhausted",
                 elapsed_ms = elapsed_ms() as u64,
@@ -557,7 +579,7 @@ pub(crate) fn emit(event: Event) {
 
     match event {
         Event::DesignerCallback { phase, viewport } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_callback",
                 elapsed_ms,
@@ -571,7 +593,7 @@ pub(crate) fn emit(event: Event) {
             viewport,
             correlation,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_focus",
                 elapsed_ms,
@@ -595,7 +617,7 @@ pub(crate) fn emit(event: Event) {
                 .map_or((0, NativeWindowOwner::Other), |identity| {
                     (identity.hwnd, identity.owner)
                 });
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_pointer",
                 elapsed_ms,
@@ -612,7 +634,7 @@ pub(crate) fn emit(event: Event) {
             );
         }
         Event::DesignerSubmitted { correlation } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_submitted",
                 elapsed_ms,
@@ -625,7 +647,7 @@ pub(crate) fn emit(event: Event) {
             );
         }
         Event::DesignerBody { state, correlation } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_body",
                 elapsed_ms,
@@ -643,7 +665,7 @@ pub(crate) fn emit(event: Event) {
             response,
             correlation,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_widget",
                 elapsed_ms,
@@ -661,7 +683,7 @@ pub(crate) fn emit(event: Event) {
             result,
             correlation,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "designer_mutation",
                 elapsed_ms,
@@ -675,7 +697,7 @@ pub(crate) fn emit(event: Event) {
             );
         }
         Event::Authoring { edge, correlation } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "authoring",
                 elapsed_ms,
@@ -688,6 +710,21 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
+        Event::HookPrimary {
+            transition,
+            provenance,
+            foreground_owner,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "hook_primary",
+                elapsed_ms,
+                ?transition,
+                ?provenance,
+                ?foreground_owner,
+                "radial acceptance trace"
+            );
+        }
         Event::InvocationPrimary {
             transition,
             provenance,
@@ -695,7 +732,7 @@ pub(crate) fn emit(event: Event) {
             invocation_id,
             generation,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "configured_primary",
                 elapsed_ms,
@@ -711,7 +748,7 @@ pub(crate) fn emit(event: Event) {
             invocation_id,
             terminal,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "short_tap",
                 elapsed_ms,
@@ -721,7 +758,7 @@ pub(crate) fn emit(event: Event) {
             );
         }
         Event::DesiredVisibility { visible, source } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "desired_visibility",
                 elapsed_ms,
@@ -734,7 +771,7 @@ pub(crate) fn emit(event: Event) {
             command,
             correlation,
         } => match command {
-            RootCommandKind::Position { x, y } => tracing::info!(
+            RootCommandKind::Position { x, y } => tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "root_command",
                 elapsed_ms,
@@ -748,7 +785,7 @@ pub(crate) fn emit(event: Event) {
                 terminal = correlation.terminal,
                 "radial acceptance trace"
             ),
-            RootCommandKind::Size { width, height } => tracing::info!(
+            RootCommandKind::Size { width, height } => tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "root_command",
                 elapsed_ms,
@@ -762,7 +799,7 @@ pub(crate) fn emit(event: Event) {
                 terminal = correlation.terminal,
                 "radial acceptance trace"
             ),
-            command => tracing::info!(
+            command => tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "root_command",
                 elapsed_ms,
@@ -776,7 +813,7 @@ pub(crate) fn emit(event: Event) {
             ),
         },
         Event::WindowSampleTruncated { correlation } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "window_sample_truncated",
                 elapsed_ms,
@@ -789,7 +826,7 @@ pub(crate) fn emit(event: Event) {
             );
         }
         Event::Restore { edge, correlation } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "restore",
                 elapsed_ms,
@@ -812,7 +849,7 @@ pub(crate) fn emit(event: Event) {
             minimized,
             correlation,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "native_window_snapshot",
                 elapsed_ms,
@@ -836,7 +873,7 @@ pub(crate) fn emit(event: Event) {
             hwnd,
             correlation,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "native_activation",
                 elapsed_ms,
@@ -857,7 +894,7 @@ pub(crate) fn emit(event: Event) {
             hwnd,
             generation,
         } => {
-            tracing::info!(
+            tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "native_pointer",
                 elapsed_ms,
@@ -909,6 +946,7 @@ mod tests {
             Event::DesignerWidget { .. } => &["category", "response", "correlation"],
             Event::DesignerMutation { .. } => &["result", "correlation"],
             Event::Authoring { .. } => &["edge", "correlation"],
+            Event::HookPrimary { .. } => &["transition", "provenance", "foreground_owner"],
             Event::InvocationPrimary { .. } => &[
                 "transition",
                 "provenance",
@@ -1008,6 +1046,11 @@ mod tests {
             Event::Authoring {
                 edge: AuthoringEdge::PendingRetired,
                 correlation,
+            },
+            Event::HookPrimary {
+                transition: PrimaryTransition::Press,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                foreground_owner: NativeWindowOwner::Root,
             },
             Event::InvocationPrimary {
                 transition: PrimaryTransition::Press,
