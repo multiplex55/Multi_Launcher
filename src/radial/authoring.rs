@@ -516,6 +516,13 @@ pub enum AuthoringRequest {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcceptancePrepareGateState {
+    Held,
+    Released,
+    TimedOut,
+}
+
 impl AuthoringRequest {
     pub fn id(&self) -> AuthoringRequestId {
         match self {
@@ -592,6 +599,36 @@ impl AuthoringRequest {
             Self::StopNativePreview { .. } => RequestKind::StopNativePreview,
         }
     }
+}
+
+/// Emit the bounded acceptance-only lifecycle edge for a held preview request.
+/// The request identity comes from the real service request so callers cannot
+/// accidentally trace a gate event for an unrelated operation.
+pub fn trace_acceptance_prepare_gate(
+    request: &AuthoringRequest,
+    state: AcceptancePrepareGateState,
+) {
+    let AuthoringRequest::PrepareEmbeddedPreview { .. } = request else {
+        return;
+    };
+    acceptance_trace::emit(Event::AcceptancePrepareGate {
+        edge: match state {
+            AcceptancePrepareGateState::Held => acceptance_trace::AcceptancePrepareGateEdge::Held,
+            AcceptancePrepareGateState::Released => {
+                acceptance_trace::AcceptancePrepareGateEdge::Released
+            }
+            AcceptancePrepareGateState::TimedOut => {
+                acceptance_trace::AcceptancePrepareGateEdge::TimedOut
+            }
+        },
+        correlation: Correlation {
+            request_id: request.id().0,
+            request_kind: RequestKind::PrepareEmbeddedPreview,
+            session_id: request.editor_session().0,
+            generation: request.generation().0,
+            terminal: false,
+        },
+    });
 }
 
 #[derive(Clone, Debug, PartialEq)]

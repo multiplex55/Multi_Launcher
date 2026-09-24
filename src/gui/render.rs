@@ -887,8 +887,20 @@ impl eframe::App for LauncherApp {
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             menu::bar(ui, |ui| {
                 let mut apps_menu_state = (false, false, false);
+                let mut file_menu_body_entered = false;
+                let mut apps_menu_body_entered = false;
                 let file_menu = ui.menu_button("File", |ui| {
+                    file_menu_body_entered = true;
+                    acceptance_trace::trace_root_menu_body(
+                        crate::radial::acceptance_trace::RootMenuControl::File,
+                        true,
+                    );
                     let apps_menu = ui.menu_button("Apps", |ui| {
+                        apps_menu_body_entered = true;
+                        acceptance_trace::trace_root_menu_body(
+                            crate::radial::acceptance_trace::RootMenuControl::Apps,
+                            true,
+                        );
                         if ui.button("Edit Apps").clicked() {
                             self.show_editor = !self.show_editor;
                         }
@@ -910,6 +922,18 @@ impl eframe::App for LauncherApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
+                if !file_menu_body_entered {
+                    acceptance_trace::trace_root_menu_body(
+                        crate::radial::acceptance_trace::RootMenuControl::File,
+                        false,
+                    );
+                }
+                if !apps_menu_body_entered {
+                    acceptance_trace::trace_root_menu_body(
+                        crate::radial::acceptance_trace::RootMenuControl::Apps,
+                        false,
+                    );
+                }
                 acceptance_trace::trace_root_menu_interaction(
                     RootMenuControl::Apps,
                     apps_menu_state.0,

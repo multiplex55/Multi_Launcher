@@ -76,6 +76,10 @@ impl AfterActionCompatibility {
 pub(crate) struct UniversalActionPickerRow {
     /// Exact legacy command identifying the target shown in this row.
     pub(crate) target_command: String,
+    /// Runtime-only source position used by the native acceptance harness to
+    /// identify a custom action without exposing its private label or command.
+    pub(crate) custom_action_index: Option<usize>,
+    search_text: String,
     /// Exact semantic action identifier resolved by the runtime provider.
     pub(crate) action_id: crate::universal_actions::ActionId,
     pub(crate) binding: Option<ActionBinding>,
@@ -125,6 +129,13 @@ impl UniversalActionAuthoringCatalog {
         let mut rows = Vec::new();
         for target in &snapshot.entries {
             let persistent = target.target.persistent_ref();
+            let search_text = [
+                target.selected_action.label.as_str(),
+                target.selected_action.desc.as_str(),
+                target.selected_action.action.as_str(),
+                target.selected_action.args.as_deref().unwrap_or_default(),
+            ]
+            .join(" ");
             let context = ActionResolutionContext::new(ActionSurface::RadialMenu, query);
             for action in registry.resolve(target, &context) {
                 let binding = persistent.clone().map(|target| ActionBinding::Persisted {
@@ -135,6 +146,8 @@ impl UniversalActionAuthoringCatalog {
                 });
                 rows.push(picker_row(
                     target.selected_action.action.clone(),
+                    target.custom_action_index,
+                    search_text.clone(),
                     action,
                     binding,
                     if persistent.is_some() {
@@ -173,6 +186,8 @@ impl UniversalActionAuthoringCatalog {
                 });
                 let mut row = picker_row(
                     selector_command(&selector).into(),
+                    None,
+                    selector_label(&selector).into(),
                     action,
                     binding,
                     PickerPersistence::Contextual,
@@ -191,6 +206,7 @@ impl UniversalActionAuthoringCatalog {
             }
         }
 
+        rows.retain(|row| matches_query(row, query));
         rows.sort_by(|left, right| {
             left.presentation
                 .label
@@ -210,6 +226,8 @@ impl UniversalActionAuthoringCatalog {
 
 fn picker_row(
     target_command: String,
+    custom_action_index: Option<usize>,
+    search_text: String,
     action: UniversalAction,
     binding: Option<ActionBinding>,
     persistence: PickerPersistence,
@@ -226,6 +244,8 @@ fn picker_row(
     let interaction = interaction_requirement(&action);
     UniversalActionPickerRow {
         target_command,
+        custom_action_index,
+        search_text,
         action_id: action.id,
         binding,
         persistence,
@@ -236,6 +256,26 @@ fn picker_row(
         interaction,
         after_action: AfterActionCompatibility::for_requirement(interaction),
     }
+}
+
+fn matches_query(row: &UniversalActionPickerRow, query: &str) -> bool {
+    let tokens = query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return true;
+    }
+
+    let searchable = format!(
+        "{} {} {} {}",
+        row.presentation.label,
+        row.presentation.description.as_deref().unwrap_or_default(),
+        row.target_command,
+        row.search_text,
+    )
+    .to_lowercase();
+    tokens.iter().all(|token| searchable.contains(token))
 }
 
 fn selected_window<'a>(
@@ -774,6 +814,48 @@ mod tests {
                 interaction_requirement(&action) == InteractionRequirement::None
             );
         }
+    }
+
+    #[test]
+    fn search_filters_before_popup_limit_and_keeps_custom_source_identity() {
+        let entries = (0..64)
+            .map(|index| {
+                let command = format!("zz_radial_acceptance_{index:03}");
+                let selected = action(&format!("Acceptance action {index:03}"), &command);
+                ResolvedActionTarget {
+                    target: ActionTarget::Generic {
+                        action: selected.clone(),
+                    },
+                    selected_action: selected,
+                    custom_action_index: Some(index),
+                }
+            })
+            .collect();
+        let snapshot = snapshot(entries);
+        let invocation = InvocationContext::empty(1);
+        let unfiltered = UniversalActionAuthoringCatalog::build(&snapshot, &invocation, "");
+        let target_rank = unfiltered
+            .rows()
+            .iter()
+            .position(|row| {
+                row.custom_action_index == Some(63) && row.action_id == action_ids::RESULT_EXECUTE
+            })
+            .expect("target action should be in the unfiltered catalog");
+        assert!(target_rank >= 50, "target rank was {target_rank}");
+
+        let filtered =
+            UniversalActionAuthoringCatalog::build(&snapshot, &invocation, "Acceptance action 063");
+        let target = filtered
+            .rows()
+            .iter()
+            .find(|row| {
+                row.custom_action_index == Some(63) && row.action_id == action_ids::RESULT_EXECUTE
+            })
+            .expect("search should reveal the custom target beyond the first page");
+        assert!(target.assignment().is_ok());
+        assert!(!filtered.rows().iter().any(|row| {
+            row.custom_action_index != Some(63) && row.target_command == "zz_radial_acceptance_063"
+        }));
     }
 
     #[test]

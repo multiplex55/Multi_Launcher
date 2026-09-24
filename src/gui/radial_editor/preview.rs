@@ -3,6 +3,9 @@ use super::canvas::{
     CanvasPoint, CanvasTransform, DesignerMode, DragPayload, PlacementDraft,
     ProjectedCellProvenance, ProjectedSelection, VisitedMenuPath,
 };
+use crate::radial::acceptance_trace::{
+    self, DesignerAuthoringRole, DesignerAuthoringTarget, ViewportClass,
+};
 use crate::radial::authoring::StableSelection;
 use crate::radial::authoring::{AuthoringClient, AuthoringSessionId, RadialAuthoringSession};
 use crate::radial::compositor::CompositorCache;
@@ -111,6 +114,7 @@ pub(super) struct EmbeddedPreview {
     tooltip_preferences: TooltipPreferences,
     tooltip_hover: TooltipHoverState,
     hovered_cell: Option<CellId>,
+    last_traced_render: Option<(u64, u64, u64)>,
     #[cfg(test)]
     preparation_attempts: usize,
 }
@@ -140,6 +144,7 @@ impl Default for EmbeddedPreview {
             tooltip_preferences: TooltipPreferences::default(),
             tooltip_hover: TooltipHoverState::default(),
             hovered_cell: None,
+            last_traced_render: None,
             #[cfg(test)]
             preparation_attempts: 0,
         }
@@ -217,6 +222,7 @@ impl EmbeddedPreview {
         self.frozen_scale = None;
         self.texture = None;
         self.drag_cell = None;
+        self.last_traced_render = None;
     }
 
     pub(super) fn prepared_frame(
@@ -797,6 +803,7 @@ impl EmbeddedPreview {
         self.frozen_scale = None;
         self.cancel_tooltip();
         self.last_intercepted_dynamic_dispatch = None;
+        self.last_traced_render = None;
         let Some(menu) = document.menus.iter().find(|menu| &menu.id == menu_id) else {
             self.reducer = None;
             return;
@@ -1495,6 +1502,78 @@ impl EmbeddedPreview {
             ..transform
         }
         .normalized();
+        if acceptance_trace::enabled() {
+            let mut flat_index = 0usize;
+            let menu_cell_ids_digest = super::menu_cell_ids_digest(menu);
+            for (ring_index, ring) in menu.rings.iter().enumerate() {
+                for (slot_index, authored) in ring.cells.iter().enumerate() {
+                    if let Some(projected) = input
+                        .layout
+                        .cells
+                        .iter()
+                        .find(|projected| projected.cell_id == authored.id)
+                    {
+                        let world = match &projected.shape {
+                            HitShape::Circle { center, .. } => *center,
+                            HitShape::Wedge {
+                                center,
+                                inner_radius,
+                                outer_radius,
+                                start_angle,
+                                end_angle,
+                            } => {
+                                let angle = (*start_angle + *end_angle) * 0.5;
+                                let radius = (*inner_radius + *outer_radius) * 0.5;
+                                LogicalPoint {
+                                    x: center.x + angle.cos() * radius,
+                                    y: center.y + angle.sin() * radius,
+                                }
+                            }
+                        };
+                        let screen = transform.world_to_screen(CanvasPoint::new(world.x, world.y));
+                        let rect = egui::Rect::from_center_size(
+                            egui::pos2(screen.x, screen.y),
+                            egui::vec2(8.0, 8.0),
+                        );
+                        let selected = authoring_session.as_deref().is_some_and(|session| {
+                            matches!(
+                                session.selection.as_ref(),
+                                Some(StableSelection::Cell {
+                                    menu_id: selected_menu,
+                                    ring_id: selected_ring,
+                                    cell_id: selected_cell,
+                                }) if selected_menu == &menu.id
+                                    && selected_ring == &ring.id
+                                    && selected_cell == &authored.id
+                            )
+                        });
+                        let clicked = response.clicked()
+                            && response
+                                .interact_pointer_pos()
+                                .is_some_and(|pointer| rect.contains(pointer));
+                        super::trace_designer_authoring_control_rect(
+                            ui,
+                            rect,
+                            clicked,
+                            DesignerAuthoringTarget::CanvasCell,
+                            DesignerAuthoringRole::Region,
+                            Some(flat_index),
+                            true,
+                            selected,
+                            false,
+                            ViewportClass::Deferred,
+                            super::trace_correlation(authoring_session.as_deref()),
+                            Some(acceptance_trace::DesignerCanvasCellScope {
+                                menu_cell_ids_digest,
+                                ring_index,
+                                slot_index,
+                            }),
+                        );
+                    }
+                    flat_index = flat_index.saturating_add(1);
+                }
+            }
+        }
         let pointer_world = response
             .interact_pointer_pos()
             .filter(|_| response.hovered())
@@ -1853,6 +1932,21 @@ impl EmbeddedPreview {
                 scene_rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
+            );
+        }
+        let render_identity = (
+            editor_session.0,
+            generation,
+            super::menu_cell_ids_digest(menu),
+        );
+        if acceptance_trace::enabled() && self.last_traced_render != Some(render_identity) {
+            self.last_traced_render = Some(render_identity);
+            acceptance_trace::emit(
+                crate::radial::acceptance_trace::Event::DesignerPreviewRendered {
+                    session_id: editor_session.0,
+                    generation,
+                    menu_cell_ids_digest: render_identity.2,
+                },
             );
         }
         if let Some(payload) = drag_payload.as_ref() {

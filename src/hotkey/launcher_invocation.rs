@@ -1204,6 +1204,11 @@ impl Drop for LauncherInvocationService {
     }
 }
 
+fn early_timer_rearm_delay_ms(deadline_ms: u64, now_ms: u64) -> Option<u32> {
+    let remaining = deadline_ms.checked_sub(now_ms)?;
+    (remaining > 0).then(|| remaining.min(u64::from(u32::MAX)) as u32)
+}
+
 #[cfg(all(windows, not(test)))]
 mod native_service {
     use super::*;
@@ -1292,20 +1297,23 @@ mod native_service {
         _window: LifecycleWindow,
     }
 
-    struct ServiceTimer(usize);
+    struct ServiceTimer {
+        timer_id: usize,
+        deadline_ms: u64,
+    }
 
     impl ServiceTimer {
         fn cancel(mut self, expected_live: bool, context: &'static str) {
-            kill_timer(self.0, expected_live, context);
-            self.0 = 0;
+            kill_timer(self.timer_id, expected_live, context);
+            self.timer_id = 0;
         }
     }
 
     impl Drop for ServiceTimer {
         fn drop(&mut self) {
-            if self.0 != 0 {
-                kill_timer(self.0, true, "service timer guard drop");
-                self.0 = 0;
+            if self.timer_id != 0 {
+                kill_timer(self.timer_id, true, "service timer guard drop");
+                self.timer_id = 0;
             }
         }
     }
@@ -1881,7 +1889,13 @@ mod native_service {
                     if timer == 0 {
                         return Some(format!("failed to schedule radial deadline for {}", id.0));
                     }
-                    state.timers.insert(id, ServiceTimer(timer));
+                    state.timers.insert(
+                        id,
+                        ServiceTimer {
+                            timer_id: timer,
+                            deadline_ms: at,
+                        },
+                    );
                     acceptance_trace::emit(Event::HookDeadline {
                         edge: HookDeadlineEdge::Scheduled,
                         invocation_id: id.0,
@@ -1893,7 +1907,7 @@ mod native_service {
                 }
                 InvocationIntent::CancelDeadline { id } => {
                     if let Some(timer) = state.timers.remove(&id) {
-                        let timer_id = timer.0 as u64;
+                        let timer_id = timer.timer_id as u64;
                         timer.cancel(true, "deadline cancellation");
                         acceptance_trace::emit(Event::HookDeadline {
                             edge: HookDeadlineEdge::Cancelled,
@@ -2229,15 +2243,65 @@ mod native_service {
                         if let Ok(mut s) = lock.lock() {
                             if let Some(state) = s.as_mut() {
                                 let timer = msg.wParam.0;
-                                if let Some(id) = state
-                                    .timers
-                                    .iter()
-                                    .find_map(|(id, actual)| (actual.0 == timer).then_some(*id))
-                                {
+                                if let Some(id) = state.timers.iter().find_map(|(id, actual)| {
+                                    (actual.timer_id == timer).then_some(*id)
+                                }) {
+                                    let at = state.epoch.elapsed().as_millis() as u64;
+                                    let deadline_ms = state
+                                        .timers
+                                        .get(&id)
+                                        .map(|timer| timer.deadline_ms)
+                                        .unwrap_or(at);
+                                    if let Some(delay_ms) =
+                                        super::early_timer_rearm_delay_ms(deadline_ms, at)
+                                    {
+                                        if let Some(timer) = state.timers.remove(&id) {
+                                            timer.cancel(false, "early deadline timer rearm");
+                                        }
+                                        let rearmed = unsafe { SetTimer(None, 0, delay_ms, None) };
+                                        if rearmed == 0 {
+                                            let error = format!(
+                                                "failed to re-arm early radial deadline for {}",
+                                                id.0
+                                            );
+                                            state.shutdown_requested = true;
+                                            let intents = cancel_lifecycle(
+                                                state,
+                                                LifecycleCancellation::HookFailure,
+                                            );
+                                            let _ = state.notices.send(ServiceNotice {
+                                                recovery: false,
+                                                intents,
+                                                error: Some(error),
+                                                action: None,
+                                                cancellation: Some(
+                                                    LifecycleCancellation::HookFailure,
+                                                ),
+                                            });
+                                            let _ = state.wake.send(());
+                                            unsafe { PostQuitMessage(0) };
+                                            continue;
+                                        }
+                                        state.timers.insert(
+                                            id,
+                                            ServiceTimer {
+                                                timer_id: rearmed,
+                                                deadline_ms,
+                                            },
+                                        );
+                                        acceptance_trace::emit(Event::HookDeadline {
+                                            edge: HookDeadlineEdge::RearmedEarly,
+                                            invocation_id: id.0,
+                                            timer_id: rearmed as u64,
+                                            delay_ms: u64::from(delay_ms),
+                                            radial_intent: false,
+                                            global_exclusive_owners: super::exclusive_owners(),
+                                        });
+                                        continue;
+                                    }
                                     if let Some(timer) = state.timers.remove(&id) {
                                         timer.cancel(false, "one-shot timer fire");
                                     }
-                                    let at = state.epoch.elapsed().as_millis() as u64;
                                     let generation = state.adapter.config().generation;
                                     let intents = state.adapter.deadline(id, at, generation);
                                     acceptance_trace::emit(Event::HookDeadline {
@@ -2388,6 +2452,19 @@ mod native_service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_native_deadline_timer_rearms_for_exact_remaining_time() {
+        assert_eq!(early_timer_rearm_delay_ms(350, 345), Some(5));
+        assert_eq!(early_timer_rearm_delay_ms(350, 349), Some(1));
+        assert_eq!(early_timer_rearm_delay_ms(350, 350), None);
+        assert_eq!(early_timer_rearm_delay_ms(350, 351), None);
+        assert_eq!(
+            early_timer_rearm_delay_ms(u64::from(u32::MAX) + 20, 0),
+            Some(u32::MAX)
+        );
+    }
+
     fn cfg() -> InvocationConfig {
         InvocationConfig {
             launcher_enabled: true,

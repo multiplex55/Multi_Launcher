@@ -12,9 +12,9 @@ use std::{sync::Mutex, sync::atomic::AtomicU64};
 
 pub(crate) const ENVIRONMENT_VARIABLE: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
 // The native acceptance pass opens Designer twice and drives geometry proposals
-// after the ROOT/Designer recovery matrix. Keep that full trace bounded while
+// after the ROOT/Designer recovery matrix. Keep the full trace bounded while
 // leaving room for both windows' semantic transitions and native input edges.
-pub(crate) const EVENT_BUDGET: usize = 4_096;
+pub(crate) const EVENT_BUDGET: usize = 8_192;
 const TRACE_TARGET: &str = "multi_launcher.radial_acceptance";
 const AUTHORING_CONTROL_REFRESH_MS: u128 = 500;
 
@@ -108,6 +108,13 @@ pub(crate) enum AuthoringEdge {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AcceptancePrepareGateEdge {
+    Held,
+    Released,
+    TimedOut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrimaryTransition {
     Press,
     Release,
@@ -192,6 +199,7 @@ pub(crate) enum HookPriorityOwner {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HookDeadlineEdge {
     Scheduled,
+    RearmedEarly,
     Fired,
     Cancelled,
 }
@@ -266,6 +274,8 @@ impl DesignerSemanticRole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DesignerAuthoringTarget {
     NewMenu,
+    MenuAfterAction,
+    AfterActionOption,
     AddRing,
     MenuRow,
     RingSelector,
@@ -278,7 +288,27 @@ pub(crate) enum DesignerAuthoringTarget {
     CancelResolution,
     DiscardCells,
     Canvas,
+    CanvasCell,
     DiscardDraft,
+    CellType,
+    ActionTypeOption,
+    ActionSearch,
+    ActionRow,
+    PopupApply,
+    PopupCancel,
+    PopupOpenInspector,
+    PopupApplyAndOpen,
+    PopupDiscardAndOpen,
+    PopupKeepEditing,
+    InspectorCell,
+    SkinRow,
+    SkinGlowEnabled,
+    OpenDesktopPreview,
+    StopDesktopPreview,
+    Undo,
+    Redo,
+    Save,
+    KeepEditing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -288,6 +318,8 @@ pub(crate) enum DesignerAuthoringRole {
     ComboBox,
     DragValue,
     Region,
+    TextEdit,
+    Checkbox,
 }
 
 impl DesignerAuthoringRole {
@@ -298,6 +330,8 @@ impl DesignerAuthoringRole {
             Self::ComboBox => "ComboBox",
             Self::DragValue => "DragValue",
             Self::Region => "Region",
+            Self::TextEdit => "TextEdit",
+            Self::Checkbox => "Checkbox",
         }
     }
 }
@@ -315,8 +349,13 @@ pub(crate) struct DesignerGeometryState {
     pub session_id: u64,
     pub menu_count: usize,
     pub selected_menu_index: Option<usize>,
+    pub selected_menu_after_action: Option<crate::radial::model::AfterActionPolicy>,
     pub ring_count: usize,
     pub selected_ring_index: Option<usize>,
+    pub selected_cell_index: Option<usize>,
+    pub selected_cell_id_digest: Option<u64>,
+    pub selected_cell_custom_action_index: Option<usize>,
+    pub selected_cell_custom_action_index_known: bool,
     pub selected_ring_slots: usize,
     pub requested_slots: usize,
     pub selected_ring_populated: usize,
@@ -347,13 +386,23 @@ struct DesignerAuthoringControlSnapshot {
     client_size: [i32; 2],
     enabled: bool,
     selected: bool,
+    focused: bool,
     clicked: bool,
     generation: u64,
+    canvas_scope: Option<DesignerCanvasCellScope>,
     last_emitted_ms: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesignerCanvasCellScope {
+    pub menu_cell_ids_digest: u64,
+    pub ring_index: usize,
+    pub slot_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DesignerCloseState {
+    pub session_id: u64,
     pub open: bool,
     pub close_prompt: bool,
     pub dirty: bool,
@@ -402,6 +451,10 @@ pub(crate) enum Event {
         hovered: bool,
         clicked: bool,
         open: bool,
+    },
+    RootMenuBody {
+        menu: RootMenuControl,
+        entered: bool,
     },
     DesignerSubmitted {
         correlation: Correlation,
@@ -454,6 +507,15 @@ pub(crate) enum Event {
     Authoring {
         edge: AuthoringEdge,
         correlation: Correlation,
+    },
+    AcceptancePrepareGate {
+        edge: AcceptancePrepareGateEdge,
+        correlation: Correlation,
+    },
+    DesignerPreviewRendered {
+        session_id: u64,
+        generation: u64,
+        menu_cell_ids_digest: u64,
     },
     HookPrimary {
         transition: PrimaryTransition,
@@ -534,9 +596,29 @@ pub(crate) enum Event {
         client_height_px: i32,
         enabled: bool,
         selected: bool,
+        focused: bool,
         clicked: bool,
         session_id: u64,
         generation: u64,
+        canvas_scope: Option<DesignerCanvasCellScope>,
+    },
+    DesignerCanvasAllocation {
+        allocated_rect_px: [i32; 4],
+        clip_rect_px: [i32; 4],
+        requested_size_px: [i32; 2],
+        session_id: u64,
+        generation: u64,
+    },
+    DesignerActionCatalogRank {
+        custom_action_index: usize,
+        rank: usize,
+        catalog_len: usize,
+        session_id: u64,
+        generation: u64,
+    },
+    NativePreviewDispatchCount {
+        editor_session: u64,
+        count: usize,
     },
     DesignerGeometryState {
         state: DesignerGeometryState,
@@ -550,6 +632,12 @@ pub(crate) enum Event {
     },
     DesignerClose {
         state: DesignerCloseState,
+    },
+    DisposableRequestCancelled {
+        request_kind: RequestKind,
+        request_id: u64,
+        session_id: u64,
+        generation: u64,
     },
     InvocationPrimary {
         transition: PrimaryTransition,
@@ -652,6 +740,7 @@ struct Runtime {
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static TRACE_STARTED_AT: OnceLock<Instant> = OnceLock::new();
 static NEXT_BOUNDARY_ID: AtomicU64 = AtomicU64::new(1);
+static ACTION_CATALOG_RANKS: OnceLock<Mutex<Vec<(u64, usize, usize, usize)>>> = OnceLock::new();
 const WINDOW_SAMPLE_CAPACITY: usize = 32;
 const WINDOW_SAMPLE_DELAY_FRAMES: u64 = 2;
 
@@ -753,6 +842,7 @@ static WINDOW_SAMPLE_QUEUE: OnceLock<Mutex<WindowSampleQueue>> = OnceLock::new()
 static NATIVE_OWNER_REGISTRY: OnceLock<Mutex<NativeOwnerRegistry>> = OnceLock::new();
 static ROOT_MENU_INTERACTIONS: OnceLock<Mutex<[Option<RootMenuInteractionState>; 2]>> =
     OnceLock::new();
+static ROOT_MENU_BODIES: OnceLock<Mutex<[Option<bool>; 2]>> = OnceLock::new();
 static DESIGNER_AUTHORING_CONTROLS: OnceLock<Mutex<Vec<DesignerAuthoringControlSnapshot>>> =
     OnceLock::new();
 static DESIGNER_GEOMETRY_STATE: OnceLock<Mutex<Option<DesignerGeometryState>>> = OnceLock::new();
@@ -1058,6 +1148,16 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
+        Event::RootMenuBody { menu, entered } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "root_menu_body",
+                elapsed_ms,
+                ?menu,
+                entered,
+                "radial acceptance trace"
+            );
+        }
         Event::DesignerSubmitted { correlation } => {
             tracing::warn!(
                 target: TRACE_TARGET,
@@ -1215,6 +1315,34 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                "radial acceptance trace"
+            );
+        }
+        Event::AcceptancePrepareGate { edge, correlation } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "acceptance_prepare_gate",
+                elapsed_ms,
+                ?edge,
+                request_id = correlation.request_id,
+                request_kind = ?correlation.request_kind,
+                session_id = correlation.session_id,
+                generation = correlation.generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerPreviewRendered {
+            session_id,
+            generation,
+            menu_cell_ids_digest,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_preview_rendered",
+                elapsed_ms,
+                session_id,
+                generation,
+                menu_cell_ids_digest,
                 "radial acceptance trace"
             );
         }
@@ -1408,9 +1536,11 @@ pub(crate) fn emit(event: Event) {
             client_height_px,
             enabled,
             selected,
+            focused,
             clicked,
             session_id,
             generation,
+            canvas_scope,
         } => {
             tracing::warn!(
                 target: TRACE_TARGET,
@@ -1428,9 +1558,71 @@ pub(crate) fn emit(event: Event) {
                 client_height_px,
                 enabled,
                 selected,
+                focused,
                 clicked,
                 session_id,
                 generation,
+                menu_cell_ids_digest = canvas_scope.map_or(0, |scope| scope.menu_cell_ids_digest),
+                cell_ring_index = canvas_scope.map_or(-1, |scope| scope.ring_index as i64),
+                cell_slot_index = canvas_scope.map_or(-1, |scope| scope.slot_index as i64),
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerCanvasAllocation {
+            allocated_rect_px,
+            clip_rect_px,
+            requested_size_px,
+            session_id,
+            generation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_canvas_allocation",
+                elapsed_ms,
+                allocated_left_px = allocated_rect_px[0],
+                allocated_top_px = allocated_rect_px[1],
+                allocated_right_px = allocated_rect_px[2],
+                allocated_bottom_px = allocated_rect_px[3],
+                clip_left_px = clip_rect_px[0],
+                clip_top_px = clip_rect_px[1],
+                clip_right_px = clip_rect_px[2],
+                clip_bottom_px = clip_rect_px[3],
+                requested_width_px = requested_size_px[0],
+                requested_height_px = requested_size_px[1],
+                session_id,
+                generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesignerActionCatalogRank {
+            custom_action_index,
+            rank,
+            catalog_len,
+            session_id,
+            generation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "designer_action_catalog_rank",
+                elapsed_ms,
+                custom_action_index,
+                rank,
+                catalog_len,
+                session_id,
+                generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::NativePreviewDispatchCount {
+            editor_session,
+            count,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "native_preview_dispatch_count",
+                elapsed_ms,
+                editor_session,
+                count,
                 "radial acceptance trace"
             );
         }
@@ -1442,8 +1634,18 @@ pub(crate) fn emit(event: Event) {
                 session_id = state.session_id,
                 menu_count = state.menu_count,
                 selected_menu_index = state.selected_menu_index.map_or(-1, |index| index as i64),
+                selected_menu_after_action = ?state.selected_menu_after_action,
                 ring_count = state.ring_count,
                 selected_ring_index = state.selected_ring_index.map_or(-1, |index| index as i64),
+                selected_cell_index = state.selected_cell_index.map_or(-1, |index| index as i64),
+                selected_cell_id_digest = state
+                    .selected_cell_id_digest
+                    .map_or(-1, |digest| (digest & i64::MAX as u64) as i64),
+                selected_cell_custom_action_index = state
+                    .selected_cell_custom_action_index
+                    .map_or(-1, |index| index as i64),
+                selected_cell_custom_action_index_known = state
+                    .selected_cell_custom_action_index_known,
                 selected_ring_slots = state.selected_ring_slots,
                 requested_slots = state.requested_slots,
                 selected_ring_populated = state.selected_ring_populated,
@@ -1489,12 +1691,30 @@ pub(crate) fn emit(event: Event) {
                 target: TRACE_TARGET,
                 trace_event = "designer_close",
                 elapsed_ms,
+                session_id = state.session_id,
                 open = state.open,
                 close_prompt = state.close_prompt,
                 dirty = state.dirty,
                 pending_disposable = state.pending_disposable,
                 pending_durable = state.pending_durable,
                 pending_native_preview = state.pending_native_preview,
+                "radial acceptance trace"
+            );
+        }
+        Event::DisposableRequestCancelled {
+            request_kind,
+            request_id,
+            session_id,
+            generation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "disposable_request_cancelled",
+                elapsed_ms,
+                ?request_kind,
+                request_id,
+                session_id,
+                generation,
                 "radial acceptance trace"
             );
         }
@@ -1717,13 +1937,42 @@ pub(crate) fn trace_root_menu_interaction(
     }
 }
 
+pub(crate) fn trace_root_menu_body(menu: RootMenuControl, entered: bool) {
+    if !enabled() {
+        return;
+    }
+
+    let index = match menu {
+        RootMenuControl::File => 0,
+        RootMenuControl::Apps => 1,
+    };
+    let should_emit = ROOT_MENU_BODIES
+        .get_or_init(|| Mutex::new([None; 2]))
+        .lock()
+        .map(|mut states| {
+            let changed = states[index] != Some(entered);
+            states[index] = Some(entered);
+            changed
+        })
+        .unwrap_or(false);
+
+    if should_emit {
+        emit(Event::RootMenuBody { menu, entered });
+    }
+}
+
 fn should_emit_root_menu_state(
     previous: &mut Option<RootMenuInteractionState>,
     current: RootMenuInteractionState,
 ) -> bool {
+    let was_active = previous.is_some_and(RootMenuInteractionState::is_active);
     let changed = *previous != Some(current);
     *previous = Some(current);
-    changed && current.is_active()
+    // Emit the terminal inactive edge when a menu closes, but avoid flooding
+    // the trace with unchanged idle state. Native acceptance uses the close
+    // edge to distinguish a real open popup from an AccessKit/UIA subtree that
+    // remains published while its parent menu is closed.
+    changed && (was_active || current.is_active())
 }
 
 pub(crate) fn emit_designer_semantic_target(
@@ -1794,9 +2043,11 @@ pub(crate) fn emit_designer_authoring_control(
     client_size: [i32; 2],
     is_enabled: bool,
     selected: bool,
+    focused: bool,
     clicked: bool,
     session_id: u64,
     generation: u64,
+    canvas_scope: Option<DesignerCanvasCellScope>,
 ) {
     if !enabled()
         || bounds[2] <= bounds[0]
@@ -1817,8 +2068,10 @@ pub(crate) fn emit_designer_authoring_control(
         client_size,
         enabled: is_enabled,
         selected,
+        focused,
         clicked,
         generation,
+        canvas_scope,
         last_emitted_ms: now_ms,
     };
     let changed = DESIGNER_AUTHORING_CONTROLS
@@ -1861,7 +2114,43 @@ pub(crate) fn emit_designer_authoring_control(
             client_height_px: client_size[1],
             enabled: is_enabled,
             selected,
+            focused,
             clicked,
+            session_id,
+            generation,
+            canvas_scope,
+        });
+    }
+}
+
+pub(crate) fn emit_designer_action_catalog_rank(
+    custom_action_index: usize,
+    rank: usize,
+    catalog_len: usize,
+    session_id: u64,
+    generation: u64,
+) {
+    if !enabled() || rank >= catalog_len {
+        return;
+    }
+    let emitted = ACTION_CATALOG_RANKS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut previous| {
+            let key = (session_id, custom_action_index, rank, catalog_len);
+            if previous.contains(&key) || previous.len() >= 1_024 {
+                false
+            } else {
+                previous.push(key);
+                true
+            }
+        })
+        .unwrap_or(false);
+    if emitted {
+        emit(Event::DesignerActionCatalogRank {
+            custom_action_index,
+            rank,
+            catalog_len,
             session_id,
             generation,
         });
@@ -1882,8 +2171,10 @@ fn authoring_control_snapshot_should_emit(
         && left.client_size == right.client_size
         && left.enabled == right.enabled
         && left.selected == right.selected
+        && left.focused == right.focused
         && left.clicked == right.clicked
-        && left.generation == right.generation;
+        && left.generation == right.generation
+        && left.canvas_scope == right.canvas_scope;
     !unchanged || now_ms.saturating_sub(left.last_emitted_ms) >= AUTHORING_CONTROL_REFRESH_MS
 }
 
@@ -1962,8 +2253,10 @@ mod tests {
             client_size: [624, 441],
             enabled: true,
             selected: false,
+            focused: false,
             clicked: false,
             generation: 4,
+            canvas_scope: None,
             last_emitted_ms,
         }
     }
@@ -1990,6 +2283,24 @@ mod tests {
         assert!(authoring_control_snapshot_should_emit(
             &prior, &resized, 1_001
         ));
+
+        let mut focused = unchanged;
+        focused.focused = true;
+        assert!(authoring_control_snapshot_should_emit(
+            &prior, &focused, 1_001
+        ));
+
+        let mut different_canvas_epoch = unchanged;
+        different_canvas_epoch.canvas_scope = Some(DesignerCanvasCellScope {
+            menu_cell_ids_digest: 41,
+            ring_index: 1,
+            slot_index: 0,
+        });
+        assert!(authoring_control_snapshot_should_emit(
+            &prior,
+            &different_canvas_epoch,
+            1_001
+        ));
     }
 
     fn schema_labels(event: Event) -> &'static [&'static str] {
@@ -2008,6 +2319,7 @@ mod tests {
             Event::RootPointerMoved { .. } => &["screen_x", "screen_y"],
             Event::RootPointerButton { .. } => &["pressed", "released", "screen_x", "screen_y"],
             Event::RootMenuInteraction { .. } => &["menu", "hovered", "clicked", "open"],
+            Event::RootMenuBody { .. } => &["menu", "entered"],
             Event::DesignerSubmitted { .. } => &["correlation"],
             Event::DesignerBody { .. } => &["state", "correlation"],
             Event::DesignerWidget { .. } => &["category", "response", "correlation"],
@@ -2045,6 +2357,10 @@ mod tests {
             ],
             Event::DesignerMutation { .. } => &["result", "correlation"],
             Event::Authoring { .. } => &["edge", "correlation"],
+            Event::AcceptancePrepareGate { .. } => &["edge", "correlation"],
+            Event::DesignerPreviewRendered { .. } => {
+                &["session_id", "generation", "menu_cell_ids_digest"]
+            }
             Event::HookPrimary { .. } => &["transition", "provenance", "foreground_owner"],
             Event::HookAdmission { .. } => &[
                 "transition",
@@ -2101,16 +2417,47 @@ mod tests {
                 "client_height_px",
                 "enabled",
                 "selected",
+                "focused",
                 "clicked",
                 "session_id",
                 "generation",
+                "menu_cell_ids_digest",
+                "cell_ring_index",
+                "cell_slot_index",
             ],
+            Event::DesignerCanvasAllocation { .. } => &[
+                "allocated_left_px",
+                "allocated_top_px",
+                "allocated_right_px",
+                "allocated_bottom_px",
+                "clip_left_px",
+                "clip_top_px",
+                "clip_right_px",
+                "clip_bottom_px",
+                "requested_width_px",
+                "requested_height_px",
+                "session_id",
+                "generation",
+            ],
+            Event::DesignerActionCatalogRank { .. } => &[
+                "custom_action_index",
+                "rank",
+                "catalog_len",
+                "session_id",
+                "generation",
+            ],
+            Event::NativePreviewDispatchCount { .. } => &["editor_session", "count"],
             Event::DesignerGeometryState { .. } => &[
                 "session_id",
                 "menu_count",
                 "selected_menu_index",
+                "selected_menu_after_action",
                 "ring_count",
                 "selected_ring_index",
+                "selected_cell_index",
+                "selected_cell_id_digest",
+                "selected_cell_custom_action_index",
+                "selected_cell_custom_action_index_known",
                 "selected_ring_slots",
                 "requested_slots",
                 "selected_ring_populated",
@@ -2137,6 +2484,7 @@ mod tests {
                 "correlation",
             ],
             Event::DesignerClose { .. } => &[
+                "session_id",
                 "open",
                 "close_prompt",
                 "dirty",
@@ -2144,6 +2492,9 @@ mod tests {
                 "pending_durable",
                 "pending_native_preview",
             ],
+            Event::DisposableRequestCancelled { .. } => {
+                &["request_kind", "request_id", "session_id", "generation"]
+            }
             Event::InvocationPrimary { .. } => &[
                 "transition",
                 "provenance",
@@ -2182,7 +2533,7 @@ mod tests {
 
     #[test]
     fn event_budget_is_hard_bounded() {
-        assert_eq!(EVENT_BUDGET, 4_096);
+        assert_eq!(EVENT_BUDGET, 8_192);
         let budget = EventBudget::new(EVENT_BUDGET);
         for _ in 0..EVENT_BUDGET {
             assert!(budget.reserve());
@@ -2223,6 +2574,7 @@ mod tests {
         assert!(should_emit_root_menu_state(&mut previous, open));
         assert!(should_emit_root_menu_state(&mut previous, clicked));
         assert!(should_emit_root_menu_state(&mut previous, open));
+        assert!(should_emit_root_menu_state(&mut previous, inactive));
         assert!(!should_emit_root_menu_state(&mut previous, inactive));
         assert!(should_emit_root_menu_state(&mut previous, open));
     }
@@ -2270,6 +2622,10 @@ mod tests {
                 hovered: true,
                 clicked: true,
                 open: true,
+            },
+            Event::RootMenuBody {
+                menu: RootMenuControl::File,
+                entered: true,
             },
             Event::DesignerSubmitted { correlation },
             Event::DesignerBody {
@@ -2393,17 +2749,48 @@ mod tests {
                 client_height_px: 441,
                 enabled: true,
                 selected: false,
+                focused: true,
                 clicked: true,
                 session_id: 77,
                 generation: 19,
+                canvas_scope: Some(DesignerCanvasCellScope {
+                    menu_cell_ids_digest: 123,
+                    ring_index: 1,
+                    slot_index: 0,
+                }),
+            },
+            Event::DesignerCanvasAllocation {
+                allocated_rect_px: [191, 157, 331, 442],
+                clip_rect_px: [0, 0, 624, 441],
+                requested_size_px: [140, 285],
+                session_id: 77,
+                generation: 19,
+            },
+            Event::DesignerActionCatalogRank {
+                custom_action_index: 67,
+                rank: 71,
+                catalog_len: 140,
+                session_id: 77,
+                generation: 19,
+            },
+            Event::NativePreviewDispatchCount {
+                editor_session: 77,
+                count: 0,
             },
             Event::DesignerGeometryState {
                 state: DesignerGeometryState {
                     session_id: 77,
                     menu_count: 10,
                     selected_menu_index: Some(9),
+                    selected_menu_after_action: Some(
+                        crate::radial::model::AfterActionPolicy::Inherit,
+                    ),
                     ring_count: 2,
                     selected_ring_index: Some(1),
+                    selected_cell_index: Some(4),
+                    selected_cell_id_digest: Some(303),
+                    selected_cell_custom_action_index: Some(67),
+                    selected_cell_custom_action_index_known: true,
                     selected_ring_slots: 10,
                     requested_slots: 10,
                     selected_ring_populated: 0,
@@ -2432,6 +2819,7 @@ mod tests {
             },
             Event::DesignerClose {
                 state: DesignerCloseState {
+                    session_id: 77,
                     open: true,
                     close_prompt: false,
                     dirty: false,
@@ -2439,6 +2827,12 @@ mod tests {
                     pending_durable: false,
                     pending_native_preview: false,
                 },
+            },
+            Event::DisposableRequestCancelled {
+                request_kind: RequestKind::PrepareEmbeddedPreview,
+                request_id: 88,
+                session_id: 77,
+                generation: 19,
             },
             Event::InvocationPrimary {
                 transition: PrimaryTransition::Press,

@@ -5,6 +5,7 @@
 //! for navigation; every dispatch intent is counted and discarded.
 
 use super::{AuthoringRequestId, AuthoringSessionId, DraftGeneration, NativePreviewLease};
+use crate::radial::acceptance_trace::{self, Event};
 use crate::radial::context::{InvocationContext, WindowIdentity};
 use crate::radial::diagnostics::RadialDiagnostic;
 use crate::radial::geometry::{
@@ -415,6 +416,7 @@ impl NativePreviewCoordinator {
             projection,
             tooltip_hover: TooltipHoverState::default(),
         });
+        self.trace_dispatch_count(editor_session.0);
         self.send_checked(open)?;
         Ok(PreviewLeaseResult {
             lease,
@@ -1020,7 +1022,12 @@ impl NativePreviewCoordinator {
             .map(|active| active.frame.diagnostics.clone());
         for intent in intents {
             match intent {
-                SessionIntent::Dispatch { .. } => self.intercepted_dispatches += 1,
+                SessionIntent::Dispatch { .. } => {
+                    self.intercepted_dispatches += 1;
+                    if let Some(active) = self.active.as_ref() {
+                        self.trace_dispatch_count(active.lease.editor_session.0);
+                    }
+                }
                 SessionIntent::OpenSubmenu { cell_id } => self.open_submenu(&cell_id)?,
                 SessionIntent::BeginNativeDrag {
                     geometry_generation,
@@ -1610,6 +1617,9 @@ impl NativePreviewCoordinator {
         if let Some(scheduler) = &self.tooltip_scheduler {
             scheduler.cancel();
         }
+        if let Some(active) = self.active.as_ref() {
+            self.trace_dispatch_count(active.lease.editor_session.0);
+        }
         if let Some(active) = self.active.take()
             && let Some(host) = self.host.as_ref()
         {
@@ -1618,6 +1628,13 @@ impl NativePreviewCoordinator {
                 reason,
             });
         }
+    }
+
+    fn trace_dispatch_count(&self, editor_session: u64) {
+        acceptance_trace::emit(Event::NativePreviewDispatchCount {
+            editor_session,
+            count: self.intercepted_dispatches,
+        });
     }
 
     fn send_checked(&mut self, command: NativeCommand) -> Result<(), String> {

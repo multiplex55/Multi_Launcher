@@ -213,6 +213,36 @@ fn trace_designer_authoring_control(
     viewport: ViewportClass,
     correlation: Correlation,
 ) {
+    trace_designer_authoring_control_rect(
+        ui,
+        response.rect,
+        response.clicked(),
+        target,
+        role,
+        index,
+        enabled,
+        selected,
+        response.has_focus(),
+        viewport,
+        correlation,
+        None,
+    );
+}
+
+fn trace_designer_authoring_control_rect(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    clicked: bool,
+    target: DesignerAuthoringTarget,
+    role: DesignerAuthoringRole,
+    index: Option<usize>,
+    enabled: bool,
+    selected: bool,
+    focused: bool,
+    viewport: ViewportClass,
+    correlation: Correlation,
+    canvas_scope: Option<acceptance_trace::DesignerCanvasCellScope>,
+) {
     if !acceptance_trace::enabled() {
         return;
     }
@@ -220,7 +250,6 @@ fn trace_designer_authoring_control(
     if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
         return;
     }
-    let rect = response.rect;
     let scale = |coordinate: f32| {
         let scaled = coordinate * pixels_per_point;
         (scaled.is_finite() && scaled >= i32::MIN as f32 && scaled <= i32::MAX as f32)
@@ -259,15 +288,75 @@ fn trace_designer_authoring_control(
         [client_width_px, client_height_px],
         enabled,
         selected,
-        response.clicked(),
+        focused,
+        clicked,
         correlation.session_id,
         correlation.generation,
+        canvas_scope,
     );
 }
 
-fn menu_cell_ids_digest(menu: &MenuDefinition) -> u64 {
+fn trace_designer_canvas_allocation(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    requested_size: egui::Vec2,
+    correlation: Correlation,
+) {
+    if !acceptance_trace::enabled() {
+        return;
+    }
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return;
+    }
+    let rect_pixels = |rect: egui::Rect| {
+        let px = |coordinate: f32| {
+            let coordinate = coordinate * pixels_per_point;
+            (coordinate.is_finite()
+                && coordinate >= i32::MIN as f32
+                && coordinate <= i32::MAX as f32)
+                .then(|| coordinate.round() as i32)
+        };
+        Some([
+            px(rect.left())?,
+            px(rect.top())?,
+            px(rect.right())?,
+            px(rect.bottom())?,
+        ])
+    };
+    let Some(allocated_rect_px) = rect_pixels(response.rect) else {
+        return;
+    };
+    let Some(clip_rect_px) = rect_pixels(ui.clip_rect()) else {
+        return;
+    };
+    let requested_width_px = requested_size.x * pixels_per_point;
+    let requested_height_px = requested_size.y * pixels_per_point;
+    if !requested_width_px.is_finite()
+        || !requested_height_px.is_finite()
+        || requested_width_px < 0.0
+        || requested_height_px < 0.0
+        || requested_width_px > i32::MAX as f32
+        || requested_height_px > i32::MAX as f32
+    {
+        return;
+    }
+    acceptance_trace::emit(Event::DesignerCanvasAllocation {
+        allocated_rect_px,
+        clip_rect_px,
+        requested_size_px: [
+            requested_width_px.round() as i32,
+            requested_height_px.round() as i32,
+        ],
+        session_id: correlation.session_id,
+        generation: correlation.generation,
+    });
+}
+
+pub(super) fn menu_cell_ids_digest(menu: &MenuDefinition) -> u64 {
     static HASH_STATE: OnceLock<RandomState> = OnceLock::new();
     let mut hasher = HASH_STATE.get_or_init(RandomState::new).build_hasher();
+    menu.id.as_str().hash(&mut hasher);
     menu.rings.len().hash(&mut hasher);
     for ring in &menu.rings {
         ring.id.as_str().hash(&mut hasher);
@@ -277,6 +366,13 @@ fn menu_cell_ids_digest(menu: &MenuDefinition) -> u64 {
         }
     }
     hasher.finish()
+}
+
+fn stable_cell_id_digest(cell_id: &str) -> u64 {
+    static HASH_STATE: OnceLock<RandomState> = OnceLock::new();
+    let mut hasher = HASH_STATE.get_or_init(RandomState::new).build_hasher();
+    cell_id.hash(&mut hasher);
+    hasher.finish() & i64::MAX as u64
 }
 
 fn designer_viewport_builder(open: bool, launcher_always_on_top: bool) -> egui::ViewportBuilder {
@@ -921,8 +1017,8 @@ struct DesignerPaneLayout {
 /// Allocate every Designer pane from the actual remaining viewport.  Side
 /// panes yield width before the canvas does, and the final widths always fit
 /// within the caller's bounded rect (including compact 720px windows). Reserve
-/// trailing egui item spacing below the row so its response rect stays inside
-/// the native client at compact heights.
+/// trailing egui item spacing and a small native-client rounding guard below
+/// the row so its response rect stays inside the client at compact heights.
 fn designer_pane_layout(
     available: egui::Vec2,
     trailing_item_spacing: f32,
@@ -935,6 +1031,7 @@ fn designer_pane_layout(
     const MIN_CANVAS: f32 = 140.0;
     const MIN_TREE: f32 = 120.0;
     const MIN_INSPECTOR: f32 = 220.0;
+    const CLIENT_EDGE_ROUNDING_GUARD: f32 = 4.0;
 
     let width = if available.x.is_finite() {
         available.x.clamp(1.0, 10_000.0)
@@ -942,7 +1039,8 @@ fn designer_pane_layout(
         1.0
     };
     let height = if available.y.is_finite() && trailing_item_spacing.is_finite() {
-        (available.y - trailing_item_spacing.max(0.0)).clamp(1.0, 10_000.0)
+        (available.y - trailing_item_spacing.max(0.0) - CLIENT_EDGE_ROUNDING_GUARD)
+            .clamp(1.0, 10_000.0)
     } else {
         1.0
     };
@@ -1651,6 +1749,12 @@ impl RadialEditorState {
             .filter(|pending| pending.kind.is_disposable())
             && let Some(session) = self.session.as_mut()
         {
+            acceptance_trace::emit(Event::DisposableRequestCancelled {
+                request_kind: trace_request_kind(pending.kind),
+                request_id: pending.id.0,
+                session_id: pending.editor_session.0,
+                generation: pending.generation.0,
+            });
             session.cancel_pending_request_exact(pending);
         }
         if let Some(pending) = self
@@ -1669,21 +1773,22 @@ impl RadialEditorState {
             self.stop_native_preview();
         }
         self.maybe_finish_close();
-        let Some(session) = self.session.as_ref() else {
-            acceptance_trace::emit(Event::DesignerClose {
-                state: DesignerCloseState {
-                    open: self.open,
-                    close_prompt: self.close_prompt,
-                    dirty: self.properties_popup_dirty(),
-                    pending_disposable: false,
-                    pending_durable: false,
-                    pending_native_preview: false,
-                },
-            });
-            return;
-        };
-        acceptance_trace::emit(Event::DesignerClose {
-            state: DesignerCloseState {
+        self.trace_close_state();
+    }
+
+    fn trace_close_state(&self) {
+        let state = self.session.as_ref().map_or_else(
+            || DesignerCloseState {
+                session_id: 0,
+                open: self.open,
+                close_prompt: self.close_prompt,
+                dirty: self.properties_popup_dirty(),
+                pending_disposable: false,
+                pending_durable: false,
+                pending_native_preview: false,
+            },
+            |session| DesignerCloseState {
+                session_id: session.editor_session.0,
                 open: self.open,
                 close_prompt: self.close_prompt,
                 dirty: session.is_dirty() || self.properties_popup_dirty(),
@@ -1695,7 +1800,8 @@ impl RadialEditorState {
                     .is_some_and(|pending| !pending.kind.is_disposable()),
                 pending_native_preview: session.pending_native_preview.is_some(),
             },
-        });
+        );
+        acceptance_trace::emit(Event::DesignerClose { state });
     }
 
     fn finish_close(&mut self) {
@@ -2251,7 +2357,9 @@ impl RadialEditorState {
                         // compact viewport sizes.
                         egui::ScrollArea::vertical()
                             .id_source("radial-designer-resources")
-                            .show(ui, |ui| self.resources_ui(ui));
+                            .show(ui, |ui| {
+                                self.resources_ui(ui, trace_viewport_class(viewport_class))
+                            });
                     } else {
                         let correlation = trace_correlation(self.session.as_ref());
                         ui.horizontal(|ui| {
@@ -2305,6 +2413,12 @@ impl RadialEditorState {
                                 true,
                                 false,
                                 trace_viewport_class(viewport_class),
+                                correlation,
+                            );
+                            trace_designer_canvas_allocation(
+                                ui,
+                                &canvas_response.response,
+                                egui::vec2(pane.canvas_width, pane.height),
                                 correlation,
                             );
                             if pane.inspector_width > 0.0 {
@@ -2398,6 +2512,7 @@ impl RadialEditorState {
             self.focus_restore = selection_after;
         }
         self.enqueue_preferences_ready_if_due();
+        self.trace_authoring_geometry(Some(&frame.action_catalog));
         if self.preferences_dirty && !self.preferences_flush_requested {
             ctx.request_repaint_after(Duration::from_millis(300));
         }
@@ -2520,6 +2635,20 @@ impl RadialEditorState {
                 &self.popup_action_filter,
             );
         let action_match_count = filtered_actions.rows().len();
+        let correlation = trace_correlation(self.session.as_ref());
+        if self.popup_action_filter.trim().is_empty() {
+            for (rank, row) in filtered_actions.rows().iter().enumerate() {
+                if let Some(custom_action_index) = row.custom_action_index {
+                    acceptance_trace::emit_designer_action_catalog_rank(
+                        custom_action_index,
+                        rank,
+                        action_match_count,
+                        correlation.session_id,
+                        correlation.generation,
+                    );
+                }
+            }
+        }
         let action_rows = filtered_actions
             .rows()
             .iter()
@@ -2548,17 +2677,53 @@ impl RadialEditorState {
             .show(ctx, |ui| {
                 ui.label("Cell properties");
                 ui.add(egui::TextEdit::singleline(&mut draft.label).hint_text("Label"));
-                enum_combo(
+                let selected_type = [
+                    ("Spacer", 0),
+                    ("Action", 1),
+                    ("Submenu", 2),
+                    ("Dynamic source", 3),
+                    ("Control", 4),
+                ]
+                .iter()
+                .find(|(_, kind)| *kind == draft.content_kind)
+                .map_or("Unknown", |(label, _)| *label);
+                let type_combo = egui::ComboBox::from_label("Type")
+                    .selected_text(selected_type)
+                    .show_ui(ui, |ui| {
+                        for (label, kind) in [
+                            ("Spacer", 0),
+                            ("Action", 1),
+                            ("Submenu", 2),
+                            ("Dynamic source", 3),
+                            ("Control", 4),
+                        ] {
+                            let response =
+                                ui.selectable_value(&mut draft.content_kind, kind, label);
+                            if kind == 1 {
+                                trace_designer_authoring_control(
+                                    ui,
+                                    &response,
+                                    DesignerAuthoringTarget::ActionTypeOption,
+                                    DesignerAuthoringRole::Selectable,
+                                    None,
+                                    true,
+                                    draft.content_kind == kind,
+                                    ViewportClass::Deferred,
+                                    correlation,
+                                );
+                            }
+                        }
+                    });
+                trace_designer_authoring_control(
                     ui,
-                    "Type",
-                    &mut draft.content_kind,
-                    &[
-                        ("Spacer", 0),
-                        ("Action", 1),
-                        ("Submenu", 2),
-                        ("Dynamic source", 3),
-                        ("Control", 4),
-                    ],
+                    &type_combo.response,
+                    DesignerAuthoringTarget::CellType,
+                    DesignerAuthoringRole::ComboBox,
+                    None,
+                    true,
+                    false,
+                    ViewportClass::Deferred,
+                    correlation,
                 );
                 if draft.content_kind == 3 {
                     enum_combo(
@@ -2586,9 +2751,20 @@ impl RadialEditorState {
                     } else {
                         "Choose an action"
                     });
-                    ui.add(
+                    let search_response = ui.add(
                         egui::TextEdit::singleline(&mut self.popup_action_filter)
                             .hint_text("Search actions"),
+                    );
+                    trace_designer_authoring_control(
+                        ui,
+                        &search_response,
+                        DesignerAuthoringTarget::ActionSearch,
+                        DesignerAuthoringRole::TextEdit,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        correlation,
                     );
                     ui.small(format!(
                         "{} matching action(s); showing up to 50",
@@ -2599,14 +2775,26 @@ impl RadialEditorState {
                         .show(ui, |ui| {
                             for row in &action_rows {
                                 let label = row.presentation.label.clone();
-                                if ui
+                                let response = ui
                                     .selectable_label(
                                         draft.action_binding.as_ref() == row.binding.as_ref(),
                                         label,
                                     )
-                                    .on_hover_text(&row.target_command)
-                                    .clicked()
-                                {
+                                    .on_hover_text(&row.target_command);
+                                if let Some(custom_action_index) = row.custom_action_index {
+                                    trace_designer_authoring_control(
+                                        ui,
+                                        &response,
+                                        DesignerAuthoringTarget::ActionRow,
+                                        DesignerAuthoringRole::Selectable,
+                                        Some(custom_action_index),
+                                        row.binding.is_some(),
+                                        draft.action_binding.as_ref() == row.binding.as_ref(),
+                                        ViewportClass::Deferred,
+                                        correlation,
+                                    );
+                                }
+                                if response.clicked() {
                                     match row.assignment() {
                                         Ok(binding) => draft.action_binding = Some(binding),
                                         Err(error) => {
@@ -2653,13 +2841,49 @@ impl RadialEditorState {
                     "Action bindings and advanced appearance options are available in Inspector.",
                 );
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
+                    let response = ui.button("Apply");
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::PopupApply,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        correlation,
+                    );
+                    if response.clicked() {
                         apply = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    let response = ui.button("Cancel");
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::PopupCancel,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        correlation,
+                    );
+                    if response.clicked() {
                         cancel = true;
                     }
-                    if ui.button("Open in Inspector").clicked() {
+                    let response = ui.button("Open in Inspector");
+                    trace_designer_authoring_control(
+                        ui,
+                        &response,
+                        DesignerAuthoringTarget::PopupOpenInspector,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        correlation,
+                    );
+                    if response.clicked() {
                         if draft.differs_from(&cell) {
                             self.properties_handoff_prompt = true;
                         } else {
@@ -2671,16 +2895,52 @@ impl RadialEditorState {
                     ui.separator();
                     ui.label("Apply popup edits before opening Inspector?");
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("Apply and open").clicked() {
+                        let response = ui.button("Apply and open");
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::PopupApplyAndOpen,
+                            DesignerAuthoringRole::Button,
+                            None,
+                            true,
+                            false,
+                            ViewportClass::Deferred,
+                            correlation,
+                        );
+                        if response.clicked() {
                             apply = true;
                             open_inspector_after_apply = true;
                             self.properties_handoff_prompt = false;
                         }
-                        if ui.button("Discard and open").clicked() {
+                        let response = ui.button("Discard and open");
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::PopupDiscardAndOpen,
+                            DesignerAuthoringRole::Button,
+                            None,
+                            true,
+                            false,
+                            ViewportClass::Deferred,
+                            correlation,
+                        );
+                        if response.clicked() {
                             discard_and_open = true;
                             self.properties_handoff_prompt = false;
                         }
-                        if ui.button("Keep editing").clicked() {
+                        let response = ui.button("Keep editing");
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::PopupKeepEditing,
+                            DesignerAuthoringRole::Button,
+                            None,
+                            true,
+                            false,
+                            ViewportClass::Deferred,
+                            correlation,
+                        );
+                        if response.clicked() {
                             self.properties_handoff_prompt = false;
                         }
                     });
@@ -3029,21 +3289,41 @@ impl RadialEditorState {
                 .session
                 .as_ref()
                 .is_some_and(|session| session.pending_request.is_some());
-            if ui
+            let undo = ui
                 .add_enabled(!pending, egui::Button::new("Undo"))
-                .on_hover_text("Undo (Ctrl+Z)")
-                .clicked()
-            {
+                .on_hover_text("Undo (Ctrl+Z)");
+            trace_designer_authoring_control(
+                ui,
+                &undo,
+                DesignerAuthoringTarget::Undo,
+                DesignerAuthoringRole::Button,
+                None,
+                !pending,
+                false,
+                ViewportClass::Deferred,
+                trace_correlation(self.session.as_ref()),
+            );
+            if undo.clicked() {
                 let _ = self
                     .session
                     .as_mut()
                     .is_some_and(RadialAuthoringSession::undo);
             }
-            if ui
+            let redo = ui
                 .add_enabled(!pending, egui::Button::new("Redo"))
-                .on_hover_text("Redo (Ctrl+Shift+Z)")
-                .clicked()
-            {
+                .on_hover_text("Redo (Ctrl+Shift+Z)");
+            trace_designer_authoring_control(
+                ui,
+                &redo,
+                DesignerAuthoringTarget::Redo,
+                DesignerAuthoringRole::Button,
+                None,
+                !pending,
+                false,
+                ViewportClass::Deferred,
+                trace_correlation(self.session.as_ref()),
+            );
+            if redo.clicked() {
                 let _ = self
                     .session
                     .as_mut()
@@ -3062,12 +3342,22 @@ impl RadialEditorState {
             {
                 self.send_commit(CommitDisposition::Apply);
             }
-            if ui
+            let save = ui
                 .add_enabled(!pending && valid, egui::Button::new("Save"))
                 .on_disabled_hover_text("Resolve the inline validation diagnostics before Save")
-                .on_hover_text("Save and close (Ctrl+S)")
-                .clicked()
-            {
+                .on_hover_text("Save and close (Ctrl+S)");
+            trace_designer_authoring_control(
+                ui,
+                &save,
+                DesignerAuthoringTarget::Save,
+                DesignerAuthoringRole::Button,
+                None,
+                !pending && valid,
+                false,
+                ViewportClass::Deferred,
+                trace_correlation(self.session.as_ref()),
+            );
+            if save.clicked() {
                 self.send_commit(CommitDisposition::Save);
             }
             if ui.button("Cancel").clicked() {
@@ -3198,14 +3488,43 @@ impl RadialEditorState {
                 .as_ref()
                 .and_then(|session| session.native_preview_lease.as_ref())
                 .is_some();
-            if !native_active && ui.button("Open desktop preview").clicked() {
-                self.send_native_preview(false);
+            let correlation = trace_correlation(self.session.as_ref());
+            if !native_active {
+                let response = ui.button("Open desktop preview");
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::OpenDesktopPreview,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    true,
+                    false,
+                    ViewportClass::Deferred,
+                    correlation,
+                );
+                if response.clicked() {
+                    self.send_native_preview(false);
+                }
             }
             if native_active && ui.button("Update desktop preview").clicked() {
                 self.send_native_preview(true);
             }
-            if native_active && ui.button("Stop desktop preview").clicked() {
-                self.stop_native_preview();
+            if native_active {
+                let response = ui.button("Stop desktop preview");
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::StopDesktopPreview,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    true,
+                    false,
+                    ViewportClass::Deferred,
+                    correlation,
+                );
+                if response.clicked() {
+                    self.stop_native_preview();
+                }
             }
             if let Some(session) = &self.session {
                 ui.small(if session.pending_native_preview.is_some() {
@@ -3232,7 +3551,7 @@ impl RadialEditorState {
         });
     }
 
-    fn resources_ui(&mut self, ui: &mut egui::Ui) {
+    fn resources_ui(&mut self, ui: &mut egui::Ui, viewport: ViewportClass) {
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -3243,8 +3562,20 @@ impl RadialEditorState {
             if ui.button("User defaults").clicked() {
                 session.select(None);
             }
-            for skin in session.draft.skins.clone() {
-                if ui.button(&skin.name).clicked() {
+            for (skin_index, skin) in session.draft.skins.clone().into_iter().enumerate() {
+                let response = ui.button(&skin.name);
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    DesignerAuthoringTarget::SkinRow,
+                    DesignerAuthoringRole::Button,
+                    Some(skin_index),
+                    true,
+                    session.selection == Some(StableSelection::Skin(skin.id.clone())),
+                    viewport,
+                    trace_correlation(Some(session)),
+                );
+                if response.clicked() {
                     session.select(Some(StableSelection::Skin(skin.id)));
                 }
             }
@@ -3305,7 +3636,7 @@ impl RadialEditorState {
                         .id_source("radial-style-fields")
                         .max_height(240.0)
                         .show(ui, |ui| {
-                            for row in rows {
+                            for (style_index, row) in rows.into_iter().enumerate() {
                                 let input_key = format!("{scope:?}.{}.{}", row.section, row.field);
                                 let kind = skin_editor::control_kind(&row.section, &row.field)
                                     .expect("style schema must have an editor control");
@@ -3357,6 +3688,14 @@ impl RadialEditorState {
                                                 text_input,
                                                 &session.font_families,
                                                 &format!("{}.{}", row.section, row.field),
+                                                (row.section == "effects"
+                                                    && row.field == "glow_enabled")
+                                                    .then_some((
+                                                        DesignerAuthoringTarget::SkinGlowEnabled,
+                                                        viewport,
+                                                        Some(style_index),
+                                                        trace_correlation(Some(session)),
+                                                    )),
                                             ) && let Err(error) = skin_editor::set_override_edit(
                                                 session,
                                                 &scope,
@@ -4012,7 +4351,7 @@ impl RadialEditorState {
             self.ring_proposal = None;
             self.ring_proposal_nonce = None;
         }
-        self.trace_authoring_geometry();
+        self.trace_authoring_geometry(None);
     }
 
     fn install_ring_proposal(&mut self, proposal: menu::RingEditProposal) {
@@ -4023,7 +4362,12 @@ impl RadialEditorState {
         self.preview.retry_preparation();
     }
 
-    fn trace_authoring_geometry(&self) {
+    fn trace_authoring_geometry(
+        &self,
+        action_catalog: Option<
+            &crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
+        >,
+    ) {
         if !acceptance_trace::enabled() {
             return;
         }
@@ -4064,6 +4408,58 @@ impl RadialEditorState {
         });
         let selected_ring = selected_menu
             .and_then(|menu| selected_ring_index.and_then(|index| menu.rings.get(index)));
+        let selected_cell = session
+            .selection
+            .as_ref()
+            .and_then(|selection| match selection {
+                StableSelection::Cell {
+                    menu_id,
+                    ring_id,
+                    cell_id,
+                } => session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| &menu.id == menu_id)
+                    .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                    .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id)),
+                _ => None,
+            });
+        let selected_cell_index = selected_cell.and_then(|cell| {
+            selected_ring.and_then(|ring| {
+                ring.cells
+                    .iter()
+                    .position(|candidate| candidate.id == cell.id)
+            })
+        });
+        let selected_cell_id_digest =
+            selected_cell.map(|cell| stable_cell_id_digest(cell.id.as_str()));
+        let selected_cell_action_reference = selected_cell.and_then(|cell| match &cell.content {
+            CellContent::Action {
+                binding: crate::radial::model::ActionBinding::Persisted { action },
+            } => Some(action.clone()),
+            _ => None,
+        });
+        let (selected_cell_custom_action_index, selected_cell_custom_action_index_known) =
+            selected_cell_action_reference.map_or((None, true), |reference| {
+                let Some(action_catalog) = action_catalog else {
+                    return (None, false);
+                };
+                let catalog = action_catalog.persisted_catalog();
+                let context = crate::universal_actions::ActionResolutionContext::new(
+                    crate::universal_actions::ActionSurface::RadialMenu,
+                    "",
+                );
+                let index = catalog
+                    .resolve(
+                        &reference,
+                        &crate::universal_actions::UniversalActionRegistry,
+                        &context,
+                    )
+                    .ok()
+                    .and_then(|resolved| resolved.target.custom_action_index);
+                (index, true)
+            });
         let requested_slots = selected_menu.zip(selected_ring).map_or(0, |(menu, ring)| {
             self.ring_resize_drafts
                 .get(&(menu.id.clone(), ring.id.clone()))
@@ -4187,8 +4583,13 @@ impl RadialEditorState {
             session_id: session.editor_session.0,
             menu_count: session.draft.menus.len(),
             selected_menu_index,
+            selected_menu_after_action: selected_menu.map(|menu| menu.after_action),
             ring_count: selected_menu.map_or(0, |menu| menu.rings.len()),
             selected_ring_index,
+            selected_cell_index,
+            selected_cell_id_digest,
+            selected_cell_custom_action_index,
+            selected_cell_custom_action_index_known,
             selected_ring_slots: selected_ring.map_or(0, |ring| ring.cells.len()),
             requested_slots,
             selected_ring_populated: selected_ring.map_or(0, |ring| {
@@ -4562,8 +4963,12 @@ impl RadialEditorState {
             .cloned()
         {
             let original = edited.clone();
-            let continuous =
-                menu_behavior_controls(ui, &mut edited, &mut self.preferences.expanded_sections);
+            let continuous = menu_behavior_controls(
+                ui,
+                &mut edited,
+                &mut self.preferences.expanded_sections,
+                trace_correlation(Some(session)),
+            );
             if edited != original || continuous.is_some() {
                 let mut document = (*session.draft).clone();
                 if let Some(menu) = document.menus.iter_mut().find(|menu| menu.id == menu_id) {
@@ -4797,7 +5202,39 @@ impl RadialEditorState {
         else {
             return;
         };
-        ui.label(format!("ID: {}", cell_id));
+        let cell_index = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| menu.id == menu_id)
+            .and_then(|menu| {
+                let mut offset = 0usize;
+                for ring in &menu.rings {
+                    if ring.id == ring_id {
+                        return ring
+                            .cells
+                            .iter()
+                            .position(|candidate| candidate.id == cell_id)
+                            .map(|index| offset.saturating_add(index));
+                    }
+                    offset = offset.saturating_add(ring.cells.len());
+                }
+                None
+            });
+        let id_label = ui.label(format!("ID: {}", cell_id));
+        if let Some(cell_index) = cell_index {
+            trace_designer_authoring_control(
+                ui,
+                &id_label,
+                DesignerAuthoringTarget::InspectorCell,
+                DesignerAuthoringRole::Region,
+                Some(cell_index),
+                true,
+                true,
+                ViewportClass::Deferred,
+                trace_correlation(Some(session)),
+            );
+        }
         if self.placement_draft.as_ref().is_some_and(|draft| {
             draft.menu_id == menu_id && draft.ring_id == ring_id && draft.cell_id == cell_id
         }) {
@@ -5293,13 +5730,26 @@ impl RadialEditorState {
                             self.close_prompt = false;
                             self.cancel();
                         }
-                        if ui.button("Keep editing").clicked() {
+                        let response = ui.button("Keep editing");
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::KeepEditing,
+                            DesignerAuthoringRole::Button,
+                            None,
+                            true,
+                            false,
+                            ViewportClass::Deferred,
+                            correlation,
+                        );
+                        if response.clicked() {
                             self.close_prompt = false;
                             self.close_intent = CloseIntent::None;
                             self.close_stop_attempted = false;
                             if let Some(session) = self.session.as_mut() {
                                 session.clear_close_intent();
                             }
+                            self.trace_close_state();
                         }
                     });
                 });
@@ -5649,6 +6099,12 @@ fn style_value_widget(
     text_input: &mut String,
     font_families: &[String],
     accessible_name: &str,
+    trace: Option<(
+        DesignerAuthoringTarget,
+        ViewportClass,
+        Option<usize>,
+        Correlation,
+    )>,
 ) -> Option<(serde_json::Value, EditPhase)> {
     use skin_editor::StyleControlKind;
     let payload = skin_editor::override_payload(current)
@@ -5661,6 +6117,19 @@ fn style_value_widget(
             response.widget_info(|| {
                 egui::WidgetInfo::selected(egui::WidgetType::Checkbox, value, accessible_name)
             });
+            if let Some((target, viewport, index, correlation)) = trace {
+                trace_designer_authoring_control(
+                    ui,
+                    &response,
+                    target,
+                    DesignerAuthoringRole::Checkbox,
+                    index,
+                    true,
+                    value,
+                    viewport,
+                    correlation,
+                );
+            }
             (response.changed() || response.lost_focus())
                 .then(|| (serde_json::json!(value), widget_edit_phase(&response)))
         }
@@ -5923,6 +6392,7 @@ fn menu_behavior_controls(
     ui: &mut egui::Ui,
     menu: &mut crate::radial::model::MenuDefinition,
     expanded_sections: &mut std::collections::BTreeMap<String, bool>,
+    correlation: Correlation,
 ) -> Option<ContinuousWidgetEdit> {
     let mut continuous = None;
     enum_combo(
@@ -5965,7 +6435,7 @@ fn menu_behavior_controls(
             ("Same center", SubmenuPresentation::SameCenter),
         ],
     );
-    after_action_combo(ui, "Menu after action", &mut menu.after_action);
+    traced_menu_after_action_combo(ui, &mut menu.after_action, correlation);
     let center_response = ui.add(
         egui::DragValue::new(&mut menu.center_radius)
             .prefix("Center radius ")
@@ -6099,17 +6569,54 @@ fn enum_combo<T: Copy + PartialEq>(
         });
 }
 
+const AFTER_ACTION_CHOICES: [(&str, AfterActionPolicy); 4] = [
+    ("Inherit", AfterActionPolicy::Inherit),
+    ("Keep open", AfterActionPolicy::KeepOpen),
+    ("Close current", AfterActionPolicy::CloseCurrentMenu),
+    ("Close tree", AfterActionPolicy::CloseTree),
+];
+
 fn after_action_combo(ui: &mut egui::Ui, label: &str, value: &mut AfterActionPolicy) {
-    enum_combo(
+    enum_combo(ui, label, value, &AFTER_ACTION_CHOICES);
+}
+
+fn traced_menu_after_action_combo(
+    ui: &mut egui::Ui,
+    value: &mut AfterActionPolicy,
+    correlation: Correlation,
+) {
+    let selected = AFTER_ACTION_CHOICES
+        .iter()
+        .find(|(_, choice)| choice == value)
+        .map_or("Unknown", |(label, _)| *label);
+    let response = egui::ComboBox::from_label("Menu after action")
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for (index, (label, choice)) in AFTER_ACTION_CHOICES.iter().copied().enumerate() {
+                let option = ui.selectable_value(value, choice, label);
+                trace_designer_authoring_control(
+                    ui,
+                    &option,
+                    DesignerAuthoringTarget::AfterActionOption,
+                    DesignerAuthoringRole::Selectable,
+                    Some(index),
+                    true,
+                    *value == choice,
+                    ViewportClass::Deferred,
+                    correlation,
+                );
+            }
+        });
+    trace_designer_authoring_control(
         ui,
-        label,
-        value,
-        &[
-            ("Inherit", AfterActionPolicy::Inherit),
-            ("Keep open", AfterActionPolicy::KeepOpen),
-            ("Close current", AfterActionPolicy::CloseCurrentMenu),
-            ("Close tree", AfterActionPolicy::CloseTree),
-        ],
+        &response.response,
+        DesignerAuthoringTarget::MenuAfterAction,
+        DesignerAuthoringRole::ComboBox,
+        None,
+        true,
+        false,
+        ViewportClass::Deferred,
+        correlation,
     );
 }
 
@@ -7224,7 +7731,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_designer_pane_reserves_the_trailing_item_spacing() {
+    fn compact_designer_pane_reserves_trailing_spacing_and_client_rounding_guard() {
         let preferences = crate::settings::RadialDesignerPreferences::default();
         let layout = designer_pane_layout(
             egui::vec2(624.0, 299.0),
@@ -7235,8 +7742,8 @@ mod tests {
             preferences.inspector_width,
         );
 
-        assert_eq!(layout.height, 295.0);
-        assert!(layout.height + 4.0 <= 299.0);
+        assert_eq!(layout.height, 291.0);
+        assert!(layout.height + 8.0 <= 299.0);
     }
 
     #[test]
@@ -8002,6 +8509,7 @@ mod tests {
                     &mut scratch,
                     &[],
                     "text.color",
+                    None,
                 );
                 let _ = style_value_widget(
                     ui,
@@ -8011,6 +8519,7 @@ mod tests {
                     &mut scratch,
                     &[],
                     "text.visible",
+                    None,
                 );
             });
         });

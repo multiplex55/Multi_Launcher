@@ -50,7 +50,11 @@ use std::thread;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
+    time::{Duration, Instant},
 };
+
+const RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE_ENV: &str =
+    "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE";
 
 fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::ViewportBuilder {
     let (w, h) = settings.window_size.unwrap_or((400, 220));
@@ -923,6 +927,8 @@ fn main() -> anyhow::Result<()> {
     let startup_settings_diagnostic = startup_settings.diagnostic;
     multi_launcher::settings::set_settings_path("settings.json");
     let _logging_guard = logging::init(settings.debug_logging, settings.log_file_path());
+    let acceptance_prepare_hold_file =
+        std::env::var_os(RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE_ENV).map(PathBuf::from);
     settings_timer.finish("startup.settings_load");
     if let Some(diagnostic) = startup_recovery.diagnostic.as_ref() {
         tracing::error!(error = %diagnostic, "startup recovery remains pending for retry");
@@ -1393,6 +1399,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         while let Ok(request) = authoring_endpoint.request_rx.try_recv() {
+            hold_acceptance_prepare_request(&request, acceptance_prepare_hold_file.as_deref());
             let request_id = request.id();
             let request_generation = request.generation();
             let editor_session = request.editor_session();
@@ -2896,6 +2903,36 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+fn hold_acceptance_prepare_request(
+    request: &AuthoringRequest,
+    hold_file: Option<&std::path::Path>,
+) {
+    if !matches!(request, AuthoringRequest::PrepareEmbeddedPreview { .. }) {
+        return;
+    }
+    let Some(hold_file) = hold_file.filter(|path| path.is_file()) else {
+        return;
+    };
+
+    use multi_launcher::radial::authoring::{
+        AcceptancePrepareGateState, trace_acceptance_prepare_gate,
+    };
+
+    trace_acceptance_prepare_gate(request, AcceptancePrepareGateState::Held);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while hold_file.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    trace_acceptance_prepare_gate(
+        request,
+        if hold_file.exists() {
+            AcceptancePrepareGateState::TimedOut
+        } else {
+            AcceptancePrepareGateState::Released
+        },
+    );
 }
 
 #[cfg(test)]
