@@ -255,23 +255,29 @@ fn runtime_suppressions_are_nested_and_release_is_idempotent() {
     let mut config = MouseGestureConfig::default();
     config.enabled = true;
     service.update_config(config);
+    assert!(handle.emit(HookEvent::SelectBinding(0)));
 
     let first = service.acquire_runtime_suppression();
     let second = service.acquire_runtime_suppression();
 
     assert!(!service.is_running());
     assert_eq!(handle.install_count(), 1);
-    assert_eq!(handle.uninstall_count(), 1);
+    assert_eq!(handle.uninstall_count(), 0);
+    assert!(!handle.emit(HookEvent::SelectBinding(0)));
     assert!(service.release_runtime_suppression(first));
     assert!(!service.release_runtime_suppression(first));
     assert!(!service.is_running());
     assert_eq!(handle.install_count(), 1);
+    assert!(!handle.emit(HookEvent::SelectBinding(0)));
 
     assert!(service.release_runtime_suppression(second));
     assert!(service.is_running());
-    assert_eq!(handle.install_count(), 2);
+    assert_eq!(handle.install_count(), 1);
+    assert!(handle.emit(HookEvent::SelectBinding(0)));
 
     service.stop();
+    assert_eq!(handle.uninstall_count(), 1);
+    assert!(!handle.emit(HookEvent::SelectBinding(0)));
 }
 
 #[test]
@@ -339,12 +345,16 @@ fn db_update_while_suppressed_waits_for_final_release() {
 
     assert!(!service.is_running());
     assert_eq!(handle.install_count(), 1);
-    assert_eq!(handle.uninstall_count(), 1);
+    assert_eq!(handle.uninstall_count(), 0);
+    assert!(!handle.emit(HookEvent::SelectBinding(0)));
     assert!(service.release_runtime_suppression(token));
     assert!(service.is_running());
-    assert_eq!(handle.install_count(), 2);
+    assert_eq!(handle.install_count(), 1);
+    assert!(handle.emit(HookEvent::SelectBinding(0)));
 
     service.stop();
+    assert_eq!(handle.uninstall_count(), 1);
+    assert!(!handle.emit(HookEvent::SelectBinding(0)));
 }
 
 #[test]

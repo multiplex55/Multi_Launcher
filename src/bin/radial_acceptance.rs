@@ -247,10 +247,10 @@ struct CopiedProfileSummary {
     copied_total_bytes: u64,
     source_settings_sha256: String,
     source_radial_sha256: String,
-    source_actions_sha256: String,
+    source_actions_sha256: Option<String>,
     copied_initial_settings_sha256: String,
     copied_initial_radial_sha256: String,
-    copied_initial_actions_sha256: String,
+    copied_initial_actions_sha256: Option<String>,
     launch_settings_sha256: String,
     launch_radial_sha256: String,
     launch_actions_sha256: String,
@@ -351,10 +351,10 @@ struct CopiedProfileMetadata {
     copied_total_bytes: u64,
     source_settings_sha256: String,
     source_radial_sha256: String,
-    source_actions_sha256: String,
+    source_actions_sha256: Option<String>,
     copied_initial_settings_sha256: String,
     copied_initial_radial_sha256: String,
-    copied_initial_actions_sha256: String,
+    copied_initial_actions_sha256: Option<String>,
     launch_settings_sha256: String,
     launch_radial_sha256: String,
     launch_actions_sha256: String,
@@ -2346,15 +2346,21 @@ fn validate_copied_profile_summary(
         &summary.copied_initial_tree_sha256,
         &summary.source_settings_sha256,
         &summary.source_radial_sha256,
-        &summary.source_actions_sha256,
         &summary.copied_initial_settings_sha256,
         &summary.copied_initial_radial_sha256,
-        &summary.copied_initial_actions_sha256,
         &summary.launch_settings_sha256,
         &summary.launch_radial_sha256,
         &summary.launch_actions_sha256,
     ];
     if hashes.iter().any(|hash| !is_sha256(hash))
+        || summary
+            .source_actions_sha256
+            .as_deref()
+            .is_some_and(|hash| !is_sha256(hash))
+        || summary
+            .copied_initial_actions_sha256
+            .as_deref()
+            .is_some_and(|hash| !is_sha256(hash))
         || summary
             .source_tree_sha256_after
             .as_ref()
@@ -2370,7 +2376,7 @@ fn validate_copied_profile_summary(
             && (summary.launch_settings_sha256 != report.profile.settings_sha256
                 || summary.launch_radial_sha256 != report.profile.radial_sha256
                 || summary.launch_actions_sha256 != report.profile.actions_sha256))
-        || !(3..=copied_profile::MAX_PROFILE_FILES).contains(&summary.copied_file_count)
+        || !(2..=copied_profile::MAX_PROFILE_FILES).contains(&summary.copied_file_count)
         || summary.copied_total_bytes == 0
         || summary.copied_total_bytes > copied_profile::MAX_PROFILE_TOTAL_BYTES
     {
@@ -2838,7 +2844,14 @@ fn prepare_copied_profile(
     };
     let source_settings_sha256 = source_hash("settings.json")?;
     let source_radial_sha256 = source_hash("radial.json")?;
-    let source_actions_sha256 = source_hash("actions.json")?;
+    let source_actions_sha256 = match source_inventory.file_hash("actions.json") {
+        Some(hash) => Some(hash.to_owned()),
+        None => match fs::symlink_metadata(source_inventory.root.join("actions.json")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Ok(_) => return Err("profile root actions.json must be a regular file".into()),
+            Err(_) => return Err("profile root actions.json could not be inspected".into()),
+        },
+    };
     let copied_initial_settings_sha256 = initial_copy
         .file_hash("settings.json")
         .ok_or_else(|| "copied settings.json was not inventoried".to_string())?
@@ -2847,10 +2860,7 @@ fn prepare_copied_profile(
         .file_hash("radial.json")
         .ok_or_else(|| "copied radial.json was not inventoried".to_string())?
         .to_owned();
-    let copied_initial_actions_sha256 = initial_copy
-        .file_hash("actions.json")
-        .ok_or_else(|| "copied actions.json was not inventoried".to_string())?
-        .to_owned();
+    let copied_initial_actions_sha256 = initial_copy.file_hash("actions.json").map(str::to_owned);
     if copied_initial_settings_sha256 != source_settings_sha256
         || copied_initial_radial_sha256 != source_radial_sha256
         || copied_initial_actions_sha256 != source_actions_sha256
@@ -2921,16 +2931,12 @@ fn prepare_copied_profile(
         .map(|menu| menu.name.clone())
         .ok_or_else(|| "copied radial document default menu could not be resolved".to_string())?;
 
-    let mut actions =
-        match multi_launcher::actions::load_actions_typed(copy_root.join("actions.json"))
-            .map_err(|_| "copied actions.json could not be typed-loaded".to_string())?
-        {
-            LoadState::Loaded(actions) => actions,
-            LoadState::Empty => Vec::new(),
-            LoadState::Missing => {
-                return Err("copied actions.json disappeared after inventory".into());
-            }
-        };
+    let startup_actions =
+        multi_launcher::actions::load_startup_actions(copy_root.join("actions.json"));
+    if startup_actions.diagnostic.is_some() {
+        return Err("copied actions.json could not be typed-loaded".into());
+    }
+    let mut actions = startup_actions.actions;
     let target_action_index = actions
         .len()
         .checked_add(ACCEPTANCE_ACTION_COUNT - 1)
@@ -3193,7 +3199,7 @@ fn render_text_report(report: &AcceptanceReport) -> String {
             copied.source_tree_sha256_after
         ));
         contents.push_str(&format!(
-            "Copied profile critical SHA-256: source_settings={}, source_radial={}, source_actions={}, initial_settings={}, initial_radial={}, initial_actions={}, launch_settings={}, launch_radial={}, launch_actions={}\n",
+            "Copied profile critical SHA-256: source_settings={}, source_radial={}, source_actions={:?}, initial_settings={}, initial_radial={}, initial_actions={:?}, launch_settings={}, launch_radial={}, launch_actions={}\n",
             copied.source_settings_sha256,
             copied.source_radial_sha256,
             copied.source_actions_sha256,
@@ -3925,10 +3931,10 @@ mod tests {
             copied_total_bytes: 100,
             source_settings_sha256: source_settings.clone(),
             source_radial_sha256: source_radial.clone(),
-            source_actions_sha256: source_actions.clone(),
+            source_actions_sha256: Some(source_actions.clone()),
             copied_initial_settings_sha256: source_settings,
             copied_initial_radial_sha256: source_radial,
-            copied_initial_actions_sha256: source_actions,
+            copied_initial_actions_sha256: Some(source_actions),
             launch_settings_sha256: launch_settings.clone(),
             launch_radial_sha256: launch_radial.clone(),
             launch_actions_sha256: launch_actions.clone(),
@@ -3952,6 +3958,30 @@ mod tests {
             });
         }
         assert!(copied_status_contract_is_valid(&report));
+
+        let mut absent_actions_summary = summary.clone();
+        absent_actions_summary.source_actions_sha256 = None;
+        absent_actions_summary.copied_initial_actions_sha256 = None;
+        absent_actions_summary.copied_file_count = 2;
+        let serialized_summary = serde_json::to_value(&absent_actions_summary).unwrap();
+        assert!(serialized_summary["source_actions_sha256"].is_null());
+        assert!(serialized_summary["copied_initial_actions_sha256"].is_null());
+        report.copied_profile = Some(absent_actions_summary.clone());
+        assert!(validate_copied_profile_summary(&report, &absent_actions_summary).is_ok());
+        assert!(copied_status_contract_is_valid(&report));
+
+        let mut mismatched_actions_summary = absent_actions_summary.clone();
+        mismatched_actions_summary.source_actions_sha256 = Some("4".repeat(64));
+        report.copied_profile = Some(mismatched_actions_summary);
+        assert!(!copied_status_contract_is_valid(&report));
+
+        let mut malformed_actions_summary = absent_actions_summary.clone();
+        malformed_actions_summary.source_actions_sha256 = Some("malformed".into());
+        malformed_actions_summary.copied_initial_actions_sha256 = Some("malformed".into());
+        report.copied_profile = Some(malformed_actions_summary);
+        assert!(!copied_status_contract_is_valid(&report));
+
+        report.copied_profile = Some(summary.clone());
 
         report.cases[1].status = CaseStatus::Failed;
         report.cases[1].failure_stage = Some(FailureStage::Environment);
@@ -4006,10 +4036,16 @@ mod tests {
         assert!(source_inventory.still_matches_source());
         assert_eq!(metadata.source_settings_sha256, original_settings);
         assert_eq!(metadata.source_radial_sha256, original_radial);
-        assert_eq!(metadata.source_actions_sha256, original_actions);
+        assert_eq!(
+            metadata.source_actions_sha256.as_deref(),
+            Some(original_actions.as_str())
+        );
         assert_eq!(metadata.copied_initial_settings_sha256, original_settings);
         assert_eq!(metadata.copied_initial_radial_sha256, original_radial);
-        assert_eq!(metadata.copied_initial_actions_sha256, original_actions);
+        assert_eq!(
+            metadata.copied_initial_actions_sha256.as_deref(),
+            Some(original_actions.as_str())
+        );
         assert_ne!(
             metadata.launch_settings_sha256,
             metadata.copied_initial_settings_sha256
@@ -4020,7 +4056,7 @@ mod tests {
         );
         assert_ne!(
             metadata.launch_actions_sha256,
-            metadata.copied_initial_actions_sha256
+            metadata.copied_initial_actions_sha256.as_deref().unwrap()
         );
 
         let mut settings = match Settings::load_typed(&copy.path().join("settings.json")).unwrap() {
@@ -4090,14 +4126,107 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn copied_profile_rejects_invalid_typed_settings_and_radial_documents() {
+    fn copied_profile_accepts_missing_and_empty_actions_without_touching_source() {
         let fixture_dir = tempfile::tempdir().unwrap();
         let fixture = deterministic_fixture(
             &fixture_dir.path().join("acceptance.log"),
             MouseGestureMode::Enabled,
         )
         .unwrap();
-        for invalid_name in ["settings.json", "radial.json"] {
+
+        for actions_present in [false, true] {
+            let source = tempfile::tempdir().unwrap();
+            fs::write(source.path().join("settings.json"), &fixture.settings_json).unwrap();
+            fs::write(source.path().join("radial.json"), &fixture.radial_json).unwrap();
+            if actions_present {
+                fs::write(source.path().join("actions.json"), b"").unwrap();
+            }
+            let source_inventory = copied_profile::ProfileInventory::scan(source.path()).unwrap();
+            let expected_actions_sha256 = actions_present.then(|| sha256_bytes(b""));
+            assert_eq!(
+                source_inventory
+                    .file_hash("actions.json")
+                    .map(str::to_owned),
+                expected_actions_sha256
+            );
+
+            let untouched_copy = tempfile::tempdir().unwrap();
+            let initial_copy = source_inventory.copy_to(untouched_copy.path()).unwrap();
+            assert_eq!(initial_copy.tree_sha256, source_inventory.tree_sha256);
+            assert_eq!(initial_copy.file_count, if actions_present { 3 } else { 2 });
+            assert_eq!(
+                initial_copy.file_hash("actions.json").map(str::to_owned),
+                expected_actions_sha256
+            );
+            assert_eq!(
+                untouched_copy.path().join("actions.json").exists(),
+                actions_present
+            );
+
+            let copy = tempfile::tempdir().unwrap();
+            let metadata = prepare_copied_profile(&source_inventory, copy.path()).unwrap();
+            assert_eq!(metadata.source_actions_sha256, expected_actions_sha256);
+            assert_eq!(
+                metadata.copied_initial_actions_sha256,
+                expected_actions_sha256
+            );
+            assert_eq!(
+                metadata.initial_copy_tree_sha256,
+                source_inventory.tree_sha256
+            );
+            assert!(source_inventory.still_matches_source());
+            assert_eq!(source.path().join("actions.json").exists(), actions_present);
+
+            let LoadState::Loaded(actions) =
+                multi_launcher::actions::load_actions_typed(copy.path().join("actions.json"))
+                    .unwrap()
+            else {
+                panic!("copied acceptance action catalog must load as typed actions");
+            };
+            assert_eq!(actions.len(), ACCEPTANCE_ACTION_COUNT);
+            assert!(actions.iter().all(|action| {
+                action
+                    .label
+                    .starts_with("Radial Acceptance Harmless Action ")
+                    && action.action.starts_with("radial_acceptance_inert_")
+                    && action.args.is_none()
+            }));
+            assert_eq!(
+                metadata.target_action_index,
+                actions.len().saturating_sub(1)
+            );
+            validate_copied_profile_after_run(copy.path(), &metadata).unwrap();
+
+            let source_after = copied_profile::ProfileInventory::scan(source.path()).unwrap();
+            assert_eq!(source_after, source_inventory);
+            let summary = metadata.report_summary(
+                &source_inventory,
+                Some(source_after.tree_sha256.clone()),
+                true,
+            );
+            assert_eq!(summary.source_actions_sha256, expected_actions_sha256);
+            assert_eq!(
+                summary.copied_initial_actions_sha256,
+                expected_actions_sha256
+            );
+            let mut report = acceptance_report("native_windows_copied_profile");
+            report.profile.settings_sha256 = metadata.launch_settings_sha256.clone();
+            report.profile.radial_sha256 = metadata.launch_radial_sha256.clone();
+            report.profile.actions_sha256 = metadata.launch_actions_sha256.clone();
+            assert!(validate_copied_profile_summary(&report, &summary).is_ok());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copied_profile_rejects_invalid_typed_settings_radial_and_actions() {
+        let fixture_dir = tempfile::tempdir().unwrap();
+        let fixture = deterministic_fixture(
+            &fixture_dir.path().join("acceptance.log"),
+            MouseGestureMode::Enabled,
+        )
+        .unwrap();
+        for invalid_name in ["settings.json", "radial.json", "actions.json"] {
             let source = tempfile::tempdir().unwrap();
             fs::write(source.path().join("settings.json"), &fixture.settings_json).unwrap();
             fs::write(source.path().join("radial.json"), &fixture.radial_json).unwrap();
