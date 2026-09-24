@@ -3,7 +3,9 @@
 #![cfg(windows)]
 
 mod suite;
-pub(super) use suite::{record_environment_failure, run_suite};
+pub(super) use suite::{
+    CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_suite,
+};
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -34,8 +36,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern,
-    IUIAutomationTogglePattern, IUIAutomationTreeWalker, ToggleState, TreeScope_Descendants,
-    UIA_EditControlTypeId, UIA_NamePropertyId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
+    IUIAutomationTogglePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern, ToggleState,
+    TreeScope_Descendants, UIA_EditControlTypeId, UIA_NamePropertyId, UIA_SelectionItemPatternId,
+    UIA_TogglePatternId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
@@ -1331,11 +1334,20 @@ fn quoted_command_line_argument(value: &std::ffi::OsStr) -> Vec<u16> {
 }
 
 fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
+    const COPY_CONTROLLED_ENV: [&str; 4] = [
+        "ML_NOTES_DIR",
+        "ML_NOTE_TEMPLATES_DIR",
+        "ML_TMP_DIR",
+        "ML_SKIP_CLIPBOARD_SYNC",
+    ];
     let mut entries = std::env::vars_os()
         .filter_map(|(name, value)| {
             let wide_name = name.encode_wide().collect::<Vec<_>>();
             if wide_key_eq_ascii(&wide_name, TRACE_ENV)
                 || wide_key_eq_ascii(&wide_name, PREPARE_HOLD_ENV)
+                || COPY_CONTROLLED_ENV
+                    .iter()
+                    .any(|key| wide_key_eq_ascii(&wide_name, key))
             {
                 None
             } else {
@@ -1351,6 +1363,20 @@ fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
             .as_os_str()
             .encode_wide()
             .collect(),
+    ));
+    for (name, relative) in [
+        ("ML_NOTES_DIR", "notes"),
+        ("ML_NOTE_TEMPLATES_DIR", "note_templates"),
+        ("ML_TMP_DIR", "multi_launcher_tmp"),
+    ] {
+        entries.push((
+            name.encode_utf16().collect(),
+            profile.join(relative).as_os_str().encode_wide().collect(),
+        ));
+    }
+    entries.push((
+        "ML_SKIP_CLIPBOARD_SYNC".encode_utf16().collect(),
+        vec![b'1' as u16],
     ));
     entries.sort_by_cached_key(|(name, _)| {
         name.iter()
@@ -2244,24 +2270,117 @@ impl UiAutomation {
         Ok(None)
     }
 
-    pub fn wait_named(
+    /// Wait for an owned UIA element whose accessible name contains a stable command label.
+    /// Search-result containers may include profile-dependent descriptions or punctuation, so
+    /// callers should match the production action label and then verify the action's outcome.
+    pub fn wait_named_containing(
         &self,
         hwnd: HWND,
         expected_pid: u32,
-        name: &str,
+        name_fragment: &str,
         timeout: Duration,
     ) -> Result<SemanticControl, String> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Some(control) = self.find_named(hwnd, expected_pid, name)? {
+            if let Some(control) = self.find_named_containing(hwnd, expected_pid, name_fragment)? {
                 return Ok(control);
             }
             if Instant::now() >= deadline {
-                return Err(format!(
-                    "UIA control '{}' was not published by process {} before timeout",
-                    bounded_label(name),
-                    expected_pid
-                ));
+                return Err(
+                    "UIA did not publish the expected radial command result before timeout".into(),
+                );
+            }
+            std::thread::sleep(WINDOW_POLL);
+        }
+    }
+
+    fn find_named_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+    ) -> Result<Option<SemanticControl>, String> {
+        let root = unsafe { self.automation.ElementFromHandle(hwnd) }
+            .map_err(|error| format!("query UI Automation root: {error}"))?;
+        let condition = unsafe { self.automation.CreateTrueCondition() }
+            .map_err(|error| format!("create UIA descendant condition: {error}"))?;
+        let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
+            .map_err(|error| format!("find UIA descendants: {error}"))?;
+        let count = unsafe { matches.Length() }
+            .map_err(|error| format!("read UIA descendant count: {error}"))?
+            .min(2_048);
+        let name_fragment = name_fragment.to_lowercase();
+        let mut found: Option<SemanticControl> = None;
+        for index in 0..count {
+            let element = unsafe { matches.GetElement(index) }
+                .map_err(|error| format!("read UIA descendant: {error}"))?;
+            let process_id = unsafe { element.CurrentProcessId() }
+                .map_err(|error| format!("read UIA descendant process: {error}"))?;
+            if process_id != expected_pid as i32 {
+                continue;
+            }
+            let name = unsafe { element.CurrentName() }
+                .map_err(|error| format!("read UIA descendant name: {error}"))?
+                .to_string();
+            if !semantic_name_contains(&name, &name_fragment) {
+                continue;
+            }
+            let bounds = unsafe { element.CurrentBoundingRectangle() }
+                .map_err(|error| format!("read matching UIA bounds: {error}"))?;
+            if bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+                continue;
+            }
+            let enabled = unsafe { element.CurrentIsEnabled() }
+                .map_err(|error| format!("read matching UIA enabled state: {error}"))?
+                .as_bool();
+            let candidate = SemanticControl {
+                element,
+                bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+                process_id: expected_pid,
+                enabled,
+            };
+            if let Some(previous) = found.as_ref() {
+                if previous.bounds != candidate.bounds {
+                    return Err(
+                        "UIA radial command label matched multiple distinct result controls".into(),
+                    );
+                }
+            } else {
+                found = Some(candidate);
+            }
+        }
+        Ok(found)
+    }
+
+    pub fn edit_value_matches(
+        &self,
+        control: &SemanticControl,
+        expected: &str,
+    ) -> Result<bool, String> {
+        let pattern = unsafe {
+            control
+                .element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        }
+        .map_err(|error| format!("read UIA edit value pattern: {error}"))?;
+        let value = unsafe { pattern.CurrentValue() }
+            .map_err(|error| format!("read UIA edit value: {error}"))?;
+        Ok(value.to_string() == expected)
+    }
+
+    pub fn wait_edit_value(
+        &self,
+        control: &SemanticControl,
+        expected: &str,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.edit_value_matches(control, expected)? {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
             }
             std::thread::sleep(WINDOW_POLL);
         }
@@ -2419,6 +2538,10 @@ impl UiAutomation {
         .ok()?;
         unsafe { pattern.CurrentToggleState() }.ok()
     }
+}
+
+fn semantic_name_contains(name: &str, fragment: &str) -> bool {
+    name.to_lowercase().contains(&fragment.to_lowercase())
 }
 
 fn describe_uia_element(element: &IUIAutomationElement) -> String {
@@ -3500,27 +3623,48 @@ pub(super) fn semantic_client_center(
     Ok(point)
 }
 
-pub(super) fn send_text(
+pub(super) fn replace_text(
     child: &NativeChild,
     target: &WindowSnapshot,
     control: &SemanticControl,
     uia: &UiAutomation,
     text: &str,
-) -> Result<usize, String> {
+) -> Result<(usize, usize), String> {
     child.validate_window(target.hwnd)?;
     if control.process_id != child.process_id || !control.enabled {
-        return Err("refused text input for disabled or foreign-process UIA control".into());
+        return Err("refused text replacement for disabled or foreign-process UIA control".into());
     }
     child.focus_window(target)?;
     uia.focus(control)?;
     focus_is_validated(target.hwnd, child.process_id)?;
-    input_modifiers_clear()?;
-    let events = unicode_text_events(text);
-    let expected = events.len();
-    if expected == 0 {
-        return Ok(0);
+
+    let select_all = VIRTUAL_KEY(b'A' as u16);
+    let select_events = [
+        key_input(VK_CONTROL, false),
+        key_input(select_all, false),
+        key_input(select_all, true),
+        key_input(VK_CONTROL, true),
+    ];
+    let selected = send_validated_input(
+        target.hwnd,
+        child.process_id,
+        &select_events,
+        "focused Ctrl+A before query replacement",
+    )?
+    .inserted;
+
+    let text_events = unicode_text_events(text);
+    if text_events.is_empty() {
+        return Ok((selected, 0));
     }
-    send_input_checked(&events, "Unicode text")
+    let typed = send_validated_input(
+        target.hwnd,
+        child.process_id,
+        &text_events,
+        "replacement Unicode text",
+    )?
+    .inserted;
+    Ok((selected, typed))
 }
 
 pub(super) fn send_text_to_focused_window(
@@ -3767,8 +3911,8 @@ mod tests {
         cursor_restore_input_target, format_uia_element_snapshot, fresh_canvas_cell_for_generation,
         latest_authoring_controls_after, normalized_absolute_coordinate, parse_action_catalog_rank,
         parse_authoring_control, parse_geometry_state, pointer_correction_delta,
-        relative_mouse_move_input, semantic_client_center, trace_event_lines,
-        unique_authoring_control,
+        relative_mouse_move_input, semantic_client_center, semantic_name_contains,
+        trace_event_lines, unique_authoring_control,
     };
 
     fn authoring_control() -> AuthoringControlSnapshot {
@@ -4095,6 +4239,19 @@ mod tests {
                 "durable UIA snapshot exposed {private_value:?}: {snapshot}"
             );
         }
+    }
+
+    #[test]
+    fn command_result_name_match_is_case_insensitive_and_label_scoped() {
+        assert!(semantic_name_contains(
+            "Edit radial skins : Radial menu",
+            "Edit radial skins"
+        ));
+        assert!(semantic_name_contains(
+            "Edit RADIAL SKINS",
+            "Edit radial skins"
+        ));
+        assert!(!semantic_name_contains("Radial menu", "Edit radial skins"));
     }
 
     #[test]

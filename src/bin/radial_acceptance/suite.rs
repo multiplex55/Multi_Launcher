@@ -1,6 +1,6 @@
 use super::super::{
     ACCEPTANCE_TARGET_ACTION_INDEX, AcceptanceCaseResult, AcceptanceReport, CASE_IDS, CaseStatus,
-    FailureStage, H6RepeatMode, MAX_PATH_BYTES, MAX_RESULT_BYTES,
+    FailureStage, H6RepeatMode, MAX_PATH_BYTES, MAX_RESULT_BYTES, sha256_bytes,
 };
 use super::*;
 use serde::Serialize;
@@ -59,6 +59,14 @@ struct PersistedMenuGraphExpectation {
     ring_slots: Vec<usize>,
     populated_cells: usize,
     cell_ids_digest: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CopiedAuthoringOptions {
+    pub target_action_index: usize,
+    pub skin_index: usize,
+    pub original_menu_sha256: Vec<String>,
+    pub restore_menu_name: String,
 }
 
 #[derive(Clone, Debug)]
@@ -474,8 +482,26 @@ pub fn run_suite(
 
     if let (Some(automation), Some(designer)) = (uia.as_ref(), designer_window.as_ref()) {
         run_designer_focus_case(report, &mut child, automation, designer, trace_path, output);
-        run_designer_pointer_case(report, &mut child, automation, designer, trace_path, output);
-        run_tab_case(report, &mut child, automation, designer, output, trace_path);
+        run_designer_pointer_case(
+            report,
+            &mut child,
+            automation,
+            designer,
+            trace_path,
+            output,
+            expected("D1"),
+            false,
+        );
+        run_tab_case(
+            report,
+            &mut child,
+            automation,
+            designer,
+            output,
+            trace_path,
+            DESIGNER_STARTER_NAME,
+            false,
+        );
         run_skins_command_case(report, &mut child, automation, designer, trace_path, output);
         run_designer_close_case(report, &mut child, designer, output, trace_path);
         match run_designer_entry(&mut child, automation, &anchor, trace_path) {
@@ -489,6 +515,7 @@ pub fn run_suite(
                 entry.session_id,
                 output,
                 trace_path,
+                None,
             ),
             Err(failure) => {
                 append_blocked_authoring_cases(report, &failure, Some(&child), output, trace_path)
@@ -522,6 +549,264 @@ pub fn run_suite(
         report.cases.len()
     );
     Some(anchor)
+}
+
+pub fn run_copied_profile_suite(
+    executable: &str,
+    profile: &Path,
+    output: &Path,
+    trace_path: &Path,
+    cursor_restore: Option<POINT>,
+    _desktop: &InputDesktopAttachment,
+    report: &mut AcceptanceReport,
+    runner_log: &mut File,
+    copied: CopiedAuthoringOptions,
+) -> Option<FocusAnchor> {
+    let mut child = None;
+    let mut anchor = None;
+    if let Err(error) = preflight_acceptance_hotkey() {
+        let _ = writeln!(
+            runner_log,
+            "copied-profile hotkey preflight failed: {error}"
+        );
+    } else {
+        let stdout_path = profile.join("child.stdout.log");
+        let stderr_path = profile.join("child.stderr.log");
+        match NativeChild::launch(
+            Path::new(executable),
+            profile,
+            trace_path,
+            &stdout_path,
+            &stderr_path,
+        ) {
+            Ok(mut launched) => {
+                report.environment.child_process_id = Some(launched.process_id());
+                report.environment.child_started_unix_ms = launched
+                    .started()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_millis());
+                let created_anchor = FocusAnchor::create();
+                match created_anchor {
+                    Ok(created_anchor) => {
+                        anchor = Some(created_anchor);
+                        let anchor_ref = anchor.as_ref().expect("anchor was just created");
+                        run_tap_case(
+                            report,
+                            "H0",
+                            &mut launched,
+                            anchor_ref,
+                            trace_path,
+                            output,
+                            expected("H0"),
+                            true,
+                            false,
+                            1,
+                        );
+                        run_tap_case(
+                            report,
+                            "H1",
+                            &mut launched,
+                            anchor_ref,
+                            trace_path,
+                            output,
+                            expected("H1"),
+                            false,
+                            true,
+                            1,
+                        );
+                        run_other_focus_case(report, &mut launched, anchor_ref, trace_path, output);
+
+                        match UiAutomation::new() {
+                            Ok(automation) => match run_designer_entry(
+                                &mut launched,
+                                &automation,
+                                anchor_ref,
+                                trace_path,
+                            ) {
+                                Ok(entry) => {
+                                    append_case(
+                                        report,
+                                        "D0",
+                                        expected("D0"),
+                                        started_now(),
+                                        Ok("one child-owned Designer HWND is ready for copied-profile native input".into()),
+                                        None,
+                                        output,
+                                        trace_path,
+                                    );
+                                    run_failure_artifact_case(
+                                        report, &launched, output, trace_path,
+                                    );
+                                    run_designer_focus_case(
+                                        report,
+                                        &mut launched,
+                                        &automation,
+                                        &entry.window,
+                                        trace_path,
+                                        output,
+                                    );
+                                    run_designer_pointer_case(
+                                        report,
+                                        &mut launched,
+                                        &automation,
+                                        &entry.window,
+                                        trace_path,
+                                        output,
+                                        "the copied Designer exercises checked Tree pointer transitions; CP_D2 separately selects Menus",
+                                        true,
+                                    );
+                                    run_tab_case(
+                                        report,
+                                        &mut launched,
+                                        &automation,
+                                        &entry.window,
+                                        output,
+                                        trace_path,
+                                        &copied.restore_menu_name,
+                                        true,
+                                    );
+                                    run_skins_command_case(
+                                        report,
+                                        &mut launched,
+                                        &automation,
+                                        &entry.window,
+                                        trace_path,
+                                        output,
+                                    );
+                                    run_designer_close_case(
+                                        report,
+                                        &mut launched,
+                                        &entry.window,
+                                        output,
+                                        trace_path,
+                                    );
+                                    match run_designer_entry(
+                                        &mut launched,
+                                        &automation,
+                                        anchor_ref,
+                                        trace_path,
+                                    ) {
+                                        Ok(authoring_entry) => run_authoring_geometry_cases(
+                                            report,
+                                            &mut launched,
+                                            &automation,
+                                            anchor_ref,
+                                            profile,
+                                            &authoring_entry.window,
+                                            authoring_entry.session_id,
+                                            output,
+                                            trace_path,
+                                            Some(&copied),
+                                        ),
+                                        Err(failure) => append_blocked_authoring_cases(
+                                            report,
+                                            &failure,
+                                            Some(&launched),
+                                            output,
+                                            trace_path,
+                                        ),
+                                    }
+                                }
+                                Err(failure) => {
+                                    append_case(
+                                        report,
+                                        "D0",
+                                        expected("D0"),
+                                        started_now(),
+                                        Err(failure),
+                                        Some(&launched),
+                                        output,
+                                        trace_path,
+                                    );
+                                }
+                            },
+                            Err(error) => append_case(
+                                report,
+                                "D0",
+                                expected("D0"),
+                                started_now(),
+                                Err(CaseFailure::new(FailureStage::Environment, error)),
+                                Some(&launched),
+                                output,
+                                trace_path,
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        let _ =
+                            writeln!(runner_log, "copied-profile anchor creation failed: {error}");
+                    }
+                }
+                restore_cursor_before_shutdown(cursor_restore, runner_log);
+                stop_child(&mut launched, report, runner_log, output, trace_path);
+                child = Some(launched);
+            }
+            Err(error) => {
+                report.environment.child_process_id = error.process_id;
+                report.environment.child_started_unix_ms = error.started.and_then(|started| {
+                    started
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_millis())
+                });
+                let _ = writeln!(
+                    runner_log,
+                    "copied-profile candidate startup failed: {error}"
+                );
+            }
+        }
+    }
+    drop(child);
+    let renamed = [
+        ("R1", "CP_R1"),
+        ("H0", "CP_H0"),
+        ("H1", "CP_H1"),
+        ("H2", "CP_H2"),
+        ("H3", "CP_H3"),
+        ("D0", "CP_D0"),
+        ("D1", "CP_D1"),
+        ("D2", "CP_D2"),
+        ("D4", "CP_D4"),
+        ("D5", "CP_D5"),
+        ("A0", "CP_A0"),
+        ("A1", "CP_A1"),
+        ("G0", "CP_G0"),
+        ("A2", "CP_A2"),
+        ("A3", "CP_A3"),
+        ("A4", "CP_A4"),
+        ("A5", "CP_A5"),
+        ("A6", "CP_A6"),
+        ("A7", "CP_A7"),
+        ("A8", "CP_A8"),
+        ("D3", "CP_D3"),
+        ("D6", "CP_D6"),
+        ("D7", "CP_D7"),
+    ];
+    for case in &mut report.cases {
+        if let Some((_, copied_id)) = renamed.iter().find(|(old, _)| case.id == *old) {
+            case.id = (*copied_id).to_string();
+        }
+    }
+    for id in super::super::COPIED_CASE_IDS {
+        if matches!(
+            id,
+            "CP_PREFLIGHT" | "CP_SOURCE_INTEGRITY" | "R0" | "R2" | "CLEANUP"
+        ) || report.cases.iter().any(|case| case.id == id)
+        {
+            continue;
+        }
+        append_case_without_artifacts(
+            report,
+            id,
+            Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "copied-profile native case was not reached because an earlier boundary failed"
+                    .into(),
+            )),
+        );
+    }
+    anchor
 }
 
 pub fn record_environment_failure(
@@ -2704,11 +2989,13 @@ fn run_designer_pointer_case(
     designer: &WindowSnapshot,
     trace_path: &Path,
     output: &Path,
+    case_expected: &str,
+    exercise_tree_round_trip: bool,
 ) {
     let started = Instant::now();
     let result = (|| {
         save_uia_snapshot("D1", "designer", uia, designer.hwnd, output);
-        let before = wait_for_designer_semantic_target(
+        let mut before = wait_for_designer_semantic_target(
             trace_path,
             DesignerSemanticTarget::Tree,
             UIA_TIMEOUT,
@@ -2720,6 +3007,35 @@ fn run_designer_pointer_case(
                 "production Designer did not publish its Tree semantic target".into(),
             )
         })?;
+        let mut tree_round_trip = false;
+        if before.selected && exercise_tree_round_trip {
+            let deselect_cursor = trace_lines(trace_path).len();
+            click_designer_client_bounds(child, designer, before.bounds, trace_path)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+            let deselect_events =
+                wait_trace(trace_path, deselect_cursor, TRACE_TIMEOUT, |events| {
+                    checked_designer_toggle_transition(
+                        events,
+                        DesignerSemanticTarget::Tree,
+                        before,
+                        false,
+                    )
+                    .is_some()
+                });
+            before = checked_designer_toggle_transition(
+                &deselect_events,
+                DesignerSemanticTarget::Tree,
+                before,
+                false,
+            )
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::DesignerFrameworkInput,
+                    "checked CP_D1 pointer input did not clear the selected Tree through a same-session production widget transition".into(),
+                )
+            })?;
+            tree_round_trip = true;
+        }
         if before.selected {
             return Err(CaseFailure::new(
                 FailureStage::DesignerMutation,
@@ -2731,38 +3047,23 @@ fn run_designer_pointer_case(
             click_designer_client_bounds(child, designer, before.bounds, trace_path)
                 .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
         let events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
-            has_trace(events, "designer_pointer", &["pointer_down=true"])
-                && has_trace(events, "designer_pointer", &["pointer_up=true"])
-                && has_trace(events, "designer_body", &["state=Enabled"])
-                && has_trace(
-                    events,
-                    "designer_widget",
-                    &["category=Tree", "response=Accepted"],
-                )
-                && events.iter().any(|line| {
-                    parse_designer_semantic_target(line, DesignerSemanticTarget::Tree)
-                        .is_some_and(|state| state.selected)
-                })
+            checked_designer_toggle_transition(events, DesignerSemanticTarget::Tree, before, true)
+                .is_some()
         });
-        if !has_trace(&events, "designer_pointer", &["pointer_down=true"])
-            || !has_trace(&events, "designer_pointer", &["pointer_up=true"])
-            || !has_trace(&events, "designer_body", &["state=Enabled"])
-            || !has_trace(
-                &events,
-                "designer_widget",
-                &["category=Tree", "response=Accepted"],
-            )
-            || !events.iter().any(|line| {
-                parse_designer_semantic_target(line, DesignerSemanticTarget::Tree)
-                    .is_some_and(|state| state.selected != before.selected)
-            })
+        if checked_designer_toggle_transition(&events, DesignerSemanticTarget::Tree, before, true)
+            .is_none()
         {
             return Err(CaseFailure::new(
                 FailureStage::DesignerFrameworkInput,
                 format!(
-                    "native click did not reach the production Designer pointer/body/Tree accepted boundaries; click proof=[{}]",
+                    "native click did not reach the same-session production Designer pointer/body/Tree accepted boundaries; click proof=[{}]",
                     click_evidence.describe()
                 ),
+            ));
+        }
+        if exercise_tree_round_trip {
+            return Ok(format!(
+                "evidence:v1; tree_round_trip={tree_round_trip}; checked_pointer=true; tree_selected=true"
             ));
         }
         Ok(format!(
@@ -2775,7 +3076,7 @@ fn run_designer_pointer_case(
     append_case(
         report,
         "D1",
-        expected("D1"),
+        case_expected,
         started,
         result,
         Some(child),
@@ -2791,10 +3092,58 @@ fn run_tab_case(
     designer: &WindowSnapshot,
     output: &Path,
     trace_path: &Path,
+    restore_menu_name: &str,
+    select_menus_first: bool,
 ) {
     let started = Instant::now();
     let result = (|| {
         save_uia_snapshot("D2", "designer", uia, designer.hwnd, output);
+        let mut click_proofs = Vec::new();
+        let mut menus_click_count = 0usize;
+        if select_menus_first {
+            let menus = wait_for_designer_semantic_target(
+                trace_path,
+                DesignerSemanticTarget::Menus,
+                UIA_TIMEOUT,
+                |_| true,
+            )
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::DesignerNativeTarget,
+                    "production Designer did not publish its Menus semantic target".into(),
+                )
+            })?;
+            let cursor = trace_lines(trace_path).len();
+            let click = click_designer_client_bounds(child, designer, menus.bounds, trace_path)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+            click_proofs.push(format!("Menus=[{}]", click.describe()));
+            menus_click_count = 1;
+            let events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+                checked_designer_toggle_transition(
+                    events,
+                    DesignerSemanticTarget::Menus,
+                    menus,
+                    true,
+                )
+                .is_some()
+            });
+            if checked_designer_toggle_transition(
+                &events,
+                DesignerSemanticTarget::Menus,
+                menus,
+                true,
+            )
+            .is_none()
+            {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerFrameworkInput,
+                    format!(
+                        "checked native click did not select Menus in the same Designer session and generation; proof=[{}]",
+                        click.describe()
+                    ),
+                ));
+            }
+        }
         let tree = wait_for_designer_semantic_target(
             trace_path,
             DesignerSemanticTarget::Tree,
@@ -2807,7 +3156,6 @@ fn run_tab_case(
                 "production Designer did not publish its Tree semantic target".into(),
             )
         })?;
-        let mut click_proofs = Vec::new();
         if !tree.selected {
             let click = click_designer_client_bounds(child, designer, tree.bounds, trace_path)
                 .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
@@ -2979,7 +3327,7 @@ fn run_tab_case(
             ],
         );
         if !model_edit_proved {
-            let restored = replace_focused_designer_text(child, designer, DESIGNER_STARTER_NAME);
+            let restored = replace_focused_designer_text(child, designer, restore_menu_name);
             return Err(CaseFailure::new(
                 FailureStage::DesignerMutation,
                 format!(
@@ -2989,9 +3337,8 @@ fn run_tab_case(
         }
 
         let restore_cursor = trace_lines(trace_path).len();
-        let restore_input =
-            replace_focused_designer_text(child, designer, DESIGNER_STARTER_NAME)
-                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let restore_input = replace_focused_designer_text(child, designer, restore_menu_name)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         let restored = wait_trace(trace_path, restore_cursor, TRACE_TIMEOUT, |events| {
             has_trace(
                 events,
@@ -3041,9 +3388,16 @@ fn run_tab_case(
             ));
         };
         let _ = (menu_name, next_state, uia_limitation, click_proofs);
-        Ok(format!(
-            "evidence:v1; text_edit=restored; tab_focus=menu_combo; unsaved=false; tab_events={count}; unicode_events={probe_input_count:?}"
-        ))
+        let evidence = if select_menus_first {
+            format!(
+                "evidence:v1; menus_selected=true; menus_clicks={menus_click_count}; text_edit=restored; tab_focus=menu_combo; unsaved=false; tab_events={count}; unicode_events={probe_input_count:?}"
+            )
+        } else {
+            format!(
+                "evidence:v1; text_edit=restored; tab_focus=menu_combo; unsaved=false; tab_events={count}; unicode_events={probe_input_count:?}"
+            )
+        };
+        Ok(evidence)
     })();
     append_case(
         report,
@@ -3096,20 +3450,71 @@ fn run_skins_command_case(
                     "ROOT did not publish its semantic Edit query control in UIA".into(),
                 )
             })?;
-        let typed = send_text(child, &root, &edit, &uia, "radial skins")
+        let (selected_all, typed) = replace_text(child, &root, &edit, &uia, "radial skins")
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        if !uia
+            .wait_edit_value(&edit, "radial skins", Duration::from_secs(2))
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerEntry, error))?
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerEntry,
+                "ROOT did not publish the checked replacement query in its UIA edit value".into(),
+            ));
+        }
         save_uia_snapshot("D4", "root-after-type", uia, root.hwnd, output);
         let result_control = uia
-            .wait_named(
+            .wait_named_containing(
                 root.hwnd,
                 child.process_id(),
-                "Edit radial skins : Radial menu",
+                "Edit radial skins",
                 UIA_TIMEOUT,
             )
             .map_err(|error| CaseFailure::new(FailureStage::DesignerEntry, error))?;
         let semantic_cursor = trace_lines(trace_path).len();
         let click = click_semantic_control(child, &root, &result_control, trace_path)
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let action_events = wait_trace(trace_path, semantic_cursor, TRACE_TIMEOUT, |events| {
+            has_trace(events, "radial_action", &["stage=Activated", "skins=true"])
+                && has_trace(events, "radial_action", &["stage=Parsed", "skins=true"])
+                && has_trace(events, "radial_action", &["stage=Dispatched", "skins=true"])
+                && has_trace(
+                    events,
+                    "radial_action",
+                    &[
+                        "stage=EditorModeApplied",
+                        "skins=true",
+                        "editor_open=Some(true)",
+                        "skins_selected=Some(true)",
+                    ],
+                )
+        });
+        let radial_action_dispatched = has_trace(
+            &action_events,
+            "radial_action",
+            &["stage=Dispatched", "skins=true"],
+        );
+        if !radial_action_dispatched {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                "checked command-result click did not produce the production radial Skins dispatch trace".into(),
+            ));
+        }
+        let radial_skins_applied = has_trace(
+            &action_events,
+            "radial_action",
+            &[
+                "stage=EditorModeApplied",
+                "skins=true",
+                "editor_open=Some(true)",
+                "skins_selected=Some(true)",
+            ],
+        );
+        if !radial_skins_applied {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                "production radial Skins dispatch did not publish the typed Designer mode transition".into(),
+            ));
+        }
         let same = wait_until(Duration::from_secs(4), || {
             find_child_window(child, WindowRole::Designer)
                 .is_some_and(|window| window.hwnd == designer.hwnd)
@@ -3157,7 +3562,7 @@ fn run_skins_command_case(
             ));
         }
         Ok(format!(
-            "typed radial skins using {typed} checked Unicode events, found the exact command at {:?}, and activated it with a checked native pointer click=[{}]; Skins semantic target became selected on the same queryable Designer HWND={}",
+            "replaced the prior ROOT query with {typed} checked Unicode events after {selected_all} checked Ctrl+A events; UIA confirmed the replacement query, the radial skins command label was published at {:?}, and a checked native pointer click=[{}] selected Skins on the same queryable Designer HWND={}",
             result_control.bounds,
             click.describe(),
             hwnd_id(designer.hwnd)
@@ -3508,6 +3913,7 @@ fn run_authoring_geometry_cases(
     session_id: u64,
     output: &Path,
     trace_path: &Path,
+    copied: Option<&CopiedAuthoringOptions>,
 ) {
     let mut authored_menu_graph = None;
     let mut overflow_root_graph = None;
@@ -3996,135 +4402,148 @@ fn run_authoring_geometry_cases(
         ))
     });
 
-    append_authoring_case(report, child, output, trace_path, "G1", || {
-        let evidence = run_populated_shrink_resolution(child, designer, trace_path, session_id)
+    if copied.is_none() {
+        append_authoring_case(report, child, output, trace_path, "G1", || {
+            let evidence = run_populated_shrink_resolution(child, designer, trace_path, session_id)
+                .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+            let root = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+                !state.proposal_active
+                    && state.selected_menu_index == Some(0)
+                    && state.selected_ring_index == Some(0)
+                    && state.ring_count == 2
+                    && state.selected_ring_slots == 8
+                    && state.menu_populated == 9
+            })
             .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        let root = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
-            !state.proposal_active
-                && state.selected_menu_index == Some(0)
-                && state.selected_ring_index == Some(0)
-                && state.ring_count == 2
-                && state.selected_ring_slots == 8
-                && state.menu_populated == 9
-        })
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        let (_, selector_click) = click_authoring_target(
-            child,
-            designer,
-            trace_path,
-            session_id,
-            AuthoringControlTarget::RingSelector,
-            None,
-            AuthoringControlRole::ComboBox,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
-        let ring_one = wait_for_authoring_control(
-            trace_path,
-            session_id,
-            AuthoringControlTarget::RingOption,
-            Some(1),
-            AuthoringControlRole::Selectable,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
-        if ring_one.selected {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerMutation,
-                "G1 selected the new overflow ring before its exact slot count was checked".into(),
-            ));
-        }
-        let ring_one_click =
-            click_designer_client_bounds(child, designer, ring_one.bounds, trace_path).map_err(
-                |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
-            )?;
-        let overflow = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
-            !state.proposal_active
-                && state.selected_menu_index == Some(0)
-                && state.selected_ring_index == Some(1)
-                && state.ring_count == 2
-                && state.selected_ring_slots == 1
-                && state.menu_populated == 9
-        })
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        if overflow.draft_cell_ids_digest != root.draft_cell_ids_digest {
-            return Err(CaseFailure::new(
+            let (_, selector_click) = click_authoring_target(
+                child,
+                designer,
+                trace_path,
+                session_id,
+                AuthoringControlTarget::RingSelector,
+                None,
+                AuthoringControlRole::ComboBox,
+            )
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+            let ring_one = wait_for_authoring_control(
+                trace_path,
+                session_id,
+                AuthoringControlTarget::RingOption,
+                Some(1),
+                AuthoringControlRole::Selectable,
+                UIA_TIMEOUT,
+            )
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+            if ring_one.selected {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerMutation,
+                    "G1 selected the new overflow ring before its exact slot count was checked"
+                        .into(),
+                ));
+            }
+            let ring_one_click =
+                click_designer_client_bounds(child, designer, ring_one.bounds, trace_path)
+                    .map_err(|error| {
+                        authoring_case_failure(FailureStage::DesignerNativeTarget, error)
+                    })?;
+            let overflow =
+                wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+                    !state.proposal_active
+                        && state.selected_menu_index == Some(0)
+                        && state.selected_ring_index == Some(1)
+                        && state.ring_count == 2
+                        && state.selected_ring_slots == 1
+                        && state.menu_populated == 9
+                })
+                .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+            if overflow.draft_cell_ids_digest != root.draft_cell_ids_digest {
+                return Err(CaseFailure::new(
                 FailureStage::DesignerMutation,
                 "selecting the G1 overflow ring changed the complete root menu/ring/cell ID graph"
                     .into(),
             ));
-        }
-        let (_, selector_reopen) = click_authoring_target(
-            child,
-            designer,
-            trace_path,
-            session_id,
-            AuthoringControlTarget::RingSelector,
-            None,
-            AuthoringControlRole::ComboBox,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
-        let ring_zero = wait_for_authoring_control(
-            trace_path,
-            session_id,
-            AuthoringControlTarget::RingOption,
-            Some(0),
-            AuthoringControlRole::Selectable,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
-        let ring_zero_click =
-            click_designer_client_bounds(child, designer, ring_zero.bounds, trace_path).map_err(
-                |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
-            )?;
-        let restored = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
-            !state.proposal_active
-                && state.selected_menu_index == Some(0)
-                && state.selected_ring_index == Some(0)
-                && state.ring_count == 2
-                && state.selected_ring_slots == 8
-                && state.menu_populated == 9
-        })
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        if restored.draft_cell_ids_digest != overflow.draft_cell_ids_digest {
-            return Err(CaseFailure::new(
+            }
+            let (_, selector_reopen) = click_authoring_target(
+                child,
+                designer,
+                trace_path,
+                session_id,
+                AuthoringControlTarget::RingSelector,
+                None,
+                AuthoringControlRole::ComboBox,
+            )
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+            let ring_zero = wait_for_authoring_control(
+                trace_path,
+                session_id,
+                AuthoringControlTarget::RingOption,
+                Some(0),
+                AuthoringControlRole::Selectable,
+                UIA_TIMEOUT,
+            )
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+            let ring_zero_click =
+                click_designer_client_bounds(child, designer, ring_zero.bounds, trace_path)
+                    .map_err(|error| {
+                        authoring_case_failure(FailureStage::DesignerNativeTarget, error)
+                    })?;
+            let restored =
+                wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
+                    !state.proposal_active
+                        && state.selected_menu_index == Some(0)
+                        && state.selected_ring_index == Some(0)
+                        && state.ring_count == 2
+                        && state.selected_ring_slots == 8
+                        && state.menu_populated == 9
+                })
+                .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+            if restored.draft_cell_ids_digest != overflow.draft_cell_ids_digest {
+                return Err(CaseFailure::new(
                 FailureStage::DesignerMutation,
                 "returning to the G1 root ring changed the complete root menu/ring/cell ID graph"
                     .into(),
             ));
-        }
-        overflow_root_graph = Some(PersistedMenuGraphExpectation {
-            menu_index: 0,
-            ring_slots: vec![8, 1],
-            populated_cells: 9,
-            cell_ids_digest: restored.draft_cell_ids_digest,
+            }
+            overflow_root_graph = Some(PersistedMenuGraphExpectation {
+                menu_index: 0,
+                ring_slots: vec![8, 1],
+                populated_cells: 9,
+                cell_ids_digest: restored.draft_cell_ids_digest,
+            });
+            let _ = (
+                evidence,
+                selector_click,
+                ring_one_click,
+                ring_zero_click,
+                selector_reopen,
+                overflow,
+            );
+            Ok(format!(
+                "evidence:v1; overflow_root=[8,1]/9; stable_ids={}; root_ring_slots={}; populated_cells={}",
+                restored.draft_cell_ids_digest == root.draft_cell_ids_digest,
+                root.selected_ring_slots,
+                root.menu_populated
+            ))
         });
-        let _ = (
-            evidence,
-            selector_click,
-            ring_one_click,
-            ring_zero_click,
-            selector_reopen,
-            overflow,
-        );
-        Ok(format!(
-            "evidence:v1; overflow_root=[8,1]/9; stable_ids={}; root_ring_slots={}; populated_cells={}",
-            restored.draft_cell_ids_digest == root.draft_cell_ids_digest,
-            root.selected_ring_slots,
-            root.menu_populated
-        ))
-    });
 
-    append_authoring_case(report, child, output, trace_path, "G2", || {
-        let compact = run_compact_geometry_case(child, designer, trace_path, session_id)
+        append_authoring_case(report, child, output, trace_path, "G2", || {
+            let compact = run_compact_geometry_case(child, designer, trace_path, session_id)
+                .map_err(|error| {
+                    authoring_case_failure(FailureStage::DesignerPresentation, error)
+                })?;
+            let working_viewport = restore_authoring_viewport(
+                child, designer, trace_path, session_id,
+            )
             .map_err(|error| authoring_case_failure(FailureStage::DesignerPresentation, error))?;
-        let working_viewport = restore_authoring_viewport(child, designer, trace_path, session_id)
-            .map_err(|error| authoring_case_failure(FailureStage::DesignerPresentation, error))?;
-        Ok(format!(
-            "{compact}; {working_viewport}; retaining the authored A0/G0/A2 menu and G1 overflow-root draft for the A3-A6 Save/reopen workflow"
-        ))
-    });
+            Ok(format!(
+                "{compact}; {working_viewport}; retaining the authored A0/G0/A2 menu and G1 overflow-root draft for the A3-A6 Save/reopen workflow"
+            ))
+        });
+    }
 
-    let post_g2_observation = record_post_g2_root_snapshot(report, child, output, trace_path);
+    let post_g2_observation = copied
+        .is_none()
+        .then(|| record_post_g2_root_snapshot(report, child, output, trace_path));
     let side_effect_baseline = match capture_action_side_effect_baseline(profile, trace_path) {
         Ok(baseline) => baseline,
         Err(error) => {
@@ -4143,10 +4562,11 @@ fn run_authoring_geometry_cases(
             return;
         }
     };
-    let entry_evidence = format!(
-        "post-G2 ROOT snapshot={post_g2_observation}; same Designer session {session_id} and authored geometry remain open for A3-A6"
+    let entry_evidence = post_g2_observation.map_or_else(
+        || format!("copied-profile derived menu geometry remains open in Designer session {session_id}"),
+        |observation| format!("post-G2 ROOT snapshot={observation}; same Designer session {session_id} and authored geometry remain open for A3-A6"),
     );
-    let Some(entry) = run_radial_action_authoring_cases(
+    let Some((entry, saved_glow)) = run_radial_action_authoring_cases(
         report,
         child,
         uia,
@@ -4156,11 +4576,14 @@ fn run_authoring_geometry_cases(
         trace_path,
         profile,
         session_id,
-        ACCEPTANCE_TARGET_ACTION_INDEX,
+        copied.map_or(ACCEPTANCE_TARGET_ACTION_INDEX, |options| {
+            options.target_action_index
+        }),
         &entry_evidence,
         authored_menu_graph,
         overflow_root_graph,
         &side_effect_baseline,
+        copied,
     ) else {
         append_blocked_lifecycle_cases(report, output, trace_path);
         return;
@@ -4175,6 +4598,8 @@ fn run_authoring_geometry_cases(
         trace_path,
         profile,
         &side_effect_baseline,
+        saved_glow,
+        copied.map_or(0, |options| options.skin_index),
     );
 }
 
@@ -4193,12 +4618,14 @@ fn run_radial_action_authoring_cases(
     authored_menu_graph: Option<PersistedMenuGraphExpectation>,
     overflow_root_graph: Option<PersistedMenuGraphExpectation>,
     side_effect_baseline: &ActionSideEffectBaseline,
-) -> Option<DesignerEntry> {
+    copied: Option<&CopiedAuthoringOptions>,
+) -> Option<(DesignerEntry, bool)> {
     let mut selected_canvas_cell_index = None;
     let mut selected_cell_slot_index = None;
     let mut authored_cell_identity = None;
     let mut action_mutation_generation = None;
     let mut style_mutation_generation = None;
+    let mut style_glow_after_edit = None;
     append_authoring_case(report, child, output, trace_path, "A3", || {
         let expected_graph = authored_menu_graph.as_ref().ok_or_else(|| {
             CaseFailure::new(
@@ -4571,6 +4998,7 @@ fn run_radial_action_authoring_cases(
     });
 
     append_authoring_case(report, child, output, trace_path, "A5", || {
+        let skin_index = copied.map_or(0, |options| options.skin_index);
         let skins = wait_for_designer_semantic_target_in_session(
             trace_path,
             DesignerSemanticTarget::Skins,
@@ -4610,7 +5038,7 @@ fn run_radial_action_authoring_cases(
             trace_path,
             session_id,
             AuthoringControlTarget::SkinRow,
-            Some(0),
+            Some(skin_index),
             AuthoringControlRole::Button,
             UIA_TIMEOUT,
         )
@@ -4628,7 +5056,7 @@ fn run_radial_action_authoring_cases(
             trace_path,
             session_id,
             AuthoringControlTarget::SkinRow,
-            Some(0),
+            Some(skin_index),
             AuthoringControlRole::Button,
             true,
             TRACE_TIMEOUT,
@@ -4642,12 +5070,8 @@ fn run_radial_action_authoring_cases(
             UIA_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
-        if !glow.selected {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerMutation,
-                "deterministic Carbon skin glow fixture was not enabled before the edit".into(),
-            ));
-        }
+        let glow_before = glow.selected;
+        let glow_after = !glow_before;
         let before = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |_| true)
             .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
         let preview_cursor = trace_lines(trace_path).len();
@@ -4663,7 +5087,7 @@ fn run_radial_action_authoring_cases(
             AuthoringControlTarget::SkinGlowEnabled,
             glow.index,
             AuthoringControlRole::Checkbox,
-            false,
+            glow_after,
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
@@ -4758,6 +5182,7 @@ fn run_radial_action_authoring_cases(
             )
         })?;
         style_mutation_generation = Some(after.generation);
+        style_glow_after_edit = Some(glow_after);
         let _ = (
             selected_skins,
             mode_click,
@@ -4769,7 +5194,9 @@ fn run_radial_action_authoring_cases(
             rendered_preview,
         );
         Ok(format!(
-            "evidence:v1; glow=true->false; generation={}->{}; preview_reply=accepted; preview_request={}; preview_generation={}; preview_rendered=true; render_session={session_id}",
+            "evidence:v1; glow={}->{}; generation={}->{}; preview_reply=accepted; preview_request={}; preview_generation={}; preview_rendered=true; render_session={session_id}",
+            glow_before,
+            glow_after,
             before.generation,
             after.generation,
             preview_request.request_id,
@@ -4843,10 +5270,10 @@ fn run_radial_action_authoring_cases(
                 "A6 has no captured A0/G0/A2 menu graph to save".into(),
             )
         })?;
-        let root_graph = overflow_root_graph.as_ref().ok_or_else(|| {
+        let saved_glow = style_glow_after_edit.ok_or_else(|| {
             CaseFailure::new(
                 FailureStage::DesignerMutation,
-                "A6 has no captured G1 overflow-root graph to save".into(),
+                "A6 has no captured skin style value to persist".into(),
             )
         })?;
         let before = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
@@ -5129,9 +5556,12 @@ fn run_radial_action_authoring_cases(
         let persisted = verify_saved_authoring_fixture(
             profile,
             expected_graph,
-            root_graph,
+            overflow_root_graph.as_ref(),
             cell_slot_index,
             target_action_index,
+            copied.map_or(0, |options| options.skin_index),
+            saved_glow,
+            copied.map(|options| options.original_menu_sha256.as_slice()),
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
         let reopened = run_designer_entry(child, uia, anchor, trace_path)?;
@@ -5308,75 +5738,86 @@ fn run_radial_action_authoring_cases(
                     && state.selected_cell_custom_action_index == Some(target_action_index)
             })
             .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        let root_row = wait_for_authoring_control(
-            trace_path,
-            reopened.session_id,
-            AuthoringControlTarget::MenuRow,
-            Some(root_graph.menu_index),
-            AuthoringControlRole::Selectable,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
-        if !root_row.selected {
-            click_designer_client_bounds(child, &reopened.window, root_row.bounds, trace_path)
-                .map_err(|error| {
-                    authoring_case_failure(FailureStage::DesignerNativeTarget, error)
-                })?;
-        }
-        let reloaded_root_menu =
-            wait_for_geometry_state(trace_path, reopened.session_id, TRACE_TIMEOUT, |state| {
-                state.selected_menu_index == Some(root_graph.menu_index)
-                    && state.ring_count == root_graph.ring_slots.len()
-                    && state.draft_cell_ids_digest == root_graph.cell_ids_digest
-            })
-            .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        let root_ring_click = if reloaded_root_menu.selected_ring_index == Some(0) {
-            None
-        } else {
-            click_authoring_target(
-                child,
-                &reopened.window,
+        let root_summary = if let Some(root_graph) = overflow_root_graph.as_ref() {
+            let root_row = wait_for_authoring_control(
                 trace_path,
                 reopened.session_id,
-                AuthoringControlTarget::RingSelector,
-                None,
-                AuthoringControlRole::ComboBox,
+                AuthoringControlTarget::MenuRow,
+                Some(root_graph.menu_index),
+                AuthoringControlRole::Selectable,
+                UIA_TIMEOUT,
             )
-            .and_then(|_| {
-                wait_for_authoring_control(
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+            if !root_row.selected {
+                click_designer_client_bounds(child, &reopened.window, root_row.bounds, trace_path)
+                    .map_err(|error| {
+                        authoring_case_failure(FailureStage::DesignerNativeTarget, error)
+                    })?;
+            }
+            let reloaded_root_menu =
+                wait_for_geometry_state(trace_path, reopened.session_id, TRACE_TIMEOUT, |state| {
+                    state.selected_menu_index == Some(root_graph.menu_index)
+                        && state.ring_count == root_graph.ring_slots.len()
+                        && state.draft_cell_ids_digest == root_graph.cell_ids_digest
+                })
+                .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+            let root_ring_click = if reloaded_root_menu.selected_ring_index == Some(0) {
+                None
+            } else {
+                click_authoring_target(
+                    child,
+                    &reopened.window,
                     trace_path,
                     reopened.session_id,
-                    AuthoringControlTarget::RingOption,
-                    Some(0),
-                    AuthoringControlRole::Selectable,
-                    UIA_TIMEOUT,
+                    AuthoringControlTarget::RingSelector,
+                    None,
+                    AuthoringControlRole::ComboBox,
                 )
-            })
-            .and_then(|ring| {
-                click_designer_client_bounds(child, &reopened.window, ring.bounds, trace_path)
-            })
-            .map(Some)
-            .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?
+                .and_then(|_| {
+                    wait_for_authoring_control(
+                        trace_path,
+                        reopened.session_id,
+                        AuthoringControlTarget::RingOption,
+                        Some(0),
+                        AuthoringControlRole::Selectable,
+                        UIA_TIMEOUT,
+                    )
+                })
+                .and_then(|ring| {
+                    click_designer_client_bounds(child, &reopened.window, ring.bounds, trace_path)
+                })
+                .map(Some)
+                .map_err(|error| {
+                    authoring_case_failure(FailureStage::DesignerNativeTarget, error)
+                })?
+            };
+            let reloaded_root =
+                wait_for_geometry_state(trace_path, reopened.session_id, TRACE_TIMEOUT, |state| {
+                    state.selected_menu_index == Some(root_graph.menu_index)
+                        && state.ring_count == root_graph.ring_slots.len()
+                        && state.selected_ring_index == Some(0)
+                        && state.selected_ring_slots == 8
+                        && state.menu_populated == root_graph.populated_cells
+                        && state.draft_cell_ids_digest == root_graph.cell_ids_digest
+                })
+                .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+            if root_graph.ring_slots != [8, 1] || root_graph.populated_cells != 9 {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerMutation,
+                    format!(
+                        "G1 expected persisted root graph is not [8,1] / 9 populated: rings={:?}, populated={}",
+                        root_graph.ring_slots, root_graph.populated_cells
+                    ),
+                ));
+            }
+            let _ = (root_row, root_ring_click, reloaded_root);
+            format!(
+                "overflow_root=[8,1]/9; root_ids={}",
+                root_graph.cell_ids_digest
+            )
+        } else {
+            "original_menus_preserved=true".to_string()
         };
-        let reloaded_root =
-            wait_for_geometry_state(trace_path, reopened.session_id, TRACE_TIMEOUT, |state| {
-                state.selected_menu_index == Some(root_graph.menu_index)
-                    && state.ring_count == root_graph.ring_slots.len()
-                    && state.selected_ring_index == Some(0)
-                    && state.selected_ring_slots == 8
-                    && state.menu_populated == root_graph.populated_cells
-                    && state.draft_cell_ids_digest == root_graph.cell_ids_digest
-            })
-            .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        if root_graph.ring_slots != [8, 1] || root_graph.populated_cells != 9 {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerMutation,
-                format!(
-                    "G1 expected persisted root graph is not [8,1] / 9 populated: rings={:?}, populated={}",
-                    root_graph.ring_slots, root_graph.populated_cells
-                ),
-            ));
-        }
         verify_no_leaf_side_effects(profile, trace_path, &side_effect_baseline)
             .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
         reopened_entry = Some(reopened);
@@ -5390,13 +5831,11 @@ fn run_radial_action_authoring_cases(
             save_click,
             row,
             reloaded_cell_click,
-            root_row,
-            root_ring_click,
-            reloaded_root,
         );
+        let saved_glow = saved_glow;
         Ok(format!(
-            "evidence:v1; typed_radial=decoded; authored_geometry=[8,10]; action_binding=true; cell_index={cell_index}; cell_identity={cell_identity}; action_index={target_action_index}; after_action=close_tree; overflow_root=[8,1]/9; root_ids={}; glow=false; reopened=true; save_generation={}; reopened_generation={}",
-            root_graph.cell_ids_digest, saved_draft.generation, reloaded_cell.generation
+            "evidence:v1; typed_radial=decoded; authored_geometry=[8,10]; action_binding=true; cell_index={cell_index}; cell_identity={cell_identity}; action_index={target_action_index}; after_action=close_tree; {root_summary}; glow={saved_glow}; reopened=true; save_generation={}; reopened_generation={}",
+            saved_draft.generation, reloaded_cell.generation
         ))
     })();
     append_case(
@@ -5409,15 +5848,18 @@ fn run_radial_action_authoring_cases(
         output,
         trace_path,
     );
-    reopened_entry
+    reopened_entry.map(|entry| (entry, style_glow_after_edit.unwrap_or(false)))
 }
 
 fn verify_saved_authoring_fixture(
     profile: &Path,
     authored_graph: &PersistedMenuGraphExpectation,
-    root_graph: &PersistedMenuGraphExpectation,
+    root_graph: Option<&PersistedMenuGraphExpectation>,
     cell_index: usize,
     target_action_index: usize,
+    skin_index: usize,
+    expected_glow: bool,
+    original_menu_sha256: Option<&[String]>,
 ) -> Result<String, String> {
     let radial_bytes = fs::read(profile.join("radial.json"))
         .map_err(|error| format!("read saved radial.json: {error}"))?;
@@ -5485,45 +5927,71 @@ fn verify_saved_authoring_fixture(
     }
     validate_menu_identity_graph(menu, "authored")?;
 
-    let root_menu = decoded
-        .document
-        .menus
-        .get(root_graph.menu_index)
-        .ok_or_else(|| "saved document omitted the G1 starter root menu".to_string())?;
-    let root_slots = root_menu
-        .rings
-        .iter()
-        .map(|ring| ring.cells.len())
-        .collect::<Vec<_>>();
-    if root_slots != root_graph.ring_slots
-        || count_menu_populated_cells(root_menu) != root_graph.populated_cells
-    {
-        return Err(format!(
-            "saved G1 root graph did not preserve overflow resolution: expected rings {:?} / {} populated cells, observed {root_slots:?} / {}",
-            root_graph.ring_slots,
-            root_graph.populated_cells,
-            count_menu_populated_cells(root_menu)
-        ));
-    }
-    validate_menu_identity_graph(root_menu, "G1 root")?;
-    if !matches!(
-        decoded
+    let root_summary = if let Some(root_graph) = root_graph {
+        let root_menu = decoded
             .document
-            .skins
-            .first()
-            .map(|skin| &skin.style.values.effects.glow_enabled),
-        Some(multi_launcher::radial::model::Override::Value(false))
+            .menus
+            .get(root_graph.menu_index)
+            .ok_or_else(|| "saved document omitted the G1 root menu".to_string())?;
+        let root_slots = root_menu
+            .rings
+            .iter()
+            .map(|ring| ring.cells.len())
+            .collect::<Vec<_>>();
+        if root_slots != root_graph.ring_slots
+            || count_menu_populated_cells(root_menu) != root_graph.populated_cells
+        {
+            return Err(format!(
+                "saved G1 root graph did not preserve overflow resolution: expected rings {:?} / {} populated cells, observed {root_slots:?} / {}",
+                root_graph.ring_slots,
+                root_graph.populated_cells,
+                count_menu_populated_cells(root_menu)
+            ));
+        }
+        validate_menu_identity_graph(root_menu, "G1 root")?;
+        format!(
+            "G1 root index {} retained resolved geometry {:?}, {} populated cells and stable menu/ring/cell IDs",
+            root_graph.menu_index,
+            root_slots,
+            count_menu_populated_cells(root_menu)
+        )
+    } else if let Some(expected_menus) = original_menu_sha256 {
+        if decoded.document.menus.len() != expected_menus.len() + 1 {
+            return Err("saved copied profile did not preserve its original menu count plus one derived menu".into());
+        }
+        for (index, expected) in expected_menus.iter().enumerate() {
+            let menu = decoded.document.menus.get(index).ok_or_else(|| {
+                "saved copied profile omitted an original radial menu".to_string()
+            })?;
+            let actual = serde_json::to_vec(menu)
+                .map(|bytes| sha256_bytes(&bytes))
+                .map_err(|_| "saved original radial menu could not be hashed".to_string())?;
+            if &actual != expected {
+                return Err("authoring changed an original copied radial menu definition".into());
+            }
+        }
+        "original_menus_preserved=true".to_string()
+    } else {
+        return Err(
+            "saved authoring had neither a fixture root graph nor copied menu baseline".into(),
+        );
+    };
+    let skin = decoded
+        .document
+        .skins
+        .get(skin_index)
+        .ok_or_else(|| "saved document omitted the edited skin".to_string())?;
+    if !matches!(
+        &skin.style.values.effects.glow_enabled,
+        multi_launcher::radial::model::Override::Value(value) if *value == expected_glow
     ) {
-        return Err("saved Carbon skin did not retain the harmless glow=false style edit".into());
+        return Err("saved skin did not retain the requested harmless glow edit".into());
     }
     Ok(format!(
-        "typed radial.json decoded the same A0/G0/A2 authored menu index {} with geometry {:?}, {} populated action cells including exact fixture action index {target_action_index}, stable authored ID graph, and persisted Close tree policy; G1 starter root index {} retained resolved geometry {:?}, {} populated cells and stable menu/ring/cell IDs; Carbon glow=false persisted",
+        "typed radial.json decoded the authored menu index {} with geometry {:?}, {} populated action cells including action source index {target_action_index}, stable authored ID graph, and persisted Close tree policy; {root_summary}; selected skin glow={expected_glow} persisted",
         authored_graph.menu_index,
         authored_slots,
         count_menu_populated_cells(menu),
-        root_graph.menu_index,
-        root_slots,
-        count_menu_populated_cells(root_menu)
     ))
 }
 
@@ -5722,6 +6190,8 @@ fn run_designer_lifecycle_cases(
     trace_path: &Path,
     profile: &Path,
     side_effect_baseline: &ActionSideEffectBaseline,
+    saved_glow: bool,
+    skin_index: usize,
 ) {
     append_case(
         report,
@@ -5753,6 +6223,30 @@ fn run_designer_lifecycle_cases(
                 |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
             )?;
         }
+        let skin = wait_for_authoring_control(
+            trace_path,
+            entry.session_id,
+            AuthoringControlTarget::SkinRow,
+            Some(skin_index),
+            AuthoringControlRole::Button,
+            UIA_TIMEOUT,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        if !skin.selected {
+            click_designer_client_bounds(child, &entry.window, skin.bounds, trace_path).map_err(
+                |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
+            )?;
+        }
+        wait_for_authoring_control_selected(
+            trace_path,
+            entry.session_id,
+            AuthoringControlTarget::SkinRow,
+            Some(skin_index),
+            AuthoringControlRole::Button,
+            true,
+            TRACE_TIMEOUT,
+        )
+        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
         let glow = wait_for_unique_authoring_control_any_index(
             trace_path,
             entry.session_id,
@@ -5761,10 +6255,10 @@ fn run_designer_lifecycle_cases(
             UIA_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
-        if glow.selected {
+        if glow.selected != saved_glow {
             return Err(CaseFailure::new(
                 FailureStage::DesignerMutation,
-                "saved glow=false value was not present before Undo".into(),
+                "saved copied skin glow value was not present before Undo".into(),
             ));
         }
         let before_edit =
@@ -5785,7 +6279,7 @@ fn run_designer_lifecycle_cases(
             AuthoringControlTarget::SkinGlowEnabled,
             glow.index,
             AuthoringControlRole::Checkbox,
-            true,
+            !saved_glow,
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
@@ -5810,7 +6304,7 @@ fn run_designer_lifecycle_cases(
             AuthoringControlTarget::SkinGlowEnabled,
             glow.index,
             AuthoringControlRole::Checkbox,
-            false,
+            saved_glow,
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
@@ -5835,14 +6329,14 @@ fn run_designer_lifecycle_cases(
             AuthoringControlTarget::SkinGlowEnabled,
             glow.index,
             AuthoringControlRole::Checkbox,
-            true,
+            !saved_glow,
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
         let _ = (edit_click, undo.1, redo.1, restored, reapplied);
         Ok(format!(
-            "evidence:v1; undo_restored=false; redo_restored=true; edit_generation={}; undo_generation={}; redo_generation={}",
-            edited.generation, undone.generation, redone.generation
+            "evidence:v1; undo_restored={saved_glow}; redo_restored={}; edit_generation={}; undo_generation={}; redo_generation={}",
+            !saved_glow, edited.generation, undone.generation, redone.generation
         ))
     });
 
@@ -6044,10 +6538,10 @@ fn run_designer_lifecycle_cases(
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        if !glow.selected {
+        if glow.selected != !saved_glow {
             return Err(CaseFailure::new(
                 FailureStage::DesignerMutation,
-                "Keep Editing did not retain the unsaved glow=true draft from Redo".into(),
+                "Keep Editing did not retain the unsaved style draft from Redo".into(),
             ));
         }
         let after_keep =
@@ -6071,8 +6565,8 @@ fn run_designer_lifecycle_cases(
         }
         let _ = (prompt, keep, keep_click, keep_clicked, glow, discard);
         Ok(format!(
-            "evidence:v1; keep_editing=retained_dirty; draft_glow=true; generation={}; discard=saved_json_unchanged; same_designer=true",
-            after_keep.generation
+            "evidence:v1; keep_editing=retained_dirty; draft_glow={}; generation={}; discard=saved_json_unchanged; same_designer=true",
+            !saved_glow, after_keep.generation
         ))
     });
 
@@ -6269,6 +6763,17 @@ fn run_root_hidden_designer_case(
             format!(
                 "ROOT hide trace completed without production HookObserved down/up despite independent runner proof; events={:?}",
                 hidden_events
+            ),
+        ));
+    }
+    if !wait_root_visibility(child, false, ROOT_TIMEOUT) {
+        let current = child.refresh_root().ok();
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!(
+                "production F11 hide trace completed, but ROOT did not settle outside the virtual screen within {:?}; latest bounds={:?}",
+                ROOT_TIMEOUT,
+                current.as_ref().map(|root| root.bounds)
             ),
         ));
     }
@@ -6526,6 +7031,17 @@ fn run_root_hidden_designer_case(
         )
         .map(|()| "acknowledged".to_string())
         .unwrap_or_else(|error| format!("failed: {error}"));
+    if !wait_root_visibility(child, true, ROOT_TIMEOUT) {
+        let current = child.refresh_root().ok();
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!(
+                "production F11 show trace completed, but ROOT did not settle on-screen within {:?}; latest bounds={:?}",
+                ROOT_TIMEOUT,
+                current.as_ref().map(|root| root.bounds)
+            ),
+        ));
+    }
     let shown = child
         .refresh_root()
         .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
@@ -6841,7 +7357,7 @@ fn run_disposable_close_case(
             "D7 disposal closed ROOT or terminated the child process".into(),
         ));
     }
-    let closed_observation = verify_designer_stays_closed_for(child, Duration::from_secs(1))
+    let _closed_observation = verify_designer_stays_closed_for(child, Duration::from_secs(1))
         .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?;
     if hold.path.exists() {
         return Err(CaseFailure::new(
@@ -6864,7 +7380,7 @@ fn run_disposable_close_case(
         click,
     );
     Ok(format!(
-        "evidence:v1; pending_request=true; request_id={}; generation={}; cancelled_before_prompt=true; late_reply=rejected; stop=accepted; stop_request={}; no_reopen=1s ({closed_observation}); marker_clean=true; child_alive=true",
+        "evidence:v1; pending_request=true; request_id={}; generation={}; cancelled_before_prompt=true; late_reply=rejected; stop=accepted; stop_request={}; no_reopen=1s; marker_clean=true; child_alive=true",
         request.request_id, changed.generation, stop.identity.request_id
     ))
 }
@@ -8080,11 +8596,16 @@ fn run_failure_artifact_case(
             Some(FailureStage::Environment),
         ),
     };
+    let report_case_id = if report.mode == "native_windows_copied_profile" {
+        "CP_R1"
+    } else {
+        "R1"
+    };
     report.push_case(AcceptanceCaseResult {
-        id: "R1".into(),
+        id: report_case_id.into(),
         status,
         elapsed_ms: elapsed_ms(started),
-        expected: bounded_text(expected("R1"), MAX_RESULT_BYTES),
+        expected: bounded_text(expected(report_case_id), MAX_RESULT_BYTES),
         observed,
         failure_stage,
         artifacts: artifacts
@@ -8652,7 +9173,7 @@ fn expected(id: &str) -> &'static str {
         "R0" => {
             "valid bounded JSON and text reports identify source, profile, hashes, elapsed time, and evidence"
         }
-        "R1" => {
+        "R1" | "CP_R1" => {
             "controlled harness failure writes bounded privacy-safe trace and owned screenshot evidence"
         }
         "R2" => "child process, HWNDs, temp profile, and native input state are cleaned up",
@@ -9077,6 +9598,7 @@ struct DesignerSemanticTargetState {
     selected: bool,
     focused: bool,
     session_id: u64,
+    generation: u64,
 }
 
 fn parse_designer_semantic_target(
@@ -9114,7 +9636,50 @@ fn parse_designer_semantic_target(
         selected: field("selected")?.parse().ok()?,
         focused: field("focused")?.parse().ok()?,
         session_id: field("session_id")?.parse().ok()?,
+        generation: field("generation")?.parse().ok()?,
     })
+}
+
+fn checked_designer_toggle_transition(
+    events: &[String],
+    target: DesignerSemanticTarget,
+    baseline: DesignerSemanticTargetState,
+    selected: bool,
+) -> Option<DesignerSemanticTargetState> {
+    let current = |line: &str, event: &str| {
+        line.contains(&format!("trace_event=\"{event}\""))
+            && trace_field_value(line, "session_id").and_then(|value| value.parse::<u64>().ok())
+                == Some(baseline.session_id)
+            && trace_field_value(line, "generation").and_then(|value| value.parse::<u64>().ok())
+                == Some(baseline.generation)
+    };
+    let has_pointer_edge = |edge: &str| {
+        events
+            .iter()
+            .any(|line| current(line, "designer_pointer") && line.contains(edge))
+    };
+    let body_accepted = events.iter().any(|line| {
+        current(line, "designer_body") && trace_field_value(line, "state") == Some("Enabled")
+    });
+    let widget_name = format!("{target:?}");
+    let widget_accepted = events.iter().any(|line| {
+        current(line, "designer_widget")
+            && trace_field_value(line, "category") == Some(widget_name.as_str())
+            && trace_field_value(line, "response") == Some("Accepted")
+    });
+    let state = events
+        .iter()
+        .filter_map(|line| parse_designer_semantic_target(line, target))
+        .find(|state| {
+            state.session_id == baseline.session_id
+                && state.generation == baseline.generation
+                && state.selected == selected
+        })?;
+    (has_pointer_edge("pointer_down=true")
+        && has_pointer_edge("pointer_up=true")
+        && body_accepted
+        && widget_accepted)
+        .then_some(state)
 }
 
 fn wait_for_designer_semantic_target(
@@ -9725,9 +10290,12 @@ mod tests {
         let saved = verify_saved_authoring_fixture(
             profile.path(),
             &authored,
-            &root,
+            Some(&root),
             0,
             ACCEPTANCE_TARGET_ACTION_INDEX,
+            0,
+            false,
+            None,
         )
         .expect("typed saved graph should retain both authored menus");
         assert!(saved.contains("[8, 10]"));
@@ -9739,9 +10307,12 @@ mod tests {
         let error = verify_saved_authoring_fixture(
             profile.path(),
             &authored,
-            &wrong_root,
+            Some(&wrong_root),
             0,
             ACCEPTANCE_TARGET_ACTION_INDEX,
+            0,
+            false,
+            None,
         )
         .expect_err("the oracle must reject a lost/changed overflow ring");
         assert!(error.contains("G1 root graph"));
@@ -9827,13 +10398,69 @@ mod tests {
             latest_designer_semantic_target(&lines, DesignerSemanticTarget::Menus, Some(2))
                 .expect("reopened Designer Menus target should be present");
         assert_eq!(reopened.session_id, 2);
+        assert_eq!(reopened.generation, 2);
         assert!(!reopened.selected);
 
         let earlier =
             latest_designer_semantic_target(&lines, DesignerSemanticTarget::Menus, Some(1))
                 .expect("earlier Designer Menus target should remain addressable");
         assert_eq!(earlier.session_id, 1);
+        assert_eq!(earlier.generation, 7);
         assert!(earlier.selected);
+    }
+
+    #[test]
+    fn checked_designer_toggle_requires_same_session_generation_and_widget_acceptance() {
+        let make_events = |widget_session: u64, target_generation: u64| {
+            vec![
+                "trace_event=\"designer_pointer\" pointer_down=true session_id=4 generation=7"
+                    .to_string(),
+                "trace_event=\"designer_pointer\" pointer_up=true session_id=4 generation=7"
+                    .to_string(),
+                "trace_event=\"designer_body\" state=Enabled session_id=4 generation=7".to_string(),
+                format!(
+                    "trace_event=\"designer_widget\" category=Tree response=Accepted session_id={widget_session} generation=7"
+                ),
+                format!(
+                    "trace_event=\"designer_semantic_target\" target=Tree role=\"SelectableLabel\" viewport=Deferred left_px=10 top_px=20 right_px=40 bottom_px=44 selected=false focused=false session_id=4 generation={target_generation}"
+                ),
+            ]
+        };
+        let baseline = DesignerSemanticTargetState {
+            bounds: [10, 20, 40, 44],
+            selected: true,
+            focused: false,
+            session_id: 4,
+            generation: 7,
+        };
+
+        assert!(
+            checked_designer_toggle_transition(
+                &make_events(4, 7),
+                DesignerSemanticTarget::Tree,
+                baseline,
+                false,
+            )
+            .is_some()
+        );
+        assert!(
+            checked_designer_toggle_transition(
+                &make_events(5, 7),
+                DesignerSemanticTarget::Tree,
+                baseline,
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            checked_designer_toggle_transition(
+                &make_events(4, 8),
+                DesignerSemanticTarget::Tree,
+                baseline,
+                false,
+            )
+            .is_none()
+        );
     }
 
     #[test]
