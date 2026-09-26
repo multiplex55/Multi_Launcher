@@ -445,6 +445,7 @@ pub(super) struct RadialRootState {
     resolved_grid_layout: bool,
     visible: bool,
     restore: bool,
+    visibility_revision: u64,
     focus_query: bool,
     move_cursor_end: bool,
     last_results_valid: bool,
@@ -456,14 +457,21 @@ pub(super) struct RadialRootState {
 
 impl RadialRootState {
     pub(super) fn capture(app: &LauncherApp) -> Self {
+        let (visibility_revision, (visible, restore)) = app.visibility_revision.inspect(|| {
+            (
+                app.visible_flag.load(Ordering::SeqCst),
+                app.restore_flag.load(Ordering::SeqCst),
+            )
+        });
         Self {
             query: app.query.clone(),
             pending_query: app.pending_query.clone(),
             results: app.results.clone(),
             selected: app.selected,
             resolved_grid_layout: app.resolved_grid_layout,
-            visible: app.visible_flag.load(Ordering::SeqCst),
-            restore: app.restore_flag.load(Ordering::SeqCst),
+            visible,
+            restore,
+            visibility_revision,
             focus_query: app.focus_query,
             move_cursor_end: app.move_cursor_end,
             last_results_valid: app.last_results_valid,
@@ -479,8 +487,14 @@ impl RadialRootState {
         app.results = self.results;
         app.selected = self.selected;
         app.resolved_grid_layout = self.resolved_grid_layout;
-        app.visible_flag.store(self.visible, Ordering::SeqCst);
-        app.restore_flag.store(self.restore, Ordering::SeqCst);
+        let _ = app.visibility_revision.with_current(
+            self.visibility_revision,
+            || true,
+            || {
+                app.visible_flag.store(self.visible, Ordering::SeqCst);
+                app.restore_flag.store(self.restore, Ordering::SeqCst);
+            },
+        );
         app.focus_query = self.focus_query;
         app.move_cursor_end = self.move_cursor_end;
         app.last_results_valid = self.last_results_valid;
@@ -815,6 +829,23 @@ mod tests {
         assert_eq!(app.suggestions, ["one", "two"]);
         assert_eq!(app.autocomplete_index, 1);
         assert_eq!(app.query_history.newer("older"), Some("keep root".into()));
+    }
+
+    #[test]
+    fn root_snapshot_cannot_overwrite_a_newer_visibility_request() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.query = "captured query".into();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(true, Ordering::SeqCst);
+        let snapshot = RadialRootState::capture(&app);
+
+        app.request_launcher_state(Some(false), Some(false));
+        snapshot.restore(&mut app);
+
+        assert_eq!(app.query, "captured query");
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
     }
 
     #[test]

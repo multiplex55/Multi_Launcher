@@ -321,10 +321,11 @@ impl LauncherApp {
                             if !interaction_is_current {
                                 completion.completion_outcome.toasts.clear();
                             }
-                            self.apply_command_outcome_with_history_query(
+                            self.apply_command_outcome_with_root_policy(
                                 completion.completion_outcome,
                                 &completion.invocation,
                                 Some(&completion.history_query),
+                                completion.root_policy,
                             );
                         }
                         Err(error) if interaction_is_current => {
@@ -545,15 +546,33 @@ mod tests {
         };
         app.virtual_desktop_interaction_token = 7;
         app.query = "untouched root".into();
+        app.pending_query = Some("pending root".into());
+        app.results = vec![Action {
+            label: "Existing result".into(),
+            desc: "Existing result".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        app.selected = Some(0);
         app.last_search_query = "old search".into();
         app.last_results_valid = true;
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.focus_query = false;
+        app.move_cursor_end = false;
         app.visible_flag.store(true, Ordering::SeqCst);
         app.event_tx
             .send(WatchEvent::VirtualDesktop(VirtualDesktopGuiCompletion {
                 invocation,
                 completion_outcome: crate::commands::CommandOutcome {
                     query: crate::commands::QueryPolicy::Set("changed".into()),
+                    pending_query: crate::commands::PendingQueryPolicy::Set("changed".into()),
+                    search: true,
+                    invalidate_results: true,
+                    results: crate::commands::ResultsPolicy::Replace(Vec::new()),
                     visibility: crate::commands::VisibilityPolicy::Hide,
+                    restore: true,
+                    focus: true,
+                    move_cursor_end: true,
                     history: crate::commands::HistoryPolicy::Record,
                     ..crate::commands::CommandOutcome::default()
                 },
@@ -567,11 +586,72 @@ mod tests {
             .unwrap();
         app.process_watch_events();
         assert_eq!(app.query, "untouched root");
+        assert_eq!(app.pending_query.as_deref(), Some("pending root"));
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.selected, Some(0));
         assert_eq!(app.last_search_query, "old search");
         assert!(app.last_results_valid);
         assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.focus_query);
+        assert!(!app.move_cursor_end);
         assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
         assert_eq!(app.usage.get("vd:create"), Some(&1));
+    }
+
+    #[test]
+    fn delayed_preserved_completion_cannot_overwrite_a_newer_launcher_visibility_request() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::Create,
+            ),
+            original_action: Action {
+                label: "Create Virtual Desktop".into(),
+                desc: "Virtual Desktop".into(),
+                action: "vd:create".into(),
+                args: None,
+            },
+            query_override: None,
+            source: ActivationSource::RadialRelease,
+        };
+        app.virtual_desktop_interaction_token = 3;
+        app.query = "newer hotkey query".into();
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+
+        // Model a newer hotkey decision committed while the virtual desktop
+        // operation was still running.
+        app.request_launcher_state(Some(true), Some(true));
+        let newer_revision = app.visibility_revision.current();
+        app.event_tx
+            .send(WatchEvent::VirtualDesktop(VirtualDesktopGuiCompletion {
+                invocation,
+                completion_outcome: crate::commands::CommandOutcome {
+                    query: crate::commands::QueryPolicy::Set("stale completion".into()),
+                    visibility: crate::commands::VisibilityPolicy::Hide,
+                    restore: false,
+                    history: crate::commands::HistoryPolicy::Record,
+                    ..crate::commands::CommandOutcome::default()
+                },
+                history_query: "captured radial query".into(),
+                interaction_token: 3,
+                expected_query: "old query".into(),
+                expected_visible: true,
+                root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                result: Ok(()),
+            }))
+            .unwrap();
+
+        app.process_watch_events();
+
+        assert_eq!(app.visibility_revision.current(), newer_revision);
+        assert_eq!(app.query, "newer hotkey query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
+        assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
     }
 
     #[test]

@@ -6,9 +6,10 @@ pub use crate::platform::windows_api::{
 use crate::radial::acceptance_trace::{
     self, Correlation, Event, NativeActivationEdge, NativeWindowIdentity,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_RESTORE_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+use std::sync::{
+    Arc, Condvar, Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn virtual_key_from_string(key: &str) -> Option<u32> {
@@ -154,21 +155,35 @@ pub fn force_restore_and_foreground(hwnd: windows::Win32::Foundation::HWND) {
 }
 
 /// Restore the launcher while explicitly relocating it onto the current desktop.
-pub fn restore_launcher_to_current_desktop(hwnd: windows::Win32::Foundation::HWND) {
+pub fn restore_launcher_to_current_desktop_ordered(
+    hwnd: windows::Win32::Foundation::HWND,
+    revision: crate::visibility::VisibilityRevision,
+    request_revision: u64,
+    visible: Arc<AtomicBool>,
+    root_window: crate::visibility::RootWindowBridge,
+) {
     let request =
         crate::window_activation::WindowActivationRequest::move_to_current_desktop(hwnd.0 as usize);
     let trace_enabled = acceptance_trace::enabled();
     let trace_hwnd_value = hwnd.0 as usize;
     let trace_hwnd = trace_hwnd_value as u64;
+    let Some(admission) = admit_launcher_restore(
+        trace_hwnd_value,
+        &revision,
+        request_revision,
+        &visible,
+        &root_window,
+    ) else {
+        tracing::debug!(
+            requested_hwnd = trace_hwnd_value,
+            request_revision,
+            "skipping a stale or non-activating ROOT restore before trace admission"
+        );
+        return;
+    };
     let correlation = if trace_enabled {
-        let trace_id = NEXT_RESTORE_TRACE_ID.fetch_add(1, Ordering::Relaxed);
-        Correlation {
-            request_id: trace_id,
-            request_kind: Default::default(),
-            session_id: 0,
-            generation: trace_id,
-            terminal: false,
-        }
+        let trace_id = acceptance_trace::next_request_id();
+        launcher_restore_correlation(trace_id, request_revision, admission.invocation_id)
     } else {
         Correlation::default()
     };
@@ -179,42 +194,203 @@ pub fn restore_launcher_to_current_desktop(hwnd: windows::Win32::Foundation::HWN
             correlation,
         });
     }
-    // Desktop transitions and foreground verification use bounded backoff. Keep that work off
-    // egui's render path so a slow or policy-blocked target cannot stall a frame.
-    std::thread::spawn(move || {
-        if let Err(error) = crate::window_activation::activate_window(request) {
-            if trace_enabled {
-                let terminal_correlation = Correlation {
-                    terminal: true,
-                    ..correlation
-                };
-                acceptance_trace::emit(Event::NativeActivation {
-                    edge: NativeActivationEdge::RestoreFailed,
-                    hwnd: trace_hwnd,
-                    correlation: terminal_correlation,
-                });
-                emit_window_snapshot(
-                    windows::Win32::Foundation::HWND(trace_hwnd_value as *mut _),
-                    terminal_correlation,
-                );
-            }
-            tracing::warn!(error = %error, "failed to restore launcher window");
-        } else if trace_enabled {
-            let terminal_correlation = Correlation {
-                terminal: true,
-                ..correlation
-            };
-            acceptance_trace::emit(Event::NativeActivation {
-                edge: NativeActivationEdge::RestoreCompleted,
-                hwnd: trace_hwnd,
-                correlation: terminal_correlation,
-            });
-            emit_window_snapshot(
-                windows::Win32::Foundation::HWND(trace_hwnd_value as *mut _),
-                terminal_correlation,
-            );
-        }
+    let expected_process = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+    let activation = crate::window_activation::WindowActivationFence {
+        revision,
+        request_revision,
+        visible,
+        expected_process,
+        root_window,
+        root_window_generation: admission.root_window_generation,
+    };
+    enqueue_launcher_restore(LauncherRestoreRequest {
+        request,
+        fence: activation,
+        hwnd: trace_hwnd,
+        hwnd_value: trace_hwnd_value,
+        correlation,
+        trace_enabled,
     });
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LauncherRestoreAdmission {
+    root_window_generation: u64,
+    invocation_id: Option<u64>,
+}
+
+fn admit_launcher_restore(
+    requested_hwnd: usize,
+    revision: &crate::visibility::VisibilityRevision,
+    request_revision: u64,
+    visible: &AtomicBool,
+    root_window: &crate::visibility::RootWindowBridge,
+) -> Option<LauncherRestoreAdmission> {
+    let (observed_revision, (is_visible, focus_intent, invocation_id)) = revision.inspect(|| {
+        (
+            visible.load(Ordering::Acquire),
+            revision.focus_intent(),
+            revision.invocation_id(),
+        )
+    });
+    if observed_revision != request_revision
+        || !is_visible
+        || focus_intent != crate::visibility::RootFocusIntent::ActivateRoot
+    {
+        return None;
+    }
+
+    let (current_hwnd, root_window_generation) = revision.with_current(
+        request_revision,
+        || visible.load(Ordering::Acquire),
+        || root_window.identity(),
+    )?;
+    (current_hwnd == requested_hwnd).then_some(LauncherRestoreAdmission {
+        root_window_generation,
+        invocation_id,
+    })
+}
+
+fn launcher_restore_correlation(
+    request_id: u64,
+    visibility_revision: u64,
+    invocation_id: Option<u64>,
+) -> Correlation {
+    Correlation {
+        request_id,
+        generation: request_id,
+        visibility_revision,
+        invocation_id: invocation_id.unwrap_or(0),
+        ..Correlation::default()
+    }
+}
+
+struct LauncherRestoreRequest {
+    request: crate::window_activation::WindowActivationRequest,
+    fence: crate::window_activation::WindowActivationFence,
+    hwnd: u64,
+    hwnd_value: usize,
+    correlation: Correlation,
+    trace_enabled: bool,
+}
+
+#[derive(Default)]
+struct LauncherRestoreQueue {
+    pending: Mutex<Option<LauncherRestoreRequest>>,
+    wake: Condvar,
+}
+
+static LAUNCHER_RESTORE_QUEUE: OnceLock<Option<Arc<LauncherRestoreQueue>>> = OnceLock::new();
+
+fn launcher_restore_queue() -> Option<&'static Arc<LauncherRestoreQueue>> {
+    LAUNCHER_RESTORE_QUEUE
+        .get_or_init(|| {
+            let queue = Arc::new(LauncherRestoreQueue::default());
+            let worker_queue = Arc::clone(&queue);
+            match std::thread::Builder::new()
+                .name("launcher-root-restore".into())
+                .spawn(move || {
+                    loop {
+                        let request = {
+                            let mut pending = worker_queue
+                                .pending
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            while pending.is_none() {
+                                pending = worker_queue
+                                    .wake
+                                    .wait(pending)
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            }
+                            let Some(request) = pending.take() else {
+                                continue;
+                            };
+                            request
+                        };
+                        run_launcher_restore(request);
+                    }
+                }) {
+                Ok(_) => Some(queue),
+                Err(error) => {
+                    tracing::error!(%error, "could not start bounded launcher restore worker");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn enqueue_launcher_restore(request: LauncherRestoreRequest) {
+    let Some(queue) = launcher_restore_queue() else {
+        if request.trace_enabled {
+            emit_launcher_restore_result(&request, false, false);
+        }
+        return;
+    };
+    let replaced = {
+        let mut pending = queue
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending.replace(request)
+    };
+    if let Some(replaced) = replaced
+        && replaced.trace_enabled
+    {
+        emit_launcher_restore_result(&replaced, false, false);
+    }
+    queue.wake.notify_one();
+}
+
+fn run_launcher_restore(request: LauncherRestoreRequest) {
+    let result = crate::window_activation::activate_window_if_current(
+        request.request,
+        request.fence.clone(),
+    );
+    match result {
+        Err(error) => {
+            if request.trace_enabled {
+                emit_launcher_restore_result(&request, false, true);
+            }
+            if !matches!(
+                error.kind,
+                crate::window_activation::WindowActivationErrorKind::Superseded
+            ) {
+                tracing::warn!(error = %error, "failed to restore launcher window");
+            }
+        }
+        Ok(()) => {
+            if request.trace_enabled {
+                emit_launcher_restore_result(&request, true, true);
+            }
+        }
+    }
+}
+
+fn emit_launcher_restore_result(
+    request: &LauncherRestoreRequest,
+    completed: bool,
+    include_snapshot: bool,
+) {
+    let terminal_correlation = Correlation {
+        terminal: true,
+        ..request.correlation
+    };
+    acceptance_trace::emit(Event::NativeActivation {
+        edge: if completed {
+            NativeActivationEdge::RestoreCompleted
+        } else {
+            NativeActivationEdge::RestoreFailed
+        },
+        hwnd: request.hwnd,
+        correlation: terminal_correlation,
+    });
+    if include_snapshot {
+        emit_window_snapshot(
+            windows::Win32::Foundation::HWND(request.hwnd_value as *mut _),
+            terminal_correlation,
+        );
+    }
 }
 
 /// Return the native window currently under the pointer for the opt-in trace.
@@ -271,7 +447,9 @@ pub(crate) fn emit_window_snapshot(
         return;
     }
     use windows::Win32::Foundation::RECT;
-    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsIconic, IsWindowVisible};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    };
 
     acceptance_trace::register_root_hwnd(hwnd.0 as usize as u64);
 
@@ -279,8 +457,11 @@ pub(crate) fn emit_window_snapshot(
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
         return;
     }
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
     acceptance_trace::emit(Event::NativeWindowSnapshot {
         hwnd: hwnd.0 as usize as u64,
+        process_id,
         left: rect.left,
         top: rect.top,
         right: rect.right,
@@ -370,5 +551,94 @@ pub fn send_end_key() {
         let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
         input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
         let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+#[cfg(test)]
+mod launcher_restore_trace_tests {
+    use super::*;
+
+    #[test]
+    fn restore_and_boundary_events_use_interleaved_unique_request_ids() {
+        let restore_request_id = acceptance_trace::next_request_id();
+        let restore = launcher_restore_correlation(restore_request_id, 31, Some(44));
+        let boundary = acceptance_trace::root_command_correlation();
+        let next_restore_request_id = acceptance_trace::next_request_id();
+
+        assert_ne!(restore.request_id, boundary.request_id);
+        assert_ne!(restore.request_id, next_restore_request_id);
+        assert_ne!(boundary.request_id, next_restore_request_id);
+        assert_eq!(restore.visibility_revision, 31);
+        assert_eq!(restore.invocation_id, 44);
+    }
+
+    #[test]
+    fn launcher_restore_correlation_carries_visibility_revision_and_invocation() {
+        let revision = crate::visibility::VisibilityRevision::default();
+        let visible = AtomicBool::new(false);
+        let (request_revision, ()) = revision.request_with_focus_intent_and_invocation(
+            crate::visibility::RootFocusIntent::ActivateRoot,
+            Some(17),
+            || visible.store(true, Ordering::Release),
+        );
+        let root_window = crate::visibility::RootWindowBridge::default();
+        root_window.set_identity_for_test(101);
+
+        let admission =
+            admit_launcher_restore(101, &revision, request_revision, &visible, &root_window)
+                .unwrap();
+        let correlation =
+            launcher_restore_correlation(22, request_revision, admission.invocation_id);
+
+        assert_eq!(admission.root_window_generation, root_window.identity().1);
+        assert_eq!(correlation.request_id, 22);
+        assert_eq!(correlation.visibility_revision, request_revision);
+        assert_eq!(correlation.invocation_id, 17);
+    }
+
+    #[test]
+    fn stale_root_hwnd_is_rejected_before_restore_request_trace_admission() {
+        let revision = crate::visibility::VisibilityRevision::default();
+        let visible = AtomicBool::new(false);
+        let (request_revision, ()) = revision.request_with_focus_intent_and_invocation(
+            crate::visibility::RootFocusIntent::ActivateRoot,
+            Some(19),
+            || visible.store(true, Ordering::Release),
+        );
+        let root_window = crate::visibility::RootWindowBridge::default();
+        root_window.set_identity_for_test(202);
+
+        assert!(
+            admit_launcher_restore(101, &revision, request_revision, &visible, &root_window,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stale_visibility_request_is_rejected_before_restore_trace_admission() {
+        let revision = crate::visibility::VisibilityRevision::default();
+        let visible = AtomicBool::new(false);
+        let (stale_revision, ()) = revision.request_with_focus_intent_and_invocation(
+            crate::visibility::RootFocusIntent::ActivateRoot,
+            Some(21),
+            || visible.store(true, Ordering::Release),
+        );
+        let (current_revision, ()) = revision.request_with_focus_intent_and_invocation(
+            crate::visibility::RootFocusIntent::PreserveForeground,
+            Some(22),
+            || visible.store(true, Ordering::Release),
+        );
+        let root_window = crate::visibility::RootWindowBridge::default();
+        root_window.set_identity_for_test(101);
+
+        assert!(current_revision > stale_revision);
+        assert!(
+            admit_launcher_restore(101, &revision, stale_revision, &visible, &root_window,)
+                .is_none()
+        );
+        assert!(
+            admit_launcher_restore(101, &revision, current_revision, &visible, &root_window,)
+                .is_none()
+        );
     }
 }

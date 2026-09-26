@@ -4,6 +4,7 @@
 //! particular, it must never carry menu names, notes, clipboard contents,
 //! arbitrary key values, window titles, or other user payload.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -46,6 +47,51 @@ pub(crate) struct Correlation {
     pub(crate) session_id: u64,
     pub(crate) generation: u64,
     pub(crate) terminal: bool,
+    /// Visibility ordering metadata is trace-only. It lets the acceptance
+    /// runner join a ROOT boundary command to the hotkey decision that caused
+    /// it without inferring from nearby log lines.
+    pub(crate) visibility_revision: u64,
+    pub(crate) invocation_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VisibilityTraceLink {
+    revision: u64,
+    invocation_id: u64,
+}
+
+thread_local! {
+    static VISIBILITY_TRACE_LINK: RefCell<Option<VisibilityTraceLink>> = const { RefCell::new(None) };
+}
+
+/// Attach the current visibility decision to ROOT commands issued while the
+/// operation runs. This scoped trace context does not participate in product
+/// state or change command ordering.
+pub(crate) fn with_visibility_trace_link<T>(
+    revision: u64,
+    invocation_id: Option<u64>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct RestorePrevious(Option<VisibilityTraceLink>);
+
+    impl Drop for RestorePrevious {
+        fn drop(&mut self) {
+            VISIBILITY_TRACE_LINK.with(|slot| *slot.borrow_mut() = self.0);
+        }
+    }
+
+    let previous = VISIBILITY_TRACE_LINK.with(|slot| {
+        slot.replace(Some(VisibilityTraceLink {
+            revision,
+            invocation_id: invocation_id.unwrap_or(0),
+        }))
+    });
+    let _restore = RestorePrevious(previous);
+    operation()
+}
+
+fn current_visibility_trace_link() -> VisibilityTraceLink {
+    VISIBILITY_TRACE_LINK.with(|slot| slot.borrow().unwrap_or_default())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +161,16 @@ pub(crate) enum AcceptancePrepareGateEdge {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimePreparationEdge {
+    GateHeld,
+    GateReleased,
+    GateTimedOut,
+    ReplyQueued,
+    ReplyRejected,
+    CancelledByLauncherTap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PrimaryTransition {
     Press,
     Release,
@@ -125,6 +181,9 @@ pub(crate) enum VisibilitySource {
     ToggleBatch,
     LegacyTrigger,
     Queued,
+    /// A Screen Draw exact restore commits a new revision for an already
+    /// visible ROOT state; this is not a launcher-toggle decision.
+    ScreenDrawRestore,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -512,6 +571,11 @@ pub(crate) enum Event {
         edge: AcceptancePrepareGateEdge,
         correlation: Correlation,
     },
+    RuntimePreparation {
+        edge: RuntimePreparationEdge,
+        invocation_id: u64,
+        generation: u64,
+    },
     DesignerPreviewRendered {
         session_id: u64,
         generation: u64,
@@ -650,9 +714,26 @@ pub(crate) enum Event {
         invocation_id: u64,
         terminal: bool,
     },
+    RadialDispatchRequested {
+        invocation_id: u64,
+        session_generation: u64,
+    },
+    RuntimeRadialHover {
+        session_digest: u64,
+        cell_digest: u64,
+        role: &'static str,
+        executable: bool,
+    },
     DesiredVisibility {
         visible: bool,
+        revision: u64,
         source: VisibilitySource,
+        invocation_id: Option<u64>,
+    },
+    ScreenDrawRestoreFocusIntent {
+        revision: u64,
+        invocation_id: Option<u64>,
+        focus_intent: crate::visibility::RootFocusIntent,
     },
     RootCommand {
         command: RootCommandKind,
@@ -667,6 +748,7 @@ pub(crate) enum Event {
     },
     NativeWindowSnapshot {
         hwnd: u64,
+        process_id: u32,
         left: i32,
         top: i32,
         right: i32,
@@ -739,7 +821,7 @@ struct Runtime {
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static TRACE_STARTED_AT: OnceLock<Instant> = OnceLock::new();
-static NEXT_BOUNDARY_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static ACTION_CATALOG_RANKS: OnceLock<Mutex<Vec<(u64, usize, usize, usize)>>> = OnceLock::new();
 const WINDOW_SAMPLE_CAPACITY: usize = 32;
 const WINDOW_SAMPLE_DELAY_FRAMES: u64 = 2;
@@ -890,12 +972,22 @@ fn elapsed_ms() -> u128 {
 }
 
 pub(crate) fn root_command_correlation() -> Correlation {
-    let id = NEXT_BOUNDARY_ID.fetch_add(1, Ordering::Relaxed);
+    let id = next_request_id();
+    let visibility = current_visibility_trace_link();
     Correlation {
         request_id: id,
         generation: id,
+        visibility_revision: visibility.revision,
+        invocation_id: visibility.invocation_id,
         ..Correlation::default()
     }
+}
+
+/// Allocate an identifier shared by ROOT boundary and native restore traces.
+/// Both event families can describe one visibility request, so they must not
+/// draw from independent namespaces that can collide in the acceptance log.
+pub(crate) fn next_request_id() -> u64 {
+    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 pub(crate) fn request_window_sample(correlation: Correlation) {
@@ -1055,6 +1147,8 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                visibility_revision = correlation.visibility_revision,
+                invocation_id = correlation.invocation_id,
                 "radial acceptance trace"
             );
         }
@@ -1328,6 +1422,21 @@ pub(crate) fn emit(event: Event) {
                 request_kind = ?correlation.request_kind,
                 session_id = correlation.session_id,
                 generation = correlation.generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::RuntimePreparation {
+            edge,
+            invocation_id,
+            generation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "runtime_preparation",
+                elapsed_ms,
+                ?edge,
+                invocation_id,
+                generation,
                 "radial acceptance trace"
             );
         }
@@ -1750,13 +1859,71 @@ pub(crate) fn emit(event: Event) {
                 "radial acceptance trace"
             );
         }
-        Event::DesiredVisibility { visible, source } => {
+        Event::RadialDispatchRequested {
+            invocation_id,
+            session_generation,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "radial_dispatch_requested",
+                elapsed_ms,
+                invocation_id,
+                session_generation,
+                "radial acceptance trace"
+            );
+        }
+        Event::RuntimeRadialHover {
+            session_digest,
+            cell_digest,
+            role,
+            executable,
+        } => {
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "runtime_radial_hover",
+                elapsed_ms,
+                session_digest,
+                cell_digest,
+                role,
+                executable,
+                "radial acceptance trace"
+            );
+        }
+        Event::DesiredVisibility {
+            visible,
+            revision,
+            source,
+            invocation_id,
+        } => {
+            let invocation_id = invocation_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string());
             tracing::warn!(
                 target: TRACE_TARGET,
                 trace_event = "desired_visibility",
                 elapsed_ms,
                 visible,
+                revision,
                 ?source,
+                invocation_id,
+                "radial acceptance trace"
+            );
+        }
+        Event::ScreenDrawRestoreFocusIntent {
+            revision,
+            invocation_id,
+            focus_intent,
+        } => {
+            let invocation_id = invocation_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            tracing::warn!(
+                target: TRACE_TARGET,
+                trace_event = "screen_draw_restore_focus_intent",
+                elapsed_ms,
+                revision,
+                invocation_id,
+                ?focus_intent,
                 "radial acceptance trace"
             );
         }
@@ -1776,6 +1943,8 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                visibility_revision = correlation.visibility_revision,
+                invocation_id = correlation.invocation_id,
                 "radial acceptance trace"
             ),
             RootCommandKind::Size { width, height } => tracing::warn!(
@@ -1790,6 +1959,8 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                visibility_revision = correlation.visibility_revision,
+                invocation_id = correlation.invocation_id,
                 "radial acceptance trace"
             ),
             command => tracing::warn!(
@@ -1802,6 +1973,8 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                visibility_revision = correlation.visibility_revision,
+                invocation_id = correlation.invocation_id,
                 "radial acceptance trace"
             ),
         },
@@ -1815,6 +1988,8 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                visibility_revision = correlation.visibility_revision,
+                invocation_id = correlation.invocation_id,
                 "radial acceptance trace"
             );
         }
@@ -1834,6 +2009,7 @@ pub(crate) fn emit(event: Event) {
         }
         Event::NativeWindowSnapshot {
             hwnd,
+            process_id,
             left,
             top,
             right,
@@ -1847,6 +2023,7 @@ pub(crate) fn emit(event: Event) {
                 trace_event = "native_window_snapshot",
                 elapsed_ms,
                 hwnd,
+                process_id,
                 left,
                 top,
                 right,
@@ -1858,6 +2035,8 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                visibility_revision = correlation.visibility_revision,
+                invocation_id = correlation.invocation_id,
                 "radial acceptance trace"
             );
         }
@@ -1877,6 +2056,8 @@ pub(crate) fn emit(event: Event) {
                 session_id = correlation.session_id,
                 generation = correlation.generation,
                 terminal = correlation.terminal,
+                visibility_revision = correlation.visibility_revision,
+                invocation_id = correlation.invocation_id,
                 "radial acceptance trace"
             );
         }
@@ -1900,6 +2081,13 @@ pub(crate) fn emit(event: Event) {
             );
         }
     }
+}
+
+pub fn emit_radial_dispatch_requested(invocation_id: u64, session_generation: u64) {
+    emit(Event::RadialDispatchRequested {
+        invocation_id,
+        session_generation,
+    });
 }
 
 pub(crate) fn trace_root_menu_interaction(
@@ -2358,6 +2546,7 @@ mod tests {
             Event::DesignerMutation { .. } => &["result", "correlation"],
             Event::Authoring { .. } => &["edge", "correlation"],
             Event::AcceptancePrepareGate { .. } => &["edge", "correlation"],
+            Event::RuntimePreparation { .. } => &["edge", "invocation_id", "generation"],
             Event::DesignerPreviewRendered { .. } => {
                 &["session_id", "generation", "menu_cell_ids_digest"]
             }
@@ -2503,12 +2692,20 @@ mod tests {
                 "generation",
             ],
             Event::ShortTap { .. } => &["invocation_id", "terminal"],
-            Event::DesiredVisibility { .. } => &["visible", "source"],
+            Event::RadialDispatchRequested { .. } => &["invocation_id", "session_generation"],
+            Event::RuntimeRadialHover { .. } => {
+                &["session_digest", "cell_digest", "role", "executable"]
+            }
+            Event::DesiredVisibility { .. } => &["visible", "revision", "source", "invocation_id"],
+            Event::ScreenDrawRestoreFocusIntent { .. } => {
+                &["revision", "invocation_id", "focus_intent"]
+            }
             Event::RootCommand { .. } => &["command", "correlation"],
             Event::WindowSampleTruncated { .. } => &["correlation"],
             Event::Restore { .. } => &["edge", "correlation"],
             Event::NativeWindowSnapshot { .. } => &[
                 "hwnd",
+                "process_id",
                 "left",
                 "top",
                 "right",
@@ -2517,7 +2714,13 @@ mod tests {
                 "minimized",
                 "correlation",
             ],
-            Event::NativeActivation { .. } => &["edge", "hwnd", "correlation"],
+            Event::NativeActivation { .. } => &[
+                "edge",
+                "hwnd",
+                "correlation",
+                "visibility_revision",
+                "invocation_id",
+            ],
             Event::NativePointer { .. } => &["transition", "button", "owner", "hwnd", "generation"],
         }
     }
@@ -2529,6 +2732,31 @@ mod tests {
         assert!(!enabled_from_value(Some("false")));
         assert!(enabled_from_value(Some("1")));
         assert!(enabled_from_value(Some("true")));
+    }
+
+    #[test]
+    fn visibility_scope_links_root_command_and_native_activation_schema() {
+        let correlation = with_visibility_trace_link(73, Some(41), root_command_correlation);
+        assert_eq!(correlation.visibility_revision, 73);
+        assert_eq!(correlation.invocation_id, 41);
+
+        let labels = schema_labels(Event::NativeActivation {
+            edge: NativeActivationEdge::RestoreRequested,
+            hwnd: 303,
+            correlation,
+        });
+        assert!(labels.contains(&"visibility_revision"));
+        assert!(labels.contains(&"invocation_id"));
+    }
+
+    #[test]
+    fn boundary_and_restore_requests_share_one_unique_id_sequence() {
+        let before_restore = next_request_id();
+        let boundary = root_command_correlation();
+        let restore = next_request_id();
+
+        assert!(before_restore < boundary.request_id);
+        assert!(boundary.request_id < restore);
     }
 
     #[test]
@@ -2587,6 +2815,7 @@ mod tests {
             session_id: 11,
             generation: 13,
             terminal: true,
+            ..Correlation::default()
         };
         let events = [
             Event::DesignerCallback {
@@ -2845,9 +3074,26 @@ mod tests {
                 invocation_id: 17,
                 terminal: true,
             },
+            Event::RadialDispatchRequested {
+                invocation_id: 17,
+                session_generation: 19,
+            },
+            Event::RuntimeRadialHover {
+                session_digest: 23,
+                cell_digest: 29,
+                role: "Action",
+                executable: true,
+            },
             Event::DesiredVisibility {
                 visible: false,
+                revision: 3,
                 source: VisibilitySource::Queued,
+                invocation_id: None,
+            },
+            Event::ScreenDrawRestoreFocusIntent {
+                revision: 8,
+                invocation_id: Some(41),
+                focus_intent: crate::visibility::RootFocusIntent::PreserveForeground,
             },
             Event::RootCommand {
                 command: RootCommandKind::Position { x: -101, y: 202 },
@@ -2860,6 +3106,7 @@ mod tests {
             },
             Event::NativeWindowSnapshot {
                 hwnd: 303,
+                process_id: 404,
                 left: -1,
                 top: 2,
                 right: 3,
@@ -2888,7 +3135,8 @@ mod tests {
             "title",
             "class",
             "pid",
-            "process",
+            "process_name",
+            "process_path",
             "path",
             "name",
             "text",

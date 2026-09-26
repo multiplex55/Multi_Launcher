@@ -58,6 +58,8 @@ pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
 
+pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
+
 pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
@@ -151,8 +153,8 @@ use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
 use crate::visibility::{
-    RootViewportCtx, RootWindowBridge, ViewportCtx, ViewportWake, VisiblePlacementPolicy,
-    apply_visibility,
+    RootFocusIntent, RootViewportCtx, RootWindowBridge, ViewportCtx, ViewportWake,
+    VisiblePlacementPolicy, apply_visibility, apply_visibility_with_focus_intent,
 };
 use action_sheet::ActionSheetState;
 use chrono::NaiveDate;
@@ -736,6 +738,10 @@ pub struct LauncherApp {
     root_window_bridge: RootWindowBridge,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
+    visibility_revision: crate::visibility::VisibilityRevision,
+    authoring_catalog_cache: Mutex<universal_action_catalog::AuthoringCatalogCache>,
+    #[cfg(test)]
+    authoring_catalog_build_count: AtomicUsize,
     last_visible: bool,
     offscreen_pos: (f32, f32),
     pub window_size: (i32, i32),
@@ -747,6 +753,8 @@ pub struct LauncherApp {
     pub test_toast_messages: Vec<String>,
     #[cfg(test)]
     pub(crate) test_recorded_history_queries: Vec<String>,
+    #[cfg(test)]
+    pub(crate) test_defer_virtual_desktop_completion: bool,
     pub enable_toasts: bool,
     pub show_inline_errors: bool,
     pub show_error_toasts: bool,
@@ -2082,6 +2090,10 @@ impl LauncherApp {
             root_window_bridge: RootWindowBridge::default(),
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
+            visibility_revision: crate::visibility::VisibilityRevision::default(),
+            authoring_catalog_cache: Mutex::new(None),
+            #[cfg(test)]
+            authoring_catalog_build_count: AtomicUsize::new(0),
             last_visible: initial_visible,
             offscreen_pos,
             window_size: win_size,
@@ -2093,6 +2105,8 @@ impl LauncherApp {
             test_toast_messages: Vec::new(),
             #[cfg(test)]
             test_recorded_history_queries: Vec::new(),
+            #[cfg(test)]
+            test_defer_virtual_desktop_completion: false,
             enable_toasts,
             show_inline_errors,
             show_error_toasts,
@@ -2715,6 +2729,41 @@ impl LauncherApp {
 
     pub fn restore_flag_state(&self) -> bool {
         self.restore_flag.load(Ordering::SeqCst)
+    }
+
+    pub fn install_visibility_revision(&mut self, revision: crate::visibility::VisibilityRevision) {
+        self.visibility_revision = revision;
+    }
+
+    pub(crate) fn request_launcher_visibility(&self, visible: bool) -> u64 {
+        self.request_launcher_state(Some(visible), None)
+    }
+
+    pub(crate) fn request_launcher_state(
+        &self,
+        visible: Option<bool>,
+        restore: Option<bool>,
+    ) -> u64 {
+        self.visibility_revision
+            .request(|| {
+                if let Some(visible) = visible {
+                    self.visible_flag.store(visible, Ordering::SeqCst);
+                }
+                if let Some(restore) = restore {
+                    self.restore_flag.store(restore, Ordering::SeqCst);
+                }
+            })
+            .0
+    }
+
+    pub(crate) fn toggle_launcher_visibility(&self) -> bool {
+        self.visibility_revision
+            .request(|| {
+                let next = !self.visible_flag.load(Ordering::SeqCst);
+                self.visible_flag.store(next, Ordering::SeqCst);
+                next
+            })
+            .1
     }
 
     pub fn should_show_dashboard(&self, trimmed: &str) -> bool {

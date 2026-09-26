@@ -1,3 +1,4 @@
+use super::acceptance_trace::{self, Event as AcceptanceTraceEvent};
 use super::assets::{AssetService, PrepareVariant, PreparedMedia, reference_identity};
 use super::audio::{PreparedRadialSounds, RadialAudioSession, RadialCue, SystemRadialAudioOutput};
 use super::bindings::{
@@ -140,7 +141,9 @@ impl Drop for HandoffDeadlineScheduler {
 
 #[derive(Clone, Debug)]
 pub enum ControllerEvent {
-    ToggleLegacyLauncher,
+    ToggleLegacyLauncher {
+        invocation_id: InvocationId,
+    },
     /// The controller accepted an externally initiated open. The main thread
     /// correlates the invocation id with its command metadata and admits that
     /// lifecycle to the shared input service before forwarding preparation.
@@ -238,6 +241,7 @@ struct PendingSession {
     layout: LayoutSnapshot,
     spatial: FrozenSpatialContext,
     generation: u64,
+    closing: bool,
     application_always_on_top: bool,
     always_on_top: bool,
     activate_on_show: bool,
@@ -333,6 +337,27 @@ pub struct RadialController {
     tooltip_preferences: TooltipPreferences,
     terminal_events: VecDeque<ControllerEvent>,
 }
+
+fn acceptance_trace_id_digest(value: &str) -> u64 {
+    value.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn acceptance_trace_role_name(role: CellRole) -> &'static str {
+    match role {
+        CellRole::Action => "Action",
+        CellRole::Submenu => "Submenu",
+        CellRole::Back => "Back",
+        CellRole::Close => "Close",
+        CellRole::NextPage => "NextPage",
+        CellRole::PreviousPage => "PreviousPage",
+        CellRole::Drag => "Drag",
+        CellRole::Spacer => "Spacer",
+        CellRole::Unavailable => "Unavailable",
+    }
+}
+
 impl RadialController {
     pub fn new(document: Arc<RadialDocument>, diagnostics: bool, wake: mpsc::Sender<()>) -> Self {
         let wake_for_host = wake.clone();
@@ -575,8 +600,8 @@ impl RadialController {
         let mut out = vec![];
         for intent in intents {
             match intent {
-                InvocationIntent::ToggleLegacyLauncher { .. } => {
-                    out.push(ControllerEvent::ToggleLegacyLauncher)
+                InvocationIntent::ToggleLegacyLauncher { id } => {
+                    out.push(ControllerEvent::ToggleLegacyLauncher { invocation_id: id })
                 }
                 InvocationIntent::OpenRadial {
                     id,
@@ -1036,6 +1061,7 @@ impl RadialController {
                     layout,
                     spatial,
                     generation,
+                    closing: false,
                     application_always_on_top,
                     always_on_top,
                     activate_on_show,
@@ -1204,7 +1230,14 @@ impl RadialController {
                 });
                 matches.then(|| bridge.waiting.take()).flatten()
             });
-            let Some(waiting) = waiting else { continue };
+            let Some(waiting) = waiting else {
+                super::authoring::trace_runtime_preparation(
+                    reply.invocation_id,
+                    reply.generation,
+                    super::authoring::RuntimePreparationTraceState::ReplyRejected,
+                );
+                continue;
+            };
             self.open(
                 waiting.invocation_id,
                 reply.menu_id.clone(),
@@ -1293,7 +1326,7 @@ impl RadialController {
                 layout_generation,
             } => {
                 if !self.pending.as_ref().is_some_and(|p| {
-                    p.session_id == session_id && p.generation == layout_generation
+                    p.session_id == session_id && p.generation == layout_generation && !p.closing
                 }) {
                     return;
                 }
@@ -1405,11 +1438,12 @@ impl RadialController {
                 }
             }
             NativeEvent::Closed { session_id, reason } => {
-                if let Some(p) = self.pending.take() {
-                    if p.session_id != session_id {
-                        self.pending = Some(p);
-                        return;
-                    }
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.session_id == session_id)
+                {
+                    let p = self.pending.take().expect("matching pending session");
                     self.record(
                         Some(session_id.clone()),
                         "pending native cleanup complete".into(),
@@ -1428,11 +1462,12 @@ impl RadialController {
                     }
                     return;
                 }
-                if let Some(mut a) = self.active.take() {
-                    if a.session_id != session_id {
-                        self.active = Some(a);
-                        return;
-                    }
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.session_id == session_id)
+                {
+                    let mut a = self.active.take().expect("matching active session");
                     if let Some(audio) = a.audio.take() {
                         if !audio.finish_close(&session_id, a.audio_generation, monotonic_ms()) {
                             out.push(ControllerEvent::Error(
@@ -1453,35 +1488,71 @@ impl RadialController {
                 session_id,
                 message,
             } => {
-                if session_id.as_ref().is_some_and(|id| {
-                    self.pending.as_ref().is_none_or(|p| &p.session_id != id)
-                        && self.active.as_ref().is_none_or(|a| &a.session_id != id)
-                }) {
+                let matched_pending = session_id.as_ref().is_some_and(|id| {
+                    self.pending
+                        .as_ref()
+                        .is_some_and(|pending| &pending.session_id == id)
+                });
+                let matched_active = session_id.as_ref().is_some_and(|id| {
+                    self.active
+                        .as_ref()
+                        .is_some_and(|active| &active.session_id == id)
+                });
+
+                if session_id.is_some() && !matched_pending && !matched_active {
                     return;
                 }
-                let invocation_id = self
-                    .pending
-                    .as_ref()
-                    .map(|p| p.invocation_id)
-                    .or_else(|| self.active.as_ref().map(|a| a.invocation_id));
-                self.pending = None;
-                if let Some(mut active) = self.active.take()
-                    && let Some(audio) = active.audio.take()
-                    && !audio.stop(&active.session_id, active.audio_generation)
+
+                let invocation_id = if matched_pending {
+                    self.pending.take().map(|pending| pending.invocation_id)
+                } else if matched_active {
+                    self.active.take().and_then(|mut active| {
+                        if let Some(audio) = active.audio.take()
+                            && !audio.stop(&active.session_id, active.audio_generation)
+                        {
+                            out.push(ControllerEvent::Error(
+                                "radial audio stop retirement queue is saturated".into(),
+                            ));
+                        }
+                        Some(active.invocation_id)
+                    })
+                } else {
+                    // An uncorrelated native failure means the shared host is
+                    // unusable. Retire all current work and report the current
+                    // invocation, preserving the legacy host-failure path.
+                    let invocation_id = self
+                        .pending
+                        .as_ref()
+                        .map(|pending| pending.invocation_id)
+                        .or_else(|| self.active.as_ref().map(|active| active.invocation_id));
+                    self.pending = None;
+                    if let Some(mut active) = self.active.take()
+                        && let Some(audio) = active.audio.take()
+                        && !audio.stop(&active.session_id, active.audio_generation)
+                    {
+                        out.push(ControllerEvent::Error(
+                            "radial audio stop retirement queue is saturated".into(),
+                        ));
+                    }
+                    self.retire_host();
+                    invocation_id
+                };
+
+                if matched_active
+                    && self.handoff.as_ref().is_some_and(|handoff| {
+                        session_id.as_ref() == Some(&handoff.identity().session_id)
+                    })
                 {
-                    out.push(ControllerEvent::Error(
-                        "radial audio stop retirement queue is saturated".into(),
-                    ));
+                    self.reduce_handoff(DispatchEvent::Cancel, out);
                 }
-                self.retire_host();
                 self.record(session_id, message.clone());
                 if let Some(invocation_id) = invocation_id {
                     out.push(ControllerEvent::InvocationFailed {
                         invocation_id,
                         message,
-                    })
+                    });
                 } else {
-                    out.push(ControllerEvent::Error(message))
+                    out.push(ControllerEvent::Error(message));
                 }
             }
             NativeEvent::PointerMoved {
@@ -1574,6 +1645,17 @@ impl RadialController {
                     .and_then(|active| active.tooltip_hover.visible().cloned());
                 let tooltip_scene_changed = current_visible_tooltip != previous_visible_tooltip;
                 if current_selection != previous_selection {
+                    if let Some(cell) = current_selection.clone() {
+                        if acceptance_trace::enabled() {
+                            let role = self.cell_role_for_session(&session_id, &cell);
+                            acceptance_trace::emit(AcceptanceTraceEvent::RuntimeRadialHover {
+                                session_digest: acceptance_trace_id_digest(session_id.as_str()),
+                                cell_digest: acceptance_trace_id_digest(cell.as_str()),
+                                role: acceptance_trace_role_name(role),
+                                executable: role == CellRole::Action,
+                            });
+                        }
+                    }
                     if let Some(cell) = current_selection.clone()
                         && let Some(active) = self
                             .active
@@ -3145,12 +3227,19 @@ impl RadialController {
             })
     }
     pub fn close(&mut self, reason: CloseReason, requested: Option<&SessionId>) {
-        if reason != CloseReason::ActionHandoff {
-            self.handoff = None;
-            self.cancel_handoff_deadline();
-            self.release_aliases.clear();
-            self.release_waits.clear();
-        }
+        self.close_inner(reason, requested, false);
+    }
+
+    fn close_preserving_committed_handoff(&mut self, requested: Option<&SessionId>) {
+        self.close_inner(CloseReason::Dismissed, requested, true);
+    }
+
+    fn close_inner(
+        &mut self,
+        reason: CloseReason,
+        requested: Option<&SessionId>,
+        preserve_committed_handoff: bool,
+    ) {
         let target = self
             .pending
             .as_ref()
@@ -3159,6 +3248,35 @@ impl RadialController {
         let Some(id) = target else { return };
         if requested.is_some_and(|v| v != &id) {
             return;
+        }
+        // The Dispatch intent is the selection commit point. Only the legacy
+        // launcher tap may close the radial without revoking that committed
+        // selection; lifecycle and replacement cancellations must cancel it.
+        if reason != CloseReason::ActionHandoff
+            && !(preserve_committed_handoff && self.handoff.is_some())
+        {
+            self.handoff = None;
+            self.cancel_handoff_deadline();
+            self.release_aliases.clear();
+            self.release_waits.clear();
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == id && pending.closing)
+            || self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.session_id == id && active.closing)
+        {
+            return;
+        }
+        if let Some(pending) = self
+            .pending
+            .as_mut()
+            .filter(|pending| pending.session_id == id)
+        {
+            pending.closing = true;
         }
         if let Some(active) = self
             .active
@@ -3296,15 +3414,66 @@ impl RadialController {
     pub fn grid_keyboard_owner(&self) -> GridKeyboardOwner {
         self.grid_keyboard_owner
     }
-    /// Transfer keyboard ownership for one legacy-grid toggle. The caller
-    /// supplies the grid state immediately before that edge so several queued
-    /// toggles remain ordered without synthesizing pointer movement.
-    pub fn handle_legacy_grid_toggle(&mut self, grid_was_visible: bool) {
-        if grid_was_visible {
-            self.set_grid_keyboard_owner(GridKeyboardOwner::RadialMenu);
-        } else {
-            self.set_grid_keyboard_owner(GridKeyboardOwner::LegacyLauncher);
+    /// Dismiss runtime radial work when a short launcher tap toggles the grid.
+    /// The invocation identity is retained across the controller boundary for
+    /// trace correlation. The legacy trigger route has no reducer identity.
+    pub fn handle_legacy_grid_toggle(
+        &mut self,
+        tap_invocation: Option<InvocationId>,
+        grid_was_visible: bool,
+    ) -> Vec<InvocationId> {
+        tracing::debug!(
+            tap_invocation = tap_invocation.map(|id| id.0),
+            grid_was_visible,
+            "short launcher tap dismissing runtime radial"
+        );
+
+        let mut dismissed = Vec::with_capacity(3);
+        if let Some(waiting) = self
+            .preparation
+            .as_mut()
+            .and_then(|bridge| bridge.waiting.take())
+        {
+            super::authoring::trace_runtime_preparation(
+                waiting.invocation_id,
+                waiting.generation,
+                super::authoring::RuntimePreparationTraceState::CancelledByLauncherTap,
+            );
+            dismissed.push(waiting.invocation_id);
         }
+        if let Some(pending) = self.pending.as_ref() {
+            dismissed.push(pending.invocation_id);
+        }
+        if let Some(active) = self.active.as_ref() {
+            dismissed.push(active.invocation_id);
+        }
+        dismissed.sort_unstable();
+        dismissed.dedup();
+
+        if self
+            .queued_item_activation
+            .as_ref()
+            .is_some_and(|queued| dismissed.contains(&queued.id))
+        {
+            self.queued_item_activation = None;
+        }
+        let pending_id = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.session_id.clone());
+        let active_id = self.active.as_ref().map(|active| active.session_id.clone());
+        if let Some(session_id) = pending_id {
+            self.close_preserving_committed_handoff(Some(&session_id));
+        }
+        if let Some(session_id) = active_id {
+            self.close_preserving_committed_handoff(Some(&session_id));
+        }
+
+        // A dismissed radial no longer owns keyboard input. New sessions start
+        // with radial ownership, while explicit non-dismissal ownership changes
+        // continue to use suspend_active_keyboard/resume_active_keyboard.
+        self.grid_keyboard_owner = GridKeyboardOwner::RadialMenu;
+        dismissed
     }
     fn record(&mut self, session_id: Option<SessionId>, message: String) {
         if let Some(log) = &mut self.diagnostics {
@@ -5363,6 +5532,274 @@ mod tests {
         );
     }
     #[test]
+    fn tap_after_selected_action_preserves_committed_dispatch_until_close_ack() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::Persisted {
+                action: crate::universal_actions::PersistedUniversalActionRef {
+                    target: None,
+                    action_id: crate::universal_actions::ActionId::new("test"),
+                },
+            },
+        };
+        document.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                *made.lock().unwrap() += 1;
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        let mut open = open();
+        if let InvocationIntent::OpenRadial {
+            trigger_still_down, ..
+        } = &mut open
+        {
+            *trigger_still_down = false;
+        }
+        let radial_invocation = match &open {
+            InvocationIntent::OpenRadial { id, .. } => *id,
+            _ => unreachable!("test helper returns an OpenRadial intent"),
+        };
+        controller.handle_intents(vec![open], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+
+        let cell_id = controller.document.menus[0].rings[0].cells[0].id.clone();
+        let selected = controller.handle_intents(
+            vec![InvocationIntent::ActivateItem {
+                id: InvocationId(88),
+                menu_id: MenuId::new("starter"),
+                cell_id,
+                gesture: ClickGesture::Primary,
+                scope: TriggerScope::MenuLocal,
+                source: crate::commands::ActivationSource::RadialShortcut,
+                trigger_still_down: true,
+            }],
+            false,
+        );
+        assert!(
+            selected
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        assert_eq!(
+            controller.handoff.as_ref().unwrap().phase(),
+            super::super::handoff::DispatchPhase::AwaitingClose
+        );
+
+        assert_eq!(
+            controller.handle_legacy_grid_toggle(Some(InvocationId(89)), false),
+            vec![radial_invocation]
+        );
+        assert!(
+            controller.handoff.is_some(),
+            "a committed selection survives a later tap"
+        );
+        assert!(controller.active.as_ref().unwrap().closing);
+
+        events.lock().unwrap().push_back(NativeEvent::Closed {
+            session_id,
+            reason: CloseReason::ActionHandoff,
+        });
+        let close_events = controller.poll();
+        assert!(
+            close_events
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        let released = controller.handle_intents(
+            vec![InvocationIntent::TriggerReleased {
+                id: InvocationId(88),
+            }],
+            false,
+        );
+        assert_eq!(
+            released
+                .iter()
+                .filter(|event| matches!(event, ControllerEvent::DispatchRequested(_)))
+                .count(),
+            1,
+            "the selected action dispatches once after close and release are acknowledged"
+        );
+    }
+
+    #[test]
+    fn lifecycle_cancel_after_selection_clears_handoff_before_close_ack_and_release() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::Persisted {
+                action: crate::universal_actions::PersistedUniversalActionRef {
+                    target: None,
+                    action_id: crate::universal_actions::ActionId::new("test"),
+                },
+            },
+        };
+        document.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                *made.lock().unwrap() += 1;
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        let mut intent = open();
+        if let InvocationIntent::OpenRadial {
+            trigger_still_down, ..
+        } = &mut intent
+        {
+            *trigger_still_down = false;
+        }
+        controller.handle_intents(vec![intent], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: generation,
+        });
+        controller.poll();
+
+        let cell_id = controller.document.menus[0].rings[0].cells[0].id.clone();
+        controller.handle_intents(
+            vec![InvocationIntent::ActivateItem {
+                id: InvocationId(188),
+                menu_id: MenuId::new("starter"),
+                cell_id,
+                gesture: ClickGesture::Primary,
+                scope: TriggerScope::MenuLocal,
+                source: crate::commands::ActivationSource::RadialShortcut,
+                trigger_still_down: true,
+            }],
+            false,
+        );
+        assert_eq!(
+            controller.handoff.as_ref().unwrap().phase(),
+            super::super::handoff::DispatchPhase::AwaitingClose
+        );
+
+        controller.close(CloseReason::SettingsReload, Some(&session_id));
+        assert!(
+            controller.handoff.is_none(),
+            "lifecycle cancellation revokes selection"
+        );
+
+        events.lock().unwrap().push_back(NativeEvent::Closed {
+            session_id,
+            reason: CloseReason::SettingsReload,
+        });
+        controller.poll();
+        let released = controller.handle_intents(
+            vec![InvocationIntent::TriggerReleased {
+                id: InvocationId(188),
+            }],
+            false,
+        );
+        assert!(
+            released
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+    }
+
+    #[test]
+    fn old_active_failure_is_correlated_while_replacement_is_pending() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut document = RadialDocument::starter();
+        let mut second_menu = document.menus[0].clone();
+        second_menu.id = MenuId::new("second");
+        second_menu.name = "Second".into();
+        document.menus.push(second_menu);
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                *made.lock().unwrap() += 1;
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        controller.handle_intents(
+            vec![InvocationIntent::ToggleDirectMenu {
+                id: InvocationId(601),
+                menu_id: MenuId::new("starter"),
+                primary_key: 0x54,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        let first = controller.pending.as_ref().unwrap();
+        let old_session = first.session_id.clone();
+        let old_generation = first.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: old_session.clone(),
+            layout_generation: old_generation,
+        });
+        controller.poll();
+
+        controller.close(CloseReason::Dismissed, Some(&old_session));
+        controller.handle_intents(
+            vec![InvocationIntent::ToggleDirectMenu {
+                id: InvocationId(602),
+                menu_id: MenuId::new("second"),
+                primary_key: 0x54,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        let replacement = controller.pending.as_ref().unwrap();
+        let new_session = replacement.session_id.clone();
+
+        events.lock().unwrap().push_back(NativeEvent::Failed {
+            session_id: Some(old_session),
+            message: "old host cleanup failed".into(),
+        });
+        let failed = controller.poll();
+        assert!(failed.iter().any(|event| matches!(
+            event,
+            ControllerEvent::InvocationFailed {
+                invocation_id: InvocationId(601),
+                ..
+            }
+        )));
+        assert!(!failed.iter().any(|event| matches!(
+            event,
+            ControllerEvent::InvocationFailed {
+                invocation_id: InvocationId(602),
+                ..
+            }
+        )));
+        assert!(controller.active.is_none());
+        assert_eq!(controller.pending.as_ref().unwrap().session_id, new_session);
+    }
+
+    #[test]
     fn runtime_cascade_raster_keeps_parent_and_child_skin_pixels_distinct() {
         let directory = tempfile::tempdir().unwrap();
         let write_png = |name: &str, color: [u8; 4]| {
@@ -5995,7 +6432,80 @@ mod tests {
     }
 
     #[test]
-    fn legacy_grid_toggle_round_trip_restores_radial_keyboard_without_mouse() {
+    fn old_active_close_ack_retires_while_replacement_is_pending() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut document = RadialDocument::starter();
+        let mut second = document.menus[0].clone();
+        second.id = MenuId::new("second");
+        second.name = "Second".into();
+        document.menus.push(second);
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            false,
+            Arc::new(move || {
+                *made.lock().unwrap() += 1;
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        controller.handle_intents(
+            vec![InvocationIntent::ToggleDirectMenu {
+                id: InvocationId(20),
+                menu_id: MenuId::new("starter"),
+                primary_key: 0x54,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        let first = controller.pending.as_ref().unwrap();
+        let old_session = first.session_id.clone();
+        let old_generation = first.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: old_session.clone(),
+            layout_generation: old_generation,
+        });
+        controller.poll();
+        assert_eq!(controller.active.as_ref().unwrap().session_id, old_session);
+
+        controller.handle_intents(
+            vec![InvocationIntent::ToggleDirectMenu {
+                id: InvocationId(21),
+                menu_id: MenuId::new("second"),
+                primary_key: 0x54,
+                provenance: crate::radial::invocation::InputProvenance::Physical,
+                trigger_still_down: false,
+            }],
+            false,
+        );
+        let replacement = controller.pending.as_ref().unwrap();
+        let new_session = replacement.session_id.clone();
+        let new_generation = replacement.generation;
+        assert!(controller.active.as_ref().unwrap().closing);
+
+        events.lock().unwrap().push_back(NativeEvent::Closed {
+            session_id: old_session,
+            reason: CloseReason::Dismissed,
+        });
+        controller.poll();
+        assert!(controller.active.is_none());
+        assert_eq!(controller.pending.as_ref().unwrap().session_id, new_session);
+
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: new_session.clone(),
+            layout_generation: new_generation,
+        });
+        controller.poll();
+        assert_eq!(controller.active.as_ref().unwrap().session_id, new_session);
+        assert!(controller.pending.is_none());
+    }
+
+    #[test]
+    fn legacy_grid_toggle_dismisses_radial_and_preserves_visibility_order() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let events = Arc::new(Mutex::new(VecDeque::new()));
@@ -6019,28 +6529,53 @@ mod tests {
             layout_generation: generation,
         });
         controller.poll();
-        let original_scope = controller.active_input_scope();
-        assert!(original_scope.is_some());
+        assert!(controller.active_input_scope().is_some());
 
-        // Two queued hidden -> visible -> hidden edges must be preserved even
-        // though viewport commands are applied only after this event batch.
+        // Visibility edges remain ordered even though viewport commands are
+        // applied after the event batch. The first tap closes the runtime menu.
         let visibility = AtomicBool::new(false);
         let mut toggles = crate::visibility::VisibilityToggleBatch::default();
         let first_was_visible = toggles.record_toggle(&visibility);
         assert!(!first_was_visible);
-        controller.handle_legacy_grid_toggle(first_was_visible);
+        assert_eq!(
+            controller.handle_legacy_grid_toggle(Some(InvocationId(2_001)), first_was_visible),
+            vec![InvocationId(1_001)]
+        );
+        assert!(
+            controller
+                .active
+                .as_ref()
+                .is_some_and(|active| active.closing)
+        );
+
+        events.lock().unwrap().push_back(NativeEvent::Closed {
+            session_id: session_id.clone(),
+            reason: CloseReason::Dismissed,
+        });
+        let close_events = controller.poll();
+        assert!(close_events.iter().any(|event| matches!(
+            event,
+            ControllerEvent::Closed {
+                invocation_id: InvocationId(1_001),
+                reason: CloseReason::Dismissed,
+                ..
+            }
+        )));
         assert!(controller.active_input_scope().is_none());
 
         let second_was_visible = toggles.record_toggle(&visibility);
         assert!(second_was_visible);
-        controller.handle_legacy_grid_toggle(second_was_visible);
+        assert!(
+            controller
+                .handle_legacy_grid_toggle(Some(InvocationId(2_002)), second_was_visible)
+                .is_empty()
+        );
         assert!(!visibility.load(Ordering::SeqCst));
         assert_eq!(toggles.final_visible(), Some(false));
-        assert_eq!(controller.active_input_scope(), original_scope);
     }
 
     #[test]
-    fn legacy_hotkey_trigger_transfers_keyboard_for_direct_radial_session() {
+    fn legacy_trigger_tap_dismisses_direct_radial_session_without_selection() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let events = Arc::new(Mutex::new(VecDeque::new()));
@@ -6060,12 +6595,11 @@ mod tests {
         let session_id = pending.session_id.clone();
         let generation = pending.generation;
         events.lock().unwrap().push_back(NativeEvent::Ready {
-            session_id,
+            session_id: session_id.clone(),
             layout_generation: generation,
         });
         controller.poll();
-        let original_scope = controller.active_input_scope();
-        assert!(original_scope.is_some());
+        assert!(controller.active_input_scope().is_some());
 
         let trigger = crate::hotkey::HotkeyTrigger::new(
             crate::hotkey::parse_hotkey("End").expect("test hotkey parses"),
@@ -6088,9 +6622,27 @@ mod tests {
             None,
             None,
             (400.0, 220.0),
-            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
+            |was_visible| {
+                controller.handle_legacy_grid_toggle(None, was_visible);
+            },
         ));
         assert!(visibility.load(Ordering::SeqCst));
+        assert!(
+            controller
+                .active
+                .as_ref()
+                .is_some_and(|active| active.closing)
+        );
+        events.lock().unwrap().push_back(NativeEvent::Closed {
+            session_id: session_id.clone(),
+            reason: CloseReason::Dismissed,
+        });
+        assert!(
+            controller
+                .poll()
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
         assert!(controller.active_input_scope().is_none());
 
         *trigger.open.lock().unwrap() = true;
@@ -6106,22 +6658,62 @@ mod tests {
             None,
             None,
             (400.0, 220.0),
-            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
+            |was_visible| {
+                controller.handle_legacy_grid_toggle(None, was_visible);
+            },
         ));
         assert!(!visibility.load(Ordering::SeqCst));
-        assert_eq!(controller.active_input_scope(), original_scope);
+        assert!(controller.active_input_scope().is_none());
     }
 
     #[test]
-    fn grid_keyboard_owner_persists_from_opening_through_native_ready() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
+    fn non_dismissal_keyboard_owner_transfer_remains_supported() {
         let events = Arc::new(Mutex::new(VecDeque::new()));
         let made = Arc::new(Mutex::new(0));
         let mut controller = controller(events.clone(), made);
-        controller.handle_intents(
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id,
+            layout_generation: generation,
+        });
+        controller.poll();
+        assert!(controller.active_input_scope().is_some());
+
+        controller.suspend_active_keyboard();
+        assert_eq!(
+            controller.grid_keyboard_owner(),
+            GridKeyboardOwner::LegacyLauncher
+        );
+        assert!(controller.active_input_scope().is_none());
+        controller.resume_active_keyboard();
+        assert_eq!(
+            controller.grid_keyboard_owner(),
+            GridKeyboardOwner::RadialMenu
+        );
+        assert!(controller.active_input_scope().is_some());
+    }
+
+    #[test]
+    fn tap_during_preparation_cancels_late_radial_open() {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let made = Arc::new(Mutex::new(0));
+        let mut controller = controller(events, made.clone());
+        let (tx, rx) = mpsc::channel();
+        let (wake, _wake_rx) = mpsc::channel();
+        controller.preparation = Some(PreparationBridge {
+            tx,
+            rx,
+            wake,
+            next_generation: 1,
+            waiting: None,
+        });
+        let radial_invocation = InvocationId(2_010);
+        let requested = controller.handle_intents(
             vec![InvocationIntent::ToggleDirectMenu {
-                id: InvocationId(1_002),
+                id: radial_invocation,
                 menu_id: MenuId::new("starter"),
                 primary_key: 0x54,
                 provenance: crate::radial::invocation::InputProvenance::Physical,
@@ -6129,69 +6721,53 @@ mod tests {
             }],
             false,
         );
-        let pending = controller.pending.as_ref().unwrap();
-        let session_id = pending.session_id.clone();
-        let generation = pending.generation;
-
-        // The grid is shown while native preparation is still pending. There
-        // is no active reducer to suspend yet, so the controller must retain
-        // this owner and apply it when the session becomes Ready.
-        let trigger = crate::hotkey::HotkeyTrigger::new(
-            crate::hotkey::parse_hotkey("End").expect("test hotkey parses"),
-        );
-        let visibility = Arc::new(AtomicBool::new(false));
-        let restore_flag = Arc::new(AtomicBool::new(false));
-        let ctx = Arc::new(Mutex::new(Some(NoopViewport)));
-        let mut queued_visibility = None;
-        *trigger.open.lock().unwrap() = true;
-        assert!(crate::visibility::handle_visibility_trigger_with_owner(
-            &trigger,
-            &visibility,
-            &restore_flag,
-            &ctx,
-            &mut queued_visibility,
-            (-10_000.0, -10_000.0),
-            false,
-            false,
-            None,
-            None,
-            (400.0, 220.0),
-            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
-        ));
-        assert!(visibility.load(Ordering::SeqCst));
+        let Some(ControllerEvent::PrepareRequested(envelope)) = requested
+            .iter()
+            .find(|event| matches!(event, ControllerEvent::PrepareRequested(_)))
+        else {
+            panic!("the radial open should be preparing")
+        };
         assert_eq!(
-            controller.grid_keyboard_owner(),
-            GridKeyboardOwner::LegacyLauncher
+            controller.handle_legacy_grid_toggle(Some(InvocationId(2_011)), false),
+            vec![radial_invocation]
         );
-        events.lock().unwrap().push_back(NativeEvent::Ready {
-            session_id,
-            layout_generation: generation,
-        });
-        controller.poll();
-        assert!(controller.active_input_scope().is_none());
+        assert!(
+            controller
+                .preparation
+                .as_ref()
+                .is_some_and(|bridge| bridge.waiting.is_none())
+        );
 
-        // Hiding the grid returns ownership without mouse movement.
-        *trigger.open.lock().unwrap() = true;
-        assert!(crate::visibility::handle_visibility_trigger_with_owner(
-            &trigger,
-            &visibility,
-            &restore_flag,
-            &ctx,
-            &mut queued_visibility,
-            (-10_000.0, -10_000.0),
-            false,
-            false,
-            None,
-            None,
-            (400.0, 220.0),
-            |was_visible| controller.handle_legacy_grid_toggle(was_visible),
-        ));
-        assert!(!visibility.load(Ordering::SeqCst));
-        assert_eq!(
-            controller.grid_keyboard_owner(),
-            GridKeyboardOwner::RadialMenu
+        let mut document = RadialDocument::starter();
+        let menu = document.menus.remove(0);
+        let frame = crate::radial::bindings::project_menu_frame(
+            &menu,
+            Default::default(),
+            &Default::default(),
+            0,
+            64,
         );
-        assert!(controller.active_input_scope().is_some());
+        envelope
+            .reply
+            .send(RadialPrepareReply {
+                generation: envelope.request.generation,
+                invocation_id: radial_invocation,
+                menu_id: menu.id.clone(),
+                unavailable: Default::default(),
+                dynamic: Default::default(),
+                frame: frame.clone(),
+                static_cells: Default::default(),
+                frames: [(menu.id.clone(), frame)].into(),
+            })
+            .expect("late preparation reply should be delivered");
+        let events = controller.poll();
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            ControllerEvent::Opened { .. } | ControllerEvent::PrepareRequested(_)
+        )));
+        assert!(controller.pending.is_none());
+        assert!(controller.active.is_none());
+        assert_eq!(*made.lock().unwrap(), 0);
     }
 
     #[test]

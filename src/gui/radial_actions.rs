@@ -22,6 +22,39 @@ use std::sync::Arc;
 use super::{ActivationSource, LauncherApp};
 
 const RADIAL_DISPATCH_TOMBSTONE_LIMIT: usize = 64;
+const ACCEPTANCE_RUNTIME_PREPARE_HOLD_ENV: &str =
+    "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE";
+const ACCEPTANCE_RUNTIME_PREPARE_HOLD_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(4);
+
+fn hold_acceptance_runtime_preparation(request: &crate::radial::bindings::RadialPrepareRequest) {
+    use crate::radial::authoring::{
+        RuntimePreparationTraceState as State, trace_runtime_preparation,
+    };
+
+    let Some(path) = std::env::var_os(ACCEPTANCE_RUNTIME_PREPARE_HOLD_ENV) else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    if !path.is_file() {
+        return;
+    }
+
+    trace_runtime_preparation(request.invocation_id, request.generation, State::GateHeld);
+    let deadline = std::time::Instant::now() + ACCEPTANCE_RUNTIME_PREPARE_HOLD_TIMEOUT;
+    while path.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    trace_runtime_preparation(
+        request.invocation_id,
+        request.generation,
+        if path.is_file() {
+            State::GateTimedOut
+        } else {
+            State::GateReleased
+        },
+    );
+}
 
 impl LauncherApp {
     pub(super) fn invalidate_radial_leases(&mut self) {
@@ -53,6 +86,7 @@ impl LauncherApp {
                 ))
     }
     pub(super) fn prepare_radial(&mut self, envelope: RadialPrepareEnvelope) {
+        hold_acceptance_runtime_preparation(&envelope.request);
         let mut captured_request = envelope.request.clone();
         captured_request.invocation_query = self.query.clone();
         let request = &captured_request;
@@ -668,6 +702,11 @@ impl LauncherApp {
             frames,
         });
         if reply_sent.is_ok() {
+            crate::radial::authoring::trace_runtime_preparation(
+                request.invocation_id,
+                request.generation,
+                crate::radial::authoring::RuntimePreparationTraceState::ReplyQueued,
+            );
             let _ = envelope.wake.send(());
         }
     }

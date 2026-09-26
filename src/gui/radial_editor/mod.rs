@@ -93,6 +93,7 @@ fn trace_correlation(session: Option<&RadialAuthoringSession>) -> Correlation {
             session_id: pending.editor_session.0,
             generation: pending.generation.0,
             terminal: false,
+            ..Correlation::default()
         },
     )
 }
@@ -377,7 +378,7 @@ fn stable_cell_id_digest(cell_id: &str) -> u64 {
 
 fn designer_viewport_builder(open: bool, launcher_always_on_top: bool) -> egui::ViewportBuilder {
     let builder = egui::ViewportBuilder::default()
-        .with_title("Radial Designer")
+        .with_title(crate::gui::RADIAL_DESIGNER_WINDOW_TITLE)
         .with_min_inner_size([520.0, 380.0])
         .with_resizable(true)
         .with_visible(open);
@@ -621,9 +622,10 @@ impl DesignerIntentBridge {
 struct DesignerFrameContext {
     feature_defaults: crate::radial::model::RadialFeatureSettings,
     expected_diagnostics: Vec<crate::radial::diagnostics::RadialDiagnostic>,
-    action_catalog: crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
+    action_catalog: Arc<crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot>,
     require_confirm_destructive: bool,
     intent_bridge: Arc<DesignerIntentBridge>,
+    root_window_bridge: crate::visibility::RootWindowBridge,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1428,7 +1430,6 @@ impl RadialEditorState {
             viewport_restore_pending,
             viewport_focus_pending,
             preferences,
-            action_catalog,
             feature_defaults,
             diagnostics,
             require_confirm,
@@ -1440,7 +1441,6 @@ impl RadialEditorState {
                 editor.viewport_restore_pending,
                 editor.viewport_focus_pending,
                 editor.preferences.clone().normalized(),
-                app.universal_action_catalog_snapshot(),
                 app.radial_feature_settings.clone(),
                 app.radial_expected_diagnostics.iter().cloned().collect(),
                 app.require_confirm_destructive,
@@ -1451,6 +1451,11 @@ impl RadialEditorState {
         if !open && !viewport_close_pending {
             return;
         }
+        let action_catalog = if open {
+            app.cached_universal_action_catalog_snapshot()
+        } else {
+            Arc::new(crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot::empty())
+        };
         let viewport_id = radial_designer_viewport_id();
         let reply_ctx = ctx.clone();
         let reply_wake: Arc<dyn Fn() + Send + Sync> =
@@ -1475,6 +1480,7 @@ impl RadialEditorState {
             action_catalog,
             require_confirm_destructive: require_confirm,
             intent_bridge,
+            root_window_bridge: app.root_window_bridge.clone(),
         };
         let saved_geometry = WindowGeometry {
             position: preferences
@@ -1517,6 +1523,7 @@ impl RadialEditorState {
                 }
             }
             if !editor.open {
+                frame.root_window_bridge.clear_designer_identity();
                 // The deferred viewport is removed when ROOT stops registering it.
                 // Sending Close here would only enqueue another close-request event
                 // in eframe 0.27, which keeps this callback alive and repainting.
@@ -1536,6 +1543,12 @@ impl RadialEditorState {
                         ui.small("This host only provides an embedded viewport.");
                     });
                 return;
+            }
+            if child
+                .input(|input| input.viewport().focused)
+                .unwrap_or(false)
+            {
+                frame.root_window_bridge.capture_focused_designer();
             }
             let focus_requested = std::mem::take(&mut editor.viewport_focus_pending);
             if focus_requested {
@@ -7594,7 +7607,7 @@ mod tests {
             let frame = DesignerFrameContext {
                 feature_defaults: crate::radial::model::RadialFeatureSettings::default(),
                 expected_diagnostics: Vec::new(),
-                action_catalog:
+                action_catalog: std::sync::Arc::new(
                     crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot {
                         entries: Vec::new(),
                         recent_entries: Vec::new(),
@@ -7602,8 +7615,10 @@ mod tests {
                             crate::dashboard::DashboardDataSnapshot::default(),
                         ),
                     },
+                ),
                 require_confirm_destructive: false,
                 intent_bridge: std::sync::Arc::clone(&editor.intent_bridge),
+                root_window_bridge: crate::visibility::RootWindowBridge::default(),
             };
             Self {
                 context,

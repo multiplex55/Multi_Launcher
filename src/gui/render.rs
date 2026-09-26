@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::radial::acceptance_trace::{
-    self, Correlation, RestoreEdge, RootMenuControl, RootResultKind,
+    self, Correlation, RestoreEdge, RootMenuControl, RootResultKind, VisibilitySource,
 };
 
 #[derive(Clone, Debug)]
@@ -522,8 +522,7 @@ impl LauncherApp {
                 self.selected = None;
                 self.move_cursor_end = true;
                 self.focus_input();
-                self.visible_flag.store(true, Ordering::SeqCst);
-                self.restore_flag.store(true, Ordering::SeqCst);
+                self.request_launcher_state(Some(true), Some(true));
                 LauncherCommandResponse::PresentedForSelection { result_count }
             }
         }
@@ -830,8 +829,33 @@ impl eframe::App for LauncherApp {
         if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
             self.window_pos = (rect.min.x as i32, rect.min.y as i32);
         }
-        let do_restore = self.restore_flag.swap(false, Ordering::SeqCst);
-        let root_ctx = RootViewportCtx::new(ctx);
+        let (
+            visibility_request,
+            (
+                should_be_visible,
+                do_restore,
+                focus_intent,
+                visibility_invocation_id,
+                reconcile_native_presentation,
+            ),
+        ) = self.visibility_revision.inspect(|| {
+            (
+                self.visible_flag.load(Ordering::SeqCst),
+                self.restore_flag.swap(false, Ordering::SeqCst),
+                self.visibility_revision.focus_intent(),
+                self.visibility_revision.invocation_id(),
+                self.root_window_bridge
+                    .take_presentation_reconcile_request(),
+            )
+        });
+        let screen_draw_repark_result = if reconcile_native_presentation && !should_be_visible {
+            self.screen_draw_launcher_parking
+                .as_mut()
+                .map(|transaction| transaction.repark_after_stale_restore())
+        } else {
+            None
+        };
+        let root_ctx = RootViewportCtx::with_window_bridge(ctx, self.root_window_bridge.clone());
         if self.visible_flag.load(Ordering::SeqCst) && self.help_flag.swap(false, Ordering::SeqCst)
         {
             self.help_window.overlay_open = !self.help_window.overlay_open;
@@ -839,49 +863,145 @@ impl eframe::App for LauncherApp {
             // reset any queued toggle when window not visible
             self.help_flag.store(false, Ordering::SeqCst);
         }
-        if do_restore && self.visible_flag.load(Ordering::SeqCst) {
-            acceptance_trace::emit(acceptance_trace::Event::Restore {
-                edge: RestoreEdge::RestoreFlag,
-                correlation: Correlation::default(),
-            });
-            tracing::debug!("Restoring window on restore_flag");
-            apply_visibility(
-                true,
-                VisiblePlacementPolicy::PreserveCurrentGeometry,
-                &root_ctx,
-                self.offscreen_pos,
-                self.follow_mouse,
-                self.static_location_enabled,
-                self.static_pos.map(|(x, y)| (x as f32, y as f32)),
-                self.static_size.map(|(w, h)| (w as f32, h as f32)),
-                (self.window_size.0 as f32, self.window_size.1 as f32),
-            );
-            if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
-                crate::window_manager::restore_launcher_to_current_desktop(hwnd);
-            }
-        }
+        let mut just_became_visible = false;
+        let mut native_restore_hwnd = None;
+        let _ = self.visibility_revision.with_current(
+            visibility_request,
+            || self.visible_flag.load(Ordering::SeqCst) == should_be_visible,
+            || {
+                let mut native_restore_queued = false;
+                if do_restore && should_be_visible {
+                    acceptance_trace::emit(acceptance_trace::Event::Restore {
+                        edge: RestoreEdge::RestoreFlag,
+                        correlation: Correlation::default(),
+                    });
+                    tracing::debug!("Restoring window on restore_flag");
+                    acceptance_trace::with_visibility_trace_link(
+                        visibility_request,
+                        visibility_invocation_id,
+                        || {
+                            apply_visibility_with_focus_intent(
+                                true,
+                                focus_intent,
+                                VisiblePlacementPolicy::PreserveCurrentGeometry,
+                                &root_ctx,
+                                self.offscreen_pos,
+                                self.follow_mouse,
+                                self.static_location_enabled,
+                                self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                                self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                                (self.window_size.0 as f32, self.window_size.1 as f32),
+                            );
+                        },
+                    );
+                    if focus_intent == RootFocusIntent::ActivateRoot
+                        && let Some(hwnd) = crate::window_manager::get_hwnd(frame)
+                    {
+                        native_restore_hwnd = Some(hwnd);
+                        native_restore_queued = true;
+                    }
+                }
 
-        let should_be_visible = self.visible_flag.load(Ordering::SeqCst);
-        let just_became_visible = !self.last_visible && should_be_visible;
-        if self.last_visible != should_be_visible {
-            tracing::debug!("gui thread -> visible: {}", should_be_visible);
-            // Screen Draw owns its own exact-geometry parking transaction.
-            // Ordinary grid hiding keeps ROOT drawable at its parked position
-            // so radial preparation can continue in the GUI frame.
-            if should_be_visible || self.screen_draw_launcher_parking.is_none() {
-                apply_visibility(
-                    should_be_visible,
-                    VisiblePlacementPolicy::ApplyConfiguredPlacement,
-                    &root_ctx,
-                    self.offscreen_pos,
-                    self.follow_mouse,
-                    self.static_location_enabled,
-                    self.static_pos.map(|(x, y)| (x as f32, y as f32)),
-                    self.static_size.map(|(w, h)| (w as f32, h as f32)),
-                    (self.window_size.0 as f32, self.window_size.1 as f32),
-                );
-            }
-            self.last_visible = should_be_visible;
+                just_became_visible = !self.last_visible && should_be_visible;
+                let visibility_changed = self.last_visible != should_be_visible;
+                if visibility_changed || reconcile_native_presentation {
+                    tracing::debug!("gui thread -> visible: {}", should_be_visible);
+                    // Screen Draw owns its exact-geometry parking transaction.
+                    // Ordinary grid hiding keeps ROOT drawable for radial work.
+                    let screen_draw_owns_hidden_geometry = reconcile_native_presentation
+                        && !should_be_visible
+                        && screen_draw_repark_result
+                            .as_ref()
+                            .is_some_and(Result::is_ok);
+                    if !screen_draw_owns_hidden_geometry
+                        && (should_be_visible || self.screen_draw_launcher_parking.is_none())
+                    {
+                        let placement_policy = if reconcile_native_presentation {
+                            VisiblePlacementPolicy::PreserveCurrentGeometry
+                        } else {
+                            VisiblePlacementPolicy::ApplyConfiguredPlacement
+                        };
+                        acceptance_trace::with_visibility_trace_link(
+                            visibility_request,
+                            visibility_invocation_id,
+                            || {
+                                apply_visibility_with_focus_intent(
+                                    should_be_visible,
+                                    focus_intent,
+                                    placement_policy,
+                                    &root_ctx,
+                                    self.offscreen_pos,
+                                    self.follow_mouse,
+                                    self.static_location_enabled,
+                                    self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                                    self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                                    (self.window_size.0 as f32, self.window_size.1 as f32),
+                                );
+                            },
+                        );
+                    }
+                    if reconcile_native_presentation
+                        && let Some(Err(error)) = screen_draw_repark_result.as_ref()
+                    {
+                        tracing::warn!(
+                            %error,
+                            "failed to repark ROOT during stale activation reconciliation; queued ordinary visibility fallback"
+                        );
+                        if !should_be_visible {
+                            acceptance_trace::with_visibility_trace_link(
+                                visibility_request,
+                                visibility_invocation_id,
+                                || {
+                                    apply_visibility_with_focus_intent(
+                                        false,
+                                        focus_intent,
+                                        VisiblePlacementPolicy::PreserveCurrentGeometry,
+                                        &root_ctx,
+                                        self.offscreen_pos,
+                                        self.follow_mouse,
+                                        self.static_location_enabled,
+                                        self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                                        self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                                        (self.window_size.0 as f32, self.window_size.1 as f32),
+                                    );
+                                },
+                            );
+                            if let Some(transaction) =
+                                self.screen_draw_launcher_parking.as_mut()
+                            {
+                                transaction.retain_restore_point_after_fallback_park();
+                            }
+                        }
+                    }
+                    if reconcile_native_presentation
+                        && should_be_visible
+                        && focus_intent == RootFocusIntent::ActivateRoot
+                        && !native_restore_queued
+                        && let Some(hwnd) = crate::window_manager::get_hwnd(frame)
+                    {
+                        native_restore_hwnd = Some(hwnd);
+                    }
+                    self.last_visible = should_be_visible;
+                }
+            },
+        );
+        // The ordered restore performs its own revision/HWND admission. Keep
+        // that check outside `with_current`, whose gate is non-reentrant.
+        if let Some(hwnd) = native_restore_hwnd {
+            crate::window_manager::restore_launcher_to_current_desktop_ordered(
+                hwnd,
+                self.visibility_revision.clone(),
+                visibility_request,
+                self.visible_flag.clone(),
+                self.root_window_bridge.clone(),
+            );
+        }
+        if reconcile_native_presentation && self.visibility_revision.current() != visibility_request
+        {
+            // An exact Screen Draw repark or viewport command may have raced a
+            // newer show. Re-arm reconciliation so the newest frame repairs
+            // native geometry instead of trusting last_visible.
+            self.root_window_bridge.request_presentation_reconcile();
         }
 
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -1131,7 +1251,7 @@ impl eframe::App for LauncherApp {
                             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                         }
                     } else {
-                        self.visible_flag.store(false, Ordering::SeqCst);
+                        self.request_launcher_visibility(false);
                     }
                 }
 
@@ -1734,7 +1854,7 @@ impl eframe::App for LauncherApp {
             self.report_error("multi_manager.bindings.save_on_exit", err);
         }
         self.unregister_all_hotkeys();
-        self.visible_flag.store(false, Ordering::SeqCst);
+        self.request_launcher_visibility(false);
         self.last_visible = false;
         self.save_file_search_ui_preferences_if_dirty();
         let window_size = self.window_size;
@@ -1905,9 +2025,8 @@ impl LauncherApp {
                 transaction.commit_hidden();
             }
             self.screen_draw_launcher_parking = None;
-            self.visible_flag.store(false, Ordering::SeqCst);
+            self.request_launcher_state(Some(false), Some(false));
             self.last_visible = false;
-            self.restore_flag.store(false, Ordering::SeqCst);
         }
         if let Some(delay) = poll.repoll_after {
             ctx.request_repaint_after(delay);
@@ -1944,9 +2063,8 @@ impl LauncherApp {
         if let Some(transaction) = self.screen_draw_launcher_parking.as_ref() {
             match transaction.verify() {
                 Ok(true) => {
-                    self.visible_flag.store(false, Ordering::SeqCst);
+                    self.request_launcher_state(Some(false), Some(false));
                     self.last_visible = false;
-                    self.restore_flag.store(false, Ordering::SeqCst);
                     self.egui_ctx.request_repaint();
                     return Ok(());
                 }
@@ -1973,9 +2091,8 @@ impl LauncherApp {
         self.screen_draw_launcher_parking = Some(transaction);
         // Synchronize both logical visibility values so the ordinary visibility
         // path cannot apply configured off-screen placement after native parking.
-        self.visible_flag.store(false, Ordering::SeqCst);
+        self.request_launcher_state(Some(false), Some(false));
         self.last_visible = false;
-        self.restore_flag.store(false, Ordering::SeqCst);
         // Verification occurs on the next event-loop turn, after SetWindowPos.
         self.egui_ctx.request_repaint();
         Ok(())
@@ -1983,7 +2100,16 @@ impl LauncherApp {
 
     pub(super) fn restore_screen_draw_launcher_exact(&mut self) -> Result<(), String> {
         let restored_exact_geometry = self.screen_draw_launcher_parking.is_some();
-        let launcher_was_logically_hidden = !self.visible_flag.load(Ordering::SeqCst);
+        let (
+            observed_revision,
+            (launcher_was_logically_hidden, observed_focus_intent, observed_invocation_id),
+        ) = self.visibility_revision.inspect(|| {
+            (
+                !self.visible_flag.load(Ordering::SeqCst),
+                self.visibility_revision.focus_intent(),
+                self.visibility_revision.invocation_id(),
+            )
+        });
         if let Some(transaction) = self.screen_draw_launcher_parking.as_mut() {
             transaction.restore()?;
         }
@@ -1992,44 +2118,176 @@ impl LauncherApp {
             crate::screen_draw::ScreenDrawState::Ghost { .. }
                 | crate::screen_draw::ScreenDrawState::Finish { .. }
         );
+
+        // Exact geometry restoration is a native call and must not hold the
+        // visibility gate. Commit the logical show only if no newer request
+        // arrived while SetWindowPos was in flight.
+        let Some((request_revision, ())) = self
+            .visibility_revision
+            .request_if_current_with_focus_intent_and_invocation(
+                observed_revision,
+                observed_focus_intent,
+                observed_invocation_id,
+                || {
+                    self.visible_flag.store(true, Ordering::SeqCst);
+                    self.restore_flag.store(false, Ordering::SeqCst);
+                },
+            )
+        else {
+            let (
+                current_revision,
+                (should_be_visible, current_focus_intent, current_invocation_id),
+            ) = self.visibility_revision.inspect(|| {
+                (
+                    self.visible_flag.load(Ordering::SeqCst),
+                    self.visibility_revision.focus_intent(),
+                    self.visibility_revision.invocation_id(),
+                )
+            });
+
+            let mut repark_error = None;
+            if retain_for_resume && !should_be_visible {
+                if let Some(transaction) = self.screen_draw_launcher_parking.as_mut() {
+                    if let Err(error) = transaction.repark_after_stale_restore() {
+                        repark_error = Some(error);
+                    }
+                }
+            } else if !retain_for_resume {
+                self.screen_draw_launcher_parking = None;
+            }
+
+            // Keep the next frame armed if another request races this
+            // reconciliation. A successful current request will set the
+            // baseline to its desired state below.
+            self.last_visible = !should_be_visible;
+            let root_ctx = RootViewportCtx::with_window_bridge(
+                &self.egui_ctx,
+                self.root_window_bridge.clone(),
+            );
+            let reconciled = self.visibility_revision.with_current(
+                current_revision,
+                || self.visible_flag.load(Ordering::SeqCst) == should_be_visible,
+                || {
+                    acceptance_trace::with_visibility_trace_link(
+                        current_revision,
+                        current_invocation_id,
+                        || {
+                            if !retain_for_resume || should_be_visible || repark_error.is_some() {
+                                crate::visibility::apply_visibility_with_focus_intent(
+                                    should_be_visible,
+                                    current_focus_intent,
+                                    if restored_exact_geometry {
+                                        crate::visibility::VisiblePlacementPolicy::PreserveCurrentGeometry
+                                    } else {
+                                        crate::visibility::VisiblePlacementPolicy::ApplyConfiguredPlacement
+                                    },
+                                    &root_ctx,
+                                    self.offscreen_pos,
+                                    self.follow_mouse,
+                                    self.static_location_enabled,
+                                    self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                                    self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                                    (self.window_size.0 as f32, self.window_size.1 as f32),
+                                );
+                                if repark_error.is_some()
+                                    && !should_be_visible
+                                    && let Some(transaction) = self.screen_draw_launcher_parking.as_mut()
+                                {
+                                    transaction.retain_restore_point_after_fallback_park();
+                                }
+                            }
+                        }
+                    )
+                },
+            );
+            if reconciled.is_some() {
+                self.last_visible = should_be_visible;
+            } else {
+                let (_, latest_visibility) = self
+                    .visibility_revision
+                    .inspect(|| self.visible_flag.load(Ordering::SeqCst));
+                self.last_visible = !latest_visibility;
+            }
+            if let Some(error) = repark_error {
+                return Err(format!(
+                    "failed to repark ROOT after stale Screen Draw restore; queued current visibility fallback: {error}"
+                ));
+            }
+            return Ok(());
+        };
+
         if !retain_for_resume {
             self.screen_draw_launcher_parking = None;
         }
-        self.visible_flag.store(true, Ordering::SeqCst);
         self.last_visible = true;
-        self.restore_flag.store(false, Ordering::SeqCst);
-        let root_ctx = RootViewportCtx::new(&self.egui_ctx);
-        if !restored_exact_geometry && launcher_was_logically_hidden {
-            // A successful terminal operation commits and discards the exact
-            // snapshot while leaving the HWND parked. Establish a guaranteed
-            // onscreen fallback before optional configured placement; a later
-            // static or follow-mouse command in the same batch supersedes it.
-            root_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
-        }
-        crate::visibility::apply_visibility(
-            true,
-            if restored_exact_geometry {
-                crate::visibility::VisiblePlacementPolicy::PreserveCurrentGeometry
-            } else {
-                // A completed Screen Draw session deliberately discards its
-                // exact snapshot while the native window is still parked.
-                // The next explicit show must therefore use the ordinary
-                // configured placement instead of preserving parked geometry.
-                crate::visibility::VisiblePlacementPolicy::ApplyConfiguredPlacement
+        let mut native_restore_hwnd = None;
+        let root_ctx =
+            RootViewportCtx::with_window_bridge(&self.egui_ctx, self.root_window_bridge.clone());
+        let _ = self.visibility_revision.with_current(
+            request_revision,
+            || self.visible_flag.load(Ordering::SeqCst),
+            || {
+                acceptance_trace::with_visibility_trace_link(
+                    request_revision,
+                    observed_invocation_id,
+                    || {
+                        acceptance_trace::emit(acceptance_trace::Event::DesiredVisibility {
+                            visible: true,
+                            revision: request_revision,
+                            source: VisibilitySource::ScreenDrawRestore,
+                            invocation_id: observed_invocation_id,
+                        });
+                        acceptance_trace::emit(
+                            acceptance_trace::Event::ScreenDrawRestoreFocusIntent {
+                                revision: request_revision,
+                                invocation_id: observed_invocation_id,
+                                focus_intent: observed_focus_intent,
+                            },
+                        );
+                        if !restored_exact_geometry && launcher_was_logically_hidden {
+                            // A completed Screen Draw session discards its exact
+                            // snapshot while the native window is parked. Move ROOT
+                            // onscreen before applying optional configured placement.
+                            root_ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                                egui::pos2(0.0, 0.0),
+                            ));
+                        }
+                        crate::visibility::apply_visibility_with_focus_intent(
+                            true,
+                            observed_focus_intent,
+                            if restored_exact_geometry {
+                                crate::visibility::VisiblePlacementPolicy::PreserveCurrentGeometry
+                            } else {
+                                crate::visibility::VisiblePlacementPolicy::ApplyConfiguredPlacement
+                            },
+                            &root_ctx,
+                            self.offscreen_pos,
+                            self.follow_mouse,
+                            self.static_location_enabled,
+                            self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                            self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                            (self.window_size.0 as f32, self.window_size.1 as f32),
+                        );
+                        #[cfg(windows)]
+                        if observed_focus_intent == RootFocusIntent::ActivateRoot
+                            && let Some(hwnd) = self.launcher_hwnd
+                        {
+                            native_restore_hwnd = Some(windows::Win32::Foundation::HWND(
+                                hwnd as *mut core::ffi::c_void,
+                            ));
+                        }
+                    },
+                )
             },
-            &root_ctx,
-            self.offscreen_pos,
-            self.follow_mouse,
-            self.static_location_enabled,
-            self.static_pos.map(|(x, y)| (x as f32, y as f32)),
-            self.static_size.map(|(w, h)| (w as f32, h as f32)),
-            (self.window_size.0 as f32, self.window_size.1 as f32),
         );
-        #[cfg(windows)]
-        if let Some(hwnd) = self.launcher_hwnd {
-            crate::window_manager::force_restore_and_foreground(windows::Win32::Foundation::HWND(
-                hwnd as *mut core::ffi::c_void,
-            ));
+        if let Some(hwnd) = native_restore_hwnd {
+            crate::window_manager::restore_launcher_to_current_desktop_ordered(
+                hwnd,
+                self.visibility_revision.clone(),
+                request_revision,
+                self.visible_flag.clone(),
+                self.root_window_bridge.clone(),
+            );
         }
         Ok(())
     }
@@ -2625,6 +2883,219 @@ mod tests {
         assert!(!commands.iter().any(|command| matches!(
             command,
             egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
+        )));
+    }
+
+    #[test]
+    fn screen_draw_restore_error_does_not_publish_logical_visibility() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.restore_flag.store(true, Ordering::SeqCst);
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(12),
+                crate::screen_draw::launcher_parking::LauncherWindowRect {
+                    left: 21,
+                    top: 34,
+                    right: 421,
+                    bottom: 234,
+                },
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
+        observer.fail_next_restore();
+        let revision = app.visibility_revision.current();
+
+        ctx.begin_frame(egui::RawInput::default());
+        let result = app.restore_screen_draw_launcher_exact();
+        let _ = ctx.end_frame();
+
+        assert!(result.is_err());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(app.visibility_revision.current(), revision);
+        assert!(app.screen_draw_launcher_parking.is_some());
+        assert!(observer.restored_rects().is_empty());
+    }
+
+    #[test]
+    fn newer_show_after_screen_draw_hide_request_keeps_restore_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.restore_flag.store(true, Ordering::SeqCst);
+
+        app.request_launcher_state(Some(false), Some(false));
+        app.last_visible = false;
+        app.request_launcher_state(Some(true), Some(true));
+
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn newer_hide_during_screen_draw_restore_reconciles_exact_geometry() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.restore_flag.store(true, Ordering::SeqCst);
+        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            left: 21,
+            top: 34,
+            right: 421,
+            bottom: 234,
+        };
+        let (transaction, observer) =
+            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(13),
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
+        app.screen_draw_launcher_parking = Some(transaction);
+        let revision = app.visibility_revision.clone();
+        let visible = Arc::clone(&app.visible_flag);
+        let restore = Arc::clone(&app.restore_flag);
+        observer.before_next_restore(move || {
+            revision.request(|| {
+                visible.store(false, Ordering::SeqCst);
+                restore.store(false, Ordering::SeqCst);
+            });
+        });
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.restore_screen_draw_launcher_exact().unwrap();
+        let output = ctx.end_frame();
+
+        assert_eq!(observer.restored_rects(), [original]);
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        assert!(app.screen_draw_launcher_parking.is_none());
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .unwrap()
+            .commands;
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Visible(true) | egui::ViewportCommand::Focus
+        )));
+    }
+
+    #[test]
+    fn newer_preserve_foreground_show_survives_blocked_screen_draw_restore() {
+        let ctx = egui::Context::default();
+        let (mut app, generation, _commands) = drawing_app_with_resume_fixture(&ctx);
+        app.screen_draw_controller.enter_ghost().unwrap();
+        let (observer, _) = install_recovery_parking(&mut app, generation);
+        let revision = app.visibility_revision.clone();
+        let visible = Arc::clone(&app.visible_flag);
+        observer.before_next_restore(move || {
+            revision.request_with_focus_intent_and_invocation(
+                RootFocusIntent::PreserveForeground,
+                Some(88),
+                || visible.store(true, Ordering::SeqCst),
+            );
+        });
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.restore_screen_draw_launcher_exact().unwrap();
+        let output = ctx.end_frame();
+
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        let (revision, (focus_intent, invocation_id)) = app.visibility_revision.inspect(|| {
+            (
+                app.visibility_revision.focus_intent(),
+                app.visibility_revision.invocation_id(),
+            )
+        });
+        assert!(revision > 0);
+        assert_eq!(focus_intent, RootFocusIntent::PreserveForeground);
+        assert_eq!(invocation_id, Some(88));
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .unwrap()
+            .commands;
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Focus | egui::ViewportCommand::Minimized(false)
+        )));
+    }
+
+    #[test]
+    fn newer_show_during_stale_screen_draw_repark_arms_next_frame_reconciliation() {
+        let ctx = egui::Context::default();
+        let (mut app, generation, _commands) = drawing_app_with_resume_fixture(&ctx);
+        app.screen_draw_controller.enter_ghost().unwrap();
+        let (observer, _) = install_recovery_parking(&mut app, generation);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+
+        let hide_revision = app.visibility_revision.clone();
+        let hide_visible = Arc::clone(&app.visible_flag);
+        observer.before_next_restore(move || {
+            hide_revision.request(|| hide_visible.store(false, Ordering::SeqCst));
+        });
+        let show_revision = app.visibility_revision.clone();
+        let show_visible = Arc::clone(&app.visible_flag);
+        observer.before_next_park(move || {
+            show_revision.request(|| show_visible.store(true, Ordering::SeqCst));
+        });
+
+        ctx.begin_frame(egui::RawInput::default());
+        app.restore_screen_draw_launcher_exact().unwrap();
+        let _ = ctx.end_frame();
+
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(
+            !app.last_visible,
+            "the newer show must differ from last_visible so the next frame reapplies it"
+        );
+        assert_eq!(
+            app.screen_draw_launcher_parking.as_ref().unwrap().state(),
+            crate::screen_draw::launcher_parking::LauncherParkingState::Active
+        );
+    }
+
+    #[test]
+    fn failed_stale_screen_draw_repark_queues_guarded_hidden_fallback() {
+        let ctx = egui::Context::default();
+        let (mut app, generation, _commands) = drawing_app_with_resume_fixture(&ctx);
+        app.screen_draw_controller.enter_ghost().unwrap();
+        let (observer, _) = install_recovery_parking(&mut app, generation);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        observer.fail_next_park();
+        let hide_revision = app.visibility_revision.clone();
+        let hide_visible = Arc::clone(&app.visible_flag);
+        observer.before_next_restore(move || {
+            hide_revision.request(|| hide_visible.store(false, Ordering::SeqCst));
+        });
+
+        ctx.begin_frame(egui::RawInput::default());
+        let result = app.restore_screen_draw_launcher_exact();
+        let output = ctx.end_frame();
+
+        assert!(result.is_err());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        let commands = &output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .unwrap()
+            .commands;
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::OuterPosition(_)))
+        );
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Visible(true) | egui::ViewportCommand::Focus
         )));
     }
 

@@ -298,6 +298,9 @@ fn activate_handle_with(
             crate::window_activation::WindowActivationErrorKind::ForegroundDenied => {
                 DiagnosticKind::Backend
             }
+            crate::window_activation::WindowActivationErrorKind::Superseded => {
+                DiagnosticKind::Backend
+            }
         };
         let mut diagnostic = ExecutionDiagnostic::new(kind, error.message)
             .context("backend", "window activation")

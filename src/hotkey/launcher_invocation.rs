@@ -150,6 +150,92 @@ impl AdapterOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HookDisposition {
+    Consume,
+    Forward,
+}
+
+fn with_hook_state<T, R>(
+    state_lock: &std::sync::Mutex<Option<T>>,
+    process: impl FnOnce(&mut T) -> HookDisposition,
+    forward: impl FnOnce() -> R,
+    consume: impl FnOnce() -> R,
+) -> R {
+    let disposition = match state_lock.lock() {
+        Ok(mut guard) => guard
+            .as_mut()
+            .map(process)
+            .unwrap_or(HookDisposition::Forward),
+        Err(_) => HookDisposition::Forward,
+    };
+
+    match disposition {
+        HookDisposition::Forward => forward(),
+        HookDisposition::Consume => consume(),
+    }
+}
+
+#[cfg(test)]
+mod hook_forwarding_tests {
+    use super::{HookDisposition, with_hook_state};
+    use std::cell::Cell;
+    use std::sync::Mutex;
+
+    #[test]
+    fn forwarding_callback_can_reacquire_state_lock() {
+        let state = Mutex::new(Some(7));
+        let forwarded = Cell::new(0);
+        let consumed = Cell::new(0);
+
+        let result = with_hook_state(
+            &state,
+            |_| HookDisposition::Forward,
+            || {
+                assert!(state.try_lock().is_ok());
+                forwarded.set(forwarded.get() + 1);
+                13
+            },
+            || {
+                consumed.set(consumed.get() + 1);
+                0
+            },
+        );
+
+        assert_eq!(result, 13);
+        assert_eq!(forwarded.get(), 1);
+        assert_eq!(consumed.get(), 0);
+    }
+
+    #[test]
+    fn consumed_callback_never_forwards_and_runs_after_state_unlock() {
+        let state = Mutex::new(Some(7));
+        let forwarded = Cell::new(0);
+
+        let result = with_hook_state(
+            &state,
+            |state| {
+                *state = 9;
+                HookDisposition::Consume
+            },
+            || {
+                forwarded.set(forwarded.get() + 1);
+                0
+            },
+            || {
+                let guard = state
+                    .try_lock()
+                    .expect("state lock released before consume");
+                assert_eq!(*guard, Some(9));
+                1
+            },
+        );
+
+        assert_eq!(result, 1);
+        assert_eq!(forwarded.get(), 0);
+    }
+}
+
 #[derive(Default, Clone, Copy, Debug)]
 struct Modifiers {
     ctrl_left: bool,
@@ -1541,339 +1627,345 @@ mod native_service {
         let Some(lock) = STATE.get() else {
             return unsafe { CallNextHookEx(None, code, w, l) };
         };
-        let Ok(mut guard) = lock.lock() else {
-            return unsafe { CallNextHookEx(None, code, w, l) };
-        };
-        let Some(state) = guard.as_mut() else {
-            return unsafe { CallNextHookEx(None, code, w, l) };
-        };
-        let primary = vk_from_key(state.adapter.config().hotkey.key);
-        callback_timing.primary = Some(data.vkCode) == primary;
-        let transition = if Some(data.vkCode) == primary
-            && transition == KeyTransition::Down
-            && state.primary_down
-        {
-            KeyTransition::Repeat
-        } else {
-            transition
-        };
-        if Some(data.vkCode) == primary {
-            state.primary_down = transition != KeyTransition::Up
-        }
-        let provenance = classify_provenance(injected, data.dwExtraInfo);
-        if Some(data.vkCode) == primary
-            && let Some(transition) = acceptance_trace_primary_transition(transition)
-        {
-            acceptance_trace::emit(Event::HookPrimary {
-                transition,
-                provenance,
-                foreground_owner: acceptance_trace::foreground_owner(),
-            });
-        }
-        let at = state.epoch.elapsed().as_millis() as u64;
-        if state.item_owned.is_some() {
-            state.item_recognizer.observe_owned_cycle_event(KeyEvent {
-                vk: data.vkCode,
-                transition,
-                at,
-                provenance,
-            });
-        }
-        if state.item_owned.is_some_and(|owned| {
-            owned.primary_key == data.vkCode
-                && owned.provenance == provenance
-                && transition != KeyTransition::Up
-        }) {
-            return if state.item_primary_suppressed {
-                LRESULT(1)
-            } else {
-                unsafe { CallNextHookEx(None, code, w, l) }
-            };
-        }
-        if transition == KeyTransition::Up
-            && state.direct_owned.is_some_and(|owned| {
-                owned.matches_release(KeyEvent {
+        with_hook_state(
+            lock,
+            |state| {
+                let primary = vk_from_key(state.adapter.config().hotkey.key);
+                callback_timing.primary = Some(data.vkCode) == primary;
+                let transition = if Some(data.vkCode) == primary
+                    && transition == KeyTransition::Down
+                    && state.primary_down
+                {
+                    KeyTransition::Repeat
+                } else {
+                    transition
+                };
+                if Some(data.vkCode) == primary {
+                    state.primary_down = transition != KeyTransition::Up
+                }
+                let provenance = classify_provenance(injected, data.dwExtraInfo);
+                if Some(data.vkCode) == primary
+                    && let Some(transition) = acceptance_trace_primary_transition(transition)
+                {
+                    acceptance_trace::emit(Event::HookPrimary {
+                        transition,
+                        provenance,
+                        foreground_owner: acceptance_trace::foreground_owner(),
+                    });
+                }
+                let at = state.epoch.elapsed().as_millis() as u64;
+                if state.item_owned.is_some() {
+                    state.item_recognizer.observe_owned_cycle_event(KeyEvent {
+                        vk: data.vkCode,
+                        transition,
+                        at,
+                        provenance,
+                    });
+                }
+                if state.item_owned.is_some_and(|owned| {
+                    owned.primary_key == data.vkCode
+                        && owned.provenance == provenance
+                        && transition != KeyTransition::Up
+                }) {
+                    return if state.item_primary_suppressed {
+                        HookDisposition::Consume
+                    } else {
+                        HookDisposition::Forward
+                    };
+                }
+                if transition == KeyTransition::Up
+                    && state.direct_owned.is_some_and(|owned| {
+                        owned.matches_release(KeyEvent {
+                            vk: data.vkCode,
+                            transition,
+                            at,
+                            provenance,
+                        })
+                    })
+                {
+                    let id = state
+                        .direct_owned
+                        .take()
+                        .expect("matched direct ownership")
+                        .id;
+                    let _ = state.notices.send(ServiceNotice {
+                        recovery: false,
+                        intents: vec![InvocationIntent::TriggerReleased { id }],
+                        error: None,
+                        action: None,
+                        cancellation: None,
+                    });
+                    let _ = state.wake.send(());
+                }
+                if transition == KeyTransition::Up
+                    && state.item_owned.is_some_and(|owned| {
+                        owned.matches_release(KeyEvent {
+                            vk: data.vkCode,
+                            transition,
+                            at,
+                            provenance,
+                        })
+                    })
+                {
+                    let id = state.item_owned.take().expect("matched item ownership").id;
+                    let consume = std::mem::take(&mut state.item_primary_suppressed);
+                    let _ = state.notices.send(ServiceNotice {
+                        recovery: false,
+                        intents: vec![InvocationIntent::TriggerReleased { id }],
+                        error: None,
+                        action: None,
+                        cancellation: None,
+                    });
+                    let _ = state.wake.send(());
+                    acknowledge_handoffs_if_drained(state);
+                    if state.shutdown_requested && !has_owned_input(state) {
+                        unsafe { PostQuitMessage(0) };
+                    }
+                    return if consume {
+                        HookDisposition::Consume
+                    } else {
+                        HookDisposition::Forward
+                    };
+                }
+                let key_event = KeyEvent {
                     vk: data.vkCode,
                     transition,
                     at,
                     provenance,
-                })
-            })
-        {
-            let id = state
-                .direct_owned
-                .take()
-                .expect("matched direct ownership")
-                .id;
-            let _ = state.notices.send(ServiceNotice {
-                recovery: false,
-                intents: vec![InvocationIntent::TriggerReleased { id }],
-                error: None,
-                action: None,
-                cancellation: None,
-            });
-            let _ = state.wake.send(());
-        }
-        if transition == KeyTransition::Up
-            && state.item_owned.is_some_and(|owned| {
-                owned.matches_release(KeyEvent {
-                    vk: data.vkCode,
-                    transition,
-                    at,
-                    provenance,
-                })
-            })
-        {
-            let id = state.item_owned.take().expect("matched item ownership").id;
-            let consume = std::mem::take(&mut state.item_primary_suppressed);
-            let _ = state.notices.send(ServiceNotice {
-                recovery: false,
-                intents: vec![InvocationIntent::TriggerReleased { id }],
-                error: None,
-                action: None,
-                cancellation: None,
-            });
-            let _ = state.wake.send(());
-            acknowledge_handoffs_if_drained(state);
-            if state.shutdown_requested && !has_owned_input(state) {
-                unsafe { PostQuitMessage(0) };
-            }
-            return if consume {
-                LRESULT(1)
-            } else {
-                unsafe { CallNextHookEx(None, code, w, l) }
-            };
-        }
-        let key_event = KeyEvent {
-            vk: data.vkCode,
-            transition,
-            at,
-            provenance,
-        };
-        let accept_external_injected = state.adapter.config().accept_external_injected;
-        let allow_navigation = state.active_frame.is_some();
-        let navigation_modifiers = state.adapter.navigation_modifiers();
-        if let Some(out) = route_escape_event(
-            &mut state.escape,
-            &mut state.adapter,
-            key_event,
-            accept_external_injected,
-            navigation_modifiers,
-            allow_navigation,
-        ) {
-            let consume = out.consume;
-            publish(state, out);
-            if consume {
-                return LRESULT(1);
-            }
-            return unsafe { CallNextHookEx(None, code, w, l) };
-        }
-        if state.shutdown_requested {
-            let out = state.adapter.process(
-                KeyEvent {
-                    vk: data.vkCode,
-                    transition,
-                    at,
-                    provenance,
-                },
-                PriorityOwner::ExclusiveTool,
-            );
-            let consume = out.consume;
-            publish(state, out);
-            acknowledge_handoffs_if_drained(state);
-            if !has_owned_input(state) {
-                unsafe { PostQuitMessage(0) };
-            }
-            return if consume {
-                LRESULT(1)
-            } else {
-                unsafe { CallNextHookEx(None, code, w, l) }
-            };
-        }
-        let current_owner = (state.owner)();
-        let mut related_preempted = false;
-        if provenance != InputProvenance::SelfInjected
-            && (provenance != InputProvenance::ExternalInjected
-                || state.adapter.config().accept_external_injected)
-        {
-            if transition == KeyTransition::Up {
-                state.down.remove(&data.vkCode);
-            } else {
-                state.down.insert(data.vkCode);
-            }
-            let mut selected: Option<(u8, RelatedAction, u32)> = None;
-            for (binding, latched) in &mut state.related {
-                let eligible = related_binding_eligible(&state.down, &binding.hotkey);
-                if eligible && !*latched {
-                    let priority = related_priority(&binding.action);
-                    if selected.as_ref().is_none_or(|(p, _, _)| priority < *p) {
-                        if let Some(primary) = vk_from_key(binding.hotkey.key) {
-                            selected = Some((priority, binding.action.clone(), primary));
+                };
+                let accept_external_injected = state.adapter.config().accept_external_injected;
+                let allow_navigation = state.active_frame.is_some();
+                let navigation_modifiers = state.adapter.navigation_modifiers();
+                if let Some(out) = route_escape_event(
+                    &mut state.escape,
+                    &mut state.adapter,
+                    key_event,
+                    accept_external_injected,
+                    navigation_modifiers,
+                    allow_navigation,
+                ) {
+                    let consume = out.consume;
+                    publish(state, out);
+                    if consume {
+                        return HookDisposition::Consume;
+                    }
+                    return HookDisposition::Forward;
+                }
+                if state.shutdown_requested {
+                    let out = state.adapter.process(
+                        KeyEvent {
+                            vk: data.vkCode,
+                            transition,
+                            at,
+                            provenance,
+                        },
+                        PriorityOwner::ExclusiveTool,
+                    );
+                    let consume = out.consume;
+                    publish(state, out);
+                    acknowledge_handoffs_if_drained(state);
+                    if !has_owned_input(state) {
+                        unsafe { PostQuitMessage(0) };
+                    }
+                    return if consume {
+                        HookDisposition::Consume
+                    } else {
+                        HookDisposition::Forward
+                    };
+                }
+                let current_owner = (state.owner)();
+                let mut related_preempted = false;
+                if provenance != InputProvenance::SelfInjected
+                    && (provenance != InputProvenance::ExternalInjected
+                        || state.adapter.config().accept_external_injected)
+                {
+                    if transition == KeyTransition::Up {
+                        state.down.remove(&data.vkCode);
+                    } else {
+                        state.down.insert(data.vkCode);
+                    }
+                    let mut selected: Option<(u8, RelatedAction, u32)> = None;
+                    for (binding, latched) in &mut state.related {
+                        let eligible = related_binding_eligible(&state.down, &binding.hotkey);
+                        if eligible && !*latched {
+                            let priority = related_priority(&binding.action);
+                            if selected.as_ref().is_none_or(|(p, _, _)| priority < *p) {
+                                if let Some(primary) = vk_from_key(binding.hotkey.key) {
+                                    selected = Some((priority, binding.action.clone(), primary));
+                                }
+                            }
                         }
+                        *latched = eligible;
+                    }
+                    if let Some((_, action, related_primary)) =
+                        selected.filter(|(_, action, _)| related_allowed(current_owner, action))
+                    {
+                        let mut intents = state.adapter.preempt();
+                        let mut published_action = Some(action.clone());
+                        if let RelatedAction::DirectMenu { menu_id, .. } = &action {
+                            let id = InvocationId(state.next_direct_id);
+                            state.next_direct_id =
+                                state.next_direct_id.checked_add(1).unwrap_or(1_000_000);
+                            state.direct_owned = Some(DirectCycleOwnership {
+                                id,
+                                primary_key: related_primary,
+                                provenance,
+                            });
+                            intents.push(InvocationIntent::ToggleDirectMenu {
+                                id,
+                                menu_id: menu_id.clone(),
+                                primary_key: related_primary,
+                                provenance,
+                                trigger_still_down: true,
+                            });
+                            published_action = None;
+                        }
+                        let _ = update_timers(state, &intents);
+                        let _ = state.notices.send(ServiceNotice {
+                            recovery: false,
+                            intents,
+                            error: None,
+                            action: published_action,
+                            cancellation: None,
+                        });
+                        let _ = state.wake.send(());
+                        related_preempted = true;
                     }
                 }
-                *latched = eligible;
-            }
-            if let Some((_, action, related_primary)) =
-                selected.filter(|(_, action, _)| related_allowed(current_owner, action))
-            {
-                let mut intents = state.adapter.preempt();
-                let mut published_action = Some(action.clone());
-                if let RelatedAction::DirectMenu { menu_id, .. } = &action {
+                let owner = if related_preempted {
+                    PriorityOwner::ExclusiveTool
+                } else {
+                    current_owner
+                };
+                state.item_recognizer.transition(
+                    unsafe { GetForegroundWindow() }.0 as isize,
+                    state.session_epoch,
+                    owner != PriorityOwner::Launcher,
+                );
+                if !related_preempted
+                    && owner == PriorityOwner::Launcher
+                    && state.item_owned.is_none()
+                    && let Some(matched) = state.item_recognizer.process(
+                        &state.item_inputs,
+                        state.active_frame.as_ref().map(|(_, menu)| menu),
+                        KeyEvent {
+                            vk: data.vkCode,
+                            transition,
+                            at,
+                            provenance,
+                        },
+                    )
+                {
                     let id = InvocationId(state.next_direct_id);
                     state.next_direct_id = state.next_direct_id.checked_add(1).unwrap_or(1_000_000);
-                    state.direct_owned = Some(DirectCycleOwnership {
-                        id,
-                        primary_key: related_primary,
-                        provenance,
+                    let trigger_still_down = matched.primary_key.is_some();
+                    if let Some(primary_key) = matched.primary_key {
+                        state.item_owned = Some(DirectCycleOwnership {
+                            id,
+                            primary_key,
+                            provenance: matched.provenance,
+                        });
+                        state.item_primary_suppressed = matched.consume_current;
+                    }
+                    let source = match matched.binding.trigger {
+                        crate::radial::item_input::ItemInputTrigger::Shortcut(_) => {
+                            crate::commands::ActivationSource::RadialShortcut
+                        }
+                        crate::radial::item_input::ItemInputTrigger::Hotstring { .. } => {
+                            crate::commands::ActivationSource::RadialHotstring
+                        }
+                    };
+                    let consume = matched.consume_current;
+                    let _ = state.notices.send(ServiceNotice {
+                        recovery: false,
+                        intents: vec![InvocationIntent::ActivateItem {
+                            id,
+                            menu_id: matched.binding.menu_id,
+                            cell_id: matched.binding.cell_id,
+                            gesture: matched.binding.gesture,
+                            scope: matched.binding.scope,
+                            source,
+                            trigger_still_down,
+                        }],
+                        error: None,
+                        action: None,
+                        cancellation: None,
                     });
-                    intents.push(InvocationIntent::ToggleDirectMenu {
-                        id,
-                        menu_id: menu_id.clone(),
-                        primary_key: related_primary,
+                    let _ = state.wake.send(());
+                    if consume {
+                        return HookDisposition::Consume;
+                    }
+                }
+                let out = state.adapter.process(
+                    KeyEvent {
+                        vk: data.vkCode,
+                        transition,
+                        at,
                         provenance,
-                        trigger_still_down: true,
+                    },
+                    owner,
+                );
+                if callback_timing.primary
+                    && let Some(primary_transition) =
+                        acceptance_trace_primary_transition(transition)
+                {
+                    let deadline_scheduled = out
+                        .intents
+                        .iter()
+                        .any(|intent| matches!(intent, InvocationIntent::ScheduleDeadline { .. }));
+                    let radial_intent = out.intents.iter().any(|intent| {
+                        matches!(
+                            intent,
+                            InvocationIntent::OpenRadial { .. }
+                                | InvocationIntent::CloseRadial { .. }
+                        )
                     });
-                    published_action = None;
+                    acceptance_trace::emit(Event::HookAdmission {
+                        transition: primary_transition,
+                        provenance,
+                        owner: match current_owner {
+                            PriorityOwner::Launcher => HookPriorityOwner::Launcher,
+                            PriorityOwner::ScreenDrawRecovery => {
+                                HookPriorityOwner::ScreenDrawRecovery
+                            }
+                            PriorityOwner::ExclusiveTool => HookPriorityOwner::ExclusiveTool,
+                        },
+                        global_exclusive_owners: super::exclusive_owners(),
+                        adapter_exclusive: state.adapter.is_exclusive(),
+                        recovery: out.recovery,
+                        deadline_scheduled,
+                        radial_intent,
+                    });
                 }
-                let _ = update_timers(state, &intents);
-                let _ = state.notices.send(ServiceNotice {
-                    recovery: false,
-                    intents,
-                    error: None,
-                    action: published_action,
-                    cancellation: None,
-                });
-                let _ = state.wake.send(());
-                related_preempted = true;
-            }
-        }
-        let owner = if related_preempted {
-            PriorityOwner::ExclusiveTool
-        } else {
-            current_owner
-        };
-        state.item_recognizer.transition(
-            unsafe { GetForegroundWindow() }.0 as isize,
-            state.session_epoch,
-            owner != PriorityOwner::Launcher,
-        );
-        if !related_preempted
-            && owner == PriorityOwner::Launcher
-            && state.item_owned.is_none()
-            && let Some(matched) = state.item_recognizer.process(
-                &state.item_inputs,
-                state.active_frame.as_ref().map(|(_, menu)| menu),
-                KeyEvent {
-                    vk: data.vkCode,
-                    transition,
-                    at,
-                    provenance,
-                },
-            )
-        {
-            let id = InvocationId(state.next_direct_id);
-            state.next_direct_id = state.next_direct_id.checked_add(1).unwrap_or(1_000_000);
-            let trigger_still_down = matched.primary_key.is_some();
-            if let Some(primary_key) = matched.primary_key {
-                state.item_owned = Some(DirectCycleOwnership {
-                    id,
-                    primary_key,
-                    provenance: matched.provenance,
-                });
-                state.item_primary_suppressed = matched.consume_current;
-            }
-            let source = match matched.binding.trigger {
-                crate::radial::item_input::ItemInputTrigger::Shortcut(_) => {
-                    crate::commands::ActivationSource::RadialShortcut
+                let timer_error = update_timers(state, &out.intents);
+                if let Some(error) = timer_error {
+                    state.shutdown_requested = true;
+                    let cancel = cancel_lifecycle(state, LifecycleCancellation::HookFailure);
+                    let _ = state.notices.send(ServiceNotice {
+                        recovery: false,
+                        intents: cancel,
+                        error: Some(error),
+                        action: None,
+                        cancellation: Some(LifecycleCancellation::HookFailure),
+                    });
+                    let _ = state.wake.send(());
+                    unsafe { PostQuitMessage(0) };
                 }
-                crate::radial::item_input::ItemInputTrigger::Hotstring { .. } => {
-                    crate::commands::ActivationSource::RadialHotstring
+                let consume = out.consume;
+                publish(state, out);
+                acknowledge_handoffs_if_drained(state);
+                if state.shutdown_requested && !has_owned_input(state) {
+                    unsafe { PostQuitMessage(0) };
                 }
-            };
-            let consume = matched.consume_current;
-            let _ = state.notices.send(ServiceNotice {
-                recovery: false,
-                intents: vec![InvocationIntent::ActivateItem {
-                    id,
-                    menu_id: matched.binding.menu_id,
-                    cell_id: matched.binding.cell_id,
-                    gesture: matched.binding.gesture,
-                    scope: matched.binding.scope,
-                    source,
-                    trigger_still_down,
-                }],
-                error: None,
-                action: None,
-                cancellation: None,
-            });
-            let _ = state.wake.send(());
-            if consume {
-                return LRESULT(1);
-            }
-        }
-        let out = state.adapter.process(
-            KeyEvent {
-                vk: data.vkCode,
-                transition,
-                at,
-                provenance,
+                if consume {
+                    HookDisposition::Consume
+                } else {
+                    HookDisposition::Forward
+                }
             },
-            owner,
-        );
-        if callback_timing.primary
-            && let Some(primary_transition) = acceptance_trace_primary_transition(transition)
-        {
-            let deadline_scheduled = out
-                .intents
-                .iter()
-                .any(|intent| matches!(intent, InvocationIntent::ScheduleDeadline { .. }));
-            let radial_intent = out.intents.iter().any(|intent| {
-                matches!(
-                    intent,
-                    InvocationIntent::OpenRadial { .. } | InvocationIntent::CloseRadial { .. }
-                )
-            });
-            acceptance_trace::emit(Event::HookAdmission {
-                transition: primary_transition,
-                provenance,
-                owner: match current_owner {
-                    PriorityOwner::Launcher => HookPriorityOwner::Launcher,
-                    PriorityOwner::ScreenDrawRecovery => HookPriorityOwner::ScreenDrawRecovery,
-                    PriorityOwner::ExclusiveTool => HookPriorityOwner::ExclusiveTool,
-                },
-                global_exclusive_owners: super::exclusive_owners(),
-                adapter_exclusive: state.adapter.is_exclusive(),
-                recovery: out.recovery,
-                deadline_scheduled,
-                radial_intent,
-            });
-        }
-        let timer_error = update_timers(state, &out.intents);
-        if let Some(error) = timer_error {
-            state.shutdown_requested = true;
-            let cancel = cancel_lifecycle(state, LifecycleCancellation::HookFailure);
-            let _ = state.notices.send(ServiceNotice {
-                recovery: false,
-                intents: cancel,
-                error: Some(error),
-                action: None,
-                cancellation: Some(LifecycleCancellation::HookFailure),
-            });
-            let _ = state.wake.send(());
-            unsafe { PostQuitMessage(0) };
-        }
-        let consume = out.consume;
-        publish(state, out);
-        acknowledge_handoffs_if_drained(state);
-        if state.shutdown_requested && !has_owned_input(state) {
-            unsafe { PostQuitMessage(0) };
-        }
-        if consume {
-            LRESULT(1)
-        } else {
-            unsafe { CallNextHookEx(None, code, w, l) }
-        }
+            || unsafe { CallNextHookEx(None, code, w, l) },
+            || LRESULT(1),
+        )
     }
     fn update_timers(state: &mut State, intents: &[InvocationIntent]) -> Option<String> {
         for intent in intents {

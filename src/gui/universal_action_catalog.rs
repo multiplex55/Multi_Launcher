@@ -10,6 +10,7 @@ use crate::universal_actions::{
     PersistedActionCatalog, PersistedUniversalActionRef, ResolvedActionTarget, RootLauncherPolicy,
     UniversalAction, UniversalActionInvocationContext, UniversalActionRegistry,
 };
+use std::hash::{Hash, Hasher};
 
 use super::{ActivationSource, LauncherApp};
 
@@ -25,7 +26,23 @@ pub(crate) struct UniversalActionCatalogSnapshot {
     pub(super) dashboard: std::sync::Arc<DashboardDataSnapshot>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AuthoringCatalogDemand(u64);
+
+pub(super) type AuthoringCatalogCache = Option<(
+    AuthoringCatalogDemand,
+    std::sync::Arc<UniversalActionCatalogSnapshot>,
+)>;
+
 impl UniversalActionCatalogSnapshot {
+    pub(crate) fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            recent_entries: Vec::new(),
+            dashboard: std::sync::Arc::new(DashboardDataSnapshot::default()),
+        }
+    }
+
     pub(super) fn persisted_catalog(&self) -> PersistedActionCatalog {
         PersistedActionCatalog::new(self.entries.clone())
     }
@@ -321,6 +338,60 @@ fn resolved_window(window: &WindowIdentity) -> ResolvedActionTarget {
 }
 
 impl LauncherApp {
+    fn authoring_catalog_demand(&self) -> AuthoringCatalogDemand {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        crate::actions::actions_version().hash(&mut hasher);
+        self.plugins.search_generation().hash(&mut hasher);
+        self.custom_len.hash(&mut hasher);
+        self.plugins
+            .internal_services()
+            .window_catalog
+            .generation()
+            .hash(&mut hasher);
+        let dashboard = self.dashboard_data_cache.snapshot();
+        (std::sync::Arc::as_ptr(&dashboard) as usize).hash(&mut hasher);
+        let radial_document = crate::gui::radial_published_document();
+        radial_document.revision.hash(&mut hasher);
+        (std::sync::Arc::as_ptr(&radial_document) as usize).hash(&mut hasher);
+        let macro_document = self.plugins.internal_services().mkmacro_store.snapshot();
+        (std::sync::Arc::as_ptr(&macro_document) as usize).hash(&mut hasher);
+
+        // Launcher results are part of the authoring catalog. Their contents
+        // can change with the active query even when provider generations do
+        // not, so fingerprint only these already-materialized rows.
+        hash_actions(&self.results, &mut hasher);
+        hash_aliases(&self.folder_aliases, &mut hasher);
+        hash_aliases(&self.bookmark_aliases, &mut hasher);
+        crate::history::with_history(|entries| {
+            for entry in entries.iter().rev().take(32) {
+                hash_action(&entry.action, &mut hasher);
+                entry.query.hash(&mut hasher);
+            }
+        });
+        AuthoringCatalogDemand(hasher.finish())
+    }
+
+    pub(crate) fn cached_universal_action_catalog_snapshot(
+        &self,
+    ) -> std::sync::Arc<UniversalActionCatalogSnapshot> {
+        let demand = self.authoring_catalog_demand();
+        if let Ok(cache) = self.authoring_catalog_cache.lock()
+            && let Some((cached_demand, snapshot)) = cache.as_ref()
+            && *cached_demand == demand
+        {
+            return std::sync::Arc::clone(snapshot);
+        }
+
+        let snapshot = std::sync::Arc::new(self.universal_action_catalog_snapshot());
+        if let Ok(mut cache) = self.authoring_catalog_cache.lock() {
+            *cache = Some((demand, std::sync::Arc::clone(&snapshot)));
+        }
+        #[cfg(test)]
+        self.authoring_catalog_build_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        snapshot
+    }
+
     pub(crate) fn universal_action_catalog_snapshot(&self) -> UniversalActionCatalogSnapshot {
         let resolver = ActionTargetResolver;
         let custom_len = self.custom_len.min(self.actions.len());
@@ -614,6 +685,31 @@ impl LauncherApp {
     }
 }
 
+fn hash_actions(actions: &[Action], hasher: &mut impl Hasher) {
+    actions
+        .iter()
+        .for_each(|action| hash_action(action, hasher));
+}
+
+fn hash_action(action: &Action, hasher: &mut impl Hasher) {
+    action.label.hash(hasher);
+    action.desc.hash(hasher);
+    action.action.hash(hasher);
+    action.args.hash(hasher);
+}
+
+fn hash_aliases(
+    aliases: &std::collections::HashMap<String, Option<String>>,
+    hasher: &mut impl Hasher,
+) {
+    let mut entries = aliases.iter().collect::<Vec<_>>();
+    entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    for (alias, value) in entries {
+        alias.hash(hasher);
+        value.hash(hasher);
+    }
+}
+
 fn persisted_request(binding: &ActionBinding) -> Option<PersistedUniversalActionRef> {
     match binding {
         ActionBinding::Persisted { action } => Some(action.clone()),
@@ -868,6 +964,32 @@ mod tests {
         let catalog = app.universal_action_authoring_catalog(&InvocationContext::empty(1), "");
         assert!(!catalog.rows().is_empty());
         assert_eq!(app.test_activation_trace.len(), before);
+    }
+
+    #[test]
+    fn unchanged_designer_reuses_action_catalog_until_results_change() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+
+        let first = app.cached_universal_action_catalog_snapshot();
+        let second = app.cached_universal_action_catalog_snapshot();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            app.authoring_catalog_build_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an unchanged open Designer must not rerun its provider catalog searches"
+        );
+
+        app.results.push(action("Changed result", "help:show"));
+        let refreshed = app.cached_universal_action_catalog_snapshot();
+        assert!(!std::sync::Arc::ptr_eq(&second, &refreshed));
+        assert_eq!(
+            app.authoring_catalog_build_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a changed launcher result set invalidates the cached authoring catalog"
+        );
     }
 
     #[test]

@@ -1521,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn tap_while_open_toggles_grid_without_touching_radial_lifecycle() {
+    fn short_tap_emits_its_identity_and_controller_feedback_closes_radial() {
         let mut reducer = InvocationReducer::default();
         reducer.reduce(press(210, 0, InteractionMode::StickyClick));
         reducer.reduce(InvocationEvent::Deadline {
@@ -1539,7 +1539,6 @@ mod tests {
             at: 351,
         });
 
-        let before = reducer.radial_lifecycle().clone();
         reducer.reduce(press(211, 500, InteractionMode::StickyClick));
         let intents = reducer.reduce(InvocationEvent::PrimaryReleased {
             id: InvocationId(211),
@@ -1556,7 +1555,17 @@ mod tests {
                 }
             ]
         ));
-        assert_eq!(reducer.radial_lifecycle(), &before);
+        assert!(matches!(
+            reducer.radial_lifecycle(),
+            RadialLifecycle::Active { id, .. } if *id == InvocationId(210)
+        ));
+        reducer.reduce(InvocationEvent::RadialSessionClosed {
+            id: InvocationId(210),
+        });
+        assert!(matches!(
+            reducer.radial_lifecycle(),
+            RadialLifecycle::Closed
+        ));
     }
 
     #[test]

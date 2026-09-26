@@ -9,13 +9,14 @@
 use super::acceptance_trace::{
     self, AuthoringEdge, Correlation, Event, MutationResult, RequestKind,
 };
+use super::bindings::PreparationGeneration;
 use super::diagnostics::{
     MAX_EXPECTED_LAYOUT_DIAGNOSTICS, MAX_RADIAL_DIAGNOSTICS, bound_diagnostics,
 };
 use super::geometry::{PhysicalPoint, PhysicalRect, ScaleFactor};
 use super::model::{
     AssetId, AssetRecord, CellDefinition, CellId, ConfigRevision, ContextRuleId, HotstringId,
-    MenuId, RadialDocument, RingId, ShortcutId, SkinId, TriggerId,
+    InvocationId, MenuId, RadialDocument, RingId, ShortcutId, SkinId, TriggerId,
 };
 use super::package::ImportPlan;
 use super::preparation::{PreparedFrameInput, PreviewProjection, synthetic_preview_dynamic};
@@ -523,6 +524,49 @@ pub enum AcceptancePrepareGateState {
     TimedOut,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimePreparationTraceState {
+    GateHeld,
+    GateReleased,
+    GateTimedOut,
+    ReplyQueued,
+    ReplyRejected,
+    CancelledByLauncherTap,
+}
+
+/// Emit a bounded acceptance-only edge for the real runtime preparation path.
+/// Only opaque invocation and preparation identities leave the process.
+pub fn trace_runtime_preparation(
+    invocation_id: InvocationId,
+    generation: PreparationGeneration,
+    state: RuntimePreparationTraceState,
+) {
+    acceptance_trace::emit(Event::RuntimePreparation {
+        edge: match state {
+            RuntimePreparationTraceState::GateHeld => {
+                acceptance_trace::RuntimePreparationEdge::GateHeld
+            }
+            RuntimePreparationTraceState::GateReleased => {
+                acceptance_trace::RuntimePreparationEdge::GateReleased
+            }
+            RuntimePreparationTraceState::GateTimedOut => {
+                acceptance_trace::RuntimePreparationEdge::GateTimedOut
+            }
+            RuntimePreparationTraceState::ReplyQueued => {
+                acceptance_trace::RuntimePreparationEdge::ReplyQueued
+            }
+            RuntimePreparationTraceState::ReplyRejected => {
+                acceptance_trace::RuntimePreparationEdge::ReplyRejected
+            }
+            RuntimePreparationTraceState::CancelledByLauncherTap => {
+                acceptance_trace::RuntimePreparationEdge::CancelledByLauncherTap
+            }
+        },
+        invocation_id: invocation_id.0,
+        generation: generation.0,
+    });
+}
+
 impl AuthoringRequest {
     pub fn id(&self) -> AuthoringRequestId {
         match self {
@@ -627,6 +671,7 @@ pub fn trace_acceptance_prepare_gate(
             session_id: request.editor_session().0,
             generation: request.generation().0,
             terminal: false,
+            ..Correlation::default()
         },
     });
 }
@@ -862,6 +907,7 @@ impl AuthoringReplySender {
             session_id: reply.editor_session().0,
             generation: reply.generation().0,
             terminal: false,
+            ..Correlation::default()
         };
         self.tx.send(reply)?;
         acceptance_trace::emit(Event::Authoring {
@@ -969,6 +1015,7 @@ impl AuthoringClient {
             session_id: request.editor_session().0,
             generation: request.generation().0,
             terminal: false,
+            ..Correlation::default()
         };
         self.request_tx
             .send(request)
@@ -1451,6 +1498,7 @@ impl RadialAuthoringSession {
                 session_id: self.editor_session.0,
                 generation: self.generation.0,
                 terminal: true,
+                ..Correlation::default()
             },
         });
         result
@@ -2170,6 +2218,7 @@ impl RadialAuthoringSession {
             session_id,
             generation,
             terminal: accepted && reply_terminal,
+            ..Correlation::default()
         };
         let retired = correlated.is_some_and(|pending| {
             self.pending_request != Some(pending) && self.pending_native_preview != Some(pending)

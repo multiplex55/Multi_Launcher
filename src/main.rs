@@ -34,8 +34,8 @@ use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::{
-    RootViewportCtx, RootWindowBridge, ViewportCtx, VisibilityToggleBatch,
-    handle_visibility_toggle_batch, handle_visibility_trigger_with_owner,
+    RootViewportCtx, RootWindowBridge, ViewportCtx, VisibilityRevision, VisibilityToggleBatch,
+    handle_visibility_toggle_batch_ordered, handle_visibility_trigger_with_owner_ordered,
 };
 use multi_launcher::{indexer, logging};
 
@@ -787,6 +787,7 @@ fn spawn_gui(
     startup_recovery: multi_launcher::persistence::RecoveryStartupResult,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     screen_draw_recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
+    visibility_revision: VisibilityRevision,
     event_tx: Sender<()>,
     radial_hotkey_reservations: Vec<(String, String)>,
 ) -> (
@@ -795,6 +796,7 @@ fn spawn_gui(
     Arc<AtomicBool>,
     Arc<AtomicBool>,
     Arc<Mutex<Option<RootViewportCtx>>>,
+    RootWindowBridge,
 ) {
     let custom_len_for_window = custom_len;
     let mut reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
@@ -895,6 +897,7 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                app.install_visibility_revision(visibility_revision);
                 app.install_root_window_bridge(root_window_bridge_for_gui.clone());
                 app.install_screen_draw_recovery_bridge(screen_draw_recovery_bridge);
                 app.startup_settings_diagnostic = startup_settings_diagnostic;
@@ -907,7 +910,14 @@ fn spawn_gui(
         let _ = event_tx.send(());
     });
 
-    (handle, visible_flag, restore_flag, help_flag, ctx_handle)
+    (
+        handle,
+        visible_flag,
+        restore_flag,
+        help_flag,
+        ctx_handle,
+        root_window_bridge,
+    )
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1160,7 +1170,8 @@ fn main() -> anyhow::Result<()> {
 
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
-    let (handle, visibility, restore_flag, help_flag, ctx) = spawn_gui(
+    let visibility_revision = VisibilityRevision::default();
+    let (handle, visibility, restore_flag, help_flag, ctx, root_window_bridge) = spawn_gui(
         Arc::clone(&actions),
         custom_len,
         settings.clone(),
@@ -1170,6 +1181,7 @@ fn main() -> anyhow::Result<()> {
         startup_recovery,
         settings.enabled_capabilities.clone(),
         Arc::clone(&screen_draw_recovery_bridge),
+        visibility_revision.clone(),
         event_tx.clone(),
         radial_global_hotkey_reservations(&settings, &radial_document),
     );
@@ -2350,9 +2362,22 @@ fn main() -> anyhow::Result<()> {
             }
             for event in radial_controller.handle_intents(notice.intents, settings.always_on_top) {
                 match event {
-                    ControllerEvent::ToggleLegacyLauncher => {
-                        let was_visible = grid_toggle_batch.record_toggle(&visibility);
-                        radial_controller.handle_legacy_grid_toggle(was_visible);
+                    ControllerEvent::ToggleLegacyLauncher { invocation_id } => {
+                        let (was_visible, _) = grid_toggle_batch.record_toggle_ordered_with_intent(
+                            &visibility_revision,
+                            &visibility,
+                            Some(invocation_id.0),
+                            root_window_bridge.focus_intent_for_launcher_toggle(),
+                        );
+                        for dismissed_id in radial_controller
+                            .handle_legacy_grid_toggle(Some(invocation_id), was_visible)
+                        {
+                            if let Some(service) = invocation_service.as_ref() {
+                                let _ = service.feedback(InvocationEvent::RadialSessionClosed {
+                                    id: dismissed_id,
+                                });
+                            }
+                        }
                     }
                     ControllerEvent::ExternalSessionAdmitted { invocation_id } => {
                         let metadata = take_external_radial_metadata(
@@ -2470,6 +2495,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     ControllerEvent::DispatchRequested(request) => {
+                        multi_launcher::radial::acceptance_trace::emit_radial_dispatch_requested(
+                            request.identity.invocation_id.0,
+                            request.identity.session_generation,
+                        );
                         multi_launcher::gui::send_event(
                             multi_launcher::gui::WatchEvent::RadialDispatch(request),
                         );
@@ -2623,11 +2652,28 @@ fn main() -> anyhow::Result<()> {
                         let _ = service.feedback(event);
                     }
                 }
-                ControllerEvent::ToggleLegacyLauncher => {
-                    let was_visible = grid_toggle_batch.record_toggle(&visibility);
-                    radial_controller.handle_legacy_grid_toggle(was_visible);
+                ControllerEvent::ToggleLegacyLauncher { invocation_id } => {
+                    let (was_visible, _) = grid_toggle_batch.record_toggle_ordered_with_intent(
+                        &visibility_revision,
+                        &visibility,
+                        Some(invocation_id.0),
+                        root_window_bridge.focus_intent_for_launcher_toggle(),
+                    );
+                    for dismissed_id in radial_controller
+                        .handle_legacy_grid_toggle(Some(invocation_id), was_visible)
+                    {
+                        if let Some(service) = invocation_service.as_ref() {
+                            let _ = service.feedback(InvocationEvent::RadialSessionClosed {
+                                id: dismissed_id,
+                            });
+                        }
+                    }
                 }
                 ControllerEvent::DispatchRequested(request) => {
+                    multi_launcher::radial::acceptance_trace::emit_radial_dispatch_requested(
+                        request.identity.invocation_id.0,
+                        request.identity.session_generation,
+                    );
                     multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialDispatch(request),
                     );
@@ -2852,8 +2898,9 @@ fn main() -> anyhow::Result<()> {
         radial_resources.reconcile(&mut radial_controller);
 
         let visibility_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let grid_toggles_changed = handle_visibility_toggle_batch(
+            let grid_toggles_changed = handle_visibility_toggle_batch_ordered(
                 &grid_toggle_batch,
+                &visibility_revision,
                 &restore_flag,
                 &ctx,
                 &mut queued_visibility,
@@ -2870,7 +2917,7 @@ fn main() -> anyhow::Result<()> {
                     (w as f32, h as f32)
                 },
             );
-            let legacy_trigger_changed = handle_visibility_trigger_with_owner(
+            let legacy_trigger_changed = handle_visibility_trigger_with_owner_ordered(
                 trigger.as_ref(),
                 &visibility,
                 &restore_flag,
@@ -2888,7 +2935,18 @@ fn main() -> anyhow::Result<()> {
                     let (w, h) = settings.window_size.unwrap_or((400, 220));
                     (w as f32, h as f32)
                 },
-                |was_visible| radial_controller.handle_legacy_grid_toggle(was_visible),
+                &visibility_revision,
+                |was_visible| {
+                    for dismissed_id in
+                        radial_controller.handle_legacy_grid_toggle(None, was_visible)
+                    {
+                        if let Some(service) = invocation_service.as_ref() {
+                            let _ = service.feedback(InvocationEvent::RadialSessionClosed {
+                                id: dismissed_id,
+                            });
+                        }
+                    }
+                },
             );
             grid_toggles_changed || legacy_trigger_changed
         }));

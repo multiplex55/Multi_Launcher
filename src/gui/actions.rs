@@ -106,8 +106,7 @@ impl LauncherApp {
             .zip(&before.panel_instances)
             .any(|((panel, after), before)| *panel != Panel::RadialEditor && after > before);
         if opened_root_panel || (after.confirmation_open && !before.confirmation_open) {
-            self.visible_flag.store(true, Ordering::SeqCst);
-            self.restore_flag.store(true, Ordering::SeqCst);
+            self.request_launcher_state(Some(true), Some(true));
         }
     }
 
@@ -196,9 +195,9 @@ impl LauncherApp {
                     ));
                     self.record_history_usage(&meta.action, &meta.query, meta.source);
                     if meta.hide_launcher_on_success {
-                        self.visible_flag.store(false, Ordering::SeqCst);
+                        self.request_launcher_visibility(false);
                     } else {
-                        self.visible_flag.store(true, Ordering::SeqCst);
+                        self.request_launcher_visibility(true);
                         self.move_cursor_end = true;
                         self.focus_input();
                     }
@@ -221,7 +220,7 @@ impl LauncherApp {
                     self.query = meta.query;
                     self.last_results_valid = false;
                     self.search();
-                    self.visible_flag.store(true, Ordering::SeqCst);
+                    self.request_launcher_visibility(true);
                     self.move_cursor_end = true;
                     self.focus_input();
                     self.report_error_message("clipboard_modify", err.message.clone());

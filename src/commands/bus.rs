@@ -1,9 +1,9 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
     handle_calendar, handle_clipboard_modify, handle_crop, handle_data, handle_diff,
-    handle_file_search, handle_headless_gui, handle_launcher, handle_link, handle_mouse_gesture,
-    handle_multi_manager, handle_note, handle_query, handle_radial, handle_screen_draw,
-    handle_screenshot, handle_simple_dialog, handle_todo,
+    handle_file_search, handle_headless_gui_with_history_query, handle_launcher, handle_link,
+    handle_mouse_gesture, handle_multi_manager, handle_note, handle_query, handle_radial,
+    handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -14,6 +14,15 @@ impl CommandBus {
         &self,
         invocation: &CommandInvocation,
         host: &mut dyn CommandHost,
+    ) -> Result<CommandOutcome, CommandError> {
+        self.dispatch_with_history_query(invocation, host, None)
+    }
+
+    pub fn dispatch_with_history_query(
+        &self,
+        invocation: &CommandInvocation,
+        host: &mut dyn CommandHost,
+        captured_history_query: Option<&str>,
     ) -> Result<CommandOutcome, CommandError> {
         tracing::debug!(
             domain = invocation.domain(),
@@ -58,7 +67,9 @@ impl CommandBus {
             | Command::Layout(_)
             | Command::Macro(_)
             | Command::VirtualDesktop(_)
-            | Command::External(_) => handle_headless_gui(host, invocation),
+            | Command::External(_) => {
+                handle_headless_gui_with_history_query(host, invocation, captured_history_query)
+            }
             Command::Dialog(_) => unreachable!("dialog commands are handled before dispatch"),
         }
     }

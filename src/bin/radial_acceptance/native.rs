@@ -3,8 +3,10 @@
 #![cfg(windows)]
 
 mod suite;
+use super::{AcceptanceHotkey, foreign_edge_indices_interfering_owned_spans, owned_gesture_spans};
 pub(super) use suite::{
-    CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_suite,
+    CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_hotkey_suite,
+    run_suite,
 };
 
 use std::fmt::Write as _;
@@ -28,6 +30,7 @@ use windows::Win32::System::StationsAndDesktops::{
     DESKTOP_WRITEOBJECTS, GetThreadDesktop, GetUserObjectInformationW, HDESK, OpenInputDesktop,
     SetThreadDesktop, UOI_NAME,
 };
+use windows::Win32::System::SystemServices::SS_NOTIFY;
 use windows::Win32::System::Threading::{
     AttachThreadInput, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetCurrentThreadId,
     GetExitCodeProcess, GetExitCodeThread, GetProcessIdOfThread, OpenThread, PROCESS_INFORMATION,
@@ -42,11 +45,11 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_VIRTUALDESK,
-    MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_F4,
-    VK_F11, VK_F24, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
-    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY,
+    VK_CONTROL, VK_END, VK_F4, VK_F11, VK_F24, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+    VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
@@ -72,6 +75,8 @@ struct RunnerHookEdge {
     vk: u32,
     down: bool,
     injected: bool,
+    extra_info: usize,
+    at: Instant,
 }
 
 const TRACE_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
@@ -87,10 +92,12 @@ const CASE_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_ENUMERATED_WINDOWS: usize = 256;
 const MAX_POINTER_CORRECTIONS: usize = 4;
 const MAX_POINTER_CORRECTION_PIXELS: u32 = 8;
+const ACCEPTANCE_RUNNER_INPUT_COOKIE: usize = 0x5241_4449_414C_0001; // "RADIAL\x01"
 const ACCEPTANCE_HOTKEY_ID: i32 = 0x4D4C;
 // Keep this acceptance-only pump probe message aligned with
 // native_service::WM_HOOK_PUMP_PROBE in hotkey/launcher_invocation.rs.
 const HOOK_PUMP_PROBE_MESSAGE: u32 = WM_APP + 0x54;
+const FOCUS_ANCHOR_COMMAND_MESSAGE: u32 = WM_APP + 0x55;
 
 pub(super) struct InputDesktopAttachment {
     previous: HDESK,
@@ -105,6 +112,7 @@ pub(super) struct NativeInputEdgeEvidence {
     pub foreground_hwnd: u64,
     pub foreground_pid: u32,
     pub input_desktop: String,
+    pub cleanup_status: String,
     keyboard_input: Option<KeyboardInputEvidence>,
 }
 
@@ -113,6 +121,7 @@ struct KeyboardInputEvidence {
     vk: u16,
     scan: u16,
     flags: u32,
+    extra_info: usize,
     async_state_before: i16,
     async_state_after: i16,
 }
@@ -120,17 +129,19 @@ struct KeyboardInputEvidence {
 impl NativeInputEdgeEvidence {
     pub fn describe(&self) -> String {
         format!(
-            "inserted={} at_unix_ms={} foreground=HWND:{} PID:{} desktop={}{}",
+            "inserted={} at_unix_ms={} foreground=HWND:{} PID:{} desktop={} cleanup={}{}",
             self.inserted,
             self.at_unix_ms,
             self.foreground_hwnd,
             self.foreground_pid,
             self.input_desktop,
+            self.cleanup_status,
             self.keyboard_input.as_ref().map_or_else(String::new, |key| format!(
-                " keyboard(vk=0x{:04x},scan=0x{:04x},flags=0x{:04x},async_state_before=0x{:04x},async_state_after=0x{:04x})",
+                " keyboard(vk=0x{:04x},scan=0x{:04x},flags=0x{:04x},extra_info=0x{:x},async_state_before=0x{:04x},async_state_after=0x{:04x})",
                 key.vk,
                 key.scan,
                 key.flags,
+                key.extra_info,
                 key.async_state_before as u16,
                 key.async_state_after as u16
             ))
@@ -154,12 +165,211 @@ impl F11TapEvidence {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct AcceptanceHotkeyTapEvidence {
+    pub down: NativeInputEdgeEvidence,
+    pub up: NativeInputEdgeEvidence,
+    pub observed_vks: Vec<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct AcceptanceHotkeyBurstEvidence {
+    pub down_inserted: usize,
+    pub up_inserted: usize,
+    pub input_desktop: String,
+    pub cleanup: String,
+}
+
+impl AcceptanceHotkeyTapEvidence {
+    pub fn describe(&self) -> String {
+        format!(
+            "owned key down=[{}], up=[{}], observed_vks={:?}",
+            self.down.describe(),
+            self.up.describe(),
+            self.observed_vks
+        )
+    }
+}
+
 pub(super) struct RunnerHookObservation {
     pub desktop: String,
     pub down_seen: bool,
     pub up_seen: bool,
     pub down_injected: bool,
     pub up_injected: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RunnerChordKeyObservation {
+    pub vk: u32,
+    pub down: usize,
+    pub up: usize,
+    pub injected_down: usize,
+    pub injected_up: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RunnerChordObservation {
+    pub desktop: String,
+    pub keys: Vec<RunnerChordKeyObservation>,
+    pub ordered_edges: Vec<RunnerChordEdge>,
+    pub foreign_edges: Vec<RunnerChordEdge>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RunnerChordEdge {
+    pub vk: u32,
+    pub down: bool,
+    pub injected: bool,
+    pub extra_info: usize,
+    pub at: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RunnerChordTiming {
+    pub primary_hold_ms: Vec<u128>,
+    pub released_gap_ms: Vec<u128>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RunnerKeyQuietEvidence {
+    pub quiet_ms: u128,
+    pub matching_edges: usize,
+}
+
+impl RunnerChordObservation {
+    pub fn exact_injected_pairs(&self, expected_pairs: usize) -> bool {
+        !self.keys.is_empty()
+            && self.keys.iter().all(|key| {
+                key.down == expected_pairs
+                    && key.up == expected_pairs
+                    && key.injected_down == expected_pairs
+                    && key.injected_up == expected_pairs
+            })
+    }
+
+    pub fn exact_injected_sequence(&self, expected: &[(u32, bool)]) -> bool {
+        self.ordered_edges.len() == expected.len()
+            && self.ordered_edges.iter().zip(expected).all(
+                |(edge, (expected_vk, expected_down))| {
+                    edge.vk == *expected_vk
+                        && edge.down == *expected_down
+                        && edge.injected
+                        && edge.extra_info == ACCEPTANCE_RUNNER_INPUT_COOKIE
+                },
+            )
+    }
+
+    pub fn foreign_edges_interfering_with_owned_gestures(&self) -> Vec<RunnerChordEdge> {
+        let spans = owned_gesture_spans(
+            self.ordered_edges
+                .iter()
+                .map(|edge| (edge.at, edge.vk, edge.down)),
+        );
+        let foreign_timeline = self
+            .foreign_edges
+            .iter()
+            .map(|edge| (edge.at, edge.vk, edge.down))
+            .collect::<Vec<_>>();
+        let mut interfering =
+            foreign_edge_indices_interfering_owned_spans(&spans, &foreign_timeline)
+                .into_iter()
+                .map(|index| self.foreign_edges[index])
+                .collect::<Vec<_>>();
+        interfering.sort_by_key(|edge| edge.at);
+        interfering
+    }
+
+    pub fn timing(
+        &self,
+        hotkey: AcceptanceHotkey,
+        taps: usize,
+    ) -> Result<RunnerChordTiming, String> {
+        let edges_per_tap = match hotkey {
+            AcceptanceHotkey::F11 => 2,
+            AcceptanceHotkey::ShiftAltWinEnd => 8,
+        };
+        if self.ordered_edges.len() != taps.saturating_mul(edges_per_tap) {
+            return Err("observed hotkey edge timing was incomplete".into());
+        }
+        if self
+            .ordered_edges
+            .windows(2)
+            .any(|pair| pair[1].at < pair[0].at)
+        {
+            return Err("hook observer timestamps moved backwards".into());
+        }
+        let primary_down_offset = match hotkey {
+            AcceptanceHotkey::F11 => 0,
+            AcceptanceHotkey::ShiftAltWinEnd => 3,
+        };
+        let primary_up_offset = primary_down_offset + 1;
+        let mut primary_hold_ms = Vec::with_capacity(taps);
+        let mut released_gap_ms = Vec::with_capacity(taps.saturating_sub(1));
+        for tap in 0..taps {
+            let base = tap * edges_per_tap;
+            let down = self.ordered_edges[base + primary_down_offset];
+            let up = self.ordered_edges[base + primary_up_offset];
+            if !down.down || up.down || down.vk != up.vk {
+                return Err("primary key hold timing did not have a down/up pair".into());
+            }
+            let hold = up
+                .at
+                .checked_duration_since(down.at)
+                .ok_or_else(|| "primary key release preceded its press".to_string())?;
+            primary_hold_ms.push(hold.as_millis());
+            if tap + 1 < taps {
+                let next_down = self.ordered_edges[(tap + 1) * edges_per_tap + primary_down_offset];
+                if !next_down.down || next_down.vk != down.vk {
+                    return Err("next primary press was missing from cadence trace".into());
+                }
+                let gap = next_down
+                    .at
+                    .checked_duration_since(up.at)
+                    .ok_or_else(|| "next primary press preceded the prior release".to_string())?;
+                released_gap_ms.push(gap.as_millis());
+            }
+        }
+        Ok(RunnerChordTiming {
+            primary_hold_ms,
+            released_gap_ms,
+        })
+    }
+
+    pub fn describe(&self) -> String {
+        let keys = self
+            .keys
+            .iter()
+            .map(|key| {
+                format!(
+                    "vk=0x{:02x} down/up={}/{} injected={}/{}",
+                    key.vk, key.down, key.up, key.injected_down, key.injected_up
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let foreign_edges = self
+            .foreign_edges
+            .iter()
+            .take(8)
+            .map(|edge| {
+                format!(
+                    "0x{:02x}:{}:injected={}:extra=0x{:x}",
+                    edge.vk,
+                    if edge.down { "down" } else { "up" },
+                    edge.injected,
+                    edge.extra_info
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "runner chord observer desktop={} [{keys}] foreign_matching_edges={} foreign_samples=[{}]",
+            self.desktop,
+            self.foreign_edges.len(),
+            foreign_edges
+        )
+    }
 }
 
 impl RunnerHookObservation {
@@ -311,6 +521,165 @@ impl RunnerHookObserver {
         }
     }
 
+    pub fn wait_for_key_quiet(
+        &mut self,
+        vks: &[u32],
+        quiet_period: Duration,
+        timeout: Duration,
+    ) -> Result<RunnerKeyQuietEvidence, String> {
+        if vks.is_empty() || quiet_period.is_zero() || timeout < quiet_period {
+            return Err("key quiet preflight requires keys and a bounded positive interval".into());
+        }
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut last_matching = started;
+        let mut matching_edges = 0usize;
+        loop {
+            let now = Instant::now();
+            let quiet_elapsed = now.saturating_duration_since(last_matching);
+            if quiet_elapsed >= quiet_period {
+                return Ok(RunnerKeyQuietEvidence {
+                    quiet_ms: quiet_elapsed.as_millis(),
+                    matching_edges,
+                });
+            }
+            if now >= deadline {
+                return Err(format!(
+                    "matching hotkey edges did not remain quiet for {}ms within {}ms (observed {matching_edges} matching edges)",
+                    quiet_period.as_millis(),
+                    timeout.as_millis()
+                ));
+            }
+            let wait_for = (quiet_period - quiet_elapsed).min(deadline - now);
+            match self.events.recv_timeout(wait_for) {
+                Ok(edge) if vks.contains(&edge.vk) => {
+                    matching_edges = matching_edges.saturating_add(1);
+                    last_matching = Instant::now();
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("runner hook observer disconnected during quiet preflight".into());
+                }
+            }
+        }
+    }
+
+    pub fn wait_for_chord(&mut self, vks: &[u32], timeout: Duration) -> RunnerHookObservation {
+        let deadline = Instant::now() + timeout;
+        let mut observed = std::collections::BTreeMap::<u32, [bool; 4]>::new();
+        for vk in vks {
+            observed.insert(*vk, [false; 4]);
+        }
+        while observed.values().any(|edges| !(edges[0] && edges[1])) {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match self
+                .events
+                .recv_timeout(deadline.saturating_duration_since(now))
+            {
+                Ok(edge) => {
+                    if let Some(edges) = observed.get_mut(&edge.vk) {
+                        let (seen_index, injected_index) = if edge.down { (0, 2) } else { (1, 3) };
+                        edges[seen_index] = true;
+                        edges[injected_index] |= edge.injected;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let complete = !observed.is_empty() && observed.values().all(|edges| edges[0] && edges[1]);
+        RunnerHookObservation {
+            desktop: self.desktop.clone(),
+            down_seen: complete,
+            up_seen: complete,
+            down_injected: complete && observed.values().all(|edges| edges[2]),
+            up_injected: complete && observed.values().all(|edges| edges[3]),
+        }
+    }
+
+    pub fn wait_for_chord_burst(
+        &mut self,
+        vks: &[u32],
+        expected_pairs: usize,
+        timeout: Duration,
+    ) -> RunnerChordObservation {
+        let deadline = Instant::now() + timeout;
+        let mut counts = std::collections::BTreeMap::<u32, [usize; 4]>::new();
+        for vk in vks {
+            counts.entry(*vk).or_insert([0; 4]);
+        }
+        let mut ordered_edges = Vec::with_capacity(expected_pairs.saturating_mul(vks.len()) * 2);
+        let mut foreign_edges = Vec::new();
+        let complete = |counts: &std::collections::BTreeMap<u32, [usize; 4]>| {
+            !counts.is_empty()
+                && counts
+                    .values()
+                    .all(|edges| edges[0] >= expected_pairs && edges[1] >= expected_pairs)
+        };
+        while !complete(&counts) {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match self
+                .events
+                .recv_timeout(deadline.saturating_duration_since(now))
+            {
+                Ok(edge) => {
+                    record_runner_chord_edge(
+                        edge,
+                        &mut counts,
+                        &mut ordered_edges,
+                        &mut foreign_edges,
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Drain a short quiet interval after the requested edge budget so an
+        // extra edge in the same uninterrupted burst cannot hide behind the
+        // first complete set of down/up observations.
+        let mut quiet_deadline = Instant::now() + Duration::from_millis(40);
+        while Instant::now() < quiet_deadline && Instant::now() < deadline {
+            match self.events.recv_timeout(
+                quiet_deadline
+                    .min(deadline)
+                    .saturating_duration_since(Instant::now()),
+            ) {
+                Ok(edge) => {
+                    record_runner_chord_edge(
+                        edge,
+                        &mut counts,
+                        &mut ordered_edges,
+                        &mut foreign_edges,
+                    );
+                    quiet_deadline = Instant::now() + Duration::from_millis(40);
+                }
+                Err(_) => break,
+            }
+        }
+
+        RunnerChordObservation {
+            desktop: self.desktop.clone(),
+            keys: counts
+                .into_iter()
+                .map(|(vk, edges)| RunnerChordKeyObservation {
+                    vk,
+                    down: edges[0],
+                    up: edges[1],
+                    injected_down: edges[2],
+                    injected_up: edges[3],
+                })
+                .collect(),
+            ordered_edges,
+            foreign_edges,
+        }
+    }
+
     pub fn drain_pending(&mut self) -> usize {
         let mut drained = 0;
         while self.events.try_recv().is_ok() {
@@ -439,6 +808,34 @@ impl RunnerHookObserver {
     }
 }
 
+fn record_runner_chord_edge(
+    edge: RunnerHookEdge,
+    counts: &mut std::collections::BTreeMap<u32, [usize; 4]>,
+    owned_edges: &mut Vec<RunnerChordEdge>,
+    foreign_edges: &mut Vec<RunnerChordEdge>,
+) {
+    let Some(count) = counts.get_mut(&edge.vk) else {
+        return;
+    };
+    let observed = RunnerChordEdge {
+        vk: edge.vk,
+        down: edge.down,
+        injected: edge.injected,
+        extra_info: edge.extra_info,
+        at: edge.at,
+    };
+    if edge.extra_info != ACCEPTANCE_RUNNER_INPUT_COOKIE {
+        foreign_edges.push(observed);
+        return;
+    }
+    let (seen_index, injected_index) = if edge.down { (0, 2) } else { (1, 3) };
+    count[seen_index] = count[seen_index].saturating_add(1);
+    if edge.injected {
+        count[injected_index] = count[injected_index].saturating_add(1);
+    }
+    owned_edges.push(observed);
+}
+
 pub(super) fn thread_liveness(thread_id: u32) -> String {
     if thread_id == 0 {
         return "thread id unavailable".into();
@@ -504,24 +901,31 @@ unsafe extern "system" fn runner_hook_proc(
         };
         if let Some(down) = transition {
             let data = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-            if data.vkCode == VK_F24.0 as u32 || data.vkCode == VK_F11.0 as u32 {
-                RUNNER_HOOK_EVENTS.with(|slot| {
-                    if let Ok(sender) = slot.try_borrow()
-                        && let Some(sender) = sender.as_ref()
-                    {
-                        let _ = sender.send(RunnerHookEdge {
-                            vk: data.vkCode,
-                            down,
-                            injected: data
-                                .flags
-                                .contains(windows::Win32::UI::WindowsAndMessaging::LLKHF_INJECTED),
-                        });
-                    }
-                });
-            }
+            // Observe every keyboard edge. The suite correlates only the
+            // requested virtual keys and our unique injection cookie; filtering
+            // here would make supported direct-trigger chords invisible.
+            forward_runner_hook_edge(RunnerHookEdge {
+                vk: data.vkCode,
+                down,
+                injected: data
+                    .flags
+                    .contains(windows::Win32::UI::WindowsAndMessaging::LLKHF_INJECTED),
+                extra_info: data.dwExtraInfo,
+                at: Instant::now(),
+            });
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn forward_runner_hook_edge(edge: RunnerHookEdge) {
+    RUNNER_HOOK_EVENTS.with(|slot| {
+        if let Ok(sender) = slot.try_borrow()
+            && let Some(sender) = sender.as_ref()
+        {
+            let _ = sender.send(edge);
+        }
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -678,20 +1082,33 @@ fn desktop_name(desktop: HDESK) -> Result<String, String> {
     Ok(String::from_utf16_lossy(&name[..length]))
 }
 
-pub(super) fn preflight_acceptance_hotkey() -> Result<(), String> {
-    unsafe {
-        RegisterHotKey(
-            None,
-            ACCEPTANCE_HOTKEY_ID,
-            HOT_KEY_MODIFIERS(0),
-            VK_F11.0 as u32,
-        )
+pub(super) fn preflight_acceptance_hotkey(hotkey: AcceptanceHotkey) -> Result<(), String> {
+    let (label, modifiers, key) = match hotkey {
+        AcceptanceHotkey::F11 => ("F11", HOT_KEY_MODIFIERS(0), VK_F11),
+        AcceptanceHotkey::ShiftAltWinEnd => (
+            "Shift+Alt+Win+End",
+            // RegisterHotKey MOD_SHIFT | MOD_ALT | MOD_WIN.
+            HOT_KEY_MODIFIERS(0x0004 | 0x0001 | 0x0008),
+            VK_END,
+        ),
+    };
+    input_modifiers_clear()?;
+    if unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0 {
+        return Err(format!(
+            "refusing hotkey preflight while {label} key is held"
+        ));
     }
-    .map_err(|error| {
-        format!("acceptance hotkey F11 is already registered or unavailable: {error}")
-    })?;
-    unsafe { UnregisterHotKey(None, ACCEPTANCE_HOTKEY_ID) }
-        .map_err(|error| format!("release F11 acceptance hotkey preflight registration: {error}"))
+    unsafe { RegisterHotKey(None, ACCEPTANCE_HOTKEY_ID, modifiers, key.0 as u32) }.map_err(
+        |error| format!("acceptance hotkey {label} is already registered or unavailable: {error}"),
+    )?;
+    let unregister = unsafe { UnregisterHotKey(None, ACCEPTANCE_HOTKEY_ID) }.map_err(|error| {
+        format!("release {label} acceptance hotkey preflight registration: {error}")
+    });
+    input_modifiers_clear()?;
+    if unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0 {
+        return Err(format!("{label} key became held during hotkey preflight"));
+    }
+    unregister
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -820,33 +1237,59 @@ impl Drop for ChildProcessHandle {
 pub(super) struct FocusAnchor {
     hwnd: HWND,
     process_id: u32,
+    display_bounds: Vec<[i32; 4]>,
+    ui_thread_id: u32,
+    command_tx: std::sync::mpsc::SyncSender<FocusAnchorCommand>,
+    ui_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+enum FocusAnchorCommandKind {
+    Raise,
+    MoveTo { left: i32, top: i32 },
+    RestoreNonTopmost,
+    Focus,
+    Destroy,
+}
+
+struct FocusAnchorCommand {
+    kind: FocusAnchorCommandKind,
+    reply: std::sync::mpsc::SyncSender<Result<(), String>>,
 }
 
 impl FocusAnchor {
     pub fn create() -> Result<Self, String> {
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_TOOLWINDOW,
-                w!("STATIC"),
-                w!("Radial acceptance focus anchor"),
-                WINDOW_STYLE(WS_CAPTION.0 | WS_SYSMENU.0 | WS_VISIBLE.0),
-                48,
-                48,
-                320,
-                96,
-                HWND::default(),
-                None,
-                None,
-                None,
-            )
-        }
-        .map_err(|error| format!("create runner-owned focus anchor: {error}"))?;
+        let display_bounds = suite::native_display_bounds()?;
         let process_id = std::process::id();
+        let (hwnd, ui_thread_id, command_tx, ui_thread) = spawn_focus_anchor_window(process_id)?;
         if window_process_id(hwnd) != process_id {
-            let _ = unsafe { DestroyWindow(hwnd) };
+            let _ = unsafe { PostThreadMessageW(ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+            let _ = ui_thread.join();
             return Err("focus anchor HWND is not owned by the acceptance runner".into());
         }
-        Ok(Self { hwnd, process_id })
+        let anchor = Self {
+            hwnd,
+            process_id,
+            display_bounds,
+            ui_thread_id,
+            command_tx,
+            ui_thread: Some(ui_thread),
+        };
+        anchor.raise_for_checked_activation()?;
+        let placement = anchor.find_uncovered_client_center();
+        let restore_z_order = anchor.restore_non_topmost();
+        match (placement, restore_z_order) {
+            (Ok((_, evidence)), Ok(())) => {
+                tracing::debug!(%evidence, "validated runner focus anchor placement");
+                Ok(anchor)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(format!(
+                "focus anchor placement validated but runner anchor z-order could not be restored: {error}"
+            )),
+            (Err(placement_error), Err(z_order_error)) => Err(format!(
+                "{placement_error}; restoring runner anchor z-order also failed: {z_order_error}"
+            )),
+        }
     }
 
     pub fn hwnd(&self) -> HWND {
@@ -875,7 +1318,10 @@ impl FocusAnchor {
     }
 
     pub fn focus(&self) -> Result<(), String> {
-        match focus_owned_window(self.hwnd, self.process_id) {
+        match self
+            .send_ui_command(FocusAnchorCommandKind::Focus)
+            .and_then(|()| focus_is_validated(self.hwnd, self.process_id))
+        {
             Ok(()) => Ok(()),
             Err(focus_error) => self.click_to_activate().map_err(|activation_error| {
                 format!(
@@ -893,58 +1339,367 @@ impl FocusAnchor {
         {
             return Err("focus anchor is no longer a visible, runner-owned window".into());
         }
-        let _ = unsafe { BringWindowToTop(self.hwnd) };
-        unsafe {
-            SetWindowPos(
-                self.hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
+        if let Err(error) = self.raise_for_checked_activation() {
+            let restore = self.restore_non_topmost();
+            return Err(format!("{error}; z-order recovery={restore:?}"));
         }
-        .map_err(|error| {
-            format!("temporarily raise runner anchor for checked activation: {error}")
-        })?;
 
+        let mut candidate_evidence = String::new();
         let activate = (|| {
-            let mut client = RECT::default();
-            unsafe { GetClientRect(self.hwnd, &mut client) }
-                .map_err(|error| format!("read runner anchor client bounds: {error}"))?;
-            if client.right <= client.left || client.bottom <= client.top {
-                return Err("runner anchor has empty client bounds".into());
-            }
-            let mut point = POINT {
-                x: client.left + (client.right - client.left) / 2,
-                y: client.top + (client.bottom - client.top) / 2,
-            };
-            if !unsafe { ClientToScreen(self.hwnd, &mut point) }.as_bool() {
-                return Err("convert runner anchor client center to screen coordinates".into());
-            }
-            let hit = unsafe { WindowFromPoint(point) };
-            if hit.is_invalid()
-                || window_process_id(hit) != self.process_id
-                || (hit != self.hwnd && !unsafe { IsChild(self.hwnd, hit) }.as_bool())
-            {
-                return Err(format!(
-                    "runner anchor client center is covered by an unowned window HWND={} PID={}",
-                    hwnd_id(hit),
-                    window_process_id(hit)
-                ));
-            }
+            let (point, evidence) = self.find_uncovered_client_center()?;
+            candidate_evidence = evidence;
             unsafe { SetCursorPos(point.x, point.y) }
                 .map_err(|error| format!("move pointer onto runner anchor: {error}"))?;
-            send_input_checked(
-                &[mouse_input(true), mouse_input(false)],
-                "runner focus-anchor activation click",
-            )?;
+            let mut button_guard = MouseButtonGuard::new(self.hwnd, self.process_id);
+            let (inserted, down_error) = send_input_checked_prefix(
+                &[mouse_input(true)],
+                "runner focus-anchor activation mouse down",
+            );
+            button_guard.armed = inserted != 0;
+            if let Some(error) = down_error {
+                let cleanup = if button_guard.armed {
+                    button_guard.release().map(|_| "released".to_string())
+                } else {
+                    Ok("no down event was inserted".to_string())
+                };
+                return Err(match cleanup {
+                    Ok(cleanup) => format!("{error}; mouse-up cleanup={cleanup}"),
+                    Err(cleanup_error) => {
+                        format!("{error}; mouse-up cleanup failed: {cleanup_error}")
+                    }
+                });
+            }
+            if inserted != 1 {
+                return Err(format!(
+                    "runner focus-anchor activation mouse down inserted {inserted}/1 events"
+                ));
+            }
+            button_guard.release().map_err(|error| {
+                format!("runner focus-anchor activation mouse up failed: {error}")
+            })?;
             wait_for_foreground(self.hwnd, self.process_id)
+                .map_err(|error| format!("{error}; candidates={candidate_evidence}"))
         })();
-        let restore_z_order = unsafe {
+        let restore_z_order = self.restore_non_topmost();
+        activate.map_err(|error| {
+            if candidate_evidence.is_empty() {
+                error
+            } else {
+                format!("{error}; anchor candidates={candidate_evidence}")
+            }
+        })?;
+        restore_z_order?;
+        focus_is_validated(self.hwnd, self.process_id)
+            .map_err(|error| format!("{error}; anchor candidates={candidate_evidence}"))
+    }
+
+    fn raise_for_checked_activation(&self) -> Result<(), String> {
+        self.send_ui_command(FocusAnchorCommandKind::Raise)
+    }
+
+    fn restore_non_topmost(&self) -> Result<(), String> {
+        self.send_ui_command(FocusAnchorCommandKind::RestoreNonTopmost)
+    }
+
+    fn send_ui_command(&self, kind: FocusAnchorCommandKind) -> Result<(), String> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        self.command_tx
+            .try_send(FocusAnchorCommand {
+                kind,
+                reply: reply_tx,
+            })
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    "focus anchor UI command queue is full".to_string()
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    "focus anchor UI command thread has exited".to_string()
+                }
+            })?;
+        unsafe {
+            PostThreadMessageW(
+                self.ui_thread_id,
+                FOCUS_ANCHOR_COMMAND_MESSAGE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        }
+        .map_err(|error| format!("wake focus anchor UI thread: {error}"))?;
+        reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| format!("focus anchor UI command timed out: {error}"))?
+    }
+
+    fn find_uncovered_client_center(&self) -> Result<(POINT, String), String> {
+        let current = self.snapshot().ok_or_else(|| {
+            "focus anchor lost runner ownership while checking physical-display placement"
+                .to_string()
+        })?;
+        let width = current.bounds[2].saturating_sub(current.bounds[0]);
+        let height = current.bounds[3].saturating_sub(current.bounds[1]);
+        let positions = focus_anchor_candidate_positions(&self.display_bounds, width, height);
+        if positions.is_empty() {
+            return Err(format!(
+                "no physical display can contain runner focus anchor rect size={width}x{height}; displays={:?}",
+                self.display_bounds
+            ));
+        }
+
+        let mut candidate_evidence = Vec::with_capacity(positions.len());
+        for (left, top) in positions {
+            let requested_rect = [
+                left,
+                top,
+                left.saturating_add(width),
+                top.saturating_add(height),
+            ];
+            if let Err(error) = self.send_ui_command(FocusAnchorCommandKind::MoveTo { left, top }) {
+                candidate_evidence.push(format!(
+                    "candidate_rect={requested_rect:?} center=unavailable hit=unavailable desktop={:?} placement_error={error}",
+                    input_desktop_evidence()
+                ));
+                continue;
+            }
+            let point = match self.client_center_screen() {
+                Ok(point) => point,
+                Err(error) => {
+                    candidate_evidence.push(format!(
+                        "candidate_rect={requested_rect:?} center=unavailable hit=unavailable desktop={:?} center_error={error}",
+                        input_desktop_evidence()
+                    ));
+                    continue;
+                }
+            };
+            let actual_rect = self
+                .snapshot()
+                .map(|snapshot| snapshot.bounds)
+                .unwrap_or(requested_rect);
+            let hit = unsafe { WindowFromPoint(point) };
+            let hit_pid = window_process_id(hit);
+            let hit_bounds = window_bounds(hit);
+            let desktop =
+                input_desktop_evidence().unwrap_or_else(|error| format!("unavailable({error})"));
+            candidate_evidence.push(format!(
+                "candidate_rect={actual_rect:?} center=({}, {}) hit_hwnd={} hit_pid={} hit_class={:?} hit_rect={hit_bounds:?} desktop={desktop}",
+                point.x,
+                point.y,
+                hwnd_id(hit),
+                hit_pid,
+                window_class_name(hit),
+            ));
+            if !hit.is_invalid()
+                && hit_pid == self.process_id
+                && (hit == self.hwnd || unsafe { IsChild(self.hwnd, hit) }.as_bool())
+            {
+                return Ok((point, candidate_evidence.join(" | ")));
+            }
+        }
+        Err(format!(
+            "all bounded physical-display runner focus anchor positions were covered by non-owned windows; anchor_hwnd={} anchor_pid={} candidate_count={} candidates={}",
+            hwnd_id(self.hwnd),
+            self.process_id,
+            candidate_evidence.len(),
+            candidate_evidence.join(" | ")
+        ))
+    }
+
+    fn client_center_screen(&self) -> Result<POINT, String> {
+        let mut client = RECT::default();
+        unsafe { GetClientRect(self.hwnd, &mut client) }
+            .map_err(|error| format!("read runner anchor client bounds: {error}"))?;
+        if client.right <= client.left || client.bottom <= client.top {
+            return Err("runner anchor has empty client bounds".into());
+        }
+        let mut point = POINT {
+            x: client.left + (client.right - client.left) / 2,
+            y: client.top + (client.bottom - client.top) / 2,
+        };
+        if !unsafe { ClientToScreen(self.hwnd, &mut point) }.as_bool() {
+            return Err("convert runner anchor client center to screen coordinates".into());
+        }
+        Ok(point)
+    }
+}
+
+fn focus_anchor_candidate_positions(
+    displays: &[[i32; 4]],
+    anchor_width: i32,
+    anchor_height: i32,
+) -> Vec<(i32, i32)> {
+    const HORIZONTAL_INSET: i32 = 16;
+    const TOP_INSET: i32 = 24;
+    const BOTTOM_INSET: i32 = 48;
+    let mut positions = Vec::new();
+    for display in displays {
+        let display_width = display[2].saturating_sub(display[0]);
+        let display_height = display[3].saturating_sub(display[1]);
+        if display_width < anchor_width.saturating_add(HORIZONTAL_INSET * 2)
+            || display_height < anchor_height.saturating_add(TOP_INSET + BOTTOM_INSET)
+        {
+            continue;
+        }
+        let left = display[0].saturating_add(HORIZONTAL_INSET);
+        let right = display[2]
+            .saturating_sub(anchor_width)
+            .saturating_sub(HORIZONTAL_INSET);
+        let middle_x = left.saturating_add(right.saturating_sub(left) / 2);
+        let top = display[1].saturating_add(TOP_INSET);
+        let bottom = display[3]
+            .saturating_sub(anchor_height)
+            .saturating_sub(BOTTOM_INSET);
+        let middle_y = top.saturating_add(bottom.saturating_sub(top) / 2);
+        for y in [top, middle_y, bottom] {
+            for x in [left, middle_x, right] {
+                if !positions.contains(&(x, y)) {
+                    positions.push((x, y));
+                }
+            }
+        }
+    }
+    positions
+}
+
+fn focus_anchor_window_style() -> WINDOW_STYLE {
+    WINDOW_STYLE(WS_CAPTION.0 | WS_SYSMENU.0 | WS_VISIBLE.0 | SS_NOTIFY.0)
+}
+
+fn spawn_focus_anchor_window(
+    process_id: u32,
+) -> Result<
+    (
+        HWND,
+        u32,
+        std::sync::mpsc::SyncSender<FocusAnchorCommand>,
+        std::thread::JoinHandle<()>,
+    ),
+    String,
+> {
+    let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel(1);
+    let (window_tx, window_rx) = std::sync::mpsc::sync_channel(1);
+    let (command_tx, command_rx) = std::sync::mpsc::sync_channel::<FocusAnchorCommand>(1);
+    let ui_thread = std::thread::Builder::new()
+        .name("radial-acceptance-focus-anchor".into())
+        .spawn(move || {
+            let thread_id = unsafe { GetCurrentThreadId() };
+            let mut queue_probe = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+            let _ = unsafe { PeekMessageW(&mut queue_probe, None, 0, 0, PM_NOREMOVE) };
+            if thread_id_tx.send(thread_id).is_err() {
+                return;
+            }
+
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    w!("Radial acceptance focus anchor"),
+                    focus_anchor_window_style(),
+                    48,
+                    48,
+                    320,
+                    96,
+                    HWND::default(),
+                    None,
+                    None,
+                    None,
+                )
+            };
+            let hwnd = match hwnd {
+                Ok(hwnd) => hwnd,
+                Err(error) => {
+                    let _ =
+                        window_tx.send(Err(format!("create runner-owned focus anchor: {error}")));
+                    return;
+                }
+            };
+            if window_tx.send(Ok(hwnd.0 as usize)).is_err() {
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return;
+            }
+
+            let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+            while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+                if message.message == FOCUS_ANCHOR_COMMAND_MESSAGE {
+                    if let Ok(command) = command_rx.try_recv() {
+                        let (result, should_exit) =
+                            execute_focus_anchor_command(hwnd, process_id, command.kind);
+                        let _ = command.reply.send(result);
+                        if should_exit {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                let _ = unsafe { TranslateMessage(&message) };
+                unsafe { DispatchMessageW(&message) };
+            }
+            if window_process_id(hwnd) == process_id {
+                let _ = unsafe { DestroyWindow(hwnd) };
+            }
+        })
+        .map_err(|error| format!("start focus anchor UI thread: {error}"))?;
+
+    let thread_id = match thread_id_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
+            let _ = ui_thread.join();
+            return Err(format!("focus anchor UI thread did not start: {error}"));
+        }
+    };
+    let hwnd = match window_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(hwnd)) => HWND(hwnd as *mut std::ffi::c_void),
+        Ok(Err(error)) => {
+            let _ = ui_thread.join();
+            return Err(error);
+        }
+        Err(error) => {
+            let _ = unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+            let _ = ui_thread.join();
+            return Err(format!("focus anchor window creation timed out: {error}"));
+        }
+    };
+
+    Ok((hwnd, thread_id, command_tx, ui_thread))
+}
+
+fn execute_focus_anchor_command(
+    hwnd: HWND,
+    process_id: u32,
+    kind: FocusAnchorCommandKind,
+) -> (Result<(), String>, bool) {
+    let should_exit = matches!(&kind, FocusAnchorCommandKind::Destroy);
+    let result = match kind {
+        FocusAnchorCommandKind::Raise => {
+            let _ = unsafe { BringWindowToTop(hwnd) };
+            unsafe {
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            }
+            .map_err(|error| {
+                format!("temporarily raise runner anchor for checked activation: {error}")
+            })
+        }
+        FocusAnchorCommandKind::MoveTo { left, top } => unsafe {
             SetWindowPos(
-                self.hwnd,
+                hwnd,
+                HWND_TOPMOST,
+                left,
+                top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| format!("move runner anchor to validated candidate: {error}")),
+        FocusAnchorCommandKind::RestoreNonTopmost => unsafe {
+            SetWindowPos(
+                hwnd,
                 HWND_NOTOPMOST,
                 0,
                 0,
@@ -953,17 +1708,34 @@ impl FocusAnchor {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             )
         }
-        .map_err(|error| format!("restore runner anchor non-topmost z-order: {error}"));
-        activate?;
-        restore_z_order?;
-        focus_is_validated(self.hwnd, self.process_id)
-    }
+        .map_err(|error| format!("restore runner anchor non-topmost z-order: {error}")),
+        FocusAnchorCommandKind::Focus => focus_window_transition(hwnd, process_id),
+        FocusAnchorCommandKind::Destroy => {
+            if window_process_id(hwnd) != process_id {
+                Err("refused to destroy a focus anchor HWND without runner ownership".into())
+            } else {
+                Ok(())
+            }
+        }
+    };
+    (result, should_exit)
 }
 
 impl Drop for FocusAnchor {
     fn drop(&mut self) {
-        if window_process_id(self.hwnd) == self.process_id {
-            let _ = unsafe { DestroyWindow(self.hwnd) };
+        let destroy = self.send_ui_command(FocusAnchorCommandKind::Destroy);
+        if let Err(error) = destroy {
+            tracing::warn!(%error, "could not send focus anchor destroy command");
+            let _ = unsafe { PostThreadMessageW(self.ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+        }
+        if let Some(join) = self.ui_thread.take() {
+            if !join.is_finished() {
+                let _ =
+                    unsafe { PostThreadMessageW(self.ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+            }
+            if join.join().is_err() {
+                tracing::warn!("focus anchor UI thread panicked during cleanup");
+            }
         }
     }
 }
@@ -1142,13 +1914,183 @@ impl NativeChild {
         if target_process_id != self.process_id && target_process_id != std::process::id() {
             return Err("F11 target must be owned by the acceptance runner or child".into());
         }
-        let down = [key_input(VK_F11, false)];
+        let down = [runner_owned_key_input(VK_F11, Default::default())];
         let down = send_validated_input(target_hwnd, target_process_id, &down, "F11 down")?;
-        let mut release_guard = F11ReleaseGuard::new(target_hwnd, target_process_id);
-        release_guard.armed = true;
+        let mut release_guard = OwnedKeyboardReleaseGuard::new();
+        release_guard.owned.push(OwnedKeyboardKey {
+            vk: VK_F11,
+            extended: false,
+        });
         std::thread::sleep(down_time);
         let up = release_guard.release()?;
         Ok(F11TapEvidence { down, up })
+    }
+
+    pub fn send_acceptance_hotkey(
+        &self,
+        target_hwnd: HWND,
+        target_process_id: u32,
+        hotkey: AcceptanceHotkey,
+        dwell: Duration,
+    ) -> Result<AcceptanceHotkeyTapEvidence, String> {
+        match hotkey {
+            AcceptanceHotkey::F11 => {
+                let evidence = self.send_f11(target_hwnd, target_process_id, dwell)?;
+                Ok(AcceptanceHotkeyTapEvidence {
+                    down: evidence.down,
+                    up: evidence.up,
+                    observed_vks: vec![VK_F11.0 as u32],
+                })
+            }
+            AcceptanceHotkey::ShiftAltWinEnd => {
+                if target_process_id != self.process_id && target_process_id != std::process::id() {
+                    return Err(
+                        "Shift+Alt+Win+End target must be owned by the acceptance runner or child"
+                            .into(),
+                    );
+                }
+                send_shift_alt_win_end(target_hwnd, target_process_id, dwell)
+            }
+        }
+    }
+
+    pub fn verify_acceptance_hotkey_released(
+        &self,
+        hotkey: AcceptanceHotkey,
+    ) -> Result<String, String> {
+        verify_no_acceptance_hotkey_keys_held(&acceptance_hotkey_keys(hotkey))
+    }
+
+    pub fn send_acceptance_direct_trigger(
+        &self,
+        target_hwnd: HWND,
+        target_process_id: u32,
+        trigger_key: u16,
+        dwell: Duration,
+    ) -> Result<AcceptanceHotkeyTapEvidence, String> {
+        if target_process_id != self.process_id && target_process_id != std::process::id() {
+            return Err(
+                "direct-trigger target must be owned by the acceptance runner or child".into(),
+            );
+        }
+        send_acceptance_direct_trigger(
+            target_hwnd,
+            target_process_id,
+            VIRTUAL_KEY(trigger_key),
+            dwell,
+        )
+    }
+
+    pub fn send_acceptance_hotkey_burst(
+        &self,
+        target_hwnd: HWND,
+        target_process_id: u32,
+        hotkey: AcceptanceHotkey,
+        taps: usize,
+        down_time: Duration,
+        released_time: Duration,
+    ) -> Result<AcceptanceHotkeyBurstEvidence, String> {
+        if target_process_id != self.process_id && target_process_id != std::process::id() {
+            return Err(
+                "hotkey burst target must be owned by the acceptance runner or child".into(),
+            );
+        }
+        if taps == 0 || down_time.is_zero() || released_time.is_zero() {
+            return Err("hotkey burst requires taps and positive down/released intervals".into());
+        }
+        let keys = acceptance_hotkey_keys(hotkey);
+        let input_desktop = input_desktop_evidence()?;
+        focus_is_validated(target_hwnd, target_process_id)?;
+        input_modifiers_clear()?;
+        if let Some(held) = keys
+            .iter()
+            .find(|key| unsafe { GetAsyncKeyState(i32::from(key.vk.0)) < 0 })
+        {
+            return Err(format!(
+                "refusing uninterrupted hotkey burst because key {:?} is already held",
+                held.vk
+            ));
+        }
+
+        let mut owned = Vec::<OwnedKeyboardKey>::with_capacity(keys.len());
+        let mut down_inserted = 0usize;
+        let mut up_inserted = 0usize;
+        let mut next_press = Instant::now();
+        for _ in 0..taps {
+            sleep_until(next_press);
+            let down_events = keys
+                .iter()
+                .copied()
+                .map(OwnedKeyboardKey::down)
+                .collect::<Vec<_>>();
+            let (inserted, error) =
+                send_input_checked_prefix(&down_events, "hotkey burst key-down");
+            down_inserted = down_inserted.saturating_add(inserted);
+            owned.extend(keys.iter().copied().take(inserted));
+            if let Some(error) = error {
+                let owned_before_cleanup = describe_owned_keyboard_keys(&owned);
+                let cleanup = cleanup_owned_keyboard_keys(&mut owned);
+                let physically_down = keys_still_down(&keys);
+                let external_interference =
+                    keys_down_without_owned_keydowns(&keys, &owned, &physically_down);
+                return Err(format!(
+                    "hotkey burst key-down failed after inserting {inserted}/{} events: {error}; owned_before_cleanup={owned_before_cleanup}; owned_after_cleanup={}; physical_state_after_cleanup={}; external_interference_without_owned_down={}; cleanup={cleanup}; input_desktop={input_desktop}",
+                    keys.len(),
+                    describe_owned_keyboard_keys(&owned),
+                    describe_owned_keyboard_keys(&physically_down),
+                    describe_owned_keyboard_keys(&external_interference)
+                ));
+            }
+
+            // Start the measured dwell after SendInput has inserted the down
+            // edges; synchronous insertion latency must not shorten the hold.
+            let press_at = Instant::now();
+            sleep_until(press_at + down_time);
+            let release_order = keys.iter().rev().copied().collect::<Vec<_>>();
+            let up_events = release_order
+                .iter()
+                .copied()
+                .map(OwnedKeyboardKey::up)
+                .collect::<Vec<_>>();
+            let (inserted, error) = send_input_checked_prefix(&up_events, "hotkey burst key-up");
+            up_inserted = up_inserted.saturating_add(inserted);
+            let retired = retire_inserted_keyboard_ups(&mut owned, &release_order, inserted);
+            if let Some(error) = error {
+                let held_before_cleanup = describe_owned_keyboard_keys(&owned);
+                let cleanup = cleanup_owned_keyboard_keys(&mut owned);
+                let held_after_cleanup = describe_owned_keyboard_keys(&owned);
+                let physical_state = describe_keys_still_down(&keys);
+                return Err(format!(
+                    "hotkey burst key-up failed after inserting {inserted}/{} events (retired {retired} owned downs): {error}; owned_before_cleanup={held_before_cleanup}; owned_after_cleanup={held_after_cleanup}; physical_state_after_cleanup={physical_state}; cleanup={cleanup}; input_desktop={input_desktop}",
+                    release_order.len()
+                ));
+            }
+            next_press = Instant::now() + released_time;
+        }
+
+        let cleanup = if owned.is_empty() {
+            "no_owned_keydowns_remain".to_string()
+        } else {
+            cleanup_owned_keyboard_keys(&mut owned)
+        };
+        let still_held = keys_still_down(&keys);
+        if !still_held.is_empty() || !owned.is_empty() {
+            let external_interference =
+                keys_down_without_owned_keydowns(&keys, &owned, &still_held);
+            return Err(format!(
+                "hotkey burst ended with owned keydowns remaining={}; physical keys still down={}; external interference with no matching owned keydown={}; no extra synthetic key-up was sent; cleanup={cleanup}; input_desktop={input_desktop}",
+                describe_owned_keyboard_keys(&owned),
+                describe_owned_keyboard_keys(&still_held),
+                describe_owned_keyboard_keys(&external_interference)
+            ));
+        }
+        let cleanup = format!("{cleanup};async_state_clear");
+        Ok(AcceptanceHotkeyBurstEvidence {
+            down_inserted,
+            up_inserted,
+            input_desktop,
+            cleanup,
+        })
     }
 
     pub fn press_hook_sentinel(
@@ -1427,17 +2369,28 @@ fn validate_f11_target(
 }
 
 fn send_input_checked(events: &[INPUT], operation: &str) -> Result<usize, String> {
+    let (inserted, error) = send_input_checked_prefix(events, operation);
+    match error {
+        Some(error) => Err(error),
+        None => Ok(inserted),
+    }
+}
+
+fn send_input_checked_prefix(events: &[INPUT], operation: &str) -> (usize, Option<String>) {
     let inserted = unsafe { SendInput(events, std::mem::size_of::<INPUT>() as i32) } as usize;
     if inserted != events.len() {
         // SendInput may report UIPI blocks without updating GetLastError, so retain both the
         // checked insertion count and the immediate last-error value for diagnosis.
         let last_error = unsafe { GetLastError() }.0;
-        return Err(format!(
-            "SendInput {operation} inserted {inserted}/{} events (immediate GetLastError=0x{last_error:08x}; UIPI may block without setting it)",
-            events.len()
-        ));
+        return (
+            inserted,
+            Some(format!(
+                "SendInput {operation} inserted {inserted}/{} events (immediate GetLastError=0x{last_error:08x}; UIPI may block without setting it)",
+                events.len()
+            )),
+        );
     }
-    Ok(inserted)
+    (inserted, None)
 }
 
 fn unix_time_ms() -> u128 {
@@ -1453,15 +2406,29 @@ fn send_validated_input(
     events: &[INPUT],
     operation: &str,
 ) -> Result<NativeInputEdgeEvidence, String> {
-    let input_desktop = input_desktop_evidence()?;
-    focus_is_validated(target_hwnd, target_process_id)?;
-    input_modifiers_clear()?;
+    send_validated_input_allowing_owned_keys(target_hwnd, target_process_id, events, operation, &[])
+        .map_err(|(_, error)| error)
+}
+
+fn send_validated_input_allowing_owned_keys(
+    target_hwnd: HWND,
+    target_process_id: u32,
+    events: &[INPUT],
+    operation: &str,
+    owned_keys: &[VIRTUAL_KEY],
+) -> Result<NativeInputEdgeEvidence, (usize, String)> {
+    let input_desktop = input_desktop_evidence().map_err(|error| (0, error))?;
+    focus_is_validated(target_hwnd, target_process_id).map_err(|error| (0, error))?;
+    input_modifiers_clear_except(owned_keys).map_err(|error| (0, error))?;
     let (foreground, foreground_pid) = capture_foreground();
     if foreground != target_hwnd || foreground_pid != target_process_id {
-        return Err(format!(
-            "refused {operation}: target foreground changed before SendInput; expected HWND={} PID={target_process_id}, actual HWND={} PID={foreground_pid}; {input_desktop}",
-            hwnd_id(target_hwnd),
-            hwnd_id(foreground)
+        return Err((
+            0,
+            format!(
+                "refused {operation}: target foreground changed before SendInput; expected HWND={} PID={target_process_id}, actual HWND={} PID={foreground_pid}; {input_desktop}",
+                hwnd_id(target_hwnd),
+                hwnd_id(foreground)
+            ),
         ));
     }
     let at_unix_ms = unix_time_ms();
@@ -1472,23 +2439,30 @@ fn send_validated_input(
                 vk: keyboard.wVk.0,
                 scan: keyboard.wScan,
                 flags: keyboard.dwFlags.0,
+                extra_info: keyboard.dwExtraInfo,
                 async_state_before: unsafe { GetAsyncKeyState(i32::from(keyboard.wVk.0)) },
                 async_state_after: 0,
             }
         })
     });
-    let inserted = send_input_checked(events, operation)?;
+    let (inserted, error) = send_input_checked_prefix(events, operation);
     if let Some(keyboard) = keyboard_input.as_mut() {
         keyboard.async_state_after = unsafe { GetAsyncKeyState(i32::from(keyboard.vk)) };
     }
-    Ok(NativeInputEdgeEvidence {
+    let evidence = NativeInputEdgeEvidence {
         inserted,
         at_unix_ms,
         foreground_hwnd: hwnd_id(foreground),
         foreground_pid,
         input_desktop,
+        cleanup_status: "not_required_for_down_edge".into(),
         keyboard_input,
-    })
+    };
+    if let Some(error) = error {
+        Err((inserted, error))
+    } else {
+        Ok(evidence)
+    }
 }
 
 fn input_desktop_evidence() -> Result<String, String> {
@@ -1510,23 +2484,458 @@ fn input_desktop_evidence() -> Result<String, String> {
     Ok(format!("thread={thread_name};active={active_name}"))
 }
 
+fn send_owned_keyboard_release(
+    events: &[INPUT],
+    operation: &str,
+) -> Result<NativeInputEdgeEvidence, (usize, String)> {
+    let input_desktop = input_desktop_evidence().map_err(|error| (0, error))?;
+    let (foreground, foreground_pid) = capture_foreground();
+    let at_unix_ms = unix_time_ms();
+    let mut keyboard_input = events.first().and_then(|event| {
+        (event.r#type == INPUT_KEYBOARD).then(|| {
+            let keyboard = unsafe { event.Anonymous.ki };
+            KeyboardInputEvidence {
+                vk: keyboard.wVk.0,
+                scan: keyboard.wScan,
+                flags: keyboard.dwFlags.0,
+                extra_info: keyboard.dwExtraInfo,
+                async_state_before: unsafe { GetAsyncKeyState(i32::from(keyboard.wVk.0)) },
+                async_state_after: 0,
+            }
+        })
+    });
+    let (inserted, error) = send_input_checked_prefix(events, operation);
+    if let Some(keyboard) = keyboard_input.as_mut() {
+        keyboard.async_state_after = unsafe { GetAsyncKeyState(i32::from(keyboard.vk)) };
+    }
+    if let Some(error) = error {
+        return Err((inserted, error));
+    }
+    Ok(NativeInputEdgeEvidence {
+        inserted,
+        at_unix_ms,
+        foreground_hwnd: hwnd_id(foreground),
+        foreground_pid,
+        input_desktop,
+        cleanup_status: "release_inserted;async_state_to_be_verified_by_owner".into(),
+        keyboard_input,
+    })
+}
+
 fn key_input(key: VIRTUAL_KEY, key_up: bool) -> INPUT {
+    key_input_with_flags(
+        key,
+        if key_up {
+            KEYEVENTF_KEYUP
+        } else {
+            Default::default()
+        },
+    )
+}
+
+fn key_input_with_flags(
+    key: VIRTUAL_KEY,
+    extra_flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: key,
                 wScan: 0,
-                dwFlags: if key_up {
-                    KEYEVENTF_KEYUP
-                } else {
-                    Default::default()
-                },
+                dwFlags: extra_flags,
                 time: 0,
                 // Zero is ordinary SendInput provenance; never use the app's self-injection tag.
                 dwExtraInfo: 0,
             },
         },
+    }
+}
+
+fn runner_owned_key_input(
+    key: VIRTUAL_KEY,
+    extra_flags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS,
+) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: key,
+                wScan: 0,
+                dwFlags: extra_flags,
+                time: 0,
+                dwExtraInfo: ACCEPTANCE_RUNNER_INPUT_COOKIE,
+            },
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OwnedKeyboardKey {
+    vk: VIRTUAL_KEY,
+    extended: bool,
+}
+
+impl OwnedKeyboardKey {
+    fn down(self) -> INPUT {
+        runner_owned_key_input(
+            self.vk,
+            if self.extended {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                Default::default()
+            },
+        )
+    }
+
+    fn up(self) -> INPUT {
+        runner_owned_key_input(
+            self.vk,
+            KEYEVENTF_KEYUP
+                | if self.extended {
+                    KEYEVENTF_EXTENDEDKEY
+                } else {
+                    Default::default()
+                },
+        )
+    }
+}
+
+fn acceptance_hotkey_keys(hotkey: AcceptanceHotkey) -> Vec<OwnedKeyboardKey> {
+    match hotkey {
+        AcceptanceHotkey::F11 => vec![OwnedKeyboardKey {
+            vk: VK_F11,
+            extended: false,
+        }],
+        AcceptanceHotkey::ShiftAltWinEnd => vec![
+            OwnedKeyboardKey {
+                vk: VK_LSHIFT,
+                extended: false,
+            },
+            OwnedKeyboardKey {
+                vk: VK_LMENU,
+                extended: false,
+            },
+            OwnedKeyboardKey {
+                vk: VK_LWIN,
+                extended: true,
+            },
+            OwnedKeyboardKey {
+                vk: VK_END,
+                extended: true,
+            },
+        ],
+    }
+}
+
+fn retire_inserted_keyboard_ups(
+    owned: &mut Vec<OwnedKeyboardKey>,
+    release_order: &[OwnedKeyboardKey],
+    inserted: usize,
+) -> usize {
+    let mut retired = 0;
+    for released in release_order.iter().take(inserted) {
+        if let Some(index) = owned.iter().position(|owned_key| owned_key == released) {
+            owned.remove(index);
+            retired += 1;
+        }
+    }
+    retired
+}
+
+fn describe_owned_keyboard_keys(keys: &[OwnedKeyboardKey]) -> String {
+    keys.iter()
+        .map(|key| format!("{:?}", key.vk))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn keys_still_down(keys: &[OwnedKeyboardKey]) -> Vec<OwnedKeyboardKey> {
+    keys.iter()
+        .filter(|key| unsafe { GetAsyncKeyState(i32::from(key.vk.0)) < 0 })
+        .copied()
+        .collect()
+}
+
+fn keys_down_without_owned_keydowns(
+    candidates: &[OwnedKeyboardKey],
+    owned_keydowns: &[OwnedKeyboardKey],
+    physically_down: &[OwnedKeyboardKey],
+) -> Vec<OwnedKeyboardKey> {
+    candidates
+        .iter()
+        .filter(|candidate| {
+            physically_down.contains(candidate) && !owned_keydowns.contains(candidate)
+        })
+        .copied()
+        .collect()
+}
+
+fn describe_keys_still_down(keys: &[OwnedKeyboardKey]) -> String {
+    format!("{:?}", describe_owned_keyboard_keys(&keys_still_down(keys)))
+}
+
+fn cleanup_owned_keyboard_keys(owned: &mut Vec<OwnedKeyboardKey>) -> String {
+    if owned.is_empty() {
+        return "no_owned_keys".into();
+    }
+    let initial = owned.len();
+    let mut total_inserted = 0usize;
+    let mut attempts = 0usize;
+    let mut last_error = None;
+    while !owned.is_empty() && attempts < initial.saturating_add(1) {
+        attempts += 1;
+        if let Err(error) = input_desktop_evidence() {
+            last_error = Some(error);
+            break;
+        }
+        let release_order = owned.iter().rev().copied().collect::<Vec<_>>();
+        let events = release_order
+            .iter()
+            .copied()
+            .map(OwnedKeyboardKey::up)
+            .collect::<Vec<_>>();
+        let (inserted, error) = send_input_checked_prefix(&events, "owned hotkey cleanup");
+        total_inserted = total_inserted.saturating_add(inserted);
+        if error.is_some() {
+            last_error = error;
+        }
+        retire_inserted_keyboard_ups(owned, &release_order, inserted);
+        if inserted == 0 {
+            break;
+        }
+    }
+    format!(
+        "release_attempts={attempts};release_inserted={total_inserted}/{initial};owned_remaining={};physical_state_after_cleanup={};last_error={}",
+        describe_owned_keyboard_keys(owned),
+        describe_keys_still_down(owned),
+        last_error.as_deref().unwrap_or("none")
+    )
+}
+
+fn verify_no_acceptance_hotkey_keys_held(keys: &[OwnedKeyboardKey]) -> Result<String, String> {
+    let physically_down = keys_still_down(keys);
+    if physically_down.is_empty() {
+        return Ok("async_state_clear_after_owned_release".into());
+    }
+    let external_interference = keys_down_without_owned_keydowns(keys, &[], &physically_down);
+    Err(format!(
+        "keys remain physically down after all runner-owned key-up events were inserted: {}; no owned keydown remains, so classify as external physical/key interference and do not send another synthetic key-up",
+        describe_owned_keyboard_keys(&external_interference)
+    ))
+}
+
+fn sleep_until(deadline: Instant) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        std::thread::sleep(remaining);
+    }
+}
+
+fn send_shift_alt_win_end(
+    target_hwnd: HWND,
+    target_process_id: u32,
+    dwell: Duration,
+) -> Result<AcceptanceHotkeyTapEvidence, String> {
+    const CHORD: [OwnedKeyboardKey; 4] = [
+        OwnedKeyboardKey {
+            vk: VK_LSHIFT,
+            extended: false,
+        },
+        OwnedKeyboardKey {
+            vk: VK_LMENU,
+            extended: false,
+        },
+        OwnedKeyboardKey {
+            vk: VK_LWIN,
+            extended: true,
+        },
+        OwnedKeyboardKey {
+            vk: VK_END,
+            extended: true,
+        },
+    ];
+
+    focus_is_validated(target_hwnd, target_process_id)?;
+    input_modifiers_clear()?;
+    if unsafe { GetAsyncKeyState(i32::from(VK_END.0)) } < 0 {
+        return Err("refusing Shift+Alt+Win+End while End is already held".into());
+    }
+
+    let mut release_guard = OwnedKeyboardReleaseGuard::new();
+    let down_events = CHORD.map(OwnedKeyboardKey::down);
+    let down = match send_validated_input_allowing_owned_keys(
+        target_hwnd,
+        target_process_id,
+        &down_events,
+        "Shift+Alt+Win+End chord down",
+        &[],
+    ) {
+        Ok(evidence) => {
+            release_guard.owned.extend(CHORD);
+            evidence
+        }
+        Err((inserted, error)) => {
+            release_guard.owned.extend(CHORD.into_iter().take(inserted));
+            let cleanup = if release_guard.owned.is_empty() {
+                "no_owned_keys".to_string()
+            } else {
+                release_guard
+                    .release()
+                    .map(|evidence| format!("released={}", evidence.inserted))
+                    .unwrap_or_else(|cleanup_error| cleanup_error)
+            };
+            return Err(format!("{error}; cleanup={cleanup}"));
+        }
+    };
+    std::thread::sleep(dwell);
+    let up = release_guard.release()?;
+    Ok(AcceptanceHotkeyTapEvidence {
+        down,
+        up,
+        observed_vks: CHORD.map(|key| key.vk.0 as u32).to_vec(),
+    })
+}
+
+fn send_acceptance_direct_trigger(
+    target_hwnd: HWND,
+    target_process_id: u32,
+    trigger_key: VIRTUAL_KEY,
+    dwell: Duration,
+) -> Result<AcceptanceHotkeyTapEvidence, String> {
+    let chord = [
+        OwnedKeyboardKey {
+            vk: VK_LCONTROL,
+            extended: false,
+        },
+        OwnedKeyboardKey {
+            vk: VK_LMENU,
+            extended: false,
+        },
+        OwnedKeyboardKey {
+            vk: trigger_key,
+            extended: false,
+        },
+    ];
+
+    focus_is_validated(target_hwnd, target_process_id)?;
+    input_modifiers_clear()?;
+    if chord
+        .iter()
+        .any(|key| unsafe { GetAsyncKeyState(i32::from(key.vk.0)) } < 0)
+    {
+        return Err("refusing direct trigger while one of Ctrl+Alt+T is already held".into());
+    }
+
+    let mut release_guard = OwnedKeyboardReleaseGuard::new();
+    let down_events = chord.map(OwnedKeyboardKey::down);
+    let down = match send_validated_input_allowing_owned_keys(
+        target_hwnd,
+        target_process_id,
+        &down_events,
+        "acceptance direct-trigger chord down",
+        &[],
+    ) {
+        Ok(evidence) => {
+            release_guard.owned.extend(chord);
+            evidence
+        }
+        Err((inserted, error)) => {
+            release_guard.owned.extend(chord.into_iter().take(inserted));
+            let cleanup = if release_guard.owned.is_empty() {
+                "no_owned_keys".to_string()
+            } else {
+                release_guard
+                    .release()
+                    .map(|evidence| format!("released={}", evidence.inserted))
+                    .unwrap_or_else(|cleanup_error| cleanup_error)
+            };
+            return Err(format!("{error}; cleanup={cleanup}"));
+        }
+    };
+    std::thread::sleep(dwell);
+    let up = release_guard.release()?;
+    input_modifiers_clear()?;
+    if unsafe { GetAsyncKeyState(i32::from(trigger_key.0)) } < 0 {
+        return Err("direct-trigger key remained down after owned release".into());
+    }
+    Ok(AcceptanceHotkeyTapEvidence {
+        down,
+        up,
+        observed_vks: chord.map(|key| key.vk.0 as u32).to_vec(),
+    })
+}
+
+struct OwnedKeyboardReleaseGuard {
+    owned: Vec<OwnedKeyboardKey>,
+}
+
+impl OwnedKeyboardReleaseGuard {
+    fn new() -> Self {
+        Self { owned: Vec::new() }
+    }
+
+    fn release(&mut self) -> Result<NativeInputEdgeEvidence, String> {
+        if self.owned.is_empty() {
+            return Err("owned keyboard release was requested with no inserted key-downs".into());
+        }
+        let release_order = self.owned.iter().rev().copied().collect::<Vec<_>>();
+        let events = release_order
+            .iter()
+            .copied()
+            .map(OwnedKeyboardKey::up)
+            .collect::<Vec<_>>();
+        match send_owned_keyboard_release(&events, "owned chord key-up") {
+            Ok(mut evidence) => {
+                let retired = retire_inserted_keyboard_ups(
+                    &mut self.owned,
+                    &release_order,
+                    release_order.len(),
+                );
+                if !self.owned.is_empty() {
+                    return Err(format!(
+                        "inserted all {} release events but retired only {retired} owned keydowns; remaining={}",
+                        release_order.len(),
+                        describe_owned_keyboard_keys(&self.owned)
+                    ));
+                }
+                let cleanup_status = verify_no_acceptance_hotkey_keys_held(&release_order)?;
+                evidence.cleanup_status = cleanup_status;
+                Ok(evidence)
+            }
+            Err((inserted, error)) => {
+                let retired =
+                    retire_inserted_keyboard_ups(&mut self.owned, &release_order, inserted);
+                let held_before_cleanup = self
+                    .owned
+                    .iter()
+                    .map(|key| format!("{:?}", key.vk))
+                    .collect::<Vec<_>>();
+                let cleanup = cleanup_owned_keyboard_keys(&mut self.owned);
+                let held_after_cleanup = self
+                    .owned
+                    .iter()
+                    .map(|key| format!("{:?}", key.vk))
+                    .collect::<Vec<_>>();
+                let physically_down = keys_still_down(&release_order);
+                let external_interference =
+                    keys_down_without_owned_keydowns(&release_order, &self.owned, &physically_down);
+                Err(format!(
+                    "{error}; release_inserted={inserted}/{}; retired={retired}; owned_before_cleanup={held_before_cleanup:?}; owned_after_cleanup={held_after_cleanup:?}; physical_state_after_cleanup={}; external_interference_without_owned_down={}; cleanup={cleanup}",
+                    release_order.len(),
+                    describe_owned_keyboard_keys(&physically_down),
+                    describe_owned_keyboard_keys(&external_interference)
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for OwnedKeyboardReleaseGuard {
+    fn drop(&mut self) {
+        if !self.owned.is_empty() {
+            let _ = self.release();
+        }
     }
 }
 
@@ -1550,7 +2959,7 @@ fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
     }
 }
 
-fn held_modifiers() -> String {
+fn held_modifiers_except(allowed: &[VIRTUAL_KEY]) -> String {
     let keys = [
         ("Shift", VK_SHIFT),
         ("LeftShift", VK_LSHIFT),
@@ -1564,8 +2973,16 @@ fn held_modifiers() -> String {
         ("LeftWin", VK_LWIN),
         ("RightWin", VK_RWIN),
     ];
+    let is_allowed = |key: VIRTUAL_KEY| {
+        allowed.iter().any(|owned| {
+            owned.0 == key.0
+                || (key == VK_SHIFT && matches!(*owned, VK_LSHIFT | VK_RSHIFT))
+                || (key == VK_CONTROL && matches!(*owned, VK_LCONTROL | VK_RCONTROL))
+                || (key == VK_MENU && matches!(*owned, VK_LMENU | VK_RMENU))
+        })
+    };
     keys.iter()
-        .filter(|(_, key)| unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0)
+        .filter(|(_, key)| (unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0) && !is_allowed(*key))
         .map(|(name, _)| *name)
         .collect::<Vec<_>>()
         .join(", ")
@@ -1706,6 +3123,16 @@ fn window_process_id(hwnd: HWND) -> u32 {
     let mut process_id = 0;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
     process_id
+}
+
+fn window_bounds(hwnd: HWND) -> Option<[i32; 4]> {
+    if hwnd.is_invalid() {
+        return None;
+    }
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }
+        .ok()
+        .map(|()| [rect.left, rect.top, rect.right, rect.bottom])
 }
 
 fn virtual_screen_bounds() -> (i32, i32, i32, i32) {
@@ -2011,7 +3438,11 @@ fn cursor_restore_input_target(
 }
 
 pub(super) fn input_modifiers_clear() -> Result<(), String> {
-    let held = held_modifiers();
+    input_modifiers_clear_except(&[])
+}
+
+fn input_modifiers_clear_except(allowed: &[VIRTUAL_KEY]) -> Result<(), String> {
+    let held = held_modifiers_except(allowed);
     if held.is_empty() {
         Ok(())
     } else {
@@ -3815,44 +5246,6 @@ struct MouseButtonGuard {
     armed: bool,
 }
 
-struct F11ReleaseGuard {
-    target_hwnd: HWND,
-    target_process_id: u32,
-    armed: bool,
-}
-
-impl F11ReleaseGuard {
-    fn new(target_hwnd: HWND, target_process_id: u32) -> Self {
-        Self {
-            target_hwnd,
-            target_process_id,
-            armed: false,
-        }
-    }
-
-    fn release(&mut self) -> Result<NativeInputEdgeEvidence, String> {
-        if !self.armed {
-            return Err("F11 release was requested before a down event".into());
-        }
-        if focus_is_validated(self.target_hwnd, self.target_process_id).is_err() {
-            focus_owned_window(self.target_hwnd, self.target_process_id)?;
-        }
-        let up = [key_input(VK_F11, true)];
-        let evidence =
-            send_validated_input(self.target_hwnd, self.target_process_id, &up, "F11 up")?;
-        self.armed = false;
-        Ok(evidence)
-    }
-}
-
-impl Drop for F11ReleaseGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.release();
-        }
-    }
-}
-
 impl MouseButtonGuard {
     fn new(target_hwnd: HWND, target_process_id: u32) -> Self {
         Self {
@@ -3904,16 +5297,418 @@ fn bounded_label(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionCatalogRankSnapshot, AuthoringControlRole, AuthoringControlSnapshot,
-        AuthoringControlTarget, INPUT_MOUSE, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-        MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, POINT,
-        adjacent_pointer_point, authoring_control_click_finished, cursor_points_match,
-        cursor_restore_input_target, format_uia_element_snapshot, fresh_canvas_cell_for_generation,
-        latest_authoring_controls_after, normalized_absolute_coordinate, parse_action_catalog_rank,
-        parse_authoring_control, parse_geometry_state, pointer_correction_delta,
-        relative_mouse_move_input, semantic_client_center, semantic_name_contains,
-        trace_event_lines, unique_authoring_control,
+        ACCEPTANCE_RUNNER_INPUT_COOKIE, ActionCatalogRankSnapshot, AuthoringControlRole,
+        AuthoringControlSnapshot, AuthoringControlTarget, FocusAnchorCommand,
+        FocusAnchorCommandKind, GetCurrentThreadId, INPUT_MOUSE, KEYEVENTF_KEYUP,
+        KEYEVENTF_UNICODE, LPARAM, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+        MOUSEEVENTF_MOVE_NOCOALESCE, OwnedKeyboardKey, POINT, PostThreadMessageW,
+        RUNNER_HOOK_EVENTS, RunnerChordEdge, RunnerChordKeyObservation, RunnerChordObservation,
+        RunnerHookEdge, RunnerHookObserver, SS_NOTIFY, VK_END, VK_LMENU, VK_LSHIFT, VK_LWIN,
+        WPARAM, adjacent_pointer_point, authoring_control_click_finished, cursor_points_match,
+        cursor_restore_input_target, focus_anchor_candidate_positions, focus_anchor_window_style,
+        format_uia_element_snapshot, forward_runner_hook_edge, fresh_canvas_cell_for_generation,
+        keys_down_without_owned_keydowns, latest_authoring_controls_after,
+        normalized_absolute_coordinate, parse_action_catalog_rank, parse_authoring_control,
+        parse_geometry_state, pointer_correction_delta, record_runner_chord_edge,
+        relative_mouse_move_input, retire_inserted_keyboard_ups, semantic_client_center,
+        semantic_name_contains, spawn_focus_anchor_window, trace_event_lines,
+        unique_authoring_control, window_process_id,
     };
+    use std::time::Duration;
+
+    #[test]
+    fn chord_observer_counts_only_tagged_runner_edges_and_retains_foreign_edges() {
+        let mut counts = std::collections::BTreeMap::from([
+            (0xA0, [0; 4]),
+            (0xA4, [0; 4]),
+            (0x5B, [0; 4]),
+            (0x23, [0; 4]),
+        ]);
+        let mut owned_edges = Vec::new();
+        let mut foreign_edges = Vec::new();
+        let ordered = [
+            (0xA0, true),
+            (0xA4, true),
+            (0x5B, true),
+            (0x23, true),
+            (0x23, false),
+            (0x5B, false),
+            (0xA4, false),
+            (0xA0, false),
+        ];
+        for (vk, down) in ordered {
+            record_runner_chord_edge(
+                RunnerHookEdge {
+                    vk,
+                    down,
+                    injected: true,
+                    extra_info: ACCEPTANCE_RUNNER_INPUT_COOKIE,
+                    at: std::time::Instant::now(),
+                },
+                &mut counts,
+                &mut owned_edges,
+                &mut foreign_edges,
+            );
+        }
+        for down in [true, false] {
+            record_runner_chord_edge(
+                RunnerHookEdge {
+                    vk: 0xA4,
+                    down,
+                    injected: true,
+                    extra_info: 0,
+                    at: std::time::Instant::now(),
+                },
+                &mut counts,
+                &mut owned_edges,
+                &mut foreign_edges,
+            );
+        }
+        let observation = RunnerChordObservation {
+            desktop: "Default".into(),
+            keys: counts
+                .iter()
+                .map(|(vk, edges)| RunnerChordKeyObservation {
+                    vk: *vk,
+                    down: edges[0],
+                    up: edges[1],
+                    injected_down: edges[2],
+                    injected_up: edges[3],
+                })
+                .collect(),
+            ordered_edges: owned_edges,
+            foreign_edges,
+        };
+        assert!(observation.exact_injected_pairs(1));
+        assert!(observation.exact_injected_sequence(&ordered));
+        assert_eq!(observation.foreign_edges.len(), 2);
+        assert!(observation.describe().contains("foreign_matching_edges=2"));
+    }
+
+    #[test]
+    fn balanced_foreign_pair_in_released_gap_is_disclosed_without_contamination() {
+        let start = std::time::Instant::now();
+        let edge = |vk, down, at| RunnerChordEdge {
+            vk,
+            down,
+            injected: true,
+            extra_info: ACCEPTANCE_RUNNER_INPUT_COOKIE,
+            at,
+        };
+        let foreign = |vk, down, at| RunnerChordEdge {
+            vk,
+            down,
+            injected: true,
+            extra_info: 0,
+            at,
+        };
+        let mut ordered_edges = vec![
+            edge(0xA0, true, start),
+            edge(0xA4, true, start + Duration::from_millis(2)),
+            edge(0x5B, true, start + Duration::from_millis(4)),
+            edge(0x23, true, start + Duration::from_millis(6)),
+            edge(0x23, false, start + Duration::from_millis(16)),
+            edge(0x5B, false, start + Duration::from_millis(18)),
+            edge(0xA4, false, start + Duration::from_millis(20)),
+            edge(0xA0, false, start + Duration::from_millis(22)),
+            edge(0xA0, true, start + Duration::from_millis(100)),
+            edge(0xA4, true, start + Duration::from_millis(102)),
+            edge(0x5B, true, start + Duration::from_millis(104)),
+            edge(0x23, true, start + Duration::from_millis(106)),
+            edge(0x23, false, start + Duration::from_millis(116)),
+            edge(0x5B, false, start + Duration::from_millis(118)),
+            edge(0xA4, false, start + Duration::from_millis(120)),
+            edge(0xA0, false, start + Duration::from_millis(122)),
+        ];
+        ordered_edges.sort_by_key(|edge| edge.at);
+        let foreign_edges = vec![
+            foreign(0xA4, true, start + Duration::from_millis(50)),
+            foreign(0xA4, false, start + Duration::from_millis(55)),
+        ];
+        let observation = RunnerChordObservation {
+            desktop: "Default".into(),
+            keys: Vec::new(),
+            ordered_edges,
+            foreign_edges,
+        };
+
+        assert!(
+            observation
+                .foreign_edges_interfering_with_owned_gestures()
+                .is_empty()
+        );
+        assert_eq!(observation.foreign_edges.len(), 2);
+    }
+
+    #[test]
+    fn orphan_foreign_release_in_released_gap_is_contamination() {
+        let observation = two_tap_chord_observation(vec![(0xA4, false, 50)]);
+        let contamination = observation.foreign_edges_interfering_with_owned_gestures();
+        assert_eq!(contamination.len(), 1);
+        assert!(!contamination[0].down);
+    }
+
+    #[test]
+    fn foreign_up_after_next_gesture_begins_is_contamination() {
+        let observation = two_tap_chord_observation(vec![(0xA4, true, 50), (0xA4, false, 105)]);
+        let contamination = observation.foreign_edges_interfering_with_owned_gestures();
+        assert_eq!(contamination.len(), 2);
+        assert!(contamination[0].down);
+        assert!(!contamination[1].down);
+    }
+
+    #[test]
+    fn foreign_down_in_owned_span_is_contamination_when_release_is_in_gap() {
+        let observation = two_tap_chord_observation(vec![(0xA4, true, 7), (0xA4, false, 50)]);
+        let contamination = observation.foreign_edges_interfering_with_owned_gestures();
+        assert_eq!(contamination.len(), 1);
+        assert!(contamination[0].down);
+    }
+
+    #[test]
+    fn unbalanced_foreign_down_in_released_gap_is_held_across_next_span() {
+        let observation = two_tap_chord_observation(vec![(0xA4, true, 50)]);
+        let contamination = observation.foreign_edges_interfering_with_owned_gestures();
+        assert_eq!(contamination.len(), 1);
+        assert!(contamination[0].down);
+    }
+
+    #[test]
+    fn unbalanced_foreign_down_after_final_gesture_is_contamination() {
+        let observation = two_tap_chord_observation(vec![(0xA4, true, 130)]);
+        let contamination = observation.foreign_edges_interfering_with_owned_gestures();
+        assert_eq!(contamination.len(), 1);
+        assert!(contamination[0].down);
+    }
+
+    fn two_tap_chord_observation(foreign: Vec<(u32, bool, u64)>) -> RunnerChordObservation {
+        let start = std::time::Instant::now();
+        let owned = |vk, down, millis| RunnerChordEdge {
+            vk,
+            down,
+            injected: true,
+            extra_info: ACCEPTANCE_RUNNER_INPUT_COOKIE,
+            at: start + Duration::from_millis(millis),
+        };
+        let mut ordered_edges = Vec::new();
+        for offset in [0, 100] {
+            ordered_edges.extend([
+                owned(0xA0, true, offset),
+                owned(0xA4, true, offset + 2),
+                owned(0x5B, true, offset + 4),
+                owned(0x23, true, offset + 6),
+                owned(0x23, false, offset + 16),
+                owned(0x5B, false, offset + 18),
+                owned(0xA4, false, offset + 20),
+                owned(0xA0, false, offset + 22),
+            ]);
+        }
+        let foreign_edges = foreign
+            .into_iter()
+            .map(|(vk, down, millis)| RunnerChordEdge {
+                vk,
+                down,
+                injected: true,
+                extra_info: 0,
+                at: start + Duration::from_millis(millis),
+            })
+            .collect();
+        RunnerChordObservation {
+            desktop: "Default".into(),
+            keys: Vec::new(),
+            ordered_edges,
+            foreign_edges,
+        }
+    }
+
+    #[test]
+    fn key_quiet_preflight_resets_on_matching_foreign_edges() {
+        let (sender, events) = std::sync::mpsc::channel();
+        let (_probe_sender, probe_acks) = std::sync::mpsc::channel();
+        let (_unhook_sender, unhook_result) = std::sync::mpsc::channel();
+        let mut observer = RunnerHookObserver {
+            events,
+            probe_acks,
+            unhook_result,
+            thread_id: 0,
+            hook_id: 0,
+            join: None,
+            desktop: "Default".into(),
+        };
+        sender
+            .send(RunnerHookEdge {
+                vk: 0xA4,
+                down: false,
+                injected: true,
+                extra_info: 0,
+                at: std::time::Instant::now(),
+            })
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let evidence = observer
+            .wait_for_key_quiet(
+                &[0xA0, 0xA4, 0x5B, 0x23],
+                Duration::from_millis(25),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+        assert_eq!(evidence.matching_edges, 1);
+        assert!(evidence.quiet_ms >= 25);
+        assert!(started.elapsed() >= Duration::from_millis(25));
+    }
+
+    #[test]
+    fn runner_hook_forwards_direct_trigger_and_legacy_keyboard_edges() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = Some(sender));
+        let direct_trigger = [
+            (0xA2, true),
+            (0xA4, true),
+            (0x54, true),
+            (0x54, false),
+            (0xA4, false),
+            (0xA2, false),
+        ];
+        let legacy_trigger = [
+            (0xA2, true),
+            (0xA4, true),
+            (0x59, true),
+            (0x59, false),
+            (0xA4, false),
+            (0xA2, false),
+        ];
+        for (vk, down) in direct_trigger.into_iter().chain(legacy_trigger) {
+            forward_runner_hook_edge(RunnerHookEdge {
+                vk,
+                down,
+                injected: true,
+                extra_info: ACCEPTANCE_RUNNER_INPUT_COOKIE,
+                at: std::time::Instant::now(),
+            });
+        }
+        RUNNER_HOOK_EVENTS.with(|slot| *slot.borrow_mut() = None);
+        let observed = receiver
+            .try_iter()
+            .map(|edge| (edge.vk, edge.down))
+            .collect::<Vec<_>>();
+        let expected = direct_trigger
+            .into_iter()
+            .chain(legacy_trigger)
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn keyboard_ownership_follows_inserted_keyups_not_async_state() {
+        let chord = vec![
+            OwnedKeyboardKey {
+                vk: VK_LSHIFT,
+                extended: false,
+            },
+            OwnedKeyboardKey {
+                vk: VK_LMENU,
+                extended: false,
+            },
+            OwnedKeyboardKey {
+                vk: VK_LWIN,
+                extended: true,
+            },
+            OwnedKeyboardKey {
+                vk: VK_END,
+                extended: true,
+            },
+        ];
+        let mut owned = chord.clone();
+        let release_order = chord.iter().rev().copied().collect::<Vec<_>>();
+        assert_eq!(
+            retire_inserted_keyboard_ups(&mut owned, &release_order, 2),
+            2
+        );
+        assert_eq!(owned, chord[..2]);
+
+        let physical_down = vec![chord[1], chord[3]];
+        let external = keys_down_without_owned_keydowns(&chord, &owned, &physical_down);
+        assert_eq!(external, vec![chord[3]]);
+
+        assert_eq!(
+            retire_inserted_keyboard_ups(&mut owned, &release_order[2..], 2),
+            2
+        );
+        assert!(owned.is_empty());
+        assert_eq!(
+            keys_down_without_owned_keydowns(&chord, &owned, &physical_down),
+            physical_down
+        );
+    }
+
+    #[test]
+    fn focus_anchor_candidates_stay_inside_physical_displays_and_skip_gaps() {
+        let displays = [[-1920, 0, 0, 1080], [400, 0, 2320, 1080]];
+        let positions = focus_anchor_candidate_positions(&displays, 320, 96);
+        assert_eq!(positions.len(), 18);
+        assert!(positions.iter().all(|(x, y)| {
+            let bounds = [*x, *y, *x + 320, *y + 96];
+            displays.iter().any(|display| {
+                bounds[0] >= display[0]
+                    && bounds[1] >= display[1]
+                    && bounds[2] <= display[2]
+                    && bounds[3] <= display[3]
+            })
+        }));
+        assert!(
+            !positions
+                .iter()
+                .any(|(x, _)| *x < 400 && x.saturating_add(320) > 0)
+        );
+        assert!(focus_anchor_candidate_positions(&[[0, 0, 240, 120]], 320, 96).is_empty());
+    }
+
+    #[test]
+    fn focus_anchor_static_window_accepts_hit_testing() {
+        assert_ne!(focus_anchor_window_style().0 & SS_NOTIFY.0, 0);
+    }
+
+    #[test]
+    fn focus_anchor_owns_a_live_message_pump_until_bounded_destroy() {
+        let process_id = std::process::id();
+        let (hwnd, thread_id, command_tx, ui_thread) =
+            spawn_focus_anchor_window(process_id).expect("create message-pumped focus anchor");
+        assert_eq!(window_process_id(hwnd), process_id);
+        assert_ne!(thread_id, unsafe { GetCurrentThreadId() });
+
+        let send_command = |kind| {
+            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+            command_tx
+                .send(FocusAnchorCommand {
+                    kind,
+                    reply: reply_tx,
+                })
+                .expect("send bounded focus anchor UI command");
+            unsafe {
+                PostThreadMessageW(
+                    thread_id,
+                    super::FOCUS_ANCHOR_COMMAND_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            }
+            .expect("wake focus anchor UI message pump");
+            reply_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("focus anchor UI command reply")
+                .expect("focus anchor UI command succeeds")
+        };
+
+        send_command(FocusAnchorCommandKind::Raise);
+        send_command(FocusAnchorCommandKind::MoveTo { left: 64, top: 64 });
+        send_command(FocusAnchorCommandKind::RestoreNonTopmost);
+        send_command(FocusAnchorCommandKind::Destroy);
+        ui_thread
+            .join()
+            .expect("focus anchor UI thread exits after destroy");
+        assert_eq!(window_process_id(hwnd), 0);
+    }
 
     fn authoring_control() -> AuthoringControlSnapshot {
         AuthoringControlSnapshot {

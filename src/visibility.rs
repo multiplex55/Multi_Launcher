@@ -1,7 +1,7 @@
 use eframe::egui;
 use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicIsize, Ordering},
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering},
 };
 
 use crate::hotkey::HotkeyTrigger;
@@ -61,6 +61,13 @@ pub trait ViewportCtx {
     /// normal placement, visibility, and focus commands.
     fn wake_for_show(&self) {}
 
+    /// Present a viewport without asking the platform backend to activate it.
+    /// Contexts that cannot separate visibility from activation keep the
+    /// regular viewport command behavior.
+    fn show_without_activation(&self) {
+        self.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    }
+
     fn pixels_per_point(&self) -> f32 {
         1.0
     }
@@ -91,9 +98,196 @@ impl ViewportCtx for egui::Context {
 #[derive(Clone, Default)]
 pub struct RootWindowBridge {
     hwnd: Arc<AtomicIsize>,
+    generation: Arc<AtomicU64>,
+    designer_hwnd: Arc<AtomicIsize>,
+    designer_generation: Arc<AtomicU64>,
+    identity_gate: Arc<Mutex<()>>,
+    presentation_reconcile_requested: Arc<AtomicBool>,
+    repaint_context: Arc<OnceLock<egui::Context>>,
 }
 
 impl RootWindowBridge {
+    fn publish_hwnd(&self, hwnd: isize) {
+        let _gate = self
+            .identity_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.hwnd.load(Ordering::Acquire) != hwnd {
+            self.hwnd.store(hwnd, Ordering::Release);
+            self.generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn identity(&self) -> (usize, u64) {
+        let _gate = self
+            .identity_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            self.hwnd.load(Ordering::Acquire).max(0) as usize,
+            self.generation.load(Ordering::Acquire),
+        )
+    }
+
+    pub fn is_current(&self, hwnd: usize, generation: u64) -> bool {
+        let _gate = self
+            .identity_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.hwnd.load(Ordering::Acquire) == hwnd as isize
+            && self.generation.load(Ordering::Acquire) == generation
+    }
+
+    /// Request a ROOT frame to reapply its current visibility-owned native
+    /// presentation after a fenced activation was superseded while a Windows
+    /// call was in flight. Geometry remains owned by the GUI and, when active,
+    /// by the Screen Draw parking transaction.
+    pub(crate) fn request_presentation_reconcile(&self) {
+        self.presentation_reconcile_requested
+            .store(true, Ordering::Release);
+        if let Some(context) = self.repaint_context.get() {
+            context.request_repaint_of(egui::ViewportId::ROOT);
+        }
+    }
+
+    pub(crate) fn take_presentation_reconcile_request(&self) -> bool {
+        self.presentation_reconcile_requested
+            .swap(false, Ordering::AcqRel)
+    }
+
+    fn attach_repaint_context(&self, context: &egui::Context) {
+        let _ = self.repaint_context.set(context.clone());
+    }
+
+    fn publish_designer_hwnd(&self, hwnd: isize) {
+        let _gate = self
+            .identity_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.designer_hwnd.load(Ordering::Acquire) != hwnd {
+            self.designer_hwnd.store(hwnd, Ordering::Release);
+            self.designer_generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn designer_identity(&self) -> (usize, u64) {
+        let _gate = self
+            .identity_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            self.designer_hwnd.load(Ordering::Acquire).max(0) as usize,
+            self.designer_generation.load(Ordering::Acquire),
+        )
+    }
+
+    fn is_current_designer(&self, hwnd: usize, generation: u64) -> bool {
+        let _gate = self
+            .identity_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.designer_hwnd.load(Ordering::Acquire) == hwnd as isize
+            && self.designer_generation.load(Ordering::Acquire) == generation
+    }
+
+    pub(crate) fn clear_designer_identity(&self) {
+        self.publish_designer_hwnd(0);
+    }
+
+    /// Called from the focused Designer viewport callback. The callback's
+    /// viewport identity supplies the semantic association; the cached native
+    /// HWND avoids probing another thread's window text on the hotkey path.
+    pub(crate) fn capture_focused_designer(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::System::Threading::GetCurrentProcessId;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
+            };
+
+            let foreground = unsafe { GetForegroundWindow() };
+            let foreground_value = foreground.0 as usize;
+            let (root_hwnd, _) = self.identity();
+            if foreground.0.is_null()
+                || foreground_value == root_hwnd
+                || !unsafe { IsWindow(foreground) }.as_bool()
+            {
+                return;
+            }
+            let mut owner_process_id = 0;
+            if unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner_process_id)) } == 0
+                || owner_process_id != unsafe { GetCurrentProcessId() }
+            {
+                return;
+            }
+            self.publish_designer_hwnd(foreground.0 as isize);
+        }
+    }
+
+    /// Preserve foreground ownership only when the actual foreground HWND is
+    /// the cached independent Designer viewport owned by this process. Native
+    /// title queries are deliberately kept out of the hotkey path because a
+    /// same-process WM_GETTEXT can wait on the GUI thread.
+    pub fn focus_intent_for_launcher_toggle(&self) -> RootFocusIntent {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::System::Threading::GetCurrentProcessId;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
+            };
+
+            let (root_hwnd, root_generation) = self.identity();
+            let (designer_hwnd, designer_generation) = self.designer_identity();
+            if root_hwnd == 0
+                || designer_hwnd == 0
+                || designer_hwnd == root_hwnd
+                || !self.is_current(root_hwnd, root_generation)
+                || !self.is_current_designer(designer_hwnd, designer_generation)
+            {
+                return RootFocusIntent::ActivateRoot;
+            }
+            let foreground = unsafe { GetForegroundWindow() };
+            if foreground.0 as usize != designer_hwnd || !unsafe { IsWindow(foreground) }.as_bool()
+            {
+                return RootFocusIntent::ActivateRoot;
+            }
+            let mut owner_process_id = 0;
+            if unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner_process_id)) } == 0
+                || owner_process_id != unsafe { GetCurrentProcessId() }
+            {
+                return RootFocusIntent::ActivateRoot;
+            }
+            if should_preserve_registered_designer_foreground(
+                root_hwnd,
+                designer_hwnd,
+                foreground.0 as usize,
+                owner_process_id,
+                unsafe { GetCurrentProcessId() },
+            ) && self.is_current(root_hwnd, root_generation)
+                && self.is_current_designer(designer_hwnd, designer_generation)
+            {
+                RootFocusIntent::PreserveForeground
+            } else {
+                RootFocusIntent::ActivateRoot
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            RootFocusIntent::ActivateRoot
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_identity_for_test(&self, hwnd: usize) {
+        self.publish_hwnd(hwnd as isize);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_designer_identity_for_test(&self, hwnd: usize) {
+        self.publish_designer_hwnd(hwnd as isize);
+    }
+
     pub fn capture_frame(&self, frame: &eframe::Frame) {
         #[cfg(target_os = "windows")]
         {
@@ -103,7 +297,7 @@ impl RootWindowBridge {
                 return;
             };
             if let RawWindowHandle::Win32(handle) = handle.as_raw() {
-                self.hwnd.store(handle.hwnd.get(), Ordering::Release);
+                self.publish_hwnd(handle.hwnd.get());
             }
         }
 
@@ -112,7 +306,37 @@ impl RootWindowBridge {
     }
 
     pub fn clear(&self) {
-        self.hwnd.store(0, Ordering::Release);
+        self.clear_designer_identity();
+        self.publish_hwnd(0);
+    }
+
+    fn show_without_activation(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::System::Threading::GetCurrentProcessId;
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowThreadProcessId, IsWindow, SW_SHOWNOACTIVATE, ShowWindowAsync,
+            };
+
+            let (raw, generation) = self.identity();
+            if raw == 0 {
+                return;
+            }
+            let hwnd = HWND(raw as *mut _);
+            let mut owner_process_id = 0;
+            if !self.is_current(raw, generation)
+                || !unsafe { IsWindow(hwnd) }.as_bool()
+                || unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_process_id)) } == 0
+                || owner_process_id != unsafe { GetCurrentProcessId() }
+            {
+                return;
+            }
+            // SW_SHOWNOACTIVATE is also the non-activating unminimize path.
+            // Do not enqueue winit Visible(true), which can map to SW_SHOW after
+            // its initial-show marker has been consumed.
+            let _ = unsafe { ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE) };
+        }
     }
 
     fn wake_for_show(&self) {
@@ -154,6 +378,22 @@ impl RootWindowBridge {
     }
 }
 
+fn should_preserve_registered_designer_foreground(
+    root_hwnd: usize,
+    registered_designer_hwnd: usize,
+    foreground_hwnd: usize,
+    foreground_process_id: u32,
+    current_process_id: u32,
+) -> bool {
+    root_hwnd != 0
+        && registered_designer_hwnd != 0
+        && registered_designer_hwnd != root_hwnd
+        && foreground_hwnd != 0
+        && foreground_hwnd != root_hwnd
+        && foreground_hwnd == registered_designer_hwnd
+        && foreground_process_id == current_process_id
+}
+
 /// Controls whether making the launcher visible also reapplies its configured
 /// placement. Restoring an already-visible launcher must preserve any geometry
 /// changes made during the current visible session.
@@ -163,30 +403,235 @@ pub enum VisiblePlacementPolicy {
     PreserveCurrentGeometry,
 }
 
+/// Controls whether restoring ROOT may take foreground ownership from an
+/// independently focused application window such as the Radial Designer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RootFocusIntent {
+    #[default]
+    ActivateRoot = 0,
+    PreserveForeground = 1,
+}
+
+impl RootFocusIntent {
+    fn from_atomic(value: u8) -> Self {
+        match value {
+            1 => Self::PreserveForeground,
+            _ => Self::ActivateRoot,
+        }
+    }
+}
+
+/// Orders ROOT presentation requests against asynchronous native activation.
+/// The desired visible bit remains owned by the existing visibility atomics;
+/// this revision only identifies which request is current and serializes its
+/// short native side effects with a newer request.
+#[derive(Clone, Default)]
+pub struct VisibilityRevision {
+    revision: Arc<AtomicU64>,
+    focus_intent: Arc<AtomicU8>,
+    invocation_id: Arc<AtomicU64>,
+    side_effect_gate: Arc<Mutex<()>>,
+}
+
+impl VisibilityRevision {
+    pub fn current(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    /// Read visibility-owned values and their revision under the same gate so
+    /// snapshots cannot tag stale flags with a newer request.
+    pub fn inspect<T>(&self, read: impl FnOnce() -> T) -> (u64, T) {
+        let _gate = self
+            .side_effect_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (self.current(), read())
+    }
+
+    /// Apply a desired-state update before publishing its new revision.
+    pub fn request<T>(&self, update: impl FnOnce() -> T) -> (u64, T) {
+        self.request_with_focus_intent(RootFocusIntent::ActivateRoot, update)
+    }
+
+    /// Apply a desired-state update and its focus behavior before publishing
+    /// their shared revision. A newer visibility request replaces both.
+    pub fn request_with_focus_intent<T>(
+        &self,
+        focus_intent: RootFocusIntent,
+        update: impl FnOnce() -> T,
+    ) -> (u64, T) {
+        self.request_with_focus_intent_and_invocation(focus_intent, None, update)
+    }
+
+    pub fn request_with_focus_intent_and_invocation<T>(
+        &self,
+        focus_intent: RootFocusIntent,
+        invocation_id: Option<u64>,
+        update: impl FnOnce() -> T,
+    ) -> (u64, T) {
+        let _gate = self
+            .side_effect_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = update();
+        self.focus_intent
+            .store(focus_intent as u8, Ordering::Release);
+        self.invocation_id
+            .store(invocation_id.unwrap_or(0), Ordering::Release);
+        let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        (revision, result)
+    }
+
+    pub fn focus_intent(&self) -> RootFocusIntent {
+        RootFocusIntent::from_atomic(self.focus_intent.load(Ordering::Acquire))
+    }
+
+    pub fn invocation_id(&self) -> Option<u64> {
+        match self.invocation_id.load(Ordering::Acquire) {
+            0 => None,
+            invocation_id => Some(invocation_id),
+        }
+    }
+
+    /// Commit a desired-state update only if no newer request arrived since
+    /// the caller began an external operation. This keeps long native window
+    /// calls outside the ordering gate without allowing their completion to
+    /// overwrite a newer visibility choice.
+    pub fn request_if_current<T>(
+        &self,
+        expected_revision: u64,
+        update: impl FnOnce() -> T,
+    ) -> Option<(u64, T)> {
+        self.request_if_current_with_focus_intent(
+            expected_revision,
+            RootFocusIntent::ActivateRoot,
+            update,
+        )
+    }
+
+    pub fn request_if_current_with_focus_intent<T>(
+        &self,
+        expected_revision: u64,
+        focus_intent: RootFocusIntent,
+        update: impl FnOnce() -> T,
+    ) -> Option<(u64, T)> {
+        self.request_if_current_with_focus_intent_and_invocation(
+            expected_revision,
+            focus_intent,
+            None,
+            update,
+        )
+    }
+
+    pub fn request_if_current_with_focus_intent_and_invocation<T>(
+        &self,
+        expected_revision: u64,
+        focus_intent: RootFocusIntent,
+        invocation_id: Option<u64>,
+        update: impl FnOnce() -> T,
+    ) -> Option<(u64, T)> {
+        let _gate = self
+            .side_effect_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.current() != expected_revision {
+            return None;
+        }
+        let result = update();
+        self.focus_intent
+            .store(focus_intent as u8, Ordering::Release);
+        self.invocation_id
+            .store(invocation_id.unwrap_or(0), Ordering::Release);
+        let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        Some((revision, result))
+    }
+
+    /// Run a short side effect only while its presentation request remains
+    /// authoritative. The gate is held for the call; potentially blocking
+    /// platform work should instead validate, run outside this gate, and
+    /// revalidate afterward.
+    pub fn with_current<T>(
+        &self,
+        revision: u64,
+        still_desired: impl FnOnce() -> bool,
+        side_effect: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let _gate = self
+            .side_effect_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.current() != revision || !still_desired() {
+            return None;
+        }
+        Some(side_effect())
+    }
+}
+
 /// Ordered visibility toggles accumulated while one main-loop batch is being
 /// routed.  `record_toggle` returns the state immediately before that toggle,
 /// allowing other owners (such as radial keyboard scope) to follow each edge
 /// even though viewport commands are applied later in the loop.
 #[derive(Clone, Debug, Default)]
 pub struct VisibilityToggleBatch {
-    targets: Vec<bool>,
+    targets: Vec<(bool, Option<u64>, RootFocusIntent, Option<u64>)>,
 }
 
 impl VisibilityToggleBatch {
     pub fn record_toggle(&mut self, visibility: &AtomicBool) -> bool {
-        let was_visible = visibility.load(Ordering::SeqCst);
+        self.record_toggle_ordered(&VisibilityRevision::default(), visibility)
+            .0
+    }
+
+    pub fn record_toggle_ordered(
+        &mut self,
+        revision: &VisibilityRevision,
+        visibility: &AtomicBool,
+    ) -> (bool, u64) {
+        self.record_toggle_ordered_with_invocation(revision, visibility, None)
+    }
+
+    pub fn record_toggle_ordered_with_invocation(
+        &mut self,
+        revision: &VisibilityRevision,
+        visibility: &AtomicBool,
+        invocation_id: Option<u64>,
+    ) -> (bool, u64) {
+        self.record_toggle_ordered_with_intent(
+            revision,
+            visibility,
+            invocation_id,
+            RootFocusIntent::ActivateRoot,
+        )
+    }
+
+    pub fn record_toggle_ordered_with_intent(
+        &mut self,
+        revision: &VisibilityRevision,
+        visibility: &AtomicBool,
+        invocation_id: Option<u64>,
+        focus_intent: RootFocusIntent,
+    ) -> (bool, u64) {
+        let (revision, was_visible) =
+            revision.request_with_focus_intent_and_invocation(focus_intent, invocation_id, || {
+                let was_visible = visibility.load(Ordering::SeqCst);
+                visibility.store(!was_visible, Ordering::SeqCst);
+                was_visible
+            });
         let next_visible = !was_visible;
-        self.targets.push(next_visible);
-        visibility.store(next_visible, Ordering::SeqCst);
+        self.targets
+            .push((next_visible, Some(revision), focus_intent, invocation_id));
         acceptance_trace::emit(Event::DesiredVisibility {
             visible: next_visible,
+            revision,
             source: VisibilitySource::ToggleBatch,
+            invocation_id,
         });
-        was_visible
+        (was_visible, revision)
     }
 
     pub fn final_visible(&self) -> Option<bool> {
-        self.targets.last().copied()
+        self.targets.last().map(|(visible, _, _, _)| *visible)
     }
 }
 
@@ -210,6 +655,7 @@ impl RootViewportCtx {
     }
 
     pub fn with_window_bridge(ctx: &egui::Context, window: RootWindowBridge) -> Self {
+        window.attach_repaint_context(ctx);
         Self {
             ctx: ctx.clone(),
             window,
@@ -309,6 +755,20 @@ impl ViewportCtx for RootViewportCtx {
         self.window.wake_for_show();
     }
 
+    fn show_without_activation(&self) {
+        let correlation = if acceptance_trace::enabled() {
+            acceptance_trace::root_command_correlation()
+        } else {
+            Correlation::default()
+        };
+        acceptance_trace::emit(Event::RootCommand {
+            command: RootCommandKind::Show,
+            correlation,
+        });
+        acceptance_trace::request_window_sample(correlation);
+        self.window.show_without_activation();
+    }
+
     fn pixels_per_point(&self) -> f32 {
         self.ctx.pixels_per_point()
     }
@@ -350,9 +810,10 @@ pub fn handle_visibility_toggle_batch<C: ViewportCtx>(
     static_size: Option<(f32, f32)>,
     window_size: (f32, f32),
 ) -> bool {
-    for next in &batch.targets {
+    for &(next, _, focus_intent, _) in &batch.targets {
         apply_visibility_owner(
-            *next,
+            next,
+            focus_intent,
             restore_flag,
             ctx_handle,
             queued_visibility,
@@ -362,6 +823,48 @@ pub fn handle_visibility_toggle_batch<C: ViewportCtx>(
             static_pos,
             static_size,
             window_size,
+        );
+    }
+    !batch.targets.is_empty()
+}
+
+pub fn handle_visibility_toggle_batch_ordered<C: ViewportCtx>(
+    batch: &VisibilityToggleBatch,
+    order: &VisibilityRevision,
+    restore_flag: &Arc<AtomicBool>,
+    ctx_handle: &Arc<Mutex<Option<C>>>,
+    queued_visibility: &mut Option<bool>,
+    offscreen: (f32, f32),
+    follow_mouse: bool,
+    static_enabled: bool,
+    static_pos: Option<(f32, f32)>,
+    static_size: Option<(f32, f32)>,
+    window_size: (f32, f32),
+) -> bool {
+    for &(next, revision, focus_intent, invocation_id) in &batch.targets {
+        let Some(revision) = revision else {
+            continue;
+        };
+        let _ = order.with_current(
+            revision,
+            || true,
+            || {
+                acceptance_trace::with_visibility_trace_link(revision, invocation_id, || {
+                    apply_visibility_owner(
+                        next,
+                        focus_intent,
+                        restore_flag,
+                        ctx_handle,
+                        queued_visibility,
+                        offscreen,
+                        follow_mouse,
+                        static_enabled,
+                        static_pos,
+                        static_size,
+                        window_size,
+                    )
+                })
+            },
         );
     }
     !batch.targets.is_empty()
@@ -410,68 +913,27 @@ pub fn handle_visibility_trigger_with_owner<C: ViewportCtx>(
     static_pos: Option<(f32, f32)>,
     static_size: Option<(f32, f32)>,
     window_size: (f32, f32),
-    mut on_grid_toggle: impl FnMut(bool),
+    on_grid_toggle: impl FnMut(bool),
 ) -> bool {
-    let mut changed = false;
-    if trigger.take() {
-        let old = visibility.load(Ordering::SeqCst);
-        let next = !old;
-        acceptance_trace::emit(Event::DesiredVisibility {
-            visible: next,
-            source: VisibilitySource::LegacyTrigger,
-        });
-        on_grid_toggle(old);
-        changed = apply_visibility_target(
-            next,
-            visibility,
-            restore_flag,
-            ctx_handle,
-            queued_visibility,
-            offscreen,
-            follow_mouse,
-            static_enabled,
-            static_pos,
-            static_size,
-            window_size,
-        );
-    } else if let Some(next) = *queued_visibility {
-        acceptance_trace::emit(Event::DesiredVisibility {
-            visible: next,
-            source: VisibilitySource::Queued,
-        });
-        tracing::debug!("Processing previously queued visibility: {}", next);
-        if let Ok(guard) = ctx_handle.lock()
-            && let Some(c) = &*guard
-        {
-            let old = visibility.load(Ordering::SeqCst);
-            visibility.store(next, Ordering::SeqCst);
-            changed = old != next;
-            tracing::debug!(from=?old, to=?next, "visibility updated");
-            apply_visibility(
-                next,
-                VisiblePlacementPolicy::ApplyConfiguredPlacement,
-                c,
-                offscreen,
-                follow_mouse,
-                static_enabled,
-                static_pos,
-                static_size,
-                window_size,
-            );
-            // The root remains drawable while parked. Radial preparation and
-            // action handoff are processed by its frame even when the grid is
-            // logically hidden; hiding the HWND stalls that work until a tap
-            // shows the grid again.
-            restore_flag.store(next, Ordering::SeqCst);
-            *queued_visibility = None;
-            tracing::debug!("Applied queued visibility: {}", next);
-        }
-    }
-    changed
+    handle_visibility_trigger_with_owner_ordered(
+        trigger,
+        visibility,
+        restore_flag,
+        ctx_handle,
+        queued_visibility,
+        offscreen,
+        follow_mouse,
+        static_enabled,
+        static_pos,
+        static_size,
+        window_size,
+        &VisibilityRevision::default(),
+        on_grid_toggle,
+    )
 }
 
-fn apply_visibility_target<C: ViewportCtx>(
-    next: bool,
+pub fn handle_visibility_trigger_with_owner_ordered<C: ViewportCtx>(
+    trigger: &HotkeyTrigger,
     visibility: &Arc<AtomicBool>,
     restore_flag: &Arc<AtomicBool>,
     ctx_handle: &Arc<Mutex<Option<C>>>,
@@ -482,27 +944,122 @@ fn apply_visibility_target<C: ViewportCtx>(
     static_pos: Option<(f32, f32)>,
     static_size: Option<(f32, f32)>,
     window_size: (f32, f32),
+    order: &VisibilityRevision,
+    mut on_grid_toggle: impl FnMut(bool),
 ) -> bool {
-    let old = visibility.load(Ordering::SeqCst);
-    visibility.store(next, Ordering::SeqCst);
-    tracing::debug!(from=?old, to=?next, "visibility updated");
-    apply_visibility_owner(
-        next,
-        restore_flag,
-        ctx_handle,
-        queued_visibility,
-        offscreen,
-        follow_mouse,
-        static_enabled,
-        static_pos,
-        static_size,
-        window_size,
-    );
-    old != next
+    let mut changed = false;
+    if trigger.take() {
+        let (revision, old) = order.request_with_focus_intent_and_invocation(
+            RootFocusIntent::ActivateRoot,
+            None,
+            || {
+                let old = visibility.load(Ordering::SeqCst);
+                visibility.store(!old, Ordering::SeqCst);
+                old
+            },
+        );
+        let next = !old;
+        acceptance_trace::emit(Event::DesiredVisibility {
+            visible: next,
+            revision,
+            source: VisibilitySource::LegacyTrigger,
+            invocation_id: None,
+        });
+        on_grid_toggle(old);
+        changed = old != next;
+        let _ = order.with_current(
+            revision,
+            || visibility.load(Ordering::SeqCst) == next,
+            || {
+                acceptance_trace::with_visibility_trace_link(revision, None, || {
+                    apply_visibility_owner(
+                        next,
+                        RootFocusIntent::ActivateRoot,
+                        restore_flag,
+                        ctx_handle,
+                        queued_visibility,
+                        offscreen,
+                        follow_mouse,
+                        static_enabled,
+                        static_pos,
+                        static_size,
+                        window_size,
+                    )
+                })
+            },
+        );
+    } else if let Some(next) = *queued_visibility {
+        tracing::debug!("Processing previously queued visibility: {}", next);
+        let applied = with_current_queued_visibility(
+            order,
+            visibility,
+            next,
+            |revision, focus_intent, invocation_id| {
+                acceptance_trace::with_visibility_trace_link(revision, invocation_id, || {
+                    if let Ok(guard) = ctx_handle.lock()
+                        && let Some(c) = &*guard
+                    {
+                        acceptance_trace::emit(Event::DesiredVisibility {
+                            visible: next,
+                            revision,
+                            source: VisibilitySource::Queued,
+                            invocation_id,
+                        });
+                        let old = visibility.load(Ordering::SeqCst);
+                        visibility.store(next, Ordering::SeqCst);
+                        apply_visibility_with_focus_intent(
+                            next,
+                            focus_intent,
+                            VisiblePlacementPolicy::ApplyConfiguredPlacement,
+                            c,
+                            offscreen,
+                            follow_mouse,
+                            static_enabled,
+                            static_pos,
+                            static_size,
+                            window_size,
+                        );
+                        // The root remains drawable while parked. Radial preparation and
+                        // action handoff are processed by its frame even when the grid is
+                        // logically hidden; hiding the HWND stalls that work until a tap
+                        // shows the grid again.
+                        restore_flag.store(next, Ordering::SeqCst);
+                        *queued_visibility = None;
+                        tracing::debug!("Applied queued visibility: {}", next);
+                        Some(old != next)
+                    } else {
+                        None
+                    }
+                })
+            },
+        );
+        match applied {
+            Some(Some(changed_now)) => changed = changed_now,
+            Some(None) => {}
+            None => *queued_visibility = None,
+        }
+    }
+    changed
+}
+
+fn with_current_queued_visibility<T>(
+    order: &VisibilityRevision,
+    visibility: &AtomicBool,
+    next: bool,
+    apply: impl FnOnce(u64, RootFocusIntent, Option<u64>) -> T,
+) -> Option<T> {
+    let (revision, (focus_intent, invocation_id)) =
+        order.inspect(|| (order.focus_intent(), order.invocation_id()));
+    order.with_current(
+        revision,
+        || visibility.load(Ordering::SeqCst) == next,
+        || apply(revision, focus_intent, invocation_id),
+    )
 }
 
 fn apply_visibility_owner<C: ViewportCtx>(
     next: bool,
+    focus_intent: RootFocusIntent,
     restore_flag: &Arc<AtomicBool>,
     ctx_handle: &Arc<Mutex<Option<C>>>,
     queued_visibility: &mut Option<bool>,
@@ -515,8 +1072,9 @@ fn apply_visibility_owner<C: ViewportCtx>(
 ) {
     if let Ok(guard) = ctx_handle.lock() {
         if let Some(ctx) = &*guard {
-            apply_visibility(
+            apply_visibility_with_focus_intent(
                 next,
+                focus_intent,
                 VisiblePlacementPolicy::ApplyConfiguredPlacement,
                 ctx,
                 offscreen,
@@ -551,6 +1109,32 @@ pub fn apply_visibility<C: ViewportCtx>(
     static_size: Option<(f32, f32)>,
     window_size: (f32, f32),
 ) {
+    apply_visibility_with_focus_intent(
+        visible,
+        RootFocusIntent::ActivateRoot,
+        placement_policy,
+        ctx,
+        offscreen,
+        follow_mouse,
+        static_enabled,
+        static_pos,
+        static_size,
+        window_size,
+    );
+}
+
+pub fn apply_visibility_with_focus_intent<C: ViewportCtx>(
+    visible: bool,
+    focus_intent: RootFocusIntent,
+    placement_policy: VisiblePlacementPolicy,
+    ctx: &C,
+    offscreen: (f32, f32),
+    follow_mouse: bool,
+    static_enabled: bool,
+    static_pos: Option<(f32, f32)>,
+    static_size: Option<(f32, f32)>,
+    window_size: (f32, f32),
+) {
     if visible {
         ctx.wake_for_show();
         if placement_policy == VisiblePlacementPolicy::ApplyConfiguredPlacement {
@@ -571,9 +1155,13 @@ pub fn apply_visibility<C: ViewportCtx>(
                 )));
             }
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        if focus_intent == RootFocusIntent::ActivateRoot {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        } else {
+            ctx.show_without_activation();
+        }
     } else {
         acceptance_trace::emit(Event::RootCommand {
             command: RootCommandKind::ParkingBoundary,
@@ -600,6 +1188,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingViewport {
         commands: Arc<Mutex<Vec<egui::ViewportCommand>>>,
+        trace_correlations: Arc<Mutex<Vec<Correlation>>>,
         repaint_count: Arc<AtomicUsize>,
         wake_count: Arc<AtomicUsize>,
         order: Arc<Mutex<Vec<&'static str>>>,
@@ -613,6 +1202,10 @@ mod tests {
 
         fn send_viewport_cmd(&self, cmd: egui::ViewportCommand) {
             self.order.lock().unwrap().push("command");
+            self.trace_correlations
+                .lock()
+                .unwrap()
+                .push(acceptance_trace::root_command_correlation());
             self.commands.lock().unwrap().push(cmd);
         }
 
@@ -622,12 +1215,479 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stale_activation_reconciliation_reapplies_latest_hidden_geometry() {
+        let revision = VisibilityRevision::default();
+        let visible = AtomicBool::new(false);
+        let bridge = RootWindowBridge::default();
+        revision.request_with_focus_intent(RootFocusIntent::ActivateRoot, || ());
+        bridge.request_presentation_reconcile();
+        let viewport = RecordingViewport::default();
+        let (request_revision, (should_be_visible, focus_intent, reconcile)) =
+            revision.inspect(|| {
+                (
+                    visible.load(Ordering::Acquire),
+                    revision.focus_intent(),
+                    bridge.take_presentation_reconcile_request(),
+                )
+            });
+
+        assert!(reconcile);
+        assert!(!should_be_visible);
+        assert_eq!(request_revision, revision.current());
+        apply_visibility_with_focus_intent(
+            should_be_visible,
+            focus_intent,
+            VisiblePlacementPolicy::PreserveCurrentGeometry,
+            &viewport,
+            (-100_000.0, -100_000.0),
+            false,
+            false,
+            None,
+            None,
+            (900.0, 600.0),
+        );
+
+        assert!(matches!(
+            viewport.commands.lock().unwrap().as_slice(),
+            [egui::ViewportCommand::OuterPosition(position)]
+                if position.x == -100_000.0 && position.y == -100_000.0
+        ));
+        assert_eq!(viewport.wake_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stale_activation_reconciliation_preserves_the_newest_foreground_intent() {
+        let revision = VisibilityRevision::default();
+        let visible = AtomicBool::new(true);
+        let bridge = RootWindowBridge::default();
+        revision.request_with_focus_intent(RootFocusIntent::PreserveForeground, || ());
+        bridge.request_presentation_reconcile();
+        let viewport = RecordingViewport::default();
+        let (request_revision, (should_be_visible, focus_intent, reconcile)) =
+            revision.inspect(|| {
+                (
+                    visible.load(Ordering::Acquire),
+                    revision.focus_intent(),
+                    bridge.take_presentation_reconcile_request(),
+                )
+            });
+
+        assert!(reconcile);
+        assert!(should_be_visible);
+        assert_eq!(request_revision, revision.current());
+        apply_visibility_with_focus_intent(
+            should_be_visible,
+            focus_intent,
+            VisiblePlacementPolicy::PreserveCurrentGeometry,
+            &viewport,
+            (0.0, 0.0),
+            false,
+            false,
+            None,
+            None,
+            (900.0, 600.0),
+        );
+
+        assert!(matches!(
+            viewport.commands.lock().unwrap().as_slice(),
+            [egui::ViewportCommand::Visible(true)]
+        ));
+        assert!(
+            !viewport
+                .commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Focus))
+        );
+    }
+
     fn trigger() -> HotkeyTrigger {
         HotkeyTrigger::new(parse_hotkey("End").expect("test hotkey parses"))
     }
 
     fn toggle(trigger: &HotkeyTrigger) {
         *trigger.open.lock().unwrap() = true;
+    }
+
+    #[test]
+    fn newer_visibility_request_rejects_stale_native_restore() {
+        let revision = VisibilityRevision::default();
+        let visible = Arc::new(AtomicBool::new(true));
+        let old_revision = revision.request(|| ()).0;
+        let (new_revision, ()) = revision.request(|| {
+            visible.store(false, Ordering::SeqCst);
+        });
+        let side_effects = AtomicUsize::new(0);
+
+        assert!(
+            revision
+                .with_current(
+                    old_revision,
+                    || visible.load(Ordering::SeqCst),
+                    || side_effects.fetch_add(1, Ordering::SeqCst),
+                )
+                .is_none()
+        );
+        assert_eq!(side_effects.load(Ordering::SeqCst), 0);
+        assert_eq!(revision.current(), new_revision);
+    }
+
+    #[test]
+    fn visibility_request_and_native_side_effect_share_one_ordering_gate() {
+        let revision = VisibilityRevision::default();
+        let side_effect_revision = revision.request(|| ()).0;
+        let effect_started = Arc::new(std::sync::Barrier::new(2));
+        let update_done = Arc::new(AtomicBool::new(false));
+        let effect_started_on_thread = Arc::clone(&effect_started);
+        let update_done_on_thread = Arc::clone(&update_done);
+        let revision_for_thread = revision.clone();
+        let update = std::thread::spawn(move || {
+            effect_started_on_thread.wait();
+            revision_for_thread.request(|| {
+                update_done_on_thread.store(true, Ordering::SeqCst);
+            });
+        });
+        let observed = revision.with_current(
+            side_effect_revision,
+            || true,
+            || {
+                effect_started.wait();
+                assert!(!update_done.load(Ordering::SeqCst));
+            },
+        );
+        update.join().unwrap();
+        assert_eq!(observed, Some(()));
+        assert!(update_done.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn visibility_snapshot_reads_flags_restore_and_focus_intent_under_one_gate() {
+        let revision = VisibilityRevision::default();
+        let initial_revision = revision
+            .request_with_focus_intent(RootFocusIntent::PreserveForeground, || ())
+            .0;
+        let visible = Arc::new(AtomicBool::new(true));
+        let restore = Arc::new(AtomicBool::new(true));
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let snapshot_revision = revision.clone();
+        let snapshot_visible = Arc::clone(&visible);
+        let snapshot_restore = Arc::clone(&restore);
+        let snapshot = std::thread::spawn(move || {
+            snapshot_revision.inspect(|| {
+                inside_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                (
+                    snapshot_visible.load(Ordering::SeqCst),
+                    snapshot_restore.load(Ordering::SeqCst),
+                    snapshot_revision.focus_intent(),
+                )
+            })
+        });
+        inside_rx.recv().unwrap();
+
+        let request_revision = revision.clone();
+        let request_visible = Arc::clone(&visible);
+        let request_restore = Arc::clone(&restore);
+        let (request_started_tx, request_started_rx) = std::sync::mpsc::channel();
+        let request = std::thread::spawn(move || {
+            request_started_tx.send(()).unwrap();
+            request_revision.request(|| {
+                request_visible.store(false, Ordering::SeqCst);
+                request_restore.store(false, Ordering::SeqCst);
+            })
+        });
+        request_started_rx.recv().unwrap();
+        resume_tx.send(()).unwrap();
+
+        let (captured_revision, captured_flags) = snapshot.join().unwrap();
+        let (new_revision, ()) = request.join().unwrap();
+        assert_eq!(captured_revision, initial_revision);
+        assert_eq!(
+            captured_flags,
+            (true, true, RootFocusIntent::PreserveForeground)
+        );
+        assert_eq!(new_revision, initial_revision + 1);
+        assert_eq!(revision.current(), new_revision);
+        assert_eq!(
+            (
+                visible.load(Ordering::SeqCst),
+                restore.load(Ordering::SeqCst)
+            ),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn conditional_visibility_commit_cannot_overwrite_a_newer_request() {
+        let revision = VisibilityRevision::default();
+        let visible = AtomicBool::new(false);
+        let starting_revision = revision.current();
+        revision.request(|| visible.store(false, Ordering::SeqCst));
+
+        let committed = revision.request_if_current(starting_revision, || {
+            visible.store(true, Ordering::SeqCst);
+        });
+        assert!(committed.is_none());
+        assert!(!visible.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn ordered_toggle_batch_queues_only_the_newest_viewport_effect() {
+        let revision = VisibilityRevision::default();
+        let visibility = AtomicBool::new(false);
+        let mut batch = VisibilityToggleBatch::default();
+        assert_eq!(batch.record_toggle_ordered(&revision, &visibility).0, false);
+        assert_eq!(batch.record_toggle_ordered(&revision, &visibility).0, true);
+        let viewport = RecordingViewport::default();
+        let ctx = Arc::new(Mutex::new(Some(viewport.clone())));
+        let restore = Arc::new(AtomicBool::new(false));
+        let mut queued = None;
+
+        handle_visibility_toggle_batch_ordered(
+            &batch,
+            &revision,
+            &restore,
+            &ctx,
+            &mut queued,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+
+        assert_eq!(revision.current(), 2);
+        assert!(!visibility.load(Ordering::SeqCst));
+        assert!(!restore.load(Ordering::SeqCst));
+        assert_eq!(viewport.repaint_count.load(Ordering::SeqCst), 1);
+        assert_eq!(viewport.wake_count.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            viewport.commands.lock().unwrap().as_slice(),
+            [egui::ViewportCommand::OuterPosition(position)]
+                if *position == egui::pos2(-10_000.0, -10_000.0)
+        ));
+    }
+
+    #[test]
+    fn ordered_toggle_batch_links_invocation_to_root_command_trace() {
+        let order = VisibilityRevision::default();
+        let visibility = AtomicBool::new(false);
+        let mut batch = VisibilityToggleBatch::default();
+        let (_, revision) =
+            batch.record_toggle_ordered_with_invocation(&order, &visibility, Some(41));
+        let viewport = RecordingViewport::default();
+        let ctx = Arc::new(Mutex::new(Some(viewport.clone())));
+        let restore = Arc::new(AtomicBool::new(false));
+        let mut queued = None;
+
+        handle_visibility_toggle_batch_ordered(
+            &batch,
+            &order,
+            &restore,
+            &ctx,
+            &mut queued,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+
+        let correlations = viewport.trace_correlations.lock().unwrap();
+        assert!(!correlations.is_empty());
+        assert!(correlations.iter().all(|correlation| {
+            correlation.visibility_revision == revision && correlation.invocation_id == 41
+        }));
+    }
+
+    #[test]
+    fn preserve_foreground_show_queues_visible_without_focus_or_unminimize() {
+        let revision = VisibilityRevision::default();
+        let visibility = AtomicBool::new(false);
+        let mut batch = VisibilityToggleBatch::default();
+        batch.record_toggle_ordered_with_intent(
+            &revision,
+            &visibility,
+            Some(9),
+            RootFocusIntent::PreserveForeground,
+        );
+        let viewport = RecordingViewport::default();
+        let ctx = Arc::new(Mutex::new(Some(viewport.clone())));
+        let restore = Arc::new(AtomicBool::new(false));
+        let mut queued = None;
+        handle_visibility_toggle_batch_ordered(
+            &batch,
+            &revision,
+            &restore,
+            &ctx,
+            &mut queued,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+        let commands = viewport.commands.lock().unwrap();
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::Visible(true)))
+        );
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::Focus | egui::ViewportCommand::Minimized(false)
+        )));
+        assert_eq!(revision.focus_intent(), RootFocusIntent::PreserveForeground);
+    }
+
+    #[test]
+    fn queued_visibility_retains_focus_intent_until_context_is_available() {
+        let revision = VisibilityRevision::default();
+        let visibility = Arc::new(AtomicBool::new(false));
+        let mut batch = VisibilityToggleBatch::default();
+        batch.record_toggle_ordered_with_intent(
+            &revision,
+            &visibility,
+            Some(7),
+            RootFocusIntent::PreserveForeground,
+        );
+        let restore = Arc::new(AtomicBool::new(false));
+        let ctx = Arc::new(Mutex::new(None::<RecordingViewport>));
+        let mut queued = None;
+        handle_visibility_toggle_batch_ordered(
+            &batch,
+            &revision,
+            &restore,
+            &ctx,
+            &mut queued,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+        );
+        assert_eq!(queued, Some(true));
+        let viewport = RecordingViewport::default();
+        *ctx.lock().unwrap() = Some(viewport.clone());
+        let dormant_trigger = trigger();
+        handle_visibility_trigger_with_owner_ordered(
+            &dormant_trigger,
+            &visibility,
+            &restore,
+            &ctx,
+            &mut queued,
+            (-10_000.0, -10_000.0),
+            false,
+            false,
+            None,
+            None,
+            (400.0, 220.0),
+            &revision,
+            |_| {},
+        );
+        assert!(queued.is_none());
+        assert_eq!(revision.focus_intent(), RootFocusIntent::PreserveForeground);
+        assert!(
+            !viewport
+                .commands
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    egui::ViewportCommand::Focus | egui::ViewportCommand::Minimized(false)
+                ))
+        );
+    }
+
+    #[test]
+    fn superseded_queued_visibility_does_not_emit_a_desired_visibility_edge() {
+        let revision = VisibilityRevision::default();
+        let visibility = AtomicBool::new(false);
+        revision.request_with_focus_intent_and_invocation(
+            RootFocusIntent::PreserveForeground,
+            Some(41),
+            || visibility.store(true, Ordering::SeqCst),
+        );
+        let (hide_revision, ()) = revision.request_with_focus_intent_and_invocation(
+            RootFocusIntent::ActivateRoot,
+            Some(42),
+            || visibility.store(false, Ordering::SeqCst),
+        );
+        let emitted = Mutex::new(Vec::new());
+
+        assert!(
+            with_current_queued_visibility(
+                &revision,
+                &visibility,
+                true,
+                |rev, intent, invocation| {
+                    emitted.lock().unwrap().push((rev, intent, invocation));
+                }
+            )
+            .is_none()
+        );
+        assert!(emitted.lock().unwrap().is_empty());
+
+        let current = with_current_queued_visibility(
+            &revision,
+            &visibility,
+            false,
+            |rev, intent, invocation| (rev, intent, invocation),
+        );
+        assert_eq!(
+            current,
+            Some((hide_revision, RootFocusIntent::ActivateRoot, Some(42)))
+        );
+    }
+
+    #[test]
+    fn newer_activate_request_supersedes_preserve_foreground_intent() {
+        let revision = VisibilityRevision::default();
+        let old = revision
+            .request_with_focus_intent(RootFocusIntent::PreserveForeground, || ())
+            .0;
+        let current = revision.request(|| ()).0;
+        let (snapshot_revision, intent) = revision.inspect(|| revision.focus_intent());
+        assert!(current > old);
+        assert_eq!(snapshot_revision, current);
+        assert_eq!(intent, RootFocusIntent::ActivateRoot);
+    }
+
+    #[test]
+    fn only_the_registered_radial_designer_foreground_preserves_focus() {
+        assert!(should_preserve_registered_designer_foreground(
+            10, 20, 20, 42, 42
+        ));
+        assert!(!should_preserve_registered_designer_foreground(
+            10, 10, 20, 42, 42
+        ));
+        assert!(!should_preserve_registered_designer_foreground(
+            10, 20, 20, 43, 42
+        ));
+        assert!(!should_preserve_registered_designer_foreground(
+            10, 20, 20, 42, 43
+        ));
+    }
+
+    #[test]
+    fn replacing_registered_designer_invalidates_the_previous_lifetime() {
+        let bridge = RootWindowBridge::default();
+        bridge.set_identity_for_test(10);
+        bridge.set_designer_identity_for_test(20);
+        let (old_hwnd, old_generation) = bridge.designer_identity();
+        bridge.clear_designer_identity();
+        bridge.set_designer_identity_for_test(20);
+
+        assert_eq!(old_hwnd, 20);
+        assert!(!bridge.is_current_designer(old_hwnd, old_generation));
     }
 
     fn handle(
@@ -717,8 +1777,12 @@ mod tests {
         assert_eq!(viewport.wake_count.load(Ordering::SeqCst), 1);
         assert_eq!(viewport.order.lock().unwrap().first(), Some(&"wake"));
         assert!(matches!(
-            viewport.commands.lock().unwrap().first(),
-            Some(egui::ViewportCommand::Visible(true))
+            viewport.commands.lock().unwrap().as_slice(),
+            [
+                egui::ViewportCommand::Visible(true),
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Focus
+            ]
         ));
     }
 

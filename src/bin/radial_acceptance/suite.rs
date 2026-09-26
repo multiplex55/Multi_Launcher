@@ -1,9 +1,22 @@
 use super::super::{
-    ACCEPTANCE_TARGET_ACTION_INDEX, AcceptanceCaseResult, AcceptanceReport, CASE_IDS, CaseStatus,
-    FailureStage, H6RepeatMode, MAX_PATH_BYTES, MAX_RESULT_BYTES, sha256_bytes,
+    ACCEPTANCE_TARGET_ACTION_INDEX, AcceptanceCaseResult, AcceptanceHotkey, AcceptanceReport,
+    AcceptanceSuite, CASE_IDS, CaseStatus, FailureStage, H04CompletedBurstEvidence,
+    H04InputContaminationArtifact, H6RepeatMode, HOTKEY_CASE_IDS, HotkeyActivationEdge,
+    HotkeyCandidateEventEvidence, HotkeyCandidateStream, HotkeyCaseEvidence, HotkeyDecisionProof,
+    HotkeyEdgeTransition, HotkeyEvidenceNotApplicable, HotkeyFollowOnRestoreEvidence,
+    HotkeyGestureEvidence, HotkeyInputProvenance, HotkeyNativeActivationSpan,
+    HotkeyObservedPresentation, HotkeyRadialActionStage, HotkeyRootCommand, HotkeyRootCommandSpan,
+    HotkeyRootFocusIntent, HotkeyRootIdentityEvidence, HotkeyRunnerEdgeEvidence,
+    HotkeyRunnerInputPurpose, HotkeyStandaloneDecisionEvidence, HotkeyTraceEventKind,
+    HotkeyVisibilitySource, MAX_HOTKEY_CASE_EVIDENCE_BYTES, MAX_HOTKEY_EVIDENCE_EDGES,
+    MAX_HOTKEY_EVIDENCE_EVENTS, MAX_HOTKEY_EVIDENCE_GESTURES, MAX_PATH_BYTES, MAX_RESULT_BYTES,
+    format_h04_matrix_evidence, hotkey_expected_state, sha256_bytes,
+    validate_h04_contamination_artifact, validate_hotkey_burst_trace_with_baseline,
 };
 use super::*;
 use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +27,8 @@ const TAP_TIME: Duration = Duration::from_millis(135);
 const ROOT_TIMEOUT: Duration = Duration::from_secs(3);
 const UIA_TIMEOUT: Duration = Duration::from_secs(5);
 const TRACE_TIMEOUT: Duration = Duration::from_secs(3);
+const HOTKEY_FIXTURE_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const HOTKEY_FIXTURE_STABLE_SAMPLES: u8 = 3;
 const MAX_TRACE_EXCERPT: usize = 512;
 const MAX_TRACE_BYTES: usize = 128 * 1024;
 const STARTUP_TRACE_EVENTS: usize = 32;
@@ -22,14 +37,1218 @@ const MAX_PRIVATE_LOG_BYTES: usize = 64 * 1024;
 const MAX_KEYBOARD_FOCUS_STEPS: usize = 32;
 const POST_G2_ROOT_STABILITY_WINDOW: Duration = Duration::from_millis(750);
 const POST_G2_ROOT_STABLE_SAMPLES: u8 = 3;
+const HOTKEY_TRACE_QUIET_WINDOW: Duration = Duration::from_millis(100);
+const HOTKEY_TRACE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1_500);
 const DESIGNER_TEXT_PROBE: &str = "Native Edit Probe";
 const DESIGNER_STARTER_NAME: &str = "Starter";
 static NEXT_HOOK_PUMP_PROBE_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_HOTKEY_CAPTURE_SEGMENTS: usize = 32;
 const DEFERRED_REPORT_CASE_IDS: [&str; 3] = ["R0", "R1", "R2"];
 const BLOCKED_DESIGNER_CASE_IDS: [&str; 20] = [
     "H3", "D1", "D2", "D4", "D5", "A0", "A1", "G0", "A2", "G1", "G2", "A3", "A4", "A5", "A6", "A7",
     "A8", "D3", "D6", "D7",
 ];
+
+struct HotkeyCaptureSegment {
+    stream: HotkeyCandidateStream,
+    path: PathBuf,
+    cursor: usize,
+    end: Option<usize>,
+    materialized_events: Option<Vec<HotkeyCandidateEventEvidence>>,
+    input_group_id: u32,
+    purpose: HotkeyRunnerInputPurpose,
+    root_hwnd: u64,
+    root_process_id: u32,
+}
+
+#[derive(Clone)]
+struct HotkeySnapshotWaitContext {
+    cursor: usize,
+    stream: HotkeyCandidateStream,
+    input_group_id: u32,
+    purpose: HotkeyRunnerInputPurpose,
+    root_hwnd: u64,
+    root_process_id: u32,
+    physical_displays: Vec<[i32; 4]>,
+}
+
+struct ActiveHotkeyEvidenceCapture {
+    case_id: String,
+    segments: Vec<HotkeyCaptureSegment>,
+    stream_overrides: Vec<(PathBuf, HotkeyCandidateStream)>,
+    runner_edges: Vec<HotkeyRunnerEdgeEvidence>,
+    first_runner_edge: Option<Instant>,
+    runner_edge_overflow: bool,
+    capture_segment_overflow: bool,
+    candidate_trace_overflow: bool,
+    physical_displays: Vec<[i32; 4]>,
+    next_input_group_id: u32,
+    current_purpose: Option<HotkeyRunnerInputPurpose>,
+}
+
+thread_local! {
+    static ACTIVE_HOTKEY_EVIDENCE_CAPTURE: RefCell<Option<ActiveHotkeyEvidenceCapture>> = const { RefCell::new(None) };
+}
+
+fn begin_hotkey_evidence_capture(case_id: &str, _main_trace: &Path) {
+    let capture = ActiveHotkeyEvidenceCapture {
+        case_id: case_id.to_owned(),
+        segments: Vec::new(),
+        stream_overrides: Vec::new(),
+        runner_edges: Vec::new(),
+        first_runner_edge: None,
+        runner_edge_overflow: false,
+        capture_segment_overflow: false,
+        candidate_trace_overflow: false,
+        physical_displays: native_display_bounds().unwrap_or_default(),
+        next_input_group_id: 1,
+        current_purpose: None,
+    };
+    ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        *slot.borrow_mut() = Some(capture);
+    });
+}
+
+fn register_hotkey_candidate_stream(path: &Path, stream: HotkeyCandidateStream) {
+    ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        let mut capture = slot.borrow_mut();
+        let Some(capture) = capture.as_mut() else {
+            return;
+        };
+        let path = path.to_path_buf();
+        if !capture
+            .stream_overrides
+            .iter()
+            .any(|(existing, _)| existing == &path)
+        {
+            capture.stream_overrides.push((path, stream));
+        }
+    });
+}
+
+fn set_hotkey_capture_purpose(purpose: HotkeyRunnerInputPurpose) {
+    ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        if let Some(capture) = slot.borrow_mut().as_mut() {
+            capture.current_purpose = Some(purpose);
+        }
+    });
+}
+
+fn h04_matrix_capture_active() -> bool {
+    ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        slot.borrow().as_ref().is_some_and(|capture| {
+            capture.case_id == "H04"
+                && capture.current_purpose == Some(HotkeyRunnerInputPurpose::MatrixBurst)
+        })
+    })
+}
+
+fn capture_hotkey_runner_edges(
+    observation: &RunnerChordObservation,
+    stream: HotkeyCandidateStream,
+    input_group_id: u32,
+    purpose: HotkeyRunnerInputPurpose,
+) {
+    ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        let mut capture = slot.borrow_mut();
+        let Some(capture) = capture.as_mut() else {
+            return;
+        };
+        let mut observed_edges = observation
+            .ordered_edges
+            .iter()
+            .chain(observation.foreign_edges.iter())
+            .collect::<Vec<_>>();
+        observed_edges.sort_by_key(|edge| edge.at);
+        for edge in observed_edges {
+            if capture.runner_edges.len() >= MAX_HOTKEY_EVIDENCE_EDGES {
+                capture.runner_edge_overflow = true;
+                break;
+            }
+            let first = *capture.first_runner_edge.get_or_insert(edge.at);
+            let elapsed = edge
+                .at
+                .checked_duration_since(first)
+                .unwrap_or_default()
+                .as_micros();
+            capture.runner_edges.push(HotkeyRunnerEdgeEvidence {
+                runner_relative_us: u64::try_from(elapsed).unwrap_or(u64::MAX),
+                input_group_id,
+                stream,
+                purpose,
+                virtual_key: edge.vk,
+                transition: if edge.down {
+                    HotkeyEdgeTransition::Press
+                } else {
+                    HotkeyEdgeTransition::Release
+                },
+                injected: edge.injected,
+                runner_cookie_matched: edge.extra_info == ACCEPTANCE_RUNNER_INPUT_COOKIE,
+            });
+        }
+    });
+}
+
+fn capture_hotkey_attempt_evidence(
+    child: &NativeChild,
+    default_stream: HotkeyCandidateStream,
+    trace_path: &Path,
+    trace_cursor: usize,
+    observation: &RunnerChordObservation,
+    purpose: HotkeyRunnerInputPurpose,
+) -> u32 {
+    let root = child.root();
+    let root_hwnd = hwnd_id(root.hwnd);
+    let root_process_id = child.process_id();
+    let (stream, group_id, purpose) = ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(capture) = slot.as_mut() else {
+            return (default_stream, 0, purpose);
+        };
+        open_hotkey_capture_segment(
+            capture,
+            default_stream,
+            trace_path,
+            trace_cursor,
+            purpose,
+            root_hwnd,
+            root_process_id,
+        )
+    });
+    capture_hotkey_runner_edges(observation, stream, group_id, purpose);
+    group_id
+}
+
+fn open_hotkey_capture_segment(
+    capture: &mut ActiveHotkeyEvidenceCapture,
+    default_stream: HotkeyCandidateStream,
+    trace_path: &Path,
+    trace_cursor: usize,
+    default_purpose: HotkeyRunnerInputPurpose,
+    root_hwnd: u64,
+    root_process_id: u32,
+) -> (HotkeyCandidateStream, u32, HotkeyRunnerInputPurpose) {
+    let stream = capture
+        .stream_overrides
+        .iter()
+        .find(|(path, _)| path == trace_path)
+        .map(|(_, stream)| *stream)
+        .unwrap_or(default_stream);
+    let purpose = capture.current_purpose.unwrap_or(default_purpose);
+    let group_id = capture.next_input_group_id;
+    capture.next_input_group_id = capture.next_input_group_id.saturating_add(1);
+
+    if let Some(previous) = capture
+        .segments
+        .iter_mut()
+        .rev()
+        .find(|segment| segment.path == trace_path && segment.end.is_none())
+    {
+        // A new injected group must never extend the prior group through setup
+        // work. If its caller omitted terminal fencing, preserve only the
+        // known-safe empty interval and fail the packet closed.
+        previous.end = Some(previous.cursor);
+        capture.capture_segment_overflow = true;
+    }
+    if capture.segments.len() >= MAX_HOTKEY_CAPTURE_SEGMENTS {
+        capture.capture_segment_overflow = true;
+    } else {
+        capture.segments.push(HotkeyCaptureSegment {
+            stream,
+            path: trace_path.to_path_buf(),
+            cursor: trace_cursor,
+            end: None,
+            materialized_events: None,
+            input_group_id: group_id,
+            purpose,
+            root_hwnd,
+            root_process_id,
+        });
+    }
+    (stream, group_id, purpose)
+}
+
+fn complete_hotkey_capture_segment(
+    trace_path: &Path,
+    terminal_cursor: usize,
+) -> Result<(), String> {
+    ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(capture) = slot.as_mut() else {
+            return Ok(());
+        };
+        complete_hotkey_capture_segment_in(capture, trace_path, terminal_cursor)
+    })
+}
+
+fn complete_hotkey_capture_segment_in(
+    capture: &mut ActiveHotkeyEvidenceCapture,
+    trace_path: &Path,
+    terminal_cursor: usize,
+) -> Result<(), String> {
+    let Some(segment_index) = capture
+        .segments
+        .iter()
+        .rev()
+        .position(|segment| segment.path == trace_path && segment.end.is_none())
+    else {
+        return Err(format!(
+            "no open hotkey evidence segment for {}",
+            trace_path.display()
+        ));
+    };
+    let segment_index = capture.segments.len() - 1 - segment_index;
+    let (cursor, stream, input_group_id, purpose) = {
+        let segment = &capture.segments[segment_index];
+        (
+            segment.cursor,
+            segment.stream,
+            segment.input_group_id,
+            segment.purpose,
+        )
+    };
+    if terminal_cursor < cursor {
+        capture.capture_segment_overflow = true;
+        return Err(format!(
+            "hotkey evidence terminal cursor {terminal_cursor} precedes segment cursor {cursor}"
+        ));
+    }
+
+    let lines = trace_lines(trace_path);
+    if terminal_cursor > lines.len() || cursor > lines.len() {
+        capture.candidate_trace_overflow = true;
+    }
+    let bounded_end = terminal_cursor.min(lines.len());
+    let bounded_start = cursor.min(bounded_end);
+    let already_materialized = capture
+        .segments
+        .iter()
+        .filter_map(|segment| segment.materialized_events.as_ref())
+        .map(Vec::len)
+        .sum::<usize>();
+    let mut remaining = MAX_HOTKEY_EVIDENCE_EVENTS.saturating_sub(already_materialized);
+    let mut events = Vec::new();
+    for ordinal in bounded_start..bounded_end {
+        if let Some(event) = parse_hotkey_candidate_event(
+            &lines[ordinal],
+            stream,
+            input_group_id,
+            purpose,
+            ordinal.saturating_add(1),
+        ) {
+            if remaining == 0 {
+                capture.candidate_trace_overflow = true;
+                break;
+            }
+            remaining -= 1;
+            events.push(event);
+        }
+    }
+    if bounded_start != cursor || bounded_end != terminal_cursor {
+        capture.candidate_trace_overflow = true;
+    }
+    let segment = &mut capture.segments[segment_index];
+    segment.end = Some(terminal_cursor);
+    segment.materialized_events = Some(events);
+    Ok(())
+}
+
+fn complete_hotkey_capture_at_current_trace(trace_path: &Path) -> Result<(), CaseFailure> {
+    wait_for_hotkey_capture_snapshots(trace_path).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::RootCommand,
+            format!("could not settle measured hotkey ROOT presentation evidence: {error}"),
+        )
+    })?;
+    let terminal_cursor = trace_lines(trace_path).len();
+    complete_hotkey_capture_segment(trace_path, terminal_cursor).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!("could not fence measured hotkey trace segment: {error}"),
+        )
+    })
+}
+
+fn wait_for_hotkey_capture_snapshots(trace_path: &Path) -> Result<(), String> {
+    let context = ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        let capture = slot.borrow();
+        let capture = capture.as_ref()?;
+        let segment = capture
+            .segments
+            .iter()
+            .rev()
+            .find(|segment| segment.path == trace_path && segment.end.is_none())?;
+        Some(HotkeySnapshotWaitContext {
+            cursor: segment.cursor,
+            stream: segment.stream,
+            input_group_id: segment.input_group_id,
+            purpose: segment.purpose,
+            root_hwnd: segment.root_hwnd,
+            root_process_id: segment.root_process_id,
+            physical_displays: capture.physical_displays.clone(),
+        })
+    });
+    let Some(context) = context else {
+        return Ok(());
+    };
+
+    let mut last_events = Vec::new();
+    let settled =
+        wait_for_hotkey_snapshot_proof(&context, HOTKEY_TRACE_DRAIN_TIMEOUT, WINDOW_POLL, || {
+            last_events = hotkey_candidate_events_for_open_segment(trace_path, &context);
+            last_events.clone()
+        });
+    if settled {
+        Ok(())
+    } else {
+        let taps = last_events
+            .iter()
+            .filter(|event| {
+                event.stream == context.stream
+                    && event.input_group_id == context.input_group_id
+                    && event.kind == HotkeyTraceEventKind::ShortTap
+            })
+            .count();
+        Err(format!(
+            "timed out waiting for a same-stream ROOT command and physical snapshot correlated to all applied short taps (group={}, taps={}, root_hwnd={}, root_pid={})",
+            context.input_group_id, taps, context.root_hwnd, context.root_process_id
+        ))
+    }
+}
+
+fn hotkey_candidate_events_for_open_segment(
+    trace_path: &Path,
+    context: &HotkeySnapshotWaitContext,
+) -> Vec<HotkeyCandidateEventEvidence> {
+    trace_lines(trace_path)
+        .into_iter()
+        .skip(context.cursor)
+        .enumerate()
+        .filter_map(|(offset, line)| {
+            parse_hotkey_candidate_event(
+                &line,
+                context.stream,
+                context.input_group_id,
+                context.purpose,
+                context.cursor.saturating_add(offset).saturating_add(1),
+            )
+        })
+        .collect()
+}
+
+fn wait_for_hotkey_snapshot_proof(
+    context: &HotkeySnapshotWaitContext,
+    timeout: Duration,
+    poll_interval: Duration,
+    mut read_events: impl FnMut() -> Vec<HotkeyCandidateEventEvidence>,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if hotkey_segment_has_physical_snapshot_proof(context, &read_events()) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
+    }
+}
+
+fn hotkey_segment_has_physical_snapshot_proof(
+    context: &HotkeySnapshotWaitContext,
+    events: &[HotkeyCandidateEventEvidence],
+) -> bool {
+    let taps = events
+        .iter()
+        .filter(|event| {
+            event.stream == context.stream
+                && event.input_group_id == context.input_group_id
+                && event.kind == HotkeyTraceEventKind::ShortTap
+        })
+        .collect::<Vec<_>>();
+    if !taps.is_empty()
+        && (context.root_hwnd == 0
+            || context.root_process_id == 0
+            || context.physical_displays.is_empty())
+    {
+        return false;
+    }
+    let invocations_with_visibility_work = events
+        .iter()
+        .filter(|event| {
+            event.stream == context.stream
+                && event.input_group_id == context.input_group_id
+                && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                && event.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
+                && event.invocation_id.is_some()
+        })
+        .filter_map(|event| event.invocation_id)
+        .collect::<BTreeSet<_>>();
+    if invocations_with_visibility_work
+        .iter()
+        .any(|invocation_id| {
+            !taps
+                .iter()
+                .any(|tap| tap.invocation_id == Some(*invocation_id))
+        })
+    {
+        return false;
+    }
+
+    taps.iter().all(|tap| {
+        if tap.terminal != Some(true) {
+            return false;
+        }
+        let Some(invocation_id) = tap.invocation_id else {
+            return false;
+        };
+        let intents = events
+            .iter()
+            .filter(|event| {
+                event.stream == context.stream
+                    && event.input_group_id == context.input_group_id
+                    && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    && event.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
+                    && event.invocation_id == Some(invocation_id)
+                    && event.event_ordinal > tap.event_ordinal
+                    && event.elapsed_ms >= tap.elapsed_ms
+            })
+            .collect::<Vec<_>>();
+        if intents.len() != 1 {
+            return false;
+        }
+        let intent = intents[0];
+        let (Some(revision), Some(visible)) = (intent.visibility_revision, intent.visible) else {
+            return false;
+        };
+        let commands = events
+            .iter()
+            .filter(|event| {
+                event.stream == context.stream
+                    && event.input_group_id == context.input_group_id
+                    && event.kind == HotkeyTraceEventKind::RootCommand
+                    && event.visibility_revision == Some(revision)
+                    && event.invocation_id == Some(invocation_id)
+                    && event.elapsed_ms >= intent.elapsed_ms
+                    && event.event_ordinal > intent.event_ordinal
+                    && event.request_id.is_some()
+            })
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            return hotkey_has_terminal_successor_snapshot(
+                context,
+                events,
+                intent,
+                revision,
+                invocation_id,
+            );
+        }
+        commands.iter().any(|command| {
+            hotkey_command_has_target_snapshot(
+                context,
+                events,
+                command,
+                revision,
+                invocation_id,
+                visible,
+            )
+        })
+    })
+}
+
+fn hotkey_has_terminal_successor_snapshot(
+    context: &HotkeySnapshotWaitContext,
+    events: &[HotkeyCandidateEventEvidence],
+    source_intent: &HotkeyCandidateEventEvidence,
+    source_revision: u64,
+    source_invocation_id: u64,
+) -> bool {
+    events.iter().any(|successor| {
+        if successor.stream != context.stream
+            || successor.input_group_id != context.input_group_id
+            || successor.kind != HotkeyTraceEventKind::VisibilityIntent
+            || successor.visibility_source != Some(HotkeyVisibilitySource::ToggleBatch)
+            || successor.elapsed_ms < source_intent.elapsed_ms
+            || !successor
+                .visibility_revision
+                .is_some_and(|revision| revision > source_revision)
+        {
+            return false;
+        }
+        let Some(successor_invocation_id) = successor.invocation_id else {
+            return false;
+        };
+        if successor_invocation_id == source_invocation_id
+            || !events.iter().any(|event| {
+                event.stream == context.stream
+                    && event.input_group_id == context.input_group_id
+                    && event.kind == HotkeyTraceEventKind::ShortTap
+                    && event.invocation_id == Some(successor_invocation_id)
+                    && event.terminal == Some(true)
+                    && event.elapsed_ms <= successor.elapsed_ms
+            })
+        {
+            return false;
+        }
+        let (Some(revision), Some(visible)) = (successor.visibility_revision, successor.visible)
+        else {
+            return false;
+        };
+        events.iter().any(|command| {
+            command.stream == context.stream
+                && command.input_group_id == context.input_group_id
+                && command.kind == HotkeyTraceEventKind::RootCommand
+                && command.visibility_revision == Some(revision)
+                && command.invocation_id == Some(successor_invocation_id)
+                && command.elapsed_ms >= successor.elapsed_ms
+                && command.event_ordinal > successor.event_ordinal
+                && command.request_id.is_some()
+                && hotkey_command_has_target_snapshot(
+                    context,
+                    events,
+                    command,
+                    revision,
+                    successor_invocation_id,
+                    visible,
+                )
+        })
+    })
+}
+
+fn hotkey_command_has_target_snapshot(
+    context: &HotkeySnapshotWaitContext,
+    events: &[HotkeyCandidateEventEvidence],
+    command: &HotkeyCandidateEventEvidence,
+    revision: u64,
+    invocation_id: u64,
+    visible: bool,
+) -> bool {
+    let Some(request_id) = command.request_id else {
+        return false;
+    };
+    events.iter().any(|snapshot| {
+        if snapshot.stream != context.stream
+            || snapshot.input_group_id != context.input_group_id
+            || snapshot.kind != HotkeyTraceEventKind::NativeWindowSnapshot
+            || snapshot.request_id != Some(request_id)
+            || snapshot.visibility_revision != Some(revision)
+            || snapshot.invocation_id != Some(invocation_id)
+            || snapshot.elapsed_ms < command.elapsed_ms
+            || snapshot.event_ordinal <= command.event_ordinal
+            || snapshot.hwnd != Some(context.root_hwnd)
+            || snapshot.process_id != Some(context.root_process_id)
+        {
+            return false;
+        }
+        let (Some(native_visible), Some(minimized), Some(bounds)) =
+            (snapshot.visible, snapshot.minimized, snapshot.bounds)
+        else {
+            return false;
+        };
+        let physically_visible = native_visible
+            && !minimized
+            && intersects_display_bounds(bounds, &context.physical_displays);
+        physically_visible == visible
+    })
+}
+
+fn complete_open_hotkey_capture_at_current_trace(trace_path: &Path) -> Result<(), CaseFailure> {
+    let has_open_segment = ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+        slot.borrow().as_ref().is_some_and(|capture| {
+            capture
+                .segments
+                .iter()
+                .any(|segment| segment.path == trace_path && segment.end.is_none())
+        })
+    });
+    if has_open_segment {
+        complete_hotkey_capture_at_current_trace(trace_path)
+    } else {
+        Ok(())
+    }
+}
+
+fn finish_hotkey_evidence_capture(case_id: &str) -> Option<HotkeyCaseEvidence> {
+    let mut capture = ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| slot.borrow_mut().take())?;
+    if capture.case_id != case_id {
+        return None;
+    }
+    let mut events = Vec::new();
+    let mut candidate_trace_overflow = capture.candidate_trace_overflow;
+    for segment in &mut capture.segments {
+        if let Some(materialized_events) = segment.materialized_events.take() {
+            for event in materialized_events {
+                if events.len() >= MAX_HOTKEY_EVIDENCE_EVENTS {
+                    candidate_trace_overflow = true;
+                    break;
+                }
+                events.push(event);
+            }
+            continue;
+        }
+        let lines = trace_lines(&segment.path);
+        let end = segment.end.unwrap_or(lines.len());
+        if end > lines.len() {
+            candidate_trace_overflow = true;
+        }
+        let bounded_end = end.min(lines.len());
+        if segment.cursor > bounded_end {
+            candidate_trace_overflow = true;
+            continue;
+        }
+        for ordinal in segment.cursor..bounded_end {
+            if let Some(event) = parse_hotkey_candidate_event(
+                &lines[ordinal],
+                segment.stream,
+                segment.input_group_id,
+                segment.purpose,
+                ordinal.saturating_add(1),
+            ) {
+                if events.len() >= MAX_HOTKEY_EVIDENCE_EVENTS {
+                    candidate_trace_overflow = true;
+                    break;
+                }
+                events.push(event);
+            }
+        }
+    }
+    events.sort_by_key(|event| (event.stream, event.event_ordinal));
+    let mut root_identities = Vec::new();
+    for segment in &capture.segments {
+        let identity = HotkeyRootIdentityEvidence {
+            stream: segment.stream,
+            hwnd: segment.root_hwnd,
+            process_id: segment.root_process_id,
+        };
+        if let Some(existing) = root_identities
+            .iter()
+            .find(|existing: &&HotkeyRootIdentityEvidence| existing.stream == segment.stream)
+        {
+            if *existing != identity {
+                candidate_trace_overflow = true;
+            }
+        } else {
+            root_identities.push(identity);
+        }
+    }
+    let (gestures, standalone_decisions, gesture_overflow) = build_hotkey_decision_proofs(&events);
+    let follow_on_restorations = build_hotkey_follow_on_restorations(&events);
+    Some(HotkeyCaseEvidence {
+        schema_version: 4,
+        case_id: case_id.to_owned(),
+        expected_state: hotkey_expected_state(case_id)?,
+        runner_clock: "runner_monotonic_relative_us".to_owned(),
+        runner_edges: capture.runner_edges,
+        candidate_event_count: events.len(),
+        candidate_events: events,
+        gestures,
+        standalone_decisions,
+        follow_on_restorations,
+        root_identities,
+        physical_displays: capture.physical_displays,
+        candidate_trace_overflow,
+        capture_segment_overflow: capture.capture_segment_overflow,
+        runner_edge_overflow: capture.runner_edge_overflow,
+        gesture_overflow,
+    })
+}
+
+fn parse_hotkey_candidate_event(
+    line: &str,
+    stream: HotkeyCandidateStream,
+    input_group_id: u32,
+    input_purpose: HotkeyRunnerInputPurpose,
+    event_ordinal: usize,
+) -> Option<HotkeyCandidateEventEvidence> {
+    let event = trace_field_value(line, "trace_event")?;
+    let elapsed_ms = trace_field_value(line, "elapsed_ms")?.parse().ok()?;
+    let mut parsed = HotkeyCandidateEventEvidence {
+        stream,
+        input_group_id,
+        input_purpose,
+        event_ordinal: u32::try_from(event_ordinal).ok()?,
+        elapsed_ms,
+        kind: match event {
+            "configured_primary" => match trace_field_value(line, "transition")? {
+                "Press" => HotkeyTraceEventKind::PrimaryPress,
+                "Release" => HotkeyTraceEventKind::PrimaryRelease,
+                _ => return None,
+            },
+            "short_tap" => HotkeyTraceEventKind::ShortTap,
+            "screen_draw_restore_focus_intent" => {
+                HotkeyTraceEventKind::ScreenDrawRestoreFocusIntent
+            }
+            "desired_visibility" => HotkeyTraceEventKind::VisibilityIntent,
+            "root_command" => HotkeyTraceEventKind::RootCommand,
+            "native_window_snapshot" => HotkeyTraceEventKind::NativeWindowSnapshot,
+            "native_activation" => HotkeyTraceEventKind::NativeActivation,
+            "radial_action" => HotkeyTraceEventKind::RadialAction,
+            _ => return None,
+        },
+        invocation_id: None,
+        visibility_revision: None,
+        request_id: None,
+        visible: None,
+        minimized: None,
+        bounds: None,
+        hwnd: None,
+        process_id: None,
+        command: None,
+        visibility_source: None,
+        modifiers_match: None,
+        provenance: None,
+        terminal: None,
+        activation_edge: None,
+        focus_intent: None,
+        radial_action_stage: None,
+    };
+    parsed.invocation_id = trace_field_value(line, "invocation_id")
+        .filter(|value| *value != "none" && *value != "0")
+        .and_then(|value| value.parse().ok());
+    parsed.visibility_revision = trace_field_value(line, "revision")
+        .or_else(|| trace_field_value(line, "visibility_revision"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value != 0);
+    parsed.request_id = trace_field_value(line, "request_id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value != 0);
+    parsed.visible = trace_field_value(line, "visible").and_then(super::super::parse_trace_bool);
+    parsed.minimized =
+        trace_field_value(line, "minimized").and_then(super::super::parse_trace_bool);
+    if parsed.kind == HotkeyTraceEventKind::NativeWindowSnapshot {
+        parsed.hwnd = Some(trace_field_value(line, "hwnd")?.parse().ok()?);
+        parsed.process_id = Some(trace_field_value(line, "process_id")?.parse().ok()?);
+        parsed.bounds = Some([
+            trace_field_value(line, "left")?.parse().ok()?,
+            trace_field_value(line, "top")?.parse().ok()?,
+            trace_field_value(line, "right")?.parse().ok()?,
+            trace_field_value(line, "bottom")?.parse().ok()?,
+        ]);
+    } else if parsed.kind == HotkeyTraceEventKind::NativeActivation {
+        parsed.hwnd = Some(trace_field_value(line, "hwnd")?.parse().ok()?);
+    }
+    parsed.command = trace_field_value(line, "command").and_then(|command| match command {
+        "position" | "Position" => Some(HotkeyRootCommand::Position),
+        "size" | "Size" => Some(HotkeyRootCommand::Size),
+        "Show" => Some(HotkeyRootCommand::Show),
+        "Minimize" => Some(HotkeyRootCommand::Minimize),
+        "Focus" => Some(HotkeyRootCommand::Focus),
+        "ParkingBoundary" => Some(HotkeyRootCommand::ParkingBoundary),
+        _ => Some(HotkeyRootCommand::Other),
+    });
+    parsed.visibility_source = trace_field_value(line, "source").and_then(|source| match source {
+        "ToggleBatch" => Some(HotkeyVisibilitySource::ToggleBatch),
+        "LegacyTrigger" => Some(HotkeyVisibilitySource::LegacyTrigger),
+        "Queued" => Some(HotkeyVisibilitySource::Queued),
+        "ScreenDrawRestore" => Some(HotkeyVisibilitySource::ScreenDrawRestore),
+        _ => None,
+    });
+    parsed.modifiers_match =
+        trace_field_value(line, "modifiers_match").and_then(super::super::parse_trace_bool);
+    parsed.provenance = trace_field_value(line, "provenance").map(|provenance| match provenance {
+        "Owned" => HotkeyInputProvenance::Owned,
+        "ExternalInjected" => HotkeyInputProvenance::ExternalInjected,
+        "Physical" => HotkeyInputProvenance::Physical,
+        _ => HotkeyInputProvenance::Other,
+    });
+    parsed.terminal = trace_field_value(line, "terminal").and_then(super::super::parse_trace_bool);
+    parsed.activation_edge = trace_field_value(line, "edge").map(|edge| match edge {
+        "RestoreRequested" => HotkeyActivationEdge::RestoreRequested,
+        "RestoreCompleted" => HotkeyActivationEdge::RestoreCompleted,
+        "RestoreFailed" => HotkeyActivationEdge::RestoreFailed,
+        "Superseded" => HotkeyActivationEdge::Superseded,
+        _ => HotkeyActivationEdge::Other,
+    });
+    parsed.focus_intent = trace_field_value(line, "focus_intent").and_then(|intent| match intent {
+        "ActivateRoot" => Some(HotkeyRootFocusIntent::ActivateRoot),
+        "PreserveForeground" => Some(HotkeyRootFocusIntent::PreserveForeground),
+        _ => None,
+    });
+    if parsed.kind == HotkeyTraceEventKind::RadialAction {
+        parsed.radial_action_stage = Some(match trace_field_value(line, "stage") {
+            Some("Activated") => HotkeyRadialActionStage::Activated,
+            Some("Parsed") => HotkeyRadialActionStage::Parsed,
+            Some("ParseRejected") => HotkeyRadialActionStage::ParseRejected,
+            Some("Dispatched") => HotkeyRadialActionStage::Dispatched,
+            Some("HostEntered") => HotkeyRadialActionStage::HostEntered,
+            Some("EditorModeApplied") => HotkeyRadialActionStage::EditorModeApplied,
+            Some("HostCompleted") => HotkeyRadialActionStage::HostCompleted,
+            Some(_) => HotkeyRadialActionStage::Other,
+            None => HotkeyRadialActionStage::Other,
+        });
+    }
+    Some(parsed)
+}
+
+fn build_hotkey_decision_proofs(
+    events: &[HotkeyCandidateEventEvidence],
+) -> (
+    Vec<HotkeyGestureEvidence>,
+    Vec<HotkeyStandaloneDecisionEvidence>,
+    bool,
+) {
+    let mut proof_error = false;
+    let mut intents = events
+        .iter()
+        .filter(|event| {
+            event.kind == HotkeyTraceEventKind::VisibilityIntent
+                && event.visibility_source.is_some_and(|source| {
+                    matches!(
+                        source,
+                        HotkeyVisibilitySource::ToggleBatch | HotkeyVisibilitySource::LegacyTrigger
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    intents.sort_by_key(|event| (event.stream, event.elapsed_ms, event.event_ordinal));
+    let mut gestures = Vec::new();
+    let mut standalone = Vec::new();
+    let releases = events
+        .iter()
+        .filter(|event| event.kind == HotkeyTraceEventKind::PrimaryRelease)
+        .collect::<Vec<_>>();
+    let mut paired_releases = BTreeSet::new();
+    for release in releases {
+        let (Some(invocation_id), Some(release_modifiers_match)) =
+            (release.invocation_id, release.modifiers_match)
+        else {
+            proof_error = true;
+            continue;
+        };
+        let matching = |event: &&HotkeyCandidateEventEvidence| {
+            event.stream == release.stream && event.invocation_id == Some(invocation_id)
+        };
+        let presses = events
+            .iter()
+            .filter(|event| event.kind == HotkeyTraceEventKind::PrimaryPress)
+            .filter(matching)
+            .collect::<Vec<_>>();
+        if presses.len() != 1 || presses[0].modifiers_match != Some(true) {
+            proof_error = true;
+        }
+        let taps = events
+            .iter()
+            .filter(|event| event.kind == HotkeyTraceEventKind::ShortTap)
+            .filter(matching)
+            .collect::<Vec<_>>();
+        if taps.len() > 1 {
+            proof_error = true;
+        }
+        let group_intents = intents
+            .iter()
+            .copied()
+            .filter(|event| {
+                event.stream == release.stream && event.invocation_id == Some(invocation_id)
+            })
+            .collect::<Vec<_>>();
+        if taps.is_empty() {
+            if !group_intents.is_empty() {
+                proof_error = true;
+            }
+            let legacy_group_intents = intents
+                .iter()
+                .copied()
+                .filter(|event| {
+                    event.stream == release.stream
+                        && event.input_group_id == release.input_group_id
+                        && event.input_purpose == release.input_purpose
+                        && event.invocation_id.is_none()
+                        && event.visibility_source == Some(HotkeyVisibilitySource::LegacyTrigger)
+                })
+                .collect::<Vec<_>>();
+            let paired_legacy_trigger = legacy_group_intents.len() == 1;
+            gestures.push(HotkeyGestureEvidence {
+                stream: release.stream,
+                input_group_id: release.input_group_id,
+                input_purpose: release.input_purpose,
+                invocation_id,
+                release_elapsed_ms: release.elapsed_ms,
+                release_modifiers_match,
+                short_tap_elapsed_ms: None,
+                decision: HotkeyDecisionProof::NotApplicable {
+                    reason: if release.input_purpose == HotkeyRunnerInputPurpose::DirectTrigger
+                        || paired_legacy_trigger
+                    {
+                        HotkeyEvidenceNotApplicable::LegacyTriggerHasNoInvocationReducerId
+                    } else {
+                        HotkeyEvidenceNotApplicable::HoldGestureHasNoShortTap
+                    },
+                },
+            });
+            continue;
+        }
+        let tap = taps[0];
+        if tap.elapsed_ms < release.elapsed_ms
+            || tap.terminal != Some(true)
+            || group_intents.len() != 1
+        {
+            proof_error = true;
+        }
+        let Some(intent) = group_intents.first().copied() else {
+            continue;
+        };
+        if intent.elapsed_ms < release.elapsed_ms || intent.elapsed_ms < tap.elapsed_ms {
+            proof_error = true;
+        }
+        paired_releases.insert((release.stream, invocation_id));
+        let revision = intent.visibility_revision.unwrap_or(0);
+        let commands = commands_for_intent(events, intent, Some(release.elapsed_ms));
+        let decision = if revision == 0 {
+            proof_error = true;
+            HotkeyDecisionProof::NotApplicable {
+                reason: HotkeyEvidenceNotApplicable::SupersededIntermediateVisibility,
+            }
+        } else if !commands.is_empty() {
+            HotkeyDecisionProof::Applied {
+                visibility_revision: revision,
+                intent_elapsed_ms: intent.elapsed_ms,
+                visible: intent.visible.unwrap_or(false),
+                release_to_intent_ms: intent.elapsed_ms.saturating_sub(release.elapsed_ms),
+                root_commands: commands,
+            }
+        } else if let Some(next_revision) = intents
+            .iter()
+            .filter(|next| {
+                next.stream == intent.stream
+                    && next
+                        .visibility_revision
+                        .is_some_and(|next_revision| next_revision > revision)
+                    && next.elapsed_ms >= intent.elapsed_ms
+                    && !commands_for_intent(events, next, None).is_empty()
+            })
+            .filter_map(|next| next.visibility_revision)
+            .min()
+        {
+            HotkeyDecisionProof::Superseded {
+                visibility_revision: revision,
+                by_revision: next_revision,
+                intent_elapsed_ms: intent.elapsed_ms,
+                visible: intent.visible.unwrap_or(false),
+                release_to_intent_ms: intent.elapsed_ms.saturating_sub(release.elapsed_ms),
+            }
+        } else {
+            proof_error = true;
+            HotkeyDecisionProof::NotApplicable {
+                reason: HotkeyEvidenceNotApplicable::SupersededIntermediateVisibility,
+            }
+        };
+        gestures.push(HotkeyGestureEvidence {
+            stream: release.stream,
+            input_group_id: release.input_group_id,
+            input_purpose: release.input_purpose,
+            invocation_id,
+            release_elapsed_ms: release.elapsed_ms,
+            release_modifiers_match,
+            short_tap_elapsed_ms: Some(tap.elapsed_ms),
+            decision,
+        });
+    }
+
+    for intent in intents {
+        if intent.invocation_id.is_some() {
+            if !paired_releases.contains(&(intent.stream, intent.invocation_id.unwrap_or_default()))
+            {
+                proof_error = true;
+            }
+            continue;
+        }
+        if intent.visibility_source != Some(HotkeyVisibilitySource::LegacyTrigger) {
+            proof_error = true;
+            continue;
+        }
+        let revision = intent.visibility_revision.unwrap_or(0);
+        let root_commands = commands_for_intent(events, intent, None);
+        if revision == 0 || root_commands.is_empty() {
+            proof_error = true;
+        }
+        standalone.push(HotkeyStandaloneDecisionEvidence {
+            stream: intent.stream,
+            input_group_id: intent.input_group_id,
+            input_purpose: intent.input_purpose,
+            visibility_revision: revision,
+            invocation_id: None,
+            intent_elapsed_ms: intent.elapsed_ms,
+            visible: intent.visible.unwrap_or(false),
+            source: HotkeyVisibilitySource::LegacyTrigger,
+            root_commands,
+            decision: HotkeyDecisionProof::NotApplicable {
+                reason: HotkeyEvidenceNotApplicable::LegacyTriggerHasNoInvocationReducerId,
+            },
+        });
+    }
+    if gestures.len() > MAX_HOTKEY_EVIDENCE_GESTURES
+        || standalone.len() > MAX_HOTKEY_EVIDENCE_GESTURES
+    {
+        proof_error = true;
+        gestures.truncate(MAX_HOTKEY_EVIDENCE_GESTURES);
+        standalone.truncate(MAX_HOTKEY_EVIDENCE_GESTURES);
+    }
+    (gestures, standalone, proof_error)
+}
+
+fn build_hotkey_follow_on_restorations(
+    events: &[HotkeyCandidateEventEvidence],
+) -> Vec<HotkeyFollowOnRestoreEvidence> {
+    let mut restorations = events
+        .iter()
+        .filter(|event| {
+            event.kind == HotkeyTraceEventKind::VisibilityIntent
+                && event.visibility_source == Some(HotkeyVisibilitySource::ScreenDrawRestore)
+        })
+        .collect::<Vec<_>>();
+    restorations.sort_by_key(|event| (event.stream, event.elapsed_ms, event.event_ordinal));
+    restorations
+        .into_iter()
+        .filter_map(|event| {
+            let visibility_revision = event.visibility_revision?;
+            let focus_intent_event = events.iter().find(|candidate| {
+                candidate.stream == event.stream
+                    && candidate.input_group_id == event.input_group_id
+                    && candidate.kind == HotkeyTraceEventKind::ScreenDrawRestoreFocusIntent
+                    && candidate.visibility_revision == Some(visibility_revision)
+                    && candidate.invocation_id == event.invocation_id
+                    && candidate.event_ordinal > event.event_ordinal
+                    && candidate.elapsed_ms >= event.elapsed_ms
+            })?;
+            let focus_intent = focus_intent_event.focus_intent?;
+            let parent_visibility_revision = event.invocation_id.and_then(|invocation_id| {
+                events
+                    .iter()
+                    .filter(|prior| {
+                        prior.stream == event.stream
+                            && prior.kind == HotkeyTraceEventKind::VisibilityIntent
+                            && prior.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
+                            && prior.invocation_id == Some(invocation_id)
+                            && prior
+                                .visibility_revision
+                                .is_some_and(|revision| revision < visibility_revision)
+                            && prior.elapsed_ms <= event.elapsed_ms
+                    })
+                    .max_by_key(|prior| prior.elapsed_ms)
+                    .and_then(|prior| prior.visibility_revision)
+            });
+            Some(HotkeyFollowOnRestoreEvidence {
+                stream: event.stream,
+                input_group_id: event.input_group_id,
+                parent_visibility_revision,
+                visibility_revision,
+                invocation_id: event.invocation_id,
+                intent_elapsed_ms: event.elapsed_ms,
+                visible: event.visible.unwrap_or(false),
+                focus_intent,
+                root_commands: commands_for_intent(events, event, None),
+                native_activation: native_activation_span_for_intent(events, event),
+            })
+        })
+        .collect()
+}
+
+fn native_activation_span_for_intent(
+    events: &[HotkeyCandidateEventEvidence],
+    intent: &HotkeyCandidateEventEvidence,
+) -> Option<HotkeyNativeActivationSpan> {
+    let requested = events
+        .iter()
+        .filter(|event| {
+            event.stream == intent.stream
+                && event.kind == HotkeyTraceEventKind::NativeActivation
+                && event.visibility_revision == intent.visibility_revision
+                && event.invocation_id == intent.invocation_id
+                && event.elapsed_ms >= intent.elapsed_ms
+                && event.activation_edge == Some(HotkeyActivationEdge::RestoreRequested)
+        })
+        .min_by_key(|event| (event.elapsed_ms, event.event_ordinal))?;
+    let request_id = requested.request_id?;
+    let hwnd = requested.hwnd?;
+    let terminal = events
+        .iter()
+        .filter(|event| {
+            event.stream == intent.stream
+                && event.kind == HotkeyTraceEventKind::NativeActivation
+                && event.request_id == Some(request_id)
+                && event.visibility_revision == intent.visibility_revision
+                && event.invocation_id == intent.invocation_id
+                && event.hwnd == Some(hwnd)
+                && event.elapsed_ms >= requested.elapsed_ms
+                && event.terminal == Some(true)
+                && matches!(
+                    event.activation_edge,
+                    Some(
+                        HotkeyActivationEdge::RestoreCompleted
+                            | HotkeyActivationEdge::RestoreFailed
+                            | HotkeyActivationEdge::Superseded
+                    )
+                )
+        })
+        .min_by_key(|event| (event.elapsed_ms, event.event_ordinal));
+    Some(HotkeyNativeActivationSpan {
+        request_id,
+        hwnd,
+        requested_elapsed_ms: requested.elapsed_ms,
+        terminal_elapsed_ms: terminal.map(|event| event.elapsed_ms),
+        terminal_edge: terminal.and_then(|event| event.activation_edge),
+    })
+}
+
+fn commands_for_intent(
+    events: &[HotkeyCandidateEventEvidence],
+    intent: &HotkeyCandidateEventEvidence,
+    release_elapsed_ms: Option<u64>,
+) -> Vec<HotkeyRootCommandSpan> {
+    let Some(revision) = intent.visibility_revision else {
+        return Vec::new();
+    };
+    let mut commands = events
+        .iter()
+        .filter(|event| {
+            event.stream == intent.stream
+                && event.kind == HotkeyTraceEventKind::RootCommand
+                && event.visibility_revision == Some(revision)
+                && event.invocation_id == intent.invocation_id
+                && event.elapsed_ms >= intent.elapsed_ms
+        })
+        .filter_map(|command| {
+            let request_id = command.request_id?;
+            let observed = events
+                .iter()
+                .filter(|event| {
+                    event.stream == intent.stream
+                        && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                        && event.request_id == Some(request_id)
+                        && event.visibility_revision == Some(revision)
+                        && event.invocation_id == intent.invocation_id
+                        && event.elapsed_ms >= command.elapsed_ms
+                })
+                .min_by_key(|event| event.elapsed_ms);
+            let observed_presentation = observed.and_then(|event| {
+                Some(HotkeyObservedPresentation {
+                    elapsed_ms: event.elapsed_ms,
+                    command_to_observed_ms: event.elapsed_ms.checked_sub(command.elapsed_ms)?,
+                    visible: event.visible?,
+                    minimized: event.minimized?,
+                    bounds: event.bounds?,
+                })
+            });
+            Some(HotkeyRootCommandSpan {
+                visibility_revision: revision,
+                invocation_id: intent.invocation_id,
+                request_id,
+                command_elapsed_ms: command.elapsed_ms,
+                command: command.command.unwrap_or(HotkeyRootCommand::Other),
+                release_to_root_command_ms: release_elapsed_ms
+                    .and_then(|release| command.elapsed_ms.checked_sub(release)),
+                command_event_ordinal: command.event_ordinal,
+                observed_snapshot_event_ordinal: observed.map(|event| event.event_ordinal),
+                command_to_observed_ms: observed
+                    .and_then(|event| event.elapsed_ms.checked_sub(command.elapsed_ms)),
+                observed_presentation,
+            })
+        })
+        .collect::<Vec<_>>();
+    commands.sort_by_key(|command| (command.command_elapsed_ms, command.request_id));
+    commands
+}
 
 fn missing_case_ids(existing_ids: &[&str]) -> Vec<&'static str> {
     CASE_IDS
@@ -93,13 +1312,13 @@ struct AcceptancePrepareHold {
 }
 
 impl AcceptancePrepareHold {
-    fn create(profile: &Path) -> Result<Self, String> {
+    fn create(profile: &Path, purpose: &str) -> Result<Self, String> {
         let path = profile.join(super::PREPARE_HOLD_FILE_NAME);
         OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(|error| format!("create D7 preview preparation hold marker: {error}"))?;
+            .map_err(|error| format!("create {purpose} hold marker: {error}"))?;
         Ok(Self {
             path,
             released: false,
@@ -108,7 +1327,7 @@ impl AcceptancePrepareHold {
 
     fn release(&mut self) -> Result<String, String> {
         fs::remove_file(&self.path)
-            .map_err(|error| format!("release D7 preview preparation hold marker: {error}"))?;
+            .map_err(|error| format!("release acceptance preparation hold marker: {error}"))?;
         self.released = true;
         if self.path.exists() {
             return Err("D7 preview preparation hold marker remained after release".into());
@@ -227,7 +1446,7 @@ pub fn run_suite(
     report: &mut AcceptanceReport,
     runner_log: &mut File,
 ) -> Option<FocusAnchor> {
-    if let Err(error) = preflight_acceptance_hotkey() {
+    if let Err(error) = preflight_acceptance_hotkey(AcceptanceHotkey::F11) {
         record_environment_failure(
             format!("acceptance hotkey preflight failed: {error}"),
             report,
@@ -422,6 +1641,26 @@ pub fn run_suite(
         h6_repeat_mode,
         h5_handoff,
     );
+    run_hotkey_burst_case(
+        report,
+        "H7",
+        &child,
+        &anchor,
+        trace_path,
+        output,
+        AcceptanceHotkey::F11,
+        3,
+    );
+    run_hotkey_burst_case(
+        report,
+        "H8",
+        &child,
+        &anchor,
+        trace_path,
+        output,
+        AcceptanceHotkey::F11,
+        4,
+    );
 
     let ui_result = UiAutomation::new();
     match ui_result {
@@ -551,6 +1790,4868 @@ pub fn run_suite(
     Some(anchor)
 }
 
+pub fn run_hotkey_suite(
+    executable: &str,
+    profile: &Path,
+    output: &Path,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    cursor_restore: Option<POINT>,
+    _desktop: &InputDesktopAttachment,
+    report: &mut AcceptanceReport,
+    runner_log: &mut File,
+) -> Option<FocusAnchor> {
+    if let Err(error) = preflight_acceptance_hotkey(hotkey) {
+        record_environment_failure(
+            format!("acceptance hotkey preflight failed: {error}"),
+            report,
+            output,
+            trace_path,
+            runner_log,
+        );
+        return None;
+    }
+    let _ = writeln!(
+        runner_log,
+        "acceptance hotkey {} registered and unregistered successfully before child launch",
+        hotkey.as_str()
+    );
+
+    let stdout_path = profile.join("child.stdout.log");
+    let stderr_path = profile.join("child.stderr.log");
+    let mut child = match NativeChild::launch(
+        Path::new(executable),
+        profile,
+        trace_path,
+        &stdout_path,
+        &stderr_path,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            report.environment.child_process_id = error.process_id;
+            report.environment.child_started_unix_ms = error.started.and_then(|started| {
+                started
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_millis())
+            });
+            if let Some(inventory) = save_launch_failure_inventory(&error, output) {
+                report.push_artifact(inventory.to_string_lossy());
+            }
+            record_environment_failure(
+                format!("candidate startup failed: {error}"),
+                report,
+                output,
+                trace_path,
+                runner_log,
+            );
+            return None;
+        }
+    };
+
+    report.environment.child_process_id = Some(child.process_id());
+    report.environment.child_started_unix_ms = child
+        .started()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis());
+    let _ = writeln!(
+        runner_log,
+        "launched source-matched candidate pid={} root_hwnd={} desktop={} hotkey={}",
+        child.process_id(),
+        hwnd_id(child.root().hwnd),
+        child.desktop_name(),
+        hotkey.as_str()
+    );
+
+    if let Err(error) =
+        wait_hotkey_fixture_ready(&child, trace_path, HOTKEY_FIXTURE_STARTUP_TIMEOUT)
+    {
+        append_hotkey_setup_failures(report, error, Some(&child), output, trace_path, hotkey);
+        restore_cursor_before_shutdown(cursor_restore, runner_log);
+        stop_child(&mut child, report, runner_log, output, trace_path);
+        return None;
+    }
+
+    let anchor = match FocusAnchor::create() {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            append_hotkey_setup_failures(report, error, Some(&child), output, trace_path, hotkey);
+            restore_cursor_before_shutdown(cursor_restore, runner_log);
+            stop_child(&mut child, report, runner_log, output, trace_path);
+            return None;
+        }
+    };
+
+    let hold_threshold_ms = report.profile.hold_threshold_ms;
+    run_hotkey_matrix_case(
+        report,
+        &child,
+        &anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_behavior_cases(
+        executable,
+        profile,
+        report,
+        &mut child,
+        &anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+
+    restore_cursor_before_shutdown(cursor_restore, runner_log);
+    stop_child(&mut child, report, runner_log, output, trace_path);
+    for id in HOTKEY_CASE_IDS.into_iter().filter(|id| *id != "R0") {
+        if !report.cases.iter().any(|case| case.id == id) {
+            append_case_without_artifacts(
+                report,
+                id,
+                Err(CaseFailure::new(
+                    FailureStage::Cleanup,
+                    "runner omitted a required hotkey case result".into(),
+                )),
+            );
+        }
+    }
+    let _ = writeln!(
+        runner_log,
+        "hotkey suite completed with {} case records",
+        report.cases.len()
+    );
+    Some(anchor)
+}
+
+fn append_hotkey_setup_failures(
+    report: &mut AcceptanceReport,
+    message: String,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+) {
+    let mut case_ids = hotkey_setup_failure_case_ids();
+    let Some(first_id) = case_ids.next() else {
+        return;
+    };
+    let failure = CaseFailure::new(
+        FailureStage::Environment,
+        format!("hotkey={}; runner setup failed: {message}", hotkey.as_str()),
+    );
+    append_case(
+        report,
+        first_id,
+        expected(first_id),
+        started_now(),
+        Err(failure.clone()),
+        child,
+        output,
+        trace_path,
+    );
+    for id in case_ids {
+        append_case_without_artifacts(
+            report,
+            id,
+            Err(CaseFailure::new(
+                failure.stage,
+                format!(
+                    "hotkey={}; not run because hotkey runner setup failed; see {first_id}",
+                    hotkey.as_str()
+                ),
+            )),
+        );
+    }
+}
+
+fn hotkey_setup_failure_case_ids() -> impl Iterator<Item = &'static str> {
+    HOTKEY_CASE_IDS
+        .into_iter()
+        .filter(|id| !matches!(*id, "CLEANUP" | "R0"))
+}
+
+fn run_hotkey_burst_case(
+    report: &mut AcceptanceReport,
+    id: &str,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    taps: usize,
+) {
+    let started = Instant::now();
+    let hold_threshold_ms = report.profile.hold_threshold_ms;
+    let result = run_hotkey_burst_attempt(
+        child,
+        anchor,
+        trace_path,
+        hotkey,
+        taps,
+        true,
+        hold_threshold_ms,
+    )
+    .map(|evidence| {
+        format!(
+            "evidence:v1; hotkey={}; burst={taps}; initial_visible=true; final_visible={}; unique_invocation_ids={}; hold_ms={}..{}; released_gap_ms={}..{}; trace_fence={}; uninterrupted=true; observer=exact_injected_chord_edges; per_gesture_correlation=release_short_tap_visibility; key_cleanup=verified",
+            hotkey.as_str(),
+            evidence.final_visible,
+            evidence.invocation_ids.len(),
+            evidence.hold_min_ms,
+            evidence.hold_max_ms,
+            evidence.gap_min_ms,
+            evidence.gap_max_ms,
+            evidence.trace_fence.report_token(),
+        )
+    });
+    append_case(
+        report,
+        id,
+        expected(id),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_matrix_case(
+    report: &mut AcceptanceReport,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    let mut retained_artifacts = Vec::new();
+    let attempt_progress = RefCell::new(Vec::new());
+    let retry = run_h04_matrix_with_retry(
+        |attempt| {
+            let mut progress = attempt_progress.borrow_mut();
+            progress.clear();
+            begin_hotkey_evidence_capture("H04", trace_path);
+            set_hotkey_capture_purpose(HotkeyRunnerInputPurpose::MatrixBurst);
+            run_hotkey_matrix_attempt(
+                child,
+                anchor,
+                trace_path,
+                hotkey,
+                hold_threshold_ms,
+                &mut progress,
+            )
+            .map(|observed| (attempt, observed))
+        },
+        |attempt, failure| {
+            let path = persist_h04_contaminated_attempt(
+                attempt,
+                hotkey,
+                failure,
+                trace_path,
+                output,
+                &attempt_progress.borrow(),
+            )?;
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::Environment,
+                        "H04 contamination artifact has no bounded filename".into(),
+                    )
+                })?
+                .to_owned();
+            retained_artifacts.push(path);
+            Ok(name)
+        },
+    );
+    let artifact_names = retry.contamination_artifact_names.join("|");
+    let result = match retry.result {
+        Ok((_attempt, observed)) => Ok(format!(
+            "{observed}; matrix_attempts={}; contamination_attempts={}; contamination_artifacts={}; attempt_restart_state=hidden; full_clean_matrix=true",
+            retry.attempts,
+            retry.contamination_attempts,
+            if artifact_names.is_empty() {
+                "none"
+            } else {
+                &artifact_names
+            },
+        )),
+        Err(mut failure) => {
+            failure.message = format!(
+                "evidence:v1; hotkey={}; failure={}",
+                hotkey.as_str(),
+                failure.message
+            );
+            failure.message.push_str(&format!(
+                "; matrix_attempts={}; contamination_attempts={}; contamination_artifacts={}; attempt_restart_state=hidden; full_clean_matrix=false",
+                retry.attempts,
+                retry.contamination_attempts,
+                if artifact_names.is_empty() {
+                    "none"
+                } else {
+                    &artifact_names
+                },
+            ));
+            Err(failure)
+        }
+    };
+
+    append_case(
+        report,
+        "H04",
+        expected("H04"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+    for path in retained_artifacts {
+        attach_h04_contamination_artifact(report, path);
+    }
+}
+
+fn run_hotkey_matrix_attempt(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+    completed_bursts: &mut Vec<H04CompletedBurstEvidence>,
+) -> Result<String, CaseFailure> {
+    let mut all_ids = std::collections::BTreeSet::new();
+    let mut quiet_windows = Vec::with_capacity(10);
+    let mut preflight_matching_edges = 0usize;
+    let mut foreign_matching_edges = 0usize;
+    for initial_visible in [false, true] {
+        for taps in [1usize, 2, 5, 10, 25] {
+            let evidence = run_hotkey_burst_attempt(
+                child,
+                anchor,
+                trace_path,
+                hotkey,
+                taps,
+                initial_visible,
+                hold_threshold_ms,
+            )?;
+            let matrix_burst_index = u8::try_from(completed_bursts.len() + 1).unwrap_or(u8::MAX);
+            completed_bursts.push(H04CompletedBurstEvidence {
+                matrix_burst_index,
+                input_group_id: evidence.input_group_id,
+                initial_visible,
+                requested_taps: u8::try_from(taps).unwrap_or(u8::MAX),
+                final_visible: evidence.final_visible,
+                hold_min_ms: evidence.hold_min_ms,
+                hold_max_ms: evidence.hold_max_ms,
+                gap_min_ms: evidence.gap_min_ms,
+                gap_max_ms: evidence.gap_max_ms,
+                invocation_ids: evidence.invocation_ids.clone(),
+                trace_probe_id: evidence.trace_fence.probe_id,
+                trace_cursor: evidence.trace_fence.cursor,
+                baseline_invocation_id: evidence.trace_fence.baseline_invocation_id,
+                baseline_visibility_revision: evidence.trace_fence.baseline_visibility_revision,
+            });
+            for invocation_id in &evidence.invocation_ids {
+                if !all_ids.insert(*invocation_id) {
+                    return Err(CaseFailure::new(
+                        FailureStage::GestureDecision,
+                        format!("invocation ID {invocation_id} repeated across H04 bursts"),
+                    ));
+                }
+            }
+            let Some(quiet_ms) = evidence.preflight_quiet_ms else {
+                return Err(CaseFailure::new(
+                    FailureStage::InputInjection,
+                    "H04 measured burst omitted its matching-key quiet preflight".into(),
+                ));
+            };
+            quiet_windows.push(quiet_ms);
+            preflight_matching_edges =
+                preflight_matching_edges.saturating_add(evidence.preflight_matching_edges);
+            foreign_matching_edges =
+                foreign_matching_edges.saturating_add(evidence.foreign_matching_edges);
+        }
+    }
+    set_hotkey_capture_purpose(HotkeyRunnerInputPurpose::ReadableCadence);
+    run_readable_hotkey_transitions(child, anchor, trace_path, hotkey, hold_threshold_ms)?;
+    let ids_digest = sha256_bytes(
+        all_ids
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+            .as_bytes(),
+    );
+    let quiet_min = *quiet_windows.iter().min().unwrap_or(&0);
+    let quiet_max = *quiet_windows.iter().max().unwrap_or(&0);
+    if quiet_min < 75 || quiet_max > 100 {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!("H04 quiet preflight fell outside 75–100ms: {quiet_min}..{quiet_max}"),
+        ));
+    }
+    Ok(format_h04_matrix_evidence(
+        hotkey,
+        &ids_digest,
+        quiet_min,
+        quiet_max,
+        preflight_matching_edges,
+        foreign_matching_edges,
+    ))
+}
+
+struct H04RetryOutcome<T> {
+    attempts: u8,
+    contamination_attempts: u8,
+    contamination_artifact_names: Vec<String>,
+    result: Result<T, CaseFailure>,
+}
+
+fn run_h04_matrix_with_retry<T, RunAttempt, PreserveAttempt>(
+    mut run_attempt: RunAttempt,
+    mut preserve_attempt: PreserveAttempt,
+) -> H04RetryOutcome<T>
+where
+    RunAttempt: FnMut(u8) -> Result<T, CaseFailure>,
+    PreserveAttempt: FnMut(u8, &CaseFailure) -> Result<String, CaseFailure>,
+{
+    let mut contamination_attempts = 0u8;
+    let mut contamination_artifact_names = Vec::new();
+    let mut contamination_causes = Vec::new();
+    for attempt in 1..=2 {
+        match run_attempt(attempt) {
+            Ok(value) => {
+                return H04RetryOutcome {
+                    attempts: attempt,
+                    contamination_attempts,
+                    contamination_artifact_names,
+                    result: Ok(value),
+                };
+            }
+            Err(failure) if failure.input_contamination_group.is_some() => {
+                contamination_attempts = contamination_attempts.saturating_add(1);
+                contamination_causes.push(format!("attempt {attempt}: {}", failure.message));
+                match preserve_attempt(attempt, &failure) {
+                    Ok(name) => contamination_artifact_names.push(name),
+                    Err(preserve_error) => {
+                        return H04RetryOutcome {
+                            attempts: attempt,
+                            contamination_attempts,
+                            contamination_artifact_names,
+                            result: Err(CaseFailure::new(
+                                failure.stage,
+                                format!(
+                                    "{}; could not preserve contaminated attempt, so no retry was started: {}",
+                                    failure.message, preserve_error.message
+                                ),
+                            )),
+                        };
+                    }
+                }
+                if attempt == 2 {
+                    return H04RetryOutcome {
+                        attempts: attempt,
+                        contamination_attempts,
+                        contamination_artifact_names,
+                        result: Err(CaseFailure::new(
+                            failure.stage,
+                            format!(
+                                "both whole-matrix attempts were contaminated: {}",
+                                contamination_causes.join(" || ")
+                            ),
+                        )),
+                    };
+                }
+            }
+            Err(mut failure) => {
+                if !contamination_causes.is_empty() {
+                    failure.message = format!(
+                        "{}; previous whole-matrix attempt contamination retained: {}",
+                        failure.message,
+                        contamination_causes.join(" || ")
+                    );
+                }
+                return H04RetryOutcome {
+                    attempts: attempt,
+                    contamination_attempts,
+                    contamination_artifact_names,
+                    result: Err(failure),
+                };
+            }
+        }
+    }
+    unreachable!("bounded H04 retry loop always returns within two attempts")
+}
+
+fn persist_h04_contaminated_attempt(
+    attempt: u8,
+    hotkey: AcceptanceHotkey,
+    failure: &CaseFailure,
+    trace_path: &Path,
+    output: &Path,
+    completed_bursts: &[H04CompletedBurstEvidence],
+) -> Result<PathBuf, CaseFailure> {
+    let group_id = failure.input_contamination_group.ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            "refused to preserve an H04 attempt without typed contamination identity".into(),
+        )
+    })?;
+    let terminal_cursor = trace_lines(trace_path).len();
+    complete_hotkey_capture_segment(trace_path, terminal_cursor).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("could not close contaminated H04 trace segment: {error}"),
+        )
+    })?;
+    let packet = finish_hotkey_evidence_capture("H04").ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            "contaminated H04 attempt had no partial typed evidence packet".into(),
+        )
+    })?;
+    if packet.candidate_trace_overflow
+        || packet.capture_segment_overflow
+        || packet.runner_edge_overflow
+        || packet.gesture_overflow
+    {
+        return Err(CaseFailure::new(
+            FailureStage::Environment,
+            "contaminated H04 attempt evidence overflowed and cannot be safely retried".into(),
+        ));
+    }
+    let stream = packet
+        .runner_edges
+        .iter()
+        .find(|edge| edge.input_group_id == group_id)
+        .map(|edge| edge.stream)
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::Environment,
+                "contaminated H04 attempt has no runner edges for its typed group".into(),
+            )
+        })?;
+    let root_identity = packet
+        .root_identities
+        .iter()
+        .find(|identity| identity.stream == stream)
+        .cloned()
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::Environment,
+                "contaminated H04 attempt has no matching ROOT identity".into(),
+            )
+        })?;
+    let mut prior_group_ids = packet
+        .runner_edges
+        .iter()
+        .map(|edge| edge.input_group_id)
+        .collect::<Vec<_>>();
+    prior_group_ids.sort_unstable();
+    prior_group_ids.dedup();
+    let artifact = H04InputContaminationArtifact {
+        schema_version: 1,
+        case_id: "H04".into(),
+        attempt,
+        hotkey,
+        failure_stage: format!("{:?}", failure.stage),
+        failure: bounded_text(&failure.message, MAX_RESULT_BYTES),
+        declared_initial_state: false,
+        next_matrix_burst_index: u8::try_from(completed_bursts.len() + 1).unwrap_or(u8::MAX),
+        completed_bursts: completed_bursts.to_vec(),
+        input_group_id: group_id,
+        stream,
+        prior_group_ids,
+        owned_edges: packet
+            .runner_edges
+            .iter()
+            .filter(|edge| edge.input_group_id == group_id && edge.runner_cookie_matched)
+            .cloned()
+            .collect(),
+        foreign_edges: packet
+            .runner_edges
+            .iter()
+            .filter(|edge| edge.input_group_id == group_id && !edge.runner_cookie_matched)
+            .cloned()
+            .collect(),
+        candidate_events: packet
+            .candidate_events
+            .iter()
+            .filter(|event| event.input_group_id == group_id && event.stream == stream)
+            .cloned()
+            .collect(),
+        root_identity,
+    };
+    validate_h04_contamination_artifact(&artifact, hotkey).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("refused incomplete contaminated H04 attempt evidence: {error}"),
+        )
+    })?;
+    let bytes = serde_json::to_vec(&artifact).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("encode contaminated H04 attempt evidence: {error}"),
+        )
+    })?;
+    if bytes.is_empty() || bytes.len() > MAX_HOTKEY_CASE_EVIDENCE_BYTES {
+        return Err(CaseFailure::new(
+            FailureStage::Environment,
+            format!(
+                "contaminated H04 attempt artifact exceeds {} byte bound ({} bytes)",
+                MAX_HOTKEY_CASE_EVIDENCE_BYTES,
+                bytes.len()
+            ),
+        ));
+    }
+    let path = output.join(format!("case-H04-attempt-{attempt}-contamination.json"));
+    super::super::write_new(&path, &bytes).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("persist contaminated H04 attempt evidence: {error}"),
+        )
+    })?;
+    Ok(path)
+}
+
+fn attach_h04_contamination_artifact(report: &mut AcceptanceReport, path: PathBuf) {
+    let path_text = bounded_text(&path.to_string_lossy(), MAX_PATH_BYTES);
+    if !report
+        .artifacts
+        .iter()
+        .any(|artifact| artifact == &path_text)
+    {
+        report.push_artifact(&path_text);
+    }
+    if let Some(case) = report.cases.iter_mut().find(|case| case.id == "H04")
+        && !case.artifacts.iter().any(|artifact| artifact == &path_text)
+    {
+        case.artifacts.push(path_text);
+    }
+}
+
+fn run_hotkey_behavior_cases(
+    executable: &str,
+    profile: &Path,
+    report: &mut AcceptanceReport,
+    child: &mut NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    run_hotkey_root_focus_case(
+        report,
+        "H01",
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_root_focus_case(
+        report,
+        "H02",
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_tap_dismiss_case(
+        report,
+        "H06",
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        false,
+        hold_threshold_ms,
+        true,
+    );
+    run_hotkey_tap_dismiss_case(
+        report,
+        "H07",
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        true,
+        hold_threshold_ms,
+        false,
+    );
+    run_hotkey_pending_open_case(
+        profile,
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_hold_matrix_cases(
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_hold_close_case(
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_designer_preservation_case(
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_designer_preview_preservation_case(
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_direct_trigger_preservation_case(
+        executable,
+        profile,
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_hidden_root_wake_case(
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+    run_hotkey_dual_profile_case(
+        executable,
+        profile,
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
+}
+
+fn run_hotkey_root_focus_case(
+    report: &mut AcceptanceReport,
+    id: &str,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture(id, trace_path);
+    let result = (|| {
+        let initially_visible = id == "H02";
+        ensure_hotkey_root_visibility(child, anchor, hotkey, initially_visible)?;
+        let root = child
+            .refresh_root()
+            .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+        let (target_hwnd, target_pid) = if initially_visible {
+            child
+                .focus_window(&root)
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            (root.hwnd, child.process_id())
+        } else {
+            anchor
+                .focus()
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            (anchor.hwnd(), anchor.process_id())
+        };
+        focus_is_validated(target_hwnd, target_pid)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let cursor = trace_lines(trace_path).len();
+        let tap = run_hotkey_burst_attempt_on_target(
+            child,
+            target_hwnd,
+            target_pid,
+            None,
+            trace_path,
+            hotkey,
+            1,
+            initially_visible,
+            hold_threshold_ms,
+        )?;
+        if tap.final_visible == initially_visible {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "focused short tap did not toggle ROOT".into(),
+            ));
+        }
+        if !runtime_windows(child).is_empty() {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "focused ROOT tap unexpectedly opened a runtime radial".into(),
+            ));
+        }
+        if id == "H01" {
+            let root = child
+                .refresh_root()
+                .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+            if !wait_until(ROOT_TIMEOUT, || {
+                capture_foreground() == (root.hwnd, child.process_id())
+            }) {
+                return Err(CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    "hidden ROOT became visible but was not focused by its normal show path".into(),
+                ));
+            }
+            if !wait_root_visibility(child, true, ROOT_TIMEOUT) {
+                return Err(CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    "H01 ROOT was not visible on a physical display".into(),
+                ));
+            }
+            Ok(format!(
+                "evidence:v1; hotkey={}; initial_hidden=true; target=runner_owned; grid_visible=true; focused_root=true; radial=closed; invocation_ids={}",
+                hotkey.as_str(),
+                tap.invocation_ids.len()
+            ))
+        } else {
+            std::thread::sleep(Duration::from_millis(750));
+            if !wait_root_visibility(child, false, Duration::ZERO) {
+                return Err(CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    "focused ROOT hid but was restored during the stability interval".into(),
+                ));
+            }
+            let later = trace_lines(trace_path)
+                .into_iter()
+                .skip(cursor)
+                .filter(|line| {
+                    line.contains("trace_event=\"native_activation\"")
+                        && line.contains("edge=RestoreRequested")
+                })
+                .collect::<Vec<_>>();
+            if !later.is_empty() {
+                return Err(CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    format!("newer hide was followed by restore activation: {later:?}"),
+                ));
+            }
+            Ok(format!(
+                "evidence:v1; hotkey={}; initial_visible=true; target=root_focused; grid_visible=false; stays_hidden=true; restore=none; invocation_ids={}",
+                hotkey.as_str(),
+                tap.invocation_ids.len()
+            ))
+        }
+    })();
+    append_case(
+        report,
+        id,
+        expected(id),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn current_hotkey_target(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+) -> Result<(HWND, u32), CaseFailure> {
+    let current = capture_foreground();
+    let owned = current == (anchor.hwnd(), anchor.process_id())
+        || child
+            .windows()
+            .iter()
+            .any(|window| (window.hwnd, window.process_id) == current);
+    if !owned {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "foreground HWND={} PID={} is not owned by the candidate or runner anchor",
+                hwnd_id(current.0),
+                current.1
+            ),
+        ));
+    }
+    focus_is_validated(current.0, current.1)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    Ok(current)
+}
+
+fn hover_executable_radial_cell(
+    child: &NativeChild,
+    surfaces: &[WindowSnapshot],
+    trace_path: &Path,
+) -> Result<u64, CaseFailure> {
+    if !radial_surfaces_are_active(child, surfaces) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "radial surfaces were inactive before hover setup".into(),
+        ));
+    }
+    let surface = surfaces.first().ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::NativeRootState,
+            "radial hold did not return a visible surface for hover setup".into(),
+        )
+    })?;
+    let point = POINT {
+        x: surface.bounds[0] + (surface.bounds[2] - surface.bounds[0]) / 2,
+        y: surface.bounds[1] + (surface.bounds[3] - surface.bounds[1]) * 3 / 20,
+    };
+    let hover_cursor = trace_lines(trace_path).len();
+    set_cursor_position(point)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let hover_events = wait_trace(trace_path, hover_cursor, TRACE_TIMEOUT, |events| {
+        events
+            .iter()
+            .any(|line| trace_line_is_executable_hover(line))
+    });
+    let digest = hover_events
+        .iter()
+        .find(|line| trace_line_is_executable_hover(line))
+        .and_then(|line| trace_field_value(line, "cell_digest"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|digest| *digest != 0)
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!(
+                    "hover did not receive production acknowledgment for an executable radial cell at ({},{}); events={hover_events:?}",
+                    point.x, point.y
+                ),
+            )
+        })?;
+    if !radial_surfaces_are_active(child, surfaces) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "radial surface closed before executable-cell hover acknowledgment".into(),
+        ));
+    }
+    Ok(digest)
+}
+
+fn run_hotkey_tap_dismiss_case(
+    report: &mut AcceptanceReport,
+    id: &str,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    initial_visible: bool,
+    hold_threshold_ms: u64,
+    hover_radial: bool,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture(id, trace_path);
+    let result = (|| {
+        ensure_hotkey_root_visibility(child, anchor, hotkey, initial_visible)?;
+        let surfaces = run_hotkey_hold_attempt(
+            child,
+            anchor,
+            trace_path,
+            hotkey,
+            initial_visible,
+            hold_threshold_ms,
+            true,
+            None,
+        )?;
+        let hover_digest = if hover_radial {
+            Some(hover_executable_radial_cell(child, &surfaces, trace_path)?)
+        } else {
+            None
+        };
+
+        let before_trace = trace_lines(trace_path);
+        let dispatch_count = before_trace
+            .iter()
+            .filter(|line| line.contains("trace_event=\"radial_dispatch_requested\""))
+            .count();
+        if !radial_surfaces_are_active(child, &surfaces) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "radial surfaces were not active immediately before tap dismissal".into(),
+            ));
+        }
+        let (target_hwnd, target_pid) = current_hotkey_target(child, anchor)?;
+        let tap = run_hotkey_burst_attempt_on_target_checked(
+            child,
+            target_hwnd,
+            target_pid,
+            None,
+            trace_path,
+            hotkey,
+            1,
+            initial_visible,
+            hold_threshold_ms,
+            || {
+                if !radial_surfaces_are_active(child, &surfaces) {
+                    return Err(CaseFailure::new(
+                        FailureStage::NativeRootState,
+                        "radial surfaces closed before the dismissal key-down".into(),
+                    ));
+                }
+                if capture_foreground() != (target_hwnd, target_pid) {
+                    return Err(CaseFailure::new(
+                        FailureStage::InputInjection,
+                        "foreground changed before the dismissal key-down".into(),
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        if tap.final_visible != !initial_visible {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!("short tap did not toggle ROOT from {initial_visible}"),
+            ));
+        }
+        if !wait_until(ROOT_TIMEOUT, || {
+            radial_surfaces_are_inactive(child, &surfaces)
+        }) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "short tap did not dismiss active radial surfaces [{}]",
+                    describe_radial_surfaces(&surfaces)
+                ),
+            ));
+        }
+        let after_trace = trace_lines(trace_path);
+        let after_dispatch_count = after_trace
+            .iter()
+            .filter(|line| line.contains("trace_event=\"radial_dispatch_requested\""))
+            .count();
+        let after_tap = after_trace
+            .iter()
+            .skip(before_trace.len())
+            .cloned()
+            .collect::<Vec<_>>();
+        if after_dispatch_count != dispatch_count
+            || has_trace(&after_tap, "radial_dispatch_requested", &[])
+        {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "launcher tap dispatched a radial action instead of dismissing the runtime surface"
+                    .into(),
+            ));
+        }
+        let mut next_gesture = "not_applicable";
+        if id == "H07" {
+            let show_again = run_hotkey_burst_attempt(
+                child,
+                anchor,
+                trace_path,
+                hotkey,
+                1,
+                false,
+                hold_threshold_ms,
+            )?;
+            let hide_again = run_hotkey_burst_attempt(
+                child,
+                anchor,
+                trace_path,
+                hotkey,
+                1,
+                true,
+                hold_threshold_ms,
+            )?;
+            if !show_again.final_visible || hide_again.final_visible {
+                return Err(CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    "the next short gestures did not alternately show and hide ROOT".into(),
+                ));
+            }
+            next_gesture = "usable_show_then_hide";
+        }
+        Ok(format!(
+            "evidence:v1; hotkey={}; runtime_radial=dismissed; grid_visible={}; selection=none; dispatch=none; child_surface=closed; next_gesture={next_gesture}; hover_setup={}; hover_ack={}; hover_cell_digest={}",
+            hotkey.as_str(),
+            if id == "H06" { "true" } else { "false" },
+            if hover_radial {
+                "top_radial_cell_region"
+            } else {
+                "none"
+            },
+            if hover_digest.is_some() {
+                "executable_cell"
+            } else {
+                "not_required"
+            },
+            hover_digest.map_or_else(|| "none".into(), |digest| digest.to_string()),
+        ))
+    })();
+    append_case(
+        report,
+        id,
+        expected(id),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_pending_open_case(
+    profile: &Path,
+    report: &mut AcceptanceReport,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H08", trace_path);
+    let result = (|| {
+        ensure_hotkey_root_visibility(child, anchor, hotkey, true)?;
+        let root = child
+            .refresh_root()
+            .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+        child
+            .focus_window(&root)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        focus_is_validated(root.hwnd, child.process_id())
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+
+        let mut hold = AcceptancePrepareHold::create(profile, "H08 runtime radial preparation")
+            .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+        let hold_cursor = trace_lines(trace_path).len();
+        let mut observer = RunnerHookObserver::start()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        let probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        observer
+            .pump_roundtrip(probe_id, Duration::from_millis(500))
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        let keys = hotkey_observer_keys(hotkey);
+        let hold_input = child
+            .send_acceptance_hotkey(
+                root.hwnd,
+                child.process_id(),
+                hotkey,
+                Duration::from_millis(hold_threshold_ms.saturating_add(250).min(5_000)),
+            )
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let hold_observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(5));
+        capture_hotkey_attempt_evidence(
+            child,
+            HotkeyCandidateStream::MainCandidate,
+            trace_path,
+            hold_cursor,
+            &hold_observation,
+            HotkeyRunnerInputPurpose::LauncherChord,
+        );
+        observer
+            .stop_and_report()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        if !hold_observation.exact_injected_pairs(1)
+            || !hold_observation.exact_injected_sequence(&expected_hotkey_edges(hotkey, 1))
+            || hold_input.observed_vks != keys
+        {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "H08 hold did not produce exact injected chord edges: {}",
+                    hold_observation.describe()
+                ),
+            ));
+        }
+        let hold_timing = hold_observation
+            .timing(hotkey, 1)
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        if hold_timing.primary_hold_ms[0] < u128::from(hold_threshold_ms) {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "H08 observed hold {}ms below threshold {hold_threshold_ms}ms",
+                    hold_timing.primary_hold_ms[0]
+                ),
+            ));
+        }
+        input_modifiers_clear().map_err(|error| {
+            CaseFailure::new(
+                FailureStage::InputInjection,
+                format!("H08 hold left modifier state uncleared: {error}"),
+            )
+        })?;
+
+        let held_events = wait_trace(trace_path, hold_cursor, TRACE_TIMEOUT, |events| {
+            events.iter().any(|line| {
+                line.contains("trace_event=\"runtime_preparation\"")
+                    && trace_field_value(line, "edge") == Some("GateHeld")
+            })
+        });
+        let held = held_events
+            .iter()
+            .find(|line| {
+                line.contains("trace_event=\"runtime_preparation\"")
+                    && trace_field_value(line, "edge") == Some("GateHeld")
+            })
+            .cloned()
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    "real runtime preparation did not enter the bounded H08 service gate".into(),
+                )
+            })?;
+        let invocation_id = trace_field_value(&held, "invocation_id")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    "runtime preparation gate omitted its invocation identity".into(),
+                )
+            })?;
+        let generation = trace_field_value(&held, "generation")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    "runtime preparation gate omitted its generation identity".into(),
+                )
+            })?;
+        if held_events.iter().any(|line| {
+            line.contains("trace_event=\"short_tap\"")
+                || line.contains("trace_event=\"desired_visibility\"")
+        }) || !runtime_windows(child).is_empty()
+            || capture_foreground() != (root.hwnd, child.process_id())
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H08 hold changed ROOT or opened/focused a radial before tap cancellation".into(),
+            ));
+        }
+
+        // GateHeld is the bounded terminal point for this deliberately pending
+        // hold. Fence it before the separate cancellation tap begins.
+        complete_hotkey_capture_at_current_trace(trace_path)?;
+        let tap_cursor = trace_lines(trace_path).len();
+        let (target_hwnd, target_pid) = current_hotkey_target(child, anchor)?;
+        if target_hwnd != root.hwnd || target_pid != child.process_id() {
+            return Err(CaseFailure::new(
+                FailureStage::InputInjection,
+                "H08 pre-Ready tap target was not the focused candidate ROOT".into(),
+            ));
+        }
+        let mut tap_observer = RunnerHookObserver::start()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        let tap_probe = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        tap_observer
+            .pump_roundtrip(tap_probe, Duration::from_millis(500))
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        let tap_input = child
+            .send_acceptance_hotkey(target_hwnd, target_pid, hotkey, Duration::from_millis(25))
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let tap_observation = tap_observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(2));
+        capture_hotkey_attempt_evidence(
+            child,
+            HotkeyCandidateStream::MainCandidate,
+            trace_path,
+            tap_cursor,
+            &tap_observation,
+            HotkeyRunnerInputPurpose::LauncherChord,
+        );
+        tap_observer
+            .stop_and_report()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        if !tap_observation.exact_injected_pairs(1)
+            || !tap_observation.exact_injected_sequence(&expected_hotkey_edges(hotkey, 1))
+            || tap_input.observed_vks.len() != keys.len()
+        {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "H08 cancellation tap did not produce exact injected chord edges: {}",
+                    tap_observation.describe()
+                ),
+            ));
+        }
+        let tap_events = wait_trace(trace_path, tap_cursor, ROOT_TIMEOUT, |events| {
+            let tap_id = events.iter().find_map(|line| {
+                line.contains("trace_event=\"short_tap\"")
+                    .then(|| trace_field_value(line, "invocation_id"))
+                    .flatten()
+            });
+            tap_id.is_some_and(|tap_id| {
+                events.iter().any(|line| {
+                    line.contains("trace_event=\"desired_visibility\"")
+                        && trace_field_value(line, "visible") == Some("false")
+                        && trace_field_value(line, "invocation_id") == Some(tap_id)
+                })
+            })
+        });
+        let tap_id = tap_events
+            .iter()
+            .find(|line| line.contains("trace_event=\"short_tap\""))
+            .and_then(|line| trace_field_value(line, "invocation_id"))
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    "H08 short tap did not emit its invocation identity".into(),
+                )
+            })?;
+        let visibility = tap_events.iter().find(|line| {
+            line.contains("trace_event=\"desired_visibility\"")
+                && trace_field_value(line, "visible") == Some("false")
+                && trace_field_value(line, "invocation_id") == Some(tap_id)
+        });
+        if visibility.is_none() {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H08 short tap did not toggle the grid hidden before runtime preparation completed"
+                    .into(),
+            ));
+        }
+        let cancellation = wait_trace(trace_path, hold_cursor, TRACE_TIMEOUT, |events| {
+            events.iter().any(|line| {
+                runtime_preparation_matches(
+                    line,
+                    invocation_id,
+                    generation,
+                    "CancelledByLauncherTap",
+                )
+            })
+        })
+        .into_iter()
+        .find(|line| {
+            runtime_preparation_matches(line, invocation_id, generation, "CancelledByLauncherTap")
+        })
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::GestureDecision,
+                "H08 tap did not cancel the exact pending runtime invocation".into(),
+            )
+        })?;
+        let tap_and_cancel_events = wait_trace(trace_path, hold_cursor, TRACE_TIMEOUT, |events| {
+            let tap_index = events
+                .iter()
+                .position(|line| line.contains("trace_event=\"short_tap\""));
+            let visibility_index = events.iter().position(|line| {
+                line.contains("trace_event=\"desired_visibility\"")
+                    && trace_field_value(line, "visible") == Some("false")
+                    && trace_field_value(line, "invocation_id") == Some(tap_id)
+            });
+            let cancellation_index = events.iter().position(|line| {
+                runtime_preparation_matches(
+                    line,
+                    invocation_id,
+                    generation,
+                    "CancelledByLauncherTap",
+                )
+            });
+            matches!((tap_index, visibility_index, cancellation_index), (Some(tap), Some(visibility), Some(cancelled)) if tap < visibility && tap < cancelled)
+        });
+
+        let release_cursor = trace_lines(trace_path).len();
+        let hold_release = hold
+            .release()
+            .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+        let late_events = wait_trace(trace_path, release_cursor, TRACE_TIMEOUT, |events| {
+            ["GateReleased", "ReplyQueued", "ReplyRejected"]
+                .into_iter()
+                .all(|edge| {
+                    events.iter().any(|line| {
+                        runtime_preparation_matches(line, invocation_id, generation, edge)
+                    })
+                })
+        });
+        for edge in ["GateReleased", "ReplyQueued", "ReplyRejected"] {
+            if !late_events
+                .iter()
+                .any(|line| runtime_preparation_matches(line, invocation_id, generation, edge))
+            {
+                return Err(CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    format!("H08 late runtime reply omitted correlated {edge} evidence"),
+                ));
+            }
+        }
+        let canceled_index = tap_and_cancel_events
+            .iter()
+            .position(|line| line == &cancellation)
+            .unwrap_or(usize::MAX);
+        let release_index = late_events
+            .iter()
+            .position(|line| {
+                runtime_preparation_matches(line, invocation_id, generation, "GateReleased")
+            })
+            .unwrap_or(usize::MAX);
+        let queued_index = late_events
+            .iter()
+            .position(|line| {
+                runtime_preparation_matches(line, invocation_id, generation, "ReplyQueued")
+            })
+            .unwrap_or(usize::MAX);
+        let rejected_index = late_events
+            .iter()
+            .position(|line| {
+                runtime_preparation_matches(line, invocation_id, generation, "ReplyRejected")
+            })
+            .unwrap_or(usize::MAX);
+        if canceled_index == usize::MAX
+            || release_index >= queued_index
+            || queued_index >= rejected_index
+        {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "H08 cancellation/late-reply trace edges were out of order".into(),
+            ));
+        }
+        if !wait_until(ROOT_TIMEOUT, || {
+            wait_root_visibility(child, false, Duration::ZERO) && runtime_windows(child).is_empty()
+        }) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H08 late preparation reopened radial or failed to complete the tap's grid hide"
+                    .into(),
+            ));
+        }
+        complete_hotkey_capture_at_current_trace(trace_path)?;
+        Ok(format!(
+            "evidence:v1; hotkey={}; hold_opened=true; gate=real_runtime_radial_prepare; tap_before_ready=true; cancelled_by_tap=true; late_reply=rejected; native_ready=none; radial_reopened=none; grid_hidden=true; prepared_invocation={invocation_id}; tap_invocation={tap_id}; generation={generation}; key_cleanup=verified; hold_release={hold_release}",
+            hotkey.as_str()
+        ))
+    })();
+    append_case(
+        report,
+        "H08",
+        expected("H08"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_hold_matrix_cases(
+    report: &mut AcceptanceReport,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H09", trace_path);
+    let result = (|| {
+        for initial_visible in [false, true] {
+            ensure_hotkey_root_visibility(child, anchor, hotkey, initial_visible)?;
+            let surfaces = run_hotkey_hold_attempt(
+                child,
+                anchor,
+                trace_path,
+                hotkey,
+                initial_visible,
+                hold_threshold_ms,
+                true,
+                None,
+            )?;
+            let closed = run_hotkey_hold_attempt(
+                child,
+                anchor,
+                trace_path,
+                hotkey,
+                initial_visible,
+                hold_threshold_ms,
+                false,
+                Some(&surfaces),
+            )?;
+            if !closed.is_empty() || !wait_root_visibility(child, initial_visible, ROOT_TIMEOUT) {
+                return Err(CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    format!(
+                        "hold/release changed ROOT or failed to close radial from visible={initial_visible}"
+                    ),
+                ));
+            }
+        }
+        Ok(format!(
+            "evidence:v1; hotkey={}; initial_visible=hidden+visible; radial_opened=true; grid_visibility_unchanged=true; release_no_toggle=true; observed_hold_ms>={hold_threshold_ms}; release_keys=clear",
+            hotkey.as_str()
+        ))
+    })();
+    append_case(
+        report,
+        "H09",
+        expected("H09"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_hold_close_case(
+    report: &mut AcceptanceReport,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H10", trace_path);
+    let result = (|| {
+        let root = child
+            .refresh_root()
+            .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+        let initial_visible = root_is_physically_visible(child, &root)?;
+        ensure_hotkey_root_visibility(child, anchor, hotkey, initial_visible)?;
+        let trace_cursor = trace_lines(trace_path).len();
+        let surfaces = run_hotkey_hold_attempt(
+            child,
+            anchor,
+            trace_path,
+            hotkey,
+            initial_visible,
+            hold_threshold_ms,
+            true,
+            None,
+        )?;
+        let hover_digest = hover_executable_radial_cell(child, &surfaces, trace_path)?;
+        let closed = run_hotkey_hold_attempt(
+            child,
+            anchor,
+            trace_path,
+            hotkey,
+            initial_visible,
+            hold_threshold_ms,
+            false,
+            Some(&surfaces),
+        )?;
+        if !closed.is_empty() || !wait_root_visibility(child, initial_visible, ROOT_TIMEOUT) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "second hold did not close radial while preserving ROOT visibility".into(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        if !runtime_windows(child).is_empty() {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "radial surface reopened after hold close and key release".into(),
+            ));
+        }
+        let case_events = trace_lines(trace_path)
+            .into_iter()
+            .skip(trace_cursor)
+            .collect::<Vec<_>>();
+        if has_trace(&case_events, "radial_dispatch_requested", &[]) {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "hovered radial action dispatched during the H10 hold-close sequence".into(),
+            ));
+        }
+        input_modifiers_clear()
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        Ok(format!(
+            "evidence:v1; hotkey={}; radial_close=hold; hover_ack=executable_cell; hover_cell_digest={hover_digest}; release_keys=clear; grid_toggle=none; selection=none; dispatch=none; late_reopen=none",
+            hotkey.as_str(),
+        ))
+    })();
+    append_case(
+        report,
+        "H10",
+        expected("H10"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_hold_attempt(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    initial_visible: bool,
+    hold_threshold_ms: u64,
+    expect_active: bool,
+    known_surfaces: Option<&[WindowSnapshot]>,
+) -> Result<Vec<WindowSnapshot>, CaseFailure> {
+    if !wait_root_visibility(child, initial_visible, ROOT_TIMEOUT) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!("hold precondition ROOT visibility was not {initial_visible}"),
+        ));
+    }
+    let root = child
+        .refresh_root()
+        .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+    let target = if known_surfaces.is_some() {
+        let surfaces = known_surfaces.unwrap_or_default();
+        if !radial_surfaces_are_active(child, surfaces) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "hold-close preflight found that radial surfaces were already inactive".into(),
+            ));
+        }
+        current_hotkey_target(child, anchor)?
+    } else if initial_visible {
+        child
+            .focus_window(&root)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        (root.hwnd, child.process_id())
+    } else {
+        anchor
+            .focus()
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        (anchor.hwnd(), anchor.process_id())
+    };
+    focus_is_validated(target.0, target.1)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let cursor_before =
+        cursor_position().map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let before_surfaces = runtime_windows(child);
+    let preserved_surfaces = known_surfaces.unwrap_or_default();
+    if expect_active
+        && before_surfaces.iter().any(|surface| {
+            !preserved_surfaces
+                .iter()
+                .any(|known| known.process_id == surface.process_id && known.hwnd == surface.hwnd)
+        })
+    {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "hold-open precondition contains an unexpected active radial surface".into(),
+        ));
+    }
+    if expect_active
+        && !preserved_surfaces.is_empty()
+        && !radial_surfaces_are_active(child, preserved_surfaces)
+    {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "preserved authoring preview surfaces were inactive before runtime hold".into(),
+        ));
+    }
+    let mut observer = RunnerHookObserver::start()
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    if !observer.desktop.eq_ignore_ascii_case("Default") {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "runner observer is attached to desktop {:?}",
+                observer.desktop
+            ),
+        ));
+    }
+    let probe = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    observer
+        .pump_roundtrip(probe, Duration::from_millis(500))
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    if let Some(known) = known_surfaces {
+        if !radial_surfaces_are_active(child, known) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "radial surfaces closed during hold-close preflight".into(),
+            ));
+        }
+    }
+    focus_is_validated(target.0, target.1)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let trace_before_hold = trace_lines(trace_path);
+    let prior_visibility_revision = latest_desired_visibility_revision(&trace_before_hold);
+    let trace_cursor = trace_before_hold.len();
+    let down_time = Duration::from_millis(hold_threshold_ms.saturating_add(250).min(5_000));
+    let input = child
+        .send_acceptance_hotkey(target.0, target.1, hotkey, down_time)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let post_release_pump = observer.pump_roundtrip(
+        NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed),
+        Duration::from_millis(500),
+    );
+    let post_release_foreground = capture_foreground();
+    let post_release_desktop = input_desktop_evidence();
+    let post_release_key_state = child
+        .verify_acceptance_hotkey_released(hotkey)
+        .and_then(|release_state| input_modifiers_clear().map(|_| release_state));
+    let keys = match hotkey {
+        AcceptanceHotkey::F11 => vec![0x7A],
+        AcceptanceHotkey::ShiftAltWinEnd => vec![0xA0, 0xA4, 0x5B, 0x23],
+    };
+    let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(5));
+    capture_hotkey_attempt_evidence(
+        child,
+        HotkeyCandidateStream::MainCandidate,
+        trace_path,
+        trace_cursor,
+        &observation,
+        HotkeyRunnerInputPurpose::LauncherChord,
+    );
+    let observation_text = observation.describe();
+    let exact_edges = observation.exact_injected_pairs(1)
+        && observation.exact_injected_sequence(&expected_hotkey_edges(hotkey, 1));
+    observer
+        .stop_and_report()
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    if let Err(error) = &post_release_key_state {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "owned hotkey key state was not clear after release cleanup: {error}; release=[{}]; foreground_after={}:{}; desktop_after={post_release_desktop:?}; hook_pump_after={post_release_pump:?}; observer={observation_text}",
+                input.describe(),
+                hwnd_id(post_release_foreground.0),
+                post_release_foreground.1,
+            ),
+        ));
+    }
+    if !exact_edges {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "hold did not produce exact owned injected chord edges: {observation_text}; release=[{}]; foreground_after={}:{}; desktop_after={post_release_desktop:?}; hook_pump_after={post_release_pump:?}; key_state_after={post_release_key_state:?}",
+                input.describe(),
+                hwnd_id(post_release_foreground.0),
+                post_release_foreground.1,
+            ),
+        ));
+    }
+    let timing = observation
+        .timing(hotkey, 1)
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    let observed_hold = timing.primary_hold_ms.first().copied().unwrap_or_default();
+    if observed_hold < u128::from(hold_threshold_ms) {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!("observed primary key hold {observed_hold}ms is below {hold_threshold_ms}ms"),
+        ));
+    }
+    let events = wait_trace(trace_path, trace_cursor, TRACE_TIMEOUT, |events| {
+        has_trace(
+            events,
+            "hook_primary",
+            &["transition=Press", "provenance=ExternalInjected"],
+        ) && has_trace(
+            events,
+            "hook_primary",
+            &["transition=Release", "provenance=ExternalInjected"],
+        ) && has_trace(
+            events,
+            "configured_primary",
+            &[
+                "transition=Press",
+                "provenance=ExternalInjected",
+                "modifiers_match=true",
+            ],
+        ) && has_trace(
+            events,
+            "configured_primary",
+            &[
+                "transition=Release",
+                "provenance=ExternalInjected",
+                "modifiers_match=true",
+            ],
+        )
+    });
+    if !has_trace(
+        &events,
+        "hook_primary",
+        &["transition=Press", "provenance=ExternalInjected"],
+    ) || !has_trace(
+        &events,
+        "hook_primary",
+        &["transition=Release", "provenance=ExternalInjected"],
+    ) || !has_trace(
+        &events,
+        "configured_primary",
+        &[
+            "transition=Press",
+            "provenance=ExternalInjected",
+            "modifiers_match=true",
+        ],
+    ) || !has_trace(
+        &events,
+        "configured_primary",
+        &[
+            "transition=Release",
+            "provenance=ExternalInjected",
+            "modifiers_match=true",
+        ],
+    ) {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "production hook did not acknowledge both hold edges; observed={observation_text}; trace={events:?}"
+            ),
+        ));
+    }
+    let hold_invocation_id = events
+        .iter()
+        .find(|line| {
+            line.contains("trace_event=\"hook_primary\"") && line.contains("transition=Press")
+        })
+        .and_then(|line| trace_field_value(line, "invocation_id"))
+        .and_then(|value| value.parse::<u64>().ok());
+    if has_trace(&events, "short_tap", &[])
+        || trace_contains_hold_visibility_work(
+            &events,
+            prior_visibility_revision,
+            hold_invocation_id,
+        )
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!(
+                "hold/release emitted short-tap or correlated ROOT visibility work; prior_revision={prior_visibility_revision:?}; hold_invocation={hold_invocation_id:?}; events={events:?}"
+            ),
+        ));
+    }
+    if has_trace(&events, "radial_dispatch_requested", &[]) {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "hold gesture dispatched an action while opening or closing the radial".into(),
+        ));
+    }
+    let surfaces = if expect_active {
+        let surfaces = wait_runtime_windows(child, &before_surfaces, ROOT_TIMEOUT)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        validate_radial_surfaces(child, &surfaces)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        if !preserved_surfaces.is_empty() && !radial_surfaces_are_active(child, preserved_surfaces)
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "runtime hold changed the preserved authoring preview surfaces".into(),
+            ));
+        }
+        surfaces
+    } else {
+        let known = known_surfaces.ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::NativeRootState,
+                "hold-close requires the active surface set".into(),
+            )
+        })?;
+        if !wait_until(ROOT_TIMEOUT, || radial_surfaces_are_inactive(child, known)) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "hold did not close radial surfaces [{}]",
+                    describe_radial_surfaces(known)
+                ),
+            ));
+        }
+        Vec::new()
+    };
+    if !wait_root_visibility(child, initial_visible, ROOT_TIMEOUT) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "hold changed ROOT visibility".into(),
+        ));
+    }
+    let cursor_after =
+        cursor_position().map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    if cursor_before.x != cursor_after.x || cursor_before.y != cursor_after.y {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "cursor moved during hold: before=({},{}), after=({}, {})",
+                cursor_before.x, cursor_before.y, cursor_after.x, cursor_after.y
+            ),
+        ));
+    }
+    complete_hotkey_capture_at_current_trace(trace_path)?;
+    Ok(surfaces)
+}
+
+fn root_is_physically_visible(
+    child: &NativeChild,
+    root: &WindowSnapshot,
+) -> Result<bool, CaseFailure> {
+    let displays = native_display_bounds()
+        .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+    if root.hwnd != child.root().hwnd || root.process_id != child.process_id() {
+        return Err(CaseFailure::new(
+            FailureStage::WindowDiscovery,
+            "ROOT HWND/PID changed during hotkey behavior case".into(),
+        ));
+    }
+    Ok(root.visible && !root.minimized && intersects_display_bounds(root.bounds, &displays))
+}
+
+fn ensure_hotkey_root_visibility(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    hotkey: AcceptanceHotkey,
+    desired_visible: bool,
+) -> Result<(), CaseFailure> {
+    let root = child
+        .refresh_root()
+        .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+    if root_is_physically_visible(child, &root)? == desired_visible {
+        return Ok(());
+    }
+    anchor
+        .focus()
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    child
+        .send_acceptance_hotkey(
+            anchor.hwnd(),
+            anchor.process_id(),
+            hotkey,
+            Duration::from_millis(25),
+        )
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    if wait_root_visibility(child, desired_visible, ROOT_TIMEOUT) {
+        Ok(())
+    } else {
+        Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!("setup short tap did not establish ROOT visibility={desired_visible}"),
+        ))
+    }
+}
+
+fn ensure_designer_semantic_target_selected(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+    target: DesignerSemanticTarget,
+) -> Result<DesignerSemanticTargetState, CaseFailure> {
+    let baseline = wait_for_designer_semantic_target_in_session(
+        trace_path,
+        target,
+        session_id,
+        UIA_TIMEOUT,
+        |_| true,
+    )
+    .ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::DesignerNativeTarget,
+            format!("Designer did not publish its {target:?} target in session {session_id}"),
+        )
+    })?;
+    if baseline.selected {
+        return Ok(baseline);
+    }
+    let cursor = trace_lines(trace_path).len();
+    let click = click_designer_client_bounds(child, designer, baseline.bounds, trace_path)
+        .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+    if matches!(target, DesignerSemanticTarget::DefaultMenu) {
+        return wait_for_designer_semantic_target_in_session(
+            trace_path,
+            target,
+            session_id,
+            TRACE_TIMEOUT,
+            |state| state.selected,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerFrameworkInput,
+                format!(
+                    "checked native click did not select {target:?} in Designer session {session_id}; click=[{}]",
+                    click.describe()
+                ),
+            )
+        });
+    }
+    let events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+        checked_designer_toggle_transition(events, target, baseline, true).is_some()
+    });
+    checked_designer_toggle_transition(&events, target, baseline, true).ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::DesignerFrameworkInput,
+            format!(
+                "checked native click did not select {target:?} in Designer session {session_id}; click=[{}]",
+                click.describe()
+            ),
+        )
+    })
+}
+
+fn select_starter_menu_name_target(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+) -> Result<DesignerSemanticTargetState, CaseFailure> {
+    for target in [
+        DesignerSemanticTarget::Menus,
+        DesignerSemanticTarget::Tree,
+        DesignerSemanticTarget::Inspector,
+        DesignerSemanticTarget::DefaultMenu,
+    ] {
+        ensure_designer_semantic_target_selected(child, designer, trace_path, session_id, target)?;
+    }
+    wait_for_designer_semantic_target_in_session(
+        trace_path,
+        DesignerSemanticTarget::MenuName,
+        session_id,
+        UIA_TIMEOUT,
+        |_| true,
+    )
+    .ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::DesignerNativeTarget,
+            format!(
+                "selected starter menu did not publish its Menu Name target in session {session_id}"
+            ),
+        )
+    })
+}
+
+fn cleanup_hotkey_designer(
+    child: &NativeChild,
+    trace_path: &Path,
+    tracked: Option<&(WindowSnapshot, u64)>,
+    name_bounds: Option<[i32; 4]>,
+) -> Result<(), CaseFailure> {
+    let Some(current) = child.designer() else {
+        return Ok(());
+    };
+    let (window, session_id) = tracked
+        .map(|(window, session_id)| (window, *session_id))
+        .unwrap_or((&current, 0));
+    if current.hwnd != window.hwnd || current.process_id != child.process_id() {
+        return Err(CaseFailure::new(
+            FailureStage::Cleanup,
+            format!(
+                "refusing to close an unexpected Designer HWND: tracked={} current={} PID={}",
+                hwnd_id(window.hwnd),
+                hwnd_id(current.hwnd),
+                current.process_id
+            ),
+        ));
+    }
+
+    let restore_result = if let Some(bounds) = name_bounds {
+        if session_id == 0 {
+            Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "cannot restore the H11 Menu Name without its accepted Designer session".into(),
+            ))
+        } else {
+            (|| {
+                click_designer_client_bounds(child, window, bounds, trace_path)
+                    .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+                wait_for_designer_semantic_target_in_session(
+                    trace_path,
+                    DesignerSemanticTarget::MenuName,
+                    session_id,
+                    TRACE_TIMEOUT,
+                    |state| state.focused,
+                )
+                .ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H11 cleanup could not focus Menu Name to restore the fixture draft".into(),
+                    )
+                })?;
+                let cursor = trace_lines(trace_path).len();
+                replace_focused_designer_text(child, window, DESIGNER_STARTER_NAME)
+                    .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+                let restored = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+                    has_trace(
+                        events,
+                        "designer_edit_state",
+                        &["input_matches_model=true", "draft_dirty=false"],
+                    )
+                });
+                if !has_trace(
+                    &restored,
+                    "designer_edit_state",
+                    &["input_matches_model=true", "draft_dirty=false"],
+                ) {
+                    return Err(CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H11 cleanup did not restore the clean starter Menu Name".into(),
+                    ));
+                }
+                Ok(())
+            })()
+        }
+    } else {
+        Ok(())
+    };
+
+    let close_result = request_window_close(child, &current)
+        .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))
+        .and_then(|()| {
+            if wait_until(ROOT_TIMEOUT, || child.designer().is_none()) {
+                Ok(())
+            } else {
+                Err(CaseFailure::new(
+                    FailureStage::Cleanup,
+                    "H11 Designer HWND remained after bounded clean close".into(),
+                ))
+            }
+        });
+    match (restore_result, close_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(restore), Err(close)) => Err(CaseFailure::new(
+            FailureStage::Cleanup,
+            format!(
+                "{}; Designer close also failed: {}",
+                restore.message, close.message
+            ),
+        )),
+    }
+}
+
+fn run_hotkey_designer_preservation_case(
+    report: &mut AcceptanceReport,
+    child: &mut NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H11", trace_path);
+    let mut tracked_designer = child.designer().map(|window| (window, 0));
+    let mut name_bounds = None;
+    let proof = (|| {
+        ensure_hotkey_root_visibility(child, anchor, hotkey, true)?;
+        let uia = UiAutomation::new()
+            .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+        let entry = run_designer_entry(child, &uia, anchor, trace_path)?;
+        tracked_designer = Some((entry.window.clone(), entry.session_id));
+        let name =
+            select_starter_menu_name_target(child, &entry.window, trace_path, entry.session_id)?;
+        name_bounds = Some(name.bounds);
+        let name_click =
+            click_designer_client_bounds(child, &entry.window, name.bounds, trace_path)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+        wait_for_designer_semantic_target_in_session(
+            trace_path,
+            DesignerSemanticTarget::MenuName,
+            entry.session_id,
+            TRACE_TIMEOUT,
+            |state| state.focused,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerFrameworkInput,
+                "Menu Name did not receive production keyboard focus".into(),
+            )
+        })?;
+        let dirty_cursor = trace_lines(trace_path).len();
+        replace_focused_designer_text(child, &entry.window, "M1 hotkey draft")
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let dirty = wait_trace(trace_path, dirty_cursor, TRACE_TIMEOUT, |events| {
+            has_trace(
+                events,
+                "designer_edit_state",
+                &["input_matches_model=true", "draft_dirty=true"],
+            )
+        });
+        if !has_trace(
+            &dirty,
+            "designer_edit_state",
+            &["input_matches_model=true", "draft_dirty=true"],
+        ) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "native Menu Name edit did not create a dirty Designer draft".into(),
+            ));
+        }
+        let dirty_state =
+            wait_for_geometry_state(trace_path, entry.session_id, TRACE_TIMEOUT, |state| {
+                state.session_id == entry.session_id
+            })
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerMutation, error))?;
+        let baseline_digest = dirty_state.draft_cell_ids_digest;
+        let trace_cursor = trace_lines(trace_path).len();
+        let mut invocation_ids = std::collections::BTreeSet::new();
+        for (initial_visible, taps) in [(true, 2usize), (true, 1usize), (false, 2usize)] {
+            focus_is_validated(entry.window.hwnd, child.process_id()).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!("Designer lost foreground before repeated taps: {error}"),
+                )
+            })?;
+            let burst = run_hotkey_burst_attempt_on_target_with_policy(
+                child,
+                entry.window.hwnd,
+                child.process_id(),
+                None,
+                trace_path,
+                hotkey,
+                taps,
+                initial_visible,
+                hold_threshold_ms,
+                VisibleBurstSettlePolicy::PreserveForeground {
+                    target_hwnd: hwnd_id(entry.window.hwnd),
+                    target_process_id: child.process_id(),
+                },
+            )?;
+            let expected_final_visible = initial_visible ^ (taps % 2 == 1);
+            if burst.final_visible != expected_final_visible {
+                return Err(CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    format!(
+                        "Designer burst parity expected ROOT visible={expected_final_visible}, observed {}",
+                        burst.final_visible
+                    ),
+                ));
+            }
+            for invocation_id in burst.invocation_ids {
+                if !invocation_ids.insert(invocation_id) {
+                    return Err(CaseFailure::new(
+                        FailureStage::GestureDecision,
+                        format!("Designer burst repeated invocation ID {invocation_id}"),
+                    ));
+                }
+            }
+            let (foreground, foreground_pid) = capture_foreground();
+            if foreground != entry.window.hwnd || foreground_pid != child.process_id() {
+                return Err(CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!(
+                        "hotkey forced ordinary focus away from Designer: HWND={} PID={foreground_pid}",
+                        hwnd_id(foreground)
+                    ),
+                ));
+            }
+        }
+        if invocation_ids.len() != 5 {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!(
+                    "expected five distinct tap decisions across visible/hidden Designer bursts, observed {}",
+                    invocation_ids.len()
+                ),
+            ));
+        }
+        let after_lines = trace_lines(trace_path);
+        let designer_lines = after_lines
+            .iter()
+            .skip(trace_cursor)
+            .filter(|line| {
+                line.contains("trace_event=\"designer_close\"")
+                    || line.contains("trace_event=\"designer_submitted\"")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !designer_lines.is_empty() {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                format!("hotkey taps submitted or closed the Designer: {designer_lines:?}"),
+            ));
+        }
+        if after_lines
+            .iter()
+            .skip(trace_cursor)
+            .any(|line| line.contains("trace_event=\"radial_dispatch_requested\""))
+        {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "Designer hotkey tap dispatched an action instead of only toggling ROOT".into(),
+            ));
+        }
+        let current_designer = child.designer().ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::WindowDiscovery,
+                "Designer HWND closed during repeated hotkey taps".into(),
+            )
+        })?;
+        if current_designer.hwnd != entry.window.hwnd {
+            return Err(CaseFailure::new(
+                FailureStage::WindowDiscovery,
+                "Designer session HWND changed during repeated hotkey taps".into(),
+            ));
+        }
+        let after_state =
+            wait_for_geometry_state(trace_path, entry.session_id, TRACE_TIMEOUT, |state| {
+                state.session_id == entry.session_id
+                    && state.draft_cell_ids_digest == baseline_digest
+            })
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerMutation, error))?;
+        if after_state.draft_cell_ids_digest != baseline_digest {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "Designer draft cell identity digest changed during hotkey taps".into(),
+            ));
+        }
+        let latest_edit = after_lines
+            .iter()
+            .rev()
+            .find(|line| line.contains("trace_event=\"designer_edit_state\""));
+        if !latest_edit.is_some_and(|line| {
+            line.contains("draft_dirty=true") && line.contains("input_matches_model=true")
+        }) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "dirty Designer draft was lost during repeated hotkey taps".into(),
+            ));
+        }
+
+        replace_focused_designer_text(child, &entry.window, DESIGNER_STARTER_NAME)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let restored = wait_trace(trace_path, trace_cursor, TRACE_TIMEOUT, |events| {
+            has_trace(
+                events,
+                "designer_edit_state",
+                &["input_matches_model=true", "draft_dirty=false"],
+            )
+        });
+        if !has_trace(
+            &restored,
+            "designer_edit_state",
+            &["input_matches_model=true", "draft_dirty=false"],
+        ) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "temporary dirty draft value was not restored to the deterministic clean state"
+                    .into(),
+            ));
+        }
+
+        let current_designer = child.designer().ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::WindowDiscovery,
+                "Designer disappeared before clean post-proof close".into(),
+            )
+        })?;
+        if current_designer.hwnd != entry.window.hwnd {
+            return Err(CaseFailure::new(
+                FailureStage::WindowDiscovery,
+                "Designer HWND changed before clean post-proof close".into(),
+            ));
+        }
+        request_window_close(child, &current_designer)
+            .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+        if !wait_until(ROOT_TIMEOUT, || child.designer().is_none()) {
+            return Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "clean Designer window did not close after preserving the dirty-draft test evidence".into(),
+            ));
+        }
+        Ok(format!(
+            "evidence:v1; hotkey={}; designer_session_preserved=true; draft_digest_preserved=true; save_discard_close=none; ordinary_focus_forced=false; repeated_taps=5; designer_start_states=visible+hidden; hidden_start_burst=true; designer_cleanup=closed_cleanly; distinct_invocation_ids={}; setup_click=[{}]; temporary_draft_restored=true",
+            hotkey.as_str(),
+            invocation_ids.len(),
+            name_click.describe()
+        ))
+    })();
+    let cleanup =
+        cleanup_hotkey_designer(child, trace_path, tracked_designer.as_ref(), name_bounds);
+    let result = match (proof, cleanup) {
+        (Ok(evidence), Ok(())) => Ok(evidence),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => Err(CaseFailure::new(
+            error.stage,
+            format!(
+                "{}; H11 finally cleanup failed: {}",
+                error.message, cleanup_error.message
+            ),
+        )),
+    };
+    append_case(
+        report,
+        "H11",
+        expected("H11"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_designer_preview_preservation_case(
+    report: &mut AcceptanceReport,
+    child: &mut NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H12", trace_path);
+    let mut designer: Option<(WindowSnapshot, u64)> = None;
+    let mut name_bounds = None;
+    let mut draft_generation = None;
+    let mut draft_digest = None;
+    let mut preview_attempted = false;
+    let mut preview_generation = None;
+    let mut preview_baseline = std::collections::BTreeSet::new();
+    let mut preview_surfaces = Vec::new();
+    let mut runtime_surfaces = Vec::new();
+    let mut runtime_hold_attempted = false;
+
+    let proof = (|| {
+        ensure_hotkey_root_visibility(child, anchor, hotkey, true)?;
+        // Keep an owned Designer HWND available to the finally-style cleanup even
+        // when fresh Designer entry is rejected before returning a session.
+        designer = child.designer().map(|window| (window, 0));
+        let uia = UiAutomation::new()
+            .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+        let entry = run_designer_entry(child, &uia, anchor, trace_path)?;
+        designer = Some((entry.window.clone(), entry.session_id));
+        let name =
+            select_starter_menu_name_target(child, &entry.window, trace_path, entry.session_id)?;
+        name_bounds = Some(name.bounds);
+        click_designer_client_bounds(child, &entry.window, name.bounds, trace_path)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+        wait_for_designer_semantic_target_in_session(
+            trace_path,
+            DesignerSemanticTarget::MenuName,
+            entry.session_id,
+            TRACE_TIMEOUT,
+            |state| state.focused,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerFrameworkInput,
+                "H12 Menu Name did not receive native keyboard focus".into(),
+            )
+        })?;
+        let dirty_cursor = trace_lines(trace_path).len();
+        replace_focused_designer_text(child, &entry.window, "M1 H12 preview draft")
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let dirty = wait_trace(trace_path, dirty_cursor, TRACE_TIMEOUT, |events| {
+            has_trace(
+                events,
+                "designer_edit_state",
+                &["input_matches_model=true", "draft_dirty=true"],
+            )
+        });
+        if !has_trace(
+            &dirty,
+            "designer_edit_state",
+            &["input_matches_model=true", "draft_dirty=true"],
+        ) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "H12 native Menu Name edit did not produce a dirty draft".into(),
+            ));
+        }
+        let dirty_state =
+            wait_for_geometry_state(trace_path, entry.session_id, TRACE_TIMEOUT, |state| {
+                state.session_id == entry.session_id
+            })
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerMutation, error))?;
+        draft_generation = Some(dirty_state.generation);
+        draft_digest = Some(dirty_state.draft_cell_ids_digest);
+
+        preview_baseline = visible_radial_host_windows(child);
+        if !preview_baseline.is_empty() || !runtime_windows(child).is_empty() {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                "H12 requires an empty radial surface baseline before starting native preview"
+                    .into(),
+            ));
+        }
+        let preview_cursor = trace_lines(trace_path).len();
+        preview_attempted = true;
+        click_authoring_target(
+            child,
+            &entry.window,
+            trace_path,
+            entry.session_id,
+            AuthoringControlTarget::OpenDesktopPreview,
+            None,
+            AuthoringControlRole::Button,
+        )
+        .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+        let preview = wait_for_terminal_authoring_request(
+            trace_path,
+            preview_cursor,
+            entry.session_id,
+            "StartNativePreview",
+            UIA_TIMEOUT,
+        )
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "H12 native authoring preview did not receive its correlated start reply".into(),
+            )
+        })?;
+        preview_generation = Some(preview.identity.generation);
+        preview_surfaces = wait_runtime_windows(child, &[], TRACE_TIMEOUT)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?;
+        if preview_surfaces.len() < 2 || visible_radial_host_windows(child) == preview_baseline {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerPresentation,
+                "H12 authoring preview did not create a visible native radial surface set".into(),
+            ));
+        }
+
+        // Only classify newly opened radial HWNDs as runtime-owned after the
+        // preview set has been captured and the runtime hold phase begins.
+        runtime_hold_attempted = true;
+        let hold_attempt = run_hotkey_hold_attempt(
+            child,
+            anchor,
+            trace_path,
+            hotkey,
+            true,
+            hold_threshold_ms,
+            true,
+            Some(&preview_surfaces),
+        );
+        let mut known_preview_surfaces = preview_baseline.clone();
+        known_preview_surfaces.extend(preview_surfaces.iter().map(|surface| hwnd_id(surface.hwnd)));
+        runtime_surfaces =
+            visible_radial_host_snapshots(child, &known_preview_surfaces, runtime_hold_attempted);
+        let runtime = hold_attempt?;
+        runtime_surfaces = runtime.clone();
+        validate_radial_surfaces(child, &runtime)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        if !radial_surfaces_are_active(child, &runtime)
+            || !radial_surfaces_are_active(child, &preview_surfaces)
+            || visible_radial_host_windows(child).len() < preview_baseline.len() + 4
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H12 runtime hold did not coexist with the original authoring preview HWND set"
+                    .into(),
+            ));
+        }
+
+        let target = current_hotkey_target(child, anchor)?;
+        let tap = run_hotkey_burst_attempt_on_target_checked(
+            child,
+            target.0,
+            target.1,
+            None,
+            trace_path,
+            hotkey,
+            1,
+            true,
+            hold_threshold_ms,
+            || {
+                if !radial_surfaces_are_active(child, &runtime) || capture_foreground() != target {
+                    return Err(CaseFailure::new(
+                        FailureStage::NativeRootState,
+                        "H12 runtime radial or its owned foreground target changed before tap dismissal".into(),
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        if tap.final_visible
+            || !wait_until(ROOT_TIMEOUT, || {
+                radial_surface_set_matches_active_state(
+                    &runtime,
+                    &child.windows(),
+                    child.process_id(),
+                    false,
+                ) && radial_surfaces_are_active(child, &preview_surfaces)
+            })
+            || visible_radial_host_windows(child)
+                != preview_surfaces
+                    .iter()
+                    .map(|window| hwnd_id(window.hwnd))
+                    .collect()
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H12 tap did not close runtime radial while preserving the authoring preview HWNDs"
+                    .into(),
+            ));
+        }
+
+        let current_designer = child.designer().ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::WindowDiscovery,
+                "H12 Designer closed during runtime tap dismissal".into(),
+            )
+        })?;
+        if current_designer.hwnd != entry.window.hwnd
+            || current_designer.process_id != child.process_id()
+            || !uia.root_is_queryable(entry.window.hwnd, child.process_id())
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerNativeTarget,
+                "H12 runtime toggle changed or invalidated the same-session Designer window".into(),
+            ));
+        }
+        let state_after =
+            wait_for_geometry_state(trace_path, entry.session_id, TRACE_TIMEOUT, |state| {
+                state.session_id == entry.session_id
+                    && Some(state.draft_cell_ids_digest) == draft_digest
+                    && Some(state.generation) == draft_generation
+            })
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerMutation, error))?;
+        if Some(state_after.draft_cell_ids_digest) != draft_digest
+            || Some(state_after.generation) != draft_generation
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "H12 runtime tap changed the dirty draft revision or cell identity digest".into(),
+            ));
+        }
+        let latest_edit = trace_lines(trace_path)
+            .into_iter()
+            .rev()
+            .find(|line| line.contains("trace_event=\"designer_edit_state\""));
+        if !latest_edit.is_some_and(|line| {
+            line.contains("draft_dirty=true") && line.contains("input_matches_model=true")
+        }) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerMutation,
+                "H12 runtime tap lost the dirty Designer input/model state".into(),
+            ));
+        }
+        let case_events = trace_lines(trace_path)
+            .into_iter()
+            .skip(preview_cursor)
+            .collect::<Vec<_>>();
+        if case_events.iter().any(|line| {
+            line.contains("trace_event=\"designer_close\"")
+                || line.contains("trace_event=\"designer_submitted\"")
+                || line.contains("trace_event=\"radial_dispatch_requested\"")
+        }) {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "H12 runtime hold/tap submitted Designer state, closed the editor, or dispatched a radial action".into(),
+            ));
+        }
+        Ok(format!(
+            "evidence:v1; hotkey={}; designer_dirty=true; native_preview=active; runtime_hold_opened=true; runtime_tap_dismissed=true; preview_survived=true; preview_baseline_preserved=true; runtime_surfaces_new=true; designer_session_preserved=true; draft_digest_preserved=true; draft_generation={}; draft_cell_ids_digest={}; preview_hwnds={}; runtime_hwnds={}; invocation_ids={}",
+            hotkey.as_str(),
+            dirty_state.generation,
+            dirty_state.draft_cell_ids_digest,
+            preview_surfaces.len(),
+            runtime.len(),
+            tap.invocation_ids.len()
+        ))
+    })();
+
+    let mut cleanup_errors = Vec::new();
+    if let Some((designer_window, session_id)) = designer.as_ref() {
+        if runtime_hold_attempted && runtime_surfaces.is_empty() {
+            let mut known_preview_surfaces = preview_baseline.clone();
+            known_preview_surfaces
+                .extend(preview_surfaces.iter().map(|surface| hwnd_id(surface.hwnd)));
+            runtime_surfaces = visible_radial_host_snapshots(
+                child,
+                &known_preview_surfaces,
+                runtime_hold_attempted,
+            );
+        }
+        if !runtime_surfaces.is_empty() && radial_surfaces_are_active(child, &runtime_surfaces) {
+            attempt_cleanup_step(&mut cleanup_errors, "runtime radial", || {
+                let root = child
+                    .refresh_root()
+                    .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+                let initial_visible = root_is_physically_visible(child, &root)?;
+                let (target_hwnd, target_pid) = current_hotkey_target(child, anchor)?;
+                run_hotkey_burst_attempt_on_target_checked(
+                    child,
+                    target_hwnd,
+                    target_pid,
+                    None,
+                    trace_path,
+                    hotkey,
+                    1,
+                    initial_visible,
+                    hold_threshold_ms,
+                    || {
+                        if !radial_surfaces_are_active(child, &runtime_surfaces)
+                            || capture_foreground() != (target_hwnd, target_pid)
+                        {
+                            return Err(CaseFailure::new(
+                                FailureStage::Cleanup,
+                                "H12 cleanup could not validate the active runtime radial before dismissal".into(),
+                            ));
+                        }
+                        Ok(())
+                    },
+                )?;
+                if !wait_until(ROOT_TIMEOUT, || {
+                    radial_surface_set_matches_active_state(
+                        &runtime_surfaces,
+                        &child.windows(),
+                        child.process_id(),
+                        false,
+                    )
+                }) {
+                    return Err(CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H12 cleanup tap did not close the runtime radial".into(),
+                    ));
+                }
+                Ok(())
+            });
+        }
+
+        if preview_attempted {
+            attempt_cleanup_step(&mut cleanup_errors, "native preview stop", || {
+                child
+                    .focus_window(designer_window)
+                    .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+                let generation = preview_generation.or(draft_generation).ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H12 preview cleanup has no captured Designer generation".into(),
+                    )
+                })?;
+                let stop_cursor = trace_lines(trace_path).len();
+                tab_and_activate_authoring_control(
+                    child,
+                    designer_window,
+                    trace_path,
+                    *session_id,
+                    generation,
+                    AuthoringControlTarget::StopDesktopPreview,
+                )
+                .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+                wait_for_terminal_authoring_request(
+                    trace_path,
+                    stop_cursor,
+                    *session_id,
+                    "StopNativePreview",
+                    UIA_TIMEOUT,
+                )
+                .ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H12 preview stop did not receive its same-session terminal reply".into(),
+                    )
+                })?;
+                Ok(())
+            });
+            if !wait_until(Duration::from_secs(2), || {
+                visible_radial_host_windows(child) == preview_baseline
+            }) {
+                cleanup_errors.push("native preview windows remained visible after stop".into());
+            }
+        }
+
+        if let Some(bounds) = name_bounds {
+            attempt_cleanup_step(&mut cleanup_errors, "Designer draft restore", || {
+                click_designer_client_bounds(child, designer_window, bounds, trace_path)
+                    .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+                wait_for_designer_semantic_target_in_session(
+                    trace_path,
+                    DesignerSemanticTarget::MenuName,
+                    *session_id,
+                    TRACE_TIMEOUT,
+                    |state| state.focused,
+                )
+                .ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H12 cleanup could not focus Menu Name to restore the deterministic draft"
+                            .into(),
+                    )
+                })?;
+                let restored_cursor = trace_lines(trace_path).len();
+                replace_focused_designer_text(child, designer_window, DESIGNER_STARTER_NAME)
+                    .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))?;
+                let restored = wait_trace(trace_path, restored_cursor, TRACE_TIMEOUT, |events| {
+                    has_trace(
+                        events,
+                        "designer_edit_state",
+                        &["input_matches_model=true", "draft_dirty=false"],
+                    )
+                });
+                if !has_trace(
+                    &restored,
+                    "designer_edit_state",
+                    &["input_matches_model=true", "draft_dirty=false"],
+                ) {
+                    return Err(CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H12 cleanup did not restore the deterministic clean Designer draft".into(),
+                    ));
+                }
+                Ok(())
+            });
+        }
+
+        attempt_cleanup_step(&mut cleanup_errors, "request Designer close", || {
+            request_window_close(child, designer_window)
+                .map_err(|error| CaseFailure::new(FailureStage::Cleanup, error))
+        });
+        attempt_cleanup_step(&mut cleanup_errors, "verify Designer close", || {
+            if wait_until(ROOT_TIMEOUT, || child.designer().is_none()) {
+                Ok(())
+            } else {
+                Err(CaseFailure::new(
+                    FailureStage::Cleanup,
+                    "clean Designer close did not retire its HWND".into(),
+                ))
+            }
+        });
+    }
+    let cleanup = if cleanup_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(CaseFailure::new(
+            FailureStage::Cleanup,
+            cleanup_errors.join("; "),
+        ))
+    };
+
+    let result = match (proof, cleanup) {
+        (Ok(evidence), Ok(())) => Ok(format!(
+            "{evidence}; preview_cleanup=stopped; designer_cleanup=closed_cleanly"
+        )),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => Err(CaseFailure::new(
+            error.stage,
+            format!(
+                "{}; H12 cleanup also failed: {}",
+                error.message, cleanup_error.message
+            ),
+        )),
+    };
+    append_case(
+        report,
+        "H12",
+        expected("H12"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_direct_trigger_preservation_case(
+    executable: &str,
+    profile: &Path,
+    report: &mut AcceptanceReport,
+    child: &mut NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H16", trace_path);
+    let mut fallback_artifacts = Vec::new();
+    let mut result = (|| {
+        ensure_hotkey_root_visibility(child, anchor, hotkey, true)?;
+        if child.designer().is_some() || !runtime_windows(child).is_empty() {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H16 requires a clean Designer and runtime radial baseline".into(),
+            ));
+        }
+
+        let direct = run_acceptance_direct_trigger(
+            child,
+            anchor,
+            trace_path,
+            &runtime_windows(child),
+            0x54,
+        )?;
+        validate_radial_surfaces(child, &direct)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        if !radial_surfaces_are_active(child, &direct)
+            || !wait_root_visibility(child, true, Duration::ZERO)
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H16 direct trigger did not open runtime radial while preserving visible ROOT"
+                    .into(),
+            ));
+        }
+
+        let first_target = current_hotkey_target(child, anchor)?;
+        let first_cursor = trace_lines(trace_path).len();
+        let first_tap = run_hotkey_burst_attempt_on_target_checked(
+            child,
+            first_target.0,
+            first_target.1,
+            None,
+            trace_path,
+            hotkey,
+            1,
+            true,
+            hold_threshold_ms,
+            || {
+                if !radial_surfaces_are_active(child, &direct)
+                    || capture_foreground() != first_target
+                {
+                    return Err(CaseFailure::new(
+                        FailureStage::NativeRootState,
+                        "H16 runtime radial or owned foreground changed before launcher tap".into(),
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        let first_events = trace_lines(trace_path)
+            .into_iter()
+            .skip(first_cursor)
+            .collect::<Vec<_>>();
+        if first_tap.final_visible
+            || !wait_until(ROOT_TIMEOUT, || {
+                radial_surfaces_are_inactive(child, &direct)
+            })
+            || !first_events.iter().any(|line| {
+                line.contains("trace_event=\"desired_visibility\"")
+                    && trace_field_value(line, "visible") == Some("false")
+                    && first_tap.invocation_ids.iter().any(|id| {
+                        trace_field_value(line, "invocation_id")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            == Some(*id)
+                    })
+            })
+            || first_events
+                .iter()
+                .any(|line| line.contains("trace_event=\"radial_dispatch_requested\""))
+        {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "H16 normal launcher tap did not dismiss runtime radial, toggle grid, and avoid selection".into(),
+            ));
+        }
+
+        let root_after_hide = child
+            .refresh_root()
+            .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+        if root_is_physically_visible(child, &root_after_hide)? {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H16 first launcher tap did not leave ROOT physically hidden".into(),
+            ));
+        }
+        let second = run_acceptance_direct_trigger(
+            child,
+            anchor,
+            trace_path,
+            &runtime_windows(child),
+            0x54,
+        )?;
+        validate_radial_surfaces(child, &second)
+            .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+        let root_after_direct = child
+            .refresh_root()
+            .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+        if !radial_surfaces_are_active(child, &second)
+            || root_is_physically_visible(child, &root_after_direct)?
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "H16 direct trigger was not preserved after the launcher tap hid ROOT".into(),
+            ));
+        }
+
+        let second_target = current_hotkey_target(child, anchor)?;
+        let second_tap = run_hotkey_burst_attempt_on_target_checked(
+            child,
+            second_target.0,
+            second_target.1,
+            None,
+            trace_path,
+            hotkey,
+            1,
+            false,
+            hold_threshold_ms,
+            || {
+                if !radial_surfaces_are_active(child, &second)
+                    || capture_foreground() != second_target
+                {
+                    return Err(CaseFailure::new(
+                        FailureStage::Cleanup,
+                        "H16 runtime radial or owned foreground changed before cleanup tap".into(),
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        if !second_tap.final_visible
+            || !wait_until(ROOT_TIMEOUT, || {
+                radial_surfaces_are_inactive(child, &second)
+            })
+            || !wait_root_visibility(child, true, ROOT_TIMEOUT)
+        {
+            return Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "H16 cleanup launcher tap did not dismiss radial and restore the grid".into(),
+            ));
+        }
+        let (fallback, artifacts) = h16_fallback_result_for_case(run_hotkey_legacy_fallback_case(
+            executable, profile, output, anchor, hotkey,
+        ));
+        fallback_artifacts = artifacts;
+        let fallback = fallback?;
+        Ok(format!(
+            "evidence:v1; hotkey={}; direct_trigger=opened; native_launcher_tap=dismissed+grid_toggled; legacy_launcher_tap=dismissed+grid_toggled; legacy_source=HotkeyTrigger+LegacyTrigger; direct_trigger_preserved=true; root_refreshed_after_direct=true; root_start_visible=true; root_hide_then_show=true; direct_chord=Ctrl+Alt+T; tap_invocations={}; legacy_child_pid={}; legacy_profile_sha256={}; legacy_profile_cleanup=verified; legacy_trace_artifact={}; legacy_profile_artifact={}",
+            hotkey.as_str(),
+            first_tap.invocation_ids.len() + second_tap.invocation_ids.len(),
+            fallback.child_process_id,
+            fallback.profile_sha256,
+            fallback.artifacts[0].display(),
+            fallback.artifacts[1].display(),
+        ))
+    })();
+    if let Err(error) = complete_open_hotkey_capture_at_current_trace(trace_path) {
+        result = Err(match result {
+            Ok(_) => error,
+            Err(mut existing) => {
+                existing.message = format!(
+                    "{}; could not materialize H16 trace before fallback cleanup: {}",
+                    existing.message, error.message
+                );
+                existing
+            }
+        });
+    }
+    append_h16_case_result(
+        report,
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+        &fallback_artifacts,
+    );
+}
+
+struct LegacyFallbackEvidence {
+    child_process_id: u32,
+    profile_sha256: String,
+    artifacts: Vec<PathBuf>,
+}
+
+struct LegacyFallbackFailure {
+    failure: CaseFailure,
+    artifacts: Vec<PathBuf>,
+}
+
+impl From<CaseFailure> for LegacyFallbackFailure {
+    fn from(failure: CaseFailure) -> Self {
+        Self {
+            failure,
+            artifacts: Vec::new(),
+        }
+    }
+}
+
+fn h16_fallback_result_for_case(
+    result: Result<LegacyFallbackEvidence, LegacyFallbackFailure>,
+) -> (Result<LegacyFallbackEvidence, CaseFailure>, Vec<PathBuf>) {
+    match result {
+        Ok(evidence) => {
+            let artifacts = evidence.artifacts.clone();
+            (Ok(evidence), artifacts)
+        }
+        Err(failure) => (Err(failure.failure), failure.artifacts),
+    }
+}
+
+fn legacy_fallback_trace_path(profile: &Path) -> PathBuf {
+    profile.join("acceptance.log")
+}
+
+fn run_hotkey_legacy_fallback_case(
+    executable: &str,
+    profile: &Path,
+    output: &Path,
+    anchor: &FocusAnchor,
+    primary_hotkey: AcceptanceHotkey,
+) -> Result<LegacyFallbackEvidence, LegacyFallbackFailure> {
+    let legacy_hotkey = match primary_hotkey {
+        AcceptanceHotkey::F11 => AcceptanceHotkey::ShiftAltWinEnd,
+        AcceptanceHotkey::ShiftAltWinEnd => AcceptanceHotkey::F11,
+    };
+    let alternate_profile = tempfile::Builder::new()
+        .prefix("radial-acceptance-h16-legacy-")
+        .tempdir_in(profile)
+        .map_err(|error| CaseFailure::new(FailureStage::Environment, error.to_string()))?;
+    let trace_path = legacy_fallback_trace_path(alternate_profile.path());
+    register_hotkey_candidate_stream(&trace_path, HotkeyCandidateStream::LegacyFallbackCandidate);
+    let log_path = trace_path.clone();
+    let fixture = super::super::deterministic_fixture_for_hotkey_with_direct_trigger_chord(
+        &log_path,
+        super::super::MouseGestureMode::Enabled,
+        legacy_hotkey,
+        "Ctrl+Alt+Y",
+        false,
+    )
+    .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+    for (name, bytes) in [
+        ("settings.json", fixture.settings_json.as_slice()),
+        ("radial.json", fixture.radial_json.as_slice()),
+        ("actions.json", fixture.actions_json.as_slice()),
+    ] {
+        super::super::write_new(&alternate_profile.path().join(name), bytes)
+            .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+    }
+    let profile_sha256 = super::super::sha256_bytes(
+        &[
+            fixture.settings_json.as_slice(),
+            fixture.radial_json.as_slice(),
+            fixture.actions_json.as_slice(),
+        ]
+        .concat(),
+    );
+    let mut child = NativeChild::launch(
+        Path::new(executable),
+        alternate_profile.path(),
+        &log_path,
+        &alternate_profile.path().join("child.stdout.log"),
+        &alternate_profile.path().join("child.stderr.log"),
+    )
+    .map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("launch isolated legacy-route H16 profile: {error}"),
+        )
+    })?;
+    let child_process_id = child.process_id();
+    let proof = (|| {
+        if !wait_root_visibility(&child, true, ROOT_TIMEOUT) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "legacy-route H16 ROOT did not become physically visible".into(),
+            ));
+        }
+        if !runtime_windows(&child).is_empty() {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "legacy-route H16 runtime radial baseline was not empty".into(),
+            ));
+        }
+        let direct = run_acceptance_direct_trigger(
+            &child,
+            anchor,
+            &trace_path,
+            &runtime_windows(&child),
+            0x59,
+        )?;
+        if !radial_surfaces_are_active(&child, &direct) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "legacy-route Ctrl+Alt+Y did not open a runtime radial".into(),
+            ));
+        }
+
+        let target = current_hotkey_target(&child, anchor)?;
+        let keys = hotkey_observer_keys(legacy_hotkey);
+        let mut observer = RunnerHookObserver::start()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        let probe = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        observer
+            .pump_roundtrip(probe, Duration::from_millis(500))
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        if !radial_surfaces_are_active(&child, &direct) || capture_foreground() != target {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "legacy-route radial or owned foreground changed before launcher key-down".into(),
+            ));
+        }
+        let tap_cursor = trace_lines(&trace_path).len();
+        let input = child
+            .send_acceptance_hotkey(
+                target.0,
+                target.1,
+                legacy_hotkey,
+                Duration::from_millis(100),
+            )
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(3));
+        capture_hotkey_attempt_evidence(
+            &child,
+            HotkeyCandidateStream::LegacyFallbackCandidate,
+            &trace_path,
+            tap_cursor,
+            &observation,
+            HotkeyRunnerInputPurpose::LauncherChord,
+        );
+        observer
+            .stop_and_report()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        if !observation.exact_injected_pairs(1)
+            || !observation.exact_injected_sequence(&expected_hotkey_edges(legacy_hotkey, 1))
+            || input.observed_vks != keys
+        {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "legacy-route launcher tap edges were not exact: {}",
+                    observation.describe()
+                ),
+            ));
+        }
+        input_modifiers_clear().map_err(|error| {
+            CaseFailure::new(
+                FailureStage::InputInjection,
+                format!("legacy-route key cleanup failed: {error}"),
+            )
+        })?;
+        let legacy_visibility = wait_trace(&trace_path, tap_cursor, ROOT_TIMEOUT, |events| {
+            events.iter().any(|line| {
+                line.contains("trace_event=\"desired_visibility\"")
+                    && trace_field_value(line, "source") == Some("LegacyTrigger")
+                    && trace_field_value(line, "visible") == Some("false")
+                    && trace_field_value(line, "invocation_id") == Some("none")
+            })
+        });
+        if !legacy_visibility.iter().any(|line| {
+            line.contains("trace_event=\"desired_visibility\"")
+                && trace_field_value(line, "source") == Some("LegacyTrigger")
+                && trace_field_value(line, "visible") == Some("false")
+                && trace_field_value(line, "invocation_id") == Some("none")
+        }) || !wait_root_visibility(&child, false, ROOT_TIMEOUT)
+            || !wait_until(ROOT_TIMEOUT, || {
+                radial_surfaces_are_inactive(&child, &direct)
+            })
+            || trace_lines(&trace_path)
+                .iter()
+                .skip(tap_cursor)
+                .any(|line| line.contains("trace_event=\"radial_dispatch_requested\""))
+        {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "legacy HotkeyTrigger did not dismiss radial and produce a LegacyTrigger grid hide without selection".into(),
+            ));
+        }
+        complete_hotkey_capture_at_current_trace(&trace_path)?;
+        Ok(())
+    })();
+
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = complete_open_hotkey_capture_at_current_trace(&trace_path) {
+        cleanup_errors.push(format!(
+            "materialize legacy-route trace before temporary profile cleanup: {}",
+            error.message
+        ));
+    }
+    if let Ok(root) = child.refresh_root() {
+        if let Err(error) = request_window_close(&child, &root) {
+            cleanup_errors.push(format!("request legacy-route child close: {error}"));
+        }
+    }
+    let mut status = wait_child(&mut child, Duration::from_secs(5));
+    if status.is_none() {
+        if let Err(error) = child.kill() {
+            cleanup_errors.push(format!("terminate legacy-route child: {error}"));
+        }
+        status = wait_child(&mut child, Duration::from_secs(5));
+    }
+    if status.is_none_or(|status| !status.success()) {
+        cleanup_errors.push(format!(
+            "legacy-route child exited unsuccessfully: {status:?}"
+        ));
+    }
+    if !child.windows().is_empty() {
+        cleanup_errors.push("legacy-route child left owned HWNDs after exit".into());
+    }
+
+    let (mut artifacts, trace_copy_errors) =
+        persist_h16_legacy_trace_artifacts(&trace_path, output);
+    cleanup_errors.extend(trace_copy_errors);
+    if let Err(error) = alternate_profile.close() {
+        cleanup_errors.push(format!("remove legacy-route temporary profile: {error}"));
+    }
+    let receipt_artifact = output.join("case-H16-legacy-profile.json");
+    let proof_error = proof.as_ref().err().map(|error| {
+        serde_json::json!({
+            "stage": format!("{:?}", error.stage),
+            "message": error.message,
+        })
+    });
+    let receipt = serde_json::json!({
+        "child_process_id": child_process_id,
+        "configured_hotkey": legacy_hotkey.as_str(),
+        "direct_trigger": "Ctrl+Alt+Y",
+        "shared_tap_hold": false,
+        "route": "HotkeyTrigger -> LegacyTrigger",
+        "profile_sha256": profile_sha256,
+        "child_exited_successfully": status.is_some_and(NativeExitStatus::success),
+        "child_owned_windows_closed": child.windows().is_empty(),
+        "proof_error": proof_error,
+        "trace_artifacts": artifacts.iter().map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>(),
+        "cleanup_errors": cleanup_errors.clone(),
+    });
+    match serde_json::to_vec_pretty(&receipt) {
+        Ok(bytes) => match fs::write(&receipt_artifact, bytes) {
+            Ok(()) => artifacts.push(receipt_artifact),
+            Err(error) => {
+                cleanup_errors.push(format!("write legacy-route profile receipt: {error}"));
+            }
+        },
+        Err(error) => {
+            cleanup_errors.push(format!("serialize legacy-route profile receipt: {error}"))
+        }
+    }
+    match (proof, cleanup_errors.is_empty()) {
+        (Ok(()), true) => Ok(LegacyFallbackEvidence {
+            child_process_id,
+            profile_sha256,
+            artifacts,
+        }),
+        (Ok(()), false) => Err(LegacyFallbackFailure {
+            failure: CaseFailure::new(
+                FailureStage::Cleanup,
+                format!(
+                    "legacy-route H16 cleanup/evidence persistence failed: {}",
+                    cleanup_errors.join("; ")
+                ),
+            ),
+            artifacts,
+        }),
+        (Err(error), true) => Err(LegacyFallbackFailure {
+            failure: error,
+            artifacts,
+        }),
+        (Err(error), false) => Err(LegacyFallbackFailure {
+            failure: CaseFailure::new(
+                error.stage,
+                format!(
+                    "{}; legacy-route cleanup/evidence persistence failed: {}",
+                    error.message,
+                    cleanup_errors.join("; ")
+                ),
+            ),
+            artifacts,
+        }),
+    }
+}
+
+fn record_h16_fallback_artifacts(report: &mut AcceptanceReport, artifacts: &[PathBuf]) {
+    for artifact in artifacts {
+        report.push_artifact(artifact.to_string_lossy());
+    }
+    if let Some(case) = report.cases.iter_mut().find(|case| case.id == "H16") {
+        for artifact in artifacts {
+            case.artifacts
+                .push(bounded_text(&artifact.to_string_lossy(), MAX_PATH_BYTES));
+        }
+    }
+}
+
+fn append_h16_case_result(
+    report: &mut AcceptanceReport,
+    started: Instant,
+    result: Result<String, CaseFailure>,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+    fallback_artifacts: &[PathBuf],
+) {
+    append_case(
+        report,
+        "H16",
+        expected("H16"),
+        started,
+        result,
+        child,
+        output,
+        trace_path,
+    );
+    record_h16_fallback_artifacts(report, fallback_artifacts);
+}
+
+fn persist_h16_legacy_trace_artifacts(source: &Path, output: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let primary = output.join("case-H16-legacy-trace.log");
+    match copy_bounded_trace_file(source, &primary) {
+        Ok(()) => (vec![primary], Vec::new()),
+        Err(primary_error) => {
+            let mut errors = vec![format!(
+                "copy legacy-route trace evidence to {}: {primary_error}",
+                primary.display()
+            )];
+            let recovery = output.join("case-H16-legacy-trace-recovered.log");
+            let artifacts = match copy_bounded_trace_file(source, &recovery) {
+                Ok(()) => vec![recovery],
+                Err(recovery_error) => {
+                    errors.push(format!(
+                        "recover legacy-route trace evidence to {}: {recovery_error}",
+                        recovery.display()
+                    ));
+                    Vec::new()
+                }
+            };
+            (artifacts, errors)
+        }
+    }
+}
+
+fn copy_bounded_trace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut source_file = File::open(source).map_err(|error| error.to_string())?;
+    let length = source_file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .len();
+    if length > MAX_TRACE_BYTES as u64 {
+        source_file
+            .seek(SeekFrom::End(-(MAX_TRACE_BYTES as i64)))
+            .map_err(|error| error.to_string())?;
+    }
+    let mut bytes = Vec::with_capacity(length.min(MAX_TRACE_BYTES as u64) as usize);
+    source_file
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > MAX_TRACE_BYTES {
+        bytes.drain(..bytes.len() - MAX_TRACE_BYTES);
+    }
+    let mut destination_file = File::create(destination).map_err(|error| error.to_string())?;
+    destination_file
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())
+}
+
+fn run_acceptance_direct_trigger(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    before: &[WindowSnapshot],
+    trigger_key: u32,
+) -> Result<Vec<WindowSnapshot>, CaseFailure> {
+    anchor
+        .focus()
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    focus_is_validated(anchor.hwnd(), anchor.process_id())
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let mut observer = RunnerHookObserver::start()
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    let probe = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    observer
+        .pump_roundtrip(probe, Duration::from_millis(500))
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    let cursor = trace_lines(trace_path).len();
+    let input = child
+        .send_acceptance_direct_trigger(
+            anchor.hwnd(),
+            anchor.process_id(),
+            trigger_key as u16,
+            Duration::from_millis(40),
+        )
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let keys = vec![0xA2, 0xA4, trigger_key];
+    let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(3));
+    capture_hotkey_attempt_evidence(
+        child,
+        HotkeyCandidateStream::MainCandidate,
+        trace_path,
+        cursor,
+        &observation,
+        HotkeyRunnerInputPurpose::DirectTrigger,
+    );
+    observer
+        .stop_and_report()
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    let expected = [
+        (0xA2, true),
+        (0xA4, true),
+        (trigger_key, true),
+        (trigger_key, false),
+        (0xA4, false),
+        (0xA2, false),
+    ];
+    if !observation.exact_injected_pairs(1)
+        || !observation.exact_injected_sequence(&expected)
+        || input.observed_vks != keys
+    {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "H16 direct-trigger chord was not exact: {}",
+                observation.describe()
+            ),
+        ));
+    }
+    input_modifiers_clear().map_err(|error| {
+        CaseFailure::new(
+            FailureStage::InputInjection,
+            format!("H16 direct-trigger cleanup failed: {error}"),
+        )
+    })?;
+    let surfaces = wait_runtime_windows(child, before, TRACE_TIMEOUT)
+        .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+    if trace_lines(trace_path)
+        .iter()
+        .skip(cursor)
+        .any(|line| line.contains("trace_event=\"radial_dispatch_requested\""))
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "H16 direct trigger unexpectedly dispatched an action".into(),
+        ));
+    }
+    complete_hotkey_capture_at_current_trace(trace_path)?;
+    Ok(surfaces)
+}
+
+fn run_hotkey_hidden_root_wake_case(
+    report: &mut AcceptanceReport,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H18", trace_path);
+    let result = (|| {
+        ensure_hotkey_root_visibility(child, anchor, hotkey, false)?;
+        if child.designer().is_some() {
+            return Err(CaseFailure::new(
+                FailureStage::WindowDiscovery,
+                "Designer must be closed before hidden-root wake case".into(),
+            ));
+        }
+        let parked = child
+            .refresh_root()
+            .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+        let displays = native_display_bounds()
+            .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+        if intersects_display_bounds(parked.bounds, &displays) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "hidden ROOT is still on a physical display: {:?}",
+                    parked.bounds
+                ),
+            ));
+        }
+        let pointer = cursor_position()
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let surfaces = run_hotkey_hold_attempt(
+            child,
+            anchor,
+            trace_path,
+            hotkey,
+            false,
+            hold_threshold_ms,
+            true,
+            None,
+        )?;
+        if !wait_until(ROOT_TIMEOUT, || {
+            radial_surfaces_are_active(child, &surfaces)
+        }) || !wait_root_visibility(child, false, ROOT_TIMEOUT)
+            || !child.designer().is_none()
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "hold on parked ROOT did not leave radial active, ROOT parked, and Designer closed"
+                    .into(),
+            ));
+        }
+        if !radial_surfaces_are_active(child, &surfaces) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "parked-root radial closed before wake tap preflight".into(),
+            ));
+        }
+        let (target_hwnd, target_pid) = current_hotkey_target(child, anchor)?;
+        let tap = run_hotkey_burst_attempt_on_target_checked(
+            child,
+            target_hwnd,
+            target_pid,
+            None,
+            trace_path,
+            hotkey,
+            1,
+            false,
+            hold_threshold_ms,
+            || {
+                if !radial_surfaces_are_active(child, &surfaces) {
+                    return Err(CaseFailure::new(
+                        FailureStage::NativeRootState,
+                        "parked-root radial closed before the wake key-down".into(),
+                    ));
+                }
+                if capture_foreground() != (target_hwnd, target_pid) {
+                    return Err(CaseFailure::new(
+                        FailureStage::InputInjection,
+                        "foreground changed before parked-root wake key-down".into(),
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        if !tap.final_visible
+            || !wait_until(ROOT_TIMEOUT, || {
+                radial_surfaces_are_inactive(child, &surfaces)
+            })
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "short tap did not wake ROOT and dismiss the radial surface".into(),
+            ));
+        }
+        if trace_lines(trace_path)
+            .iter()
+            .any(|line| line.contains("trace_event=\"radial_dispatch_requested\""))
+        {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "hidden-root wake tap dispatched a radial action".into(),
+            ));
+        }
+        let after_pointer = cursor_position()
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        if pointer.x != after_pointer.x || pointer.y != after_pointer.y {
+            return Err(CaseFailure::new(
+                FailureStage::InputInjection,
+                format!(
+                    "pointer moved during hidden-root hold/tap: before=({},{}), after=({}, {})",
+                    pointer.x, pointer.y, after_pointer.x, after_pointer.y
+                ),
+            ));
+        }
+        Ok(format!(
+            "evidence:v1; hotkey={}; root_start=parked; pointer_stationary=true; tap_woke_root=true; hold_opened_radial=true; designer=closed; radial_dismissed_by_tap=true",
+            hotkey.as_str()
+        ))
+    })();
+    append_case(
+        report,
+        "H18",
+        expected("H18"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+fn run_hotkey_dual_profile_case(
+    executable: &str,
+    _profile: &Path,
+    report: &mut AcceptanceReport,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    output: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    let started = Instant::now();
+    begin_hotkey_evidence_capture("H17", trace_path);
+    let result = (|| {
+        let configured = report.profile.configured_hotkey == hotkey.as_str();
+        let mouse_gestures_enabled =
+            report.mouse_gesture_mode == super::super::MouseGestureMode::Enabled;
+        if !configured || !mouse_gestures_enabled {
+            return Err(CaseFailure::new(
+                FailureStage::Environment,
+                format!(
+                    "main profile mismatch: configured={}; requested={}; mouse_gesture_mode={:?}",
+                    report.profile.configured_hotkey,
+                    hotkey.as_str(),
+                    report.mouse_gesture_mode
+                ),
+            ));
+        }
+        run_hotkey_burst_attempt(
+            child,
+            anchor,
+            trace_path,
+            hotkey,
+            1,
+            false,
+            hold_threshold_ms,
+        )?;
+        let alternate = match hotkey {
+            AcceptanceHotkey::F11 => AcceptanceHotkey::ShiftAltWinEnd,
+            AcceptanceHotkey::ShiftAltWinEnd => AcceptanceHotkey::F11,
+        };
+        let temporary_profile = tempfile::Builder::new()
+            .prefix("radial-acceptance-h17-")
+            .tempdir()
+            .map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::Cleanup,
+                    format!("create H17 isolated profile: {error}"),
+                )
+            })?;
+        let profile_path = temporary_profile.path();
+        let log_path = profile_path.join("candidate.log");
+        let fixture = super::super::deterministic_fixture_for_hotkey(
+            &log_path,
+            super::super::MouseGestureMode::Enabled,
+            alternate,
+        )
+        .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+        for (name, bytes) in [
+            ("settings.json", fixture.settings_json.as_slice()),
+            ("radial.json", fixture.radial_json.as_slice()),
+            ("actions.json", fixture.actions_json.as_slice()),
+        ] {
+            super::super::write_new(&profile_path.join(name), bytes)
+                .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+        }
+        let settings: serde_json::Value = serde_json::from_slice(&fixture.settings_json)
+            .map_err(|error| CaseFailure::new(FailureStage::Environment, error.to_string()))?;
+        if settings.get("hotkey").and_then(serde_json::Value::as_str) != Some(alternate.as_str())
+            || settings.get("plugin_settings").is_some_and(|plugins| {
+                plugins
+                    .get("mouse_gestures")
+                    .and_then(|plugin| plugin.get("enabled"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+            })
+        {
+            return Err(CaseFailure::new(
+                FailureStage::Environment,
+                "alternate fixture does not match its configured hotkey or disables mouse gestures"
+                    .into(),
+            ));
+        }
+        // The application writes acceptance trace events to Settings.log_file.
+        // Keep launch, readiness, gesture validation, and saved artifacts on
+        // that exact path so H17 observes this isolated profile's trace.
+        let alternate_trace = log_path.clone();
+        register_hotkey_candidate_stream(
+            &alternate_trace,
+            HotkeyCandidateStream::AlternateProfileCandidate,
+        );
+        let mut alternate_child = NativeChild::launch(
+            Path::new(executable),
+            profile_path,
+            &alternate_trace,
+            &profile_path.join("child.stdout.log"),
+            &profile_path.join("child.stderr.log"),
+        )
+        .map_err(|error| {
+            CaseFailure::new(
+                FailureStage::Environment,
+                format!("launch alternate hotkey fixture: {error}"),
+            )
+        })?;
+        let alternate_process_id = alternate_child.process_id();
+        let alternate_profile_id = profile_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown-profile")
+            .to_string();
+        let mut alternate_tap = wait_hotkey_fixture_ready(
+            &alternate_child,
+            &alternate_trace,
+            HOTKEY_FIXTURE_STARTUP_TIMEOUT,
+        )
+        .map_err(|error| {
+            CaseFailure::new(
+                FailureStage::Environment,
+                format!(
+                    "alternate profile {alternate_profile_id} pid={alternate_process_id} did not reach bounded fixture readiness: {error}"
+                ),
+            )
+        })
+        .and_then(|_| {
+            run_hotkey_burst_attempt(
+                &alternate_child,
+                anchor,
+                &alternate_trace,
+                alternate,
+                1,
+                false,
+                fixture.hold_threshold_ms,
+            )
+        })
+        .map_err(|mut error| {
+            error.message = format!(
+                "alternate profile {alternate_profile_id} pid={alternate_process_id}: {}",
+                error.message
+            );
+            error
+        });
+        if let Err(error) = complete_open_hotkey_capture_at_current_trace(&alternate_trace) {
+            alternate_tap = Err(match alternate_tap {
+                Ok(_) => error,
+                Err(mut existing) => {
+                    existing.message = format!(
+                        "{}; alternate trace materialization failed before profile cleanup: {}",
+                        existing.message, error.message
+                    );
+                    existing
+                }
+            });
+        }
+        let mut close_errors = Vec::new();
+        if let Ok(root) = alternate_child.refresh_root() {
+            if let Err(error) = request_window_close(&alternate_child, &root) {
+                close_errors.push(error);
+            }
+        }
+        let mut alternate_status = wait_child(&mut alternate_child, Duration::from_secs(5));
+        if alternate_status.is_none() {
+            if let Err(error) = alternate_child.kill() {
+                close_errors.push(format!("terminate alternate profile process: {error}"));
+            }
+            alternate_status = wait_child(&mut alternate_child, Duration::from_secs(5));
+        }
+        let remaining = alternate_child.windows();
+        if !remaining.is_empty() {
+            close_errors.push(format!(
+                "alternate profile left {} child-owned HWND(s)",
+                remaining.len()
+            ));
+        }
+        let alternate_exit_succeeded = alternate_status.is_some_and(|status| status.success());
+        if !alternate_exit_succeeded {
+            close_errors.push(format!(
+                "alternate hotkey fixture did not exit successfully: {alternate_status:?}"
+            ));
+        }
+
+        // Snapshot bounded evidence while the isolated profile still exists.
+        // A successful tap can still be followed by a shutdown or TempDir
+        // cleanup failure, so decide whether to publish it only after close.
+        let alternate_artifacts =
+            capture_h17_alternate_artifacts(&alternate_child, &alternate_trace);
+        if let Err(error) = temporary_profile.close() {
+            close_errors.push(format!("remove alternate temporary profile: {error}"));
+        }
+        let tap_failure = alternate_tap.err();
+        if h17_should_preserve_alternate_artifacts(tap_failure.is_none(), close_errors.is_empty()) {
+            let (paths, artifact_errors) =
+                persist_h17_alternate_artifacts(&alternate_artifacts, output);
+            for path in paths {
+                report.push_artifact(path.to_string_lossy());
+            }
+            let mut failure_details = close_errors;
+            failure_details.extend(artifact_errors);
+            if let Some(mut failure) = tap_failure {
+                if !failure_details.is_empty() {
+                    failure.message = format!(
+                        "{}; alternate cleanup/diagnostic details: {}",
+                        failure.message,
+                        failure_details.join("; ")
+                    );
+                }
+                return Err(failure);
+            }
+            return Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                format!(
+                    "alternate hotkey fixture cleanup failed: {}",
+                    failure_details.join("; ")
+                ),
+            ));
+        }
+        let f11_passed = hotkey == AcceptanceHotkey::F11 || alternate == AcceptanceHotkey::F11;
+        let chord_passed = hotkey == AcceptanceHotkey::ShiftAltWinEnd
+            || alternate == AcceptanceHotkey::ShiftAltWinEnd;
+        Ok(format!(
+            "evidence:v1; f11_control={}; exact_chord={}; mouse_gestures=enabled; profile_matches=true; alternate_profile_cleanup=verified; main_profile={}; alternate_profile={}; alternate_profile_id={}; alternate_child_pid={}",
+            if f11_passed { "passed" } else { "failed" },
+            if chord_passed { "passed" } else { "failed" },
+            hotkey.as_str(),
+            alternate.as_str(),
+            alternate_profile_id,
+            alternate_process_id
+        ))
+    })();
+    append_case(
+        report,
+        "H17",
+        expected("H17"),
+        started,
+        result,
+        Some(child),
+        output,
+        trace_path,
+    );
+}
+
+struct HotkeyBurstEvidence {
+    final_visible: bool,
+    invocation_ids: Vec<u64>,
+    input_group_id: u32,
+    hold_min_ms: u128,
+    hold_max_ms: u128,
+    gap_min_ms: u128,
+    gap_max_ms: u128,
+    preflight_quiet_ms: Option<u128>,
+    preflight_matching_edges: usize,
+    foreign_matching_edges: usize,
+    trace_fence: HotkeyTraceFence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisibleBurstSettlePolicy {
+    ActivateRoot,
+    PreserveForeground {
+        target_hwnd: u64,
+        target_process_id: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HotkeyTraceFence {
+    cursor: usize,
+    probe_id: u64,
+    baseline_invocation_id: Option<u64>,
+    baseline_visibility_revision: Option<u64>,
+}
+
+impl HotkeyTraceFence {
+    fn report_token(self) -> String {
+        format!(
+            "probe:{},cursor:{},invocation:{},revision:{}",
+            self.probe_id,
+            self.cursor,
+            self.baseline_invocation_id
+                .map_or_else(|| "none".into(), |id| id.to_string()),
+            self.baseline_visibility_revision
+                .map_or_else(|| "none".into(), |revision| revision.to_string())
+        )
+    }
+}
+
+fn run_hotkey_burst_attempt(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    taps: usize,
+    initial_visible: bool,
+    hold_threshold_ms: u64,
+) -> Result<HotkeyBurstEvidence, CaseFailure> {
+    run_hotkey_burst_attempt_on_target(
+        child,
+        anchor.hwnd(),
+        anchor.process_id(),
+        Some(anchor),
+        trace_path,
+        hotkey,
+        taps,
+        initial_visible,
+        hold_threshold_ms,
+    )
+}
+
+fn run_hotkey_burst_attempt_on_target(
+    child: &NativeChild,
+    target_hwnd: HWND,
+    target_process_id: u32,
+    focus_anchor: Option<&FocusAnchor>,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    taps: usize,
+    initial_visible: bool,
+    hold_threshold_ms: u64,
+) -> Result<HotkeyBurstEvidence, CaseFailure> {
+    run_hotkey_burst_attempt_on_target_checked(
+        child,
+        target_hwnd,
+        target_process_id,
+        focus_anchor,
+        trace_path,
+        hotkey,
+        taps,
+        initial_visible,
+        hold_threshold_ms,
+        || Ok(()),
+    )
+}
+
+fn run_hotkey_burst_attempt_on_target_checked<F>(
+    child: &NativeChild,
+    target_hwnd: HWND,
+    target_process_id: u32,
+    focus_anchor: Option<&FocusAnchor>,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    taps: usize,
+    initial_visible: bool,
+    hold_threshold_ms: u64,
+    before_injection: F,
+) -> Result<HotkeyBurstEvidence, CaseFailure>
+where
+    F: FnOnce() -> Result<(), CaseFailure>,
+{
+    run_hotkey_burst_attempt_on_target_with_policy_checked(
+        child,
+        target_hwnd,
+        target_process_id,
+        focus_anchor,
+        trace_path,
+        hotkey,
+        taps,
+        initial_visible,
+        hold_threshold_ms,
+        before_injection,
+        VisibleBurstSettlePolicy::ActivateRoot,
+    )
+}
+
+fn run_hotkey_burst_attempt_on_target_with_policy(
+    child: &NativeChild,
+    target_hwnd: HWND,
+    target_process_id: u32,
+    focus_anchor: Option<&FocusAnchor>,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    taps: usize,
+    initial_visible: bool,
+    hold_threshold_ms: u64,
+    settle_policy: VisibleBurstSettlePolicy,
+) -> Result<HotkeyBurstEvidence, CaseFailure> {
+    run_hotkey_burst_attempt_on_target_with_policy_checked(
+        child,
+        target_hwnd,
+        target_process_id,
+        focus_anchor,
+        trace_path,
+        hotkey,
+        taps,
+        initial_visible,
+        hold_threshold_ms,
+        || Ok(()),
+        settle_policy,
+    )
+}
+
+fn run_hotkey_burst_attempt_on_target_with_policy_checked<F>(
+    child: &NativeChild,
+    target_hwnd: HWND,
+    target_process_id: u32,
+    focus_anchor: Option<&FocusAnchor>,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    taps: usize,
+    initial_visible: bool,
+    hold_threshold_ms: u64,
+    before_injection: F,
+    settle_policy: VisibleBurstSettlePolicy,
+) -> Result<HotkeyBurstEvidence, CaseFailure>
+where
+    F: FnOnce() -> Result<(), CaseFailure>,
+{
+    let root = child
+        .refresh_root()
+        .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+    let displays = native_display_bounds()
+        .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+    let currently_visible =
+        root.visible && !root.minimized && intersects_display_bounds(root.bounds, &displays);
+    let mut setup_trace_cursor = None;
+    if currently_visible != initial_visible {
+        setup_trace_cursor = Some(trace_lines(trace_path).len());
+        if let Some(anchor) = focus_anchor {
+            anchor
+                .focus()
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        } else {
+            focus_is_validated(target_hwnd, target_process_id)
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        }
+        child
+            .send_acceptance_hotkey(
+                target_hwnd,
+                target_process_id,
+                hotkey,
+                Duration::from_millis(25),
+            )
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        if !wait_root_visibility(child, initial_visible, ROOT_TIMEOUT) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!("separate setup tap did not establish initial_visible={initial_visible}"),
+            ));
+        }
+    }
+    if !wait_root_visibility(child, initial_visible, Duration::ZERO) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!("ROOT did not start H04 burst in visible={initial_visible} state"),
+        ));
+    }
+    run_after_hotkey_setup_settled(
+        || {
+            if let Some(trace_cursor) = setup_trace_cursor {
+                settle_hotkey_setup_toggle(
+                    child,
+                    trace_path,
+                    trace_cursor,
+                    initial_visible,
+                    settle_policy,
+                )
+            } else {
+                Ok(())
+            }
+        },
+        || {
+            if let Some(anchor) = focus_anchor {
+                anchor
+                    .focus()
+                    .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            } else {
+                focus_is_validated(target_hwnd, target_process_id)
+                    .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            }
+            Ok(())
+        },
+    )?;
+    let cursor_before =
+        cursor_position().map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let mut observer = RunnerHookObserver::start()
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    if !observer.desktop.eq_ignore_ascii_case("Default") {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "runner observer desktop {:?} is not Default",
+                observer.desktop
+            ),
+        ));
+    }
+    let probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    observer
+        .pump_roundtrip(probe_id, Duration::from_millis(500))
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    focus_is_validated(target_hwnd, target_process_id)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let trace_fence = establish_hotkey_trace_fence(child, trace_path, initial_visible)?;
+    focus_is_validated(target_hwnd, target_process_id)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let observed_vks = match hotkey {
+        AcceptanceHotkey::F11 => vec![0x7A],
+        AcceptanceHotkey::ShiftAltWinEnd => vec![0xA0, 0xA4, 0x5B, 0x23],
+    };
+    let preflight = if h04_matrix_capture_active() {
+        input_modifiers_clear().map_err(|error| {
+            CaseFailure::new(
+                FailureStage::InputInjection,
+                format!("H04 matrix preflight found uncleared modifier state: {error}"),
+            )
+        })?;
+        let quiet = observer
+            .wait_for_key_quiet(
+                &observed_vks,
+                Duration::from_millis(80),
+                Duration::from_secs(2),
+            )
+            .map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!("H04 matrix matching-key quiet preflight failed: {error}"),
+                )
+            })?;
+        input_modifiers_clear().map_err(|error| {
+            CaseFailure::new(
+                FailureStage::InputInjection,
+                format!("H04 matrix preflight modifier recheck failed: {error}"),
+            )
+        })?;
+        focus_is_validated(target_hwnd, target_process_id)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        Some(quiet)
+    } else {
+        None
+    };
+    before_injection()?;
+    let trace_cursor = trace_fence.cursor;
+    let (down_time, released_time) = hotkey_burst_intervals(preflight.is_some());
+    let injection = child
+        .send_acceptance_hotkey_burst(
+            target_hwnd,
+            target_process_id,
+            hotkey,
+            taps,
+            down_time,
+            released_time,
+        )
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    if injection.input_desktop != "thread=Default;active=Default" {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "hotkey burst input desktop was not WinSta0\\Default: {}",
+                injection.input_desktop
+            ),
+        ));
+    }
+
+    let observation = observer.wait_for_chord_burst(&observed_vks, taps, Duration::from_secs(10));
+    let input_group_id = capture_hotkey_attempt_evidence(
+        child,
+        HotkeyCandidateStream::MainCandidate,
+        trace_path,
+        trace_cursor,
+        &observation,
+        HotkeyRunnerInputPurpose::LauncherChord,
+    );
+    let foreign_overlap = observation.foreign_edges_interfering_with_owned_gestures();
+    let foreign_matching_edges = observation.foreign_edges.len();
+    let observer_description = observation.describe();
+    let observer_exact = observation.exact_injected_pairs(taps)
+        && observation.exact_injected_sequence(&expected_hotkey_edges(hotkey, taps));
+    observer
+        .stop_and_report()
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    if let Some(failure) = foreign_edge_contamination_failure(
+        input_group_id,
+        &foreign_overlap,
+        h04_matrix_capture_active(),
+        &observer_description,
+    ) {
+        return Err(failure);
+    }
+    if !observer_exact {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!("observer did not see exact injected hotkey edges: {observer_description}"),
+        ));
+    }
+    let timing = observation
+        .timing(hotkey, taps)
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    if !hotkey_cadence_is_valid(&timing, hold_threshold_ms) {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "observed physical cadence fell outside 10–100ms or approached hold threshold {hold_threshold_ms}ms: holds={:?}; gaps={:?}; observer={observer_description}",
+                timing.primary_hold_ms, timing.released_gap_ms
+            ),
+        ));
+    }
+    input_modifiers_clear().map_err(|error| {
+        CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "modifier/key cleanup verification failed: {error}; {}",
+                injection.cleanup
+            ),
+        )
+    })?;
+    let hook_events = wait_trace(trace_path, trace_cursor, TRACE_TIMEOUT, |events| {
+        let expected_edges = taps.saturating_mul(2);
+        hotkey_trace_edge_count(events, "hook_primary") >= expected_edges
+            && hotkey_trace_edge_count(events, "configured_primary") >= expected_edges
+    });
+    validate_hotkey_production_admission(&hook_events, taps).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!("runner observed exact injected chord edges but production hook admission failed: {error}; observer={observer_description}"),
+        )
+    })?;
+    let events = wait_trace(trace_path, trace_cursor, TRACE_TIMEOUT, |events| {
+        validate_hotkey_burst_trace_with_baseline(
+            events,
+            taps,
+            initial_visible,
+            trace_fence.baseline_visibility_revision,
+            trace_fence.baseline_invocation_id,
+        )
+        .is_ok()
+    });
+    let summary = validate_hotkey_burst_trace_with_baseline(
+        &events,
+        taps,
+        initial_visible,
+        trace_fence.baseline_visibility_revision,
+        trace_fence.baseline_invocation_id,
+    )
+    .map_err(|error| {
+        CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!("uninterrupted burst trace validation failed: {error}; observer={observer_description}"),
+        )
+    })?;
+    let expected_end_visible = initial_visible ^ (taps % 2 == 1);
+    if summary.final_visible != expected_end_visible
+        || !wait_root_visibility(child, expected_end_visible, ROOT_TIMEOUT)
+    {
+        let current = child.refresh_root().ok();
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!(
+                "ROOT failed initial={initial_visible} taps={taps} parity={expected_end_visible}: {:?}; trace final={}; observer={observer_description}",
+                current.map(|root| (
+                    root.hwnd.0,
+                    root.process_id,
+                    root.visible,
+                    root.minimized,
+                    root.bounds
+                )),
+                summary.final_visible
+            ),
+        ));
+    }
+    if let Some(settle_policy) = hotkey_burst_settle_policy(settle_policy, expected_end_visible) {
+        settle_hotkey_burst(
+            child,
+            trace_path,
+            trace_cursor,
+            settle_policy,
+            expected_end_visible,
+            TRACE_TIMEOUT,
+        )?;
+    }
+    let cursor_after =
+        cursor_position().map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    if cursor_before.x != cursor_after.x || cursor_before.y != cursor_after.y {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "cursor moved during uninterrupted burst: before=({},{}), after=({},{})",
+                cursor_before.x, cursor_before.y, cursor_after.x, cursor_after.y
+            ),
+        ));
+    }
+    let expected_events = match hotkey {
+        AcceptanceHotkey::F11 => taps,
+        AcceptanceHotkey::ShiftAltWinEnd => taps.saturating_mul(4),
+    };
+    if injection.down_inserted != expected_events || injection.up_inserted != expected_events {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "SendInput inserted {}/{} down/up edges, expected {expected_events}/{expected_events}",
+                injection.down_inserted, injection.up_inserted
+            ),
+        ));
+    }
+    complete_hotkey_capture_at_current_trace(trace_path)?;
+    Ok(HotkeyBurstEvidence {
+        final_visible: summary.final_visible,
+        invocation_ids: summary.invocation_ids,
+        input_group_id,
+        hold_min_ms: *timing.primary_hold_ms.iter().min().unwrap_or(&0),
+        hold_max_ms: *timing.primary_hold_ms.iter().max().unwrap_or(&0),
+        gap_min_ms: *timing.released_gap_ms.iter().min().unwrap_or(&0),
+        gap_max_ms: *timing.released_gap_ms.iter().max().unwrap_or(&0),
+        preflight_quiet_ms: preflight.map(|quiet| quiet.quiet_ms),
+        preflight_matching_edges: preflight.map_or(0, |quiet| quiet.matching_edges),
+        foreign_matching_edges,
+        trace_fence,
+    })
+}
+
+fn foreign_edge_contamination_failure(
+    input_group_id: u32,
+    foreign_overlap: &[RunnerChordEdge],
+    retryable_h04_matrix: bool,
+    observer_description: &str,
+) -> Option<CaseFailure> {
+    if foreign_overlap.is_empty() {
+        return None;
+    }
+    let details = foreign_overlap
+        .iter()
+        .map(|edge| {
+            format!(
+                "vk=0x{:02x}:{}:injected={}:extra=0x{:x}",
+                edge.vk,
+                if edge.down { "down" } else { "up" },
+                edge.injected,
+                edge.extra_info
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let message = format!(
+        "foreign matching-key edge overlapped owned burst interval: {details}; observer={observer_description}"
+    );
+    Some(if retryable_h04_matrix && input_group_id != 0 {
+        CaseFailure::input_contamination(input_group_id, message)
+    } else {
+        CaseFailure::new(FailureStage::InputInjection, message)
+    })
+}
+
+fn run_after_hotkey_setup_settled<S, N, T>(settle_setup: S, next: N) -> Result<T, CaseFailure>
+where
+    S: FnOnce() -> Result<(), CaseFailure>,
+    N: FnOnce() -> Result<T, CaseFailure>,
+{
+    settle_setup()?;
+    next()
+}
+
+fn settle_hotkey_setup_toggle(
+    child: &NativeChild,
+    trace_path: &Path,
+    trace_cursor: usize,
+    expected_visible: bool,
+    policy: VisibleBurstSettlePolicy,
+) -> Result<(), CaseFailure> {
+    match policy {
+        VisibleBurstSettlePolicy::ActivateRoot if expected_visible => {
+            wait_for_root_restore_after(trace_path, trace_cursor, TRACE_TIMEOUT).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::RootCommand,
+                    format!("visible setup tap did not complete its correlated ROOT restore: {error}"),
+                )
+            })?;
+        }
+        VisibleBurstSettlePolicy::ActivateRoot => {
+            wait_for_no_native_activation_quiet(trace_path, trace_cursor, TRACE_TIMEOUT).map_err(
+                |error| {
+                    CaseFailure::new(
+                        FailureStage::RootCommand,
+                        format!("hidden setup tap unexpectedly activated ROOT or did not settle: {error}"),
+                    )
+                },
+            )?;
+        }
+        VisibleBurstSettlePolicy::PreserveForeground {
+            target_hwnd: preserved_hwnd,
+            target_process_id: preserved_process_id,
+        } => {
+            wait_for_preserved_foreground_burst(
+                child,
+                trace_path,
+                trace_cursor,
+                preserved_hwnd,
+                preserved_process_id,
+                expected_visible,
+                TRACE_TIMEOUT,
+            )
+            .map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::RootCommand,
+                    format!("PreserveForeground setup tap did not settle cleanly: {error}"),
+                )
+            })?;
+        }
+    }
+    if !wait_root_visibility(child, expected_visible, Duration::ZERO) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!("ROOT left expected visible={expected_visible} state after setup settle"),
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_no_native_activation_quiet(
+    trace_path: &Path,
+    trace_cursor: usize,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let quiet_since = Instant::now();
+    loop {
+        let events = trace_lines(trace_path);
+        validate_no_native_root_activation_after(&events, trace_cursor)?;
+        if quiet_since.elapsed() >= HOTKEY_TRACE_QUIET_WINDOW {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "native ROOT activation trace did not remain quiet for {:?}",
+                HOTKEY_TRACE_QUIET_WINDOW
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn hotkey_cadence_is_valid(timing: &RunnerChordTiming, hold_threshold_ms: u64) -> bool {
+    timing
+        .primary_hold_ms
+        .iter()
+        .all(|hold| (10..=100).contains(hold) && *hold < u128::from(hold_threshold_ms))
+        && timing
+            .released_gap_ms
+            .iter()
+            .all(|gap| (10..=100).contains(gap))
+}
+
+fn hotkey_burst_intervals(h04_matrix_preflight: bool) -> (Duration, Duration) {
+    (
+        Duration::from_millis(25),
+        Duration::from_millis(if h04_matrix_preflight { 75 } else { 25 }),
+    )
+}
+
+fn hotkey_burst_settle_policy(
+    policy: VisibleBurstSettlePolicy,
+    expected_end_visible: bool,
+) -> Option<VisibleBurstSettlePolicy> {
+    match (policy, expected_end_visible) {
+        (VisibleBurstSettlePolicy::ActivateRoot, true) => Some(policy),
+        (VisibleBurstSettlePolicy::ActivateRoot, false) => None,
+        (VisibleBurstSettlePolicy::PreserveForeground { .. }, _) => Some(policy),
+    }
+}
+
+fn settle_hotkey_burst(
+    child: &NativeChild,
+    trace_path: &Path,
+    trace_cursor: usize,
+    policy: VisibleBurstSettlePolicy,
+    expected_end_visible: bool,
+    timeout: Duration,
+) -> Result<(), CaseFailure> {
+    match policy {
+        VisibleBurstSettlePolicy::ActivateRoot => {
+            wait_for_root_restore_after(trace_path, trace_cursor, timeout).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::RootCommand,
+                    format!(
+                        "visible burst did not settle through its correlated native ROOT restore: {error}"
+                    ),
+                )
+            })?;
+            Ok(())
+        }
+        VisibleBurstSettlePolicy::PreserveForeground {
+            target_hwnd,
+            target_process_id,
+        } => wait_for_preserved_foreground_burst(
+            child,
+            trace_path,
+            trace_cursor,
+            target_hwnd,
+            target_process_id,
+            expected_end_visible,
+            timeout,
+        )
+        .map_err(|error| {
+            CaseFailure::new(
+                FailureStage::RootCommand,
+                format!("PreserveForeground burst did not settle cleanly: {error}"),
+            )
+        }),
+    }
+}
+
+fn wait_for_preserved_foreground_burst(
+    child: &NativeChild,
+    trace_path: &Path,
+    trace_cursor: usize,
+    target_hwnd: u64,
+    target_process_id: u32,
+    require_root_presented: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let mut stable_since = None;
+    loop {
+        let events = trace_lines(trace_path);
+        if visible_burst_trace_settled(
+            &events,
+            trace_cursor,
+            VisibleBurstSettlePolicy::PreserveForeground {
+                target_hwnd,
+                target_process_id,
+            },
+        )?
+        .is_none()
+        {
+            return Err("PreserveForeground trace did not settle".into());
+        }
+
+        let root_presentation_satisfied =
+            require_root_presented.then(|| wait_root_visibility(child, true, Duration::ZERO));
+        let (foreground, foreground_pid) = capture_foreground();
+        if preserved_target_retained_foreground(
+            root_presentation_satisfied,
+            hwnd_id(foreground),
+            foreground_pid,
+            target_hwnd,
+            target_process_id,
+        ) {
+            let since = stable_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= HOTKEY_TRACE_QUIET_WINDOW {
+                return Ok(());
+            }
+        } else {
+            stable_since = None;
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "ROOT presentation check={root_presentation_satisfied:?}, retained target foreground=({},{}), expected=({target_hwnd},{target_process_id})",
+                hwnd_id(foreground),
+                foreground_pid
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn preserved_target_retained_foreground(
+    root_presentation_satisfied: Option<bool>,
+    foreground_hwnd: u64,
+    foreground_process_id: u32,
+    target_hwnd: u64,
+    target_process_id: u32,
+) -> bool {
+    root_presentation_satisfied != Some(false)
+        && foreground_hwnd == target_hwnd
+        && foreground_process_id == target_process_id
+}
+
+fn validate_no_native_root_activation_after(
+    events: &[String],
+    cursor: usize,
+) -> Result<(), String> {
+    if let Some(event) = events
+        .iter()
+        .skip(cursor)
+        .find(|line| line.contains("trace_event=\"native_activation\""))
+    {
+        return Err(format!(
+            "PreserveForeground burst emitted an unexpected native activation: {event}"
+        ));
+    }
+    Ok(())
+}
+
+fn run_readable_hotkey_transitions(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) -> Result<Vec<HotkeyTraceFence>, CaseFailure> {
+    let initial_visible = false;
+    if !wait_root_visibility(child, initial_visible, ROOT_TIMEOUT) {
+        anchor
+            .focus()
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        child
+            .send_acceptance_hotkey(
+                anchor.hwnd(),
+                anchor.process_id(),
+                hotkey,
+                Duration::from_millis(25),
+            )
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        if !wait_root_visibility(child, false, ROOT_TIMEOUT) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "could not prepare readable cadence with hidden ROOT".into(),
+            ));
+        }
+    }
+    anchor
+        .focus()
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let mut visible = false;
+    let mut trace_fences = Vec::with_capacity(3);
+    for tap in 0..3 {
+        let mut observer = RunnerHookObserver::start()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        let probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        observer
+            .pump_roundtrip(probe_id, Duration::from_millis(500))
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        let (target_hwnd, target_pid) = current_hotkey_target(child, anchor)?;
+        if tap == 1 {
+            let root = child
+                .refresh_root()
+                .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+            if !visible
+                || target_hwnd != root.hwnd
+                || target_pid != child.process_id()
+                || !wait_root_visibility(child, true, Duration::ZERO)
+            {
+                return Err(CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!(
+                        "second readable tap must hide currently focused ROOT without refocusing: foreground=({},{}), ROOT=({},{}), visible={visible}",
+                        hwnd_id(target_hwnd),
+                        target_pid,
+                        hwnd_id(root.hwnd),
+                        child.process_id()
+                    ),
+                ));
+            }
+        }
+        let trace_fence = establish_hotkey_trace_fence(child, trace_path, visible)?;
+        focus_is_validated(target_hwnd, target_pid)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        if tap == 1 {
+            let root = child
+                .refresh_root()
+                .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+            if !visible
+                || target_hwnd != root.hwnd
+                || target_pid != child.process_id()
+                || !wait_root_visibility(child, true, Duration::ZERO)
+            {
+                return Err(CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!(
+                        "second readable tap lost focused ROOT before key-down: foreground=({},{}), ROOT=({},{}), visible={visible}",
+                        hwnd_id(target_hwnd),
+                        target_pid,
+                        hwnd_id(root.hwnd),
+                        child.process_id()
+                    ),
+                ));
+            }
+        }
+        let cursor = trace_fence.cursor;
+        child
+            .send_acceptance_hotkey(target_hwnd, target_pid, hotkey, Duration::from_millis(25))
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let keys = match hotkey {
+            AcceptanceHotkey::F11 => vec![0x7A],
+            AcceptanceHotkey::ShiftAltWinEnd => vec![0xA0, 0xA4, 0x5B, 0x23],
+        };
+        let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(2));
+        capture_hotkey_attempt_evidence(
+            child,
+            HotkeyCandidateStream::MainCandidate,
+            trace_path,
+            cursor,
+            &observation,
+            HotkeyRunnerInputPurpose::LauncherChord,
+        );
+        observer
+            .stop_and_report()
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        if !observation.exact_injected_pairs(1)
+            || !observation.exact_injected_sequence(&expected_hotkey_edges(hotkey, 1))
+        {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                "readable cadence did not observe one exact injected tap".into(),
+            ));
+        }
+        let timing = observation
+            .timing(hotkey, 1)
+            .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+        if timing.primary_hold_ms[0] >= u128::from(hold_threshold_ms)
+            || !(10..=100).contains(&timing.primary_hold_ms[0])
+        {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "readable tap was not a bounded short press: {}ms",
+                    timing.primary_hold_ms[0]
+                ),
+            ));
+        }
+        let admission_events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+            hotkey_trace_edge_count(events, "hook_primary") >= 2
+                && hotkey_trace_edge_count(events, "configured_primary") >= 2
+        });
+        validate_hotkey_production_admission(&admission_events, 1).map_err(|error| {
+            CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "readable tap observer saw exact input but production admission failed: {error}"
+                ),
+            )
+        })?;
+        let events = wait_trace(trace_path, cursor, TRACE_TIMEOUT, |events| {
+            validate_hotkey_burst_trace_with_baseline(
+                events,
+                1,
+                visible,
+                trace_fence.baseline_visibility_revision,
+                trace_fence.baseline_invocation_id,
+            )
+            .is_ok()
+        });
+        let summary = validate_hotkey_burst_trace_with_baseline(
+            &events,
+            1,
+            visible,
+            trace_fence.baseline_visibility_revision,
+            trace_fence.baseline_invocation_id,
+        )
+        .map_err(|error| CaseFailure::new(FailureStage::GestureDecision, error))?;
+        trace_fences.push(trace_fence);
+        visible = !visible;
+        if summary.final_visible != visible || !wait_root_visibility(child, visible, ROOT_TIMEOUT) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "readable tap {} did not transition ROOT to {visible}",
+                    tap + 1
+                ),
+            ));
+        }
+        if visible {
+            wait_for_root_restore_after(trace_path, cursor, TRACE_TIMEOUT).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::RootCommand,
+                    format!(
+                        "readable tap {} did not settle through its correlated native ROOT restore: {error}",
+                        tap + 1
+                    ),
+                )
+            })?;
+        }
+        complete_hotkey_capture_at_current_trace(trace_path)?;
+    }
+    Ok(trace_fences)
+}
+
+fn hotkey_key_names(hotkey: AcceptanceHotkey) -> &'static str {
+    match hotkey {
+        AcceptanceHotkey::F11 => "F11",
+        AcceptanceHotkey::ShiftAltWinEnd => "LeftShift+LeftAlt+LeftWin+End",
+    }
+}
+
+fn expected_hotkey_edges(hotkey: AcceptanceHotkey, taps: usize) -> Vec<(u32, bool)> {
+    let tap_edges: &[(u32, bool)] = match hotkey {
+        AcceptanceHotkey::F11 => &[(0x7A, true), (0x7A, false)],
+        AcceptanceHotkey::ShiftAltWinEnd => &[
+            (0xA0, true),
+            (0xA4, true),
+            (0x5B, true),
+            (0x23, true),
+            (0x23, false),
+            (0x5B, false),
+            (0xA4, false),
+            (0xA0, false),
+        ],
+    };
+    let mut expected = Vec::with_capacity(tap_edges.len().saturating_mul(taps));
+    for _ in 0..taps {
+        expected.extend_from_slice(tap_edges);
+    }
+    expected
+}
+
+fn hotkey_observer_keys(hotkey: AcceptanceHotkey) -> Vec<u32> {
+    match hotkey {
+        AcceptanceHotkey::F11 => vec![0x7A],
+        AcceptanceHotkey::ShiftAltWinEnd => vec![0xA0, 0xA4, 0x5B, 0x23],
+    }
+}
+
 pub fn run_copied_profile_suite(
     executable: &str,
     profile: &Path,
@@ -564,7 +6665,7 @@ pub fn run_copied_profile_suite(
 ) -> Option<FocusAnchor> {
     let mut child = None;
     let mut anchor = None;
-    if let Err(error) = preflight_acceptance_hotkey() {
+    if let Err(error) = preflight_acceptance_hotkey(AcceptanceHotkey::F11) {
         let _ = writeln!(
             runner_log,
             "copied-profile hotkey preflight failed: {error}"
@@ -817,9 +6918,14 @@ pub fn record_environment_failure(
     runner_log: &mut File,
 ) {
     let failure = CaseFailure::new(FailureStage::Environment, message);
-    for (index, id) in CASE_IDS
-        .into_iter()
-        .filter(|id| !DEFERRED_REPORT_CASE_IDS.contains(id))
+    let ids: &[&str] = match report.suite {
+        AcceptanceSuite::All => &CASE_IDS,
+        AcceptanceSuite::Hotkey => &HOTKEY_CASE_IDS,
+    };
+    for (index, id) in ids
+        .iter()
+        .copied()
+        .filter(|id| *id != "R0" && !DEFERRED_REPORT_CASE_IDS.contains(id))
         .enumerate()
     {
         if index == 0 {
@@ -2348,6 +8454,16 @@ fn run_designer_entry(
     anchor: &FocusAnchor,
     trace_path: &Path,
 ) -> Result<DesignerEntry, CaseFailure> {
+    if let Some(existing) = child.designer() {
+        return Err(CaseFailure::new(
+            FailureStage::DesignerEntry,
+            format!(
+                "cannot claim a fresh Designer InitialSnapshot while an owned Designer HWND is already open: HWND={} PID={}",
+                hwnd_id(existing.hwnd),
+                existing.process_id
+            ),
+        ));
+    }
     let root = child
         .refresh_root()
         .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
@@ -7162,7 +13278,7 @@ fn run_disposable_close_case(
     })?;
     let baseline = wait_for_geometry_state(trace_path, entry.session_id, TRACE_TIMEOUT, |_| true)
         .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
-    let mut hold = AcceptancePrepareHold::create(profile)
+    let mut hold = AcceptancePrepareHold::create(profile, "D7 preview preparation")
         .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
     let preparation_cursor = trace_lines(trace_path).len();
     let (new_menu, new_menu_click) = click_authoring_target(
@@ -8460,6 +14576,45 @@ fn append_case(
     trace_path: &Path,
 ) {
     let mut artifacts = Vec::new();
+    let mut evidence_packet = if super::super::hotkey_expected_state(id).is_some() {
+        finish_hotkey_evidence_capture(id)
+    } else {
+        None
+    };
+    let mut result = result;
+    let evidence_validation = evidence_packet.as_ref().map(|packet| {
+        crate::validate_hotkey_evidence_packet_with_context(
+            packet,
+            report.hotkey,
+            report.profile.hold_threshold_ms,
+        )
+    });
+    let evidence_error = match evidence_validation {
+        Some(Ok(())) => None,
+        Some(Err(error)) => Some(format!(
+            "typed H evidence packet failed validation: {error}"
+        )),
+        None if super::super::hotkey_expected_state(id).is_some() => {
+            Some("typed H evidence packet was not captured".to_owned())
+        }
+        None => None,
+    };
+    if let Some(error) = evidence_error {
+        evidence_packet = None;
+        result = Err(match result {
+            Ok(_) => CaseFailure::new(FailureStage::GestureDecision, error),
+            Err(existing) => {
+                CaseFailure::new(existing.stage, format!("{}; {error}", existing.message))
+            }
+        });
+    }
+    if let Some(packet) = evidence_packet.take() {
+        if report.hotkey_evidence.len() >= super::super::MAX_HOTKEY_EVIDENCE_GESTURES {
+            report.capacity_saturated = true;
+        } else {
+            report.hotkey_evidence.push(packet);
+        }
+    }
     let (status, observed, failure_stage) = match result {
         Ok(observed) => (CaseStatus::Passed, observed, None),
         Err(error) => {
@@ -8564,6 +14719,77 @@ fn save_failure_artifacts(
         written.push(screenshot_destination);
     }
     written
+}
+
+#[derive(Default)]
+struct H17AlternateArtifactSnapshot {
+    trace_excerpt: Option<Vec<u8>>,
+    windows_inventory: Option<Vec<u8>>,
+    private_log_tail: Option<Vec<u8>>,
+    capture_errors: Vec<String>,
+}
+
+fn capture_h17_alternate_artifacts(
+    child: &NativeChild,
+    trace_path: &Path,
+) -> H17AlternateArtifactSnapshot {
+    let mut snapshot = H17AlternateArtifactSnapshot::default();
+    match fs::read_to_string(trace_path) {
+        Ok(trace) => snapshot.trace_excerpt = Some(safe_trace_excerpt(&trace).into_bytes()),
+        Err(error) => snapshot.capture_errors.push(format!(
+            "read alternate trace before profile cleanup: {error}"
+        )),
+    }
+
+    let windows = child.windows();
+    let inventory = WindowInventory {
+        runner_process_id: std::process::id(),
+        child_process_id: Some(child.process_id()),
+        windows: windows.iter().map(WindowRecord::from).collect(),
+    };
+    match serde_json::to_vec_pretty(&inventory) {
+        Ok(bytes) => snapshot.windows_inventory = Some(bytes),
+        Err(error) => snapshot
+            .capture_errors
+            .push(format!("serialize alternate HWND inventory: {error}")),
+    }
+
+    match read_bounded_log_tail(child.log_path()) {
+        Ok(bytes) => snapshot.private_log_tail = Some(bytes),
+        Err(error) => snapshot
+            .capture_errors
+            .push(format!("capture alternate private log tail: {error}")),
+    }
+    snapshot
+}
+
+fn h17_should_preserve_alternate_artifacts(tap_succeeded: bool, cleanup_succeeded: bool) -> bool {
+    !tap_succeeded || !cleanup_succeeded
+}
+
+fn persist_h17_alternate_artifacts(
+    snapshot: &H17AlternateArtifactSnapshot,
+    output: &Path,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut written = Vec::new();
+    let mut errors = snapshot.capture_errors.clone();
+    for (suffix, content) in [
+        ("trace.log", snapshot.trace_excerpt.as_deref()),
+        ("windows.json", snapshot.windows_inventory.as_deref()),
+        ("private.log", snapshot.private_log_tail.as_deref()),
+    ] {
+        let Some(content) = content else {
+            continue;
+        };
+        let destination = output.join(format!("case-H17-alternate-{suffix}"));
+        match fs::write(&destination, content) {
+            Ok(()) => written.push(destination),
+            Err(error) => errors.push(format!(
+                "write alternate {suffix} evidence before temp profile deletion: {error}"
+            )),
+        }
+    }
+    (written, errors)
 }
 
 fn run_failure_artifact_case(
@@ -8991,6 +15217,12 @@ fn trace_value(raw: &str) -> Option<String> {
 }
 
 fn copy_bounded_log_tail(source: &Path, destination: &Path) -> Result<(), String> {
+    let bytes = read_bounded_log_tail(source)?;
+    fs::write(destination, bytes)
+        .map_err(|error| format!("write private bounded log tail: {error}"))
+}
+
+fn read_bounded_log_tail(source: &Path) -> Result<Vec<u8>, String> {
     let mut input = File::open(source).map_err(|error| format!("open candidate log: {error}"))?;
     let length = input
         .metadata()
@@ -9008,8 +15240,7 @@ fn copy_bounded_log_tail(source: &Path, destination: &Path) -> Result<(), String
     if bytes.is_empty() {
         return Err("candidate log is empty".into());
     }
-    fs::write(destination, bytes)
-        .map_err(|error| format!("write private bounded log tail: {error}"))
+    Ok(bytes)
 }
 
 fn save_uia_snapshot(case_id: &str, role: &str, uia: &UiAutomation, hwnd: HWND, output: &Path) {
@@ -9105,15 +15336,28 @@ impl From<&WindowSnapshot> for WindowRecord {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct CaseFailure {
     stage: FailureStage,
     message: String,
+    input_contamination_group: Option<u32>,
 }
 
 impl CaseFailure {
     fn new(stage: FailureStage, message: String) -> Self {
-        Self { stage, message }
+        Self {
+            stage,
+            message,
+            input_contamination_group: None,
+        }
+    }
+
+    fn input_contamination(group_id: u32, message: String) -> Self {
+        Self {
+            stage: FailureStage::InputInjection,
+            message,
+            input_contamination_group: (group_id != 0).then_some(group_id),
+        }
     }
 }
 
@@ -9132,6 +15376,51 @@ fn expected(id: &str) -> &'static str {
         "H4" => "threshold hold opens runtime radial while ROOT stays visible",
         "H5" => "release after hold does not co-fire grid/ROOT visibility",
         "H6" => "second threshold hold closes runtime radial while ROOT stays visible",
+        "H7" => {
+            "three consecutive configured hotkey taps produce exactly three visibility toggles and leave ROOT hidden"
+        }
+        "H8" => {
+            "four consecutive configured hotkey taps produce exactly four visibility toggles and leave ROOT visible"
+        }
+        "H01" => {
+            "one configured short tap from runner-owned focus wakes hidden ROOT on a physical display and focuses ROOT; no runtime radial opens"
+        }
+        "H02" => {
+            "one configured short tap from focused ROOT parks it off physical displays without a later restore or radial open"
+        }
+        "H04" => {
+            "uninterrupted 1, 2, 5, 10, and 25 tap bursts from hidden and visible starts produce 86 one-to-one visibility decisions; three readable taps hide focused ROOT"
+        }
+        "H06" => {
+            "from hidden ROOT, a short tap dismisses the active runtime radial, shows ROOT, and selects or dispatches no cell"
+        }
+        "H07" => {
+            "a short tap dismisses a hovered executable runtime cell without dispatch, then later short taps show and hide ROOT"
+        }
+        "H08" => {
+            "a real runtime preparation hold is canceled by a short tap before Ready; late preparation is rejected and cannot reopen radial"
+        }
+        "H09" => {
+            "holds from hidden and visible ROOT states open runtime radial; release does not toggle ROOT; a second hold closes radial"
+        }
+        "H10" => {
+            "a hold closes radial while an executable cell is hovered, preserving ROOT visibility with no selection, dispatch, or late reopen"
+        }
+        "H11" => {
+            "five taps from visible and hidden starts preserve the same dirty Designer session, draft, and foreground without save or discard"
+        }
+        "H12" => {
+            "runtime hold and tap dismiss only runtime radial while dirty Designer and native preview surfaces, session, and draft survive"
+        }
+        "H16" => {
+            "a direct-trigger binding opens runtime radial; native and supported legacy-route launcher taps each dismiss it and toggle ROOT without selection, while the binding remains usable"
+        }
+        "H17" => {
+            "main and isolated opposite-hotkey profiles each exercise their configured hotkey with mouse gestures enabled and clean teardown"
+        }
+        "H18" => {
+            "a hold from parked ROOT opens radial without pointer movement; a short tap wakes ROOT and dismisses radial without dispatch"
+        }
         "D0" => "production Edit Radial Menus entry opens one ready child-owned Designer",
         "D1" => {
             "validated native client click on production Tree semantic target reaches accepted widget and changes state"
@@ -9384,6 +15673,20 @@ fn acceptance_prepare_gate_matches(
             == Some(identity.session_id)
 }
 
+fn runtime_preparation_matches(
+    line: &str,
+    invocation_id: u64,
+    generation: u64,
+    edge: &str,
+) -> bool {
+    line.contains("trace_event=\"runtime_preparation\"")
+        && trace_field_value(line, "edge") == Some(edge)
+        && trace_field_value(line, "invocation_id").and_then(|value| value.parse::<u64>().ok())
+            == Some(invocation_id)
+        && trace_field_value(line, "generation").and_then(|value| value.parse::<u64>().ok())
+            == Some(generation)
+}
+
 fn disposable_cancel_matches(
     line: &str,
     identity: AuthoringRequestIdentity,
@@ -9590,6 +15893,49 @@ fn visible_radial_host_windows(child: &NativeChild) -> std::collections::BTreeSe
         .filter(|window| window.visible && window.class_name == "MultiLauncherRadialHost")
         .map(|window| hwnd_id(window.hwnd))
         .collect()
+}
+
+fn visible_radial_host_snapshots(
+    child: &NativeChild,
+    baseline: &std::collections::BTreeSet<u64>,
+    runtime_hold_attempted: bool,
+) -> Vec<WindowSnapshot> {
+    if !runtime_hold_attempted {
+        return Vec::new();
+    }
+    child
+        .windows()
+        .into_iter()
+        .filter(|window| {
+            window.process_id == child.process_id()
+                && window.visible
+                && !window.minimized
+                && window.class_name == "MultiLauncherRadialHost"
+                && h12_surface_belongs_to_runtime(
+                    runtime_hold_attempted,
+                    hwnd_id(window.hwnd),
+                    baseline,
+                )
+        })
+        .collect()
+}
+
+fn h12_surface_belongs_to_runtime(
+    runtime_hold_attempted: bool,
+    hwnd: u64,
+    known_preview_surfaces: &std::collections::BTreeSet<u64>,
+) -> bool {
+    runtime_hold_attempted && hwnd != 0 && !known_preview_surfaces.contains(&hwnd)
+}
+
+fn attempt_cleanup_step(
+    errors: &mut Vec<String>,
+    label: &str,
+    action: impl FnOnce() -> Result<(), CaseFailure>,
+) {
+    if let Err(error) = action() {
+        errors.push(format!("{label}: {}", error.message));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -9802,6 +16148,12 @@ fn trace_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
         .map(|value| value.trim_matches('"'))
 }
 
+fn trace_line_is_executable_hover(line: &str) -> bool {
+    line.contains("trace_event=\"runtime_radial_hover\"")
+        && trace_field_value(line, "role") == Some("Action")
+        && trace_field_value(line, "executable") == Some("true")
+}
+
 fn hook_service_thread_id(path: &Path) -> Option<u32> {
     trace_lines(path).into_iter().find_map(|line| {
         let event = line.split("trace_event=\"").nth(1)?.split('\"').next()?;
@@ -9815,6 +16167,141 @@ fn hook_service_thread_id(path: &Path) -> Option<u32> {
             .parse()
             .ok()
     })
+}
+
+fn establish_hotkey_trace_fence(
+    child: &NativeChild,
+    trace_path: &Path,
+    expected_visible: bool,
+) -> Result<HotkeyTraceFence, CaseFailure> {
+    let hook_thread_id = wait_until(Duration::from_secs(1), || {
+        hook_service_thread_id(trace_path).is_some()
+    })
+    .then(|| hook_service_thread_id(trace_path))
+    .flatten()
+    .ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::HookAdmission,
+            "production hook service did not publish its thread identity before the trace fence"
+                .into(),
+        )
+    })?;
+    let probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+    let probe_cursor = trace_lines(trace_path).len();
+    post_validated_hook_pump_probe(hook_thread_id, child.process_id(), probe_id)
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    let probe_events = wait_trace(
+        trace_path,
+        probe_cursor,
+        Duration::from_millis(750),
+        |events| {
+            has_trace(
+                events,
+                "hook_pump_probe",
+                &[&format!("probe_id={probe_id}")],
+            )
+        },
+    );
+    if !has_trace(
+        &probe_events,
+        "hook_pump_probe",
+        &[&format!("probe_id={probe_id}")],
+    ) {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "production hook service thread {hook_thread_id} did not acknowledge trace-fence probe {probe_id}"
+            ),
+        ));
+    }
+
+    let deadline = Instant::now() + HOTKEY_TRACE_DRAIN_TIMEOUT;
+    let mut signature = hotkey_trace_activity_signature(&trace_lines(trace_path));
+    let mut quiet_since = Instant::now();
+    loop {
+        if Instant::now() >= deadline {
+            return Err(CaseFailure::new(
+                FailureStage::HookAdmission,
+                format!(
+                    "production hotkey and visibility trace did not settle within {:?} after pump probe {probe_id}",
+                    HOTKEY_TRACE_DRAIN_TIMEOUT
+                ),
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+        let next_signature = hotkey_trace_activity_signature(&trace_lines(trace_path));
+        if next_signature != signature {
+            signature = next_signature;
+            quiet_since = Instant::now();
+            continue;
+        }
+        if quiet_since.elapsed() >= HOTKEY_TRACE_QUIET_WINDOW {
+            break;
+        }
+    }
+    if !wait_root_visibility(child, expected_visible, Duration::ZERO) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!(
+                "ROOT did not remain in expected visible={expected_visible} state while draining setup trace before probe {probe_id}"
+            ),
+        ));
+    }
+    let events = trace_lines(trace_path);
+    Ok(hotkey_trace_fence_from_events(&events, probe_id))
+}
+
+fn hotkey_trace_fence_from_events(events: &[String], probe_id: u64) -> HotkeyTraceFence {
+    let baseline_invocation_id = events.iter().rev().find_map(|line| {
+        line.contains("trace_event=\"short_tap\"")
+            .then(|| trace_field_value(line, "invocation_id"))
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+    });
+    HotkeyTraceFence {
+        cursor: events.len(),
+        probe_id,
+        baseline_invocation_id,
+        baseline_visibility_revision: latest_desired_visibility_revision(events),
+    }
+}
+
+fn hotkey_trace_activity_signature(events: &[String]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|line| {
+            line.contains("trace_event=\"hook_primary\"")
+                || line.contains("trace_event=\"configured_primary\"")
+                || line.contains("trace_event=\"short_tap\"")
+                || line.contains("trace_event=\"desired_visibility\"")
+        })
+        .cloned()
+        .collect()
+}
+
+fn hotkey_trace_edge_count(events: &[String], event_name: &str) -> usize {
+    let event_marker = format!("trace_event=\"{event_name}\"");
+    events
+        .iter()
+        .filter(|line| line.contains(&event_marker))
+        .count()
+}
+
+fn validate_hotkey_production_admission(events: &[String], taps: usize) -> Result<(), String> {
+    let expected_edges = taps.saturating_mul(2);
+    let hook_edges = hotkey_trace_edge_count(events, "hook_primary");
+    if hook_edges != expected_edges {
+        return Err(format!(
+            "expected {expected_edges} production hook_primary edges after runner injection, observed {hook_edges}"
+        ));
+    }
+    let configured_edges = hotkey_trace_edge_count(events, "configured_primary");
+    if configured_edges != expected_edges {
+        return Err(format!(
+            "expected {expected_edges} configured_primary edges after runner injection, observed {configured_edges}"
+        ));
+    }
+    Ok(())
 }
 
 fn wait_trace<F>(path: &Path, cursor: usize, timeout: Duration, mut predicate: F) -> Vec<String>
@@ -9862,20 +16349,223 @@ fn wait_for_latest_root_restore(path: &Path, timeout: Duration) -> Option<String
     if completed { request_id } else { None }
 }
 
+fn root_restore_terminal_after(events: &[String], cursor: usize) -> Option<Result<String, String>> {
+    let request = events.iter().skip(cursor).rev().find(|line| {
+        line.contains("trace_event=\"native_activation\"") && line.contains("edge=RestoreRequested")
+    })?;
+    let request_id = request
+        .split("request_id=")
+        .nth(1)?
+        .split_ascii_whitespace()
+        .next()?;
+    let terminal = events.iter().skip(cursor).find(|line| {
+        line.contains("trace_event=\"native_activation\"")
+            && line.contains("terminal=true")
+            && line.contains(&format!("request_id={request_id}"))
+            && (line.contains("edge=RestoreCompleted") || line.contains("edge=RestoreFailed"))
+    })?;
+    if terminal.contains("edge=RestoreCompleted") {
+        Some(Ok(request_id.to_owned()))
+    } else {
+        Some(Err(format!(
+            "native ROOT restore request {request_id} ended with RestoreFailed"
+        )))
+    }
+}
+
+fn visible_burst_trace_settled(
+    events: &[String],
+    cursor: usize,
+    policy: VisibleBurstSettlePolicy,
+) -> Result<Option<String>, String> {
+    match policy {
+        VisibleBurstSettlePolicy::ActivateRoot => {
+            root_restore_terminal_after(events, cursor).transpose()
+        }
+        VisibleBurstSettlePolicy::PreserveForeground { .. } => {
+            validate_no_native_root_activation_after(events, cursor)?;
+            Ok(Some("PreserveForeground".into()))
+        }
+    }
+}
+
+fn wait_for_root_restore_after(
+    path: &Path,
+    cursor: usize,
+    timeout: Duration,
+) -> Result<String, String> {
+    wait_for_root_restore_after_events(timeout, || {
+        trace_lines(path)
+            .into_iter()
+            .skip(cursor)
+            .collect::<Vec<_>>()
+    })
+}
+
+fn wait_for_root_restore_after_events<F>(
+    timeout: Duration,
+    mut events_after_cursor: F,
+) -> Result<String, String>
+where
+    F: FnMut() -> Vec<String>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let events = events_after_cursor();
+        match visible_burst_trace_settled(&events, 0, VisibleBurstSettlePolicy::ActivateRoot)? {
+            Some(request_id) => return Ok(request_id),
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "no matching terminal native ROOT restore appeared within {}ms",
+                timeout.as_millis()
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn wait_hotkey_fixture_ready(
+    child: &NativeChild,
+    trace_path: &Path,
+    timeout: Duration,
+) -> Result<WindowSnapshot, String> {
+    let displays = native_display_bounds()
+        .map_err(|error| format!("inspect displays during hotkey fixture startup: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    let mut hook_ready = false;
+    let mut stable_root: Option<WindowSnapshot> = None;
+    let mut stable_samples = 0u8;
+    let mut latest_root = None;
+    while Instant::now() < deadline {
+        hook_ready |= trace_lines(trace_path)
+            .iter()
+            .any(|line| line.contains("trace_event=\"hook_service_ready\""));
+        let current = child.refresh_root().ok();
+        if let Some(root) = current.as_ref() {
+            latest_root = Some(root.clone());
+            if hotkey_fixture_root_is_ready(root, child.root().hwnd, child.process_id(), &displays)
+            {
+                if stable_root
+                    .as_ref()
+                    .is_some_and(|previous| same_window_state(previous, root))
+                {
+                    stable_samples = stable_samples.saturating_add(1);
+                } else {
+                    stable_root = Some(root.clone());
+                    stable_samples = 1;
+                }
+                if hook_ready && stable_samples >= HOTKEY_FIXTURE_STABLE_SAMPLES {
+                    return Ok(root.clone());
+                }
+            } else {
+                stable_root = None;
+                stable_samples = 0;
+            }
+        } else {
+            stable_root = None;
+            stable_samples = 0;
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+    Err(format!(
+        "hotkey fixture did not publish hook readiness and a stable, physically presented ROOT at configured static placement within {}ms; hook_service_ready={hook_ready}; stable_samples={stable_samples}/{HOTKEY_FIXTURE_STABLE_SAMPLES}; latest_root={:?}",
+        timeout.as_millis(),
+        latest_root.map(|root| (root.visible, root.minimized, root.bounds))
+    ))
+}
+
+fn hotkey_fixture_root_is_ready(
+    root: &WindowSnapshot,
+    expected_hwnd: HWND,
+    expected_pid: u32,
+    displays: &[[i32; 4]],
+) -> bool {
+    let width = root.bounds[2].saturating_sub(root.bounds[0]);
+    let height = root.bounds[3].saturating_sub(root.bounds[1]);
+    root.role == WindowRole::Root
+        && root.hwnd == expected_hwnd
+        && root.process_id == expected_pid
+        && root.visible
+        && !root.minimized
+        && intersects_display_bounds(root.bounds, displays)
+        && root.bounds[0].abs_diff(240) <= 80
+        && root.bounds[1].abs_diff(180) <= 80
+        && (760..=1_040).contains(&width)
+        && (540..=780).contains(&height)
+}
+
 fn wait_root_visibility(child: &NativeChild, visible: bool, timeout: Duration) -> bool {
+    let Ok(displays) = native_display_bounds() else {
+        return false;
+    };
     wait_until(timeout, || {
         child.refresh_root().is_ok_and(|root| {
-            if visible {
-                root.visible && !root.minimized && root.intersects_virtual_screen()
-            } else {
-                !root.intersects_virtual_screen()
-            }
+            root_matches_requested_visibility(
+                &root,
+                child.root().hwnd,
+                child.process_id(),
+                visible,
+                &displays,
+            )
         })
     })
 }
 
+fn root_is_physically_presented(root: &WindowSnapshot, displays: &[[i32; 4]]) -> bool {
+    root.visible && !root.minimized && intersects_display_bounds(root.bounds, displays)
+}
+
+fn root_matches_requested_visibility(
+    root: &WindowSnapshot,
+    expected_hwnd: HWND,
+    expected_pid: u32,
+    visible: bool,
+    displays: &[[i32; 4]],
+) -> bool {
+    let owned_root = root.role == WindowRole::Root
+        && root.process_id == expected_pid
+        && root.hwnd == expected_hwnd;
+    owned_root && root_is_physically_presented(root, displays) == visible
+}
+
+fn latest_desired_visibility_revision(events: &[String]) -> Option<u64> {
+    events.iter().rev().find_map(|line| {
+        line.contains("trace_event=\"desired_visibility\"")
+            .then(|| trace_field_value(line, "revision"))
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+    })
+}
+
+fn trace_contains_hold_visibility_work(
+    events: &[String],
+    previous_revision: Option<u64>,
+    hold_invocation_id: Option<u64>,
+) -> bool {
+    events.iter().any(|line| {
+        if !line.contains("trace_event=\"desired_visibility\"") {
+            return false;
+        }
+        let invocation_matches = hold_invocation_id.is_some_and(|expected| {
+            trace_field_value(line, "invocation_id").and_then(|value| value.parse::<u64>().ok())
+                == Some(expected)
+        });
+        let revision_advanced = match (
+            previous_revision,
+            trace_field_value(line, "revision").and_then(|value| value.parse::<u64>().ok()),
+        ) {
+            (Some(previous), Some(current)) => current > previous,
+            (None, Some(_)) | (_, None) => true,
+        };
+        invocation_matches || revision_advanced
+    })
+}
+
 fn require_visible(root: &WindowSnapshot) -> Result<(), String> {
-    if root.visible && !root.minimized && root.intersects_virtual_screen() {
+    let displays = native_display_bounds()?;
+    if root.role == WindowRole::Root && root_is_physically_presented(root, &displays) {
         Ok(())
     } else {
         Err(format!(
@@ -9886,11 +16576,12 @@ fn require_visible(root: &WindowSnapshot) -> Result<(), String> {
 }
 
 fn require_hidden(root: &WindowSnapshot) -> Result<(), String> {
-    if !root.intersects_virtual_screen() {
+    let displays = native_display_bounds()?;
+    if root.role == WindowRole::Root && !root_is_physically_presented(root, &displays) {
         Ok(())
     } else {
         Err(format!(
-            "ROOT remains in the virtual screen bounds after hide: visible={} minimized={} bounds={:?}",
+            "ROOT remains physically presented after hide: visible={} minimized={} bounds={:?}",
             root.visible, root.minimized, root.bounds
         ))
     }
@@ -10151,6 +16842,1938 @@ fn bounded_text(text: &str, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mandatory_hotkey_cases_have_case_specific_expected_states() {
+        let ids = [
+            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17",
+            "H18",
+        ];
+        let generic = "candidate exits normally through production close path";
+        let descriptions = ids
+            .into_iter()
+            .map(|id| (id, expected(id)))
+            .collect::<Vec<_>>();
+
+        assert!(descriptions.iter().all(|(_, text)| *text != generic));
+        assert_eq!(
+            descriptions
+                .iter()
+                .map(|(_, text)| *text)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            ids.len()
+        );
+        assert_eq!(
+            descriptions.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            HOTKEY_CASE_IDS
+                .into_iter()
+                .filter(|id| id.starts_with('H'))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn h06_expected_contract_matches_hidden_start_and_visible_grid_evidence() {
+        assert_eq!(
+            expected("H06"),
+            "from hidden ROOT, a short tap dismisses the active runtime radial, shows ROOT, and selects or dispatches no cell"
+        );
+
+        let observed = "evidence:v1; hotkey=F11; runtime_radial=dismissed; grid_visible=true; selection=none; dispatch=none; child_surface=closed; hover_ack=executable_cell";
+        crate::validate_required_case_evidence("H06", CaseStatus::Passed, observed)
+            .expect("H06 observed evidence must satisfy the R0 contract");
+        let inconsistent = observed.replace("grid_visible=true", "grid_visible=false");
+        assert!(
+            crate::validate_required_case_evidence("H06", CaseStatus::Passed, &inconsistent)
+                .is_err(),
+            "a hidden-ending H06 observation must not satisfy its show-ROOT expectation"
+        );
+    }
+
+    #[test]
+    fn h16_expected_contract_matches_dismissal_grid_toggle_and_binding_evidence() {
+        assert_eq!(
+            expected("H16"),
+            "a direct-trigger binding opens runtime radial; native and supported legacy-route launcher taps each dismiss it and toggle ROOT without selection, while the binding remains usable"
+        );
+
+        let observed = "evidence:v1; hotkey=F11; direct_trigger=opened; native_launcher_tap=dismissed+grid_toggled; legacy_launcher_tap=dismissed+grid_toggled; legacy_source=HotkeyTrigger+LegacyTrigger; direct_trigger_preserved=true; root_refreshed_after_direct=true; legacy_profile_cleanup=verified; legacy_child_pid=1234; legacy_profile_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; legacy_trace_artifact=trace.log; legacy_profile_artifact=profile.json";
+        crate::validate_required_case_evidence("H16", CaseStatus::Passed, observed)
+            .expect("H16 observed evidence must satisfy the R0 contract");
+        let incorrect = observed.replace(
+            "native_launcher_tap=dismissed+grid_toggled",
+            "native_launcher_tap=survived",
+        );
+        assert!(
+            crate::validate_required_case_evidence("H16", CaseStatus::Passed, &incorrect).is_err(),
+            "the native launcher tap must dismiss radial and toggle ROOT"
+        );
+    }
+
+    #[test]
+    fn finished_hotkey_capture_emits_the_validator_schema_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let trace_path = directory.path().join("trace.log");
+        fs::write(
+            &trace_path,
+            [
+                "trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=5 modifiers_match=true provenance=ExternalInjected",
+                "trace_event=\"configured_primary\" elapsed_ms=20 transition=Release invocation_id=5 modifiers_match=false provenance=ExternalInjected",
+                "trace_event=\"short_tap\" elapsed_ms=22 invocation_id=5 terminal=true",
+                "trace_event=\"desired_visibility\" elapsed_ms=24 visible=true revision=7 source=ToggleBatch invocation_id=5",
+                "trace_event=\"root_command\" elapsed_ms=26 command=Focus request_id=9 visibility_revision=7 invocation_id=5",
+                "trace_event=\"native_window_snapshot\" elapsed_ms=32 hwnd=1001 process_id=202 left=100 top=100 right=900 bottom=700 visible=true minimized=false request_id=9 visibility_revision=7 invocation_id=5",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let capture = ActiveHotkeyEvidenceCapture {
+            case_id: "H01".into(),
+            segments: vec![HotkeyCaptureSegment {
+                stream: HotkeyCandidateStream::MainCandidate,
+                path: trace_path,
+                cursor: 0,
+                end: None,
+                materialized_events: None,
+                input_group_id: 1,
+                purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                root_hwnd: 1001,
+                root_process_id: 202,
+            }],
+            stream_overrides: Vec::new(),
+            runner_edges: vec![
+                HotkeyRunnerEdgeEvidence {
+                    runner_relative_us: 100_000,
+                    input_group_id: 1,
+                    stream: HotkeyCandidateStream::MainCandidate,
+                    purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                    virtual_key: 0x7A,
+                    transition: HotkeyEdgeTransition::Press,
+                    injected: true,
+                    runner_cookie_matched: true,
+                },
+                HotkeyRunnerEdgeEvidence {
+                    runner_relative_us: 125_000,
+                    input_group_id: 1,
+                    stream: HotkeyCandidateStream::MainCandidate,
+                    purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                    virtual_key: 0x7A,
+                    transition: HotkeyEdgeTransition::Release,
+                    injected: true,
+                    runner_cookie_matched: true,
+                },
+            ],
+            first_runner_edge: Some(Instant::now()),
+            runner_edge_overflow: false,
+            capture_segment_overflow: false,
+            candidate_trace_overflow: false,
+            physical_displays: vec![[0, 0, 1920, 1080]],
+            next_input_group_id: 2,
+            current_purpose: None,
+        };
+        ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| *slot.borrow_mut() = Some(capture));
+
+        let packet = finish_hotkey_evidence_capture("H01").unwrap();
+        assert_eq!(packet.schema_version, 4);
+        crate::validate_hotkey_evidence_packet_with_context(&packet, AcceptanceHotkey::F11, 350)
+            .unwrap();
+    }
+
+    #[test]
+    fn benign_foreign_gap_edges_are_retained_in_hotkey_evidence() {
+        let start = Instant::now();
+        let owned = |virtual_key, down, offset_ms| RunnerChordEdge {
+            vk: virtual_key,
+            down,
+            injected: true,
+            extra_info: ACCEPTANCE_RUNNER_INPUT_COOKIE,
+            at: start + Duration::from_millis(offset_ms),
+        };
+        let foreign = |virtual_key, down, offset_ms| RunnerChordEdge {
+            vk: virtual_key,
+            down,
+            injected: true,
+            extra_info: 0,
+            at: start + Duration::from_millis(offset_ms),
+        };
+        let observation = RunnerChordObservation {
+            desktop: "Default".into(),
+            keys: Vec::new(),
+            ordered_edges: vec![
+                owned(0xA0, true, 0),
+                owned(0xA4, true, 2),
+                owned(0x5B, true, 4),
+                owned(0x23, true, 6),
+                owned(0x23, false, 16),
+                owned(0x5B, false, 18),
+                owned(0xA4, false, 20),
+                owned(0xA0, false, 22),
+            ],
+            foreign_edges: vec![foreign(0xA4, true, 50), foreign(0xA4, false, 55)],
+        };
+
+        begin_hotkey_evidence_capture("H04", Path::new("unused-trace.log"));
+        set_hotkey_capture_purpose(HotkeyRunnerInputPurpose::MatrixBurst);
+        capture_hotkey_runner_edges(
+            &observation,
+            HotkeyCandidateStream::MainCandidate,
+            1,
+            HotkeyRunnerInputPurpose::MatrixBurst,
+        );
+        let packet = finish_hotkey_evidence_capture("H04").unwrap();
+        let foreign_rows = packet
+            .runner_edges
+            .iter()
+            .filter(|edge| !edge.runner_cookie_matched)
+            .collect::<Vec<_>>();
+        assert_eq!(foreign_rows.len(), 2);
+        assert!(foreign_rows.iter().all(|edge| {
+            edge.input_group_id == 1
+                && edge.purpose == HotkeyRunnerInputPurpose::MatrixBurst
+                && edge.virtual_key == 0xA4
+                && edge.injected
+        }));
+        assert_eq!(packet.runner_edges.len(), 10);
+    }
+
+    fn snapshot_wait_context() -> HotkeySnapshotWaitContext {
+        HotkeySnapshotWaitContext {
+            cursor: 0,
+            stream: HotkeyCandidateStream::MainCandidate,
+            input_group_id: 3,
+            purpose: HotkeyRunnerInputPurpose::MatrixBurst,
+            root_hwnd: 1001,
+            root_process_id: 202,
+            physical_displays: vec![[0, 0, 1920, 1080]],
+        }
+    }
+
+    fn snapshot_wait_events(include_snapshot: bool) -> Vec<HotkeyCandidateEventEvidence> {
+        let mut lines = vec![
+            "trace_event=\"short_tap\" elapsed_ms=22 invocation_id=5 terminal=true",
+            "trace_event=\"desired_visibility\" elapsed_ms=24 visible=true revision=7 source=ToggleBatch invocation_id=5",
+            "trace_event=\"root_command\" elapsed_ms=26 command=Focus request_id=9 visibility_revision=7 invocation_id=5",
+        ];
+        if include_snapshot {
+            lines.push("trace_event=\"native_window_snapshot\" elapsed_ms=32 hwnd=1001 process_id=202 left=100 top=100 right=900 bottom=700 visible=true minimized=false request_id=9 visibility_revision=7 invocation_id=5");
+        }
+        lines
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                parse_hotkey_candidate_event(
+                    line,
+                    HotkeyCandidateStream::MainCandidate,
+                    3,
+                    HotkeyRunnerInputPurpose::MatrixBurst,
+                    index + 1,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn applied_tap_waits_for_its_correlated_physical_snapshot() {
+        let context = snapshot_wait_context();
+        let mut calls = 0;
+        let mut events = snapshot_wait_events(false);
+        let settled = wait_for_hotkey_snapshot_proof(
+            &context,
+            Duration::from_millis(100),
+            Duration::from_millis(1),
+            || {
+                calls += 1;
+                if calls == 2 {
+                    events = snapshot_wait_events(true);
+                }
+                events.clone()
+            },
+        );
+
+        assert!(settled);
+        assert!(calls >= 2, "the wait must observe the deferred snapshot");
+    }
+
+    #[test]
+    fn missing_or_uncorrelated_snapshot_does_not_settle_an_applied_tap() {
+        let context = snapshot_wait_context();
+        assert!(!hotkey_segment_has_physical_snapshot_proof(
+            &context,
+            &snapshot_wait_events(false)
+        ));
+
+        let mut wrong_snapshot = snapshot_wait_events(true);
+        let snapshot = wrong_snapshot.last_mut().unwrap();
+        snapshot.process_id = Some(203);
+        assert!(!hotkey_segment_has_physical_snapshot_proof(
+            &context,
+            &wrong_snapshot
+        ));
+
+        let mut wrong_visibility = snapshot_wait_events(true);
+        let snapshot = wrong_visibility.last_mut().unwrap();
+        snapshot.bounds = Some([2000, 2000, 2800, 2600]);
+        assert!(!hotkey_segment_has_physical_snapshot_proof(
+            &context,
+            &wrong_visibility
+        ));
+
+        let mut without_display_oracle = context.clone();
+        without_display_oracle.physical_displays.clear();
+        assert!(!hotkey_segment_has_physical_snapshot_proof(
+            &without_display_oracle,
+            &snapshot_wait_events(true)
+        ));
+
+        assert!(!wait_for_hotkey_snapshot_proof(
+            &context,
+            Duration::ZERO,
+            Duration::ZERO,
+            || snapshot_wait_events(false),
+        ));
+    }
+
+    #[test]
+    fn measured_segment_closes_before_intervening_setup_tap() {
+        let directory = tempfile::tempdir().unwrap();
+        let trace_path = directory.path().join("trace.log");
+        let measured = [
+            "trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=5 modifiers_match=true provenance=ExternalInjected",
+            "trace_event=\"configured_primary\" elapsed_ms=20 transition=Release invocation_id=5 modifiers_match=false provenance=ExternalInjected",
+            "trace_event=\"short_tap\" elapsed_ms=22 invocation_id=5 terminal=true",
+            "trace_event=\"desired_visibility\" elapsed_ms=24 visible=true revision=7 source=ToggleBatch invocation_id=5",
+            "trace_event=\"root_command\" elapsed_ms=26 command=Focus request_id=9 visibility_revision=7 invocation_id=5",
+            "trace_event=\"native_window_snapshot\" elapsed_ms=32 hwnd=1001 process_id=202 left=100 top=100 right=900 bottom=700 visible=true minimized=false request_id=9 visibility_revision=7 invocation_id=5",
+        ];
+        fs::write(&trace_path, measured.join("\n")).unwrap();
+        let mut capture = ActiveHotkeyEvidenceCapture {
+            case_id: "H01".into(),
+            segments: Vec::new(),
+            stream_overrides: Vec::new(),
+            runner_edges: Vec::new(),
+            first_runner_edge: None,
+            runner_edge_overflow: false,
+            capture_segment_overflow: false,
+            candidate_trace_overflow: false,
+            physical_displays: vec![[0, 0, 1920, 1080]],
+            next_input_group_id: 1,
+            current_purpose: None,
+        };
+        let (_, first_group, _) = open_hotkey_capture_segment(
+            &mut capture,
+            HotkeyCandidateStream::MainCandidate,
+            &trace_path,
+            0,
+            HotkeyRunnerInputPurpose::LauncherChord,
+            1001,
+            202,
+        );
+        complete_hotkey_capture_segment_in(&mut capture, &trace_path, measured.len()).unwrap();
+
+        let setup = [
+            "trace_event=\"configured_primary\" elapsed_ms=40 transition=Press invocation_id=6 modifiers_match=true provenance=ExternalInjected",
+            "trace_event=\"configured_primary\" elapsed_ms=50 transition=Release invocation_id=6 modifiers_match=false provenance=ExternalInjected",
+            "trace_event=\"short_tap\" elapsed_ms=52 invocation_id=6 terminal=true",
+            "trace_event=\"desired_visibility\" elapsed_ms=54 visible=false revision=8 source=ToggleBatch invocation_id=6",
+        ];
+        let mut trace_lines = measured.to_vec();
+        trace_lines.extend(setup);
+        fs::write(&trace_path, trace_lines.join("\n")).unwrap();
+        let second_cursor = trace_lines.len();
+        let (_, second_group, _) = open_hotkey_capture_segment(
+            &mut capture,
+            HotkeyCandidateStream::MainCandidate,
+            &trace_path,
+            second_cursor,
+            HotkeyRunnerInputPurpose::MatrixBurst,
+            1001,
+            202,
+        );
+        trace_lines.push(
+            "trace_event=\"configured_primary\" elapsed_ms=60 transition=Press invocation_id=7 modifiers_match=true provenance=ExternalInjected".into(),
+        );
+        trace_lines.push(
+            "trace_event=\"configured_primary\" elapsed_ms=70 transition=Release invocation_id=7 modifiers_match=false provenance=ExternalInjected".into(),
+        );
+        trace_lines
+            .push("trace_event=\"short_tap\" elapsed_ms=72 invocation_id=7 terminal=true".into());
+        trace_lines.push(
+            "trace_event=\"desired_visibility\" elapsed_ms=74 visible=true revision=9 source=ToggleBatch invocation_id=7".into(),
+        );
+        fs::write(&trace_path, trace_lines.join("\n")).unwrap();
+        complete_hotkey_capture_segment_in(&mut capture, &trace_path, trace_lines.len()).unwrap();
+        fs::remove_file(&trace_path).unwrap();
+        ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| *slot.borrow_mut() = Some(capture));
+
+        let packet = finish_hotkey_evidence_capture("H01").unwrap();
+        let first_events = packet
+            .candidate_events
+            .iter()
+            .filter(|event| event.input_group_id == first_group)
+            .collect::<Vec<_>>();
+        let second_events = packet
+            .candidate_events
+            .iter()
+            .filter(|event| event.input_group_id == second_group)
+            .collect::<Vec<_>>();
+        assert_eq!(first_events.len(), measured.len());
+        assert!(
+            first_events
+                .iter()
+                .all(|event| event.invocation_id != Some(6))
+        );
+        assert!(first_events.iter().any(|event| {
+            event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                && event.invocation_id == Some(5)
+        }));
+        assert_eq!(second_events.len(), 4);
+        assert!(
+            second_events
+                .iter()
+                .all(|event| event.invocation_id == Some(7))
+        );
+        assert!(!packet.capture_segment_overflow);
+    }
+
+    #[test]
+    fn temp_profile_legacy_stream_override_materializes_before_profile_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let main_trace_path = directory.path().join("main.log");
+        let main_trace = [
+            "trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=5 modifiers_match=true provenance=ExternalInjected",
+            "trace_event=\"configured_primary\" elapsed_ms=20 transition=Release invocation_id=5 modifiers_match=false provenance=ExternalInjected",
+            "trace_event=\"short_tap\" elapsed_ms=22 invocation_id=5 terminal=true",
+            "trace_event=\"desired_visibility\" elapsed_ms=24 visible=true revision=7 source=ToggleBatch invocation_id=5",
+            "trace_event=\"root_command\" elapsed_ms=26 command=Focus request_id=9 visibility_revision=7 invocation_id=5",
+            "trace_event=\"native_window_snapshot\" elapsed_ms=32 hwnd=1001 process_id=202 left=100 top=100 right=900 bottom=700 visible=true minimized=false request_id=9 visibility_revision=7 invocation_id=5",
+        ];
+        let legacy_profile = tempfile::tempdir_in(directory.path()).unwrap();
+        let legacy_trace_path = legacy_profile.path().join("acceptance.log");
+        let legacy_trace = [
+            "trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=5 modifiers_match=true provenance=ExternalInjected",
+            "trace_event=\"configured_primary\" elapsed_ms=20 transition=Release invocation_id=5 modifiers_match=false provenance=ExternalInjected",
+            "trace_event=\"short_tap\" elapsed_ms=22 invocation_id=5 terminal=true",
+            "trace_event=\"desired_visibility\" elapsed_ms=24 visible=true revision=8 source=ToggleBatch invocation_id=5",
+            "trace_event=\"root_command\" elapsed_ms=26 command=Focus request_id=10 visibility_revision=8 invocation_id=5",
+            "trace_event=\"native_window_snapshot\" elapsed_ms=32 hwnd=2002 process_id=303 left=100 top=100 right=900 bottom=700 visible=true minimized=false request_id=10 visibility_revision=8 invocation_id=5",
+        ];
+        fs::write(&main_trace_path, main_trace.join("\n")).unwrap();
+        fs::write(&legacy_trace_path, legacy_trace.join("\n")).unwrap();
+        let mut capture = ActiveHotkeyEvidenceCapture {
+            case_id: "H01".into(),
+            segments: Vec::new(),
+            stream_overrides: Vec::new(),
+            runner_edges: Vec::new(),
+            first_runner_edge: None,
+            runner_edge_overflow: false,
+            capture_segment_overflow: false,
+            candidate_trace_overflow: false,
+            physical_displays: vec![[0, 0, 1920, 1080]],
+            next_input_group_id: 1,
+            current_purpose: None,
+        };
+        let main = open_hotkey_capture_segment(
+            &mut capture,
+            HotkeyCandidateStream::MainCandidate,
+            &main_trace_path,
+            0,
+            HotkeyRunnerInputPurpose::LauncherChord,
+            1001,
+            202,
+        );
+        assert_eq!(main.0, HotkeyCandidateStream::MainCandidate);
+        ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| *slot.borrow_mut() = Some(capture));
+
+        assert!(complete_open_hotkey_capture_at_current_trace(&main_trace_path).is_ok());
+        register_hotkey_candidate_stream(
+            &legacy_trace_path,
+            HotkeyCandidateStream::LegacyFallbackCandidate,
+        );
+        let legacy = ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+            let mut capture = slot.borrow_mut();
+            let capture = capture.as_mut().unwrap();
+            open_hotkey_capture_segment(
+                capture,
+                HotkeyCandidateStream::MainCandidate,
+                &legacy_trace_path,
+                0,
+                HotkeyRunnerInputPurpose::LauncherChord,
+                2002,
+                303,
+            )
+        });
+        assert_eq!(legacy.0, HotkeyCandidateStream::LegacyFallbackCandidate);
+        assert!(complete_open_hotkey_capture_at_current_trace(&legacy_trace_path).is_ok());
+        legacy_profile.close().unwrap();
+
+        let packet = finish_hotkey_evidence_capture("H01").unwrap();
+        assert_eq!(
+            packet.candidate_events.len(),
+            main_trace.len() + legacy_trace.len()
+        );
+        assert!(packet.candidate_events.iter().any(|event| {
+            event.stream == HotkeyCandidateStream::MainCandidate
+                && event.hwnd == Some(1001)
+                && event.process_id == Some(202)
+        }));
+        assert!(packet.candidate_events.iter().any(|event| {
+            event.stream == HotkeyCandidateStream::LegacyFallbackCandidate
+                && event.hwnd == Some(2002)
+                && event.process_id == Some(303)
+        }));
+        assert_eq!(packet.root_identities.len(), 2);
+        assert!(!packet.candidate_trace_overflow);
+        assert!(!packet.capture_segment_overflow);
+    }
+
+    #[test]
+    fn hotkey_capture_retains_unmatched_intent_command_and_radial_action_events() {
+        fn capture_case(extra_line: &str) -> HotkeyCaseEvidence {
+            let directory = tempfile::tempdir().unwrap();
+            let trace_path = directory.path().join("trace.log");
+            let mut lines = vec![
+                "trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=5 modifiers_match=true provenance=ExternalInjected",
+                "trace_event=\"configured_primary\" elapsed_ms=20 transition=Release invocation_id=5 modifiers_match=false provenance=ExternalInjected",
+                "trace_event=\"short_tap\" elapsed_ms=22 invocation_id=5 terminal=true",
+                "trace_event=\"desired_visibility\" elapsed_ms=24 visible=true revision=7 source=ToggleBatch invocation_id=5",
+                "trace_event=\"root_command\" elapsed_ms=26 command=Focus request_id=9 visibility_revision=7 invocation_id=5",
+                "trace_event=\"native_window_snapshot\" elapsed_ms=32 hwnd=1001 process_id=202 left=100 top=100 right=900 bottom=700 visible=true minimized=false request_id=9 visibility_revision=7 invocation_id=5",
+            ];
+            lines.push(extra_line);
+            fs::write(&trace_path, lines.join("\n")).unwrap();
+            ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
+                *slot.borrow_mut() = Some(ActiveHotkeyEvidenceCapture {
+                    case_id: "H01".into(),
+                    segments: vec![HotkeyCaptureSegment {
+                        stream: HotkeyCandidateStream::MainCandidate,
+                        path: trace_path,
+                        cursor: 0,
+                        end: None,
+                        materialized_events: None,
+                        input_group_id: 1,
+                        purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                        root_hwnd: 1001,
+                        root_process_id: 202,
+                    }],
+                    stream_overrides: Vec::new(),
+                    runner_edges: vec![
+                        HotkeyRunnerEdgeEvidence {
+                            runner_relative_us: 100_000,
+                            input_group_id: 1,
+                            stream: HotkeyCandidateStream::MainCandidate,
+                            purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                            virtual_key: 0x7A,
+                            transition: HotkeyEdgeTransition::Press,
+                            injected: true,
+                            runner_cookie_matched: true,
+                        },
+                        HotkeyRunnerEdgeEvidence {
+                            runner_relative_us: 125_000,
+                            input_group_id: 1,
+                            stream: HotkeyCandidateStream::MainCandidate,
+                            purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                            virtual_key: 0x7A,
+                            transition: HotkeyEdgeTransition::Release,
+                            injected: true,
+                            runner_cookie_matched: true,
+                        },
+                    ],
+                    first_runner_edge: Some(Instant::now()),
+                    runner_edge_overflow: false,
+                    capture_segment_overflow: false,
+                    candidate_trace_overflow: false,
+                    physical_displays: vec![[0, 0, 1920, 1080]],
+                    next_input_group_id: 2,
+                    current_purpose: None,
+                });
+            });
+            finish_hotkey_evidence_capture("H01").unwrap()
+        }
+
+        let unmatched_intent = capture_case(
+            "trace_event=\"desired_visibility\" elapsed_ms=34 visible=false revision=8 source=ToggleBatch invocation_id=99",
+        );
+        assert!(unmatched_intent.candidate_events.iter().any(|event| {
+            event.kind == HotkeyTraceEventKind::VisibilityIntent
+                && event.invocation_id == Some(99)
+                && event.visibility_revision == Some(8)
+        }));
+        assert!(crate::validate_hotkey_evidence_packet(&unmatched_intent).is_err());
+
+        let unmatched_command = capture_case(
+            "trace_event=\"root_command\" elapsed_ms=34 command=Focus request_id=10 visibility_revision=8 invocation_id=99",
+        );
+        assert!(unmatched_command.candidate_events.iter().any(|event| {
+            event.kind == HotkeyTraceEventKind::RootCommand && event.request_id == Some(10)
+        }));
+        assert!(crate::validate_hotkey_evidence_packet(&unmatched_command).is_err());
+
+        let radial_dispatch = capture_case(
+            "trace_event=\"radial_action\" elapsed_ms=34 stage=Dispatched skins=false editor_open=None skins_selected=None panel_registered=None",
+        );
+        assert!(radial_dispatch.candidate_events.iter().any(|event| {
+            event.kind == HotkeyTraceEventKind::RadialAction
+                && event.radial_action_stage == Some(HotkeyRadialActionStage::Dispatched)
+        }));
+        assert!(crate::validate_hotkey_evidence_packet(&radial_dispatch).is_err());
+    }
+
+    #[test]
+    fn hotkey_candidate_parser_keeps_invocation_revision_and_boundary_identity() {
+        let intent = parse_hotkey_candidate_event(
+            "WARN target trace_event=\"desired_visibility\" elapsed_ms=27 visible=true revision=7 source=ToggleBatch invocation_id=5",
+            HotkeyCandidateStream::MainCandidate,
+            3,
+            HotkeyRunnerInputPurpose::MatrixBurst,
+            10,
+        )
+        .expect("desired visibility event");
+        assert_eq!(intent.kind, HotkeyTraceEventKind::VisibilityIntent);
+        assert_eq!(intent.input_group_id, 3);
+        assert_eq!(intent.invocation_id, Some(5));
+        assert_eq!(intent.visibility_revision, Some(7));
+        assert_eq!(intent.visible, Some(true));
+        assert_eq!(
+            intent.visibility_source,
+            Some(HotkeyVisibilitySource::ToggleBatch)
+        );
+
+        let command = parse_hotkey_candidate_event(
+            "WARN target trace_event=\"root_command\" elapsed_ms=31 command=Show request_id=99 request_kind=None session_id=0 generation=99 terminal=false visibility_revision=7 invocation_id=5",
+            HotkeyCandidateStream::MainCandidate,
+            4,
+            HotkeyRunnerInputPurpose::MatrixBurst,
+            11,
+        )
+        .expect("ROOT boundary command");
+        assert_eq!(command.kind, HotkeyTraceEventKind::RootCommand);
+        assert_eq!(command.visibility_revision, Some(7));
+        assert_eq!(command.invocation_id, Some(5));
+        assert_eq!(command.request_id, Some(99));
+        assert_eq!(command.terminal, Some(false));
+        let compact = crate::encode_hotkey_candidate_event(&command).unwrap();
+        assert_eq!(compact[7], serde_json::json!(false));
+        let round_trip = crate::decode_hotkey_candidate_event(
+            command.stream,
+            command.input_group_id,
+            command.input_purpose,
+            &compact,
+        )
+        .unwrap();
+        assert_eq!(round_trip, command);
+        let mut mutated = compact;
+        mutated[7] = serde_json::Value::Null;
+        let mutated_round_trip = crate::decode_hotkey_candidate_event(
+            command.stream,
+            command.input_group_id,
+            command.input_purpose,
+            &mutated,
+        )
+        .unwrap();
+        assert_ne!(mutated_round_trip, command);
+
+        let snapshot = parse_hotkey_candidate_event(
+            "WARN target trace_event=\"native_window_snapshot\" elapsed_ms=39 hwnd=7 process_id=42 left=100 top=200 right=900 bottom=700 visible=true minimized=false request_id=99 request_kind=Snapshot session_id=0 generation=99 terminal=true visibility_revision=7 invocation_id=5",
+            HotkeyCandidateStream::MainCandidate,
+            5,
+            HotkeyRunnerInputPurpose::MatrixBurst,
+            12,
+        )
+        .expect("correlated native snapshot");
+        assert_eq!(snapshot.kind, HotkeyTraceEventKind::NativeWindowSnapshot);
+        assert_eq!(snapshot.request_id, Some(99));
+        assert_eq!(snapshot.hwnd, Some(7));
+        assert_eq!(snapshot.process_id, Some(42));
+        assert_eq!(snapshot.bounds, Some([100, 200, 900, 700]));
+        assert_eq!(snapshot.visible, Some(true));
+        assert_eq!(snapshot.terminal, Some(true));
+        let compact_snapshot = crate::encode_hotkey_candidate_event(&snapshot).unwrap();
+        assert_eq!(compact_snapshot[11], serde_json::json!(true));
+        let snapshot_round_trip = crate::decode_hotkey_candidate_event(
+            snapshot.stream,
+            snapshot.input_group_id,
+            snapshot.input_purpose,
+            &compact_snapshot,
+        )
+        .unwrap();
+        assert_eq!(snapshot_round_trip, snapshot);
+        let mut mutated_snapshot = compact_snapshot;
+        mutated_snapshot[11] = serde_json::json!(false);
+        let mutated_snapshot_round_trip = crate::decode_hotkey_candidate_event(
+            snapshot.stream,
+            snapshot.input_group_id,
+            snapshot.input_purpose,
+            &mutated_snapshot,
+        )
+        .unwrap();
+        assert_ne!(mutated_snapshot_round_trip, snapshot);
+
+        let snapshot_false = parse_hotkey_candidate_event(
+            "WARN target trace_event=\"native_window_snapshot\" elapsed_ms=40 hwnd=7 process_id=42 left=100 top=200 right=900 bottom=700 visible=true minimized=false request_id=100 request_kind=Snapshot session_id=0 generation=100 terminal=false visibility_revision=7 invocation_id=5",
+            HotkeyCandidateStream::MainCandidate,
+            5,
+            HotkeyRunnerInputPurpose::MatrixBurst,
+            14,
+        )
+        .expect("correlated nonterminal native snapshot");
+        assert_eq!(snapshot_false.terminal, Some(false));
+        let compact_snapshot_false = crate::encode_hotkey_candidate_event(&snapshot_false).unwrap();
+        assert_eq!(compact_snapshot_false[11], serde_json::json!(false));
+        let snapshot_false_round_trip = crate::decode_hotkey_candidate_event(
+            snapshot_false.stream,
+            snapshot_false.input_group_id,
+            snapshot_false.input_purpose,
+            &compact_snapshot_false,
+        )
+        .unwrap();
+        assert_eq!(snapshot_false_round_trip, snapshot_false);
+        let mut mutated_snapshot_false = compact_snapshot_false;
+        mutated_snapshot_false[11] = serde_json::Value::Null;
+        let mutated_snapshot_false_round_trip = crate::decode_hotkey_candidate_event(
+            snapshot_false.stream,
+            snapshot_false.input_group_id,
+            snapshot_false.input_purpose,
+            &mutated_snapshot_false,
+        )
+        .unwrap();
+        assert_ne!(mutated_snapshot_false_round_trip, snapshot_false);
+
+        let legacy = parse_hotkey_candidate_event(
+            "WARN target trace_event=\"desired_visibility\" elapsed_ms=42 visible=false revision=8 source=LegacyTrigger invocation_id=none",
+            HotkeyCandidateStream::LegacyFallbackCandidate,
+            6,
+            HotkeyRunnerInputPurpose::LauncherChord,
+            13,
+        )
+        .expect("legacy trigger decision");
+        assert_eq!(legacy.invocation_id, None);
+        assert_eq!(legacy.visibility_revision, Some(8));
+        assert_eq!(
+            legacy.visibility_source,
+            Some(HotkeyVisibilitySource::LegacyTrigger)
+        );
+    }
+
+    #[test]
+    fn legacy_trigger_intent_pairs_with_its_configured_no_tap_gesture() {
+        let stream = HotkeyCandidateStream::LegacyFallbackCandidate;
+        let purpose = HotkeyRunnerInputPurpose::LauncherChord;
+        let lines = [
+            "WARN target trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=17 modifiers_match=true provenance=ExternalInjected",
+            "WARN target trace_event=\"configured_primary\" elapsed_ms=20 transition=Release invocation_id=17 modifiers_match=false provenance=ExternalInjected",
+            "WARN target trace_event=\"desired_visibility\" elapsed_ms=22 visible=false revision=8 source=LegacyTrigger invocation_id=none",
+            "WARN target trace_event=\"root_command\" elapsed_ms=24 command=Minimize request_id=90 visibility_revision=8 invocation_id=none",
+            "WARN target trace_event=\"native_window_snapshot\" elapsed_ms=26 hwnd=1001 process_id=202 left=3000 top=100 right=3800 bottom=700 visible=false minimized=true request_id=90 visibility_revision=8 invocation_id=none",
+        ];
+        let events = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                parse_hotkey_candidate_event(*line, stream, 6, purpose, index + 1)
+                    .expect("parse legacy chord trace event")
+            })
+            .collect::<Vec<_>>();
+
+        let (gestures, standalone, proof_error) = build_hotkey_decision_proofs(&events);
+        assert!(!proof_error);
+        assert_eq!(gestures.len(), 1);
+        assert!(gestures[0].short_tap_elapsed_ms.is_none());
+        assert!(matches!(
+            gestures[0].decision,
+            HotkeyDecisionProof::NotApplicable {
+                reason: HotkeyEvidenceNotApplicable::LegacyTriggerHasNoInvocationReducerId
+            }
+        ));
+        assert_eq!(standalone.len(), 1);
+        assert_eq!(standalone[0].input_group_id, 6);
+        assert_eq!(standalone[0].source, HotkeyVisibilitySource::LegacyTrigger);
+
+        let mut unrelated_group = events;
+        for event in unrelated_group.iter_mut().skip(2) {
+            event.input_group_id = 7;
+        }
+        let (unpaired_gestures, _, _) = build_hotkey_decision_proofs(&unrelated_group);
+        assert!(matches!(
+            unpaired_gestures[0].decision,
+            HotkeyDecisionProof::NotApplicable {
+                reason: HotkeyEvidenceNotApplicable::HoldGestureHasNoShortTap
+            }
+        ));
+    }
+
+    #[test]
+    fn screen_draw_trace_builds_linked_follow_on_root_and_native_spans() {
+        let stream = HotkeyCandidateStream::MainCandidate;
+        let purpose = HotkeyRunnerInputPurpose::LauncherChord;
+        let lines = [
+            "WARN target trace_event=\"desired_visibility\" elapsed_ms=10 visible=true revision=7 source=ToggleBatch invocation_id=5",
+            "WARN target trace_event=\"desired_visibility\" elapsed_ms=15 visible=true revision=8 source=ScreenDrawRestore invocation_id=5",
+            "WARN target trace_event=\"screen_draw_restore_focus_intent\" elapsed_ms=15 revision=8 invocation_id=5 focus_intent=ActivateRoot",
+            "WARN target trace_event=\"root_command\" elapsed_ms=16 command=Show request_id=99 visibility_revision=8 invocation_id=5",
+            "WARN target trace_event=\"native_activation\" elapsed_ms=17 edge=RestoreRequested hwnd=7 request_id=100 visibility_revision=8 invocation_id=5 terminal=false",
+            "WARN target trace_event=\"native_window_snapshot\" elapsed_ms=20 hwnd=7 process_id=42 left=100 top=200 right=900 bottom=700 visible=true minimized=false request_id=99 visibility_revision=8 invocation_id=5",
+            "WARN target trace_event=\"native_activation\" elapsed_ms=22 edge=RestoreCompleted hwnd=7 request_id=100 visibility_revision=8 invocation_id=5 terminal=true",
+        ];
+        let events = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                parse_hotkey_candidate_event(line, stream, 4, purpose, index + 1)
+                    .expect("parse Screen Draw trace row")
+            })
+            .collect::<Vec<_>>();
+        let follow_on = build_hotkey_follow_on_restorations(&events);
+        assert_eq!(follow_on.len(), 1);
+        assert_eq!(follow_on[0].parent_visibility_revision, Some(7));
+        assert_eq!(follow_on[0].visibility_revision, 8);
+        assert_eq!(follow_on[0].invocation_id, Some(5));
+        assert_eq!(
+            follow_on[0].focus_intent,
+            HotkeyRootFocusIntent::ActivateRoot
+        );
+        assert_eq!(follow_on[0].root_commands.len(), 1);
+        let activation = follow_on[0]
+            .native_activation
+            .as_ref()
+            .expect("correlated terminal native activation");
+        assert_eq!(activation.request_id, 100);
+        assert_eq!(
+            activation.terminal_edge,
+            Some(HotkeyActivationEdge::RestoreCompleted)
+        );
+
+        let mut unrelated = events;
+        for event in unrelated.iter_mut().skip(1) {
+            if event.visibility_revision == Some(8) {
+                event.invocation_id = None;
+            }
+        }
+        let unrelated_follow_on = build_hotkey_follow_on_restorations(&unrelated);
+        assert_eq!(unrelated_follow_on.len(), 1);
+        assert_eq!(unrelated_follow_on[0].invocation_id, None);
+        assert_eq!(unrelated_follow_on[0].parent_visibility_revision, None);
+
+        let preserve_lines = [
+            "WARN target trace_event=\"desired_visibility\" elapsed_ms=10 visible=true revision=7 source=ToggleBatch invocation_id=5",
+            "WARN target trace_event=\"desired_visibility\" elapsed_ms=15 visible=true revision=8 source=ScreenDrawRestore invocation_id=5",
+            "WARN target trace_event=\"screen_draw_restore_focus_intent\" elapsed_ms=15 revision=8 invocation_id=5 focus_intent=PreserveForeground",
+            "WARN target trace_event=\"root_command\" elapsed_ms=16 command=Show request_id=99 visibility_revision=8 invocation_id=5",
+            "WARN target trace_event=\"native_window_snapshot\" elapsed_ms=20 hwnd=7 process_id=42 left=100 top=200 right=900 bottom=700 visible=true minimized=false request_id=99 visibility_revision=8 invocation_id=5",
+        ];
+        let preserve_events = preserve_lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                parse_hotkey_candidate_event(line, stream, 4, purpose, index + 1)
+                    .expect("parse PreserveForeground Screen Draw trace row")
+            })
+            .collect::<Vec<_>>();
+        let preserve_follow_on = build_hotkey_follow_on_restorations(&preserve_events);
+        assert_eq!(preserve_follow_on.len(), 1);
+        assert_eq!(
+            preserve_follow_on[0].focus_intent,
+            HotkeyRootFocusIntent::PreserveForeground
+        );
+        assert!(preserve_follow_on[0].native_activation.is_none());
+    }
+
+    #[test]
+    fn h16_legacy_fixture_log_matches_the_runner_proof_path() {
+        let profile = tempfile::tempdir().expect("temporary legacy profile");
+        let proof_path = legacy_fallback_trace_path(profile.path());
+        let fixture = crate::deterministic_fixture_for_hotkey_with_direct_trigger_chord(
+            &proof_path,
+            crate::MouseGestureMode::Enabled,
+            AcceptanceHotkey::F11,
+            "Ctrl+Alt+Y",
+            false,
+        )
+        .expect("deterministic legacy-route fixture");
+        let settings: crate::Settings =
+            serde_json::from_slice(&fixture.settings_json).expect("decode fixture settings");
+        let configured_path = match settings.log_file {
+            Some(crate::LogFile::Path(path)) => PathBuf::from(path),
+            other => panic!("fixture did not configure its trace log path: {other:?}"),
+        };
+
+        assert_eq!(configured_path, proof_path);
+        assert_eq!(configured_path.file_name().unwrap(), "acceptance.log");
+    }
+
+    #[test]
+    fn h16_trace_copy_failure_keeps_bounded_recovery_evidence() {
+        let output = tempfile::tempdir().expect("temporary H16 evidence directory");
+        let source = output.path().join("isolated-acceptance.log");
+        fs::write(&source, b"isolated child trace evidence").expect("write isolated trace");
+        fs::create_dir(output.path().join("case-H16-legacy-trace.log"))
+            .expect("block canonical trace destination");
+
+        let (artifacts, errors) = persist_h16_legacy_trace_artifacts(&source, output.path());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("copy legacy-route trace evidence"));
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            artifacts[0].file_name().unwrap(),
+            "case-H16-legacy-trace-recovered.log"
+        );
+        assert_eq!(
+            fs::read(&artifacts[0]).expect("read recovered bounded trace"),
+            b"isolated child trace evidence"
+        );
+    }
+
+    #[test]
+    fn h16_failed_result_still_attaches_isolated_trace_and_receipt_artifacts() {
+        let output = tempfile::tempdir().expect("temporary H16 report directory");
+        let main_trace = output.path().join("main-acceptance.log");
+        fs::write(&main_trace, "main child trace").expect("write main trace");
+        let isolated_source = output.path().join("isolated-acceptance.log");
+        fs::write(&isolated_source, "isolated child trace").expect("write isolated trace");
+        fs::create_dir(output.path().join("case-H16-legacy-trace.log"))
+            .expect("block canonical trace destination");
+        let (mut artifacts, copy_errors) =
+            persist_h16_legacy_trace_artifacts(&isolated_source, output.path());
+        assert_eq!(copy_errors.len(), 1);
+        let receipt = output.path().join("case-H16-legacy-profile.json");
+        fs::write(
+            &receipt,
+            serde_json::to_vec(&serde_json::json!({"cleanup_errors": copy_errors}))
+                .expect("serialize cleanup receipt"),
+        )
+        .expect("write isolated cleanup receipt");
+        artifacts.push(receipt.clone());
+        let (case_result, fallback_artifacts) =
+            h16_fallback_result_for_case(Err(LegacyFallbackFailure {
+                failure: CaseFailure::new(
+                    FailureStage::Cleanup,
+                    "legacy-route cleanup/evidence persistence failed".into(),
+                ),
+                artifacts,
+            }));
+        let mut report = test_acceptance_report(AcceptanceHotkey::F11);
+
+        append_h16_case_result(
+            &mut report,
+            Instant::now(),
+            case_result.map(|_| "unexpected success".to_string()),
+            None,
+            output.path(),
+            &main_trace,
+            &fallback_artifacts,
+        );
+
+        let case = report
+            .cases
+            .iter()
+            .find(|case| case.id == "H16")
+            .expect("failed H16 case");
+        assert!(matches!(case.status, CaseStatus::Failed));
+        for artifact in &fallback_artifacts {
+            let path = artifact.to_string_lossy().to_string();
+            assert!(case.artifacts.contains(&path));
+            assert!(report.artifacts.contains(&path));
+        }
+    }
+
+    fn test_acceptance_report(hotkey: AcceptanceHotkey) -> AcceptanceReport {
+        AcceptanceReport {
+            schema_version: 7,
+            run_id: "test-run".into(),
+            mode: "native_windows",
+            started_unix_ms: 1,
+            finished_unix_ms: 2,
+            copied_profile_status: super::super::super::CopiedProfileStatus::NotRun,
+            copied_profile: None,
+            private_artifacts: None,
+            h6_repeat_mode: H6RepeatMode::Quiescent,
+            mouse_gesture_mode: super::super::super::MouseGestureMode::Enabled,
+            suite: AcceptanceSuite::Hotkey,
+            hotkey,
+            outcome: "failed",
+            candidate: super::super::super::CandidateIdentity {
+                executable: "candidate.exe".into(),
+                sha256: "a".repeat(64),
+            },
+            environment: super::super::super::EnvironmentIdentity {
+                os_version: "test".into(),
+                architecture: "x64".into(),
+                runner_process_id: 1,
+                runner_sha256: Some("b".repeat(64)),
+                child_process_id: None,
+                child_started_unix_ms: None,
+                source_revision: Some("test-revision".into()),
+                monitors: Vec::new(),
+            },
+            profile: super::super::super::ProfileIdentity {
+                mode: "test",
+                temporary_data_root: "temporary".into(),
+                settings_sha256: "c".repeat(64),
+                radial_sha256: "d".repeat(64),
+                actions_sha256: "e".repeat(64),
+                configured_hotkey: hotkey.as_str(),
+                hold_threshold_ms: 350,
+            },
+            cases: Vec::new(),
+            hotkey_evidence: Vec::new(),
+            artifacts: Vec::new(),
+            cleanup: super::super::super::CleanupResult::default(),
+            capacity_saturated: false,
+            report_overflow: None,
+        }
+    }
+
+    #[test]
+    fn hotkey_observed_cadence_accepts_bounded_holds_and_releases() {
+        let timing = RunnerChordTiming {
+            primary_hold_ms: vec![10, 25, 100],
+            released_gap_ms: vec![10, 25, 100],
+        };
+        assert!(hotkey_cadence_is_valid(&timing, 350));
+        assert!(!hotkey_cadence_is_valid(
+            &RunnerChordTiming {
+                primary_hold_ms: vec![9],
+                released_gap_ms: vec![],
+            },
+            350,
+        ));
+        assert!(!hotkey_cadence_is_valid(
+            &RunnerChordTiming {
+                primary_hold_ms: vec![101],
+                released_gap_ms: vec![],
+            },
+            350,
+        ));
+        assert!(!hotkey_cadence_is_valid(
+            &RunnerChordTiming {
+                primary_hold_ms: vec![25],
+                released_gap_ms: vec![9],
+            },
+            350,
+        ));
+        assert!(!hotkey_cadence_is_valid(
+            &RunnerChordTiming {
+                primary_hold_ms: vec![350],
+                released_gap_ms: vec![],
+            },
+            350,
+        ));
+    }
+
+    #[test]
+    fn h04_uses_steady_released_cadence_without_changing_other_hotkey_cases() {
+        let (matrix_down, matrix_release) = hotkey_burst_intervals(true);
+        assert_eq!(matrix_down, Duration::from_millis(25));
+        assert_eq!(matrix_release, Duration::from_millis(75));
+        assert!((10..=100).contains(&matrix_down.as_millis()));
+        assert!((10..=100).contains(&matrix_release.as_millis()));
+
+        let (ordinary_down, ordinary_release) = hotkey_burst_intervals(false);
+        assert_eq!(ordinary_down, Duration::from_millis(25));
+        assert_eq!(ordinary_release, Duration::from_millis(25));
+    }
+
+    #[test]
+    fn only_in_window_foreign_h04_edges_receive_retryable_classification() {
+        let edge = RunnerChordEdge {
+            vk: 0xA4,
+            down: false,
+            injected: true,
+            extra_info: 0,
+            at: Instant::now(),
+        };
+        let contaminated =
+            foreign_edge_contamination_failure(4, &[edge], true, "observer").unwrap();
+        assert!(matches!(contaminated.stage, FailureStage::InputInjection));
+        assert_eq!(contaminated.input_contamination_group, Some(4));
+
+        let non_matrix = foreign_edge_contamination_failure(4, &[edge], false, "observer").unwrap();
+        assert_eq!(non_matrix.input_contamination_group, None);
+        assert!(foreign_edge_contamination_failure(4, &[], true, "observer").is_none());
+    }
+
+    #[test]
+    fn h04_retry_restarts_whole_matrix_once_and_retains_contamination_evidence() {
+        let mut calls = Vec::new();
+        let mut preserved = Vec::new();
+        let outcome = run_h04_matrix_with_retry(
+            |attempt| {
+                calls.push(attempt);
+                if attempt == 1 {
+                    Err(CaseFailure::input_contamination(
+                        7,
+                        "foreign Alt-up overlapped owned chord".into(),
+                    ))
+                } else {
+                    Ok("full clean 86-decision matrix".to_owned())
+                }
+            },
+            |attempt, failure| {
+                preserved.push((attempt, failure.message.clone()));
+                Ok(format!("case-H04-attempt-{attempt}-contamination.json"))
+            },
+        );
+
+        assert_eq!(calls, [1, 2]);
+        assert_eq!(outcome.attempts, 2);
+        assert_eq!(outcome.contamination_attempts, 1);
+        assert_eq!(
+            outcome.contamination_artifact_names,
+            ["case-H04-attempt-1-contamination.json"]
+        );
+        assert_eq!(outcome.result.unwrap(), "full clean 86-decision matrix");
+        assert_eq!(preserved.len(), 1);
+        assert!(preserved[0].1.contains("foreign Alt-up"));
+    }
+
+    #[test]
+    fn h04_retry_is_limited_to_two_contaminated_whole_matrix_attempts() {
+        let mut calls = Vec::new();
+        let mut preserved = Vec::new();
+        let outcome: H04RetryOutcome<()> = run_h04_matrix_with_retry(
+            |attempt| {
+                calls.push(attempt);
+                Err(CaseFailure::input_contamination(
+                    u32::from(attempt),
+                    format!("attempt {attempt} foreign Alt edge"),
+                ))
+            },
+            |attempt, failure| {
+                preserved.push((attempt, failure.message.clone()));
+                Ok(format!("attempt-{attempt}-artifact"))
+            },
+        );
+
+        assert_eq!(calls, [1, 2]);
+        assert_eq!(outcome.attempts, 2);
+        assert_eq!(outcome.contamination_attempts, 2);
+        assert_eq!(
+            preserved
+                .iter()
+                .map(|(attempt, _)| *attempt)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let failure = outcome.result.unwrap_err();
+        assert!(failure.message.contains("attempt 1 foreign Alt edge"));
+        assert!(failure.message.contains("attempt 2 foreign Alt edge"));
+        assert_eq!(outcome.contamination_artifact_names.len(), 2);
+    }
+
+    #[test]
+    fn h04_product_mismatch_does_not_retry_or_lose_its_original_cause() {
+        let mut calls = 0usize;
+        let mut preserve_calls = 0usize;
+        let outcome: H04RetryOutcome<()> = run_h04_matrix_with_retry(
+            |_| {
+                calls += 1;
+                Err(CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    "missing committed ToggleBatch intent".into(),
+                ))
+            },
+            |_, _| {
+                preserve_calls += 1;
+                Ok("should-not-be-written".into())
+            },
+        );
+
+        assert_eq!(calls, 1);
+        assert_eq!(preserve_calls, 0);
+        assert_eq!(outcome.attempts, 1);
+        assert_eq!(outcome.contamination_attempts, 0);
+        let failure = outcome.result.unwrap_err();
+        assert!(matches!(failure.stage, FailureStage::GestureDecision));
+        assert_eq!(failure.message, "missing committed ToggleBatch intent");
+    }
+
+    #[test]
+    fn failed_attempt_preservation_prevents_retry_and_keeps_original_failure() {
+        let mut calls = 0usize;
+        let outcome: H04RetryOutcome<()> = run_h04_matrix_with_retry(
+            |_| {
+                calls += 1;
+                Err(CaseFailure::input_contamination(
+                    9,
+                    "foreign Shift edge interrupted input".into(),
+                ))
+            },
+            |_, _| {
+                Err(CaseFailure::new(
+                    FailureStage::Environment,
+                    "attempt evidence exceeded its byte bound".into(),
+                ))
+            },
+        );
+
+        assert_eq!(calls, 1);
+        assert_eq!(outcome.attempts, 1);
+        let failure = outcome.result.unwrap_err();
+        assert!(
+            failure
+                .message
+                .contains("foreign Shift edge interrupted input")
+        );
+        assert!(
+            failure
+                .message
+                .contains("attempt evidence exceeded its byte bound")
+        );
+        assert!(failure.message.contains("no retry was started"));
+    }
+
+    #[test]
+    fn h04_retry_artifact_is_typed_bounded_and_linked_into_r0_input() {
+        let output = tempfile::tempdir().unwrap();
+        let stream = HotkeyCandidateStream::MainCandidate;
+        let purpose = HotkeyRunnerInputPurpose::MatrixBurst;
+        let group = 7;
+        let edge = |time, virtual_key, transition, owned| HotkeyRunnerEdgeEvidence {
+            runner_relative_us: time,
+            input_group_id: group,
+            stream,
+            purpose,
+            virtual_key,
+            transition,
+            injected: true,
+            runner_cookie_matched: owned,
+        };
+        let owned_edges = vec![
+            edge(1_000, 0xA0, HotkeyEdgeTransition::Press, true),
+            edge(1_100, 0xA4, HotkeyEdgeTransition::Press, true),
+            edge(1_200, 0x5B, HotkeyEdgeTransition::Press, true),
+            edge(1_300, 0x23, HotkeyEdgeTransition::Press, true),
+            edge(1_800, 0x23, HotkeyEdgeTransition::Release, true),
+            edge(1_900, 0x5B, HotkeyEdgeTransition::Release, true),
+            edge(2_000, 0xA4, HotkeyEdgeTransition::Release, true),
+            edge(2_100, 0xA0, HotkeyEdgeTransition::Release, true),
+        ];
+        let completed_bursts = (0..6usize)
+            .scan(100u64, |next_id, index| {
+                let initial_visible = index >= 5;
+                let taps = [1usize, 2, 5, 10, 25][index % 5];
+                let invocation_ids = (*next_id..*next_id + taps as u64).collect::<Vec<_>>();
+                *next_id += taps as u64;
+                Some(H04CompletedBurstEvidence {
+                    matrix_burst_index: (index + 1) as u8,
+                    input_group_id: (index + 1) as u32,
+                    initial_visible,
+                    requested_taps: taps as u8,
+                    final_visible: initial_visible ^ (taps % 2 == 1),
+                    hold_min_ms: 25,
+                    hold_max_ms: 25,
+                    gap_min_ms: if taps == 1 { 0 } else { 75 },
+                    gap_max_ms: if taps == 1 { 0 } else { 75 },
+                    invocation_ids,
+                    trace_probe_id: (index + 1) as u64,
+                    trace_cursor: (index + 1) * 100,
+                    baseline_invocation_id: None,
+                    baseline_visibility_revision: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        let artifact = H04InputContaminationArtifact {
+            schema_version: 1,
+            case_id: "H04".into(),
+            attempt: 1,
+            hotkey: AcceptanceHotkey::ShiftAltWinEnd,
+            failure_stage: "InputInjection".into(),
+            failure: "foreign Alt-up interleaved with the owned chord".into(),
+            declared_initial_state: false,
+            next_matrix_burst_index: 7,
+            completed_bursts,
+            input_group_id: group,
+            stream,
+            prior_group_ids: (1..=group).collect(),
+            owned_edges,
+            foreign_edges: vec![
+                edge(600, 0xA4, HotkeyEdgeTransition::Press, false),
+                edge(700, 0xA4, HotkeyEdgeTransition::Release, false),
+                edge(1_500, 0xA4, HotkeyEdgeTransition::Release, false),
+            ],
+            candidate_events: Vec::new(),
+            root_identity: HotkeyRootIdentityEvidence {
+                stream,
+                hwnd: 42,
+                process_id: 7001,
+            },
+        };
+        super::super::super::validate_h04_contamination_artifact(
+            &artifact,
+            AcceptanceHotkey::ShiftAltWinEnd,
+        )
+        .unwrap();
+
+        let artifact_name = "case-H04-attempt-1-contamination.json";
+        let artifact_path = output.path().join(artifact_name);
+        fs::write(&artifact_path, serde_json::to_vec(&artifact).unwrap()).unwrap();
+        let path_text = artifact_path.to_string_lossy().to_string();
+        let mut second_attempt = artifact.clone();
+        second_attempt.attempt = 2;
+        second_attempt.next_matrix_burst_index = 1;
+        second_attempt.completed_bursts.clear();
+        second_attempt.input_group_id = 1;
+        second_attempt.prior_group_ids = vec![1];
+        for edge in second_attempt
+            .owned_edges
+            .iter_mut()
+            .chain(second_attempt.foreign_edges.iter_mut())
+        {
+            edge.input_group_id = 1;
+        }
+        super::super::super::validate_h04_contamination_artifact(
+            &second_attempt,
+            AcceptanceHotkey::ShiftAltWinEnd,
+        )
+        .unwrap();
+        let second_artifact_name = "case-H04-attempt-2-contamination.json";
+        let second_artifact_path = output.path().join(second_artifact_name);
+        fs::write(
+            &second_artifact_path,
+            serde_json::to_vec(&second_attempt).unwrap(),
+        )
+        .unwrap();
+        let second_path_text = second_artifact_path.to_string_lossy().to_string();
+        let mut report = test_acceptance_report(AcceptanceHotkey::ShiftAltWinEnd);
+        report.artifacts.push(path_text.clone());
+        report.artifacts.push(second_path_text.clone());
+        report.cases.push(AcceptanceCaseResult {
+            id: "H04".into(),
+            status: CaseStatus::Failed,
+            elapsed_ms: 1,
+            expected: expected("H04").into(),
+            observed: format!(
+                "evidence:v1; hotkey={}; failure=InputInjection: both whole-matrix attempts were contaminated; matrix_attempts=2; contamination_attempts=2; contamination_artifacts={artifact_name}|{second_artifact_name}; attempt_restart_state=hidden; full_clean_matrix=false",
+                AcceptanceHotkey::ShiftAltWinEnd.as_str()
+            ),
+            failure_stage: Some(FailureStage::InputInjection),
+            artifacts: vec![path_text.clone(), second_path_text.clone()],
+        });
+        super::super::super::validate_hotkey_evidence_report(&report).unwrap();
+        super::super::super::validate_case_hotkey_profile_relation(&report, &report.cases[0])
+            .unwrap();
+
+        let mut wrong_hotkey = report.cases[0].clone();
+        wrong_hotkey.observed = wrong_hotkey
+            .observed
+            .replace("hotkey=Shift+Alt+Win+End", "hotkey=F11");
+        assert!(
+            super::super::super::validate_case_hotkey_profile_relation(&report, &wrong_hotkey)
+                .is_err()
+        );
+        let mut missing_hotkey = report.cases[0].clone();
+        missing_hotkey.observed = missing_hotkey.observed.replace(
+            "evidence:v1; hotkey=Shift+Alt+Win+End; ",
+            "InputInjection: ",
+        );
+        assert!(
+            super::super::super::validate_case_hotkey_profile_relation(&report, &missing_hotkey)
+                .is_err()
+        );
+
+        let mut mismatched_path = report.clone();
+        mismatched_path.cases[0].artifacts[0] = format!("different-root/{artifact_name}");
+        assert!(super::super::super::validate_hotkey_evidence_report(&mismatched_path).is_err());
+
+        // Two retries with a single artifact for attempt 2 must not look like a
+        // complete report: contamination records are a one-to-one prefix.
+        let mut skipped_attempt = report.clone();
+        let case = &mut skipped_attempt.cases[0];
+        case.status = CaseStatus::Passed;
+        case.failure_stage = None;
+        case.observed = format!(
+            "evidence:v1; hotkey={}; matrix=hidden+visible:1,2,5,10,25; decisions=86; unique_invocation_ids=86; invocation_ids_sha256={}; quiet_window_ms=80..80; preflight_matching_edges=0; foreign_matching_edges=0; modifiers_clear_each_burst=true; matrix_attempts=2; contamination_attempts=1; contamination_artifacts={second_artifact_name}; attempt_restart_state=hidden; full_clean_matrix=true",
+            AcceptanceHotkey::ShiftAltWinEnd.as_str(),
+            "a".repeat(64)
+        );
+        case.artifacts = vec![second_path_text.clone()];
+        skipped_attempt.artifacts = vec![second_path_text.clone()];
+        assert!(
+            super::super::super::validate_h04_contamination_artifacts(
+                &skipped_attempt,
+                &skipped_attempt.cases[0]
+            )
+            .is_err()
+        );
+
+        report.artifacts.clear();
+        assert!(super::super::super::validate_hotkey_evidence_report(&report).is_err());
+        report.artifacts.push(path_text);
+        report.artifacts.push(second_path_text);
+        let mut malformed = artifact;
+        malformed.foreign_edges[2].runner_cookie_matched = true;
+        fs::write(&artifact_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+        assert!(super::super::super::validate_hotkey_evidence_report(&report).is_err());
+    }
+
+    #[test]
+    fn h12_preview_hosts_are_never_runtime_cleanup_targets_before_hold_attempt() {
+        let mut preview_hosts = std::collections::BTreeSet::new();
+        preview_hosts.insert(101);
+        preview_hosts.insert(102);
+
+        // OpenDesktopPreview may create hosts before its reply/window discovery
+        // times out. Until the runtime hold phase starts, those HWNDs cannot be
+        // classified as runtime radial surfaces.
+        assert!(!h12_surface_belongs_to_runtime(false, 101, &preview_hosts));
+        assert!(!h12_surface_belongs_to_runtime(false, 103, &preview_hosts));
+        assert!(!h12_surface_belongs_to_runtime(true, 101, &preview_hosts));
+        assert!(!h12_surface_belongs_to_runtime(true, 102, &preview_hosts));
+        assert!(h12_surface_belongs_to_runtime(true, 103, &preview_hosts));
+    }
+
+    #[test]
+    fn h17_successful_tap_still_preserves_evidence_when_later_cleanup_fails() {
+        assert!(!h17_should_preserve_alternate_artifacts(true, true));
+        assert!(h17_should_preserve_alternate_artifacts(true, false));
+        assert!(h17_should_preserve_alternate_artifacts(false, true));
+
+        let output = tempfile::tempdir().expect("temporary H17 evidence directory");
+        let snapshot = H17AlternateArtifactSnapshot {
+            trace_excerpt: Some(b"alternate trace".to_vec()),
+            windows_inventory: Some(b"{\"windows\":[]}".to_vec()),
+            private_log_tail: Some(b"alternate log tail".to_vec()),
+            capture_errors: Vec::new(),
+        };
+        let (paths, errors) = if h17_should_preserve_alternate_artifacts(true, false) {
+            persist_h17_alternate_artifacts(&snapshot, output.path())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        assert!(errors.is_empty());
+        assert_eq!(paths.len(), 3);
+        assert_eq!(
+            fs::read(output.path().join("case-H17-alternate-trace.log")).unwrap(),
+            b"alternate trace"
+        );
+        assert_eq!(
+            fs::read(output.path().join("case-H17-alternate-windows.json")).unwrap(),
+            b"{\"windows\":[]}"
+        );
+        assert_eq!(
+            fs::read(output.path().join("case-H17-alternate-private.log")).unwrap(),
+            b"alternate log tail"
+        );
+    }
+
+    #[test]
+    fn h12_cleanup_steps_continue_after_an_earlier_cleanup_error() {
+        let attempts = std::cell::Cell::new(0usize);
+        let mut errors = Vec::new();
+        attempt_cleanup_step(&mut errors, "runtime", || {
+            attempts.set(attempts.get() + 1);
+            Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "dismiss failed".into(),
+            ))
+        });
+        attempt_cleanup_step(&mut errors, "preview", || {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        });
+        attempt_cleanup_step(&mut errors, "designer", || {
+            attempts.set(attempts.get() + 1);
+            Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "close failed".into(),
+            ))
+        });
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("runtime: dismiss failed"));
+        assert!(errors[1].contains("designer: close failed"));
+    }
+
+    fn root_snapshot(
+        hwnd: usize,
+        process_id: u32,
+        visible: bool,
+        minimized: bool,
+        bounds: [i32; 4],
+    ) -> WindowSnapshot {
+        WindowSnapshot {
+            hwnd: HWND(hwnd as *mut _),
+            process_id,
+            role: WindowRole::Root,
+            class_name: "MultiLauncherRoot".into(),
+            visible,
+            minimized,
+            bounds,
+        }
+    }
+
+    #[test]
+    fn hotkey_setup_failure_records_current_cases_before_r0() {
+        let output = tempfile::tempdir().expect("temporary setup-failure artifact directory");
+        let trace_path = output.path().join("acceptance.log");
+        fs::write(&trace_path, "setup trace").expect("write setup trace");
+        let hotkey = AcceptanceHotkey::ShiftAltWinEnd;
+        let mut report = AcceptanceReport {
+            schema_version: 7,
+            run_id: "test-run".into(),
+            mode: "native_windows",
+            started_unix_ms: 1,
+            finished_unix_ms: 2,
+            copied_profile_status: super::super::super::CopiedProfileStatus::NotRun,
+            copied_profile: None,
+            private_artifacts: None,
+            h6_repeat_mode: H6RepeatMode::Quiescent,
+            mouse_gesture_mode: super::super::super::MouseGestureMode::Enabled,
+            suite: AcceptanceSuite::Hotkey,
+            hotkey,
+            outcome: "failed",
+            candidate: super::super::super::CandidateIdentity {
+                executable: "candidate.exe".into(),
+                sha256: "a".repeat(64),
+            },
+            environment: super::super::super::EnvironmentIdentity {
+                os_version: "test".into(),
+                architecture: "x64".into(),
+                runner_process_id: 1,
+                runner_sha256: Some("b".repeat(64)),
+                child_process_id: None,
+                child_started_unix_ms: None,
+                source_revision: Some("test-revision".into()),
+                monitors: Vec::new(),
+            },
+            profile: super::super::super::ProfileIdentity {
+                mode: "test",
+                temporary_data_root: "temporary".into(),
+                settings_sha256: "c".repeat(64),
+                radial_sha256: "d".repeat(64),
+                actions_sha256: "e".repeat(64),
+                configured_hotkey: hotkey.as_str(),
+                hold_threshold_ms: 350,
+            },
+            cases: Vec::new(),
+            hotkey_evidence: Vec::new(),
+            artifacts: Vec::new(),
+            cleanup: super::super::super::CleanupResult::default(),
+            capacity_saturated: false,
+            report_overflow: None,
+        };
+
+        append_hotkey_setup_failures(
+            &mut report,
+            "anchor hit-test setup failed".into(),
+            None,
+            output.path(),
+            &trace_path,
+            hotkey,
+        );
+
+        let expected_ids = HOTKEY_CASE_IDS
+            .into_iter()
+            .filter(|id| !matches!(*id, "CLEANUP" | "R0"))
+            .collect::<Vec<_>>();
+        let observed_ids = report
+            .cases
+            .iter()
+            .map(|case| case.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(observed_ids, expected_ids);
+        assert!(!observed_ids.contains(&"H7"));
+        assert!(!observed_ids.contains(&"H8"));
+        assert!(report.cases.iter().all(|case| {
+            matches!(case.status, CaseStatus::Failed)
+                && matches!(case.failure_stage, Some(FailureStage::Environment))
+                && case.observed.contains(hotkey.as_str())
+        }));
+        assert!(
+            report.cases[0]
+                .observed
+                .contains("anchor hit-test setup failed")
+        );
+
+        append_case_without_artifacts(
+            &mut report,
+            "CLEANUP",
+            Ok("child and owned windows cleaned up".into()),
+        );
+        assert_eq!(report.cases.len() + 1, HOTKEY_CASE_IDS.len());
+    }
+
+    #[test]
+    fn hotkey_trace_fence_records_completed_setup_baseline_and_cursor() {
+        let events = vec![
+            "trace_event=\"short_tap\" invocation_id=41 terminal=true".to_string(),
+            "trace_event=\"desired_visibility\" visible=false revision=73 source=ToggleBatch invocation_id=41"
+                .to_string(),
+            "trace_event=\"desired_visibility\" visible=false revision=73 source=Queued invocation_id=none"
+                .to_string(),
+        ];
+        let fence = hotkey_trace_fence_from_events(&events, 9);
+        assert_eq!(fence.cursor, events.len());
+        assert_eq!(fence.probe_id, 9);
+        assert_eq!(fence.baseline_invocation_id, Some(41));
+        assert_eq!(fence.baseline_visibility_revision, Some(73));
+        assert!(fence.report_token().contains("invocation:41,revision:73"));
+    }
+
+    #[test]
+    fn delayed_setup_restore_terminal_precedes_target_focus_and_burst_injection() {
+        let request =
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=28 terminal=false"
+                .to_string();
+        let terminal =
+            "trace_event=\"native_activation\" edge=RestoreCompleted request_id=28 terminal=true"
+                .to_string();
+        let poll_count = std::cell::Cell::new(0usize);
+        let order = std::cell::RefCell::new(Vec::new());
+
+        let result = run_after_hotkey_setup_settled(
+            || {
+                order.borrow_mut().push("setup-settle-start");
+                let request_id =
+                    wait_for_root_restore_after_events(Duration::from_millis(500), || {
+                        let poll = poll_count.get() + 1;
+                        poll_count.set(poll);
+                        if poll < 3 {
+                            vec![request.clone()]
+                        } else {
+                            vec![request.clone(), terminal.clone()]
+                        }
+                    })
+                    .map_err(|error| CaseFailure::new(FailureStage::RootCommand, error))?;
+                assert_eq!(request_id, "28");
+                order.borrow_mut().push("restore-terminal");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("target-focus");
+                order.borrow_mut().push("burst-injection");
+                Ok(())
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "setup barrier should accept the terminal restore"
+        );
+        assert!(poll_count.get() >= 3);
+        assert_eq!(
+            *order.borrow(),
+            [
+                "setup-settle-start",
+                "restore-terminal",
+                "target-focus",
+                "burst-injection"
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_setup_restore_terminal_prevents_target_focus_and_burst_injection() {
+        let request =
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=29 terminal=false"
+                .to_string();
+        let focus_or_injection_called = std::cell::Cell::new(false);
+
+        let result = run_after_hotkey_setup_settled(
+            || {
+                wait_for_root_restore_after_events(Duration::from_millis(50), || {
+                    vec![request.clone()]
+                })
+                .map(|_| ())
+                .map_err(|error| CaseFailure::new(FailureStage::RootCommand, error))
+            },
+            || {
+                focus_or_injection_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(CaseFailure {
+                stage: FailureStage::RootCommand,
+                ..
+            })
+        ));
+        assert!(!focus_or_injection_called.get());
+    }
+
+    #[test]
+    fn visible_burst_settle_uses_the_latest_correlated_restore_terminal() {
+        let events = vec![
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=8 terminal=false"
+                .to_string(),
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=9 terminal=false"
+                .to_string(),
+            "trace_event=\"native_activation\" edge=RestoreFailed request_id=8 terminal=true"
+                .to_string(),
+            "trace_event=\"native_activation\" edge=RestoreCompleted request_id=9 terminal=true"
+                .to_string(),
+        ];
+
+        assert_eq!(
+            visible_burst_trace_settled(&events, 1, VisibleBurstSettlePolicy::ActivateRoot,),
+            Ok(Some("9".into()))
+        );
+    }
+
+    #[test]
+    fn visible_burst_settle_rejects_failed_or_unfinished_restore() {
+        let failed = vec![
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=11 terminal=false"
+                .to_string(),
+            "trace_event=\"native_activation\" edge=RestoreFailed request_id=11 terminal=true"
+                .to_string(),
+        ];
+        assert!(matches!(
+            visible_burst_trace_settled(
+                &failed,
+                0,
+                VisibleBurstSettlePolicy::ActivateRoot,
+            ),
+            Err(message) if message.contains("request 11")
+        ));
+
+        let unfinished = vec![
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=12 terminal=false"
+                .to_string(),
+        ];
+        assert_eq!(
+            visible_burst_trace_settled(&unfinished, 0, VisibleBurstSettlePolicy::ActivateRoot,),
+            Ok(None)
+        );
+        assert_eq!(
+            visible_burst_trace_settled(&unfinished, 1, VisibleBurstSettlePolicy::ActivateRoot,),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn preserve_foreground_settle_requires_visible_root_and_retained_target_without_activation() {
+        let policy = VisibleBurstSettlePolicy::PreserveForeground {
+            target_hwnd: 42,
+            target_process_id: 9,
+        };
+        assert_eq!(
+            visible_burst_trace_settled(&[], 0, policy),
+            Ok(Some("PreserveForeground".into()))
+        );
+        assert!(preserved_target_retained_foreground(
+            Some(true),
+            42,
+            9,
+            42,
+            9
+        ));
+        assert!(!preserved_target_retained_foreground(
+            Some(false),
+            42,
+            9,
+            42,
+            9
+        ));
+        assert!(!preserved_target_retained_foreground(
+            Some(true),
+            7,
+            9,
+            42,
+            9
+        ));
+        assert!(!preserved_target_retained_foreground(
+            Some(true),
+            42,
+            8,
+            42,
+            9
+        ));
+        assert!(preserved_target_retained_foreground(None, 42, 9, 42, 9));
+
+        let unexpected_activation = vec![
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=13 terminal=false"
+                .to_string(),
+        ];
+        assert!(matches!(
+            visible_burst_trace_settled(&unexpected_activation, 0, policy),
+            Err(message) if message.contains("unexpected native activation")
+        ));
+    }
+
+    #[test]
+    fn hidden_ending_preserve_foreground_burst_still_rejects_native_activation() {
+        let policy = VisibleBurstSettlePolicy::PreserveForeground {
+            target_hwnd: 42,
+            target_process_id: 9,
+        };
+        assert_eq!(hotkey_burst_settle_policy(policy, false), Some(policy));
+        assert_eq!(
+            hotkey_burst_settle_policy(VisibleBurstSettlePolicy::ActivateRoot, false),
+            None
+        );
+
+        let unexpected_activation = vec![
+            "trace_event=\"native_activation\" edge=RestoreRequested request_id=14 terminal=false"
+                .to_string(),
+        ];
+        assert!(matches!(
+            visible_burst_trace_settled(&unexpected_activation, 0, policy),
+            Err(message) if message.contains("unexpected native activation")
+        ));
+    }
+
+    #[test]
+    fn hotkey_production_admission_requires_exact_hook_and_configured_edges() {
+        let missing = Vec::new();
+        assert!(
+            validate_hotkey_production_admission(&missing, 1)
+                .expect_err("observer input without production edges must fail admission")
+                .contains("hook_primary edges")
+        );
+
+        let hook_only = vec![
+            "trace_event=\"hook_primary\" transition=Press provenance=ExternalInjected".into(),
+            "trace_event=\"hook_primary\" transition=Release provenance=ExternalInjected".into(),
+        ];
+        assert!(
+            validate_hotkey_production_admission(&hook_only, 1)
+                .expect_err("hook callback without configured admission must fail")
+                .contains("configured_primary edges")
+        );
+
+        let complete = vec![
+            "trace_event=\"hook_primary\" transition=Press provenance=ExternalInjected".into(),
+            "trace_event=\"configured_primary\" transition=Press provenance=ExternalInjected"
+                .into(),
+            "trace_event=\"hook_primary\" transition=Release provenance=ExternalInjected".into(),
+            "trace_event=\"configured_primary\" transition=Release provenance=ExternalInjected"
+                .into(),
+        ];
+        assert!(validate_hotkey_production_admission(&complete, 1).is_ok());
+        let duplicated = [
+            complete,
+            vec![
+                "trace_event=\"hook_primary\" transition=Press provenance=ExternalInjected".into(),
+            ],
+        ]
+        .concat();
+        assert!(
+            validate_hotkey_production_admission(&duplicated, 1)
+                .expect_err("extra production edge must be reported")
+                .contains("observed 3")
+        );
+    }
+
+    #[test]
+    fn hotkey_trace_quiet_signature_ignores_non_gesture_events() {
+        let before = vec![
+            "trace_event=\"root_command\" command=Show".to_string(),
+            "trace_event=\"desired_visibility\" visible=false revision=2 source=Queued invocation_id=none"
+                .to_string(),
+        ];
+        let after = vec![
+            "trace_event=\"root_command\" command=Focus".to_string(),
+            before[1].clone(),
+        ];
+        assert_eq!(
+            hotkey_trace_activity_signature(&before),
+            hotkey_trace_activity_signature(&after)
+        );
+        assert_ne!(
+            hotkey_trace_activity_signature(&before),
+            hotkey_trace_activity_signature(&[
+                after[1].clone(),
+                "trace_event=\"desired_visibility\" visible=true revision=3 source=ToggleBatch invocation_id=2"
+                    .into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn root_visibility_uses_owned_physical_presentation_predicate() {
+        let displays = [[0, 0, 1920, 1080], [2200, 0, 4120, 1440]];
+        let hidden_in_place = root_snapshot(10, 42, false, false, [40, 60, 940, 710]);
+        assert!(root_matches_requested_visibility(
+            &hidden_in_place,
+            HWND(10 as *mut _),
+            42,
+            false,
+            &displays,
+        ));
+        assert!(!root_matches_requested_visibility(
+            &hidden_in_place,
+            HWND(10 as *mut _),
+            42,
+            true,
+            &displays,
+        ));
+
+        let minimized = root_snapshot(10, 42, true, true, [40, 60, 940, 710]);
+        assert!(root_matches_requested_visibility(
+            &minimized,
+            HWND(10 as *mut _),
+            42,
+            false,
+            &displays,
+        ));
+
+        let in_monitor_gap = root_snapshot(10, 42, true, false, [1960, 40, 2160, 240]);
+        assert!(root_matches_requested_visibility(
+            &in_monitor_gap,
+            HWND(10 as *mut _),
+            42,
+            false,
+            &displays,
+        ));
+
+        let visible = root_snapshot(10, 42, true, false, [2240, 40, 3140, 690]);
+        assert!(root_matches_requested_visibility(
+            &visible,
+            HWND(10 as *mut _),
+            42,
+            true,
+            &displays,
+        ));
+        assert!(!root_matches_requested_visibility(
+            &visible,
+            HWND(11 as *mut _),
+            42,
+            true,
+            &displays,
+        ));
+        assert!(!root_matches_requested_visibility(
+            &visible,
+            HWND(10 as *mut _),
+            43,
+            true,
+            &displays,
+        ));
+    }
+
+    #[test]
+    fn hold_ignores_delayed_setup_visibility_echo_but_rejects_new_decisions() {
+        let delayed_setup = vec![
+            "trace_event=\"desired_visibility\" revision=1 source=Queued invocation_id=none".into(),
+        ];
+        assert!(!trace_contains_hold_visibility_work(
+            &delayed_setup,
+            Some(1),
+            Some(2)
+        ));
+
+        let new_revision = vec![
+            "trace_event=\"desired_visibility\" revision=2 source=Queued invocation_id=none".into(),
+        ];
+        assert!(trace_contains_hold_visibility_work(
+            &new_revision,
+            Some(1),
+            Some(2)
+        ));
+
+        let hold_invocation = vec![
+            "trace_event=\"desired_visibility\" revision=1 source=ToggleBatch invocation_id=2"
+                .into(),
+        ];
+        assert!(trace_contains_hold_visibility_work(
+            &hold_invocation,
+            Some(1),
+            Some(2)
+        ));
+    }
 
     fn spacer_from(
         template: &multi_launcher::radial::model::CellDefinition,
@@ -10894,5 +19517,34 @@ mod tests {
         assert!(same_window_state(&root_before, &root_after));
         root_after.bounds[0] = root_after.bounds[0].saturating_add(1);
         assert!(!same_window_state(&root_before, &root_after));
+    }
+
+    #[test]
+    fn hotkey_fixture_startup_requires_the_configured_physical_root_placement() {
+        let displays = [[0, 0, 1920, 1080]];
+        let ready = root_snapshot(100, 44, true, false, [240, 180, 1156, 869]);
+        assert!(hotkey_fixture_root_is_ready(
+            &ready,
+            ready.hwnd,
+            ready.process_id,
+            &displays
+        ));
+
+        // A child can have a valid ROOT HWND before its configured viewport placement
+        // arrives. A physically visible default-position window is not startup-ready.
+        let before_placement = root_snapshot(100, 44, true, false, [800, 150, 1716, 839]);
+        assert!(!hotkey_fixture_root_is_ready(
+            &before_placement,
+            before_placement.hwnd,
+            before_placement.process_id,
+            &displays
+        ));
+        let parked = root_snapshot(100, 44, true, false, [2000, 2000, 2916, 2689]);
+        assert!(!hotkey_fixture_root_is_ready(
+            &parked,
+            parked.hwnd,
+            parked.process_id,
+            &displays
+        ));
     }
 }

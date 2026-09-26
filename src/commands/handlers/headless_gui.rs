@@ -8,9 +8,20 @@ pub(crate) fn handle_headless_gui<H: HeadlessCommandHost + ?Sized>(
     host: &mut H,
     invocation: &CommandInvocation,
 ) -> Result<CommandOutcome, CommandError> {
+    handle_headless_gui_with_history_query(host, invocation, None)
+}
+
+pub(crate) fn handle_headless_gui_with_history_query<H: HeadlessCommandHost + ?Sized>(
+    host: &mut H,
+    invocation: &CommandInvocation,
+    captured_history_query: Option<&str>,
+) -> Result<CommandOutcome, CommandError> {
     if let Command::VirtualDesktop(command) = &invocation.command {
         let _ = command;
-        host.spawn_virtual_desktop_command(invocation.clone());
+        let history_query = captured_history_query
+            .map(str::to_owned)
+            .unwrap_or_else(|| host.current_query().to_owned());
+        host.spawn_virtual_desktop_command_with_history_query(invocation.clone(), history_query);
         return Ok(CommandOutcome::default());
     }
     if matches!(
