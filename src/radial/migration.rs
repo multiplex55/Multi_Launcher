@@ -1,6 +1,8 @@
 use super::model::{CURRENT_SCHEMA_VERSION, RadialDocument};
 use super::validation::{ValidationErrors, validate};
 
+const V2_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug)]
 pub enum DocumentDecodeError {
     Malformed(serde_json::Error),
@@ -32,11 +34,17 @@ pub fn decode_document(bytes: &[u8]) -> Result<DecodedDocument, DocumentDecodeEr
             supported: CURRENT_SCHEMA_VERSION,
         });
     }
-    let migrated_from = if version == 1 {
-        migrate_v1(&mut value);
-        Some(1)
-    } else {
-        None
+    let migrated_from = match version {
+        1 => {
+            migrate_v1(&mut value);
+            migrate_v2_to_v3(&mut value);
+            Some(1)
+        }
+        2 => {
+            migrate_v2_to_v3(&mut value);
+            Some(2)
+        }
+        _ => None,
     };
     let document = serde_json::from_value(value).map_err(DocumentDecodeError::Malformed)?;
     validate(&document).map_err(DocumentDecodeError::Validation)?;
@@ -47,7 +55,7 @@ pub fn decode_document(bytes: &[u8]) -> Result<DecodedDocument, DocumentDecodeEr
 }
 
 fn migrate_v1(value: &mut serde_json::Value) {
-    value["schema_version"] = serde_json::Value::from(CURRENT_SCHEMA_VERSION);
+    value["schema_version"] = serde_json::Value::from(V2_SCHEMA_VERSION);
     let Some(document) = value.as_object_mut() else {
         return;
     };
@@ -117,6 +125,10 @@ fn migrate_v1(value: &mut serde_json::Value) {
         }
         object.insert("style".into(), serde_json::json!({ "values": values }));
     }
+}
+
+fn migrate_v2_to_v3(value: &mut serde_json::Value) {
+    value["schema_version"] = serde_json::Value::from(CURRENT_SCHEMA_VERSION);
 }
 
 fn migrate_media_override(value: &mut serde_json::Value) {
@@ -221,6 +233,24 @@ mod tests {
                 .media_search_roots
                 .image_directories
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn v2_documents_advance_to_v3_without_changing_authored_values() {
+        let mut document = RadialDocument::starter();
+        document.schema_version = V2_SCHEMA_VERSION;
+        document.menus[0].name = "  Keep authored text  ".into();
+        let input = serde_json::to_vec(&document).unwrap();
+
+        let decoded = decode_document(&input).unwrap();
+
+        assert_eq!(decoded.migrated_from, Some(2));
+        assert_eq!(decoded.document.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(decoded.document.menus[0].name, "  Keep authored text  ");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&input).unwrap()["schema_version"],
+            V2_SCHEMA_VERSION
         );
     }
 

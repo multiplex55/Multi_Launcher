@@ -1289,19 +1289,32 @@ fn validate_keep_open(
     if effective_after_action(document, menu, policy) != AfterActionPolicy::KeepOpen {
         return;
     }
-    let ActionBinding::Persisted { action } = binding else {
-        return;
-    };
-    let requirement = match action.target.as_ref() {
-        Some(
-            PersistableActionTargetRef::LegacyAction { action }
-            | PersistableActionTargetRef::CustomAction { action },
-        ) => crate::commands::parse_action(action)
-            .map(|command| crate::radial::handoff::command_requirement(&command))
-            .unwrap_or(crate::radial::handoff::InteractionRequirement::ExternalInput),
-        _ => match crate::radial::handoff::action_id_requirement(&action.action_id) {
-            Some(requirement) => requirement,
-            None => return,
+    let requirement = match binding {
+        ActionBinding::LauncherQuery { .. } => {
+            crate::radial::handoff::InteractionRequirement::Deferred
+        }
+        ActionBinding::ExactCommand { .. } => {
+            crate::radial::bindings::prepare_deferred_binding(binding)
+                .and_then(|prepared| match prepared.availability {
+                    crate::radial::dynamic::FrozenAvailability::Deferred { kind } => {
+                        Some(kind.keep_open_requirement())
+                    }
+                    _ => None,
+                })
+                .unwrap_or(crate::radial::handoff::InteractionRequirement::Deferred)
+        }
+        ActionBinding::Contextual { .. } => return,
+        ActionBinding::Persisted { action } => match action.target.as_ref() {
+            Some(
+                PersistableActionTargetRef::LegacyAction { action }
+                | PersistableActionTargetRef::CustomAction { action },
+            ) => crate::commands::parse_action(action)
+                .map(|command| crate::radial::handoff::command_requirement(&command))
+                .unwrap_or(crate::radial::handoff::InteractionRequirement::ExternalInput),
+            _ => match crate::radial::handoff::action_id_requirement(&action.action_id) {
+                Some(requirement) => requirement,
+                None => return,
+            },
         },
     };
     if requirement != crate::radial::handoff::InteractionRequirement::None {
@@ -1358,6 +1371,63 @@ fn validate_binding(binding: &ActionBinding, path: &str, errors: &mut Vec<Valida
             action: PersistedUniversalActionRef { action_id, target },
         } => (action_id.as_str(), target.as_ref()),
         ActionBinding::Contextual { action_id, .. } => (action_id.as_str(), None),
+        ActionBinding::LauncherQuery { query, .. } => {
+            if query.trim().is_empty() {
+                errors.push(issue(
+                    format!("{path}.query"),
+                    "saved launcher query cannot be blank",
+                ));
+            }
+            if query.len() > limits::MAX_SAVED_LAUNCHER_QUERY_BYTES {
+                errors.push(issue(
+                    format!("{path}.query"),
+                    "saved launcher query is too long",
+                ));
+            }
+            return;
+        }
+        ActionBinding::ExactCommand { command, args } => {
+            if command.trim().is_empty() {
+                errors.push(issue(
+                    format!("{path}.command"),
+                    "exact command cannot be blank",
+                ));
+            }
+            if command.len() > limits::MAX_EXACT_COMMAND_BYTES {
+                errors.push(issue(
+                    format!("{path}.command"),
+                    "exact command is too long",
+                ));
+            }
+            if args.as_ref().is_some_and(|args| args.trim().is_empty()) {
+                errors.push(issue(
+                    format!("{path}.args"),
+                    "exact command arguments cannot be blank when present",
+                ));
+            }
+            if args
+                .as_ref()
+                .is_some_and(|args| args.len() > limits::MAX_EXACT_COMMAND_ARGS_BYTES)
+            {
+                errors.push(issue(
+                    format!("{path}.args"),
+                    "exact command arguments are too long",
+                ));
+            }
+            let action = crate::actions::Action {
+                label: command.clone(),
+                desc: String::new(),
+                action: command.clone(),
+                args: args.clone(),
+            };
+            if let Err(error) = crate::commands::parse_action(&action) {
+                errors.push(issue(
+                    format!("{path}.command"),
+                    format!("invalid exact command: {}", error.message),
+                ));
+            }
+            return;
+        }
     };
     if action_id.trim().is_empty() {
         errors.push(issue(
@@ -1487,6 +1557,97 @@ mod tests {
     #[test]
     fn starter_validates() {
         validate(&valid()).unwrap();
+    }
+
+    #[test]
+    fn saved_queries_and_exact_commands_are_bounded_and_structurally_checked() {
+        let mut document = valid();
+        let menu_index = document
+            .menus
+            .iter()
+            .position(|menu| menu.id.as_str() == "starter-screen-tools")
+            .unwrap();
+        document.menus[menu_index].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "  authored query  ".into(),
+                mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+            },
+        };
+        validate(&document).unwrap();
+
+        document.menus[menu_index].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::ExactCommand {
+                command: "legacy-wire-command".into(),
+                args: Some("--raw value".into()),
+            },
+        };
+        validate(&document).unwrap(); // Unknown commands use the existing External fallback.
+
+        for binding in [
+            ActionBinding::LauncherQuery {
+                query: " \t ".into(),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            },
+            ActionBinding::LauncherQuery {
+                query: "q".repeat(limits::MAX_SAVED_LAUNCHER_QUERY_BYTES + 1),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            },
+            ActionBinding::ExactCommand {
+                command: " \t ".into(),
+                args: None,
+            },
+            ActionBinding::ExactCommand {
+                command: "radial show".into(),
+                args: None,
+            },
+            ActionBinding::ExactCommand {
+                command: "x".repeat(limits::MAX_EXACT_COMMAND_BYTES + 1),
+                args: None,
+            },
+            ActionBinding::ExactCommand {
+                command: "radial close".into(),
+                args: Some(" \t ".into()),
+            },
+            ActionBinding::ExactCommand {
+                command: "radial close".into(),
+                args: Some("x".repeat(limits::MAX_EXACT_COMMAND_ARGS_BYTES + 1)),
+            },
+        ] {
+            document.menus[menu_index].rings[0].cells[0].content = CellContent::Action { binding };
+            assert!(validate(&document).is_err());
+        }
+    }
+
+    #[test]
+    fn keep_open_rejects_deferred_saved_queries_conservatively() {
+        let mut document = valid();
+        let menu_index = document
+            .menus
+            .iter()
+            .position(|menu| menu.id.as_str() == "starter-screen-tools")
+            .unwrap();
+        document.menus[menu_index].rings[0].cells[0].after_action = AfterActionPolicy::KeepOpen;
+        document.menus[menu_index].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "saved query".into(),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            },
+        };
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.ends_with("after_action") && issue.message.contains("Deferred")
+        }));
+
+        document.menus[menu_index].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::ExactCommand {
+                command: "radial edit".into(),
+                args: None,
+            },
+        };
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.ends_with("after_action") && issue.message.contains("LauncherUi")
+        }));
     }
 
     #[test]

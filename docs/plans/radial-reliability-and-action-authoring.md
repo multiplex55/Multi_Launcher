@@ -40,8 +40,8 @@ Critical override of older plans: a short launcher tap toggles the grid AND dism
 | ID | Scope | Code status | Verification status | Commit/diff | Evidence / blocker |
 |---|---|---|---|---|---|
 | M0 | Source baseline and fixture/test map | complete | complete (metadata inspection) | `8c09d29b` | Direct ZIP unavailable; byte fingerprint discrepancy and native preflight limits recorded below. |
-| M1 | Hotkey/grid/runtime reliability and exact-chord runner | complete | complete: Gate H, full Nextest, doctests, format and diff checks | starts at `8c09d29b`; candidate 24 source patch `d928edb8f050565aa30a8143c09c8140da0ada459810a7ebdb72accbcf56a46a` | Candidate 24 reports 6–7 pass all H cases, CLEANUP, R0 with typed latency and corrected expected fields; independent review finding resolved. Full Nextest 4,872/4,872 passed (8 skipped); doctests 0/0 passed. |
-| M2 | Typed bindings and persistence migration | pending | pending | — | — |
+| M1 | Hotkey/grid/runtime reliability and exact-chord runner | complete | complete: Gate H, full Nextest, doctests, format and diff checks | `f0e1c4466ce28e3298dfa613e6cae6a67bac70c6`; candidate 24 source patch `d928edb8f050565aa30a8143c09c8140da0ada459810a7ebdb72accbcf56a46a` | Candidate 24 reports 6–7 pass all H cases, CLEANUP, R0 with typed latency and corrected expected fields; independent review finding resolved. Full Nextest 4,872/4,872 passed (8 skipped); doctests 0/0 passed. |
+| M2 | Typed bindings and persistence migration | complete | Gate P 151/151 passed; all-target check, format and diff checks passed | starts at `f0e1c446`; precommit source patch `2e85b58bdd848ab613d13b6d439a2635c9a885160a5a818c71613efd242a3602` | Schema v3, typed deferred query/exact-command binding, explicit v1→v2→v3 migration, shared package decoder, fresh-store compatibility fixture; independent review finding resolved. |
 | M3 | Shared query resolution and execution/handoff | pending | pending | — | — |
 | M4 | Shared authoring editor and Add to radial | pending | pending | — | — |
 | M5 | Multi-select/bulk editing/navigation | pending | pending | — | — |
@@ -55,7 +55,7 @@ Use `pending`, `in_progress`, `code_complete`, `complete`, or `blocked` explicit
 | Gate | Meaning | Status | Exact source/candidate identity | Report/exit/counts |
 |---|---|---|---|---|
 | H | Rapid exact-chord native hotkey reliability | complete | Candidate 24: HEAD `8c09d29b32057fff7a4de7fd9b629c9d22e6ab69` + source patch `d928edb8f050565aa30a8143c09c8140da0ada459810a7ebdb72accbcf56a46a`; app `83601d4332110407b8fe22baa0fc6c5ea20846540fd696746bef966ba8d5f55d`; runner `9c2756fcd29941e79411d2da6146169e24e9370f899630c9f4d2e38daf5a2c9e` | `target/radial-reliability-m1-20260925-candidate24/hotkey-exact-{6,7}/report.json` both exit 0: all 13 H cases, CLEANUP, R0; H04 hidden+visible 1/2/5/10/25, 86 unique decisions, typed event/latency evidence, no pointer movement or intertap wait/refocus; exact chord and F11 control. Earlier candidate 24 attempts 1–3 failed documented external cursor movement, 4–5 failed single measured 101–102 ms H04 gaps; no failure was relabeled as passing. |
-| P | Model/migration/store/package compatibility | pending | — | — |
+| P | Model/migration/store/package compatibility | complete | HEAD `f0e1c446` + source patch `2e85b58bdd848ab613d13b6d439a2635c9a885160a5a818c71613efd242a3602` | Parent `target/radial-reliability-m2-20260925/gate-p-nextest.log` exit 0: 151/151 selected tests passed, 4,741 skipped by filter. Independent review closed P02/P09/P10 fixture finding. No native case required for data-only M2. |
 | Q | Same-ranked query resolution and correct execution | pending | — | — |
 | C | Core editor and insertion, H/Q rerun | pending | — | — |
 | D | Bulk/nav usability | pending | — | — |
@@ -102,6 +102,8 @@ Use `pending`, `in_progress`, `code_complete`, `complete`, or `blocked` explicit
 | M1 candidate 24 exact 6–7 | same source-matched exact-chord runner, interactive desktop | candidate 24 | 2026-09-25 UTC | `target/radial-reliability-m1-20260925-candidate24/hotkey-exact-{6,7}/report.json`, `report.txt`, sibling runner logs/metas | Both complete reports passed all H cases, CLEANUP, and R0. H04 matrix had 86 unique decisions, one attempt, no contamination, measured 25 ms down/75 ms scheduled release, no intertap polling/refocus or pointer movement. | 0 each |
 | M1 candidate 24 full Nextest | `cargo nextest run --locked --no-fail-fast` | candidate 24 source | 2026-09-25 UTC | `target/radial-reliability-m1-20260925-candidate24/full-nextest.log`, `full-nextest.meta.txt` | completed: 4,872 run, 4,872 passed, 8 skipped | 0 |
 | M1 candidate 24 doctests | `cargo test --doc --locked` | candidate 24 source | 2026-09-25 UTC | `target/radial-reliability-m1-20260925-candidate24/doctest.log`, `doctest.meta.txt` | completed: 0 doctests present, 0 failed | 0 |
+| M2 Gate P Nextest | focused `cargo nextest run --locked -E 'test(radial::model) | test(radial::migration) | test(radial::validation) | test(radial::store) | test(radial::package) | test(radial::bindings) | test(radial::authoring)'` | HEAD `f0e1c446` + source patch `2e85b58bdd848ab613d13b6d439a2635c9a885160a5a818c71613efd242a3602` | 2026-09-25 UTC | `target/radial-reliability-m2-20260925/gate-p-nextest.log`, `gate-p-nextest.meta.txt` | completed: 151/151 passed, 4,741 skipped by filter | 0 |
+| M2 all-target check | `cargo check --locked --all-targets` | same M2 source | 2026-09-25 UTC | `target/radial-reliability-m2-20260925/all-targets-check.log`, `all-targets-check.meta.txt` | completed; existing acceptance-runner dead-code warnings remain | 0 |
 
 One expensive job at a time. Check actual process state before starting another. Use completion notification or the user's 10–20 minute observation cadence for long jobs. Keep native test timing independent.
 
@@ -139,7 +141,7 @@ Next bounded milestone: M1 hotkey/grid/runtime ordering, deterministic tests, an
 
 Objective/requirement IDs: Gate H, including H01–H18 applicable native and deterministic cases, ROOT presentation and runtime dismissal, Designer independence, exact configured chord, bounded source-matched evidence and cleanup.
 
-Starting and ending source/commit/diff: Started at M0 commit `8c09d29b32057fff7a4de7fd9b629c9d22e6ab69`. Final precommit application/runner source patch SHA-256 `d928edb8f050565aa30a8143c09c8140da0ada459810a7ebdb72accbcf56a46a`; candidate 24 binary hashes are in Gate H above. The ledger change is excluded from that application/runner patch hash.
+Starting and ending source/commit/diff: Started at M0 commit `8c09d29b32057fff7a4de7fd9b629c9d22e6ab69` and committed as `f0e1c4466ce28e3298dfa613e6cae6a67bac70c6`. Final precommit application/runner source patch SHA-256 `d928edb8f050565aa30a8143c09c8140da0ada459810a7ebdb72accbcf56a46a`; candidate 24 binary hashes are in Gate H above. The ledger change is excluded from that application/runner patch hash.
 
 Changed files/architectural owners: The launcher hotkey invocation layer owns admitted tap/hold identity and release handling. Visibility, activation, ROOT window management, and Screen Draw parking own ordered presentation and focus restoration. The runtime radial controller owns dismissal and stale-open cancellation; Designer keeps its own session/draft lease. The native acceptance runner owns physical chord injection/observation, case-specific expected and observed evidence, bounded typed event packets, latency spans, report integrity, and cleanup.
 
@@ -162,6 +164,34 @@ Performance measurements, if any: The typed native packet records physical relea
 Unresolved blockers/limitations: The starting ZIP remained unavailable for direct comparison. Copied-profile and additional monitor/elevation combinations were not established as supported in this environment. Neither prevents the standard Gate H pass recorded above.
 
 Next bounded milestone: M2 typed saved-query/exact-command bindings, v3 migration and persistence/package compatibility (Gate P).
+
+### M2 — Typed bindings and persistence migration (complete)
+
+Objective/requirement IDs: Gate P, P01–P10, covering typed saved single-cell launcher queries and exact commands without losing v1/v2 documents or existing persisted settings, IDs, actions, and package semantics.
+
+Starting and ending source/commit/diff: Started at committed M1 `f0e1c4466ce28e3298dfa613e6cae6a67bac70c6`; final precommit source patch SHA-256 `2e85b58bdd848ab613d13b6d439a2635c9a885160a5a818c71613efd242a3602` (ledger excluded). Milestone commit is recorded in the Git log after this ledger snapshot.
+
+Changed files/architectural owners: `src/radial/model.rs` owns `ActionBinding::LauncherQuery`, `ExactCommand`, and `QueryRunMode` under schema v3. `migration.rs` and `store.rs` own read-only sequential migration and atomic persistence. `validation.rs` owns structural limits and conservative KeepOpen checks. `bindings.rs`, `dynamic.rs`, controller, GUI preparation, and preview use typed deferred binding state without execution; `package.rs` uses the shared decoder for embedded documents.
+
+Important decisions and intentional behavior changes: New queries default to `OpenLauncher` when the mode is absent; `ExecuteFirst` is explicit. Exact command text and optional argument text remain separate, with recognized versus External parser classification preserved. Both new forms are deferred until M3 supplies live resolution/dispatch. Existing dynamic LauncherQuery menus remain a distinct representation. v1 migrates through v2 before v3, v2 migrates to v3, and decode/import/reload do not save or execute.
+
+Tasks completed: Added typed forms, finite validation limits and errors, deferred preparation/interaction metadata, sequential migration, package decoder integration, and compatible GUI/catalog/preview handling. No M3 live execution or M4 editing surface was introduced. Independent review found missing store save/reopen evidence; a fresh-store fixture now covers both modes, exact args, alternate click, stable IDs, selected skin/style/trigger, separate threshold setting, unchanged radial bytes on reload, and no command sentinel. Narrow re-review closed the finding.
+
+Tests added/migrated and why: Model serde/default mode, v2 read-only migration and future-version refusal, validation of blank/oversize query/command/args and KeepOpen, deferred binding preparation, package export/import and old/future embedded schema handling, authoring duplicate/undo, store invalid reload and full v3 save/fresh reopen compatibility. Existing conflict/rollback/dynamic-menu tests remain in the affected Gate P filter.
+
+Commands, discovered counts, pass/fail/skip counts, exit codes: Parent affected `cargo nextest run --locked -E 'test(radial::model) | test(radial::migration) | test(radial::validation) | test(radial::store) | test(radial::package) | test(radial::bindings) | test(radial::authoring)'` exit 0: 151/151 passed, 4,741 skipped by filter. Parent `cargo check --locked --all-targets` exit 0. Writer `cargo fmt --all -- --check` and `git diff --check` exit 0. An earlier parent rerun was intentionally interrupted during compilation when independent review required a new fixture; it reported no test result.
+
+Candidate/runner/profile identities: No native candidate was needed for this data-only milestone; source patch identity above and targeted test log identify the checked source. M1 native Gate H remains associated with committed M1 source, not claimed as an M2 native rerun.
+
+Native cases and report path: Not applicable for Gate P; no native suite was run for M2.
+
+Source-backed root-cause evidence versus remaining hypotheses: Existing v1 migration had stamped the current version directly; embedded package import had deserialized without the shared migration boundary; unresolved new bindings would otherwise appear as informational/no-interaction. The M2 source replaces these paths with explicit migration and typed deferred state. No runtime provider ranking or actual command effect is claimed until M3.
+
+Performance measurements, if any: None required for this persistence milestone.
+
+Unresolved blockers/limitations: None identified for the data model after the store fixture review. M3 still owns live query resolution and effectful exact-command execution.
+
+Next bounded milestone: M3 shared query resolution, safe Auto Submit, exact command execution, and ROOT handoff (Gate Q).
 
 ### Mx — title
 

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 pub const RADIAL_FILE: &str = "radial.json";
 pub const RADIAL_ASSETS_DIRECTORY: &str = "radial_assets";
 
@@ -21,6 +21,9 @@ pub mod limits {
     pub const MAX_MEDIA_SEARCH_ROOTS: usize = 32;
     pub const MAX_ITEM_SHORTCUTS_PER_CELL: usize = 16;
     pub const MAX_ITEM_HOTSTRINGS_PER_CELL: usize = 16;
+    pub const MAX_SAVED_LAUNCHER_QUERY_BYTES: usize = 512;
+    pub const MAX_EXACT_COMMAND_BYTES: usize = 4_096;
+    pub const MAX_EXACT_COMMAND_ARGS_BYTES: usize = 4_096;
     pub const MAX_TEXTURE_DIMENSION: u32 = 8_192;
     pub const MAX_TEXTURE_BYTES: u64 = 128 * 1024 * 1024;
     pub const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
@@ -514,6 +517,28 @@ pub enum ActionBinding {
         selector: TargetSelector,
         action_id: crate::universal_actions::ActionId,
     },
+    LauncherQuery {
+        query: String,
+        #[serde(default)]
+        mode: QueryRunMode,
+    },
+    ExactCommand {
+        command: String,
+        #[serde(default)]
+        args: Option<String>,
+    },
+}
+
+/// How an authored single-cell launcher query is expected to behave once the
+/// runtime query dispatcher is available. M2 deliberately prepares both modes
+/// as deferred work; this value is persistence intent, not permission to run
+/// during decoding, import, validation, or preview.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryRunMode {
+    #[default]
+    OpenLauncher,
+    ExecuteFirst,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1187,6 +1212,48 @@ mod tests {
         assert_eq!(
             legacy.background_primary_after_action,
             AfterActionPolicy::Inherit
+        );
+    }
+
+    #[test]
+    fn authored_query_modes_and_exact_command_arguments_round_trip() {
+        let bindings = [
+            ActionBinding::LauncherQuery {
+                query: "  saved query  ".into(),
+                mode: QueryRunMode::OpenLauncher,
+            },
+            ActionBinding::LauncherQuery {
+                query: "type:value".into(),
+                mode: QueryRunMode::ExecuteFirst,
+            },
+            ActionBinding::ExactCommand {
+                command: "query:example".into(),
+                args: None,
+            },
+            ActionBinding::ExactCommand {
+                command: "external-tool".into(),
+                args: Some("--flag value".into()),
+            },
+        ];
+        for binding in bindings {
+            let encoded = serde_json::to_vec(&binding).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<ActionBinding>(&encoded).unwrap(),
+                binding
+            );
+        }
+
+        let defaulted: ActionBinding = serde_json::from_value(serde_json::json!({
+            "kind": "launcher_query",
+            "query": "default mode"
+        }))
+        .unwrap();
+        assert_eq!(
+            defaulted,
+            ActionBinding::LauncherQuery {
+                query: "default mode".into(),
+                mode: QueryRunMode::OpenLauncher,
+            }
         );
     }
 

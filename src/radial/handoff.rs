@@ -9,6 +9,9 @@ use crate::universal_actions::{UniversalAction, UniversalActionOperation};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractionRequirement {
     None,
+    /// The authored operation is validly represented, but its execution owner
+    /// is intentionally deferred to a later runtime milestone.
+    Deferred,
     LauncherUi,
     ExternalInput,
     ExclusiveCapture,

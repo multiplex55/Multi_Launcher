@@ -1,7 +1,7 @@
 use crate::radial::bindings::RadialBindingResolver;
 use crate::radial::bindings::{
     BindingUnavailable, PreparedBinding, PreparedCell, RadialPrepareEnvelope, RadialPrepareReply,
-    project_menu_frame_with_style,
+    prepare_deferred_binding, project_menu_frame_with_style,
 };
 use crate::radial::context::{CompiledContextRules, InvocationContext};
 use crate::radial::dynamic::{
@@ -887,6 +887,15 @@ fn prepared_cell(
     after_action: crate::radial::model::AfterActionPolicy,
     history_query: &str,
 ) -> PreparedCell {
+    if let Some(deferred) = prepare_deferred_binding(binding) {
+        return PreparedCell {
+            binding: deferred.binding,
+            availability: deferred.availability,
+            requirement: deferred.requirement,
+            after_action,
+            history_query: history_query.to_owned(),
+        };
+    }
     let frozen = freeze_action_binding(binding, invocation);
     let unavailable = resolved
         .as_ref()
@@ -920,6 +929,12 @@ fn freeze_action_binding(
     match binding {
         crate::radial::model::ActionBinding::Persisted { .. } => {
             Ok(FrozenBinding::Stable(binding.clone()))
+        }
+        crate::radial::model::ActionBinding::LauncherQuery { .. }
+        | crate::radial::model::ActionBinding::ExactCommand { .. } => {
+            prepare_deferred_binding(binding)
+                .map(|deferred| deferred.binding)
+                .ok_or(BindingUnavailable::Informational)
         }
         crate::radial::model::ActionBinding::Contextual {
             selector,
@@ -1088,7 +1103,7 @@ mod tests {
     use super::*;
     use crate::radial::bindings::BindingUnavailable;
     use crate::radial::context::InvocationContext;
-    use crate::radial::model::{ActionBinding, TargetSelector};
+    use crate::radial::model::{ActionBinding, QueryRunMode, TargetSelector};
     use crate::universal_actions::ActionId;
 
     fn leased_request() -> RadialDispatchRequest {
@@ -1144,6 +1159,39 @@ mod tests {
             FrozenAvailability::Unavailable { ref reason }
                 if reason.contains("ExternalInput") && reason.contains("KeepOpen")
         ));
+    }
+
+    #[test]
+    fn saved_query_preparation_stays_deferred_and_keeps_the_invocation_query() {
+        let binding = ActionBinding::LauncherQuery {
+            query: "saved".into(),
+            mode: QueryRunMode::OpenLauncher,
+        };
+        let prepared = prepared_cell(
+            &binding,
+            Err(BindingUnavailable::Deferred(
+                crate::radial::dynamic::DeferredBindingKind::LauncherQuery {
+                    mode: QueryRunMode::OpenLauncher,
+                },
+            )),
+            &InvocationContext::empty(1),
+            crate::radial::model::AfterActionPolicy::CloseTree,
+            "root query captured at invocation",
+        );
+
+        assert!(matches!(
+            prepared.binding,
+            FrozenBinding::Deferred {
+                binding: ActionBinding::LauncherQuery { ref query, .. },
+                ..
+            } if query == "saved"
+        ));
+        assert!(matches!(
+            prepared.availability,
+            FrozenAvailability::Deferred { .. }
+        ));
+        assert_eq!(prepared.requirement, InteractionRequirement::Deferred);
+        assert_eq!(prepared.history_query, "root query captured at invocation");
     }
 
     #[test]

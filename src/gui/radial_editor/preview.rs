@@ -14,8 +14,8 @@ use crate::radial::geometry::{
     cascade_placement_with_direction, layout_document_menu,
 };
 use crate::radial::model::{
-    CellContent, CellId, InvocationId, MenuDefinition, MenuId, RadialDocument, RingId, SessionId,
-    SkinId,
+    ActionBinding, CellContent, CellId, InvocationId, MenuDefinition, MenuId, RadialDocument,
+    RingId, SessionId, SkinId,
 };
 use crate::radial::preparation::{
     PreparedFrameInput, PreparedPlacement, PreviewPlacement, ensure_preview_center_back,
@@ -2265,14 +2265,16 @@ fn cell_role(document: &RadialDocument, menu_id: &MenuId, cell_id: &CellId) -> C
     let menu = document.menus.iter().find(|menu| &menu.id == menu_id);
     if let Some(menu) = menu {
         let special = match cell_id.as_str() {
-            "__center" => menu
-                .center_control
-                .map(control_cell_role)
-                .or_else(|| menu.center_action.as_ref().map(|_| CellRole::Action)),
-            "__background" => menu
-                .background_control
-                .map(control_cell_role)
-                .or_else(|| menu.background_action.as_ref().map(|_| CellRole::Action)),
+            "__center" => menu.center_control.map(control_cell_role).or_else(|| {
+                menu.center_action
+                    .as_ref()
+                    .map(authored_binding_preview_role)
+            }),
+            "__background" => menu.background_control.map(control_cell_role).or_else(|| {
+                menu.background_action
+                    .as_ref()
+                    .map(authored_binding_preview_role)
+            }),
             _ => None,
         };
         if let Some(role) = special {
@@ -2286,7 +2288,8 @@ fn cell_role(document: &RadialDocument, menu_id: &MenuId, cell_id: &CellId) -> C
             .find(|cell| &cell.id == cell_id)
     })
     .map_or(CellRole::Unavailable, |cell| match &cell.content {
-        CellContent::Action { .. } | CellContent::Dynamic { .. } => CellRole::Action,
+        CellContent::Action { binding } => authored_binding_preview_role(binding),
+        CellContent::Dynamic { .. } => CellRole::Action,
         CellContent::Submenu { .. } => CellRole::Submenu,
         CellContent::Control { control } => match control {
             crate::radial::model::Control::Back => CellRole::Back,
@@ -2297,6 +2300,15 @@ fn cell_role(document: &RadialDocument, menu_id: &MenuId, cell_id: &CellId) -> C
         },
         CellContent::Spacer => CellRole::Spacer,
     })
+}
+
+fn authored_binding_preview_role(binding: &ActionBinding) -> CellRole {
+    match binding {
+        ActionBinding::LauncherQuery { .. } | ActionBinding::ExactCommand { .. } => {
+            CellRole::Unavailable
+        }
+        ActionBinding::Persisted { .. } | ActionBinding::Contextual { .. } => CellRole::Action,
+    }
 }
 
 fn control_cell_role(control: crate::radial::model::Control) -> CellRole {
@@ -2377,6 +2389,7 @@ fn representative_document(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radial::model::QueryRunMode;
 
     fn authoring_session() -> RadialAuthoringSession {
         let document = std::sync::Arc::new(RadialDocument::starter());
@@ -2384,6 +2397,34 @@ mod tests {
             document,
             "preview-test",
         ))
+    }
+
+    #[test]
+    fn saved_query_and_exact_command_are_not_executable_in_embedded_preview() {
+        let mut document = RadialDocument::starter();
+        let menu_id = document.menus[0].id.clone();
+        let cell_id = document.menus[0].rings[0].cells[0].id.clone();
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "saved".into(),
+                mode: QueryRunMode::OpenLauncher,
+            },
+        };
+        assert_eq!(
+            cell_role(&document, &menu_id, &cell_id),
+            CellRole::Unavailable
+        );
+
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::ExactCommand {
+                command: "radial close".into(),
+                args: None,
+            },
+        };
+        assert_eq!(
+            cell_role(&document, &menu_id, &cell_id),
+            CellRole::Unavailable
+        );
     }
 
     #[test]

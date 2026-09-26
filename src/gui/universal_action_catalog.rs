@@ -612,6 +612,9 @@ impl LauncherApp {
                         })
                     }
                     ActionBinding::Persisted { .. } => None,
+                    ActionBinding::LauncherQuery { .. } | ActionBinding::ExactCommand { .. } => {
+                        None
+                    }
                 };
                 if let Some(identity) = captured_identity.as_ref()
                     && !self
@@ -713,7 +716,9 @@ fn hash_aliases(
 fn persisted_request(binding: &ActionBinding) -> Option<PersistedUniversalActionRef> {
     match binding {
         ActionBinding::Persisted { action } => Some(action.clone()),
-        ActionBinding::Contextual { .. } => None,
+        ActionBinding::Contextual { .. }
+        | ActionBinding::LauncherQuery { .. }
+        | ActionBinding::ExactCommand { .. } => None,
     }
 }
 

@@ -1,6 +1,7 @@
 use super::handoff::InteractionRequirement;
-use super::model::{ActionBinding, DynamicSource};
+use super::model::{ActionBinding, DynamicSource, QueryRunMode};
 use crate::actions::Action;
+use crate::commands::Command;
 use crate::universal_actions::{ActionId, ActionTarget, PersistedUniversalActionRef};
 use std::collections::BTreeMap;
 
@@ -13,6 +14,7 @@ pub enum FrozenAvailability {
     Empty { reason: String },
     Loading { reason: String },
     Unavailable { reason: String },
+    Deferred { kind: DeferredBindingKind },
 }
 
 impl FrozenAvailability {
@@ -22,8 +24,64 @@ impl FrozenAvailability {
             Self::Empty { reason } | Self::Loading { reason } | Self::Unavailable { reason } => {
                 Some(reason)
             }
+            Self::Deferred { kind } => Some(kind.reason()),
         }
     }
+}
+
+/// Runtime-only description of saved work that M2 can validate and type but
+/// intentionally does not execute. M3 will supply the query/dispatch owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeferredBindingKind {
+    LauncherQuery {
+        mode: QueryRunMode,
+    },
+    ExactCommand {
+        disposition: ExactCommandDisposition,
+        required_interaction: InteractionRequirement,
+    },
+}
+
+impl DeferredBindingKind {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::LauncherQuery {
+                mode: QueryRunMode::OpenLauncher,
+            } => "saved launcher query is deferred",
+            Self::LauncherQuery {
+                mode: QueryRunMode::ExecuteFirst,
+            } => "saved launcher query execution is deferred",
+            Self::ExactCommand {
+                disposition: ExactCommandDisposition::Recognized,
+                ..
+            } => "saved exact command is parsed but deferred",
+            Self::ExactCommand {
+                disposition: ExactCommandDisposition::ExternalFallback,
+                ..
+            } => "saved exact command uses the external fallback and is deferred",
+            Self::ExactCommand {
+                disposition: ExactCommandDisposition::Invalid,
+                ..
+            } => "saved exact command could not be parsed",
+        }
+    }
+
+    pub const fn keep_open_requirement(self) -> InteractionRequirement {
+        match self {
+            Self::LauncherQuery { .. } => InteractionRequirement::Deferred,
+            Self::ExactCommand {
+                required_interaction,
+                ..
+            } => required_interaction,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExactCommandDisposition {
+    Recognized,
+    ExternalFallback,
+    Invalid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +121,11 @@ pub enum FrozenBinding {
         selected_action: Action,
         action_id: ActionId,
         identity: Option<RuntimeTargetIdentity>,
+    },
+    Deferred {
+        binding: ActionBinding,
+        kind: DeferredBindingKind,
+        parsed_command: Option<Command>,
     },
     /// A visible, non-dispatchable source status. This can only occur in an
     /// invocation-frozen frame and has no persisted representation.

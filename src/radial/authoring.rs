@@ -2649,6 +2649,7 @@ fn three_way_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radial::model::{ActionBinding, AfterActionPolicy, CellContent};
 
     #[test]
     fn reply_trace_distinguishes_enqueue_accept_reject_and_retire_terminality() {
@@ -3379,6 +3380,14 @@ mod tests {
         let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
         let original_menu_count = session.draft.menus.len();
         let mut document = (*session.draft).clone();
+        let authored_binding = ActionBinding::LauncherQuery {
+            query: "  authoring copy  ".into(),
+            mode: crate::radial::model::QueryRunMode::OpenLauncher,
+        };
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: authored_binding.clone(),
+        };
+        document.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;
         let mut duplicate = document.menus[0].clone();
         duplicate.id = MenuId::new("duplicate");
         duplicate.name = "Duplicate".into();
@@ -3390,9 +3399,18 @@ mod tests {
         session.replace_document_atomic(document).unwrap();
         assert_eq!(session.draft.menus.len(), original_menu_count + 1);
         assert_eq!(session.draft.menus.last().unwrap().id.as_str(), "duplicate");
+        assert!(matches!(
+            &session.draft.menus.last().unwrap().rings[0].cells[0].content,
+            CellContent::Action { binding } if binding == &authored_binding
+        ));
         assert!(session.undo());
         assert_eq!(session.draft.menus.len(), original_menu_count);
         assert!(!session.undo());
+        assert!(session.redo());
+        assert!(matches!(
+            &session.draft.menus.last().unwrap().rings[0].cells[0].content,
+            CellContent::Action { binding } if binding == &authored_binding
+        ));
     }
 
     #[test]

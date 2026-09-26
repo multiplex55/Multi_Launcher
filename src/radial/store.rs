@@ -1285,7 +1285,11 @@ fn collect_value_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::radial::model::{AssetRecord, MediaKind, Override};
+    use crate::radial::model::{
+        ActionBinding, AfterActionPolicy, AssetRecord, ClickBinding, ClickGesture,
+        GeometryStyleOverrides, MediaKind, Override, QueryRunMode, SelectedSkinStyleLayer,
+        SkinDefinition, SkinId, StyleOverrides, TriggerDefinition, TriggerId, TriggerScope,
+    };
     use crate::radial::package::{IdRemap, PackageManifest};
     use base64::Engine;
     use std::collections::BTreeMap;
@@ -1541,6 +1545,199 @@ mod tests {
             serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(saved_value["schema_version"], CURRENT_SCHEMA_VERSION);
         assert!(saved_value["skins"][0].get("scale").is_none());
+    }
+
+    #[test]
+    fn v2_reload_migrates_only_in_memory() {
+        let (directory, store) = fixture();
+        let path = directory.path().join(RADIAL_FILE);
+        let mut document = RadialDocument::starter();
+        document.schema_version = 2;
+        let bytes = serde_json::to_vec_pretty(&document).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let migrated = store.reload().unwrap();
+
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn v3_saved_bindings_survive_fresh_store_reload_without_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let radial_path = directory.path().join(RADIAL_FILE);
+        let settings_path = directory.path().join("settings.json");
+        let mut settings = crate::settings::Settings::default();
+        settings.radial.hold_threshold_ms = 725;
+        let settings_path_text = settings_path.to_string_lossy().into_owned();
+        settings.save(&settings_path_text).unwrap();
+        let settings_bytes = fs::read(&settings_path).unwrap();
+
+        let sentinel_path = directory.path().join("exact-command-was-executed.txt");
+        let exact_args = format!("/C echo executed > \"{}\"", sentinel_path.display());
+
+        let mut document = RadialDocument::starter();
+        let menu_id = document.default_menu_id.clone();
+        let menu = document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == menu_id)
+            .unwrap();
+        let selected_skin_id = SkinId::new("round-trip-accent");
+        menu.skin_id = selected_skin_id.clone();
+        menu.rings[0].cells[0].content = super::super::model::CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "title: saved query".into(),
+                mode: QueryRunMode::OpenLauncher,
+            },
+        };
+        menu.rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;
+        menu.rings[0].cells[0].alternate_clicks.push(ClickBinding {
+            gesture: ClickGesture::Secondary,
+            action: ActionBinding::ExactCommand {
+                command: "launcher:show".into(),
+                args: Some("alternate query".into()),
+            },
+            after_action: AfterActionPolicy::CloseCurrentMenu,
+        });
+        menu.rings[0].cells[1].content = super::super::model::CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "type:document".into(),
+                mode: QueryRunMode::ExecuteFirst,
+            },
+        };
+        menu.rings[0].cells[1].after_action = AfterActionPolicy::CloseTree;
+        menu.rings[0].cells[2].content = super::super::model::CellContent::Action {
+            binding: ActionBinding::ExactCommand {
+                command: "cmd.exe".into(),
+                args: Some(exact_args.clone()),
+            },
+        };
+        menu.rings[0].cells[2].after_action = AfterActionPolicy::CloseTree;
+        let stable_cell_ids = menu.rings[0]
+            .cells
+            .iter()
+            .take(3)
+            .map(|cell| cell.id.clone())
+            .collect::<Vec<_>>();
+
+        document.skins.push(SkinDefinition {
+            id: selected_skin_id.clone(),
+            name: "Round trip accent".into(),
+            style: SelectedSkinStyleLayer {
+                values: StyleOverrides {
+                    geometry: GeometryStyleOverrides {
+                        menu_scale: Override::Value(1.25),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        });
+        document.custom_triggers.push(TriggerDefinition {
+            id: TriggerId::new("round-trip-trigger"),
+            chord: "Alt+F9".into(),
+            menu_id: menu_id.clone(),
+            scope: TriggerScope::Global,
+        });
+
+        let first_store = RadialStore::at_path(&radial_path, RadialDocument::starter()).unwrap();
+        let before_save = first_store.snapshot().unwrap();
+        let saved = first_store.save(before_save.revision, document).unwrap();
+        assert_eq!(saved.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(saved.revision.0, before_save.revision.0 + 1);
+        let saved_bytes = fs::read(&radial_path).unwrap();
+        let saved_json: serde_json::Value = serde_json::from_slice(&saved_bytes).unwrap();
+        assert_eq!(saved_json["schema_version"], CURRENT_SCHEMA_VERSION);
+        drop(first_store);
+
+        let reopened_store = RadialStore::at_path(&radial_path, RadialDocument::starter()).unwrap();
+        let bytes_before_reload = fs::read(&radial_path).unwrap();
+        let reloaded = reopened_store.reload().unwrap();
+        assert_eq!(fs::read(&radial_path).unwrap(), bytes_before_reload);
+        assert_eq!(*reloaded, *saved);
+        assert_eq!(reloaded.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(reloaded.revision, saved.revision);
+
+        let reloaded_menu = reloaded
+            .menus
+            .iter()
+            .find(|menu| menu.id == menu_id)
+            .unwrap();
+        assert_eq!(reloaded_menu.skin_id, selected_skin_id);
+        assert_eq!(
+            reloaded_menu.rings[0]
+                .cells
+                .iter()
+                .take(3)
+                .map(|cell| cell.id.clone())
+                .collect::<Vec<_>>(),
+            stable_cell_ids
+        );
+        assert_eq!(
+            reloaded_menu.rings[0].cells[0].content,
+            super::super::model::CellContent::Action {
+                binding: ActionBinding::LauncherQuery {
+                    query: "title: saved query".into(),
+                    mode: QueryRunMode::OpenLauncher,
+                },
+            }
+        );
+        assert_eq!(
+            reloaded_menu.rings[0].cells[0].alternate_clicks,
+            vec![ClickBinding {
+                gesture: ClickGesture::Secondary,
+                action: ActionBinding::ExactCommand {
+                    command: "launcher:show".into(),
+                    args: Some("alternate query".into()),
+                },
+                after_action: AfterActionPolicy::CloseCurrentMenu,
+            }]
+        );
+        assert_eq!(
+            reloaded_menu.rings[0].cells[1].content,
+            super::super::model::CellContent::Action {
+                binding: ActionBinding::LauncherQuery {
+                    query: "type:document".into(),
+                    mode: QueryRunMode::ExecuteFirst,
+                },
+            }
+        );
+        assert_eq!(
+            reloaded_menu.rings[0].cells[2].content,
+            super::super::model::CellContent::Action {
+                binding: ActionBinding::ExactCommand {
+                    command: "cmd.exe".into(),
+                    args: Some(exact_args),
+                },
+            }
+        );
+        let selected_skin = reloaded
+            .skins
+            .iter()
+            .find(|skin| skin.id == selected_skin_id)
+            .unwrap();
+        assert_eq!(
+            selected_skin.style.values.geometry.menu_scale,
+            Override::Value(1.25)
+        );
+        assert_eq!(
+            reloaded.custom_triggers,
+            vec![TriggerDefinition {
+                id: TriggerId::new("round-trip-trigger"),
+                chord: "Alt+F9".into(),
+                menu_id,
+                scope: TriggerScope::Global,
+            }]
+        );
+
+        let settings_after = crate::settings::Settings::load(&settings_path_text).unwrap();
+        assert_eq!(settings_after.radial.hold_threshold_ms, 725);
+        assert_eq!(fs::read(&settings_path).unwrap(), settings_bytes);
+        assert!(
+            !sentinel_path.exists(),
+            "loading persisted bindings must not execute them"
+        );
     }
 
     fn imported_plan_with_asset(target: &RadialDocument) -> ImportPlan {

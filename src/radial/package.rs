@@ -132,6 +132,7 @@ pub enum PackageError {
     MissingFile(String),
     MissingRoot(MenuId),
     MissingAsset(AssetId),
+    UnsupportedDocumentVersion { found: u64, supported: u32 },
     NonPortableReference(String),
     InvalidMedia { asset: AssetId, reason: String },
     Validation(ValidationErrors),
@@ -522,9 +523,21 @@ pub fn plan_import(
     let document_bytes = files
         .get(&manifest.document_path)
         .ok_or_else(|| PackageError::MissingFile(manifest.document_path.clone()))?;
-    let mut document: RadialDocument = serde_json::from_slice(document_bytes)
-        .map_err(|error| PackageError::Malformed(error.to_string()))?;
-    validate(&document).map_err(PackageError::Validation)?;
+    let mut document: RadialDocument = match super::migration::decode_document(document_bytes) {
+        Ok(decoded) => decoded.document,
+        Err(super::migration::DocumentDecodeError::Malformed(error)) => {
+            return Err(PackageError::Malformed(error.to_string()));
+        }
+        Err(super::migration::DocumentDecodeError::UnsupportedNewerVersion {
+            found,
+            supported,
+        }) => {
+            return Err(PackageError::UnsupportedDocumentVersion { found, supported });
+        }
+        Err(super::migration::DocumentDecodeError::Validation(errors)) => {
+            return Err(PackageError::Validation(errors));
+        }
+    };
     ensure_portable_media(&document)?;
     let referenced = managed_asset_ids(&document)?;
     if referenced.len() != document.assets.len()
@@ -1293,6 +1306,110 @@ mod tests {
             MANIFEST_FILE.into(),
             serde_json::to_vec_pretty(&plan.manifest).unwrap(),
         );
+    }
+
+    fn replace_packaged_document(files: &mut BTreeMap<String, Vec<u8>>, document_bytes: Vec<u8>) {
+        let manifest_bytes = files.remove(MANIFEST_FILE).unwrap();
+        let mut manifest: PackageManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        let document_path = manifest.document_path.clone();
+        let record = manifest
+            .files
+            .iter_mut()
+            .find(|record| record.path == document_path)
+            .unwrap();
+        record.byte_len = document_bytes.len() as u64;
+        record.sha256 = sha256_hex(&document_bytes);
+        files.insert(document_path, document_bytes);
+        files.insert(
+            MANIFEST_FILE.into(),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        );
+    }
+
+    #[test]
+    fn menu_package_round_trip_preserves_saved_query_and_exact_command_bindings() {
+        let mut source = RadialDocument::starter();
+        let menu = source
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id.as_str() == "starter-screen-tools")
+            .unwrap();
+        let root = menu.id.clone();
+        menu.rings[0].cells[0].content = CellContent::Action {
+            binding: super::super::model::ActionBinding::LauncherQuery {
+                query: "  type:report  ".into(),
+                mode: super::super::model::QueryRunMode::ExecuteFirst,
+            },
+        };
+        menu.rings[0].cells[1].content = CellContent::Action {
+            binding: super::super::model::ActionBinding::ExactCommand {
+                command: "external-tool".into(),
+                args: Some("--exact arg".into()),
+            },
+        };
+        let export = plan_export(&source, &[root], &BTreeMap::new(), Vec::new()).unwrap();
+
+        let imported = plan_import(export.files, &RadialDocument::starter()).unwrap();
+
+        let bindings = imported
+            .document
+            .menus
+            .iter()
+            .flat_map(|menu| menu.rings.iter())
+            .flat_map(|ring| ring.cells.iter())
+            .filter_map(|cell| match &cell.content {
+                CellContent::Action { binding } => Some(binding),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(bindings.iter().any(|binding| matches!(
+            binding,
+            super::super::model::ActionBinding::LauncherQuery {
+                query,
+                mode: super::super::model::QueryRunMode::ExecuteFirst
+            } if query == "  type:report  "
+        )));
+        assert!(bindings.iter().any(|binding| matches!(
+            binding,
+            super::super::model::ActionBinding::ExactCommand { command, args }
+                if command == "external-tool" && args.as_deref() == Some("--exact arg")
+        )));
+    }
+
+    #[test]
+    fn menu_package_uses_shared_decoder_and_rejects_future_document_schema() {
+        let source = isolated_package_fixture();
+        let export = plan_export(
+            &source,
+            &[source.default_menu_id.clone()],
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut v2_files = export.files.clone();
+        let document_bytes = v2_files.get(DOCUMENT_FILE).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(document_bytes).unwrap();
+        document["schema_version"] = serde_json::json!(2);
+        replace_packaged_document(&mut v2_files, serde_json::to_vec(&document).unwrap());
+        let imported = plan_import(v2_files, &RadialDocument::starter()).unwrap();
+        assert_eq!(
+            imported.document.schema_version,
+            super::super::model::CURRENT_SCHEMA_VERSION
+        );
+
+        let mut future_files = export.files;
+        let document_bytes = future_files.get(DOCUMENT_FILE).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(document_bytes).unwrap();
+        let current_schema = super::super::model::CURRENT_SCHEMA_VERSION;
+        document["schema_version"] = serde_json::json!(current_schema + 1);
+        replace_packaged_document(&mut future_files, serde_json::to_vec(&document).unwrap());
+
+        assert!(matches!(
+            plan_import(future_files, &RadialDocument::starter()),
+            Err(PackageError::UnsupportedDocumentVersion { found, supported })
+                if found == u64::from(current_schema + 1)
+                    && supported == current_schema
+        ));
     }
 
     #[test]

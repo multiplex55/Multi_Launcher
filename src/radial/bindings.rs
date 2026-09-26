@@ -1,5 +1,8 @@
 use super::context::{InvocationContext, WindowIdentity};
-use super::dynamic::{FrozenAvailability, FrozenBinding, FrozenDynamicFrame};
+use super::dynamic::{
+    DeferredBindingKind, ExactCommandDisposition, FrozenAvailability, FrozenBinding,
+    FrozenDynamicFrame,
+};
 use super::handoff::{InteractionRequirement, interaction_requirement};
 use super::model::{
     ActionBinding, AfterActionPolicy, CellContent, CellDefinition, CellId, InvocationId,
@@ -311,7 +314,72 @@ pub enum BindingUnavailable {
     ContextActionMissing {
         action_id: crate::universal_actions::ActionId,
     },
+    Deferred(DeferredBindingKind),
     Informational,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeferredBindingPreparation {
+    pub binding: FrozenBinding,
+    pub availability: FrozenAvailability,
+    pub requirement: InteractionRequirement,
+}
+
+/// Builds a non-dispatchable runtime representation for authored query and
+/// exact-command bindings. Parsing is pure; this helper never invokes a
+/// provider or executes a command.
+pub fn prepare_deferred_binding(binding: &ActionBinding) -> Option<DeferredBindingPreparation> {
+    let (kind, parsed_command, requirement) = match binding {
+        ActionBinding::LauncherQuery { mode, .. } => (
+            DeferredBindingKind::LauncherQuery { mode: *mode },
+            None,
+            InteractionRequirement::Deferred,
+        ),
+        ActionBinding::ExactCommand { command, args } => {
+            let action = Action {
+                label: command.clone(),
+                desc: String::new(),
+                action: command.clone(),
+                args: args.clone(),
+            };
+            match crate::commands::parse_action(&action) {
+                Ok(parsed) => {
+                    let disposition = if matches!(parsed, crate::commands::Command::External(_)) {
+                        ExactCommandDisposition::ExternalFallback
+                    } else {
+                        ExactCommandDisposition::Recognized
+                    };
+                    let required_interaction = super::handoff::command_requirement(&parsed);
+                    (
+                        DeferredBindingKind::ExactCommand {
+                            disposition,
+                            required_interaction,
+                        },
+                        Some(parsed),
+                        InteractionRequirement::Deferred,
+                    )
+                }
+                Err(_) => (
+                    DeferredBindingKind::ExactCommand {
+                        disposition: ExactCommandDisposition::Invalid,
+                        required_interaction: InteractionRequirement::Deferred,
+                    },
+                    None,
+                    InteractionRequirement::Deferred,
+                ),
+            }
+        }
+        ActionBinding::Persisted { .. } | ActionBinding::Contextual { .. } => return None,
+    };
+    Some(DeferredBindingPreparation {
+        binding: FrozenBinding::Deferred {
+            binding: binding.clone(),
+            kind,
+            parsed_command,
+        },
+        availability: FrozenAvailability::Deferred { kind },
+        requirement,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -335,6 +403,7 @@ impl RadialBindingResolver<'_> {
     ) -> Result<PreparedBinding, BindingUnavailable> {
         match binding {
             FrozenBinding::Stable(binding) => self.resolve(binding, invocation, query),
+            FrozenBinding::Deferred { kind, .. } => Err(BindingUnavailable::Deferred(*kind)),
             FrozenBinding::Contextual {
                 selector,
                 action_id,
@@ -394,6 +463,12 @@ impl RadialBindingResolver<'_> {
         invocation: &InvocationContext,
         query: &str,
     ) -> Result<PreparedBinding, BindingUnavailable> {
+        if let Some(deferred) = prepare_deferred_binding(binding) {
+            if let FrozenAvailability::Deferred { kind } = deferred.availability {
+                return Err(BindingUnavailable::Deferred(kind));
+            }
+            return Err(BindingUnavailable::Informational);
+        }
         let action = match binding {
             ActionBinding::Persisted { action } => {
                 self.catalog
@@ -437,6 +512,20 @@ impl RadialBindingResolver<'_> {
                     .ok_or_else(|| BindingUnavailable::ContextActionMissing {
                         action_id: action_id.clone(),
                     })?
+            }
+            ActionBinding::LauncherQuery { mode, .. } => {
+                return Err(BindingUnavailable::Deferred(
+                    DeferredBindingKind::LauncherQuery { mode: *mode },
+                ));
+            }
+            ActionBinding::ExactCommand { .. } => {
+                let Some(deferred) = prepare_deferred_binding(binding) else {
+                    return Err(BindingUnavailable::Informational);
+                };
+                if let FrozenAvailability::Deferred { kind } = deferred.availability {
+                    return Err(BindingUnavailable::Deferred(kind));
+                }
+                return Err(BindingUnavailable::Informational);
             }
         };
         Ok(PreparedBinding {
@@ -507,6 +596,104 @@ mod tests {
         assert!(matches!(
             resolver.resolve(&under_pointer, &context(), ""),
             Err(BindingUnavailable::ContextTargetMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn authored_query_and_exact_command_prepare_as_typed_non_dispatchable_work() {
+        let catalog = PersistedActionCatalog::default();
+        let registry = UniversalActionRegistry;
+        let resolver = RadialBindingResolver {
+            catalog: &catalog,
+            registry: &registry,
+        };
+        let query = ActionBinding::LauncherQuery {
+            query: "  saved query  ".into(),
+            mode: super::super::model::QueryRunMode::ExecuteFirst,
+        };
+        assert!(matches!(
+            resolver.resolve(&query, &context(), "root query"),
+            Err(BindingUnavailable::Deferred(
+                DeferredBindingKind::LauncherQuery {
+                    mode: super::super::model::QueryRunMode::ExecuteFirst
+                }
+            ))
+        ));
+        let query_prepared = prepare_deferred_binding(&query).unwrap();
+        assert!(matches!(
+            query_prepared.binding,
+            FrozenBinding::Deferred {
+                binding: ActionBinding::LauncherQuery { ref query, .. },
+                ..
+            } if query == "  saved query  "
+        ));
+        assert_eq!(query_prepared.requirement, InteractionRequirement::Deferred);
+        assert!(matches!(
+            query_prepared.availability,
+            FrozenAvailability::Deferred { .. }
+        ));
+
+        let external = ActionBinding::ExactCommand {
+            command: "unknown-wire-command".into(),
+            args: Some("--exact arg".into()),
+        };
+        assert!(matches!(
+            resolver.resolve(&external, &context(), ""),
+            Err(BindingUnavailable::Deferred(
+                DeferredBindingKind::ExactCommand {
+                    disposition: ExactCommandDisposition::ExternalFallback,
+                    ..
+                }
+            ))
+        ));
+        let exact = prepare_deferred_binding(&external).unwrap();
+        assert_eq!(exact.requirement, InteractionRequirement::Deferred);
+        assert!(matches!(
+            exact.availability,
+            FrozenAvailability::Deferred {
+                kind: DeferredBindingKind::ExactCommand {
+                    disposition: ExactCommandDisposition::ExternalFallback,
+                    required_interaction: InteractionRequirement::ExternalInput,
+                }
+            }
+        ));
+        assert!(matches!(
+            exact.binding,
+            FrozenBinding::Deferred {
+                parsed_command: Some(crate::commands::Command::External(command)),
+                ..
+            } if command.target == "unknown-wire-command"
+                && command.args.as_deref() == Some("--exact arg")
+        ));
+
+        let recognized = ActionBinding::ExactCommand {
+            command: "radial edit".into(),
+            args: None,
+        };
+        let recognized_prepared = prepare_deferred_binding(&recognized).unwrap();
+        assert_eq!(
+            recognized_prepared.requirement,
+            InteractionRequirement::Deferred
+        );
+        assert!(matches!(
+            recognized_prepared.availability,
+            FrozenAvailability::Deferred {
+                kind: DeferredBindingKind::ExactCommand {
+                    disposition: ExactCommandDisposition::Recognized,
+                    required_interaction: InteractionRequirement::LauncherUi,
+                }
+            }
+        ));
+        assert!(matches!(
+            recognized_prepared.binding,
+            FrozenBinding::Deferred {
+                kind: DeferredBindingKind::ExactCommand {
+                    disposition: ExactCommandDisposition::Recognized,
+                    ..
+                },
+                parsed_command: Some(crate::commands::Command::Radial(_)),
+                ..
+            }
         ));
     }
 

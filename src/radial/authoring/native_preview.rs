@@ -13,7 +13,8 @@ use crate::radial::geometry::{
     cascade_placement_with_direction, shape_center, translate_layout,
 };
 use crate::radial::model::{
-    CellContent, CellId, InvocationId, MenuId, RadialDocument, SessionId, SubmenuPresentation,
+    ActionBinding, CellContent, CellId, InvocationId, MenuId, RadialDocument, SessionId,
+    SubmenuPresentation,
 };
 use crate::radial::native::{CloseReason, NativeCommand, NativeEvent, NativeHost};
 pub use crate::radial::preparation::PreparedFrameInput as PreviewFrameInput;
@@ -1799,25 +1800,27 @@ fn cell_role(
                 menu.center_secondary_control.map(control_role).or_else(|| {
                     menu.center_secondary_action
                         .as_ref()
-                        .map(|_| CellRole::Action)
+                        .map(authored_binding_preview_role)
                 })
             }
-            ("__center", _) => menu
-                .center_control
-                .map(control_role)
-                .or_else(|| menu.center_action.as_ref().map(|_| CellRole::Action)),
+            ("__center", _) => menu.center_control.map(control_role).or_else(|| {
+                menu.center_action
+                    .as_ref()
+                    .map(authored_binding_preview_role)
+            }),
             ("__background", Some(crate::radial::session::PointerButton::Secondary)) => menu
                 .background_secondary_control
                 .map(control_role)
                 .or_else(|| {
                     menu.background_secondary_action
                         .as_ref()
-                        .map(|_| CellRole::Action)
+                        .map(authored_binding_preview_role)
                 }),
-            ("__background", _) => menu
-                .background_control
-                .map(control_role)
-                .or_else(|| menu.background_action.as_ref().map(|_| CellRole::Action)),
+            ("__background", _) => menu.background_control.map(control_role).or_else(|| {
+                menu.background_action
+                    .as_ref()
+                    .map(authored_binding_preview_role)
+            }),
             _ => None,
         };
         if let Some(role) = binding {
@@ -1845,7 +1848,8 @@ fn cell_role(
         })
         .map(|cell| &cell.content);
     match content {
-        Some(CellContent::Action { .. } | CellContent::Dynamic { .. }) => CellRole::Action,
+        Some(CellContent::Action { binding }) => authored_binding_preview_role(binding),
+        Some(CellContent::Dynamic { .. }) => CellRole::Action,
         Some(CellContent::Submenu { .. }) => CellRole::Submenu,
         Some(CellContent::Control {
             control: crate::radial::model::Control::Back,
@@ -1863,6 +1867,15 @@ fn cell_role(
             control: crate::radial::model::Control::Drag,
         }) => CellRole::Drag,
         _ => CellRole::Spacer,
+    }
+}
+
+fn authored_binding_preview_role(binding: &ActionBinding) -> CellRole {
+    match binding {
+        ActionBinding::LauncherQuery { .. } | ActionBinding::ExactCommand { .. } => {
+            CellRole::Unavailable
+        }
+        ActionBinding::Persisted { .. } | ActionBinding::Contextual { .. } => CellRole::Action,
     }
 }
 
@@ -1904,6 +1917,34 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn saved_query_and_exact_command_are_not_executable_in_native_preview() {
+        let mut document = RadialDocument::starter();
+        let menu_id = document.menus[0].id.clone();
+        let cell_id = document.menus[0].rings[0].cells[0].id.clone();
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "saved".into(),
+                mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+            },
+        };
+        assert_eq!(
+            cell_role(&document, &menu_id, &cell_id, &BTreeMap::new(), None),
+            CellRole::Unavailable
+        );
+
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::ExactCommand {
+                command: "radial close".into(),
+                args: None,
+            },
+        };
+        assert_eq!(
+            cell_role(&document, &menu_id, &cell_id, &BTreeMap::new(), None),
+            CellRole::Unavailable
+        );
+    }
 
     struct FakeHost {
         commands: Arc<Mutex<Vec<NativeCommand>>>,

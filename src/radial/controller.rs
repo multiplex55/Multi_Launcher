@@ -3,7 +3,7 @@ use super::assets::{AssetService, PrepareVariant, PreparedMedia, reference_ident
 use super::audio::{PreparedRadialSounds, RadialAudioSession, RadialCue, SystemRadialAudioOutput};
 use super::bindings::{
     PreparationGeneration, PreparedCell, RadialPrepareEnvelope, RadialPrepareReply,
-    RadialPrepareRequest, project_menu_frame_with_style,
+    RadialPrepareRequest, prepare_deferred_binding, project_menu_frame_with_style,
 };
 use super::compositor::CompositorCache;
 use super::context::{InvocationContext, WindowIdentity};
@@ -2271,6 +2271,9 @@ impl RadialController {
                     return;
                 };
                 if prepared.availability != FrozenAvailability::Available {
+                    if let FrozenAvailability::Deferred { kind } = prepared.availability {
+                        out.push(ControllerEvent::Error(kind.reason().to_owned()));
+                    }
                     return;
                 }
                 let requirement = prepared.requirement;
@@ -2608,6 +2611,15 @@ impl RadialController {
         let (binding, after_action) = alternate.or_else(|| {
             (gesture == ClickGesture::Primary).then(|| (binding.clone(), cell.after_action))
         })?;
+        if let Some(deferred) = prepare_deferred_binding(&binding) {
+            return Some(PreparedCell {
+                binding: deferred.binding,
+                availability: deferred.availability,
+                requirement: deferred.requirement,
+                after_action: self.effective_after_action(menu, after_action),
+                history_query: String::new(),
+            });
+        }
         if matches!(binding, ActionBinding::Contextual { .. }) {
             // Contextual actions are safe only when supplied by the correlated
             // preparation reply with its captured WindowTargetIdentity.
