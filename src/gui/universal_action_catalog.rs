@@ -682,6 +682,7 @@ impl LauncherApp {
                 stable_request,
                 history_query: history_query.to_owned(),
                 root_policy,
+                primary_invocation: false,
             },
             None,
         )

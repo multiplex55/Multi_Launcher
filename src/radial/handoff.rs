@@ -1,10 +1,44 @@
 use super::bindings::PreparationGeneration;
 use super::context::InvocationContext;
 use super::dynamic::FrozenBinding;
-use super::model::{AfterActionPolicy, ConfigRevision, InvocationId, SessionId};
+use super::model::{AfterActionPolicy, ConfigRevision, InvocationId, QueryRunMode, SessionId};
 use super::session::DispatchToken;
+use crate::actions::Action;
 use crate::commands::Command;
 use crate::universal_actions::{UniversalAction, UniversalActionOperation};
+use std::sync::mpsc;
+use std::sync::{Arc, atomic::AtomicBool};
+
+/// App-owned capacity for blocking provider searches. Cancellation invalidates
+/// a result, but does not release the capacity until the provider call exits.
+#[derive(Clone, Default)]
+pub(crate) struct DeferredProviderSearchCapacity(Arc<AtomicBool>);
+
+impl DeferredProviderSearchCapacity {
+    pub(crate) fn is_occupied(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn try_acquire(&self) -> Option<DeferredProviderSearchPermit> {
+        self.0
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| DeferredProviderSearchPermit(Arc::clone(&self.0)))
+    }
+}
+
+pub(crate) struct DeferredProviderSearchPermit(Arc<AtomicBool>);
+
+impl Drop for DeferredProviderSearchPermit {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractionRequirement {
@@ -12,6 +46,9 @@ pub enum InteractionRequirement {
     /// The authored operation is validly represented, but its execution owner
     /// is intentionally deferred to a later runtime milestone.
     Deferred,
+    /// A destructive radial operation requires a launcher confirmation modal.
+    /// Close and release the radial session before presenting the modal.
+    Confirmation,
     LauncherUi,
     ExternalInput,
     ExclusiveCapture,
@@ -77,6 +114,23 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::Dialog(_)
         | Command::FileSearch(_)
         | Command::Diff(_) => InteractionRequirement::LauncherUi,
+        Command::Note(crate::commands::NoteCommand::OpenLink { link })
+            if link.starts_with("www.") || link.contains("://") =>
+        {
+            InteractionRequirement::ExternalInput
+        }
+        Command::Note(
+            crate::commands::NoteCommand::Dialog
+            | crate::commands::NoteCommand::GraphDialog { .. }
+            | crate::commands::NoteCommand::UnusedAssets
+            | crate::commands::NoteCommand::Open { .. }
+            | crate::commands::NoteCommand::New { .. }
+            | crate::commands::NoteCommand::Tags
+            | crate::commands::NoteCommand::OpenLink { .. },
+        )
+        | Command::ClipboardModify(crate::commands::ClipboardModifyCommand::Open { .. }) => {
+            InteractionRequirement::LauncherUi
+        }
         Command::Clipboard(crate::commands::ClipboardCommand::SetText { .. })
         | Command::External(_) => InteractionRequirement::ExternalInput,
         _ => InteractionRequirement::None,
@@ -111,6 +165,9 @@ fn ui_intent_requirement(
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RadialDispatchIdentity {
     pub session_id: SessionId,
+    /// Selected authored/runtime cell, carried through deferred resolution so
+    /// trace evidence can bind the native hover to the eventual dispatch.
+    pub selected_cell_id: String,
     pub invocation_id: InvocationId,
     pub session_generation: u64,
     pub token: DispatchToken,
@@ -123,10 +180,86 @@ pub struct RadialDispatchRequest {
     pub identity: RadialDispatchIdentity,
     pub binding: FrozenBinding,
     pub requirement: InteractionRequirement,
+    /// Present only for work materialized from an authored deferred binding.
+    /// This keeps execution-time revalidation tied to the exact result selected
+    /// during the pre-close resolution round trip.
+    pub deferred_origin: Option<DeferredDispatchOrigin>,
     pub history_query: String,
     pub context: InvocationContext,
     pub after_action: AfterActionPolicy,
     pub source: crate::commands::ActivationSource,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DeferredDispatchOrigin {
+    Query {
+        query: String,
+        mode: QueryRunMode,
+        selected_action: Option<Action>,
+        provider_revision: Option<u64>,
+        result_catalog_versions: Option<super::dynamic::MutableResultCatalogVersions>,
+        explanation: Option<String>,
+    },
+    ExactCommand {
+        command: String,
+        args: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedDeferredSelection {
+    pub binding: FrozenBinding,
+    pub requirement: InteractionRequirement,
+    pub origin: DeferredDispatchOrigin,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DeferredResolutionResult {
+    Ready(ResolvedDeferredSelection),
+    Pending {
+        provider_revision: u64,
+        wait_for_change: bool,
+    },
+    Cancelled,
+    Failed(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct DeferredResolutionEnvelope {
+    pub identity: RadialDispatchIdentity,
+    /// Monotonic per-selection attempt number; replies from an older provider
+    /// search cannot satisfy a later retry or timeout fallback.
+    pub attempt: u64,
+    pub binding: FrozenBinding,
+    pub history_query: String,
+    pub last_provider_revision: Option<u64>,
+    pub wait_for_provider_change: bool,
+    pub force_open_query: Option<String>,
+    /// Set when the controller cancels/supersedes the selection. A provider
+    /// worker may still be blocked in plugin code, but it must not publish a
+    /// late result after this token is set.
+    pub cancellation: Arc<AtomicBool>,
+    pub reply: mpsc::Sender<DeferredResolutionReply>,
+    pub wake: mpsc::Sender<()>,
+}
+
+pub(crate) struct PendingDeferredSelection {
+    pub request: RadialDispatchRequest,
+    pub attempt: u64,
+    pub cancellation: Arc<AtomicBool>,
+    pub deadline_ms: u64,
+    pub retry_at_ms: Option<u64>,
+    pub retries: u8,
+    pub last_provider_revision: Option<u64>,
+    pub wait_for_provider_change: bool,
+    pub force_open_query: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeferredResolutionReply {
+    pub identity: RadialDispatchIdentity,
+    pub attempt: u64,
+    pub result: DeferredResolutionResult,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,6 +404,18 @@ mod tests {
     use crate::universal_actions::{ActionId, PersistedUniversalActionRef};
 
     #[test]
+    fn deferred_provider_capacity_stays_claimed_until_worker_releases_it() {
+        let capacity = DeferredProviderSearchCapacity::default();
+        let permit = capacity.try_acquire().expect("first worker owns slot");
+        assert!(capacity.try_acquire().is_none());
+        let cancelled = AtomicBool::new(true);
+        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(capacity.try_acquire().is_none());
+        drop(permit);
+        assert!(capacity.try_acquire().is_some());
+    }
+
+    #[test]
     fn static_action_requirements_include_external_note_editors() {
         assert_eq!(
             action_id_requirement(&crate::universal_actions::action_ids::NOTE_OPEN_NOTEPAD),
@@ -286,10 +431,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn typed_note_and_clipboard_open_commands_require_their_actual_handoff() {
+        use crate::commands::{ClipboardModifyCommand, NoteCommand};
+
+        for command in [
+            Command::Note(NoteCommand::Dialog),
+            Command::Note(NoteCommand::GraphDialog { args: None }),
+            Command::Note(NoteCommand::UnusedAssets),
+            Command::Note(NoteCommand::Open {
+                slug: "note".into(),
+            }),
+            Command::Note(NoteCommand::New {
+                slug: "new-note".into(),
+                template: None,
+            }),
+            Command::Note(NoteCommand::Tags),
+            Command::Note(NoteCommand::OpenLink {
+                link: "local-note".into(),
+            }),
+            Command::ClipboardModify(ClipboardModifyCommand::Open {
+                section: crate::clipboard_modify::actions::ClipboardModifySectionPayload::Help,
+            }),
+        ] {
+            assert_eq!(
+                command_requirement(&command),
+                InteractionRequirement::LauncherUi
+            );
+        }
+        assert_eq!(
+            command_requirement(&Command::Note(NoteCommand::OpenLink {
+                link: "https://example.com".into(),
+            })),
+            InteractionRequirement::ExternalInput
+        );
+        assert_eq!(
+            command_requirement(&Command::Note(NoteCommand::Remove {
+                slug: "note".into(),
+            })),
+            InteractionRequirement::None
+        );
+        assert_eq!(
+            command_requirement(&Command::ClipboardModify(ClipboardModifyCommand::Undo {
+                raw_argument: None,
+            })),
+            InteractionRequirement::None
+        );
+    }
+
     fn request(generation: u64) -> RadialDispatchRequest {
         RadialDispatchRequest {
             identity: RadialDispatchIdentity {
                 session_id: SessionId::new("s1"),
+                selected_cell_id: "s1-cell".into(),
                 invocation_id: InvocationId(2),
                 session_generation: generation,
                 token: DispatchToken {
@@ -306,6 +500,7 @@ mod tests {
                 },
             }),
             requirement: InteractionRequirement::ExclusiveCapture,
+            deferred_origin: None,
             history_query: String::new(),
             context: InvocationContext::empty(5),
             after_action: AfterActionPolicy::CloseTree,

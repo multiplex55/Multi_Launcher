@@ -3,6 +3,22 @@ use super::*;
 pub(crate) const NOTE_SEARCH_DEBOUNCE: Duration = Duration::from_secs(1);
 pub(crate) const COMPLETION_REBUILD_DEBOUNCE: Duration = Duration::from_millis(120);
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LauncherSearchState {
+    Results,
+    NoResults,
+    Pending,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LauncherSearchOutcome {
+    pub state: LauncherSearchState,
+    pub actions: Vec<Action>,
+    pub provider_revision: u64,
+    pub result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+    pub result_catalog_versions_stable: bool,
+}
+
 impl LauncherApp {
     fn normalize_alias(alias: Option<String>) -> (Option<String>, Option<String>) {
         let alias_lc = alias.as_ref().map(|text| text.to_lowercase());
@@ -237,6 +253,10 @@ impl LauncherApp {
     pub fn search(&mut self) {
         let perf_enabled = crate::performance::enabled();
         let total_started = crate::performance::started_if(perf_enabled);
+        let suppress_deferred_fallback_provider = self
+            .radial_suppressed_provider_query
+            .take()
+            .is_some_and(|query| query == self.query);
         if self.last_results_valid && self.query == self.last_search_query {
             self.clear_selected_after_results_replaced();
             crate::performance::log_elapsed("search.cached", total_started);
@@ -246,76 +266,26 @@ impl LauncherApp {
 
         let normalization_started = crate::performance::started_if(perf_enabled);
         let trimmed = self.query.trim();
-        let trimmed_lc = trimmed.to_lowercase();
         self.last_timer_query =
             trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
         self.last_stopwatch_query = trimmed.starts_with("sw list");
         if trimmed.is_empty() {
             self.autocomplete_index = 0;
             self.suggestions.clear();
-            let mut res = self.command_cache.clone();
-            for a in self.actions.iter() {
-                res.push(Action {
-                    label: format!("app {}", a.label),
-                    desc: a.desc.clone(),
-                    action: a.action.clone(),
-                    args: a.args.clone(),
-                });
-            }
-            self.results = res;
+            self.results = self.search_read_only_outcome(&self.query).actions;
             self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
             crate::performance::log_elapsed("search.normalize", normalization_started);
             crate::performance::log_elapsed("search.total", total_started);
             return;
         }
-
-        let mut res: Vec<(Action, f32)> = Vec::new();
-
-        let search_actions =
-            trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{} ", APP_PREFIX));
-        let action_query = if search_actions {
-            if trimmed_lc == APP_PREFIX {
-                "".to_string()
-            } else {
-                trimmed
-                    .split_once(' ')
-                    .map(|x| x.1)
-                    .unwrap_or("")
-                    .to_string()
-            }
-        } else {
-            String::new()
-        };
-        let action_query_lc = action_query.to_lowercase();
         crate::performance::log_elapsed("search.normalize", normalization_started);
-
-        if trimmed_lc.starts_with("g ") {
-            let plugins_started = crate::performance::started_if(perf_enabled);
-            res.extend(self.search_plugins_for(&self.query, trimmed, &trimmed_lc));
-            crate::performance::log_elapsed("search.plugins", plugins_started);
+        let outcome = if suppress_deferred_fallback_provider {
+            self.search_read_only_outcome_without_providers(&self.query)
         } else {
-            if search_actions {
-                let static_started = crate::performance::started_if(perf_enabled);
-                res.extend(self.search_actions(&action_query, &action_query_lc));
-                crate::performance::log_elapsed("search.static_candidates", static_started);
-            }
-            let plugins_started = crate::performance::started_if(perf_enabled);
-            res.extend(self.search_plugins_for(&self.query, trimmed, &trimmed_lc));
-            crate::performance::log_elapsed("search.plugins", plugins_started);
-        }
-
-        let usage_started = crate::performance::started_if(perf_enabled);
-        self.apply_usage_weight(&mut res);
-        crate::performance::log_elapsed("search.usage_weight", usage_started);
-
-        let sort_started = crate::performance::started_if(perf_enabled);
-        res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        crate::performance::log_elapsed("search.sort", sort_started);
-
-        let materialize_started = crate::performance::started_if(perf_enabled);
-        self.results = res.into_iter().map(|(a, _)| a).collect();
-        crate::performance::log_elapsed("search.materialize", materialize_started);
+            self.search_read_only_outcome(&self.query)
+        };
+        self.results = outcome.actions;
         self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
         self.last_results_valid = true;
@@ -377,15 +347,37 @@ impl LauncherApp {
         raw_query: &str,
         trimmed: &str,
         trimmed_lc: &str,
-    ) -> Vec<(Action, f32)> {
-        let mut res = Vec::new();
-        if trimmed_lc.starts_with("g ") {
+    ) -> (Vec<(Action, f32)>, bool) {
+        let (plugin_results, tickets) = if trimmed_lc.starts_with("g ") {
             let filter = std::collections::HashSet::from(["web_search".to_string()]);
-            let plugin_results = self.plugins.search_filtered(
+            self.plugins.search_filtered_with_tickets(
                 raw_query,
                 Some(&filter),
                 self.enabled_capabilities.as_ref(),
-            );
+            )
+        } else {
+            self.plugins.search_filtered_with_tickets(
+                raw_query,
+                self.enabled_plugins.as_ref(),
+                self.enabled_capabilities.as_ref(),
+            )
+        };
+        let pending = tickets
+            .iter()
+            .any(|(source, ticket)| !self.plugins.search_ticket_resolved(source, *ticket));
+        self.search_plugins_from_results(raw_query, trimmed, trimmed_lc, plugin_results, pending)
+    }
+
+    fn search_plugins_from_results(
+        &self,
+        raw_query: &str,
+        trimmed: &str,
+        trimmed_lc: &str,
+        plugin_results: Vec<Action>,
+        pending: bool,
+    ) -> (Vec<(Action, f32)>, bool) {
+        let mut res = Vec::new();
+        if trimmed_lc.starts_with("g ") {
             let query_term = trimmed_lc.split_once(' ').map(|x| x.1).unwrap_or("");
             for a in plugin_results {
                 let cached = CachedSearchEntry::from_action(&a);
@@ -423,14 +415,8 @@ impl LauncherApp {
                     res.push((a, score));
                 }
             }
-            return res;
+            return (res, pending);
         }
-
-        let plugin_results = self.plugins.search_filtered(
-            raw_query,
-            self.enabled_plugins.as_ref(),
-            self.enabled_capabilities.as_ref(),
-        );
 
         if plugin_results.is_empty() && !trimmed.is_empty() {
             for (a, cached) in self
@@ -504,11 +490,13 @@ impl LauncherApp {
             }
         }
 
-        res
+        (res, pending)
     }
 
-    /// Runs the established launcher/provider search boundary without mutating GUI state.
-    pub(super) fn search_read_only(&self, raw_query: &str) -> Vec<Action> {
+    /// Runs the established ordered launcher/provider search boundary without
+    /// mutating GUI state. Search and radial query resolution intentionally use
+    /// this same result ordering, cache, alias, filter, plugin, and usage path.
+    pub(super) fn search_read_only_outcome(&self, raw_query: &str) -> LauncherSearchOutcome {
         let trimmed = raw_query.trim();
         let trimmed_lc = trimmed.to_lowercase();
         if trimmed.is_empty() {
@@ -519,7 +507,121 @@ impl LauncherApp {
                 action: action.action.clone(),
                 args: action.args.clone(),
             }));
-            return results;
+            return LauncherSearchOutcome {
+                state: LauncherSearchState::Results,
+                actions: results,
+                provider_revision: self.plugins.search_generation(),
+                result_catalog_versions: Some(
+                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                ),
+                result_catalog_versions_stable: true,
+            };
+        }
+        if self.radial_provider_search_capacity.is_occupied() {
+            let revision = self.plugins.search_generation();
+            return self.search_read_only_outcome_from_scored_plugins(
+                raw_query,
+                Vec::new(),
+                true,
+                revision,
+                revision,
+                Some(crate::radial::dynamic::MutableResultCatalogVersions::current()),
+                false,
+            );
+        }
+        let catalog_versions_at_start =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let start_revision = self.plugins.search_generation();
+        let (plugins, pending) = self.search_plugins_for(raw_query, trimmed, &trimmed_lc);
+        let provider_revision = self.plugins.search_generation();
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        self.search_read_only_outcome_from_scored_plugins(
+            raw_query,
+            plugins,
+            pending,
+            start_revision,
+            provider_revision,
+            Some(catalog_versions),
+            catalog_versions_at_start == catalog_versions,
+        )
+    }
+
+    /// Search only local launcher state when a deferred query has failed and
+    /// is being opened for manual editing. This deliberately does not consult
+    /// provider capacity: the failed provider may have just returned and
+    /// released its slot, but retrying it synchronously would re-enter the
+    /// same slow/erroring lookup during fallback.
+    fn search_read_only_outcome_without_providers(&self, raw_query: &str) -> LauncherSearchOutcome {
+        let trimmed = raw_query.trim();
+        let trimmed_lc = trimmed.to_lowercase();
+        let revision = self.plugins.search_generation();
+        let (plugins, _) =
+            self.search_plugins_from_results(raw_query, trimmed, &trimmed_lc, Vec::new(), true);
+        self.search_read_only_outcome_from_scored_plugins(
+            raw_query,
+            plugins,
+            true,
+            revision,
+            revision,
+            Some(crate::radial::dynamic::MutableResultCatalogVersions::current()),
+            true,
+        )
+    }
+
+    pub(super) fn search_read_only_outcome_with_plugin_snapshot(
+        &self,
+        raw_query: &str,
+        result: crate::plugin::PluginSearchSnapshotResult,
+    ) -> LauncherSearchOutcome {
+        let trimmed = raw_query.trim();
+        let trimmed_lc = trimmed.to_lowercase();
+        let catalog_versions_stable = result.catalog_versions_at_start == result.catalog_versions;
+        let catalog_versions = result.catalog_versions;
+        let (plugins, pending) = self.search_plugins_from_results(
+            raw_query,
+            trimmed,
+            &trimmed_lc,
+            result.actions,
+            result.pending,
+        );
+        self.search_read_only_outcome_from_scored_plugins(
+            raw_query,
+            plugins,
+            pending,
+            result.start_revision,
+            result.provider_revision,
+            Some(catalog_versions),
+            catalog_versions_stable,
+        )
+    }
+
+    fn search_read_only_outcome_from_scored_plugins(
+        &self,
+        raw_query: &str,
+        plugin_results: Vec<(Action, f32)>,
+        provider_pending: bool,
+        start_revision: u64,
+        provider_revision: u64,
+        result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+        catalog_versions_stable: bool,
+    ) -> LauncherSearchOutcome {
+        let trimmed = raw_query.trim();
+        let trimmed_lc = trimmed.to_lowercase();
+        if trimmed.is_empty() {
+            let mut results = self.command_cache.clone();
+            results.extend(self.actions.iter().map(|action| Action {
+                label: format!("app {}", action.label),
+                desc: action.desc.clone(),
+                action: action.action.clone(),
+                args: action.args.clone(),
+            }));
+            return LauncherSearchOutcome {
+                state: LauncherSearchState::Results,
+                actions: results,
+                provider_revision,
+                result_catalog_versions,
+                result_catalog_versions_stable: catalog_versions_stable,
+            };
         }
         let search_actions =
             trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{APP_PREFIX} "));
@@ -530,10 +632,34 @@ impl LauncherApp {
         if !trimmed_lc.starts_with("g ") && search_actions {
             scored.extend(self.search_actions(action_query, &action_query.to_lowercase()));
         }
-        scored.extend(self.search_plugins_for(raw_query, trimmed, &trimmed_lc));
+        scored.extend(plugin_results);
         self.apply_usage_weight(&mut scored);
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().map(|(action, _)| action).collect()
+        let actions = scored
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>();
+        LauncherSearchOutcome {
+            state: if provider_pending
+                || start_revision != provider_revision
+                || !catalog_versions_stable
+            {
+                LauncherSearchState::Pending
+            } else if actions.is_empty() {
+                LauncherSearchState::NoResults
+            } else {
+                LauncherSearchState::Results
+            },
+            actions,
+            provider_revision,
+            result_catalog_versions,
+            result_catalog_versions_stable: catalog_versions_stable,
+        }
+    }
+
+    /// Compatibility helper for existing read-only catalog consumers.
+    pub(super) fn search_read_only(&self, raw_query: &str) -> Vec<Action> {
+        self.search_read_only_outcome(raw_query).actions
     }
 
     fn apply_usage_weight(&self, res: &mut Vec<(Action, f32)>) {
@@ -597,6 +723,156 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    struct StaticSearchPlugin {
+        name: &'static str,
+        result: Action,
+        always: bool,
+        searched: Option<Arc<AtomicBool>>,
+    }
+
+    impl crate::plugin::Plugin for StaticSearchPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            if let Some(searched) = &self.searched {
+                searched.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            vec![self.result.clone()]
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            self.name
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+
+        fn always_search(&self) -> bool {
+            self.always
+        }
+    }
+
+    fn g_search_plugin(name: &'static str, label: &str) -> StaticSearchPlugin {
+        StaticSearchPlugin {
+            name,
+            result: Action {
+                label: label.into(),
+                desc: "needle result".into(),
+                action: format!("{name}:needle"),
+                args: None,
+            },
+            always: true,
+            searched: None,
+        }
+    }
+
+    #[test]
+    fn deferred_snapshot_matches_ordinary_g_prefix_provider_selection() {
+        for enabled in [
+            Some(HashSet::from([
+                "web_search".to_string(),
+                "always_provider".to_string(),
+            ])),
+            Some(HashSet::new()),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.plugins
+                .register(Box::new(g_search_plugin("web_search", "Web needle")));
+            app.plugins.register(Box::new(g_search_plugin(
+                "always_provider",
+                "Always needle",
+            )));
+            app.enabled_plugins = enabled;
+
+            let ordinary = app.search_read_only_outcome("g needle");
+            let provider_snapshot = app
+                .plugins
+                .search_snapshot(
+                    app.enabled_plugins.as_ref(),
+                    app.enabled_capabilities.as_ref(),
+                )
+                .search("g needle");
+            let deferred =
+                app.search_read_only_outcome_with_plugin_snapshot("g needle", provider_snapshot);
+
+            assert_eq!(deferred.state, ordinary.state);
+            assert_eq!(deferred.actions, ordinary.actions);
+            assert_eq!(
+                deferred
+                    .actions
+                    .iter()
+                    .map(|action| action.action.as_str())
+                    .collect::<Vec<_>>(),
+                ["web_search:needle"]
+            );
+        }
+    }
+
+    #[test]
+    fn manual_query_fallback_does_not_reenter_a_blocked_provider() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let searched = Arc::new(AtomicBool::new(false));
+        app.plugins.register(Box::new(StaticSearchPlugin {
+            name: "blocked_provider",
+            result: Action {
+                label: "Provider result".into(),
+                desc: "needle".into(),
+                action: "blocked:result".into(),
+                args: None,
+            },
+            always: true,
+            searched: Some(Arc::clone(&searched)),
+        }));
+        let _provider_permit = app
+            .radial_provider_search_capacity
+            .try_acquire()
+            .expect("test owns the active provider slot");
+
+        let outcome = app.search_read_only_outcome("needle");
+
+        assert_eq!(outcome.state, LauncherSearchState::Pending);
+        assert!(outcome.actions.is_empty());
+        assert!(!searched.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn deferred_fallback_suppression_survives_provider_slot_becoming_free() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let searched = Arc::new(AtomicBool::new(false));
+        app.plugins.register(Box::new(StaticSearchPlugin {
+            name: "fallback_provider",
+            result: Action {
+                label: "Provider result".into(),
+                desc: "needle".into(),
+                action: "fallback:result".into(),
+                args: None,
+            },
+            always: true,
+            searched: Some(Arc::clone(&searched)),
+        }));
+
+        // No provider currently owns the bounded slot. The suppression is
+        // attached to the failed deferred fallback itself, not inferred from
+        // this transient capacity state.
+        assert!(!app.radial_provider_search_capacity.is_occupied());
+        app.query = "needle".into();
+        app.radial_suppressed_provider_query = Some("needle".into());
+        app.search();
+        assert!(!searched.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(app.radial_suppressed_provider_query, None);
+
+        // A later ordinary edit returns to the regular provider path.
+        app.query = "needle again".into();
+        app.search();
+        assert!(searched.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     fn assert_first_result_is_clipboard_modify_open_modify(app: &LauncherApp) {
@@ -670,6 +946,42 @@ mod tests {
         assert_eq!(
             (app.query.clone(), app.results.clone(), app.selected),
             before
+        );
+    }
+
+    #[test]
+    fn app_prefixed_qmarker_fixture_returns_alpha_before_beta() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.actions = Arc::new(vec![
+            Action {
+                label: "QMarker Alpha".into(),
+                desc: "First harmless marker".into(),
+                action: "marker.exe".into(),
+                args: Some("--marker q-first".into()),
+            },
+            Action {
+                label: "QMarker Beta".into(),
+                desc: "Second harmless marker".into(),
+                action: "marker.exe".into(),
+                args: Some("--marker q-second".into()),
+            },
+        ]);
+        app.update_action_cache();
+
+        let outcome = app.search_read_only_outcome("app QMarker");
+
+        assert_eq!(outcome.state, LauncherSearchState::Results);
+        assert_eq!(
+            outcome
+                .actions
+                .iter()
+                .map(|action| (action.label.as_str(), action.args.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("QMarker Alpha", Some("--marker q-first")),
+                ("QMarker Beta", Some("--marker q-second")),
+            ]
         );
     }
 

@@ -11,7 +11,7 @@ use crate::commands::{
     ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
-use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
+use super::{LauncherApp, Toast, ToastKind, ToastOptions};
 
 impl LauncherCommandHost for LauncherApp {
     fn launcher_is_visible(&self) -> bool {
@@ -498,8 +498,9 @@ impl ClipboardModifyCommandHost for LauncherApp {
     fn start_clipboard_modify(
         &mut self,
         intent: crate::clipboard_modify::parser::ClipboardModifyIntent,
-        metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
+        mut metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
     ) -> Result<(), String> {
+        metadata.root_policy = self.command_root_policy;
         self.clipboard_modify_immediate
             .start(
                 intent,
@@ -927,7 +928,14 @@ impl LauncherApp {
         if let Some(source) = outcome.activate_first_result
             && let Some(action) = self.results.first().cloned()
         {
-            self.activate_action(action, None, source);
+            if allow_radial_queryexec_activation(&mut self.radial_queryexec_depth, &action) {
+                self.activate_action(action, None, source);
+            } else {
+                self.report_error_message(
+                    "radial_query",
+                    "Nested queryexec stopped at the radial recursion limit",
+                );
+            }
         }
 
         if outcome.visibility != VisibilityPolicy::Keep || outcome.restore {
@@ -968,15 +976,12 @@ impl LauncherApp {
                     ToastPolicy::Success(message) => (message, ToastKind::Success),
                     ToastPolicy::Error(_) => unreachable!(),
                 };
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: text.into(),
-                        kind,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
+                self.add_toast(Toast {
+                    text: text.into(),
+                    kind,
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                });
             }
         }
         if outcome.history == HistoryPolicy::Record {
@@ -988,6 +993,31 @@ impl LauncherApp {
         }
     }
 }
+
+fn allow_radial_queryexec_activation(
+    depth: &mut Option<u8>,
+    action: &crate::actions::Action,
+) -> bool {
+    let is_queryexec = matches!(
+        crate::commands::parse_action(action),
+        Ok(Command::Query(
+            crate::commands::QueryCommand::ExecuteFirst { .. }
+        ))
+    );
+    if !is_queryexec {
+        return true;
+    }
+    let Some(depth) = depth else {
+        // Ordinary launcher callers keep their legacy recursive behavior.
+        return true;
+    };
+    if *depth >= 1 {
+        return false;
+    }
+    *depth += 1;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,6 +1050,33 @@ mod tests {
             action: raw.into(),
             args: None,
         }
+    }
+
+    #[test]
+    fn radial_queryexec_recursion_is_bounded_without_changing_legacy_activation() {
+        let queryexec = action("queryexec:queryexec:again");
+        let ordinary = action("https://example.test/");
+
+        let mut radial_depth = Some(0);
+        assert!(allow_radial_queryexec_activation(
+            &mut radial_depth,
+            &queryexec
+        ));
+        assert_eq!(radial_depth, Some(1));
+        assert!(!allow_radial_queryexec_activation(
+            &mut radial_depth,
+            &queryexec
+        ));
+        assert!(allow_radial_queryexec_activation(
+            &mut radial_depth,
+            &ordinary
+        ));
+
+        let mut legacy_depth = None;
+        assert!(allow_radial_queryexec_activation(
+            &mut legacy_depth,
+            &queryexec
+        ));
     }
 
     fn virtual_desktop_create_invocation() -> CommandInvocation {

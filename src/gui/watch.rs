@@ -54,6 +54,12 @@ impl LauncherApp {
             match ev {
                 WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
                 WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),
+                WatchEvent::RadialResolveDeferred(envelope) => {
+                    self.resolve_deferred_radial(envelope)
+                }
+                WatchEvent::RadialDeferredSearchReady { envelope, result } => {
+                    self.complete_deferred_radial_search(envelope, result)
+                }
                 WatchEvent::RadialInvalidate => {
                     self.radial_expected_diagnostics.clear();
                     self.invalidate_radial_leases();

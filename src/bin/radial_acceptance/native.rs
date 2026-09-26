@@ -6,7 +6,7 @@ mod suite;
 use super::{AcceptanceHotkey, foreign_edge_indices_interfering_owned_spans, owned_gesture_spans};
 pub(super) use suite::{
     CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_hotkey_suite,
-    run_suite,
+    run_query_suite, run_suite,
 };
 
 use std::fmt::Write as _;
@@ -80,6 +80,7 @@ struct RunnerHookEdge {
 }
 
 const TRACE_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
+const QUERY_OBSERVATION_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_OBSERVATION_FILE";
 const PREPARE_HOLD_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE";
 const PREPARE_HOLD_FILE_NAME: &str = "radial-acceptance-prepare.hold";
 const ROOT_TITLE: &str = "Multi Lnchr";
@@ -2286,6 +2287,7 @@ fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
         .filter_map(|(name, value)| {
             let wide_name = name.encode_wide().collect::<Vec<_>>();
             if wide_key_eq_ascii(&wide_name, TRACE_ENV)
+                || wide_key_eq_ascii(&wide_name, QUERY_OBSERVATION_ENV)
                 || wide_key_eq_ascii(&wide_name, PREPARE_HOLD_ENV)
                 || COPY_CONTROLLED_ENV
                     .iter()
@@ -2298,6 +2300,14 @@ fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
         })
         .collect::<Vec<_>>();
     entries.push((TRACE_ENV.encode_utf16().collect(), vec![b'1' as u16]));
+    entries.push((
+        QUERY_OBSERVATION_ENV.encode_utf16().collect(),
+        profile
+            .join("radial-query-observation")
+            .as_os_str()
+            .encode_wide()
+            .collect(),
+    ));
     entries.push((
         PREPARE_HOLD_ENV.encode_utf16().collect(),
         profile
@@ -3783,6 +3793,106 @@ impl UiAutomation {
         Ok(found)
     }
 
+    /// Read-only text assertions may match both an inline label and its toast.
+    pub fn wait_visible_text(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        expected: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self
+                .find_visible_named(hwnd, expected_pid, expected, false)?
+                .is_some()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("owned visible text {expected:?} was not exposed"));
+            }
+            std::thread::sleep(WINDOW_POLL);
+        }
+    }
+
+    pub fn find_visible_button(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        expected: &str,
+    ) -> Result<Option<SemanticControl>, String> {
+        self.find_visible_named(hwnd, expected_pid, expected, true)
+    }
+
+    fn find_visible_named(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        expected: &str,
+        require_button: bool,
+    ) -> Result<Option<SemanticControl>, String> {
+        let root = unsafe { self.automation.ElementFromHandle(hwnd) }
+            .map_err(|error| format!("query semantic root: {error}"))?;
+        let condition = unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_NamePropertyId, &VARIANT::from(expected))
+        }
+        .map_err(|error| format!("create visible name condition: {error}"))?;
+        let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
+            .map_err(|error| format!("find visible name: {error}"))?;
+        let count = unsafe { matches.Length() }
+            .map_err(|error| format!("read visible name count: {error}"))?
+            .min(2_048);
+        let mut found: Option<SemanticControl> = None;
+        for index in 0..count {
+            let element = unsafe { matches.GetElement(index) }
+                .map_err(|error| format!("read visible name element: {error}"))?;
+            let process_id = unsafe { element.CurrentProcessId() }
+                .map_err(|error| format!("read visible name process: {error}"))?;
+            let name = unsafe { element.CurrentName() }
+                .map_err(|error| format!("read visible name: {error}"))?
+                .to_string();
+            let offscreen = unsafe { element.CurrentIsOffscreen() }
+                .map_err(|error| format!("read visible name presentation: {error}"))?
+                .as_bool();
+            let enabled = unsafe { element.CurrentIsEnabled() }
+                .map_err(|error| format!("read visible name enabled: {error}"))?
+                .as_bool();
+            let bounds = unsafe { element.CurrentBoundingRectangle() }
+                .map_err(|error| format!("read visible name bounds: {error}"))?;
+            let bounds = [bounds.left, bounds.top, bounds.right, bounds.bottom];
+            if !owned_visible_name_matches(
+                &name,
+                expected,
+                process_id,
+                expected_pid,
+                offscreen,
+                bounds,
+            ) || (require_button
+                && (!enabled
+                    || unsafe { element.CurrentControlType() }
+                        .map_err(|error| format!("read button type: {error}"))?
+                        != windows::Win32::UI::Accessibility::UIA_ButtonControlTypeId))
+            {
+                continue;
+            }
+            let candidate = SemanticControl {
+                element,
+                bounds,
+                process_id: expected_pid,
+                enabled,
+            };
+            if require_button && found.as_ref().is_some_and(|prior| prior.bounds != bounds) {
+                return Err(format!(
+                    "multiple distinct visible buttons named {expected:?}"
+                ));
+            }
+            found = Some(candidate);
+        }
+        Ok(found)
+    }
+
     pub fn edit_value_matches(
         &self,
         control: &SemanticControl,
@@ -3857,6 +3967,70 @@ impl UiAutomation {
             }));
         }
         Ok(None)
+    }
+
+    pub fn find_edit_with_value_fragment(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        fragment: &str,
+    ) -> Result<Option<SemanticControl>, String> {
+        let root = unsafe { self.automation.ElementFromHandle(hwnd) }
+            .map_err(|error| format!("query UI Automation root: {error}"))?;
+        let condition = unsafe {
+            self.automation.CreatePropertyCondition(
+                windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
+                &VARIANT::from(UIA_EditControlTypeId.0),
+            )
+        }
+        .map_err(|error| format!("create UIA edit condition: {error}"))?;
+        let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
+            .map_err(|error| format!("find UIA edit controls: {error}"))?;
+        let count = unsafe { matches.Length() }
+            .map_err(|error| format!("read UIA edit-control count: {error}"))?
+            .min(2_048);
+        let mut found = None;
+        for index in 0..count {
+            let element = unsafe { matches.GetElement(index) }
+                .map_err(|error| format!("read UIA edit element: {error}"))?;
+            let process_id = unsafe { element.CurrentProcessId() }
+                .map_err(|error| format!("read UIA edit process: {error}"))?;
+            if process_id != expected_pid as i32 {
+                continue;
+            }
+            let value_pattern = match unsafe {
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            } {
+                Ok(pattern) => pattern,
+                Err(_) => continue,
+            };
+            let value = unsafe { value_pattern.CurrentValue() }
+                .map_err(|error| format!("read UIA edit value: {error}"))?
+                .to_string();
+            if !value.contains(fragment) {
+                continue;
+            }
+            let bounds = unsafe { element.CurrentBoundingRectangle() }
+                .map_err(|error| format!("read UIA edit bounds: {error}"))?;
+            let enabled = unsafe { element.CurrentIsEnabled() }
+                .map_err(|error| format!("read UIA edit enabled state: {error}"))?
+                .as_bool();
+            let candidate = SemanticControl {
+                element,
+                bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+                process_id: expected_pid,
+                enabled,
+            };
+            if found.is_some() {
+                return Err("UIA value fragment matched multiple owned edit controls".into());
+            }
+            found = Some(candidate);
+        }
+        Ok(found)
+    }
+
+    pub fn control_has_focus(&self, control: &SemanticControl) -> bool {
+        self.element_has_focus(&control.element)
     }
 
     pub fn edit_focus_at_screen_point(
@@ -3969,6 +4143,21 @@ impl UiAutomation {
         .ok()?;
         unsafe { pattern.CurrentToggleState() }.ok()
     }
+}
+
+fn owned_visible_name_matches(
+    name: &str,
+    expected: &str,
+    process_id: i32,
+    expected_pid: u32,
+    offscreen: bool,
+    bounds: [i32; 4],
+) -> bool {
+    name == expected
+        && process_id == expected_pid as i32
+        && !offscreen
+        && bounds[2] > bounds[0]
+        && bounds[3] > bounds[1]
 }
 
 fn semantic_name_contains(name: &str, fragment: &str) -> bool {
@@ -4149,6 +4338,233 @@ pub(super) fn click_designer_client_bounds(
             target_trace_point: client_point,
         },
     )
+}
+
+pub(super) fn click_owned_radial_point(
+    child: &NativeChild,
+    surface: &WindowSnapshot,
+    point: POINT,
+    trace_path: &Path,
+    trace_cursor: usize,
+    layout_generation: u64,
+) -> Result<super::QueryPointerClickEvidence, String> {
+    child.validate_window(surface.hwnd)?;
+    if surface.process_id != child.process_id()
+        || surface.class_name != RADIAL_HOST_WINDOW_CLASS
+        || !surface.visible
+        || surface.minimized
+        || point.x < surface.bounds[0]
+        || point.y < surface.bounds[1]
+        || point.x >= surface.bounds[2]
+        || point.y >= surface.bounds[3]
+    {
+        return Err("refused radial cell input outside an active candidate-owned surface".into());
+    }
+    child.focus_window(surface)?;
+    unsafe { SetCursorPos(point.x, point.y) }
+        .map_err(|error| format!("position pointer over acknowledged radial cell: {error}"))?;
+    let hit = unsafe { WindowFromPoint(point) };
+    let hit_pid = window_process_id(hit);
+    let hit_is_owned_surface = hit == surface.hwnd
+        || (hit_pid == child.process_id() && unsafe { IsChild(surface.hwnd, hit).as_bool() });
+    if !hit_is_owned_surface {
+        return Err(format!(
+            "radial selection point is covered by an unowned/non-surface HWND={} PID={hit_pid}",
+            hwnd_id(hit)
+        ));
+    }
+    if layout_generation == 0 {
+        return Err("refused radial click without a production layout generation".into());
+    }
+    focus_is_validated(surface.hwnd, child.process_id())?;
+    let mut button_guard = MouseButtonGuard::new(surface.hwnd, child.process_id());
+    let down = match send_validated_input_allowing_owned_keys(
+        surface.hwnd,
+        child.process_id(),
+        &[mouse_input(true)],
+        "radial cell primary down",
+        &[],
+    ) {
+        Ok(evidence) => {
+            button_guard.armed = evidence.inserted > 0;
+            if evidence.inserted != 1 {
+                return Err(format!(
+                    "radial primary down inserted {} events; expected exactly one",
+                    evidence.inserted
+                ));
+            }
+            evidence
+        }
+        Err((inserted, error)) => {
+            button_guard.armed = inserted > 0;
+            if button_guard.armed {
+                let cleanup = button_guard
+                    .release()
+                    .map(|evidence| format!("released={}", evidence.inserted))
+                    .unwrap_or_else(|cleanup| format!("release_failed={cleanup}"));
+                return Err(format!("{error}; radial button cleanup={cleanup}"));
+            }
+            return Err(error);
+        }
+    };
+    let up = button_guard.release()?;
+    if up.inserted != 1 {
+        return Err(format!(
+            "radial primary up inserted {} events; expected exactly one",
+            up.inserted
+        ));
+    }
+    let (ack, release_settle_ms) = wait_for_radial_primary_release(
+        trace_path,
+        trace_cursor,
+        hwnd_id(surface.hwnd),
+        layout_generation,
+        Duration::from_secs(2),
+    )
+    .map_err(|error| {
+        format!(
+            "{error}; runner down=[{}]; runner up=[{}]",
+            down.describe(),
+            up.describe()
+        )
+    })?;
+    Ok(super::QueryPointerClickEvidence {
+        down_inserted: down.inserted,
+        up_inserted: up.inserted,
+        layout_generation,
+        down_event_ordinal: ack.down_event_ordinal,
+        up_event_ordinal: ack.up_event_ordinal,
+        release_settle_ms,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RadialPointerReleaseAck {
+    down_event_ordinal: usize,
+    up_event_ordinal: usize,
+}
+
+fn radial_pointer_release_ack_after(
+    lines: &[String],
+    cursor: usize,
+    hwnd: u64,
+    generation: u64,
+) -> Option<RadialPointerReleaseAck> {
+    let mut down_event_ordinal = None;
+    for (ordinal, line) in lines.iter().enumerate().skip(cursor) {
+        if !line.contains("trace_event=\"native_pointer\"")
+            || trace_field(line, "button") != Some("Primary")
+            || trace_field(line, "owner") != Some("PreviewInput")
+            || trace_field(line, "hwnd").and_then(|value| value.parse::<u64>().ok()) != Some(hwnd)
+            || trace_field(line, "generation").and_then(|value| value.parse::<u64>().ok())
+                != Some(generation)
+        {
+            continue;
+        }
+        match trace_field(line, "transition") {
+            Some("Down") if down_event_ordinal.is_none() => {
+                down_event_ordinal = Some(ordinal.saturating_add(1));
+            }
+            Some("Down") => return None,
+            Some("Up") => {
+                let Some(down_event_ordinal) = down_event_ordinal else {
+                    continue;
+                };
+                let up_event_ordinal = ordinal.saturating_add(1);
+                if up_event_ordinal > down_event_ordinal {
+                    return Some(RadialPointerReleaseAck {
+                        down_event_ordinal,
+                        up_event_ordinal,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn wait_for_radial_primary_release(
+    trace_path: &Path,
+    trace_cursor: usize,
+    hwnd: u64,
+    generation: u64,
+    timeout: Duration,
+) -> Result<(RadialPointerReleaseAck, u64), String> {
+    let (ack, elapsed) = wait_for_pointer_release_settle(timeout, || {
+        let trace = std::fs::read_to_string(trace_path)
+            .map_err(|error| format!("read radial pointer release trace: {error}"))?;
+        let lines = trace_event_lines(&trace);
+        let ack = radial_pointer_release_ack_after(&lines, trace_cursor, hwnd, generation);
+        let async_state = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+        Ok((ack, async_state < 0, async_state as u16))
+    })
+    .map_err(|error| match error {
+        PointerReleaseWaitError::Sample(error) => error,
+        PointerReleaseWaitError::TimedOut(failure) => match failure.last_ack {
+        Some(ack) => format!(
+            "production acknowledged radial primary Down/Up ordinals {}/{} for HWND={} generation={}, but left-button release did not settle before {}ms (async_state=0x{:04x})",
+            ack.down_event_ordinal,
+            ack.up_event_ordinal,
+            hwnd,
+            generation,
+            timeout.as_millis(),
+            failure.last_async_state.unwrap_or_default(),
+        ),
+        None => format!(
+            "no fresh ordered production radial primary Down/Up acknowledgment for HWND={} generation={} before {}ms",
+            hwnd,
+            generation,
+            timeout.as_millis(),
+        ),
+        },
+    })?;
+    Ok((ack, elapsed))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PointerReleaseWaitFailure {
+    last_ack: Option<RadialPointerReleaseAck>,
+    last_async_state: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PointerReleaseWaitError {
+    Sample(String),
+    TimedOut(PointerReleaseWaitFailure),
+}
+
+fn wait_for_pointer_release_settle(
+    timeout: Duration,
+    mut sample: impl FnMut() -> Result<(Option<RadialPointerReleaseAck>, bool, u16), String>,
+) -> Result<(RadialPointerReleaseAck, u64), PointerReleaseWaitError> {
+    let started = Instant::now();
+    let deadline = started + timeout;
+    let mut last_ack = None;
+    let mut last_async_state = None;
+    loop {
+        let (ack, button_down, async_state) = sample().map_err(PointerReleaseWaitError::Sample)?;
+        if ack.is_some() {
+            last_ack = ack;
+            last_async_state = Some(async_state);
+        }
+        if let Some(ack) = ack.filter(|_| !button_down) {
+            return Ok((
+                ack,
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(PointerReleaseWaitError::TimedOut(
+                PointerReleaseWaitFailure {
+                    last_ack,
+                    last_async_state,
+                },
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL.min(deadline.saturating_duration_since(now)));
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -5301,20 +5717,43 @@ mod tests {
         AuthoringControlSnapshot, AuthoringControlTarget, FocusAnchorCommand,
         FocusAnchorCommandKind, GetCurrentThreadId, INPUT_MOUSE, KEYEVENTF_KEYUP,
         KEYEVENTF_UNICODE, LPARAM, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
-        MOUSEEVENTF_MOVE_NOCOALESCE, OwnedKeyboardKey, POINT, PostThreadMessageW,
-        RUNNER_HOOK_EVENTS, RunnerChordEdge, RunnerChordKeyObservation, RunnerChordObservation,
-        RunnerHookEdge, RunnerHookObserver, SS_NOTIFY, VK_END, VK_LMENU, VK_LSHIFT, VK_LWIN,
-        WPARAM, adjacent_pointer_point, authoring_control_click_finished, cursor_points_match,
-        cursor_restore_input_target, focus_anchor_candidate_positions, focus_anchor_window_style,
-        format_uia_element_snapshot, forward_runner_hook_edge, fresh_canvas_cell_for_generation,
+        MOUSEEVENTF_MOVE_NOCOALESCE, OwnedKeyboardKey, POINT, PointerReleaseWaitError,
+        PostThreadMessageW, RUNNER_HOOK_EVENTS, RadialPointerReleaseAck, RunnerChordEdge,
+        RunnerChordKeyObservation, RunnerChordObservation, RunnerHookEdge, RunnerHookObserver,
+        SS_NOTIFY, VK_END, VK_LMENU, VK_LSHIFT, VK_LWIN, WPARAM, adjacent_pointer_point,
+        authoring_control_click_finished, cursor_points_match, cursor_restore_input_target,
+        focus_anchor_candidate_positions, focus_anchor_window_style, format_uia_element_snapshot,
+        forward_runner_hook_edge, fresh_canvas_cell_for_generation,
         keys_down_without_owned_keydowns, latest_authoring_controls_after,
         normalized_absolute_coordinate, parse_action_catalog_rank, parse_authoring_control,
-        parse_geometry_state, pointer_correction_delta, record_runner_chord_edge,
-        relative_mouse_move_input, retire_inserted_keyboard_ups, semantic_client_center,
-        semantic_name_contains, spawn_focus_anchor_window, trace_event_lines,
-        unique_authoring_control, window_process_id,
+        parse_geometry_state, pointer_correction_delta, radial_pointer_release_ack_after,
+        record_runner_chord_edge, relative_mouse_move_input, retire_inserted_keyboard_ups,
+        semantic_client_center, semantic_name_contains, spawn_focus_anchor_window,
+        trace_event_lines, unique_authoring_control, wait_for_pointer_release_settle,
+        window_process_id,
     };
     use std::time::Duration;
+
+    #[test]
+    fn explanation_match_requires_owned_visible_full_query_text() {
+        let expected = "No launcher result is currently available for \"fixture query\"";
+        let matches = |name, pid, hidden, bounds| {
+            super::owned_visible_name_matches(name, expected, pid, 7, hidden, bounds)
+        };
+        // Inline and toast copies at different positions are both valid read-only evidence.
+        assert!(matches(expected, 7, false, [0, 0, 200, 30]));
+        assert!(matches(expected, 7, false, [100, 200, 300, 230]));
+        assert!(!matches("No launcher result", 7, false, [0, 0, 200, 30]));
+        assert!(!matches(
+            "No launcher result is currently available for \"other query\"",
+            7,
+            false,
+            [0, 0, 200, 30]
+        ));
+        assert!(!matches(expected, 8, false, [0, 0, 200, 30]));
+        assert!(!matches(expected, 7, true, [0, 0, 200, 30]));
+        assert!(!matches(expected, 7, false, [0, 0, 0, 0]));
+    }
 
     #[test]
     fn chord_observer_counts_only_tagged_runner_edges_and_retains_foreign_edges() {
@@ -5920,6 +6359,85 @@ mod tests {
         );
         assert_eq!(pointer_correction_delta((88, 81), (88, 81)).unwrap(), None);
         assert!(pointer_correction_delta((100, 81), (88, 81)).is_err());
+    }
+
+    #[test]
+    fn radial_release_ack_requires_fresh_ordered_owned_primary_edges() {
+        let lines = vec![
+            "trace_event=\"native_pointer\" transition=Down button=Primary owner=PreviewInput hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Up button=Primary owner=PreviewInput hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Down button=Primary owner=PreviewInput hwnd=42 generation=8".into(),
+            "trace_event=\"native_pointer\" transition=Up button=Primary owner=PreviewInput hwnd=42 generation=8".into(),
+            "trace_event=\"native_pointer\" transition=Down button=Secondary owner=PreviewInput hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Up button=Secondary owner=PreviewInput hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Down button=Primary owner=Other hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Up button=Primary owner=Other hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Up button=Primary owner=PreviewInput hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Down button=Primary owner=PreviewInput hwnd=41 generation=7".into(),
+            "trace_event=\"native_pointer\" transition=Up button=Primary owner=PreviewInput hwnd=41 generation=7".into(),
+        ];
+
+        let ack = radial_pointer_release_ack_after(&lines, 9, 41, 7)
+            .expect("fresh Down/Up should acknowledge the exact hovered layout");
+        assert_eq!(ack.down_event_ordinal, 10);
+        assert_eq!(ack.up_event_ordinal, 11);
+        assert!(radial_pointer_release_ack_after(&lines, 11, 41, 7).is_none());
+        assert!(radial_pointer_release_ack_after(&lines, 9, 41, 8).is_none());
+        assert!(radial_pointer_release_ack_after(&lines, 9, 42, 7).is_none());
+    }
+
+    #[test]
+    fn radial_release_ack_does_not_require_surface_to_survive_release() {
+        let ack = RadialPointerReleaseAck {
+            down_event_ordinal: 3,
+            up_event_ordinal: 4,
+        };
+        let mut samples = std::collections::VecDeque::from([
+            (None, true, 0x8000),
+            (Some(ack), true, 0x8000),
+            (Some(ack), false, 0),
+        ]);
+        let mut surface_destroyed = false;
+        let (observed_ack, _) = wait_for_pointer_release_settle(Duration::from_millis(100), || {
+            let sample = samples.pop_front().unwrap_or((Some(ack), false, 0));
+            if sample.0.is_some() {
+                surface_destroyed = true;
+            }
+            Ok(sample)
+        })
+        .expect("release ACK and physical settle remain valid after surface closes");
+        assert_eq!(observed_ack, ack);
+        assert!(surface_destroyed);
+    }
+
+    #[test]
+    fn radial_release_wait_accepts_delayed_async_clear_and_bounds_stuck_button() {
+        let ack = RadialPointerReleaseAck {
+            down_event_ordinal: 1,
+            up_event_ordinal: 2,
+        };
+        let mut samples = std::collections::VecDeque::from([
+            (Some(ack), true, 0x8000),
+            (Some(ack), true, 0x8000),
+            (Some(ack), false, 0),
+        ]);
+        assert_eq!(
+            wait_for_pointer_release_settle(Duration::from_millis(100), || {
+                Ok(samples.pop_front().expect("three asynchronous samples"))
+            })
+            .unwrap()
+            .0,
+            ack
+        );
+
+        let error = wait_for_pointer_release_settle(Duration::from_millis(5), || {
+            Ok((Some(ack), true, 0x8000))
+        })
+        .unwrap_err();
+        assert!(matches!(error, PointerReleaseWaitError::TimedOut(_)));
+        assert!(
+            wait_for_pointer_release_settle(Duration::ZERO, || { Ok((None, false, 0)) }).is_err()
+        );
     }
 
     #[test]

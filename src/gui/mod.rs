@@ -35,6 +35,7 @@ mod note_panel;
 mod notes_dialog;
 mod numpad_navigation;
 mod query_history;
+mod query_observation;
 mod radial_actions;
 mod radial_editor;
 mod render;
@@ -723,6 +724,17 @@ pub struct LauncherApp {
     rx: Receiver<WatchEvent>,
     event_sink: EventSinkRegistration,
     event_tx: Sender<WatchEvent>,
+    /// Bounds deferred radial provider work to one in-flight invocation. A
+    /// cancelled provider call keeps this slot until the call actually exits.
+    pub(crate) radial_provider_search_capacity:
+        crate::radial::handoff::DeferredProviderSearchCapacity,
+    /// Temporarily disables provider lookup while a failed deferred query is
+    /// handed back to the ordinary query UI. This is scoped to that one
+    /// synchronous command outcome so it cannot re-enter the provider that
+    /// just timed out, even if its worker releases capacity at that boundary.
+    pub(crate) radial_suppressed_provider_query: Option<String>,
+    pub(crate) radial_queryexec_depth: Option<u8>,
+    pub(crate) radial_query_observation: crate::gui::query_observation::QueryObservationMailbox,
     egui_ctx: egui::Context,
     virtual_desktop_interaction_token: u64,
     command_root_policy: crate::universal_actions::RootLauncherPolicy,
@@ -753,6 +765,8 @@ pub struct LauncherApp {
     pub test_toast_messages: Vec<String>,
     #[cfg(test)]
     pub(crate) test_recorded_history_queries: Vec<String>,
+    #[cfg(test)]
+    pub(crate) test_skip_history_persistence: bool,
     #[cfg(test)]
     pub(crate) test_defer_virtual_desktop_completion: bool,
     pub enable_toasts: bool,
@@ -2075,6 +2089,13 @@ impl LauncherApp {
             rx,
             event_sink,
             event_tx: tx,
+            radial_provider_search_capacity: Default::default(),
+            radial_suppressed_provider_query: None,
+            radial_queryexec_depth: None,
+            radial_query_observation:
+                crate::gui::query_observation::QueryObservationMailbox::from_environment(
+                    crate::radial::acceptance_trace::enabled(),
+                ),
             egui_ctx: ctx.clone(),
             virtual_desktop_interaction_token: 0,
             command_root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
@@ -2105,6 +2126,8 @@ impl LauncherApp {
             test_toast_messages: Vec::new(),
             #[cfg(test)]
             test_recorded_history_queries: Vec::new(),
+            #[cfg(test)]
+            test_skip_history_persistence: false,
             #[cfg(test)]
             test_defer_virtual_desktop_completion: false,
             enable_toasts,
@@ -3847,6 +3870,8 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::ExecuteAction(_)
             | WatchEvent::RadialDispatch(_)
             | WatchEvent::RadialPrepare(_)
+            | WatchEvent::RadialResolveDeferred(_)
+            | WatchEvent::RadialDeferredSearchReady { .. }
             | WatchEvent::RadialInvalidate
             | WatchEvent::RadialConfigDiagnostic(_)
             | WatchEvent::RadialRuntimeDiagnostic(_)

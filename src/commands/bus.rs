@@ -1,9 +1,9 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_clipboard_modify, handle_crop, handle_data, handle_diff,
-    handle_file_search, handle_headless_gui_with_history_query, handle_launcher, handle_link,
-    handle_mouse_gesture, handle_multi_manager, handle_note, handle_query, handle_radial,
-    handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_todo,
+    handle_calendar, handle_clipboard_modify_with_history_query, handle_crop, handle_data,
+    handle_diff, handle_file_search, handle_headless_gui_with_history_query, handle_launcher,
+    handle_link, handle_mouse_gesture, handle_multi_manager, handle_note, handle_query,
+    handle_radial, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -48,9 +48,12 @@ impl CommandBus {
             Command::Diff(command) => handle_diff(host, command),
             Command::Screenshot(command) => handle_screenshot(host, command),
             Command::ScreenDraw(command) => handle_screen_draw(host, command),
-            Command::ClipboardModify(command) => {
-                Ok(handle_clipboard_modify(host, command, invocation))
-            }
+            Command::ClipboardModify(command) => Ok(handle_clipboard_modify_with_history_query(
+                host,
+                command,
+                invocation,
+                captured_history_query,
+            )),
             Command::Data(command) => handle_data(host, command),
             Command::VirtualDesktop(super::VirtualDesktopCommand::Settings) => {
                 host.open_settings_dialog();
@@ -99,6 +102,8 @@ mod tests {
         screenshot_calls: usize,
         screen_draw_calls: Vec<crate::commands::ScreenDrawCommand>,
         clipboard_modify_calls: usize,
+        clipboard_modify_metadata:
+            Option<crate::clipboard_modify::coordinator::ImmediateRequestMetadata>,
         data_calls: Vec<&'static str>,
         radial_calls: usize,
     }
@@ -324,9 +329,10 @@ mod tests {
         fn start_clipboard_modify(
             &mut self,
             _: crate::clipboard_modify::parser::ClipboardModifyIntent,
-            _: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
+            metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
         ) -> Result<(), String> {
             self.clipboard_modify_calls += 1;
+            self.clipboard_modify_metadata = Some(metadata);
             Ok(())
         }
         fn clipboard_modify_hide_launcher_after_apply(&self) -> bool {
@@ -596,5 +602,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.headless_calls, 1);
+    }
+
+    #[test]
+    fn radial_captured_query_reaches_async_clipboard_modify_metadata() {
+        let mut host = FakeHost::default();
+        let invocation = invocation(Command::ClipboardModify(
+            crate::commands::ClipboardModifyCommand::Execute {
+                payload: Some(
+                    crate::clipboard_modify::actions::ClipboardModifyActionPayload::ExecuteTemplate {
+                        canonical_command: "cm template uppercase".into(),
+                        name: "uppercase".into(),
+                    },
+                ),
+                raw_argument: None,
+                payload_error: None,
+            },
+        ));
+        CommandBus
+            .dispatch_with_history_query(&invocation, &mut host, Some("radial saved query"))
+            .unwrap();
+
+        let metadata = host
+            .clipboard_modify_metadata
+            .expect("async metadata reaches the clipboard host");
+        assert_eq!(
+            metadata.history_query.as_deref(),
+            Some("radial saved query")
+        );
+        assert_eq!(metadata.query, "cm template uppercase");
+        assert_eq!(metadata.source, ActivationSource::Dashboard);
+        assert_eq!(
+            metadata.root_policy,
+            crate::universal_actions::RootLauncherPolicy::Legacy
+        );
     }
 }

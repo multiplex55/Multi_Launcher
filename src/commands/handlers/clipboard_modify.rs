@@ -14,6 +14,18 @@ pub(crate) fn handle_clipboard_modify<H>(
 where
     H: ClipboardModifyCommandHost + ?Sized,
 {
+    handle_clipboard_modify_with_history_query(host, command, invocation, None)
+}
+
+pub(crate) fn handle_clipboard_modify_with_history_query<H>(
+    host: &mut H,
+    command: &ClipboardModifyCommand,
+    invocation: &CommandInvocation,
+    captured_history_query: Option<&str>,
+) -> CommandOutcome
+where
+    H: ClipboardModifyCommandHost + ?Sized,
+{
     match command {
         ClipboardModifyCommand::Open { section } => {
             host.open_clipboard_modify(*section);
@@ -43,8 +55,10 @@ where
             let metadata = ImmediateRequestMetadata {
                 action: invocation.original_action.clone(),
                 query: canonical_query,
+                history_query: captured_history_query.map(str::to_owned),
                 source: invocation.source,
                 hide_launcher_on_success,
+                root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
             };
             match host.start_clipboard_modify(intent, metadata) {
                 Ok(()) => CommandOutcome::default(),

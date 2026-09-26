@@ -25,6 +25,29 @@ pub(crate) enum UniversalActionExecution {
 }
 
 impl LauncherApp {
+    pub(super) fn poll_radial_query_observation(&mut self, ctx: &eframe::egui::Context) {
+        if !self.radial_query_observation.enabled() {
+            return;
+        }
+        self.radial_query_observation.advance_frame();
+        if !self.radial_query_observation.has_request() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(25));
+            return;
+        }
+        let root = RadialRootState::capture(self).observation_capture();
+        let mut history = crate::history::get_history();
+        let counts = crate::gui::query_observation::QueryObservationCounts::capture(
+            history.make_contiguous(),
+            &self.usage,
+        );
+        if self.radial_query_observation.poll(root, counts) {
+            // Requests are written by the isolated acceptance process. Keep
+            // the hidden ROOT GUI servicing this read-only mailbox without
+            // changing visibility, focus, query, or selection.
+            ctx.request_repaint_after(std::time::Duration::from_millis(25));
+        }
+    }
+
     /// Execute a surface-independent action while retaining the input source
     /// and presentation surface as distinct invocation context.
     pub(crate) fn execute_universal_action(
@@ -55,10 +78,15 @@ impl LauncherApp {
         let radial_requires_confirmation = context.surface == ActionSurface::RadialMenu
             && self.radial_feature_settings.safety_policy
                 == crate::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
+        let typed_radial_destructive = (context.surface == ActionSurface::RadialMenu)
+            .then(|| DestructiveAction::from_radial_operation(&action))
+            .flatten();
         if (self.require_confirm_destructive || radial_requires_confirmation)
-            && action.safety == ActionSafety::Destructive
+            && (action.safety == ActionSafety::Destructive || typed_radial_destructive.is_some())
         {
-            let Some(kind) = DestructiveAction::from_universal_action(&action) else {
+            let Some(kind) =
+                DestructiveAction::from_universal_action(&action).or(typed_radial_destructive)
+            else {
                 self.report_error_message(
                     "universal_action",
                     format!("Missing confirmation metadata for {}", action.id),
@@ -77,13 +105,44 @@ impl LauncherApp {
             return UniversalActionExecution::ConfirmationRequired;
         }
 
-        let root = (context.root_policy == RootLauncherPolicy::PreserveOrdinaryState)
-            .then(|| RadialRootState::capture(self));
+        let preserved_root = context.root_policy == RootLauncherPolicy::PreserveOrdinaryState;
+        let root = preserved_root.then(|| RadialRootState::capture(self));
+        let trace_selection = radial_request.as_ref().and_then(|request| {
+            preserved_root
+                .then(|| radial_trace_action(&action, request))
+                .flatten()
+                .map(|selected| (request, selected))
+        });
+        if crate::radial::acceptance_trace::enabled()
+            && let (Some(root), Some((request, selected))) =
+                (root.as_ref(), trace_selection.as_ref())
+        {
+            root.emit_acceptance_snapshot(
+                self,
+                &selected,
+                &context.history_query,
+                context.source,
+                request,
+                "before",
+            );
+        }
         self.execute_universal_action_confirmed(action, &context);
-        if let Some(root) = root {
-            root.restore(self);
+        if let Some(root) = root.as_ref() {
+            root.clone().restore(self);
         }
         self.restore_for_new_launcher_interaction(&before);
+        if crate::radial::acceptance_trace::enabled()
+            && let Some((request, selected)) = trace_selection.as_ref()
+        {
+            RadialRootState::capture(self).emit_acceptance_snapshot(
+                self,
+                &selected,
+                &context.history_query,
+                context.source,
+                request,
+                "after",
+            );
+        }
         UniversalActionExecution::Executed
     }
 
@@ -103,9 +162,42 @@ impl LauncherApp {
                     );
                     return true;
                 }
+                if let Some(crate::radial::handoff::DeferredDispatchOrigin::Query {
+                    query,
+                    mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+                    selected_action: Some(_),
+                    provider_revision,
+                    result_catalog_versions,
+                    ..
+                }) = request.deferred_origin.as_ref()
+                    && !self.deferred_query_result_is_current(
+                        *provider_revision,
+                        *result_catalog_versions,
+                    )
+                {
+                    self.fallback_deferred_query_or_report(
+                        request,
+                        query,
+                        "The first result changed before confirmation; opening the saved query instead",
+                    );
+                    return true;
+                }
                 match self.resolve_radial_action(request) {
                     Ok(prepared) => prepared.action,
                     Err(reason) => {
+                        if let Some(crate::radial::handoff::DeferredDispatchOrigin::Query {
+                            query,
+                            mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+                            ..
+                        }) = request.deferred_origin.as_ref()
+                        {
+                            self.fallback_deferred_query_or_report(
+                                request,
+                                query,
+                                &format!("The selected result is no longer available ({reason:?})"),
+                            );
+                            return true;
+                        }
                         self.report_error_message(
                             "radial_action",
                             format!("Radial action changed before confirmation: {reason:?}"),
@@ -215,21 +307,38 @@ impl LauncherApp {
                 command,
                 original_action,
             } => {
-                self.dispatch_universal_secondary_command(
-                    action_id.as_str(),
-                    CommandInvocation {
-                        command,
-                        original_action,
-                        query_override: None,
-                        source,
-                    },
-                    context.root_policy,
-                );
+                let invocation = CommandInvocation {
+                    command,
+                    original_action,
+                    query_override: None,
+                    source,
+                };
+                if context.primary_invocation {
+                    self.dispatch_universal_primary_command(invocation, context);
+                } else {
+                    self.dispatch_universal_secondary_command(
+                        action_id.as_str(),
+                        invocation,
+                        context.root_policy,
+                    );
+                }
             }
             UniversalActionOperation::UiIntent(intent) => {
                 self.execute_universal_ui_intent(action_id.as_str(), intent)
             }
         }
+    }
+
+    fn dispatch_universal_primary_command(
+        &mut self,
+        invocation: CommandInvocation,
+        context: &UniversalActionInvocationContext,
+    ) {
+        let previous_policy = std::mem::replace(&mut self.command_root_policy, context.root_policy);
+        let previous_queryexec_depth = self.radial_queryexec_depth.replace(0);
+        self.dispatch_command_invocation_with_history(invocation, Some(&context.history_query));
+        self.radial_queryexec_depth = previous_queryexec_depth;
+        self.command_root_policy = previous_policy;
     }
 
     fn dispatch_radial_primary(
@@ -248,7 +357,9 @@ impl LauncherApp {
             }
         };
         let previous_policy = std::mem::replace(&mut self.command_root_policy, context.root_policy);
+        let previous_queryexec_depth = self.radial_queryexec_depth.replace(0);
         self.dispatch_command_invocation_with_history(invocation, Some(&context.history_query));
+        self.radial_queryexec_depth = previous_queryexec_depth;
         self.command_root_policy = previous_policy;
     }
 
@@ -481,6 +592,59 @@ impl RadialRootState {
             query_history: app.query_history.clone(),
         }
     }
+
+    fn observation_capture(&self) -> crate::gui::query_observation::QueryOrdinaryRootCapture {
+        let ordinary_query_digest = radial_trace_digest(&[self.query.as_str()]);
+        let results_digest = radial_trace_results_digest(&self.results);
+        let selected_index = self
+            .selected
+            .and_then(|value| i64::try_from(value).ok())
+            .unwrap_or(-1);
+        let last_search_query_digest = radial_trace_digest(&[self.last_search_query.as_str()]);
+        let suggestions_digest = radial_trace_strings_digest(&self.suggestions);
+        let query_history_digest = self.query_history.acceptance_digest();
+        let mut state_digest = 0xcbf29ce484222325u64;
+        for value in [
+            ordinary_query_digest,
+            results_digest,
+            self.results.len() as u64,
+            selected_index as u64,
+            self.resolved_grid_layout as u64,
+            self.visible as u64,
+            self.restore as u64,
+            self.visibility_revision,
+            self.focus_query as u64,
+            self.move_cursor_end as u64,
+            self.last_results_valid as u64,
+            last_search_query_digest,
+            suggestions_digest,
+            self.autocomplete_index as u64,
+            query_history_digest,
+            self.pending_query
+                .as_deref()
+                .map_or(0, |value| radial_trace_digest(&[value])),
+        ] {
+            state_digest = radial_trace_feed(state_digest, &value.to_le_bytes());
+        }
+        crate::gui::query_observation::QueryOrdinaryRootCapture {
+            state_digest,
+            query_digest: ordinary_query_digest,
+            results_digest,
+            results_count: self.results.len(),
+            selected_index: (selected_index >= 0).then_some(selected_index as usize),
+            grid_layout: self.resolved_grid_layout,
+            visible: self.visible,
+            restore: self.restore,
+            visibility_revision: self.visibility_revision,
+            focus_query: self.focus_query,
+            move_cursor_end: self.move_cursor_end,
+            last_results_valid: self.last_results_valid,
+            last_search_query_digest,
+            suggestions_digest,
+            autocomplete_index: self.autocomplete_index,
+            query_history_digest,
+        }
+    }
     pub(super) fn restore(self, app: &mut LauncherApp) {
         app.query = self.query;
         app.pending_query = self.pending_query;
@@ -503,6 +667,186 @@ impl RadialRootState {
         app.autocomplete_index = self.autocomplete_index;
         app.query_history = self.query_history;
     }
+
+    fn emit_acceptance_snapshot(
+        &self,
+        app: &LauncherApp,
+        action: &Action,
+        history_query: &str,
+        source: ActivationSource,
+        request: &crate::radial::handoff::RadialDispatchRequest,
+        phase: &'static str,
+    ) {
+        let query = radial_trace_query(request, history_query);
+        let action_digest = radial_trace_action_digest(action);
+        let ordinary_query_digest = radial_trace_digest(&[self.query.as_str()]);
+        let results_digest = radial_trace_results_digest(&self.results);
+        let last_search_query_digest = radial_trace_digest(&[self.last_search_query.as_str()]);
+        let suggestions_digest = radial_trace_strings_digest(&self.suggestions);
+        let query_history_digest = self.query_history.acceptance_digest();
+        let selected_index = self
+            .selected
+            .and_then(|value| i64::try_from(value).ok())
+            .unwrap_or(-1);
+        let mut state = 0xcbf29ce484222325u64;
+        for value in [
+            ordinary_query_digest,
+            results_digest,
+            self.results.len() as u64,
+            selected_index as u64,
+            self.resolved_grid_layout as u64,
+            self.visible as u64,
+            self.restore as u64,
+            self.visibility_revision,
+            self.focus_query as u64,
+            self.move_cursor_end as u64,
+            self.last_results_valid as u64,
+            last_search_query_digest,
+            suggestions_digest,
+            self.autocomplete_index as u64,
+            query_history_digest,
+            self.pending_query
+                .as_deref()
+                .map_or(0, |value| radial_trace_digest(&[value])),
+        ] {
+            state = radial_trace_feed(state, &value.to_le_bytes());
+        }
+        let (matching_history_count, radial_source_history_count) =
+            crate::history::with_history(|history| {
+                let matching = history
+                    .iter()
+                    .filter(|entry| {
+                        entry.query == history_query
+                            && entry.action.action == action.action
+                            && entry.action.args == action.args
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    matching.len(),
+                    matching
+                        .iter()
+                        .filter(|entry| entry.source.as_deref() == Some(source.label()))
+                        .count(),
+                )
+            })
+            .unwrap_or_default();
+        let invocation = &request.identity;
+        crate::radial::acceptance_trace::emit(
+            crate::radial::acceptance_trace::Event::RadialRootSnapshot {
+                phase,
+                invocation_id: invocation.invocation_id.0,
+                session_digest: radial_trace_id_digest(invocation.session_id.as_str()),
+                cell_digest: radial_trace_id_digest(&invocation.selected_cell_id),
+                query_digest: radial_trace_digest(&[query]),
+                action_digest,
+                source: source.label(),
+                state_digest: state,
+                ordinary_query_digest,
+                results_digest,
+                results_count: self.results.len(),
+                selected_index,
+                grid_layout: self.resolved_grid_layout,
+                visible: self.visible,
+                restore: self.restore,
+                visibility_revision: self.visibility_revision,
+                focus_query: self.focus_query,
+                move_cursor_end: self.move_cursor_end,
+                last_results_valid: self.last_results_valid,
+                last_search_query_digest,
+                suggestions_digest,
+                autocomplete_index: self.autocomplete_index,
+                query_history_digest,
+                matching_history_count,
+                radial_source_history_count,
+                usage_count: app.usage.get(&action.action).copied().unwrap_or_default(),
+            },
+        );
+    }
+}
+
+fn radial_trace_action(
+    action: &UniversalAction,
+    request: &crate::radial::handoff::RadialDispatchRequest,
+) -> Option<Action> {
+    use crate::radial::handoff::DeferredDispatchOrigin;
+    match request.deferred_origin.as_ref() {
+        Some(DeferredDispatchOrigin::Query {
+            selected_action: Some(action),
+            ..
+        }) => Some(action.clone()),
+        Some(DeferredDispatchOrigin::ExactCommand { command, args }) => Some(Action {
+            label: command.clone(),
+            desc: "Saved exact command".into(),
+            action: command.clone(),
+            args: args.clone(),
+        }),
+        _ => match &action.operation {
+            UniversalActionOperation::InvokePrimary(action) => Some(action.clone()),
+            UniversalActionOperation::Command {
+                original_action, ..
+            } => Some(original_action.clone()),
+            UniversalActionOperation::UiIntent(_) => None,
+        },
+    }
+}
+
+fn radial_trace_query<'a>(
+    request: &'a crate::radial::handoff::RadialDispatchRequest,
+    fallback: &'a str,
+) -> &'a str {
+    match request.deferred_origin.as_ref() {
+        Some(crate::radial::handoff::DeferredDispatchOrigin::Query { query, .. }) => query,
+        Some(crate::radial::handoff::DeferredDispatchOrigin::ExactCommand { command, .. }) => {
+            command
+        }
+        None => fallback,
+    }
+}
+
+fn radial_trace_digest(parts: &[&str]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for part in parts {
+        hash = radial_trace_feed(hash, part.as_bytes());
+        hash = radial_trace_feed(hash, &[0]);
+    }
+    hash
+}
+
+fn radial_trace_id_digest(value: &str) -> u64 {
+    radial_trace_feed(0xcbf29ce484222325, value.as_bytes())
+}
+
+fn radial_trace_strings_digest(values: &[String]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for value in values {
+        hash = radial_trace_feed(hash, value.as_bytes());
+        hash = radial_trace_feed(hash, &[0]);
+    }
+    hash
+}
+
+fn radial_trace_feed(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn radial_trace_action_digest(action: &Action) -> u64 {
+    radial_trace_digest(&[
+        action.label.as_str(),
+        action.desc.as_str(),
+        action.action.as_str(),
+        action.args.as_deref().unwrap_or_default(),
+    ])
+}
+
+fn radial_trace_results_digest(results: &[Action]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for action in results {
+        hash = radial_trace_feed(hash, &radial_trace_action_digest(action).to_le_bytes());
+    }
+    hash
 }
 
 fn history_pin(action: &Action, query: &str, timestamp: i64) -> HistoryPin {
@@ -812,6 +1156,7 @@ mod tests {
                 stable_request: None,
                 history_query: "captured".into(),
                 root_policy: RootLauncherPolicy::PreserveOrdinaryState,
+                primary_invocation: false,
             },
             None,
         );
@@ -932,6 +1277,189 @@ mod tests {
         assert_eq!(app.query, "window query");
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.test_recorded_history_queries.is_empty());
+    }
+
+    #[test]
+    fn confirmed_deferred_primary_command_records_captured_query_once() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.test_skip_history_persistence = true;
+        app.require_confirm_destructive = true;
+        app.query = "ordinary ROOT query".into();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.enable_toasts = true;
+
+        let original_action = Action {
+            label: "Close Editor".into(),
+            desc: "Window".into(),
+            action: "window:close:44".into(),
+            args: None,
+        };
+        let action = universal(
+            action_ids::WINDOW_CLOSE,
+            ActionTarget::Window { hwnd: 44 },
+            ActionSafety::Destructive,
+            UniversalActionOperation::Command {
+                command: Command::System(SystemCommand::WindowClose(44)),
+                original_action: original_action.clone(),
+            },
+        );
+        let context = UniversalActionInvocationContext {
+            surface: ActionSurface::RadialMenu,
+            source: ActivationSource::Gesture,
+            stable_request: None,
+            history_query: "saved radial query".into(),
+            root_policy: RootLauncherPolicy::PreserveOrdinaryState,
+            primary_invocation: true,
+        };
+
+        assert_eq!(
+            app.execute_universal_action_with_context(action, context, None),
+            UniversalActionExecution::ConfirmationRequired
+        );
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert!(
+            app.pending_universal_confirm
+                .as_ref()
+                .is_some_and(|pending| pending.context.primary_invocation)
+        );
+
+        crate::gui::set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+        app.resolve_pending_confirmation(true);
+        crate::gui::set_execute_action_hook(None);
+
+        assert_eq!(app.test_recorded_history_queries, ["saved radial query"]);
+        assert_eq!(app.usage.get("window:close:44"), Some(&1));
+        assert_eq!(app.query, "ordinary ROOT query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(
+            app.test_toast_messages
+                .iter()
+                .any(|message| message.contains("Close Editor"))
+        );
+        assert!(app.test_recorded_history_queries.len() == 1);
+    }
+
+    #[test]
+    fn normal_safety_radial_generic_destructive_primary_is_confirmed_and_consumed_once() {
+        let primary = Action {
+            label: "Remove radial confirmation fixture".into(),
+            desc: "Notes".into(),
+            action: "note:remove:__radial_confirmation_fixture__".into(),
+            args: Some("fixture-argument".into()),
+        };
+        let action = universal(
+            action_ids::RESULT_EXECUTE,
+            ActionTarget::Generic {
+                action: primary.clone(),
+            },
+            ActionSafety::Normal,
+            UniversalActionOperation::InvokePrimary(primary.clone()),
+        );
+        let context = || UniversalActionInvocationContext {
+            surface: ActionSurface::RadialMenu,
+            source: ActivationSource::Gesture,
+            stable_request: None,
+            history_query: "captured radial query".into(),
+            root_policy: RootLauncherPolicy::PreserveOrdinaryState,
+            primary_invocation: true,
+        };
+
+        let ctx = eframe::egui::Context::default();
+        let mut cancelled = crate::gui::actions::tests::new_app(&ctx);
+        cancelled.test_skip_history_persistence = true;
+        cancelled.require_confirm_destructive = true;
+        assert_eq!(
+            cancelled.execute_universal_action_with_context(action.clone(), context(), None,),
+            UniversalActionExecution::ConfirmationRequired,
+            "parsed destructive primary must enter the normal radial confirmation lease"
+        );
+        let pending = cancelled.pending_universal_confirm.as_ref().unwrap();
+        assert_eq!(pending.context.history_query, "captured radial query");
+        assert_eq!(pending.context.source, ActivationSource::Gesture);
+        assert_eq!(pending.action.operation, action.operation);
+        cancelled.resolve_pending_confirmation(false);
+        assert!(cancelled.pending_universal_confirm.is_none());
+        assert!(cancelled.test_activation_trace.is_empty());
+        assert!(!cancelled.resolve_pending_universal_action_confirmation(true));
+
+        let mut confirmed = crate::gui::actions::tests::new_app(&ctx);
+        confirmed.test_skip_history_persistence = true;
+        confirmed.require_confirm_destructive = false;
+        confirmed.radial_feature_settings.safety_policy =
+            crate::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
+        assert_eq!(
+            confirmed.execute_universal_action_with_context(action, context(), None),
+            UniversalActionExecution::ConfirmationRequired,
+            "radial AlwaysConfirm must protect a normal-safety generic primary"
+        );
+        confirmed.resolve_pending_confirmation(true);
+        assert!(confirmed.pending_universal_confirm.is_none());
+        assert_eq!(
+            confirmed.test_activation_trace,
+            [(primary.clone(), ActivationSource::Gesture)],
+            "confirmation must dispatch the frozen primary exactly once with its input source"
+        );
+        assert!(!confirmed.resolve_pending_universal_action_confirmation(true));
+        assert_eq!(confirmed.test_activation_trace.len(), 1);
+    }
+
+    #[test]
+    fn radial_confirmation_classifies_typed_commands_without_changing_nonradial_primary() {
+        let note_remove = Command::Note(crate::commands::NoteCommand::Remove {
+            slug: "fixture".into(),
+        });
+        let typed = universal(
+            action_ids::RESULT_EXECUTE,
+            ActionTarget::Generic {
+                action: Action {
+                    label: "Remove note".into(),
+                    desc: "Notes".into(),
+                    action: "note:remove:fixture".into(),
+                    args: None,
+                },
+            },
+            ActionSafety::Normal,
+            UniversalActionOperation::Command {
+                command: note_remove,
+                original_action: Action {
+                    label: "Remove note".into(),
+                    desc: "Notes".into(),
+                    action: "note:remove:fixture".into(),
+                    args: None,
+                },
+            },
+        );
+        assert_eq!(
+            DestructiveAction::from_radial_operation(&typed),
+            Some(DestructiveAction::DeleteNote)
+        );
+
+        let primary = Action {
+            label: "Clear history".into(),
+            desc: "Storage".into(),
+            action: "history:clear".into(),
+            args: None,
+        };
+        let generic = universal(
+            action_ids::RESULT_EXECUTE,
+            ActionTarget::Generic {
+                action: primary.clone(),
+            },
+            ActionSafety::Normal,
+            UniversalActionOperation::InvokePrimary(primary),
+        );
+        assert_eq!(
+            DestructiveAction::from_radial_operation(&generic),
+            Some(DestructiveAction::ClearHistory)
+        );
+        assert_eq!(
+            DestructiveAction::from_universal_action(&generic),
+            None,
+            "the generic fallback metadata remains explicitly separate from legacy surfaces"
+        );
     }
 
     #[test]

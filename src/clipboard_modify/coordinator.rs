@@ -330,8 +330,12 @@ fn run_intent<C: Cancellation + ?Sized>(
 pub struct ImmediateRequestMetadata {
     pub action: Action,
     pub query: String,
+    /// Optional invocation-time history text. Ordinary callers fall back to
+    /// `query`, while radial callers keep their captured launcher query.
+    pub history_query: Option<String>,
     pub source: ActivationSource,
     pub hide_launcher_on_success: bool,
+    pub root_policy: crate::universal_actions::RootLauncherPolicy,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredClipboardModifyError {
@@ -620,8 +624,10 @@ mod tests {
                 ImmediateRequestMetadata {
                     action: action(),
                     query: "cm upper".into(),
+                    history_query: None,
                     source: ActivationSource::Enter,
                     hide_launcher_on_success: true,
+                    root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 },
             )
             .unwrap();
@@ -648,8 +654,10 @@ mod tests {
                 ImmediateRequestMetadata {
                     action: action(),
                     query: "q".into(),
+                    history_query: None,
                     source: ActivationSource::Enter,
                     hide_launcher_on_success: true,
+                    root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 },
             )
             .unwrap();
@@ -694,8 +702,10 @@ mod tests {
         ImmediateRequestMetadata {
             action: action(),
             query: query.into(),
+            history_query: None,
             source: ActivationSource::Enter,
             hide_launcher_on_success: true,
+            root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
         }
     }
 
@@ -877,8 +887,10 @@ mod tests {
             ImmediateRequestMetadata {
                 action: action(),
                 query: "q".into(),
+                history_query: None,
                 source: ActivationSource::Click,
                 hide_launcher_on_success: true,
+                root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
             },
         )
         .unwrap();

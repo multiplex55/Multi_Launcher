@@ -10,17 +10,23 @@ use super::super::{
     HotkeyRunnerInputPurpose, HotkeyStandaloneDecisionEvidence, HotkeyTraceEventKind,
     HotkeyVisibilitySource, MAX_HOTKEY_CASE_EVIDENCE_BYTES, MAX_HOTKEY_EVIDENCE_EDGES,
     MAX_HOTKEY_EVIDENCE_EVENTS, MAX_HOTKEY_EVIDENCE_GESTURES, MAX_PATH_BYTES, MAX_RESULT_BYTES,
-    format_h04_matrix_evidence, hotkey_expected_state, sha256_bytes,
+    QUERY_CASE_IDS, QueryCaseEvidence, QueryEvidenceMode, QueryEvidenceOutcome,
+    QueryEvidenceRequirement, QueryEvidenceRootPolicy, QueryEvidenceSource, QueryEvidenceState,
+    QueryEvidenceUiAck, QueryInvocationEvidence, QueryRootPresentationEvidence,
+    QueryRootStateEvidence, QuerySetupObservedEdge, QuerySetupTapEvidence,
+    QuerySetupVisibilityEvidence, format_h04_matrix_evidence, hotkey_expected_state,
+    query_case_contract_is_valid, sha256_bytes, valid_marker_ledger,
     validate_h04_contamination_artifact, validate_hotkey_burst_trace_with_baseline,
 };
 use super::*;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const TAP_TIME: Duration = Duration::from_millis(135);
@@ -42,6 +48,7 @@ const HOTKEY_TRACE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1_500);
 const DESIGNER_TEXT_PROBE: &str = "Native Edit Probe";
 const DESIGNER_STARTER_NAME: &str = "Starter";
 static NEXT_HOOK_PUMP_PROBE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_QUERY_OBSERVATION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_HOTKEY_CAPTURE_SEGMENTS: usize = 32;
 const DEFERRED_REPORT_CASE_IDS: [&str; 3] = ["R0", "R1", "R2"];
 const BLOCKED_DESIGNER_CASE_IDS: [&str; 20] = [
@@ -1927,6 +1934,2252 @@ pub fn run_hotkey_suite(
     Some(anchor)
 }
 
+pub fn run_query_suite(
+    executable: &str,
+    profile: &Path,
+    output: &Path,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    cursor_restore: Option<POINT>,
+    _desktop: &InputDesktopAttachment,
+    report: &mut AcceptanceReport,
+    runner_log: &mut File,
+) -> Option<FocusAnchor> {
+    if let Err(error) = preflight_acceptance_hotkey(hotkey) {
+        record_environment_failure(
+            format!("acceptance hotkey preflight failed: {error}"),
+            report,
+            output,
+            trace_path,
+            runner_log,
+        );
+        return None;
+    }
+    let stdout_path = profile.join("child.stdout.log");
+    let stderr_path = profile.join("child.stderr.log");
+    let marker_path = profile.join("query-marker-ledger.txt");
+    let mut child = match NativeChild::launch(
+        Path::new(executable),
+        profile,
+        trace_path,
+        &stdout_path,
+        &stderr_path,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            report.environment.child_process_id = error.process_id;
+            report.environment.child_started_unix_ms = error.started.and_then(|started| {
+                started
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_millis())
+            });
+            if let Some(inventory) = save_launch_failure_inventory(&error, output) {
+                report.push_artifact(inventory.to_string_lossy());
+            }
+            record_environment_failure(
+                format!("Query candidate startup failed: {error}"),
+                report,
+                output,
+                trace_path,
+                runner_log,
+            );
+            return None;
+        }
+    };
+    report.environment.child_process_id = Some(child.process_id());
+    report.environment.child_started_unix_ms = child
+        .started()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis());
+    let anchor = match wait_hotkey_fixture_ready(&child, trace_path, HOTKEY_FIXTURE_STARTUP_TIMEOUT)
+        .and_then(|_| FocusAnchor::create())
+    {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            record_environment_failure(
+                format!("Query runner setup failed: {error}"),
+                report,
+                output,
+                trace_path,
+                runner_log,
+            );
+            restore_cursor_before_shutdown(cursor_restore, runner_log);
+            stop_child(&mut child, report, runner_log, output, trace_path);
+            return None;
+        }
+    };
+    let ui = match UiAutomation::new() {
+        Ok(ui) => ui,
+        Err(error) => {
+            record_environment_failure(
+                format!("Query UI Automation setup failed: {error}"),
+                report,
+                output,
+                trace_path,
+                runner_log,
+            );
+            restore_cursor_before_shutdown(cursor_restore, runner_log);
+            stop_child(&mut child, report, runner_log, output, trace_path);
+            return Some(anchor);
+        }
+    };
+    let hold_threshold_ms = report.profile.hold_threshold_ms;
+    run_query_case(
+        report,
+        "Q02",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-open",
+                false,
+                None,
+                |child, ui, _events| {
+                    wait_launcher_query(child, ui, "app QMarker")?;
+                    Ok(QueryEffectResult {
+                        effect_count: 0,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::LauncherQuery,
+                    })
+                },
+            )
+        },
+    );
+    run_query_case(
+        report,
+        "Q03",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            let before = marker_occurrences(marker_path.as_path(), "q-first")?;
+            run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-hidden-first",
+                false,
+                Some(false),
+                |_child, _ui, _events| {
+                    wait_marker_occurrences(marker_path.as_path(), "q-first", before + 1)?;
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::None,
+                    })
+                },
+            )
+        },
+    );
+    run_query_case(
+        report,
+        "Q05",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            let before = marker_occurrences(marker_path.as_path(), "q-second")?;
+            run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-pinned-second",
+                false,
+                Some(false),
+                |_child, _ui, _events| {
+                    wait_marker_occurrences(marker_path.as_path(), "q-second", before + 1)?;
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::None,
+                    })
+                },
+            )
+        },
+    );
+    run_query_case(
+        report,
+        "Q07",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-no-results",
+                false,
+                None,
+                |child, ui, _events| {
+                    wait_launcher_query(child, ui, "qa-no-such-result-9f42d2")?;
+                    let root = child.refresh_root().map_err(query_window_error)?;
+                    ui.wait_visible_text(
+                        root.hwnd,
+                        child.process_id(),
+                        "No launcher result is currently available for \"qa-no-such-result-9f42d2\"; opening the saved query",
+                        UIA_TIMEOUT,
+                    )
+                    .map_err(|error| {
+                        CaseFailure::new(
+                            FailureStage::NativeRootState,
+                            format!("no-result explanation was not exposed: {error}"),
+                        )
+                    })?;
+                    Ok(QueryEffectResult {
+                        effect_count: 0,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::LauncherQuery,
+                    })
+                },
+            )
+        },
+    );
+    run_query_case(
+        report,
+        "Q10",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            let mut invocations = Vec::new();
+            let before_hidden = marker_occurrences(marker_path.as_path(), "q-first")?;
+            invocations.push(run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-visible-first",
+                false,
+                Some(false),
+                |_child, _ui, _events| {
+                    wait_marker_occurrences(marker_path.as_path(), "q-first", before_hidden + 1)?;
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::None,
+                    })
+                },
+            )?);
+            let before_visible = marker_occurrences(marker_path.as_path(), "q-first")?;
+            invocations.push(run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-visible-first",
+                true,
+                Some(true),
+                |_child, _ui, _events| {
+                    wait_marker_occurrences(marker_path.as_path(), "q-first", before_visible + 1)?;
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::None,
+                    })
+                },
+            )?);
+            Ok(invocations)
+        },
+    );
+    run_query_case(
+        report,
+        "Q11",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-note-new",
+                false,
+                None,
+                |child, ui, _events| {
+                    wait_note_editor(child, ui, "# radial acceptance q11", output)?;
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::NoteEditor,
+                    })
+                },
+            )
+        },
+    );
+    run_query_case(
+        report,
+        "Q12",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-launcher-show",
+                false,
+                None,
+                |child, ui, _events| {
+                    wait_launcher_query(child, ui, "qa-explicit-launcher")?;
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::LauncherQuery,
+                    })
+                },
+            )
+        },
+    );
+    run_query_case(
+        report,
+        "Q13",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            let note_path = profile.join("notes").join("radial-acceptance-q13.md");
+            if !note_path.is_file() {
+                return Err(CaseFailure::new(
+                    FailureStage::Cleanup,
+                    "isolated destructive-action note was missing before confirmation test".into(),
+                ));
+            }
+            let mut invocations = Vec::new();
+            invocations.push(run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-note-remove",
+                true,
+                Some(true),
+                |child, ui, _events| {
+                    click_confirmation_control(child, ui, "Cancel", trace_path)?;
+                    if !note_path.is_file() {
+                        return Err(CaseFailure::new(
+                            FailureStage::GestureDecision,
+                            "cancelled note removal changed the isolated file".into(),
+                        ));
+                    }
+                    Ok(QueryEffectResult {
+                        effect_count: 0,
+                        cancelled_confirmation_count: 1,
+                        ui_ack: QueryEvidenceUiAck::Cancelled,
+                    })
+                },
+            )?);
+            invocations.push(run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-note-remove",
+                true,
+                Some(true),
+                |child, ui, _events| {
+                    click_confirmation_control(child, ui, "Confirm", trace_path)?;
+                    wait_until(UIA_TIMEOUT, || !note_path.exists());
+                    if note_path.exists() {
+                        return Err(CaseFailure::new(
+                            FailureStage::NativeRootState,
+                            "confirmed note removal did not remove the isolated file".into(),
+                        ));
+                    }
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::Confirmed,
+                    })
+                },
+            )?);
+            Ok(invocations)
+        },
+    );
+    run_query_case(
+        report,
+        "Q15",
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+        || {
+            let before = marker_occurrences(marker_path.as_path(), "q-exact")?;
+            run_query_invocation(
+                &child,
+                &anchor,
+                &ui,
+                trace_path,
+                output,
+                marker_path.as_path(),
+                hotkey,
+                hold_threshold_ms,
+                "qa-exact-marker",
+                false,
+                Some(false),
+                |_child, _ui, _events| {
+                    wait_marker_occurrences(marker_path.as_path(), "q-exact", before + 1)?;
+                    Ok(QueryEffectResult {
+                        effect_count: 1,
+                        cancelled_confirmation_count: 0,
+                        ui_ack: QueryEvidenceUiAck::None,
+                    })
+                },
+            )
+        },
+    );
+
+    restore_cursor_before_shutdown(cursor_restore, runner_log);
+    stop_child(&mut child, report, runner_log, output, trace_path);
+    for id in QUERY_CASE_IDS
+        .into_iter()
+        .filter(|id| !matches!(*id, "CLEANUP" | "R0"))
+    {
+        if !report.cases.iter().any(|case| case.id == id) {
+            append_case_without_artifacts(
+                report,
+                id,
+                Err(CaseFailure::new(
+                    FailureStage::Cleanup,
+                    "runner omitted a required Query case result".into(),
+                )),
+            );
+        }
+    }
+    Some(anchor)
+}
+
+#[derive(Clone, Copy)]
+struct QueryEffectResult {
+    effect_count: usize,
+    cancelled_confirmation_count: usize,
+    ui_ack: QueryEvidenceUiAck,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct QueryObservationFileRequest {
+    schema_version: u16,
+    request_id: u64,
+    phase: &'static str,
+    baseline_request_id: Option<u64>,
+    session_digest: u64,
+    cell_digest: u64,
+    invocation_id: Option<u64>,
+    query_digest: Option<u64>,
+    action_digest: Option<u64>,
+    source: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryObservationFileResponse {
+    schema_version: u16,
+    request_id: u64,
+    phase: String,
+    status: String,
+    error: Option<String>,
+    session_digest: u64,
+    cell_digest: u64,
+    invocation_id: Option<u64>,
+    baseline_request_id: Option<u64>,
+    baseline_frame_ordinal: Option<u64>,
+    observed_frame_ordinal: u64,
+    baseline_state_digest: Option<u64>,
+    query_digest: Option<u64>,
+    action_digest: Option<u64>,
+    source: Option<String>,
+    before: Option<QueryRootStateEvidence>,
+    after: Option<QueryRootStateEvidence>,
+}
+
+const QUERY_OBSERVATION_MAX_REQUEST_BYTES: usize = 8 * 1024;
+const QUERY_OBSERVATION_MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const QUERY_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn request_query_observation(
+    child: &NativeChild,
+    phase: &'static str,
+    baseline_request_id: Option<u64>,
+    session_digest: u64,
+    cell_digest: u64,
+    invocation_id: Option<u64>,
+    query_digest: Option<u64>,
+    action_digest: Option<u64>,
+    source: Option<String>,
+) -> Result<QueryObservationFileResponse, CaseFailure> {
+    let request_id = NEXT_QUERY_OBSERVATION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    let request = QueryObservationFileRequest {
+        schema_version: 1,
+        request_id,
+        phase,
+        baseline_request_id,
+        session_digest,
+        cell_digest,
+        invocation_id,
+        query_digest,
+        action_digest,
+        source,
+    };
+    let Some(profile) = child.log_path().parent() else {
+        return Err(CaseFailure::new(
+            FailureStage::Environment,
+            "candidate log path has no observation mailbox directory".into(),
+        ));
+    };
+    let base = profile.join("radial-query-observation");
+    let request_path = path_with_suffix(&base, ".request.json");
+    let response_path = path_with_suffix(&base, ".response.json");
+    let request_bytes = serde_json::to_vec(&request).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("serialize bounded observation request: {error}"),
+        )
+    })?;
+    if request_bytes.len() > QUERY_OBSERVATION_MAX_REQUEST_BYTES {
+        return Err(CaseFailure::new(
+            FailureStage::Environment,
+            "observation request exceeded its byte bound".into(),
+        ));
+    }
+    if request_path.exists() {
+        return Err(CaseFailure::new(
+            FailureStage::Environment,
+            "a prior GUI observation request is still pending".into(),
+        ));
+    }
+    if response_path.exists() {
+        fs::remove_file(&response_path).map_err(|error| {
+            CaseFailure::new(
+                FailureStage::Environment,
+                format!("remove stale GUI observation response: {error}"),
+            )
+        })?;
+    }
+    let request_temp = path_with_suffix(&request_path, &format!(".{}.tmp", request_id));
+    fs::write(&request_temp, request_bytes).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("write GUI observation request: {error}"),
+        )
+    })?;
+    fs::rename(&request_temp, &request_path).map_err(|error| {
+        let _ = fs::remove_file(&request_temp);
+        CaseFailure::new(
+            FailureStage::Environment,
+            format!("publish GUI observation request atomically: {error}"),
+        )
+    })?;
+
+    let deadline = Instant::now() + QUERY_OBSERVATION_TIMEOUT;
+    loop {
+        if let Ok(metadata) = fs::metadata(&response_path) {
+            if metadata.len() as usize > QUERY_OBSERVATION_MAX_RESPONSE_BYTES {
+                return Err(CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    "GUI observation response exceeded its byte bound".into(),
+                ));
+            }
+            let response_bytes = fs::read(&response_path).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    format!("read GUI observation response: {error}"),
+                )
+            })?;
+            let response: QueryObservationFileResponse = serde_json::from_slice(&response_bytes)
+                .map_err(|error| {
+                    CaseFailure::new(
+                        FailureStage::GestureDecision,
+                        format!("decode GUI observation response: {error}"),
+                    )
+                })?;
+            fs::remove_file(&response_path).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::Environment,
+                    format!("retire GUI observation response: {error}"),
+                )
+            })?;
+            validate_query_observation_response(&request, &response)?;
+            return Ok(response);
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return Err(CaseFailure::new(
+                FailureStage::Environment,
+                "candidate exited before its GUI observation response".into(),
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                format!(
+                    "GUI {} observation request {} was not acknowledged before timeout",
+                    request.phase, request.request_id
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+fn validate_query_observation_response(
+    request: &QueryObservationFileRequest,
+    response: &QueryObservationFileResponse,
+) -> Result<(), CaseFailure> {
+    let failure = |message: String| CaseFailure::new(FailureStage::GestureDecision, message);
+    if response.schema_version != 1
+        || response.request_id != request.request_id
+        || response.phase != request.phase
+        || response.session_digest != request.session_digest
+        || response.cell_digest != request.cell_digest
+    {
+        return Err(failure(
+            "GUI observation response has stale or mismatched identity".into(),
+        ));
+    }
+    if response.status != "captured" {
+        return Err(failure(format!(
+            "GUI observation was not captured: {}",
+            response.error.as_deref().unwrap_or("unspecified failure")
+        )));
+    }
+    match request.phase {
+        "baseline" => {
+            if request.baseline_request_id.is_some()
+                || request.invocation_id.is_some()
+                || request.query_digest.is_some()
+                || request.action_digest.is_some()
+                || request.source.is_some()
+                || response.invocation_id.is_some()
+                || response.baseline_request_id != Some(request.request_id)
+                || response.baseline_frame_ordinal != Some(response.observed_frame_ordinal)
+                || response.observed_frame_ordinal == 0
+                || response
+                    .baseline_state_digest
+                    .is_none_or(|digest| digest == 0)
+                || response.before.is_some()
+                || response.after.is_some()
+            {
+                return Err(failure("GUI baseline acknowledgement is incomplete".into()));
+            }
+        }
+        "terminal" => {
+            let terminal_state_preserved = response
+                .before
+                .as_ref()
+                .zip(response.after.as_ref())
+                .is_some_and(|(before, after)| query_observation_state_is_preserved(before, after));
+            if request.baseline_request_id.is_none_or(|id| id == 0)
+                || request.query_digest.is_none_or(|digest| digest == 0)
+                || request.action_digest.is_none_or(|digest| digest == 0)
+                || request.source.is_none()
+                || response.invocation_id != request.invocation_id
+                || response.baseline_request_id != request.baseline_request_id
+                || response
+                    .baseline_frame_ordinal
+                    .is_none_or(|frame| frame == 0)
+                || response.observed_frame_ordinal
+                    <= response.baseline_frame_ordinal.unwrap_or_default()
+                || response.query_digest != request.query_digest
+                || response.action_digest != request.action_digest
+                || response.source != request.source
+                || response.before.is_none()
+                || response.after.is_none()
+                || response.baseline_state_digest
+                    != response.before.as_ref().map(|state| state.state_digest)
+                || !terminal_state_preserved
+            {
+                return Err(failure(
+                    "GUI terminal acknowledgement is incomplete or mismatched".into(),
+                ));
+            }
+        }
+        _ => return Err(failure("unknown GUI observation phase".into())),
+    }
+    Ok(())
+}
+
+fn query_observation_state_is_preserved(
+    before: &QueryRootStateEvidence,
+    after: &QueryRootStateEvidence,
+) -> bool {
+    before.state_digest == after.state_digest
+        && before.query_digest == after.query_digest
+        && before.action_digest == after.action_digest
+        && before.results_digest == after.results_digest
+        && before.results_count == after.results_count
+        && before.selected_index == after.selected_index
+        && before.grid_layout == after.grid_layout
+        && before.visible == after.visible
+        && before.restore == after.restore
+        && before.visibility_revision == after.visibility_revision
+        && before.focus_query == after.focus_query
+        && before.move_cursor_end == after.move_cursor_end
+        && before.last_results_valid == after.last_results_valid
+        && before.last_search_query_digest == after.last_search_query_digest
+        && before.suggestions_digest == after.suggestions_digest
+        && before.autocomplete_index == after.autocomplete_index
+        && before.query_history_digest == after.query_history_digest
+        && after.matching_history_count == before.matching_history_count.saturating_add(1)
+        && after.source_history_count == before.source_history_count.saturating_add(1)
+        && after.usage_count == before.usage_count.saturating_add(1)
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn query_trace_tail(path: &Path, cursor: usize) -> Vec<String> {
+    trace_lines(path).into_iter().skip(cursor).collect()
+}
+
+fn request_terminal_query_observation(
+    child: &NativeChild,
+    baseline: &QueryObservationFileResponse,
+    events: &[String],
+    cell_id: &str,
+    cell_digest: u64,
+    session_digest: u64,
+) -> Result<Option<QueryObservationFileResponse>, CaseFailure> {
+    if baseline.phase != "baseline"
+        || baseline.status != "captured"
+        || baseline.cell_digest != cell_digest
+        || baseline.session_digest != session_digest
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "GUI ordinary-state baseline was not correlated to the hovered radial session".into(),
+        ));
+    }
+    let (resolution, dispatch) =
+        correlated_query_trace(events, cell_id, cell_digest, session_digest)?;
+    let number = |line: &str, field: &str| {
+        trace_field_value(line, field).and_then(|value| value.parse::<u64>().ok())
+    };
+    if trace_field_value(dispatch, "outcome") != Some("executed") {
+        return Ok(None);
+    }
+    if trace_field_value(dispatch, "root_policy") != Some("preserve")
+        || number(dispatch, "selected_digest").is_none_or(|digest| digest == 0)
+    {
+        return Ok(None);
+    }
+    let invocation_id = number(resolution, "invocation_id").ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query trace omitted invocation identity for terminal GUI observation".into(),
+        )
+    })?;
+    let query_digest = number(resolution, "query_digest").ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query trace omitted query identity for terminal GUI observation".into(),
+        )
+    })?;
+    let action_digest = number(resolution, "selected_digest")
+        .filter(|digest| *digest > 0)
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::GestureDecision,
+                "executed selection omitted its action digest".into(),
+            )
+        })?;
+    let source = events
+        .iter()
+        .find(|line| {
+            line.contains("trace_event=\"radial_root_snapshot\"")
+                && trace_field_value(line, "phase") == Some("before")
+                && number(line, "invocation_id") == Some(invocation_id)
+                && number(line, "session_digest") == Some(session_digest)
+                && number(line, "cell_digest") == Some(cell_digest)
+                && number(line, "action_digest") == Some(action_digest)
+        })
+        .and_then(|line| trace_field_value(line, "source"))
+        .filter(|source| {
+            matches!(
+                *source,
+                "enter"
+                    | "click"
+                    | "dashboard"
+                    | "gesture"
+                    | "macro"
+                    | "radial_release"
+                    | "radial_shortcut"
+                    | "radial_hotstring"
+            )
+        })
+        .ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::GestureDecision,
+                "no pre-action ROOT snapshot identified the accepted source".into(),
+            )
+        })?
+        .to_owned();
+    let baseline_request_id = baseline.request_id;
+    request_query_observation(
+        child,
+        "terminal",
+        Some(baseline_request_id),
+        session_digest,
+        cell_digest,
+        Some(invocation_id),
+        Some(query_digest),
+        Some(action_digest),
+        Some(source),
+    )
+    .map(Some)
+}
+
+struct QueryRootSampler {
+    stop: Arc<AtomicBool>,
+    sample_count: Arc<AtomicUsize>,
+    visible_count: Arc<AtomicUsize>,
+    hidden_count: Arc<AtomicUsize>,
+    visibility_violations: Arc<AtomicUsize>,
+    identity_violations: Arc<AtomicUsize>,
+    geometry_violations: Arc<AtomicUsize>,
+    samples: Arc<Mutex<Vec<QueryRootPresentationEvidence>>>,
+    expected_hwnd: u64,
+    process_id: u32,
+    expected_visible: Option<bool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl QueryRootSampler {
+    fn start(process_id: u32, expected_hwnd: u64, expected_visible: Option<bool>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sample_count = Arc::new(AtomicUsize::new(0));
+        let visible_count = Arc::new(AtomicUsize::new(0));
+        let hidden_count = Arc::new(AtomicUsize::new(0));
+        let visibility_violations = Arc::new(AtomicUsize::new(0));
+        let identity_violations = Arc::new(AtomicUsize::new(0));
+        let geometry_violations = Arc::new(AtomicUsize::new(0));
+        let samples = Arc::new(Mutex::new(Vec::<QueryRootPresentationEvidence>::new()));
+        let worker_stop = Arc::clone(&stop);
+        let worker_count = Arc::clone(&sample_count);
+        let worker_visible = Arc::clone(&visible_count);
+        let worker_hidden = Arc::clone(&hidden_count);
+        let worker_visibility_violations = Arc::clone(&visibility_violations);
+        let worker_identity_violations = Arc::clone(&identity_violations);
+        let worker_geometry_violations = Arc::clone(&geometry_violations);
+        let worker_samples = Arc::clone(&samples);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Acquire) {
+                let displays = native_display_bounds().unwrap_or_default();
+                let snapshot = find_window(process_id, WindowRole::Root);
+                let sample = snapshot.map_or_else(
+                    || QueryRootPresentationEvidence {
+                        hwnd: 0,
+                        process_id,
+                        bounds: [0; 4],
+                        visible: false,
+                        minimized: false,
+                        physically_visible: false,
+                    },
+                    |root| {
+                        let physically_visible = root.visible
+                            && !root.minimized
+                            && intersects_display_bounds(root.bounds, &displays);
+                        QueryRootPresentationEvidence {
+                            hwnd: hwnd_id(root.hwnd),
+                            process_id: root.process_id,
+                            bounds: root.bounds,
+                            visible: root.visible,
+                            minimized: root.minimized,
+                            physically_visible,
+                        }
+                    },
+                );
+                worker_count.fetch_add(1, Ordering::Relaxed);
+                if sample.physically_visible {
+                    worker_visible.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    worker_hidden.fetch_add(1, Ordering::Relaxed);
+                }
+                if expected_visible.is_some_and(|expected| expected != sample.physically_visible) {
+                    worker_visibility_violations.fetch_add(1, Ordering::Relaxed);
+                }
+                if sample.hwnd != expected_hwnd || sample.process_id != process_id {
+                    worker_identity_violations.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Ok(mut retained) = worker_samples.lock() {
+                    if expected_visible.is_some()
+                        && retained
+                            .first()
+                            .is_some_and(|first| first.bounds != sample.bounds)
+                    {
+                        worker_geometry_violations.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if retained.len() < 16 {
+                        retained.push(sample);
+                    } else {
+                        retained.remove(8);
+                        retained.push(sample);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        Self {
+            stop,
+            sample_count,
+            visible_count,
+            hidden_count,
+            visibility_violations,
+            identity_violations,
+            geometry_violations,
+            samples,
+            expected_hwnd,
+            process_id,
+            expected_visible,
+            worker: Some(worker),
+        }
+    }
+
+    fn wait_ready(&self) -> bool {
+        wait_until(ROOT_TIMEOUT, || {
+            self.samples.lock().ok().is_some_and(|samples| {
+                samples.first().is_some_and(|sample| {
+                    sample.hwnd == self.expected_hwnd
+                        && sample.process_id == self.process_id
+                        && self
+                            .expected_visible
+                            .is_none_or(|visible| sample.physically_visible == visible)
+                })
+            })
+        })
+    }
+
+    fn finish(
+        mut self,
+    ) -> (
+        Vec<QueryRootPresentationEvidence>,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        let samples = self
+            .samples
+            .lock()
+            .map(|samples| samples.clone())
+            .unwrap_or_default();
+        (
+            samples,
+            self.sample_count.load(Ordering::Relaxed),
+            self.visible_count.load(Ordering::Relaxed),
+            self.hidden_count.load(Ordering::Relaxed),
+            self.visibility_violations.load(Ordering::Relaxed),
+            self.identity_violations.load(Ordering::Relaxed),
+            self.geometry_violations.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl Drop for QueryRootSampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+trait IntoQueryInvocations {
+    fn into_query_invocations(self) -> Vec<QueryInvocationEvidence>;
+}
+
+impl IntoQueryInvocations for QueryInvocationEvidence {
+    fn into_query_invocations(self) -> Vec<QueryInvocationEvidence> {
+        vec![self]
+    }
+}
+
+impl IntoQueryInvocations for Vec<QueryInvocationEvidence> {
+    fn into_query_invocations(self) -> Vec<QueryInvocationEvidence> {
+        self
+    }
+}
+
+fn run_query_case<F, R>(
+    report: &mut AcceptanceReport,
+    id: &str,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    ui: &UiAutomation,
+    trace_path: &Path,
+    output: &Path,
+    marker_path: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+    run: F,
+) where
+    F: FnOnce() -> Result<R, CaseFailure>,
+    R: IntoQueryInvocations,
+{
+    let started = started_now();
+    let result = run();
+    let mut evidence = None;
+    let result = match result {
+        Ok(invocations) => {
+            let packet = QueryCaseEvidence {
+                schema_version: 1,
+                case_id: id.to_owned(),
+                invocations: invocations.into_query_invocations(),
+            };
+            match query_case_contract_is_valid(&packet) {
+                Ok(()) => {
+                    evidence = Some(packet);
+                    Ok(format!("typed query evidence proves {}", id))
+                }
+                Err(error) => Err(CaseFailure::new(FailureStage::GestureDecision, error)),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    append_query_case_result(
+        report,
+        id,
+        started,
+        result,
+        evidence,
+        Some(child),
+        output,
+        trace_path,
+        marker_path,
+        hotkey,
+        hold_threshold_ms,
+    );
+    let _ = (anchor, ui);
+}
+
+fn append_query_case_result(
+    report: &mut AcceptanceReport,
+    id: &str,
+    started: Instant,
+    mut result: Result<String, CaseFailure>,
+    mut evidence: Option<QueryCaseEvidence>,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+    _marker_path: &Path,
+    _hotkey: AcceptanceHotkey,
+    _hold_threshold_ms: u64,
+) {
+    if matches!(result, Ok(_)) && evidence.is_none() {
+        result = Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "passed Query case has no typed evidence packet".into(),
+        ));
+    }
+    if let Some(packet) = evidence.take() {
+        if report.query_evidence.len() < QUERY_CASE_IDS.len().saturating_sub(2) {
+            report.query_evidence.push(packet);
+        } else {
+            result = Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "Query evidence packet capacity was exceeded".into(),
+            ));
+        }
+    }
+    append_case(
+        report,
+        id,
+        expected(id),
+        started,
+        result,
+        child,
+        output,
+        trace_path,
+    );
+}
+
+fn run_query_invocation<F>(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    ui: &UiAutomation,
+    trace_path: &Path,
+    _output: &Path,
+    marker_path: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+    cell_id: &str,
+    initial_visible: bool,
+    preserved_root_visibility: Option<bool>,
+    finish: F,
+) -> Result<QueryInvocationEvidence, CaseFailure>
+where
+    F: FnOnce(&NativeChild, &UiAutomation, &[String]) -> Result<QueryEffectResult, CaseFailure>,
+{
+    let setup_visibility =
+        ensure_query_hotkey_root_visibility(child, anchor, trace_path, hotkey, initial_visible)?;
+    let prior_surfaces = runtime_windows(child);
+    let surfaces = run_hotkey_hold_attempt(
+        child,
+        anchor,
+        trace_path,
+        hotkey,
+        initial_visible,
+        hold_threshold_ms,
+        true,
+        None,
+    )?;
+    validate_radial_surfaces(child, &surfaces)
+        .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
+    if surfaces.iter().any(|surface| {
+        prior_surfaces
+            .iter()
+            .any(|prior| prior.hwnd == surface.hwnd)
+    }) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "runtime radial surfaces were not newly created for query selection".into(),
+        ));
+    }
+    let (surface, point, session_digest, cell_digest, layout_generation) =
+        hover_query_cell(child, &surfaces, trace_path, cell_id)?;
+    let root_hwnd = hwnd_id(child.root().hwnd);
+    let sampler = QueryRootSampler::start(child.process_id(), root_hwnd, preserved_root_visibility);
+    if !sampler.wait_ready() {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "ROOT sampler did not establish an owned physical baseline before query selection"
+                .into(),
+        ));
+    }
+    let baseline_observation = if preserved_root_visibility.is_some() {
+        Some(request_query_observation(
+            child,
+            "baseline",
+            None,
+            session_digest,
+            cell_digest,
+            None,
+            None,
+            None,
+            None,
+        )?)
+    } else {
+        None
+    };
+    let marker_before = read_marker_counts(marker_path)?;
+    let trace_cursor = trace_lines(trace_path).len();
+    let click_evidence = super::click_owned_radial_point(
+        child,
+        &surface,
+        point,
+        trace_path,
+        trace_cursor,
+        layout_generation,
+    )
+    .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+    let events = wait_trace(
+        trace_path,
+        trace_cursor,
+        Duration::from_secs(10),
+        |events| {
+            events
+                .iter()
+                .any(|line| line.contains("trace_event=\"radial_query_resolution\""))
+                && events
+                    .iter()
+                    .any(|line| line.contains("trace_event=\"radial_query_dispatch\""))
+        },
+    );
+    if !events
+        .iter()
+        .any(|line| line.contains("trace_event=\"radial_query_resolution\""))
+        || !events
+            .iter()
+            .any(|line| line.contains("trace_event=\"radial_query_dispatch\""))
+    {
+        let _ = sampler.finish();
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!(
+                "selected radial cell {cell_id} produced no correlated query resolution/dispatch trace"
+            ),
+        ));
+    }
+    if !wait_until(ROOT_TIMEOUT, || {
+        radial_surfaces_are_inactive(child, &surfaces)
+    }) {
+        let _ = sampler.finish();
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "selected query radial session did not close its runtime surfaces".into(),
+        ));
+    }
+    let effect = finish(child, ui, &events)?;
+    if !wait_query_trace_quiet(
+        trace_path,
+        trace_cursor,
+        Duration::from_millis(250),
+        Duration::from_secs(2),
+    ) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "candidate query trace did not reach a bounded ROOT/effect quiet window".into(),
+        ));
+    }
+    let pre_observation_trace = query_trace_tail(trace_path, trace_cursor);
+    let terminal_observation = if let Some(baseline) = baseline_observation.as_ref() {
+        request_terminal_query_observation(
+            child,
+            baseline,
+            &pre_observation_trace,
+            cell_id,
+            cell_digest,
+            session_digest,
+        )?
+    } else {
+        None
+    };
+    // The GUI may process a late completion, duplicate dispatch, or ROOT
+    // presentation event while acknowledging the terminal observation.
+    // Include all events through that acknowledgement in the final oracle.
+    let trace_tail = query_trace_tail(trace_path, trace_cursor);
+    let (
+        root_observations,
+        root_sample_count,
+        root_visible_samples,
+        root_hidden_samples,
+        root_visibility_violation_count,
+        root_identity_violation_count,
+        root_geometry_change_count,
+    ) = sampler.finish();
+    if root_visibility_violation_count != 0
+        || root_identity_violation_count != 0
+        || root_geometry_change_count != 0
+    {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!(
+                "ROOT changed during guarded query operation: visibility_violations={root_visibility_violation_count}, identity_violations={root_identity_violation_count}, geometry_changes={root_geometry_change_count}; samples={root_observations:?}"
+            ),
+        ));
+    }
+    let mut evidence = parse_query_invocation(
+        &trace_tail,
+        &trace_tail,
+        cell_id,
+        cell_digest,
+        session_digest,
+        root_observations,
+        root_sample_count,
+        root_visible_samples,
+        root_hidden_samples,
+        root_visibility_violation_count,
+        root_identity_violation_count,
+        root_geometry_change_count,
+        effect,
+        terminal_observation,
+        setup_visibility,
+        click_evidence,
+    )?;
+    let marker_after = read_marker_counts(marker_path)?;
+    validate_query_marker_delta(&marker_before, &marker_after, cell_id)?;
+    evidence.forbidden_root_command_count = count_forbidden_preserve_root_events(
+        &trace_tail,
+        evidence.root_policy,
+        evidence.requirement,
+    );
+    Ok(evidence)
+}
+
+fn hover_query_cell(
+    child: &NativeChild,
+    surfaces: &[WindowSnapshot],
+    trace_path: &Path,
+    cell_id: &str,
+) -> Result<(WindowSnapshot, POINT, u64, u64, u64), CaseFailure> {
+    if !radial_surfaces_are_active(child, surfaces) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "query radial surfaces became inactive before selection".into(),
+        ));
+    }
+    let expected_cell_digest = acceptance_id_digest(cell_id);
+    let mut candidates = Vec::new();
+    for surface in surfaces {
+        let width = surface.bounds[2].saturating_sub(surface.bounds[0]);
+        let height = surface.bounds[3].saturating_sub(surface.bounds[1]);
+        if width <= 0 || height <= 0 {
+            continue;
+        }
+        let radius = width.min(height);
+        let cx = surface.bounds[0] + width / 2;
+        let cy = surface.bounds[1] + height / 2;
+        for fraction in [0.29_f32, 0.37, 0.44, 0.48] {
+            let r = (radius as f32 * fraction) as i32;
+            for step in 0..24 {
+                let angle =
+                    std::f32::consts::TAU * (step as f32 / 24.0) - std::f32::consts::FRAC_PI_2;
+                let point = POINT {
+                    x: cx + (angle.cos() * r as f32) as i32,
+                    y: cy + (angle.sin() * r as f32) as i32,
+                };
+                if point.x >= surface.bounds[0]
+                    && point.x < surface.bounds[2]
+                    && point.y >= surface.bounds[1]
+                    && point.y < surface.bounds[3]
+                {
+                    candidates.push((surface.clone(), point));
+                }
+            }
+        }
+    }
+    for (surface, point) in candidates {
+        if !radial_surfaces_are_active(child, surfaces) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "radial surfaces closed while resolving the requested cell".into(),
+            ));
+        }
+        let cursor = trace_lines(trace_path).len();
+        set_cursor_position(point)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let events = wait_trace(trace_path, cursor, Duration::from_millis(55), |events| {
+            events.iter().any(|line| {
+                line.contains("trace_event=\"runtime_radial_hover\"")
+                    && trace_field_value(line, "cell_digest").and_then(|v| v.parse::<u64>().ok())
+                        == Some(expected_cell_digest)
+            })
+        });
+        if let Some(line) = events.iter().rev().find(|line| {
+            line.contains("trace_event=\"runtime_radial_hover\"")
+                && trace_field_value(line, "cell_digest").and_then(|v| v.parse::<u64>().ok())
+                    == Some(expected_cell_digest)
+                && trace_field_value(line, "role") == Some("Action")
+                && trace_field_value(line, "executable") == Some("true")
+        }) {
+            let session_digest = trace_field_value(line, "session_digest")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let layout_generation = trace_field_value(line, "layout_generation")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            if session_digest != 0 && layout_generation != 0 {
+                return Ok((
+                    surface,
+                    point,
+                    session_digest,
+                    expected_cell_digest,
+                    layout_generation,
+                ));
+            }
+        }
+    }
+    Err(CaseFailure::new(
+        FailureStage::GestureDecision,
+        format!(
+            "no production hover acknowledgment identified executable cell {cell_id:?} in the owned radial session"
+        ),
+    ))
+}
+
+fn parse_query_invocation(
+    events: &[String],
+    all_operation_events: &[String],
+    cell_id: &str,
+    cell_digest: u64,
+    session_digest: u64,
+    root_observations: Vec<QueryRootPresentationEvidence>,
+    root_sample_count: usize,
+    root_visible_samples: usize,
+    root_hidden_samples: usize,
+    root_visibility_violation_count: usize,
+    root_identity_violation_count: usize,
+    root_geometry_change_count: usize,
+    effect: QueryEffectResult,
+    terminal_observation: Option<QueryObservationFileResponse>,
+    setup_visibility: QuerySetupVisibilityEvidence,
+    pointer_click: super::super::QueryPointerClickEvidence,
+) -> Result<QueryInvocationEvidence, CaseFailure> {
+    let (resolution, dispatch) =
+        correlated_query_trace(events, cell_id, cell_digest, session_digest)?;
+    let number = |line: &str, field: &str| -> Result<u64, CaseFailure> {
+        trace_field_value(line, field)
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    format!("query trace omitted numeric {field}"),
+                )
+            })
+    };
+    for field in [
+        "invocation_id",
+        "session_digest",
+        "cell_digest",
+        "session_generation",
+        "config_revision",
+        "query_digest",
+    ] {
+        if number(resolution, field)? != number(dispatch, field)? {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!("query resolution/dispatch correlation disagrees on {field}"),
+            ));
+        }
+    }
+    let mode = match trace_field_value(resolution, "mode") {
+        Some("open_launcher") => QueryEvidenceMode::OpenLauncher,
+        Some("execute_first") => QueryEvidenceMode::ExecuteFirst,
+        Some("exact_command") => QueryEvidenceMode::ExactCommand,
+        Some("pinned_action") => QueryEvidenceMode::PinnedAction,
+        _ => {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "query resolution has unknown mode".into(),
+            ));
+        }
+    };
+    if trace_field_value(dispatch, "mode") != trace_field_value(resolution, "mode") {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query resolution and dispatch modes disagree".into(),
+        ));
+    }
+    let resolution_state = match trace_field_value(resolution, "state") {
+        Some("manual_ui") => QueryEvidenceState::ManualUi,
+        Some("ready") => QueryEvidenceState::Ready,
+        Some("query_fallback") => QueryEvidenceState::NoResults,
+        Some("failed") => QueryEvidenceState::Failed,
+        other => {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!("query resolution state is not terminal: {other:?}"),
+            ));
+        }
+    };
+    let dispatch_outcome = match trace_field_value(dispatch, "outcome") {
+        Some("executed") => QueryEvidenceOutcome::Executed,
+        Some("confirmation_required") => QueryEvidenceOutcome::ConfirmationRequired,
+        Some("unavailable") => QueryEvidenceOutcome::Unavailable,
+        _ => {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "query dispatch has unknown outcome".into(),
+            ));
+        }
+    };
+    let mut requirement = match trace_field_value(dispatch, "interaction_requirement") {
+        Some("launcher_ui") => QueryEvidenceRequirement::LauncherUi,
+        Some("confirmation") => QueryEvidenceRequirement::Confirmation,
+        Some("external_input") => QueryEvidenceRequirement::External,
+        Some("preserve_root" | "none") => QueryEvidenceRequirement::PreserveRoot,
+        other => {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!("query dispatch requirement is unknown: {other:?}"),
+            ));
+        }
+    };
+    if dispatch_outcome == QueryEvidenceOutcome::ConfirmationRequired {
+        requirement = QueryEvidenceRequirement::Confirmation;
+    }
+    let root_policy = match trace_field_value(dispatch, "root_policy") {
+        Some("preserve") => QueryEvidenceRootPolicy::Preserve,
+        Some("legacy") => QueryEvidenceRootPolicy::Legacy,
+        other => {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!("query dispatch root policy is unknown: {other:?}"),
+            ));
+        }
+    };
+    let selected_value = number(resolution, "selected_digest")?;
+    let selected_dispatch = number(dispatch, "selected_digest")?;
+    let selected_digest = (selected_value != 0).then_some(selected_value);
+    if selected_value != selected_dispatch {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query selected-result digest changed between resolution and dispatch".into(),
+        ));
+    }
+    let provider_revision =
+        trace_field_value(resolution, "provider_revision").and_then(parse_optional_trace_u64);
+    let result_count = number(resolution, "result_count")? as usize;
+    let result_digest = number(resolution, "result_digest")?;
+    let query_digest = number(resolution, "query_digest")?;
+    let query_fields = ["session_generation", "config_revision"];
+    for field in query_fields {
+        if number(resolution, field)? == 0 {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!("query resolution has zero {field}"),
+            ));
+        }
+    }
+    if number(resolution, "invocation_id")? == 0
+        || query_digest == 0
+        || cell_digest == 0
+        || session_digest == 0
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!("query selection identity is incomplete for {cell_id}"),
+        ));
+    }
+    if number(resolution, "cell_digest")? != cell_digest
+        || number(dispatch, "cell_digest")? != cell_digest
+        || number(resolution, "session_digest")? != session_digest
+        || number(dispatch, "session_digest")? != session_digest
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query resolution/dispatch does not match the acknowledged hovered cell and session"
+                .into(),
+        ));
+    }
+    let (trace_source, trace_before, trace_after) = parse_query_root_snapshots(
+        events,
+        number(resolution, "invocation_id")?,
+        session_digest,
+        cell_digest,
+        query_digest,
+        selected_digest,
+        root_policy,
+        dispatch_outcome,
+    )?;
+    let needs_ordinary_observation = root_policy == QueryEvidenceRootPolicy::Preserve
+        && dispatch_outcome == QueryEvidenceOutcome::Executed
+        && selected_digest.is_some();
+    let (
+        source,
+        root_state_before,
+        root_state_after,
+        ordinary_baseline_request_id,
+        ordinary_terminal_request_id,
+        ordinary_baseline_frame_ordinal,
+        ordinary_terminal_frame_ordinal,
+    ) = if needs_ordinary_observation {
+        let observation = terminal_observation.ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::NativeRootState,
+                "preserved query action has no post-quiet GUI ordinary-state observation".into(),
+            )
+        })?;
+        let (Some(before), Some(after), Some(baseline_request_id), Some(baseline_frame_ordinal)) = (
+            observation.before.clone(),
+            observation.after.clone(),
+            observation.baseline_request_id,
+            observation.baseline_frame_ordinal,
+        ) else {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "terminal GUI ordinary-state observation omitted baseline or final state".into(),
+            ));
+        };
+        if observation.phase != "terminal"
+            || observation.status != "captured"
+            || observation.session_digest != session_digest
+            || observation.cell_digest != cell_digest
+            || observation.invocation_id != Some(number(resolution, "invocation_id")?)
+            || observation.query_digest != Some(query_digest)
+            || observation.action_digest != selected_digest
+            || observation.source.as_deref() != trace_source.map(query_source_label)
+            || trace_before.as_ref() != Some(&before)
+            || trace_after.as_ref() != Some(&after)
+            || observation.baseline_state_digest != Some(before.state_digest)
+            || observation.observed_frame_ordinal <= baseline_frame_ordinal
+            || observation.request_id <= baseline_request_id
+        {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "post-quiet GUI observation disagrees with accepted action or synchronous trace"
+                    .into(),
+            ));
+        }
+        (
+            trace_source,
+            Some(before),
+            Some(after),
+            Some(baseline_request_id),
+            Some(observation.request_id),
+            Some(baseline_frame_ordinal),
+            Some(observation.observed_frame_ordinal),
+        )
+    } else {
+        if terminal_observation.is_some() {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "unexpected terminal GUI ordinary-state observation for non-preserving action"
+                    .into(),
+            ));
+        }
+        (
+            trace_source,
+            trace_before,
+            trace_after,
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    let forbidden_root_command_count =
+        count_forbidden_preserve_root_events(all_operation_events, root_policy, requirement);
+    Ok(QueryInvocationEvidence {
+        mode,
+        cell_id: cell_id.to_owned(),
+        query_digest,
+        cell_digest,
+        session_digest,
+        invocation_id: number(resolution, "invocation_id")?,
+        session_generation: number(resolution, "session_generation")?,
+        config_revision: number(resolution, "config_revision")?,
+        preparation_generation: number(resolution, "preparation_generation")?,
+        provider_revision,
+        resolution_state,
+        result_count,
+        result_digest,
+        selected_digest,
+        requirement,
+        dispatch_outcome,
+        root_policy,
+        effect_count: effect.effect_count,
+        cancelled_confirmation_count: effect.cancelled_confirmation_count,
+        root_observations,
+        root_sample_count,
+        root_visible_samples,
+        root_hidden_samples,
+        root_visibility_violation_count,
+        root_identity_violation_count,
+        root_geometry_change_count,
+        forbidden_root_command_count,
+        source,
+        root_state_before,
+        root_state_after,
+        ordinary_baseline_request_id,
+        ordinary_terminal_request_id,
+        ordinary_baseline_frame_ordinal,
+        ordinary_terminal_frame_ordinal,
+        setup_visibility,
+        pointer_click,
+        ui_ack: effect.ui_ack,
+    })
+}
+
+fn query_source_label(source: QueryEvidenceSource) -> &'static str {
+    match source {
+        QueryEvidenceSource::Enter => "enter",
+        QueryEvidenceSource::Click => "click",
+        QueryEvidenceSource::Dashboard => "dashboard",
+        QueryEvidenceSource::Gesture => "gesture",
+        QueryEvidenceSource::Macro => "macro",
+        QueryEvidenceSource::RadialRelease => "radial_release",
+        QueryEvidenceSource::RadialShortcut => "radial_shortcut",
+        QueryEvidenceSource::RadialHotstring => "radial_hotstring",
+    }
+}
+
+fn parse_query_root_snapshots(
+    events: &[String],
+    invocation_id: u64,
+    session_digest: u64,
+    cell_digest: u64,
+    query_digest: u64,
+    selected_digest: Option<u64>,
+    root_policy: QueryEvidenceRootPolicy,
+    dispatch_outcome: QueryEvidenceOutcome,
+) -> Result<
+    (
+        Option<QueryEvidenceSource>,
+        Option<QueryRootStateEvidence>,
+        Option<QueryRootStateEvidence>,
+    ),
+    CaseFailure,
+> {
+    let lines = events
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("trace_event=\"radial_root_snapshot\""))
+        .collect::<Vec<_>>();
+    let required = root_policy == QueryEvidenceRootPolicy::Preserve
+        && dispatch_outcome == QueryEvidenceOutcome::Executed
+        && selected_digest.is_some();
+    if !required {
+        if lines.is_empty() {
+            return Ok((None, None, None));
+        }
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "unexpected ROOT preservation snapshots for a non-preserving or nonexecuted selection"
+                .into(),
+        ));
+    }
+    if lines.len() != 2 || lines[0].0 >= lines[1].0 {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!(
+                "preserved radial execution requires ordered before/after ROOT snapshots; found {}",
+                lines.len()
+            ),
+        ));
+    }
+    let before_line = lines[0].1.as_str();
+    let after_line = lines[1].1.as_str();
+    let parse_u64 = |line: &str, field: &str| {
+        trace_field_value(line, field).and_then(|value| value.parse::<u64>().ok())
+    };
+    let parse_usize = |line: &str, field: &str| {
+        trace_field_value(line, field).and_then(|value| value.parse::<usize>().ok())
+    };
+    let parse_bool = |line: &str, field: &str| match trace_field_value(line, field) {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    };
+    let parse_source = |line: &str| match trace_field_value(line, "source") {
+        Some("enter") => Some(QueryEvidenceSource::Enter),
+        Some("click") => Some(QueryEvidenceSource::Click),
+        Some("dashboard") => Some(QueryEvidenceSource::Dashboard),
+        Some("gesture") => Some(QueryEvidenceSource::Gesture),
+        Some("macro") => Some(QueryEvidenceSource::Macro),
+        Some("radial_release") => Some(QueryEvidenceSource::RadialRelease),
+        Some("radial_shortcut") => Some(QueryEvidenceSource::RadialShortcut),
+        Some("radial_hotstring") => Some(QueryEvidenceSource::RadialHotstring),
+        _ => None,
+    };
+    let source_before = parse_source(before_line);
+    let source_after = parse_source(after_line);
+    let matches_identity = |line: &str| {
+        parse_u64(line, "invocation_id") == Some(invocation_id)
+            && parse_u64(line, "session_digest") == Some(session_digest)
+            && parse_u64(line, "cell_digest") == Some(cell_digest)
+            && parse_u64(line, "query_digest") == Some(query_digest)
+            && parse_u64(line, "action_digest") == selected_digest
+    };
+    if !matches_identity(before_line)
+        || !matches_identity(after_line)
+        || source_before.is_none()
+        || source_before != source_after
+        || trace_field_value(before_line, "phase") != Some("before")
+        || trace_field_value(after_line, "phase") != Some("after")
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "ROOT preservation snapshots have missing or mismatched invocation/source identity"
+                .into(),
+        ));
+    }
+    let parse_snapshot = |line: &str| -> Option<QueryRootStateEvidence> {
+        let selected = line
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix("selected_index="))?
+            .parse::<i64>()
+            .ok()?;
+        Some(QueryRootStateEvidence {
+            state_digest: parse_u64(line, "state_digest")?,
+            query_digest: parse_u64(line, "ordinary_query_digest")?,
+            action_digest: parse_u64(line, "action_digest")?,
+            results_digest: parse_u64(line, "results_digest")?,
+            results_count: parse_usize(line, "results_count")?,
+            selected_index: (selected >= 0).then_some(selected as usize),
+            grid_layout: parse_bool(line, "grid_layout")?,
+            visible: parse_bool(line, "visible")?,
+            restore: parse_bool(line, "restore")?,
+            visibility_revision: parse_u64(line, "visibility_revision")?,
+            focus_query: parse_bool(line, "focus_query")?,
+            move_cursor_end: parse_bool(line, "move_cursor_end")?,
+            last_results_valid: parse_bool(line, "last_results_valid")?,
+            last_search_query_digest: parse_u64(line, "last_search_query_digest")?,
+            suggestions_digest: parse_u64(line, "suggestions_digest")?,
+            autocomplete_index: parse_usize(line, "autocomplete_index")?,
+            query_history_digest: parse_u64(line, "query_history_digest")?,
+            matching_history_count: parse_usize(line, "matching_history_count")?,
+            source_history_count: parse_usize(line, "radial_source_history_count")?,
+            usage_count: u32::try_from(parse_u64(line, "usage_count")?).ok()?,
+        })
+    };
+    let before = parse_snapshot(before_line).ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::GestureDecision,
+            "before ROOT snapshot omitted query/results/selection/history fields".into(),
+        )
+    })?;
+    let after = parse_snapshot(after_line).ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::GestureDecision,
+            "after ROOT snapshot omitted query/results/selection/history fields".into(),
+        )
+    })?;
+    Ok((source_before, Some(before), Some(after)))
+}
+
+fn correlated_query_trace<'a>(
+    events: &'a [String],
+    cell_id: &str,
+    cell_digest: u64,
+    session_digest: u64,
+) -> Result<(&'a str, &'a str), CaseFailure> {
+    let (resolutions, dispatches) = events.iter().enumerate().fold(
+        (Vec::new(), Vec::new()),
+        |(mut resolutions, mut dispatches), (index, line)| {
+            if line.contains("trace_event=\"radial_query_resolution\"") {
+                resolutions.push((index, line.as_str()));
+            }
+            if line.contains("trace_event=\"radial_query_dispatch\"") {
+                dispatches.push((index, line.as_str()));
+            }
+            (resolutions, dispatches)
+        },
+    );
+    if resolutions.len() != 1 || dispatches.len() != 1 {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!(
+                "query evidence requires exactly one resolution and dispatch; got {}/{} for {cell_id}",
+                resolutions.len(),
+                dispatches.len()
+            ),
+        ));
+    }
+    let (resolution_index, resolution) = resolutions[0];
+    let (dispatch_index, dispatch) = dispatches[0];
+    if resolution_index >= dispatch_index {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query resolution trace line must precede its dispatch trace line".into(),
+        ));
+    }
+    let numeric_field = |line: &str, field: &str| {
+        trace_field_value(line, field).and_then(|value| value.parse::<u64>().ok())
+    };
+    let resolution_ms = numeric_field(resolution, "elapsed_ms");
+    let dispatch_ms = numeric_field(dispatch, "elapsed_ms");
+    if resolution_ms
+        .zip(dispatch_ms)
+        .is_none_or(|(resolved, sent)| resolved > sent)
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query dispatch was missing a later, correctly ordered resolution event".into(),
+        ));
+    }
+    for field in ["invocation_id", "session_digest", "cell_digest"] {
+        if numeric_field(resolution, field).is_none()
+            || numeric_field(resolution, field) != numeric_field(dispatch, field)
+        {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!("query resolution/dispatch correlation disagrees on {field}"),
+            ));
+        }
+    }
+    if numeric_field(resolution, "cell_digest") != Some(cell_digest)
+        || numeric_field(dispatch, "cell_digest") != Some(cell_digest)
+        || numeric_field(resolution, "session_digest") != Some(session_digest)
+        || numeric_field(dispatch, "session_digest") != Some(session_digest)
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            "query resolution/dispatch identity differs from the production hover acknowledgment"
+                .into(),
+        ));
+    }
+    Ok((resolution, dispatch))
+}
+
+fn parse_optional_trace_u64(value: &str) -> Option<u64> {
+    value
+        .strip_prefix("Some(")
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(value)
+        .parse()
+        .ok()
+}
+
+fn count_forbidden_preserve_root_events(
+    events: &[String],
+    policy: QueryEvidenceRootPolicy,
+    requirement: QueryEvidenceRequirement,
+) -> usize {
+    // Preservation describes the underlying action; confirmation still needs UI.
+    if policy != QueryEvidenceRootPolicy::Preserve
+        || matches!(
+            requirement,
+            QueryEvidenceRequirement::Confirmation | QueryEvidenceRequirement::LauncherUi
+        )
+    {
+        return 0;
+    }
+    events
+        .iter()
+        .filter(|line| {
+            line.contains("trace_event=\"native_activation\"")
+                || line.contains("trace_event=\"native_window_snapshot\"")
+                || line.contains("trace_event=\"desired_visibility\"")
+                || line.contains("trace_event=\"root_command\"")
+        })
+        .count()
+}
+
+fn acceptance_id_digest(value: &str) -> u64 {
+    value.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn wait_query_trace_quiet(path: &Path, cursor: usize, quiet: Duration, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut signature = None;
+    let mut unchanged_since = Instant::now();
+    while Instant::now() < deadline {
+        let current = trace_lines(path)
+            .into_iter()
+            .skip(cursor)
+            .filter(|line| {
+                line.contains("trace_event=\"radial_query_resolution\"")
+                    || line.contains("trace_event=\"radial_query_dispatch\"")
+                    || line.contains("trace_event=\"root_command\"")
+                    || line.contains("trace_event=\"native_activation\"")
+                    || line.contains("trace_event=\"native_window_snapshot\"")
+                    || line.contains("trace_event=\"desired_visibility\"")
+                    || line.contains("trace_event=\"runtime_radial_hover\"")
+                    || line.contains("trace_event=\"radial_action\"")
+                    || line.contains("trace_event=\"radial_root_snapshot\"")
+            })
+            .count();
+        if signature != Some(current) {
+            signature = Some(current);
+            unchanged_since = Instant::now();
+        }
+        if Instant::now().duration_since(unchanged_since) >= quiet {
+            return true;
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+    false
+}
+
+fn wait_launcher_query(
+    child: &NativeChild,
+    ui: &UiAutomation,
+    expected: &str,
+) -> Result<(), CaseFailure> {
+    let root = child.refresh_root().map_err(query_window_error)?;
+    let deadline = Instant::now() + UIA_TIMEOUT;
+    loop {
+        if let Some(edit) = ui
+            .find_first_edit(root.hwnd, child.process_id())
+            .map_err(query_uia_error)?
+            && ui
+                .edit_value_matches(&edit, expected)
+                .map_err(query_uia_error)?
+            && ui.control_has_focus(&edit)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+    Err(CaseFailure::new(
+        FailureStage::NativeRootState,
+        format!(
+            "focused launcher query editor did not contain the expected exact query {expected:?}"
+        ),
+    ))
+}
+
+fn wait_note_editor(
+    child: &NativeChild,
+    ui: &UiAutomation,
+    expected_content: &str,
+    output: &Path,
+) -> Result<(), CaseFailure> {
+    let root = child.refresh_root().map_err(query_window_error)?;
+    let deadline = Instant::now() + UIA_TIMEOUT;
+    loop {
+        if let Some(edit) = ui
+            .find_edit_with_value_fragment(root.hwnd, child.process_id(), expected_content)
+            .map_err(query_uia_error)?
+            && ui.control_has_focus(&edit)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+    let diagnostic = ui.describe_tree(root.hwnd).unwrap_or_else(|error| error);
+    fs::write(output.join("case-Q11-uia.txt"), diagnostic).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!("write note UIA diagnostic: {error}"),
+        )
+    })?;
+    Err(CaseFailure::new(
+        FailureStage::NativeRootState,
+        "Q11 did not expose the focused note-content editor with the expected note identity".into(),
+    ))
+}
+
+fn click_confirmation_control(
+    child: &NativeChild,
+    ui: &UiAutomation,
+    name: &str,
+    trace_path: &Path,
+) -> Result<(), CaseFailure> {
+    let root = child.refresh_root().map_err(query_window_error)?;
+    for text in ["Delete note", "This action cannot be undone."] {
+        ui.wait_visible_text(root.hwnd, child.process_id(), text, UIA_TIMEOUT)
+            .map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::NativeRootState,
+                    format!("destructive confirmation content was not exposed: {error}"),
+                )
+            })?;
+    }
+    let deadline = Instant::now() + UIA_TIMEOUT;
+    loop {
+        let confirm = ui
+            .find_visible_button(root.hwnd, child.process_id(), "Confirm")
+            .map_err(query_uia_error)?;
+        let cancel = ui
+            .find_visible_button(root.hwnd, child.process_id(), "Cancel")
+            .map_err(query_uia_error)?;
+        if let (Some(confirm), Some(cancel)) = (confirm, cancel) {
+            let control = match name {
+                "Confirm" => confirm,
+                "Cancel" => cancel,
+                _ => {
+                    return Err(CaseFailure::new(
+                        FailureStage::NativeRootState,
+                        "unknown confirmation control".into(),
+                    ));
+                }
+            };
+            super::click_semantic_control(child, &root, &control, trace_path).map_err(|error| {
+                CaseFailure::new(
+                    FailureStage::InputInjection,
+                    format!("click confirmation {name}: {error}"),
+                )
+            })?;
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+    Err(CaseFailure::new(
+        FailureStage::NativeRootState,
+        format!("confirmation control {name:?} was not exposed"),
+    ))
+}
+
+fn marker_occurrences(path: &Path, nonce: &str) -> Result<usize, CaseFailure> {
+    Ok(read_marker_counts(path)?.get(nonce).copied().unwrap_or(0))
+}
+
+fn read_marker_counts(path: &Path) -> Result<BTreeMap<String, usize>, CaseFailure> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Cleanup,
+            format!("read Query marker ledger metadata: {error}"),
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > 4096 {
+        return Err(CaseFailure::new(
+            FailureStage::Cleanup,
+            "Query marker ledger is not a bounded regular file".into(),
+        ));
+    }
+    let text = fs::read_to_string(path).map_err(|error| {
+        CaseFailure::new(
+            FailureStage::Cleanup,
+            format!("read isolated Query marker ledger: {error}"),
+        )
+    })?;
+    if !valid_marker_ledger(&text) {
+        return Err(CaseFailure::new(
+            FailureStage::Cleanup,
+            "Query marker ledger has invalid header or records".into(),
+        ));
+    }
+    let mut counts = BTreeMap::new();
+    for nonce in text.lines().skip(1) {
+        *counts.entry(nonce.to_owned()).or_insert(0) += 1;
+    }
+    Ok(counts)
+}
+
+fn validate_query_marker_delta(
+    before: &BTreeMap<String, usize>,
+    after: &BTreeMap<String, usize>,
+    cell_id: &str,
+) -> Result<(), CaseFailure> {
+    let expected_nonce = match cell_id {
+        "qa-hidden-first" | "qa-visible-first" => Some("q-first"),
+        "qa-pinned-second" => Some("q-second"),
+        "qa-exact-marker" => Some("q-exact"),
+        "qa-open" | "qa-no-results" | "qa-note-new" | "qa-launcher-show" | "qa-note-remove" => None,
+        _ => {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!("unknown query fixture cell for marker validation: {cell_id}"),
+            ));
+        }
+    };
+    let mut nonces = before.keys().chain(after.keys()).collect::<BTreeSet<_>>();
+    for nonce in nonces.iter() {
+        let delta = after.get(*nonce).copied().unwrap_or(0) as isize
+            - before.get(*nonce).copied().unwrap_or(0) as isize;
+        let expected = usize::from(expected_nonce == Some(nonce.as_str())) as isize;
+        if delta != expected {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                format!(
+                    "query marker ledger delta for {nonce:?} was {delta}; expected {expected} for {cell_id}"
+                ),
+            ));
+        }
+    }
+    if let Some(expected_nonce) = expected_nonce
+        && before.get(expected_nonce).copied().unwrap_or(0) + 1
+            != after.get(expected_nonce).copied().unwrap_or(0)
+    {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!("query marker {expected_nonce:?} did not append exactly once"),
+        ));
+    }
+    nonces.clear();
+    Ok(())
+}
+
+fn wait_marker_occurrences(path: &Path, nonce: &str, expected: usize) -> Result<(), CaseFailure> {
+    if !wait_until(UIA_TIMEOUT, || {
+        marker_occurrences(path, nonce).is_ok_and(|count| count == expected)
+    }) {
+        return Err(CaseFailure::new(
+            FailureStage::GestureDecision,
+            format!(
+                "isolated marker {nonce:?} did not execute exactly once; expected_count={expected}; actual={:?}",
+                marker_occurrences(path, nonce)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn query_window_error(error: String) -> CaseFailure {
+    CaseFailure::new(FailureStage::WindowDiscovery, error)
+}
+fn query_uia_error(error: String) -> CaseFailure {
+    CaseFailure::new(FailureStage::NativeRootState, error)
+}
+
 fn append_hotkey_setup_failures(
     report: &mut AcceptanceReport,
     message: String,
@@ -3714,6 +5967,277 @@ fn root_is_physically_visible(
         ));
     }
     Ok(root.visible && !root.minimized && intersects_display_bounds(root.bounds, &displays))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuerySetupTraceAck {
+    invocation_id: u64,
+    generation: u64,
+    press_event_ordinal: usize,
+    release_event_ordinal: usize,
+    short_tap_event_ordinal: usize,
+    visibility_event_ordinal: usize,
+    visibility_visible: bool,
+}
+
+fn query_setup_trace_ack(
+    events: &[String],
+    base_cursor: usize,
+    desired_visible: bool,
+) -> Option<QuerySetupTraceAck> {
+    for (press_index, press) in events.iter().enumerate().skip(base_cursor) {
+        let press_ordinal = press_index.saturating_add(1);
+        if !press.contains("trace_event=\"configured_primary\"")
+            || trace_field_value(press, "transition") != Some("Press")
+            || trace_field_value(press, "provenance") != Some("ExternalInjected")
+            || trace_field_value(press, "modifiers_match") != Some("true")
+        {
+            continue;
+        }
+        let invocation_id = trace_field_value(press, "invocation_id")?
+            .parse::<u64>()
+            .ok()?;
+        let generation = trace_field_value(press, "generation")?
+            .parse::<u64>()
+            .ok()?;
+        if invocation_id == 0 || generation == 0 {
+            continue;
+        }
+        let release_index =
+            events
+                .iter()
+                .enumerate()
+                .skip(press_index + 1)
+                .find_map(|(index, line)| {
+                    (line.contains("trace_event=\"configured_primary\"")
+                        && trace_field_value(line, "transition") == Some("Release")
+                        && trace_field_value(line, "provenance") == Some("ExternalInjected")
+                        && matches!(
+                            trace_field_value(line, "modifiers_match"),
+                            Some("true" | "false")
+                        )
+                        && trace_field_value(line, "invocation_id")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            == Some(invocation_id)
+                        && trace_field_value(line, "generation")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            == Some(generation))
+                    .then_some(index)
+                });
+        let Some(release_index) = release_index else {
+            continue;
+        };
+        let short_tap_index =
+            events
+                .iter()
+                .enumerate()
+                .skip(release_index + 1)
+                .find_map(|(index, line)| {
+                    (line.contains("trace_event=\"short_tap\"")
+                        && trace_field_value(line, "terminal") == Some("true")
+                        && trace_field_value(line, "invocation_id")
+                            .and_then(|value| value.parse::<u64>().ok())
+                            == Some(invocation_id))
+                    .then_some(index)
+                });
+        let Some(short_tap_index) = short_tap_index else {
+            continue;
+        };
+        let visibility_index = events
+            .iter()
+            .enumerate()
+            .skip(short_tap_index + 1)
+            .find_map(|(index, line)| {
+                (line.contains("trace_event=\"desired_visibility\"")
+                    && trace_field_value(line, "source") == Some("ToggleBatch")
+                    && trace_field_value(line, "visible")
+                        == Some(if desired_visible { "true" } else { "false" })
+                    && trace_field_value(line, "invocation_id")
+                        .and_then(|value| value.parse::<u64>().ok())
+                        == Some(invocation_id))
+                .then_some(index)
+            });
+        let Some(visibility_index) = visibility_index else {
+            continue;
+        };
+        return Some(QuerySetupTraceAck {
+            invocation_id,
+            generation,
+            press_event_ordinal: press_ordinal,
+            release_event_ordinal: release_index.saturating_add(1),
+            short_tap_event_ordinal: short_tap_index.saturating_add(1),
+            visibility_event_ordinal: visibility_index.saturating_add(1),
+            visibility_visible: desired_visible,
+        });
+    }
+    None
+}
+
+fn query_setup_observed_edges(edges: &[super::RunnerChordEdge]) -> Vec<QuerySetupObservedEdge> {
+    let Some(first) = edges.iter().map(|edge| edge.at).min() else {
+        return Vec::new();
+    };
+    let mut sorted = edges.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|edge| edge.at);
+    sorted
+        .into_iter()
+        .map(|edge| QuerySetupObservedEdge {
+            runner_relative_us: u64::try_from(edge.at.saturating_duration_since(first).as_micros())
+                .unwrap_or(u64::MAX),
+            virtual_key: edge.vk,
+            down: edge.down,
+            injected: edge.injected,
+            runner_cookie_matched: edge.extra_info == ACCEPTANCE_RUNNER_INPUT_COOKIE,
+        })
+        .collect()
+}
+
+fn ensure_query_hotkey_root_visibility(
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    trace_path: &Path,
+    hotkey: AcceptanceHotkey,
+    desired_visible: bool,
+) -> Result<QuerySetupVisibilityEvidence, CaseFailure> {
+    let root = child
+        .refresh_root()
+        .map_err(|error| CaseFailure::new(FailureStage::WindowDiscovery, error))?;
+    let visible_before = root_is_physically_visible(child, &root)?;
+    if visible_before == desired_visible {
+        return Ok(QuerySetupVisibilityEvidence {
+            visible_before,
+            desired_visible,
+            tap: None,
+        });
+    }
+
+    let mut observer = RunnerHookObserver::start()
+        .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
+    let observer_attempt = (|| -> Result<_, String> {
+        let probe_id = NEXT_HOOK_PUMP_PROBE_ID.fetch_add(1, Ordering::Relaxed);
+        observer.pump_roundtrip(probe_id, Duration::from_secs(1))?;
+        let quiet = observer.wait_for_key_quiet(
+            &hotkey_observer_keys(hotkey),
+            Duration::from_millis(75),
+            Duration::from_secs(1),
+        )?;
+        anchor.focus()?;
+        let trace_cursor = trace_lines(trace_path).len();
+        let tap = child.send_acceptance_hotkey(
+            anchor.hwnd(),
+            anchor.process_id(),
+            hotkey,
+            Duration::from_millis(25),
+        )?;
+        let observed =
+            observer.wait_for_chord_burst(&hotkey_observer_keys(hotkey), 1, Duration::from_secs(2));
+        Ok((quiet, trace_cursor, tap, observed))
+    })();
+    let observer_stop = observer.stop_and_report();
+    let (quiet, trace_cursor, tap, observed) = match (observer_attempt, observer_stop) {
+        (Ok(attempt), Ok(())) => attempt,
+        (Err(error), Ok(())) => {
+            return Err(CaseFailure::new(
+                FailureStage::InputInjection,
+                format!("query setup tap failed before terminal proof: {error}"),
+            ));
+        }
+        (Ok((_, _, tap, observed)), Err(error)) => {
+            return Err(CaseFailure::new(
+                FailureStage::InputInjection,
+                format!(
+                    "query setup observer cleanup failed: {error}; input=[{}]; observer=[{}]",
+                    tap.describe(),
+                    observed.describe()
+                ),
+            ));
+        }
+        (Err(error), Err(stop_error)) => {
+            return Err(CaseFailure::new(
+                FailureStage::InputInjection,
+                format!("query setup tap failed: {error}; observer cleanup failed: {stop_error}"),
+            ));
+        }
+    };
+    let expected = super::super::expected_setup_hotkey_edges(hotkey);
+    let expected_pairs = expected.iter().filter(|(_, down)| *down).count();
+    let observed_edges = query_setup_observed_edges(&observed.ordered_edges);
+    let foreign_edges = query_setup_observed_edges(&observed.foreign_edges);
+    if tap.down.inserted != expected_pairs
+        || tap.up.inserted != expected_pairs
+        || tap.observed_vks != hotkey_observer_keys(hotkey)
+        || observed.desktop != "Default"
+        || !observed.exact_injected_pairs(1)
+        || !observed.exact_injected_sequence(&expected)
+        || !observed.foreign_edges.is_empty()
+    {
+        return Err(CaseFailure::new(
+            FailureStage::InputInjection,
+            format!(
+                "query setup tap was not one clean owned configured gesture; quiet={}ms matching_edges={}; input=[{}]; observer=[{}]",
+                quiet.quiet_ms,
+                quiet.matching_edges,
+                tap.describe(),
+                observed.describe()
+            ),
+        ));
+    }
+    if !wait_until(ROOT_TIMEOUT, || {
+        query_setup_trace_ack(&trace_lines(trace_path), trace_cursor, desired_visible).is_some()
+    }) {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "setup tap input/observer receipts were complete, but no fresh configured Press→Release→terminal short-tap→matching visibility sequence arrived; trace_cursor={trace_cursor}; input=[{}]; observer=[{}]",
+                tap.describe(),
+                observed.describe()
+            ),
+        ));
+    }
+    let Some(trace_ack) =
+        query_setup_trace_ack(&trace_lines(trace_path), trace_cursor, desired_visible)
+    else {
+        return Err(CaseFailure::new(
+            FailureStage::HookAdmission,
+            format!(
+                "setup tap input/observer receipts were complete, but no fresh configured Press→Release→terminal short-tap→matching visibility sequence arrived; trace_cursor={trace_cursor}; input=[{}]; observer=[{}]",
+                tap.describe(),
+                observed.describe()
+            ),
+        ));
+    };
+    if !wait_root_visibility(child, desired_visible, ROOT_TIMEOUT) {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            format!(
+                "correlated setup invocation {} did not establish physical ROOT visibility={desired_visible}; input=[{}]; observer=[{}]",
+                trace_ack.invocation_id,
+                tap.describe(),
+                observed.describe()
+            ),
+        ));
+    }
+    Ok(QuerySetupVisibilityEvidence {
+        visible_before,
+        desired_visible,
+        tap: Some(QuerySetupTapEvidence {
+            input_down_inserted: tap.down.inserted,
+            input_up_inserted: tap.up.inserted,
+            quiet_preflight_ms: u64::try_from(quiet.quiet_ms).unwrap_or(u64::MAX),
+            quiet_matching_edges: quiet.matching_edges,
+            observer_default_desktop: observed.desktop == "Default",
+            observed_edges,
+            foreign_edges,
+            trace_cursor,
+            invocation_id: trace_ack.invocation_id,
+            generation: trace_ack.generation,
+            press_event_ordinal: trace_ack.press_event_ordinal,
+            release_event_ordinal: trace_ack.release_event_ordinal,
+            short_tap_event_ordinal: trace_ack.short_tap_event_ordinal,
+            visibility_event_ordinal: trace_ack.visibility_event_ordinal,
+            visibility_visible: trace_ack.visibility_visible,
+        }),
+    })
 }
 
 fn ensure_hotkey_root_visibility(
@@ -6625,22 +9149,10 @@ fn hotkey_key_names(hotkey: AcceptanceHotkey) -> &'static str {
 }
 
 fn expected_hotkey_edges(hotkey: AcceptanceHotkey, taps: usize) -> Vec<(u32, bool)> {
-    let tap_edges: &[(u32, bool)] = match hotkey {
-        AcceptanceHotkey::F11 => &[(0x7A, true), (0x7A, false)],
-        AcceptanceHotkey::ShiftAltWinEnd => &[
-            (0xA0, true),
-            (0xA4, true),
-            (0x5B, true),
-            (0x23, true),
-            (0x23, false),
-            (0x5B, false),
-            (0xA4, false),
-            (0xA0, false),
-        ],
-    };
+    let tap_edges = super::super::expected_setup_hotkey_edges(hotkey);
     let mut expected = Vec::with_capacity(tap_edges.len().saturating_mul(taps));
     for _ in 0..taps {
-        expected.extend_from_slice(tap_edges);
+        expected.extend_from_slice(&tap_edges);
     }
     expected
 }
@@ -6921,6 +9433,7 @@ pub fn record_environment_failure(
     let ids: &[&str] = match report.suite {
         AcceptanceSuite::All => &CASE_IDS,
         AcceptanceSuite::Hotkey => &HOTKEY_CASE_IDS,
+        AcceptanceSuite::Query => &QUERY_CASE_IDS,
     };
     for (index, id) in ids
         .iter()
@@ -14979,6 +17492,9 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "designer_widget_pointer",
         "root_result_pointer",
         "radial_action",
+        "runtime_radial_hover",
+        "radial_query_resolution",
+        "radial_query_dispatch",
         "designer_mutation",
         "authoring",
         "hook_primary",
@@ -15131,6 +17647,22 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "terminal",
         "correlation",
         "stage",
+        "session_digest",
+        "cell_digest",
+        "query_digest",
+        "result_digest",
+        "selected_digest",
+        "provider_revision",
+        "config_revision",
+        "preparation_generation",
+        "session_generation",
+        "result_count",
+        "mode",
+        "interaction_requirement",
+        "root_policy",
+        "outcome",
+        "role",
+        "executable",
     ];
 
     let tokens = split_trace_tokens(line);
@@ -15420,6 +17952,31 @@ fn expected(id: &str) -> &'static str {
         }
         "H18" => {
             "a hold from parked ROOT opens radial without pointer movement; a short tap wakes ROOT and dismisses radial without dispatch"
+        }
+        "Q02" => {
+            "saved OFF query opens the manual launcher query UI with the captured query and no automatic action"
+        }
+        "Q03" => {
+            "saved ON query executes the fresh first result once while hidden ROOT remains hidden and never flashes"
+        }
+        "Q05" => "saved non-first pinned result executes its frozen target once without re-ranking",
+        "Q07" => {
+            "empty saved ON query opens its original query with an explanation and causes no action"
+        }
+        "Q10" => {
+            "ON query preserves hidden ROOT without flash and preserves visible ROOT query, results, selection, and geometry"
+        }
+        "Q11" => {
+            "saved exact note command opens the real note editor through its launcher UI handoff"
+        }
+        "Q12" => {
+            "explicit launcher command applies its requested launcher/query effect through the radial handoff"
+        }
+        "Q13" => {
+            "isolated destructive note confirmation cancels without effect, then confirms exactly one removal"
+        }
+        "Q15" => {
+            "saved exact external command preserves separate arguments and appends one nonce marker"
         }
         "D0" => "production Edit Radial Menus entry opens one ready child-owned Designer",
         "D1" => {
@@ -16844,6 +19401,307 @@ mod tests {
     use super::*;
 
     #[test]
+    fn confirmation_ui_does_not_weaken_non_ui_root_presentation_guard() {
+        let events = vec![
+            "trace_event=\"root_command\" command=\"visible_true\"".into(),
+            "trace_event=\"native_activation\"".into(),
+        ];
+        for requirement in [
+            QueryEvidenceRequirement::PreserveRoot,
+            QueryEvidenceRequirement::External,
+        ] {
+            assert_eq!(
+                count_forbidden_preserve_root_events(
+                    &events,
+                    QueryEvidenceRootPolicy::Preserve,
+                    requirement
+                ),
+                2
+            );
+        }
+        assert_eq!(
+            count_forbidden_preserve_root_events(
+                &events,
+                QueryEvidenceRootPolicy::Preserve,
+                QueryEvidenceRequirement::Confirmation
+            ),
+            0
+        );
+        assert_eq!(
+            count_forbidden_preserve_root_events(
+                &events,
+                QueryEvidenceRootPolicy::Legacy,
+                QueryEvidenceRequirement::LauncherUi
+            ),
+            0
+        );
+    }
+
+    fn setup_trace_attempt(invocation_id: u64, generation: u64, visible: bool) -> Vec<String> {
+        vec![
+            format!(
+                "trace_event=\"configured_primary\" transition=Press provenance=ExternalInjected modifiers_match=true invocation_id={invocation_id} generation={generation}"
+            ),
+            format!(
+                "trace_event=\"configured_primary\" transition=Release provenance=ExternalInjected modifiers_match=false invocation_id={invocation_id} generation={generation}"
+            ),
+            format!("trace_event=\"short_tap\" invocation_id={invocation_id} terminal=true"),
+            format!(
+                "trace_event=\"desired_visibility\" visible={visible} source=ToggleBatch invocation_id={invocation_id}"
+            ),
+        ]
+    }
+
+    #[test]
+    fn query_setup_trace_ack_ignores_transitions_before_its_cursor() {
+        let mut events = setup_trace_attempt(1, 3, false);
+        events.push(
+            "trace_event=\"configured_primary\" transition=Press provenance=ExternalInjected modifiers_match=malformed invocation_id=2 generation=4".into(),
+        );
+        events.extend(setup_trace_attempt(7, 9, true));
+
+        let ack = query_setup_trace_ack(&events, 4, true)
+            .expect("fresh setup transition should follow the cursor");
+        assert_eq!(ack.invocation_id, 7);
+        assert_eq!(ack.generation, 9);
+        assert_eq!(
+            (
+                ack.press_event_ordinal,
+                ack.release_event_ordinal,
+                ack.short_tap_event_ordinal,
+                ack.visibility_event_ordinal,
+            ),
+            (6, 7, 8, 9)
+        );
+
+        assert!(query_setup_trace_ack(&events, events.len(), true).is_none());
+        assert!(query_setup_trace_ack(&events, 4, false).is_none());
+    }
+
+    fn query_trace_pair(cell_digest: u64, session_digest: u64) -> Vec<String> {
+        vec![
+            format!(
+                "trace_event=\"radial_query_resolution\" elapsed_ms=10 invocation_id=5 session_digest={session_digest} cell_digest={cell_digest} session_generation=2 config_revision=3 preparation_generation=4 query_digest=6 mode=execute_first state=ready provider_revision=Some(7) result_count=1 result_digest=8 selected_digest=8 interaction_requirement=external"
+            ),
+            format!(
+                "trace_event=\"radial_query_dispatch\" elapsed_ms=11 invocation_id=5 session_digest={session_digest} cell_digest={cell_digest} session_generation=2 config_revision=3 mode=execute_first query_digest=6 selected_digest=8 interaction_requirement=external root_policy=preserve outcome=executed"
+            ),
+        ]
+    }
+
+    fn observation_state(state_digest: u64) -> QueryRootStateEvidence {
+        QueryRootStateEvidence {
+            state_digest,
+            query_digest: 1,
+            action_digest: 2,
+            results_digest: 3,
+            results_count: 2,
+            selected_index: Some(1),
+            grid_layout: true,
+            visible: false,
+            restore: false,
+            visibility_revision: 4,
+            focus_query: false,
+            move_cursor_end: false,
+            last_results_valid: true,
+            last_search_query_digest: 5,
+            suggestions_digest: 6,
+            autocomplete_index: 0,
+            query_history_digest: 7,
+            matching_history_count: 0,
+            source_history_count: 0,
+            usage_count: 0,
+        }
+    }
+
+    fn observation_request_for_test(
+        phase: &'static str,
+        request_id: u64,
+        baseline_request_id: Option<u64>,
+    ) -> QueryObservationFileRequest {
+        QueryObservationFileRequest {
+            schema_version: 1,
+            request_id,
+            phase,
+            baseline_request_id,
+            session_digest: 10,
+            cell_digest: 11,
+            invocation_id: (phase == "terminal").then_some(12),
+            query_digest: (phase == "terminal").then_some(13),
+            action_digest: (phase == "terminal").then_some(14),
+            source: (phase == "terminal").then(|| "click".into()),
+        }
+    }
+
+    #[test]
+    fn gui_observation_ack_requires_ordered_identity_and_frozen_baseline() {
+        let baseline_request = observation_request_for_test("baseline", 20, None);
+        let baseline_response = QueryObservationFileResponse {
+            schema_version: 1,
+            request_id: 20,
+            phase: "baseline".into(),
+            status: "captured".into(),
+            error: None,
+            session_digest: 10,
+            cell_digest: 11,
+            invocation_id: None,
+            baseline_request_id: Some(20),
+            baseline_frame_ordinal: Some(30),
+            observed_frame_ordinal: 30,
+            baseline_state_digest: Some(40),
+            query_digest: None,
+            action_digest: None,
+            source: None,
+            before: None,
+            after: None,
+        };
+        assert!(validate_query_observation_response(&baseline_request, &baseline_response).is_ok());
+
+        let terminal_request = observation_request_for_test("terminal", 21, Some(20));
+        let mut terminal_after = observation_state(40);
+        terminal_after.matching_history_count = 1;
+        terminal_after.source_history_count = 1;
+        terminal_after.usage_count = 1;
+        let terminal_response = QueryObservationFileResponse {
+            schema_version: 1,
+            request_id: 21,
+            phase: "terminal".into(),
+            status: "captured".into(),
+            error: None,
+            session_digest: 10,
+            cell_digest: 11,
+            invocation_id: Some(12),
+            baseline_request_id: Some(20),
+            baseline_frame_ordinal: Some(30),
+            observed_frame_ordinal: 31,
+            baseline_state_digest: Some(40),
+            query_digest: Some(13),
+            action_digest: Some(14),
+            source: Some("click".into()),
+            before: Some(observation_state(40)),
+            after: Some(terminal_after),
+        };
+        assert!(validate_query_observation_response(&terminal_request, &terminal_response).is_ok());
+
+        let mut late_snapshot_mutation = terminal_response.clone();
+        late_snapshot_mutation.after.as_mut().unwrap().state_digest = 41;
+        assert!(
+            validate_query_observation_response(&terminal_request, &late_snapshot_mutation)
+                .is_err()
+        );
+
+        let mut wrong_invocation = terminal_response.clone();
+        wrong_invocation.invocation_id = Some(99);
+        assert!(validate_query_observation_response(&terminal_request, &wrong_invocation).is_err());
+
+        let mut wrong_session = terminal_response.clone();
+        wrong_session.session_digest = 99;
+        assert!(validate_query_observation_response(&terminal_request, &wrong_session).is_err());
+
+        let mut wrong_cell = terminal_response.clone();
+        wrong_cell.cell_digest = 99;
+        assert!(validate_query_observation_response(&terminal_request, &wrong_cell).is_err());
+
+        let mut stale_request_id = terminal_response.clone();
+        stale_request_id.request_id -= 1;
+        assert!(validate_query_observation_response(&terminal_request, &stale_request_id).is_err());
+
+        let mut wrong_source = terminal_response.clone();
+        wrong_source.source = Some("enter".into());
+        assert!(validate_query_observation_response(&terminal_request, &wrong_source).is_err());
+
+        let mut nonmonotonic_frame = terminal_response;
+        nonmonotonic_frame.observed_frame_ordinal = 30;
+        assert!(
+            validate_query_observation_response(&terminal_request, &nonmonotonic_frame).is_err()
+        );
+    }
+
+    #[test]
+    fn query_trace_requires_the_hovered_cell_session_and_resolution_order() {
+        let cell = acceptance_id_digest("qa-hidden-first");
+        let session = 17;
+        let trace = query_trace_pair(cell, session);
+        assert!(correlated_query_trace(&trace, "qa-hidden-first", cell, session).is_ok());
+
+        let mut wrong_cell = query_trace_pair(cell.wrapping_add(1), session);
+        assert!(correlated_query_trace(&wrong_cell, "qa-hidden-first", cell, session).is_err());
+        wrong_cell = query_trace_pair(cell, session.wrapping_add(1));
+        assert!(correlated_query_trace(&wrong_cell, "qa-hidden-first", cell, session).is_err());
+
+        let mut shuffled = trace.clone();
+        shuffled.swap(0, 1);
+        assert!(correlated_query_trace(&shuffled, "qa-hidden-first", cell, session).is_err());
+
+        let mut reversed_equal_time = trace.clone();
+        reversed_equal_time[0] = reversed_equal_time[0].replace("elapsed_ms=10", "elapsed_ms=11");
+        reversed_equal_time[1] = reversed_equal_time[1].replace("elapsed_ms=11", "elapsed_ms=11");
+        reversed_equal_time.swap(0, 1);
+        assert!(
+            correlated_query_trace(&reversed_equal_time, "qa-hidden-first", cell, session).is_err()
+        );
+
+        let mut late_duplicate = trace;
+        late_duplicate.push(late_duplicate[1].clone());
+        assert!(correlated_query_trace(&late_duplicate, "qa-hidden-first", cell, session).is_err());
+    }
+
+    #[test]
+    fn final_query_trace_tail_includes_events_during_terminal_acknowledgement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("acceptance.log");
+        let cell = acceptance_id_digest("qa-hidden-first");
+        let session = 17;
+        let initial = query_trace_pair(cell, session);
+        fs::write(&path, initial.join("\n") + "\n").unwrap();
+        let pre_ack = query_trace_tail(&path, 0);
+        assert!(correlated_query_trace(&pre_ack, "qa-hidden-first", cell, session).is_ok());
+
+        let late_duplicate = format!(
+            "trace_event=\"radial_query_dispatch\" elapsed_ms=12 invocation_id=5 session_digest={session} cell_digest={cell} session_generation=2 config_revision=3 mode=execute_first query_digest=6 selected_digest=8 interaction_requirement=external root_policy=preserve outcome=executed"
+        );
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(format!("{late_duplicate}\n").as_bytes())
+            .unwrap();
+        let post_ack = query_trace_tail(&path, 0);
+        assert_eq!(post_ack.len(), initial.len() + 1);
+        assert!(
+            correlated_query_trace(&post_ack, "qa-hidden-first", cell, session).is_err(),
+            "a duplicate dispatch appended during the terminal GUI request must fail"
+        );
+    }
+
+    #[test]
+    fn query_marker_delta_requires_exact_expected_nonce_and_no_other_growth() {
+        let before = BTreeMap::from([
+            ("q-first".to_owned(), 2),
+            ("q-second".to_owned(), 4),
+            ("q-exact".to_owned(), 1),
+        ]);
+        let mut after = before.clone();
+        after.insert("q-first".into(), 3);
+        assert!(validate_query_marker_delta(&before, &after, "qa-hidden-first").is_ok());
+
+        let mut duplicate = after.clone();
+        duplicate.insert("q-first".into(), 4);
+        assert!(validate_query_marker_delta(&before, &duplicate, "qa-hidden-first").is_err());
+
+        let mut unexpected_for_manual = before.clone();
+        unexpected_for_manual.insert("q-second".into(), 5);
+        assert!(validate_query_marker_delta(&before, &unexpected_for_manual, "qa-open").is_err());
+
+        let mut unexpected_for_no_results = before.clone();
+        unexpected_for_no_results.insert("q-exact".into(), 2);
+        assert!(
+            validate_query_marker_delta(&before, &unexpected_for_no_results, "qa-no-results")
+                .is_err()
+        );
+    }
+
+    #[test]
     fn mandatory_hotkey_cases_have_case_specific_expected_states() {
         let ids = [
             "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17",
@@ -17816,6 +20674,7 @@ mod tests {
             },
             cases: Vec::new(),
             hotkey_evidence: Vec::new(),
+            query_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: super::super::super::CleanupResult::default(),
             capacity_saturated: false,
@@ -18348,6 +21207,7 @@ mod tests {
             },
             cases: Vec::new(),
             hotkey_evidence: Vec::new(),
+            query_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: super::super::super::CleanupResult::default(),
             capacity_saturated: false,

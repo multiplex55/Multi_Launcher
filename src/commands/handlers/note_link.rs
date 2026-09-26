@@ -31,6 +31,7 @@ where
             host.open_note_tags();
             return Ok(CommandOutcome {
                 focus: true,
+                visibility: VisibilityPolicy::Show,
                 ..CommandOutcome::default()
             });
         }

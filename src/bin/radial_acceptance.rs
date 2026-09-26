@@ -39,10 +39,15 @@ const MAX_HOTKEY_EVIDENCE_EVENTS: usize = 2_200;
 const MAX_HOTKEY_EVIDENCE_GESTURES: usize = 128;
 const MAX_HOTKEY_EVIDENCE_CASES: usize = 16;
 const MAX_HOTKEY_CASE_EVIDENCE_BYTES: usize = 256 * 1024;
+const MAX_QUERY_CASE_EVIDENCE_BYTES: usize = 64 * 1024;
+const MAX_QUERY_EVIDENCE_BYTES: usize = 192 * 1024;
 const ACCEPTANCE_HOTKEY: &str = "F11";
 const HOTKEY_CASE_IDS: [&str; 15] = [
     "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17", "H18",
     "CLEANUP", "R0",
+];
+const QUERY_CASE_IDS: [&str; 11] = [
+    "Q02", "Q03", "Q05", "Q07", "Q10", "Q11", "Q12", "Q13", "Q15", "CLEANUP", "R0",
 ];
 const ACCEPTANCE_ACTION_COUNT: usize = 64;
 const ACCEPTANCE_TARGET_ACTION_INDEX: usize = ACCEPTANCE_ACTION_COUNT - 1;
@@ -100,6 +105,7 @@ struct Arguments {
 enum AcceptanceSuite {
     All,
     Hotkey,
+    Query,
 }
 
 impl AcceptanceSuite {
@@ -107,6 +113,7 @@ impl AcceptanceSuite {
         match self {
             Self::All => "all",
             Self::Hotkey => "hotkey",
+            Self::Query => "query",
         }
     }
 }
@@ -124,6 +131,22 @@ impl AcceptanceHotkey {
             Self::F11 => ACCEPTANCE_HOTKEY,
             Self::ShiftAltWinEnd => "Shift+Alt+Win+End",
         }
+    }
+}
+
+fn expected_setup_hotkey_edges(hotkey: AcceptanceHotkey) -> Vec<(u32, bool)> {
+    match hotkey {
+        AcceptanceHotkey::F11 => vec![(0x7A, true), (0x7A, false)],
+        AcceptanceHotkey::ShiftAltWinEnd => vec![
+            (0xA0, true),
+            (0xA4, true),
+            (0x5B, true),
+            (0x23, true),
+            (0x23, false),
+            (0x5B, false),
+            (0xA4, false),
+            (0xA0, false),
+        ],
     }
 }
 
@@ -2957,6 +2980,481 @@ fn validate_hotkey_evidence_report(report: &AcceptanceReport) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_query_evidence_report(report: &AcceptanceReport) -> Result<(), String> {
+    if report.suite != AcceptanceSuite::Query {
+        return if report.query_evidence.is_empty() {
+            Ok(())
+        } else {
+            Err("query evidence is present outside the Query suite".into())
+        };
+    }
+    if report.query_evidence.len() > QUERY_CASE_IDS.len() - 2 {
+        return Err("Query evidence packet count exceeds its bound".into());
+    }
+    let mut total_evidence_bytes = 0usize;
+    for (index, evidence) in report.query_evidence.iter().enumerate() {
+        if report.query_evidence[..index]
+            .iter()
+            .any(|previous| previous.case_id == evidence.case_id)
+        {
+            return Err(format!(
+                "{} has duplicate Query evidence packets",
+                evidence.case_id
+            ));
+        }
+        if !QUERY_CASE_IDS.contains(&evidence.case_id.as_str())
+            || matches!(evidence.case_id.as_str(), "CLEANUP" | "R0")
+            || evidence.schema_version != 1
+            || evidence.invocations.is_empty()
+            || evidence.invocations.len() > 2
+            || evidence
+                .invocations
+                .iter()
+                .any(|item| !query_invocation_evidence_is_valid(item, report))
+            || evidence
+                .invocations
+                .iter()
+                .enumerate()
+                .any(|(index, item)| {
+                    evidence.invocations[..index].iter().any(|prior| {
+                        prior.invocation_id == item.invocation_id
+                            || prior.session_digest == item.session_digest
+                    })
+                })
+            || !report.cases.iter().any(|case| case.id == evidence.case_id)
+        {
+            return Err(format!(
+                "{} Query evidence identity or bounds are invalid",
+                evidence.case_id
+            ));
+        }
+        let packet_bytes = serde_json::to_vec(evidence)
+            .map_err(|error| {
+                format!(
+                    "{} Query evidence could not be serialized: {error}",
+                    evidence.case_id
+                )
+            })?
+            .len();
+        if packet_bytes > MAX_QUERY_CASE_EVIDENCE_BYTES {
+            return Err(format!(
+                "{} Query evidence packet exceeds its byte bound",
+                evidence.case_id
+            ));
+        }
+        total_evidence_bytes = total_evidence_bytes
+            .checked_add(packet_bytes)
+            .ok_or_else(|| "Query evidence byte count overflowed".to_string())?;
+        if total_evidence_bytes > MAX_QUERY_EVIDENCE_BYTES {
+            return Err("Query evidence exceeds its aggregate byte bound".into());
+        }
+        let case = report
+            .cases
+            .iter()
+            .find(|case| case.id == evidence.case_id)
+            .unwrap();
+        if matches!(case.status, CaseStatus::Passed) {
+            query_case_contract_is_valid(evidence)?;
+        }
+    }
+    for case in &report.cases {
+        if !matches!(case.status, CaseStatus::Passed)
+            || !QUERY_CASE_IDS.contains(&case.id.as_str())
+            || matches!(case.id.as_str(), "CLEANUP" | "R0")
+        {
+            continue;
+        }
+        if report
+            .query_evidence
+            .iter()
+            .filter(|evidence| evidence.case_id == case.id)
+            .count()
+            != 1
+        {
+            return Err(format!(
+                "{} passed without exactly one Query evidence packet",
+                case.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn query_invocation_evidence_is_valid(
+    invocation: &QueryInvocationEvidence,
+    report: &AcceptanceReport,
+) -> bool {
+    let expected_pid = report.environment.child_process_id.unwrap_or(0);
+    !invocation.cell_id.is_empty()
+        && invocation.cell_id.len() <= 128
+        && invocation
+            .cell_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        && invocation.cell_digest == query_cell_digest(&invocation.cell_id)
+        && invocation.query_digest > 0
+        && invocation.cell_digest > 0
+        && invocation.session_digest > 0
+        && invocation.invocation_id > 0
+        && invocation.session_generation > 0
+        && invocation.config_revision > 0
+        && invocation.preparation_generation > 0
+        && ((invocation.mode != QueryEvidenceMode::ExecuteFirst)
+            || (invocation.resolution_state == QueryEvidenceState::ManualUi
+                || invocation.provider_revision.is_some()))
+        && invocation.root_observations.len() >= 2
+        && invocation.root_observations.len() <= 16
+        && invocation.root_sample_count >= invocation.root_observations.len()
+        && invocation.root_sample_count <= 512
+        && invocation.root_observations.iter().all(|sample| {
+            sample.hwnd > 0
+                && sample.process_id == expected_pid
+                && sample.bounds[2] > sample.bounds[0]
+                && sample.bounds[3] > sample.bounds[1]
+                && sample.physically_visible
+                    == (sample.visible
+                        && !sample.minimized
+                        && report.environment.monitors.iter().any(|monitor| {
+                            sample.bounds[0] < monitor.x.saturating_add(monitor.width as i32)
+                                && monitor.x < sample.bounds[2]
+                                && sample.bounds[1]
+                                    < monitor.y.saturating_add(monitor.height as i32)
+                                && monitor.y < sample.bounds[3]
+                        }))
+        })
+        && invocation
+            .root_observations
+            .windows(2)
+            .all(|pair| pair[0].hwnd == pair[1].hwnd && pair[0].process_id == pair[1].process_id)
+        && invocation.root_visible_samples + invocation.root_hidden_samples
+            == invocation.root_sample_count
+        && invocation
+            .root_observations
+            .iter()
+            .filter(|sample| sample.physically_visible)
+            .count()
+            <= invocation.root_visible_samples
+        && invocation
+            .root_observations
+            .iter()
+            .filter(|sample| !sample.physically_visible)
+            .count()
+            <= invocation.root_hidden_samples
+        && invocation.root_visibility_violation_count == 0
+        && invocation.root_identity_violation_count == 0
+        && (invocation.resolution_state != QueryEvidenceState::Ready
+            || (invocation.result_count > 0
+                && invocation.result_digest > 0
+                && invocation.selected_digest.is_some_and(|digest| digest > 0)))
+        && (invocation.resolution_state != QueryEvidenceState::NoResults
+            || (invocation.result_count == 0 && invocation.selected_digest.is_none()))
+        && query_setup_visibility_is_valid(&invocation.setup_visibility, report.hotkey)
+        && invocation.pointer_click.down_inserted == 1
+        && invocation.pointer_click.up_inserted == 1
+        && invocation.pointer_click.layout_generation > 0
+        && invocation.pointer_click.down_event_ordinal > 0
+        && invocation.pointer_click.up_event_ordinal > invocation.pointer_click.down_event_ordinal
+        && invocation.pointer_click.release_settle_ms <= 2_000
+        && preserved_query_state_is_valid(invocation)
+        && invocation.forbidden_root_command_count == 0
+}
+
+fn query_setup_visibility_is_valid(
+    evidence: &QuerySetupVisibilityEvidence,
+    hotkey: AcceptanceHotkey,
+) -> bool {
+    if evidence.visible_before == evidence.desired_visible {
+        return evidence.tap.is_none();
+    }
+    let Some(tap) = evidence.tap.as_ref() else {
+        return false;
+    };
+    let expected = expected_setup_hotkey_edges(hotkey);
+    let observed = tap
+        .observed_edges
+        .iter()
+        .map(|edge| (edge.virtual_key, edge.down))
+        .collect::<Vec<_>>();
+    let expected_pairs = expected.iter().filter(|(_, down)| *down).count();
+    !expected.is_empty()
+        && tap.input_down_inserted == expected_pairs
+        && tap.input_up_inserted == expected_pairs
+        && tap.quiet_preflight_ms >= 75
+        && tap.quiet_preflight_ms <= 1_000
+        // `wait_for_key_quiet` reports all matching edges observed while it
+        // waited, including edges that preceded the final uninterrupted quiet
+        // interval. Keep that count as evidence, but require a bounded count and
+        // validate the actual settled interval above.
+        && tap.quiet_matching_edges <= 256
+        && tap.observer_default_desktop
+        && observed == expected
+        && tap.foreign_edges.is_empty()
+        && tap.observed_edges.iter().all(|edge| {
+            edge.injected && edge.runner_cookie_matched && edge.runner_relative_us <= 5_000_000
+        })
+        && tap.trace_cursor > 0
+        && tap.invocation_id > 0
+        && tap.generation > 0
+        && tap.press_event_ordinal > tap.trace_cursor
+        && tap.release_event_ordinal > tap.press_event_ordinal
+        && tap.short_tap_event_ordinal > tap.release_event_ordinal
+        && tap.visibility_event_ordinal > tap.short_tap_event_ordinal
+        && tap.visibility_visible == evidence.desired_visible
+}
+
+fn preserved_query_state_is_valid(invocation: &QueryInvocationEvidence) -> bool {
+    let should_have_snapshot = invocation.root_policy == QueryEvidenceRootPolicy::Preserve
+        && invocation.dispatch_outcome == QueryEvidenceOutcome::Executed
+        && invocation.selected_digest.is_some();
+    if !should_have_snapshot {
+        return invocation.source.is_none()
+            && invocation.root_state_before.is_none()
+            && invocation.root_state_after.is_none()
+            && invocation.ordinary_baseline_request_id.is_none()
+            && invocation.ordinary_terminal_request_id.is_none()
+            && invocation.ordinary_baseline_frame_ordinal.is_none()
+            && invocation.ordinary_terminal_frame_ordinal.is_none();
+    }
+    let (
+        Some(source),
+        Some(before),
+        Some(after),
+        Some(selected_digest),
+        Some(baseline_request_id),
+        Some(terminal_request_id),
+        Some(baseline_frame_ordinal),
+        Some(terminal_frame_ordinal),
+    ) = (
+        invocation.source,
+        invocation.root_state_before.as_ref(),
+        invocation.root_state_after.as_ref(),
+        invocation.selected_digest,
+        invocation.ordinary_baseline_request_id,
+        invocation.ordinary_terminal_request_id,
+        invocation.ordinary_baseline_frame_ordinal,
+        invocation.ordinary_terminal_frame_ordinal,
+    )
+    else {
+        return false;
+    };
+    baseline_request_id > 0
+        && terminal_request_id > baseline_request_id
+        && baseline_frame_ordinal > 0
+        && terminal_frame_ordinal > baseline_frame_ordinal
+        && before.state_digest > 0
+        && before.query_digest > 0
+        && before.results_digest > 0
+        && before.last_search_query_digest > 0
+        && before.suggestions_digest > 0
+        && before.query_history_digest > 0
+        && before.visibility_revision > 0
+        && before.matching_history_count <= before.usage_count as usize
+        && before.source_history_count <= before.matching_history_count
+        && before.source_history_count <= before.usage_count as usize
+        && after.source_history_count <= after.matching_history_count
+        && after.source_history_count <= after.usage_count as usize
+        && before.state_digest == after.state_digest
+        && before.query_digest == after.query_digest
+        && before.action_digest == selected_digest
+        && after.action_digest == selected_digest
+        && before.results_digest == after.results_digest
+        && before.results_count == after.results_count
+        && before.selected_index == after.selected_index
+        && before.grid_layout == after.grid_layout
+        && before.visible == after.visible
+        && before.restore == after.restore
+        && before.visibility_revision == after.visibility_revision
+        && before.focus_query == after.focus_query
+        && before.move_cursor_end == after.move_cursor_end
+        && before.last_results_valid == after.last_results_valid
+        && before.last_search_query_digest == after.last_search_query_digest
+        && before.suggestions_digest == after.suggestions_digest
+        && before.autocomplete_index == after.autocomplete_index
+        && before.query_history_digest == after.query_history_digest
+        && after.matching_history_count == before.matching_history_count.saturating_add(1)
+        && after.source_history_count == before.source_history_count.saturating_add(1)
+        && after.usage_count == before.usage_count.saturating_add(1)
+        && matches!(
+            source,
+            QueryEvidenceSource::Click
+                | QueryEvidenceSource::RadialRelease
+                | QueryEvidenceSource::RadialShortcut
+                | QueryEvidenceSource::RadialHotstring
+        )
+}
+
+fn query_cell_digest(value: &str) -> u64 {
+    value.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn query_case_contract_is_valid(evidence: &QueryCaseEvidence) -> Result<(), String> {
+    let visible = |item: &QueryInvocationEvidence| {
+        item.root_visible_samples > 0
+            && item
+                .root_observations
+                .iter()
+                .any(|sample| sample.physically_visible)
+    };
+    let hidden = |item: &QueryInvocationEvidence| {
+        item.root_sample_count >= 2
+            && item.root_visible_samples == 0
+            && item
+                .root_observations
+                .iter()
+                .all(|sample| !sample.physically_visible)
+    };
+    let stably_visible = |item: &QueryInvocationEvidence| {
+        item.root_sample_count >= 2
+            && item.root_visible_samples == item.root_sample_count
+            && item.root_hidden_samples == 0
+            && item
+                .root_observations
+                .iter()
+                .all(|sample| sample.physically_visible)
+    };
+    let one = evidence.invocations.first();
+    let has_cell = |item: &QueryInvocationEvidence, expected: &str| {
+        item.cell_id == expected && item.cell_digest == query_cell_digest(expected)
+    };
+    let pass = match evidence.case_id.as_str() {
+        "Q02" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::OpenLauncher
+                && item.resolution_state == QueryEvidenceState::ManualUi
+                && item.requirement == QueryEvidenceRequirement::LauncherUi
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.root_policy == QueryEvidenceRootPolicy::Legacy
+                && item.effect_count == 0
+                && item.ui_ack == QueryEvidenceUiAck::LauncherQuery
+                && has_cell(item, "qa-open")
+                && visible(item)
+                && evidence.invocations.len() == 1
+        }),
+        "Q03" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::ExecuteFirst
+                && item.resolution_state == QueryEvidenceState::Ready
+                && item.requirement == QueryEvidenceRequirement::External
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.root_policy == QueryEvidenceRootPolicy::Preserve
+                && item.result_count >= 1
+                && item.selected_digest.is_some_and(|digest| digest != 0)
+                && item.effect_count == 1
+                && hidden(item)
+                && item.ui_ack == QueryEvidenceUiAck::None
+                && has_cell(item, "qa-hidden-first")
+                && evidence.invocations.len() == 1
+        }),
+        "Q05" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::PinnedAction
+                && item.resolution_state == QueryEvidenceState::Ready
+                && item.requirement == QueryEvidenceRequirement::External
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.root_policy == QueryEvidenceRootPolicy::Preserve
+                && item.effect_count == 1
+                && hidden(item)
+                && item.ui_ack == QueryEvidenceUiAck::None
+                && has_cell(item, "qa-pinned-second")
+                && evidence.invocations.len() == 1
+        }),
+        "Q07" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::ExecuteFirst
+                && item.resolution_state == QueryEvidenceState::NoResults
+                && item.result_count == 0
+                && item.selected_digest.is_none()
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.requirement == QueryEvidenceRequirement::LauncherUi
+                && item.root_policy == QueryEvidenceRootPolicy::Legacy
+                && item.effect_count == 0
+                && item.ui_ack == QueryEvidenceUiAck::LauncherQuery
+                && has_cell(item, "qa-no-results")
+                && visible(item)
+                && evidence.invocations.len() == 1
+        }),
+        "Q10" => {
+            evidence.invocations.len() == 2
+                && evidence.invocations.iter().all(|item| {
+                    item.mode == QueryEvidenceMode::ExecuteFirst
+                        && item.resolution_state == QueryEvidenceState::Ready
+                        && item.requirement == QueryEvidenceRequirement::External
+                        && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                        && item.root_policy == QueryEvidenceRootPolicy::Preserve
+                        && item.result_count >= 1
+                        && item.selected_digest.is_some_and(|digest| digest != 0)
+                        && item.effect_count == 1
+                        && item.ui_ack == QueryEvidenceUiAck::None
+                        && has_cell(item, "qa-visible-first")
+                })
+                && hidden(&evidence.invocations[0])
+                && stably_visible(&evidence.invocations[1])
+                && evidence.invocations[1].root_geometry_change_count == 0
+        }
+        "Q11" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::ExactCommand
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.requirement == QueryEvidenceRequirement::LauncherUi
+                && item.root_policy == QueryEvidenceRootPolicy::Legacy
+                && item.effect_count == 1
+                && item.ui_ack == QueryEvidenceUiAck::NoteEditor
+                && has_cell(item, "qa-note-new")
+                && visible(item)
+                && evidence.invocations.len() == 1
+        }),
+        "Q12" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::ExactCommand
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.requirement == QueryEvidenceRequirement::LauncherUi
+                && item.root_policy == QueryEvidenceRootPolicy::Legacy
+                && item.effect_count == 1
+                && item.ui_ack == QueryEvidenceUiAck::LauncherQuery
+                && has_cell(item, "qa-launcher-show")
+                && visible(item)
+                && evidence.invocations.len() == 1
+        }),
+        "Q13" => {
+            evidence.invocations.len() == 2
+                && evidence.invocations[0].mode == QueryEvidenceMode::ExactCommand
+                && evidence.invocations[0].requirement == QueryEvidenceRequirement::Confirmation
+                && evidence.invocations[0].dispatch_outcome
+                    == QueryEvidenceOutcome::ConfirmationRequired
+                && evidence.invocations[0].effect_count == 0
+                && evidence.invocations[0].cancelled_confirmation_count == 1
+                && evidence.invocations[0].ui_ack == QueryEvidenceUiAck::Cancelled
+                && has_cell(&evidence.invocations[0], "qa-note-remove")
+                && visible(&evidence.invocations[0])
+                && evidence.invocations[1].mode == QueryEvidenceMode::ExactCommand
+                && evidence.invocations[1].requirement == QueryEvidenceRequirement::Confirmation
+                && evidence.invocations[1].dispatch_outcome
+                    == QueryEvidenceOutcome::ConfirmationRequired
+                && evidence.invocations[1].effect_count == 1
+                && evidence.invocations[1].cancelled_confirmation_count == 0
+                && evidence.invocations[1].ui_ack == QueryEvidenceUiAck::Confirmed
+                && has_cell(&evidence.invocations[1], "qa-note-remove")
+                && visible(&evidence.invocations[1])
+        }
+        "Q15" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::ExactCommand
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.requirement == QueryEvidenceRequirement::External
+                && item.root_policy == QueryEvidenceRootPolicy::Preserve
+                && item.effect_count == 1
+                && hidden(item)
+                && item.ui_ack == QueryEvidenceUiAck::None
+                && has_cell(item, "qa-exact-marker")
+                && evidence.invocations.len() == 1
+        }),
+        _ => false,
+    };
+    if pass {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} Query evidence does not prove its case contract",
+            evidence.case_id
+        ))
+    }
+}
+
 fn validate_h04_contamination_artifacts(
     report: &AcceptanceReport,
     case: &AcceptanceCaseResult,
@@ -3347,11 +3845,213 @@ struct AcceptanceReport {
     profile: ProfileIdentity,
     cases: Vec<AcceptanceCaseResult>,
     hotkey_evidence: Vec<HotkeyCaseEvidence>,
+    query_evidence: Vec<QueryCaseEvidence>,
     artifacts: Vec<String>,
     cleanup: CleanupResult,
     capacity_saturated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     report_overflow: Option<ReportOverflowReceipt>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryEvidenceMode {
+    OpenLauncher,
+    ExecuteFirst,
+    ExactCommand,
+    PinnedAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryEvidenceState {
+    ManualUi,
+    Ready,
+    NoResults,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryEvidenceRequirement {
+    PreserveRoot,
+    LauncherUi,
+    Confirmation,
+    External,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryEvidenceOutcome {
+    Executed,
+    ConfirmationRequired,
+    Unavailable,
+    NotDispatched,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryEvidenceUiAck {
+    None,
+    LauncherQuery,
+    NoteEditor,
+    Confirmation,
+    Cancelled,
+    Confirmed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryEvidenceRootPolicy {
+    Preserve,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum QueryEvidenceSource {
+    Enter,
+    Click,
+    Dashboard,
+    Gesture,
+    Macro,
+    RadialRelease,
+    RadialShortcut,
+    RadialHotstring,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct QueryRootStateEvidence {
+    state_digest: u64,
+    query_digest: u64,
+    action_digest: u64,
+    results_digest: u64,
+    results_count: usize,
+    selected_index: Option<usize>,
+    grid_layout: bool,
+    visible: bool,
+    restore: bool,
+    visibility_revision: u64,
+    focus_query: bool,
+    move_cursor_end: bool,
+    last_results_valid: bool,
+    last_search_query_digest: u64,
+    suggestions_digest: u64,
+    autocomplete_index: usize,
+    query_history_digest: u64,
+    matching_history_count: usize,
+    source_history_count: usize,
+    usage_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct QueryRootPresentationEvidence {
+    hwnd: u64,
+    process_id: u32,
+    bounds: [i32; 4],
+    visible: bool,
+    minimized: bool,
+    physically_visible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct QuerySetupVisibilityEvidence {
+    visible_before: bool,
+    desired_visible: bool,
+    tap: Option<QuerySetupTapEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct QuerySetupObservedEdge {
+    runner_relative_us: u64,
+    virtual_key: u32,
+    down: bool,
+    injected: bool,
+    runner_cookie_matched: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct QuerySetupTapEvidence {
+    input_down_inserted: usize,
+    input_up_inserted: usize,
+    quiet_preflight_ms: u64,
+    quiet_matching_edges: usize,
+    observer_default_desktop: bool,
+    observed_edges: Vec<QuerySetupObservedEdge>,
+    foreign_edges: Vec<QuerySetupObservedEdge>,
+    trace_cursor: usize,
+    invocation_id: u64,
+    generation: u64,
+    press_event_ordinal: usize,
+    release_event_ordinal: usize,
+    short_tap_event_ordinal: usize,
+    visibility_event_ordinal: usize,
+    visibility_visible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct QueryPointerClickEvidence {
+    down_inserted: usize,
+    up_inserted: usize,
+    layout_generation: u64,
+    down_event_ordinal: usize,
+    up_event_ordinal: usize,
+    release_settle_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+struct QueryInvocationEvidence {
+    mode: QueryEvidenceMode,
+    cell_id: String,
+    query_digest: u64,
+    cell_digest: u64,
+    session_digest: u64,
+    invocation_id: u64,
+    session_generation: u64,
+    config_revision: u64,
+    preparation_generation: u64,
+    provider_revision: Option<u64>,
+    resolution_state: QueryEvidenceState,
+    result_count: usize,
+    result_digest: u64,
+    selected_digest: Option<u64>,
+    requirement: QueryEvidenceRequirement,
+    dispatch_outcome: QueryEvidenceOutcome,
+    root_policy: QueryEvidenceRootPolicy,
+    effect_count: usize,
+    cancelled_confirmation_count: usize,
+    root_observations: Vec<QueryRootPresentationEvidence>,
+    root_sample_count: usize,
+    root_visible_samples: usize,
+    root_hidden_samples: usize,
+    root_visibility_violation_count: usize,
+    root_identity_violation_count: usize,
+    root_geometry_change_count: usize,
+    forbidden_root_command_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<QueryEvidenceSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root_state_before: Option<QueryRootStateEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root_state_after: Option<QueryRootStateEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ordinary_baseline_request_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ordinary_terminal_request_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ordinary_baseline_frame_ordinal: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ordinary_terminal_frame_ordinal: Option<u64>,
+    setup_visibility: QuerySetupVisibilityEvidence,
+    pointer_click: QueryPointerClickEvidence,
+    ui_ack: QueryEvidenceUiAck,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct QueryCaseEvidence {
+    schema_version: u16,
+    case_id: String,
+    invocations: Vec<QueryInvocationEvidence>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -3438,6 +4138,8 @@ impl AcceptanceReport {
             &COPIED_CASE_IDS[..]
         } else if self.suite == AcceptanceSuite::Hotkey {
             &HOTKEY_CASE_IDS[..]
+        } else if self.suite == AcceptanceSuite::Query {
+            &QUERY_CASE_IDS[..]
         } else {
             &CASE_IDS[..]
         };
@@ -3526,7 +4228,11 @@ enum ParseResult {
 }
 
 fn main() -> ExitCode {
-    match parse_arguments(std::env::args_os().skip(1)) {
+    let command_line = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if let Some(status) = run_acceptance_marker_helper(&command_line) {
+        return status;
+    }
+    match parse_arguments(command_line) {
         Ok(ParseResult::Help) => {
             print_usage();
             ExitCode::SUCCESS
@@ -3557,6 +4263,70 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_acceptance_marker_helper(arguments: &[OsString]) -> Option<ExitCode> {
+    if arguments.first().and_then(|value| value.to_str()) != Some("--acceptance-marker") {
+        return None;
+    }
+    let result = (|| -> Result<(), String> {
+        if arguments.len() != 3 {
+            return Err("marker helper requires exactly a ledger path and nonce".into());
+        }
+        let path = PathBuf::from(&arguments[1]);
+        let nonce = arguments[2]
+            .to_str()
+            .ok_or_else(|| "marker nonce must be valid UTF-8".to_string())?;
+        if nonce.is_empty()
+            || nonce.len() > 64
+            || !nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err("marker nonce is malformed".into());
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect precreated marker ledger: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4096 {
+            return Err("marker ledger must be a bounded precreated regular file".into());
+        }
+        let existing = fs::read(&path).map_err(|error| format!("read marker ledger: {error}"))?;
+        let text = std::str::from_utf8(&existing)
+            .map_err(|_| "marker ledger is not valid UTF-8".to_string())?;
+        if !valid_marker_ledger(text) {
+            return Err("marker ledger does not have the acceptance-owned header/records".into());
+        }
+        let mut ledger = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(|error| format!("open acceptance marker ledger: {error}"))?;
+        writeln!(ledger, "{nonce}").map_err(|error| format!("append marker nonce: {error}"))?;
+        ledger
+            .sync_data()
+            .map_err(|error| format!("flush marker nonce: {error}"))?;
+        Ok(())
+    })();
+    Some(match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("acceptance marker helper rejected request: {error}");
+            ExitCode::FAILURE
+        }
+    })
+}
+
+fn valid_marker_ledger(text: &str) -> bool {
+    let mut lines = text.lines();
+    if lines.next() != Some("radial-acceptance-marker-ledger:v1") {
+        return false;
+    }
+    lines.all(|line| {
+        !line.is_empty()
+            && line.len() <= 64
+            && line
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
 fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResult, String> {
     let mut launcher = None;
     let mut output = None;
@@ -3585,11 +4355,12 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
             Some("--suite") => {
                 let value = args
                     .next()
-                    .ok_or_else(|| "--suite requires all or hotkey".to_string())?;
+                    .ok_or_else(|| "--suite requires all, hotkey, or query".to_string())?;
                 suite = match value.to_str() {
                     Some("all") => AcceptanceSuite::All,
                     Some("hotkey") => AcceptanceSuite::Hotkey,
-                    _ => return Err("--suite must be all or hotkey".into()),
+                    Some("query") => AcceptanceSuite::Query,
+                    _ => return Err("--suite must be all, hotkey, or query".into()),
                 };
             }
             Some("--hotkey") => {
@@ -3648,11 +4419,14 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
     if output.is_some() == report_file.is_some() {
         return Err("specify exactly one of --output <directory> or --report <file>".into());
     }
-    if suite == AcceptanceSuite::All && hotkey != AcceptanceHotkey::F11 {
+    if suite != AcceptanceSuite::Hotkey && hotkey != AcceptanceHotkey::F11 {
         return Err("--hotkey shift-alt-win-end requires --suite hotkey".into());
     }
     if suite == AcceptanceSuite::Hotkey && profile_copy.is_some() {
         return Err("--suite hotkey cannot be combined with --profile-copy".into());
+    }
+    if suite == AcceptanceSuite::Query && profile_copy.is_some() {
+        return Err("--suite query cannot be combined with --profile-copy".into());
     }
     let source_revision = match source_revision {
         Some(revision) => Some(validate_source_revision(revision)?),
@@ -4417,6 +5191,7 @@ fn copied_report_seed(deterministic: &AcceptanceReport, started_unix_ms: u128) -
         profile,
         cases: Vec::with_capacity(COPIED_CASE_IDS.len()),
         hotkey_evidence: Vec::new(),
+        query_evidence: Vec::new(),
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
@@ -4994,6 +5769,17 @@ fn run_windows_deterministic(
             arguments.mouse_gesture_mode,
             arguments.hotkey,
         )?
+    } else if arguments.suite == AcceptanceSuite::Query {
+        let marker_path = profile_path.join("query-marker-ledger.txt");
+        write_new(&marker_path, b"radial-acceptance-marker-ledger:v1\n")?;
+        deterministic_query_fixture(
+            &log_path,
+            arguments.mouse_gesture_mode,
+            arguments.hotkey,
+            &marker_path,
+            &std::env::current_exe()
+                .map_err(|error| format!("resolve runner for query fixture: {error}"))?,
+        )?
     } else {
         deterministic_fixture_for_hotkey(&log_path, arguments.mouse_gesture_mode, arguments.hotkey)?
     };
@@ -5045,6 +5831,7 @@ fn run_windows_deterministic(
         },
         cases: Vec::with_capacity(10),
         hotkey_evidence: Vec::new(),
+        query_evidence: Vec::new(),
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
@@ -5099,6 +5886,17 @@ fn run_windows_deterministic(
                             &mut log,
                         ),
                         AcceptanceSuite::Hotkey => native::run_hotkey_suite(
+                            &candidate_executable,
+                            &driver_profile,
+                            &driver_output,
+                            &driver_trace,
+                            arguments.hotkey,
+                            before_cursor.as_ref().ok().copied(),
+                            &desktop_attachment,
+                            &mut report,
+                            &mut log,
+                        ),
+                        AcceptanceSuite::Query => native::run_query_suite(
                             &candidate_executable,
                             &driver_profile,
                             &driver_output,
@@ -5447,6 +6245,8 @@ fn validate_r0_report(
         &COPIED_CASE_IDS
     } else if report.suite == AcceptanceSuite::Hotkey {
         &HOTKEY_CASE_IDS
+    } else if report.suite == AcceptanceSuite::Query {
+        &QUERY_CASE_IDS
     } else {
         &CASE_IDS
     };
@@ -5480,6 +6280,7 @@ fn validate_r0_report(
         validate_case_hotkey_profile_relation(report, case)?;
     }
     validate_hotkey_evidence_report(report)?;
+    validate_query_evidence_report(report)?;
     if is_copied_profile {
         validate_private_artifact_report(report)?;
         validate_copied_style_evidence_relations(report)?;
@@ -6714,6 +7515,209 @@ fn deterministic_fixture_for_hotkey(
     })
 }
 
+fn deterministic_query_fixture(
+    log_path: &Path,
+    mouse_gesture_mode: MouseGestureMode,
+    hotkey: AcceptanceHotkey,
+    marker_path: &Path,
+    runner_path: &Path,
+) -> Result<DeterministicFixture, String> {
+    let profile_root = marker_path
+        .parent()
+        .ok_or_else(|| "Query marker ledger has no profile parent".to_string())?;
+    let notes_directory = profile_root.join("notes");
+    fs::create_dir_all(&notes_directory)
+        .map_err(|error| format!("create isolated Query notes directory: {error}"))?;
+    write_new(
+        &notes_directory.join("radial-acceptance-q13.md"),
+        b"# Query acceptance fixture note\nThis note may be deleted only after the explicit confirmation case.\n",
+    )?;
+    let mut fixture = deterministic_fixture_for_hotkey(log_path, mouse_gesture_mode, hotkey)?;
+    let mut settings: Settings = serde_json::from_slice(&fixture.settings_json)
+        .map_err(|error| format!("decode Query acceptance settings: {error}"))?;
+    settings.radial.safety_policy =
+        multi_launcher::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
+    settings.note.default_view_mode = multi_launcher::settings::NoteViewMode::Edit;
+    let mut document: RadialDocument = serde_json::from_slice(&fixture.radial_json)
+        .map_err(|error| format!("decode Query acceptance radial document: {error}"))?;
+
+    let marker_target = multi_launcher::actions::Action {
+        label: "QMarker Alpha".into(),
+        desc: "Harmless marker action used only by isolated acceptance profiles".into(),
+        action: runner_path.to_string_lossy().into_owned(),
+        args: Some(marker_arguments(marker_path, "q-first")?),
+    };
+    let second_marker_target = multi_launcher::actions::Action {
+        label: "QMarker Beta".into(),
+        desc: "Second harmless marker action used only to prove selection identity".into(),
+        action: runner_path.to_string_lossy().into_owned(),
+        args: Some(marker_arguments(marker_path, "q-second")?),
+    };
+
+    let query_binding = |query: &str, mode| ActionBinding::LauncherQuery {
+        query: query.to_owned(),
+        mode,
+    };
+    let exact_binding = |command: &str, args: Option<String>| ActionBinding::ExactCommand {
+        command: command.to_owned(),
+        args,
+    };
+    let mut bindings = vec![
+        (
+            "qa-open",
+            "Open saved query",
+            query_binding(
+                "app QMarker",
+                multi_launcher::radial::model::QueryRunMode::OpenLauncher,
+            ),
+        ),
+        (
+            "qa-hidden-first",
+            "Execute first result",
+            query_binding(
+                "app QMarker",
+                multi_launcher::radial::model::QueryRunMode::ExecuteFirst,
+            ),
+        ),
+        (
+            "qa-no-results",
+            "Open query with no results",
+            query_binding(
+                "qa-no-such-result-9f42d2",
+                multi_launcher::radial::model::QueryRunMode::ExecuteFirst,
+            ),
+        ),
+        (
+            "qa-visible-first",
+            "Execute first result preserving ROOT",
+            query_binding(
+                "app QMarker",
+                multi_launcher::radial::model::QueryRunMode::ExecuteFirst,
+            ),
+        ),
+        (
+            "qa-note-new",
+            "Open note editor",
+            exact_binding("note:new:radial-acceptance-q11", None),
+        ),
+        (
+            "qa-launcher-show",
+            "Explicit launcher show",
+            exact_binding("launcher:show", Some("qa-explicit-launcher".into())),
+        ),
+        (
+            "qa-note-remove",
+            "Confirm isolated note removal",
+            exact_binding("note:remove:radial-acceptance-q13", None),
+        ),
+        (
+            "qa-exact-marker",
+            "Execute exact external marker command",
+            exact_binding(
+                runner_path.to_string_lossy().as_ref(),
+                Some(marker_arguments(marker_path, "q-exact")?),
+            ),
+        ),
+    ];
+    let menu = document
+        .menus
+        .iter_mut()
+        .find(|menu| menu.id == document.default_menu_id)
+        .ok_or_else(|| "Query fixture has no default radial menu".to_string())?;
+    let cells = menu
+        .rings
+        .first_mut()
+        .ok_or_else(|| "Query fixture default menu has no radial ring".to_string())?
+        .cells
+        .as_mut_slice();
+    if cells.len() < bindings.len() + 1 {
+        return Err("Query fixture has too few cells for its isolated cases".into());
+    }
+    for (index, (cell_id, label, binding)) in bindings.drain(..).enumerate() {
+        let cell = &mut cells[index];
+        cell.id = multi_launcher::radial::model::CellId::new(cell_id);
+        cell.label = label.into();
+        cell.content = CellContent::Action { binding };
+        cell.after_action = AfterActionPolicy::CloseTree;
+    }
+    let pinned = &mut cells[8];
+    pinned.id = multi_launcher::radial::model::CellId::new("qa-pinned-second");
+    pinned.label = "Pinned non-first result".into();
+    pinned.content = CellContent::Action {
+        binding: ActionBinding::Persisted {
+            action: PersistedUniversalActionRef {
+                target: Some(PersistableActionTargetRef::CustomAction {
+                    action: second_marker_target.clone(),
+                }),
+                action_id: action_ids::RESULT_EXECUTE,
+            },
+        },
+    };
+    pinned.after_action = AfterActionPolicy::CloseTree;
+    document
+        .menus
+        .iter_mut()
+        .find(|menu| menu.id == document.default_menu_id)
+        .and_then(|menu| menu.rings.first_mut())
+        .and_then(|ring| ring.cells.get_mut(1))
+        .map(|cell| {
+            if let CellContent::Action {
+                binding: ActionBinding::LauncherQuery { .. },
+            } = &cell.content
+            {
+                cell.alternate_clicks
+                    .push(multi_launcher::radial::model::ClickBinding {
+                        gesture: multi_launcher::radial::model::ClickGesture::ShiftPrimary,
+                        action: ActionBinding::Persisted {
+                            action: PersistedUniversalActionRef {
+                                target: Some(PersistableActionTargetRef::CustomAction {
+                                    action: marker_target.clone(),
+                                }),
+                                action_id: action_ids::RESULT_EXECUTE,
+                            },
+                        },
+                        after_action: AfterActionPolicy::CloseTree,
+                    });
+            }
+        });
+
+    let mut actions = (0..ACCEPTANCE_ACTION_COUNT)
+        .map(|index| multi_launcher::actions::Action {
+            label: format!("Radial Acceptance Harmless Action {index:03}"),
+            desc: "Deterministic native authoring fixture".into(),
+            action: format!("radial_acceptance_harmless_{index:03}"),
+            args: None,
+        })
+        .collect::<Vec<_>>();
+    actions.insert(0, marker_target);
+    actions.insert(1, second_marker_target);
+
+    validate_radial_document(&document)
+        .map_err(|error| format!("Query radial fixture is invalid: {error:?}"))?;
+    let reserved = [("launcher", settings.hotkey.as_deref())]
+        .into_iter()
+        .filter_map(|(owner, chord)| chord.map(|chord| (owner.to_string(), chord.to_string())))
+        .collect::<Vec<_>>();
+    let issues = radial_settings::validate(&settings.radial, &document, &reserved);
+    if !issues.is_empty() {
+        return Err(format!("Query radial settings are invalid: {issues:?}"));
+    }
+    fixture.settings_json = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| format!("serialize Query settings: {error}"))?;
+    fixture.radial_json = serde_json::to_vec_pretty(&document)
+        .map_err(|error| format!("serialize Query radial document: {error}"))?;
+    fixture.actions_json = serde_json::to_vec_pretty(&actions)
+        .map_err(|error| format!("serialize Query actions: {error}"))?;
+    Ok(fixture)
+}
+
+fn marker_arguments(marker_path: &Path, nonce: &str) -> Result<String, String> {
+    let marker_path_text = marker_path.to_string_lossy();
+    let marker = shlex::try_quote(&marker_path_text)
+        .map_err(|_| "query marker path could not be represented as an argument".to_string())?;
+    Ok(format!("--acceptance-marker {marker} {nonce}"))
+}
+
 fn bind_hotkey_hover_probe_action(
     document: &mut RadialDocument,
     action: &multi_launcher::actions::Action,
@@ -7424,7 +8428,7 @@ fn is_reparse_point(metadata: &Metadata) -> bool {
 
 fn print_usage() {
     println!(
-        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]"
+        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey|query] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]"
     );
 }
 
@@ -9543,11 +10547,612 @@ mod tests {
             },
             cases: Vec::new(),
             hotkey_evidence: Vec::new(),
+            query_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
             report_overflow: None,
         }
+    }
+
+    fn query_invocation_for_test(
+        cell_id: &str,
+        mode: QueryEvidenceMode,
+        resolution_state: QueryEvidenceState,
+        requirement: QueryEvidenceRequirement,
+        dispatch_outcome: QueryEvidenceOutcome,
+        root_policy: QueryEvidenceRootPolicy,
+        effect_count: usize,
+        cancelled_confirmation_count: usize,
+        ui_ack: QueryEvidenceUiAck,
+        root_visible: bool,
+        identity: u64,
+    ) -> QueryInvocationEvidence {
+        let sample = QueryRootPresentationEvidence {
+            hwnd: 44,
+            process_id: 7,
+            bounds: [0, 0, 500, 500],
+            visible: root_visible,
+            minimized: false,
+            physically_visible: root_visible,
+        };
+        let ready = resolution_state == QueryEvidenceState::Ready;
+        let query_digest = 11;
+        let selected_digest = ready.then_some(13);
+        QueryInvocationEvidence {
+            mode,
+            cell_id: cell_id.into(),
+            query_digest,
+            cell_digest: query_cell_digest(cell_id),
+            session_digest: identity + 1,
+            invocation_id: identity + 2,
+            session_generation: 1,
+            config_revision: identity + 4,
+            preparation_generation: identity + 5,
+            provider_revision: (mode == QueryEvidenceMode::ExecuteFirst).then_some(9),
+            resolution_state,
+            result_count: usize::from(ready),
+            result_digest: u64::from(ready),
+            selected_digest,
+            requirement,
+            dispatch_outcome,
+            root_policy,
+            effect_count,
+            cancelled_confirmation_count,
+            root_observations: vec![sample.clone(), sample],
+            root_sample_count: 2,
+            root_visible_samples: if root_visible { 2 } else { 0 },
+            root_hidden_samples: if root_visible { 0 } else { 2 },
+            root_visibility_violation_count: 0,
+            root_identity_violation_count: 0,
+            root_geometry_change_count: 0,
+            forbidden_root_command_count: 0,
+            source: (root_policy == QueryEvidenceRootPolicy::Preserve
+                && dispatch_outcome == QueryEvidenceOutcome::Executed
+                && ready)
+                .then_some(QueryEvidenceSource::Click),
+            root_state_before: preserved_state_for_test(
+                root_policy,
+                dispatch_outcome,
+                ready,
+                37,
+                selected_digest,
+                root_visible,
+                false,
+            ),
+            root_state_after: preserved_state_for_test(
+                root_policy,
+                dispatch_outcome,
+                ready,
+                37,
+                selected_digest,
+                root_visible,
+                true,
+            ),
+            ordinary_baseline_request_id: (root_policy == QueryEvidenceRootPolicy::Preserve
+                && dispatch_outcome == QueryEvidenceOutcome::Executed
+                && ready)
+                .then_some(identity + 6),
+            ordinary_terminal_request_id: (root_policy == QueryEvidenceRootPolicy::Preserve
+                && dispatch_outcome == QueryEvidenceOutcome::Executed
+                && ready)
+                .then_some(identity + 7),
+            ordinary_baseline_frame_ordinal: (root_policy == QueryEvidenceRootPolicy::Preserve
+                && dispatch_outcome == QueryEvidenceOutcome::Executed
+                && ready)
+                .then_some(identity + 8),
+            ordinary_terminal_frame_ordinal: (root_policy == QueryEvidenceRootPolicy::Preserve
+                && dispatch_outcome == QueryEvidenceOutcome::Executed
+                && ready)
+                .then_some(identity + 9),
+            setup_visibility: QuerySetupVisibilityEvidence {
+                visible_before: false,
+                desired_visible: false,
+                tap: None,
+            },
+            pointer_click: QueryPointerClickEvidence {
+                down_inserted: 1,
+                up_inserted: 1,
+                layout_generation: 19,
+                down_event_ordinal: 1,
+                up_event_ordinal: 2,
+                release_settle_ms: 25,
+            },
+            ui_ack,
+        }
+    }
+
+    fn preserved_state_for_test(
+        root_policy: QueryEvidenceRootPolicy,
+        outcome: QueryEvidenceOutcome,
+        selected: bool,
+        ordinary_query_digest: u64,
+        action_digest: Option<u64>,
+        visible: bool,
+        after: bool,
+    ) -> Option<QueryRootStateEvidence> {
+        if root_policy != QueryEvidenceRootPolicy::Preserve
+            || outcome != QueryEvidenceOutcome::Executed
+            || !selected
+        {
+            return None;
+        }
+        Some(QueryRootStateEvidence {
+            state_digest: 17,
+            query_digest: ordinary_query_digest,
+            action_digest: action_digest.unwrap_or_default(),
+            results_digest: 19,
+            results_count: 2,
+            selected_index: Some(0),
+            grid_layout: true,
+            visible,
+            restore: false,
+            visibility_revision: 5,
+            focus_query: false,
+            move_cursor_end: false,
+            last_results_valid: true,
+            last_search_query_digest: 23,
+            suggestions_digest: 29,
+            autocomplete_index: 0,
+            query_history_digest: 31,
+            matching_history_count: if after { 1 } else { 0 },
+            source_history_count: if after { 1 } else { 0 },
+            usage_count: if after { 1 } else { 0 },
+        })
+    }
+
+    fn query_packet_for_test(
+        case_id: &str,
+        invocations: Vec<QueryInvocationEvidence>,
+    ) -> QueryCaseEvidence {
+        QueryCaseEvidence {
+            schema_version: 1,
+            case_id: case_id.into(),
+            invocations,
+        }
+    }
+
+    fn passing_query_packets_for_test() -> Vec<QueryCaseEvidence> {
+        use QueryEvidenceMode as Mode;
+        use QueryEvidenceOutcome as Outcome;
+        use QueryEvidenceRequirement as Requirement;
+        use QueryEvidenceRootPolicy as RootPolicy;
+        use QueryEvidenceState as State;
+        use QueryEvidenceUiAck as Ack;
+
+        let hidden_ready = |cell_id, mode, identity| {
+            query_invocation_for_test(
+                cell_id,
+                mode,
+                State::Ready,
+                Requirement::External,
+                Outcome::Executed,
+                RootPolicy::Preserve,
+                1,
+                0,
+                Ack::None,
+                false,
+                identity,
+            )
+        };
+        let visible_ready = |cell_id, identity| {
+            query_invocation_for_test(
+                cell_id,
+                Mode::ExactCommand,
+                State::Ready,
+                Requirement::LauncherUi,
+                Outcome::Executed,
+                RootPolicy::Legacy,
+                1,
+                0,
+                Ack::LauncherQuery,
+                true,
+                identity,
+            )
+        };
+        vec![
+            query_packet_for_test(
+                "Q02",
+                vec![query_invocation_for_test(
+                    "qa-open",
+                    Mode::OpenLauncher,
+                    State::ManualUi,
+                    Requirement::LauncherUi,
+                    Outcome::Executed,
+                    RootPolicy::Legacy,
+                    0,
+                    0,
+                    Ack::LauncherQuery,
+                    true,
+                    10,
+                )],
+            ),
+            query_packet_for_test(
+                "Q03",
+                vec![hidden_ready("qa-hidden-first", Mode::ExecuteFirst, 20)],
+            ),
+            query_packet_for_test(
+                "Q05",
+                vec![hidden_ready("qa-pinned-second", Mode::PinnedAction, 30)],
+            ),
+            query_packet_for_test(
+                "Q07",
+                vec![query_invocation_for_test(
+                    "qa-no-results",
+                    Mode::ExecuteFirst,
+                    State::NoResults,
+                    Requirement::LauncherUi,
+                    Outcome::Executed,
+                    RootPolicy::Legacy,
+                    0,
+                    0,
+                    Ack::LauncherQuery,
+                    true,
+                    40,
+                )],
+            ),
+            query_packet_for_test(
+                "Q10",
+                vec![
+                    hidden_ready("qa-visible-first", Mode::ExecuteFirst, 50),
+                    query_invocation_for_test(
+                        "qa-visible-first",
+                        Mode::ExecuteFirst,
+                        State::Ready,
+                        Requirement::External,
+                        Outcome::Executed,
+                        RootPolicy::Preserve,
+                        1,
+                        0,
+                        Ack::None,
+                        true,
+                        60,
+                    ),
+                ],
+            ),
+            query_packet_for_test(
+                "Q11",
+                vec![query_invocation_for_test(
+                    "qa-note-new",
+                    Mode::ExactCommand,
+                    State::Ready,
+                    Requirement::LauncherUi,
+                    Outcome::Executed,
+                    RootPolicy::Legacy,
+                    1,
+                    0,
+                    Ack::NoteEditor,
+                    true,
+                    70,
+                )],
+            ),
+            query_packet_for_test("Q12", vec![visible_ready("qa-launcher-show", 80)]),
+            query_packet_for_test(
+                "Q13",
+                vec![
+                    query_invocation_for_test(
+                        "qa-note-remove",
+                        Mode::ExactCommand,
+                        State::Ready,
+                        Requirement::Confirmation,
+                        Outcome::ConfirmationRequired,
+                        RootPolicy::Legacy,
+                        0,
+                        1,
+                        Ack::Cancelled,
+                        true,
+                        90,
+                    ),
+                    query_invocation_for_test(
+                        "qa-note-remove",
+                        Mode::ExactCommand,
+                        State::Ready,
+                        Requirement::Confirmation,
+                        Outcome::ConfirmationRequired,
+                        RootPolicy::Legacy,
+                        1,
+                        0,
+                        Ack::Confirmed,
+                        true,
+                        100,
+                    ),
+                ],
+            ),
+            query_packet_for_test(
+                "Q15",
+                vec![hidden_ready("qa-exact-marker", Mode::ExactCommand, 110)],
+            ),
+        ]
+    }
+
+    #[test]
+    fn query_case_contracts_require_the_exact_hovered_cell() {
+        let mut packets = passing_query_packets_for_test();
+        assert_eq!(packets.len(), 9);
+        for packet in &packets {
+            query_case_contract_is_valid(packet).unwrap_or_else(|error| panic!("{error}"));
+        }
+
+        let packet = packets
+            .iter_mut()
+            .find(|packet| packet.case_id == "Q05")
+            .unwrap();
+        packet.invocations[0].cell_id = "qa-hidden-first".into();
+        packet.invocations[0].cell_digest = query_cell_digest("qa-hidden-first");
+        assert!(query_case_contract_is_valid(packet).is_err());
+
+        let mut packets = passing_query_packets_for_test();
+        let packet = packets
+            .iter_mut()
+            .find(|packet| packet.case_id == "Q10")
+            .unwrap();
+        let visible = &mut packet.invocations[1];
+        visible.root_observations[0].visible = false;
+        visible.root_observations[0].physically_visible = false;
+        visible.root_visible_samples = 1;
+        visible.root_hidden_samples = 1;
+        assert!(
+            query_case_contract_is_valid(packet).is_err(),
+            "Q10 visible-state proof must reject even one retained hidden ROOT sample"
+        );
+
+        let mut report = acceptance_report("native_windows_query");
+        report.suite = AcceptanceSuite::Query;
+        report.environment.child_process_id = Some(7);
+        report.environment.monitors = vec![MonitorIdentity {
+            id: 1,
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+            scale_factor: 1.0,
+        }];
+        let mut invocation = passing_query_packets_for_test()
+            .remove(1)
+            .invocations
+            .remove(0);
+        assert!(query_invocation_evidence_is_valid(&invocation, &report));
+
+        let mut impossible_hidden_sample = invocation.clone();
+        impossible_hidden_sample.root_observations[0].visible = true;
+        impossible_hidden_sample.root_observations[0].physically_visible = true;
+        assert!(
+            !query_invocation_evidence_is_valid(&impossible_hidden_sample, &report),
+            "retained onscreen samples must be consistent with the hidden counter"
+        );
+
+        let mut visible_packet = passing_query_packets_for_test()
+            .into_iter()
+            .find(|packet| packet.case_id == "Q10")
+            .unwrap();
+        let visible_invocation = &mut visible_packet.invocations[1];
+        visible_invocation.root_observations[1].visible = false;
+        visible_invocation.root_observations[1].physically_visible = false;
+        visible_invocation.root_visible_samples = 1;
+        visible_invocation.root_hidden_samples = 1;
+        assert!(query_invocation_evidence_is_valid(
+            visible_invocation,
+            &report
+        ));
+        assert!(
+            query_case_contract_is_valid(&visible_packet).is_err(),
+            "physically consistent counters cannot conceal a hidden retained sample"
+        );
+
+        invocation.cell_id = "qa-pinned-second".into();
+        assert!(!query_invocation_evidence_is_valid(&invocation, &report));
+    }
+
+    #[test]
+    fn preserved_state_requires_preclick_baseline_and_postquiet_observation() {
+        let mut invocation = query_invocation_for_test(
+            "qa-hidden-first",
+            QueryEvidenceMode::ExecuteFirst,
+            QueryEvidenceState::Ready,
+            QueryEvidenceRequirement::External,
+            QueryEvidenceOutcome::Executed,
+            QueryEvidenceRootPolicy::Preserve,
+            1,
+            0,
+            QueryEvidenceUiAck::None,
+            false,
+            901,
+        );
+        assert!(preserved_query_state_is_valid(&invocation));
+
+        let mut missing_baseline = invocation.clone();
+        missing_baseline.ordinary_baseline_request_id = None;
+        assert!(!preserved_query_state_is_valid(&missing_baseline));
+
+        let mut stale_frame = invocation.clone();
+        stale_frame.ordinary_terminal_frame_ordinal = stale_frame.ordinary_baseline_frame_ordinal;
+        assert!(!preserved_query_state_is_valid(&stale_frame));
+
+        let mut late_query_mutation = invocation.clone();
+        late_query_mutation
+            .root_state_after
+            .as_mut()
+            .unwrap()
+            .query_digest += 1;
+        assert!(!preserved_query_state_is_valid(&late_query_mutation));
+
+        let mut late_results_mutation = invocation.clone();
+        late_results_mutation
+            .root_state_after
+            .as_mut()
+            .unwrap()
+            .selected_index = Some(1);
+        assert!(!preserved_query_state_is_valid(&late_results_mutation));
+
+        let mut duplicate_history = invocation.clone();
+        duplicate_history
+            .root_state_after
+            .as_mut()
+            .unwrap()
+            .matching_history_count += 1;
+        assert!(!preserved_query_state_is_valid(&duplicate_history));
+
+        let mut duplicate_usage = invocation.clone();
+        duplicate_usage
+            .root_state_after
+            .as_mut()
+            .unwrap()
+            .usage_count += 1;
+        assert!(!preserved_query_state_is_valid(&duplicate_usage));
+
+        invocation.root_state_after.as_mut().unwrap().state_digest += 1;
+        assert!(!preserved_query_state_is_valid(&invocation));
+    }
+
+    #[test]
+    fn query_evidence_packets_fit_bounded_case_and_aggregate_caps() {
+        let packets = passing_query_packets_for_test();
+        let mut total_bytes = 0usize;
+        for packet in &packets {
+            let packet_bytes = serde_json::to_vec(packet).unwrap().len();
+            assert!(packet_bytes <= MAX_QUERY_CASE_EVIDENCE_BYTES);
+            total_bytes += packet_bytes;
+        }
+        assert!(total_bytes <= MAX_QUERY_EVIDENCE_BYTES);
+
+        let mut report = acceptance_report("native_windows_query");
+        report.suite = AcceptanceSuite::Query;
+        report.environment.child_process_id = Some(7);
+        report.environment.monitors = vec![MonitorIdentity {
+            id: 1,
+            x: 0,
+            y: 0,
+            width: 1000,
+            height: 1000,
+            scale_factor: 1.0,
+        }];
+        for packet in packets {
+            for invocation in &packet.invocations {
+                assert!(
+                    query_invocation_evidence_is_valid(invocation, &report),
+                    "{} invocation failed validation: {invocation:?}",
+                    packet.case_id
+                );
+            }
+            report.cases.push(AcceptanceCaseResult {
+                id: packet.case_id.clone(),
+                status: CaseStatus::Passed,
+                elapsed_ms: 1,
+                expected: "query proof".into(),
+                observed: "query proof".into(),
+                failure_stage: None,
+                artifacts: Vec::new(),
+            });
+            report.query_evidence.push(packet);
+        }
+        for (index, packet) in report.query_evidence.iter().enumerate() {
+            assert!(
+                QUERY_CASE_IDS.contains(&packet.case_id.as_str()),
+                "{} not in query inventory",
+                packet.case_id
+            );
+            assert_eq!(packet.schema_version, 1, "{} schema", packet.case_id);
+            assert!(
+                report.query_evidence[..index]
+                    .iter()
+                    .all(|prior| prior.case_id != packet.case_id),
+                "{} duplicated packet",
+                packet.case_id
+            );
+            for (item_index, item) in packet.invocations.iter().enumerate() {
+                assert!(
+                    packet.invocations[..item_index].iter().all(|prior| {
+                        prior.invocation_id != item.invocation_id
+                            && prior.session_digest != item.session_digest
+                    }),
+                    "{} duplicated invocation identity: {item:?}",
+                    packet.case_id
+                );
+            }
+            assert!(report.cases.iter().any(|case| case.id == packet.case_id));
+        }
+        validate_query_evidence_report(&report).unwrap();
+        let q10_index = report
+            .query_evidence
+            .iter()
+            .position(|packet| packet.case_id == "Q10")
+            .unwrap();
+        let original = report.query_evidence[q10_index].invocations[1].clone();
+        report.query_evidence[q10_index].invocations[1].session_digest =
+            report.query_evidence[q10_index].invocations[0].session_digest;
+        assert!(validate_query_evidence_report(&report).is_err());
+        report.query_evidence[q10_index].invocations[1] = original.clone();
+        report.query_evidence[q10_index].invocations[1].invocation_id =
+            report.query_evidence[q10_index].invocations[0].invocation_id;
+        assert!(validate_query_evidence_report(&report).is_err());
+        report.query_evidence[q10_index].invocations[1] = original;
+        validate_query_evidence_report(&report).unwrap();
+    }
+
+    #[test]
+    fn query_setup_visibility_accepts_early_edges_only_after_a_quiet_interval() {
+        let no_op = QuerySetupVisibilityEvidence {
+            visible_before: false,
+            desired_visible: false,
+            tap: None,
+        };
+        assert!(query_setup_visibility_is_valid(
+            &no_op,
+            AcceptanceHotkey::F11
+        ));
+
+        let mut evidence = QuerySetupVisibilityEvidence {
+            visible_before: false,
+            desired_visible: true,
+            tap: Some(QuerySetupTapEvidence {
+                input_down_inserted: 1,
+                input_up_inserted: 1,
+                quiet_preflight_ms: 82,
+                quiet_matching_edges: 1,
+                observer_default_desktop: true,
+                observed_edges: vec![
+                    QuerySetupObservedEdge {
+                        runner_relative_us: 0,
+                        virtual_key: 0x7A,
+                        down: true,
+                        injected: true,
+                        runner_cookie_matched: true,
+                    },
+                    QuerySetupObservedEdge {
+                        runner_relative_us: 25_000,
+                        virtual_key: 0x7A,
+                        down: false,
+                        injected: true,
+                        runner_cookie_matched: true,
+                    },
+                ],
+                foreign_edges: Vec::new(),
+                trace_cursor: 10,
+                invocation_id: 11,
+                generation: 4,
+                press_event_ordinal: 11,
+                release_event_ordinal: 12,
+                short_tap_event_ordinal: 13,
+                visibility_event_ordinal: 14,
+                visibility_visible: true,
+            }),
+        };
+
+        assert!(query_setup_visibility_is_valid(
+            &evidence,
+            AcceptanceHotkey::F11
+        ));
+        evidence.tap.as_mut().unwrap().quiet_preflight_ms = 74;
+        assert!(!query_setup_visibility_is_valid(
+            &evidence,
+            AcceptanceHotkey::F11
+        ));
+        evidence.tap.as_mut().unwrap().quiet_preflight_ms = 82;
+        evidence.tap.as_mut().unwrap().quiet_matching_edges = 257;
+        assert!(!query_setup_visibility_is_valid(
+            &evidence,
+            AcceptanceHotkey::F11
+        ));
     }
 
     fn passing_copied_report() -> AcceptanceReport {
@@ -11213,6 +12818,7 @@ mod tests {
                 artifacts: Vec::new(),
             }],
             hotkey_evidence: Vec::new(),
+            query_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
@@ -11473,6 +13079,7 @@ mod tests {
             },
             cases: Vec::new(),
             hotkey_evidence: Vec::new(),
+            query_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,

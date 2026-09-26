@@ -2503,6 +2503,11 @@ fn main() -> anyhow::Result<()> {
                             multi_launcher::gui::WatchEvent::RadialDispatch(request),
                         );
                     }
+                    ControllerEvent::DeferredResolutionRequested(envelope) => {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialResolveDeferred(envelope),
+                        );
+                    }
                     ControllerEvent::InvocationReleaseAcknowledged { .. } => {}
                     ControllerEvent::PrepareRequested(envelope) => {
                         multi_launcher::gui::send_event(
@@ -2676,6 +2681,11 @@ fn main() -> anyhow::Result<()> {
                     );
                     multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialDispatch(request),
+                    );
+                }
+                ControllerEvent::DeferredResolutionRequested(envelope) => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialResolveDeferred(envelope),
                     );
                 }
                 ControllerEvent::InvocationReleaseAcknowledged { .. } => {}

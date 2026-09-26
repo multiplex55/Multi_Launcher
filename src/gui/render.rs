@@ -1834,6 +1834,7 @@ impl eframe::App for LauncherApp {
             self.dashboard_data_cache
                 .request_refresh(DashboardRefreshRequest::All);
         }
+        self.poll_radial_query_observation(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

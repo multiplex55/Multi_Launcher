@@ -14,7 +14,9 @@ mod screenshot;
 mod todo;
 
 pub(crate) use calendar::handle_calendar;
-pub(crate) use clipboard_modify::handle_clipboard_modify;
+pub(crate) use clipboard_modify::{
+    handle_clipboard_modify, handle_clipboard_modify_with_history_query,
+};
 pub(crate) use data::handle_data;
 pub(crate) use dialog_crop::{handle_crop, handle_simple_dialog};
 pub(crate) use file_search_diff::{handle_diff, handle_file_search};

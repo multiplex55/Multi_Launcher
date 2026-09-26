@@ -125,6 +125,9 @@ pub struct UniversalActionInvocationContext {
     pub stable_request: Option<super::PersistedUniversalActionRef>,
     pub history_query: String,
     pub root_policy: RootLauncherPolicy,
+    /// A selected radial primary uses the ordinary command/history contract.
+    /// Secondary Universal Action commands retain their normalization policy.
+    pub primary_invocation: bool,
 }
 
 impl UniversalActionInvocationContext {
@@ -135,6 +138,7 @@ impl UniversalActionInvocationContext {
             stable_request: None,
             history_query: String::new(),
             root_policy: RootLauncherPolicy::Legacy,
+            primary_invocation: false,
         }
     }
 }

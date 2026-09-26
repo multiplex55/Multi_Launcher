@@ -2691,6 +2691,10 @@ impl NotePanel {
                 ui.set_min_width(available_size.x);
                 ui.set_max_width(available_size.x);
                 let editor_id = ui.make_persistent_id(text_id_source);
+                if self.focus_textedit_next_frame && ui.is_enabled() {
+                    // Focus before processing this frame's keyboard/clipboard events.
+                    ctx.memory_mut(|memory| memory.request_focus(editor_id));
+                }
                 self.intercept_clipboard_image_paste_with(
                     ctx,
                     app,
@@ -3206,7 +3210,12 @@ impl NotePanel {
             pending_state.store(ctx, resp.id);
             self.pending_cursor_position = None;
         }
-        if self.focus_textedit_next_frame || (request_initial_focus && first_edit_frame) {
+        if request_initial_focus && first_edit_frame {
+            self.focus_textedit_next_frame = true;
+        }
+        // egui lays out a new Window invisibly with disabled widgets first.
+        // Keep the focus request until the editor can actually receive input.
+        if self.focus_textedit_next_frame && resp.enabled() {
             resp.request_focus();
             self.focus_textedit_next_frame = false;
         }
@@ -4606,6 +4615,44 @@ mod tests {
         });
 
         assert_eq!(response_id, Some(editor_id));
+    }
+
+    #[test]
+    fn note_window_initial_focus_survives_invisible_layout_without_stealing_later_focus() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("# Focus fixture"));
+        panel.view_mode = NoteViewMode::Edit;
+        let query_id = egui::Id::new("focus-fixture-query");
+        let mut query = String::new();
+        for frame in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let response = ui.add(egui::TextEdit::singleline(&mut query).id(query_id));
+                    // ROOT's initial show may focus its query after the note's sizing pass.
+                    if frame != 2 {
+                        response.request_focus();
+                    }
+                });
+                panel.ui(ctx, &mut app);
+            });
+            if frame == 0 {
+                assert!(panel.focus_textedit_next_frame);
+            } else if frame < 3 {
+                let editor = panel.last_textedit_id.expect("note editor rendered");
+                assert!(ctx.memory(|memory| memory.has_focus(editor)));
+                assert!(!panel.focus_textedit_next_frame);
+            } else {
+                assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            }
+        }
     }
 
     #[test]

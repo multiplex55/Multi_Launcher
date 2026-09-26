@@ -18,13 +18,32 @@ pub enum FrozenAvailability {
 }
 
 impl FrozenAvailability {
+    /// Whether normal pointer, keyboard, and item activation may select this
+    /// entry. Deferred bindings are selectable because their runtime owner
+    /// resolves them at activation time; invalid exact commands remain inert.
+    pub fn is_selectable(&self) -> bool {
+        match self {
+            Self::Available => true,
+            Self::Deferred {
+                kind:
+                    DeferredBindingKind::ExactCommand {
+                        disposition: ExactCommandDisposition::Invalid,
+                        ..
+                    },
+            } => false,
+            Self::Deferred { .. } => true,
+            Self::Empty { .. } | Self::Loading { .. } | Self::Unavailable { .. } => false,
+        }
+    }
+
     pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Available => None,
             Self::Empty { reason } | Self::Loading { reason } | Self::Unavailable { reason } => {
                 Some(reason)
             }
-            Self::Deferred { kind } => Some(kind.reason()),
+            Self::Deferred { kind } if !self.is_selectable() => Some(kind.reason()),
+            Self::Deferred { .. } => None,
         }
     }
 }
@@ -138,6 +157,35 @@ pub enum RuntimeTargetIdentity {
         target: crate::window_catalog::WindowTargetIdentity,
         catalog_generation: u64,
     },
+    ClipboardEntry {
+        catalog_version: u64,
+    },
+    Todo {
+        catalog_version: u64,
+    },
+    Note {
+        catalog_version: u64,
+    },
+}
+
+/// Versions for mutable catalogs whose rows can otherwise be rebound to a
+/// different object while a selected radial action waits for release or
+/// confirmation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MutableResultCatalogVersions {
+    pub clipboard: u64,
+    pub todo: u64,
+    pub notes: u64,
+}
+
+impl MutableResultCatalogVersions {
+    pub fn current() -> Self {
+        Self {
+            clipboard: crate::plugins::clipboard::clipboard_version(),
+            todo: crate::plugins::todo::todo_version(),
+            notes: crate::plugins::note::note_version(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -394,6 +442,29 @@ mod tests {
             history_query: None,
             kind: FrozenEntryKind::Action,
         }
+    }
+
+    #[test]
+    fn deferred_query_is_actionable_for_resolution_but_invalid_exact_text_is_not() {
+        let query = crate::radial::bindings::prepare_deferred_binding(
+            &crate::radial::model::ActionBinding::LauncherQuery {
+                query: "saved query".into(),
+                mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+            },
+        )
+        .unwrap();
+        assert!(query.availability.is_selectable());
+        assert_eq!(query.availability.reason(), None);
+
+        let invalid_exact = crate::radial::bindings::prepare_deferred_binding(
+            &crate::radial::model::ActionBinding::ExactCommand {
+                command: "radial show".into(),
+                args: None,
+            },
+        )
+        .unwrap();
+        assert!(!invalid_exact.availability.is_selectable());
+        assert!(invalid_exact.availability.reason().is_some());
     }
 
     #[test]

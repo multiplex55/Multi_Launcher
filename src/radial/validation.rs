@@ -1648,6 +1648,30 @@ mod tests {
         assert!(errors.0.iter().any(|issue| {
             issue.path.ends_with("after_action") && issue.message.contains("LauncherUi")
         }));
+
+        for command in ["note:open:sample-note", "clipboard_modify:open:pipelines"] {
+            document.menus[menu_index].rings[0].cells[0].content = CellContent::Action {
+                binding: ActionBinding::ExactCommand {
+                    command: command.into(),
+                    args: None,
+                },
+            };
+            let errors = validate(&document).unwrap_err();
+            assert!(
+                errors.0.iter().any(|issue| {
+                    issue.path.ends_with("after_action") && issue.message.contains("LauncherUi")
+                }),
+                "KeepOpen must reject UI-bearing exact command {command}"
+            );
+        }
+
+        document.menus[menu_index].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::ExactCommand {
+                command: "note:remove:sample-note".into(),
+                args: None,
+            },
+        };
+        assert!(validate(&document).is_ok());
     }
 
     #[test]

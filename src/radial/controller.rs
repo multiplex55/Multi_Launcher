@@ -19,8 +19,10 @@ use super::geometry::{
     translate_layout,
 };
 use super::handoff::{
-    DispatchEvent, DispatchIntent, InteractionRequirement, PendingRadialDispatch,
-    RadialDispatchIdentity, RadialDispatchRequest,
+    DeferredDispatchOrigin, DeferredResolutionEnvelope, DeferredResolutionReply,
+    DeferredResolutionResult, DispatchEvent, DispatchIntent, InteractionRequirement,
+    PendingDeferredSelection, PendingRadialDispatch, RadialDispatchIdentity, RadialDispatchRequest,
+    ResolvedDeferredSelection,
 };
 use super::invocation::{InvocationIntent, LifecycleCancellation};
 use super::model::{
@@ -43,7 +45,11 @@ use super::tooltip::{TooltipHoverState, TooltipIdentity, TooltipPreferences};
 use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread::JoinHandle;
 
 const MAX_VISIBLE_RESOURCE_DIAGNOSTICS: usize = MAX_RADIAL_DIAGNOSTICS;
@@ -51,6 +57,7 @@ const MAX_VISIBLE_RESOURCE_DIAGNOSTICS: usize = MAX_RADIAL_DIAGNOSTICS;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DeadlineKey {
     ActionHandoff,
+    DeferredResolution,
     Dwell,
     Tooltip,
 }
@@ -179,6 +186,7 @@ pub enum ControllerEvent {
         message: String,
     },
     DispatchRequested(RadialDispatchRequest),
+    DeferredResolutionRequested(DeferredResolutionEnvelope),
     InvocationReleaseAcknowledged {
         invocation_id: InvocationId,
     },
@@ -300,6 +308,12 @@ struct PreparationBridge {
     waiting: Option<WaitingOpen>,
 }
 
+struct DeferredResolutionBridge {
+    tx: mpsc::Sender<DeferredResolutionReply>,
+    rx: mpsc::Receiver<DeferredResolutionReply>,
+    wake: mpsc::Sender<()>,
+}
+
 #[derive(Clone, Debug)]
 struct QueuedItemActivation {
     id: InvocationId,
@@ -323,6 +337,8 @@ pub struct RadialController {
     diagnostics: Option<VecDeque<DiagnosticRecord>>,
     handoff: Option<PendingRadialDispatch>,
     preparation: Option<PreparationBridge>,
+    deferred_resolution: Option<PendingDeferredSelection>,
+    deferred_bridge: Option<DeferredResolutionBridge>,
     last_external: Option<WindowIdentity>,
     deadline_scheduler: Option<HandoffDeadlineScheduler>,
     deadline_wake: Option<mpsc::Sender<()>>,
@@ -342,6 +358,25 @@ fn acceptance_trace_id_digest(value: &str) -> u64 {
     value.bytes().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     })
+}
+
+fn deferred_query(binding: &FrozenBinding) -> Option<String> {
+    match binding {
+        FrozenBinding::Deferred {
+            binding: ActionBinding::LauncherQuery { query, .. },
+            ..
+        } => Some(query.clone()),
+        _ => None,
+    }
+}
+
+fn deferred_reply_matches(
+    identity: &RadialDispatchIdentity,
+    attempt: u64,
+    cancelled: bool,
+    reply: &DeferredResolutionReply,
+) -> bool {
+    !cancelled && identity == &reply.identity && attempt == reply.attempt
 }
 
 fn acceptance_trace_role_name(role: CellRole) -> &'static str {
@@ -377,6 +412,12 @@ impl RadialController {
             next_generation: 1,
             waiting: None,
         });
+        let (deferred_tx, deferred_rx) = mpsc::channel();
+        controller.deferred_bridge = Some(DeferredResolutionBridge {
+            tx: deferred_tx,
+            rx: deferred_rx,
+            wake: wake.clone(),
+        });
         controller.deadline_wake = Some(wake);
         controller
     }
@@ -396,6 +437,8 @@ impl RadialController {
             diagnostics: diagnostics.then(VecDeque::new),
             handoff: None,
             preparation: None,
+            deferred_resolution: None,
+            deferred_bridge: None,
             last_external: None,
             deadline_scheduler: None,
             deadline_wake: None,
@@ -413,6 +456,7 @@ impl RadialController {
     }
     pub fn replace_document(&mut self, document: Arc<RadialDocument>) {
         self.invalidate_resources();
+        self.clear_deferred_resolution();
         if let Some(service) = &mut self.asset_service {
             service.replace_search_roots(document.media_search_roots.clone());
         }
@@ -896,6 +940,7 @@ impl RadialController {
         allow_context_rules: bool,
         out: &mut Vec<ControllerEvent>,
     ) {
+        self.clear_deferred_resolution();
         self.handoff = None;
         self.cancel_handoff_deadline();
         let Some(bridge) = self.preparation.as_mut() else {
@@ -1194,6 +1239,7 @@ impl RadialController {
             let Some(event) = event else { break };
             self.handle_native(event, &mut out)
         }
+        self.poll_deferred_resolution(&mut out);
         self.reduce_handoff(
             DispatchEvent::Tick {
                 now_ms: monotonic_ms(),
@@ -1203,6 +1249,186 @@ impl RadialController {
         self.poll_dwell(&mut out);
         self.poll_tooltip(&mut out);
         out
+    }
+
+    fn poll_deferred_resolution(&mut self, out: &mut Vec<ControllerEvent>) {
+        let now = monotonic_ms();
+        let timeout = self
+            .deferred_resolution
+            .as_ref()
+            .is_some_and(|pending| now >= pending.deadline_ms);
+        if timeout {
+            let query = self
+                .deferred_resolution
+                .as_ref()
+                .filter(|pending| pending.force_open_query.is_none())
+                .and_then(|pending| deferred_query(&pending.request.binding));
+            if let Some(query) = query {
+                if let Some(pending) = self.deferred_resolution.as_mut() {
+                    pending.cancellation.store(true, Ordering::Release);
+                    pending.cancellation = Arc::new(AtomicBool::new(false));
+                    pending.attempt = pending.attempt.saturating_add(1);
+                    pending.force_open_query = Some(
+                        "Provider search did not finish before the bounded radial resolution deadline"
+                            .into(),
+                    );
+                    pending.request.history_query = query;
+                    pending.deadline_ms = now.saturating_add(1_000);
+                    pending.retry_at_ms = Some(now);
+                }
+            } else if let Some(pending) = self.deferred_resolution.as_ref() {
+                let invocation_id = pending.request.identity.invocation_id;
+                self.clear_deferred_resolution();
+                out.push(ControllerEvent::Error(format!(
+                    "radial action resolution timed out for invocation {}",
+                    invocation_id.0
+                )));
+            }
+        }
+
+        let mut replies = Vec::new();
+        if let Some(bridge) = &self.deferred_bridge {
+            while let Ok(reply) = bridge.rx.try_recv() {
+                replies.push(reply);
+            }
+        }
+        for reply in replies {
+            let matches = self.deferred_resolution.as_ref().is_some_and(|pending| {
+                deferred_reply_matches(
+                    &pending.request.identity,
+                    pending.attempt,
+                    pending.cancellation.load(Ordering::Acquire),
+                    &reply,
+                )
+            });
+            if !matches || !self.deferred_selection_is_current(&reply.identity) {
+                continue;
+            }
+            match reply.result {
+                DeferredResolutionResult::Pending {
+                    provider_revision,
+                    wait_for_change,
+                } => {
+                    if let Some(pending) = self.deferred_resolution.as_mut() {
+                        pending.cancellation.store(true, Ordering::Release);
+                        pending.cancellation = Arc::new(AtomicBool::new(false));
+                        pending.attempt = pending.attempt.saturating_add(1);
+                        pending.last_provider_revision = Some(provider_revision);
+                        pending.wait_for_provider_change = wait_for_change;
+                        pending.retry_at_ms = Some(monotonic_ms().saturating_add(100));
+                        pending.retries = pending.retries.saturating_add(1);
+                    }
+                }
+                DeferredResolutionResult::Cancelled => {
+                    self.clear_deferred_resolution();
+                }
+                DeferredResolutionResult::Failed(message) => {
+                    if let Some(pending) = self.deferred_resolution.as_mut() {
+                        if let Some(query) = deferred_query(&pending.request.binding) {
+                            pending.cancellation.store(true, Ordering::Release);
+                            pending.cancellation = Arc::new(AtomicBool::new(false));
+                            pending.attempt = pending.attempt.saturating_add(1);
+                            pending.force_open_query = Some(message);
+                            pending.retry_at_ms = Some(monotonic_ms());
+                            pending.deadline_ms = monotonic_ms().saturating_add(1_000);
+                            pending.request.history_query = query;
+                        } else {
+                            self.clear_deferred_resolution();
+                            out.push(ControllerEvent::Error(message));
+                        }
+                    }
+                }
+                DeferredResolutionResult::Ready(resolved) => {
+                    let Some(mut pending) = self.deferred_resolution.take() else {
+                        continue;
+                    };
+                    pending.cancellation.store(true, Ordering::Release);
+                    pending.request.binding = resolved.binding;
+                    pending.request.requirement = resolved.requirement;
+                    pending.request.deferred_origin = Some(resolved.origin.clone());
+                    if let DeferredDispatchOrigin::Query {
+                        query,
+                        mode,
+                        selected_action,
+                        ..
+                    } = &resolved.origin
+                    {
+                        pending.request.history_query = query.clone();
+                        if *mode == crate::radial::model::QueryRunMode::OpenLauncher
+                            || selected_action.is_none()
+                        {
+                            // Showing a query UI is a deliberate launcher interaction,
+                            // even when the cell requested KeepOpen.
+                            pending.request.after_action = AfterActionPolicy::CloseTree;
+                        }
+                    }
+                    self.begin_dispatch_handoff(pending.request, out);
+                }
+            }
+        }
+
+        let retry = self.deferred_resolution.as_mut().and_then(|pending| {
+            if pending.retry_at_ms.is_some_and(|retry_at| now >= retry_at) {
+                pending.retry_at_ms = None;
+                Some((
+                    pending.request.identity.clone(),
+                    pending.request.binding.clone(),
+                    pending.request.history_query.clone(),
+                    pending.last_provider_revision,
+                    pending.wait_for_provider_change,
+                    pending.force_open_query.clone(),
+                    pending.attempt,
+                    Arc::clone(&pending.cancellation),
+                ))
+            } else {
+                None
+            }
+        });
+        if let Some((
+            identity,
+            binding,
+            history_query,
+            last_provider_revision,
+            wait_for_provider_change,
+            force_open_query,
+            attempt,
+            cancellation,
+        )) = retry
+            && self.deferred_selection_is_current(&identity)
+            && let Some(bridge) = self.deferred_bridge.as_ref()
+        {
+            out.push(ControllerEvent::DeferredResolutionRequested(
+                DeferredResolutionEnvelope {
+                    identity,
+                    attempt,
+                    binding,
+                    history_query,
+                    last_provider_revision,
+                    wait_for_provider_change,
+                    force_open_query,
+                    cancellation,
+                    reply: bridge.tx.clone(),
+                    wake: bridge.wake.clone(),
+                },
+            ));
+        }
+        self.sync_deferred_deadline();
+    }
+
+    fn deferred_selection_is_current(&self, identity: &RadialDispatchIdentity) -> bool {
+        if self.document.revision != identity.config_revision {
+            return false;
+        }
+        self.active.as_ref().is_some_and(|active| {
+            active.session_id == identity.session_id
+                && active.invocation_id == identity.invocation_id
+                && !active.closing
+                && active.reducer.state.session_generation == identity.session_generation
+                && active.prepared.as_ref().map_or(
+                    identity.preparation_generation == PreparationGeneration(0),
+                    |prepared| prepared.generation == identity.preparation_generation,
+                )
+        })
     }
     pub fn navigate_active(
         &mut self,
@@ -1651,6 +1877,7 @@ impl RadialController {
                             acceptance_trace::emit(AcceptanceTraceEvent::RuntimeRadialHover {
                                 session_digest: acceptance_trace_id_digest(session_id.as_str()),
                                 cell_digest: acceptance_trace_id_digest(cell.as_str()),
+                                layout_generation,
                                 role: acceptance_trace_role_name(role),
                                 executable: role == CellRole::Action,
                             });
@@ -2200,7 +2427,7 @@ impl RadialController {
             .map_or(CellRole::Unavailable, |prepared| match prepared {
                 Err(role) => role,
                 Ok(prepared) => {
-                    if prepared.availability == FrozenAvailability::Available {
+                    if prepared.availability.is_selectable() {
                         CellRole::Action
                     } else {
                         CellRole::Unavailable
@@ -2234,17 +2461,7 @@ impl RadialController {
                 modifiers,
                 source,
             } => {
-                let Some((
-                    prepared,
-                    invocation_id,
-                    preparation_generation,
-                    context,
-                    trigger_still_down,
-                    item_trigger_still_down,
-                    owned_item_input,
-                    stack_len,
-                    pointer,
-                )) = self
+                let Some((prepared, invocation_id, preparation_generation, context)) = self
                     .active
                     .as_ref()
                     .filter(|active| &active.session_id == id)
@@ -2259,18 +2476,18 @@ impl RadialController {
                                         .as_ref()
                                         .map_or(PreparationGeneration(0), |reply| reply.generation),
                                     active.context.clone(),
-                                    active.trigger_still_down,
-                                    active.owned_item_input.is_some(),
-                                    active.owned_item_input,
-                                    active.reducer.state.stack.len(),
-                                    active.pointer,
                                 )
                             })
                     })
                 else {
                     return;
                 };
-                if prepared.availability != FrozenAvailability::Available {
+                // A newer deliberate activation supersedes any unresolved result
+                // request from the same visible radial session.
+                self.clear_deferred_resolution();
+                let is_deferred =
+                    matches!(prepared.availability, FrozenAvailability::Deferred { .. });
+                if !prepared.availability.is_selectable() {
                     if let FrozenAvailability::Deferred { kind } = prepared.availability {
                         out.push(ControllerEvent::Error(kind.reason().to_owned()));
                     }
@@ -2278,7 +2495,8 @@ impl RadialController {
                 }
                 let requirement = prepared.requirement;
                 let after_action = prepared.after_action;
-                if after_action == AfterActionPolicy::KeepOpen
+                if !is_deferred
+                    && after_action == AfterActionPolicy::KeepOpen
                     && prepared.requirement != InteractionRequirement::None
                 {
                     out.push(ControllerEvent::Error(format!(
@@ -2290,6 +2508,7 @@ impl RadialController {
                 let request = RadialDispatchRequest {
                     identity: RadialDispatchIdentity {
                         session_id: id.clone(),
+                        selected_cell_id: cell_id.to_string(),
                         invocation_id,
                         session_generation: token.session_generation,
                         token,
@@ -2298,50 +2517,16 @@ impl RadialController {
                     },
                     requirement,
                     binding: prepared.binding,
+                    deferred_origin: None,
                     history_query: prepared.history_query,
                     context,
                     after_action,
                     source,
                 };
-                let release_required = trigger_still_down || item_trigger_still_down;
-                if release_required {
-                    let waits = self.release_waits.entry(invocation_id).or_default();
-                    if trigger_still_down {
-                        waits.insert(invocation_id);
-                    }
-                    if let Some(item_id) = owned_item_input {
-                        waits.insert(item_id);
-                        self.release_aliases.insert(item_id, invocation_id);
-                    }
-                }
-                let close_required = after_action == AfterActionPolicy::CloseTree
-                    || (after_action == AfterActionPolicy::CloseCurrentMenu && stack_len == 1)
-                    || requirement != InteractionRequirement::None;
-                if after_action == AfterActionPolicy::CloseCurrentMenu && stack_len > 1 {
-                    let geometry_generation = self.next_layout_generation();
-                    self.session_event(
-                        id,
-                        SessionEvent::Back {
-                            geometry_generation,
-                            pointer_baseline: pointer,
-                        },
-                        out,
-                    );
-                }
-                match PendingRadialDispatch::new(
-                    request,
-                    close_required,
-                    release_required,
-                    monotonic_ms(),
-                    5_000,
-                ) {
-                    Ok(mut pending) => {
-                        let intents = pending.reduce(DispatchEvent::Begin);
-                        self.handoff = Some(pending);
-                        self.arm_handoff_deadline(monotonic_ms().saturating_add(5_000));
-                        self.apply_handoff_intents(intents, out);
-                    }
-                    Err(message) => out.push(ControllerEvent::Error(message)),
+                if is_deferred {
+                    self.begin_deferred_resolution(request, out);
+                } else {
+                    self.begin_dispatch_handoff(request, out);
                 }
             }
             SessionIntent::OpenSubmenu { cell_id } => self.open_submenu(id, &cell_id, out),
@@ -2389,6 +2574,143 @@ impl RadialController {
             }
         }
     }
+
+    fn begin_deferred_resolution(
+        &mut self,
+        request: RadialDispatchRequest,
+        out: &mut Vec<ControllerEvent>,
+    ) {
+        let Some(bridge) = self.deferred_bridge.as_ref() else {
+            out.push(ControllerEvent::Error(
+                "radial deferred-resolution bridge is unavailable".into(),
+            ));
+            return;
+        };
+        if !matches!(&request.binding, FrozenBinding::Deferred { .. })
+            || !self.deferred_selection_is_current(&request.identity)
+        {
+            return;
+        }
+        let now = monotonic_ms();
+        let Some(deadline_ms) = now.checked_add(5_000) else {
+            out.push(ControllerEvent::Error(
+                "radial deferred-resolution deadline overflow".into(),
+            ));
+            return;
+        };
+        let reply = bridge.tx.clone();
+        let wake = bridge.wake.clone();
+        self.clear_deferred_resolution();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let envelope = DeferredResolutionEnvelope {
+            identity: request.identity.clone(),
+            attempt: 1,
+            binding: request.binding.clone(),
+            history_query: request.history_query.clone(),
+            last_provider_revision: None,
+            wait_for_provider_change: false,
+            force_open_query: None,
+            cancellation: Arc::clone(&cancellation),
+            reply,
+            wake,
+        };
+        self.deferred_resolution = Some(PendingDeferredSelection {
+            request,
+            attempt: 1,
+            cancellation,
+            deadline_ms,
+            retry_at_ms: None,
+            retries: 0,
+            last_provider_revision: None,
+            wait_for_provider_change: false,
+            force_open_query: None,
+        });
+        self.handoff = None;
+        self.cancel_handoff_deadline();
+        self.sync_deferred_deadline();
+        out.push(ControllerEvent::DeferredResolutionRequested(envelope));
+    }
+
+    fn begin_dispatch_handoff(
+        &mut self,
+        request: RadialDispatchRequest,
+        out: &mut Vec<ControllerEvent>,
+    ) {
+        self.clear_deferred_resolution();
+        let Some((trigger_still_down, owned_item_input, stack_len, pointer)) = self
+            .active
+            .as_ref()
+            .filter(|active| {
+                active.session_id == request.identity.session_id
+                    && active.invocation_id == request.identity.invocation_id
+                    && !active.closing
+            })
+            .map(|active| {
+                (
+                    active.trigger_still_down,
+                    active.owned_item_input,
+                    active.reducer.state.stack.len(),
+                    active.pointer,
+                )
+            })
+        else {
+            return;
+        };
+        if request.after_action == AfterActionPolicy::KeepOpen
+            && request.requirement != InteractionRequirement::None
+        {
+            out.push(ControllerEvent::Error(format!(
+                "action requires {:?} and cannot keep the radial menu open",
+                request.requirement
+            )));
+            return;
+        }
+        let release_required = trigger_still_down || owned_item_input.is_some();
+        if release_required {
+            let waits = self
+                .release_waits
+                .entry(request.identity.invocation_id)
+                .or_default();
+            if trigger_still_down {
+                waits.insert(request.identity.invocation_id);
+            }
+            if let Some(item_id) = owned_item_input {
+                waits.insert(item_id);
+                self.release_aliases
+                    .insert(item_id, request.identity.invocation_id);
+            }
+        }
+        let close_required = request.after_action == AfterActionPolicy::CloseTree
+            || (request.after_action == AfterActionPolicy::CloseCurrentMenu && stack_len == 1)
+            || request.requirement != InteractionRequirement::None;
+        if request.after_action == AfterActionPolicy::CloseCurrentMenu && stack_len > 1 {
+            let geometry_generation = self.next_layout_generation();
+            self.session_event(
+                &request.identity.session_id,
+                SessionEvent::Back {
+                    geometry_generation,
+                    pointer_baseline: pointer,
+                },
+                out,
+            );
+        }
+        match PendingRadialDispatch::new(
+            request,
+            close_required,
+            release_required,
+            monotonic_ms(),
+            5_000,
+        ) {
+            Ok(mut pending) => {
+                let intents = pending.reduce(DispatchEvent::Begin);
+                self.handoff = Some(pending);
+                self.arm_handoff_deadline(monotonic_ms().saturating_add(5_000));
+                self.apply_handoff_intents(intents, out);
+            }
+            Err(message) => out.push(ControllerEvent::Error(message)),
+        }
+    }
+
     fn role(&self, id: &SessionId, owner: &InputOwner) -> CellRole {
         let InputOwner::Actionable(cell) = owner else {
             return CellRole::Spacer;
@@ -2461,7 +2783,7 @@ impl RadialController {
         if let Some(prepared) =
             self.prepared_action(active, cell, button, active.reducer.state.modifiers)
         {
-            return if prepared.availability == FrozenAvailability::Available {
+            return if prepared.availability.is_selectable() {
                 CellRole::Action
             } else {
                 CellRole::Unavailable
@@ -2504,7 +2826,7 @@ impl RadialController {
             .as_ref()
             .and_then(|reply| reply.frame.cells.get(cell))
         {
-            return if prepared.availability == FrozenAvailability::Available {
+            return if prepared.availability.is_selectable() {
                 CellRole::Action
             } else {
                 CellRole::Unavailable
@@ -2512,9 +2834,11 @@ impl RadialController {
         }
         if let Some(menu) = active.prepared.as_ref().map(|reply| &reply.frame.menu) {
             if active.prepared.as_ref().is_some_and(|reply| {
-                reply.frame.alternates.iter().any(|((id, _), prepared)| {
-                    id == cell && prepared.availability == FrozenAvailability::Available
-                })
+                reply
+                    .frame
+                    .alternates
+                    .iter()
+                    .any(|((id, _), prepared)| id == cell && prepared.availability.is_selectable())
             }) {
                 return CellRole::Action;
             }
@@ -3163,6 +3487,26 @@ impl RadialController {
             scheduler.cancel(DeadlineKey::ActionHandoff);
         }
     }
+    fn clear_deferred_resolution(&mut self) {
+        if let Some(pending) = self.deferred_resolution.take() {
+            pending.cancellation.store(true, Ordering::Release);
+        }
+        if let Some(scheduler) = &self.deadline_scheduler {
+            scheduler.cancel(DeadlineKey::DeferredResolution);
+        }
+    }
+    fn sync_deferred_deadline(&mut self) {
+        let deadline = self.deferred_resolution.as_ref().map(|pending| {
+            pending
+                .retry_at_ms
+                .map_or(pending.deadline_ms, |retry| retry.min(pending.deadline_ms))
+        });
+        if let Some(deadline) = deadline {
+            self.arm_deadline(DeadlineKey::DeferredResolution, deadline);
+        } else if let Some(scheduler) = &self.deadline_scheduler {
+            scheduler.cancel(DeadlineKey::DeferredResolution);
+        }
+    }
     fn sync_dwell_deadline(&mut self) {
         let deadline = self.active.as_ref().and_then(|active| {
             active
@@ -3261,6 +3605,7 @@ impl RadialController {
         if requested.is_some_and(|v| v != &id) {
             return;
         }
+        self.clear_deferred_resolution();
         // The Dispatch intent is the selection commit point. Only the legacy
         // launcher tap may close the radial without revoking that committed
         // selection; lifecycle and replacement cancellations must cancel it.
@@ -3761,11 +4106,10 @@ fn apply_prepared_availability(
             .map(|((_, gesture), prepared)| (*gesture, prepared))
             .collect();
         if primary.is_some() || !alternates.is_empty() {
-            cell.actionable = primary
-                .is_some_and(|prepared| prepared.availability == FrozenAvailability::Available)
+            cell.actionable = primary.is_some_and(|prepared| prepared.availability.is_selectable())
                 || alternates
                     .iter()
-                    .any(|(_, prepared)| prepared.availability == FrozenAvailability::Available);
+                    .any(|(_, prepared)| prepared.availability.is_selectable());
             let mut diagnostics = Vec::new();
             if let Some(reason) = primary.and_then(|prepared| prepared.availability.reason()) {
                 diagnostics.push(format!("Left: {reason}"));
@@ -3920,6 +4264,43 @@ mod tests {
     use crate::radial::model::CellId;
 
     #[test]
+    fn deferred_resolution_timer_wakes_without_input() {
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let scheduler = HandoffDeadlineScheduler::spawn(wake_tx).unwrap();
+        scheduler.arm(
+            DeadlineKey::DeferredResolution,
+            monotonic_ms().saturating_add(25),
+        );
+        wake_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("deferred retry/timeout must wake the event loop without user input");
+    }
+
+    #[test]
+    fn deferred_reply_requires_current_selection_attempt_and_live_token() {
+        let identity = RadialDispatchIdentity {
+            session_id: SessionId::new("deferred-session"),
+            selected_cell_id: "deferred-cell".into(),
+            invocation_id: InvocationId(7),
+            session_generation: 3,
+            token: super::super::session::DispatchToken {
+                session_generation: 3,
+                ordinal: 2,
+            },
+            config_revision: super::super::model::ConfigRevision(4),
+            preparation_generation: PreparationGeneration(5),
+        };
+        let reply = DeferredResolutionReply {
+            identity: identity.clone(),
+            attempt: 2,
+            result: DeferredResolutionResult::Cancelled,
+        };
+        assert!(deferred_reply_matches(&identity, 2, false, &reply));
+        assert!(!deferred_reply_matches(&identity, 1, false, &reply));
+        assert!(!deferred_reply_matches(&identity, 2, true, &reply));
+    }
+
+    #[test]
     fn lifecycle_cancellation_reasons_retain_native_close_identity() {
         for (cancellation, close) in [
             (
@@ -4024,6 +4405,588 @@ mod tests {
                 }))
             }),
         )
+    }
+
+    fn deferred_query_controller() -> (
+        RadialController,
+        Arc<Mutex<VecDeque<NativeEvent>>>,
+        DeferredResolutionEnvelope,
+        mpsc::Receiver<()>,
+    ) {
+        let mut document = RadialDocument::starter();
+        document.menus[0].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "saved query".into(),
+                mode: super::super::model::QueryRunMode::ExecuteFirst,
+            },
+        };
+        document.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::CloseTree;
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            false,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::new(Mutex::new(Vec::new())),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let (wake, wake_rx) = mpsc::channel();
+        controller.deferred_bridge = Some(DeferredResolutionBridge {
+            tx: reply_tx,
+            rx: reply_rx,
+            wake: wake.clone(),
+        });
+        controller.deadline_wake = Some(wake);
+
+        let mut open_intent = open();
+        if let InvocationIntent::OpenRadial {
+            trigger_still_down, ..
+        } = &mut open_intent
+        {
+            *trigger_still_down = false;
+        }
+        controller.handle_intents(vec![open_intent], false);
+        let pending = controller.pending.as_ref().expect("opening session");
+        let session_id = pending.session_id.clone();
+        let generation = pending.generation;
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id,
+            layout_generation: generation,
+        });
+        assert!(
+            controller
+                .poll()
+                .iter()
+                .any(|event| matches!(event, ControllerEvent::Opened { .. }))
+        );
+
+        let cell_id = controller.document.menus[0].rings[0].cells[0].id.clone();
+        let selected = controller.handle_intents(
+            vec![InvocationIntent::ActivateItem {
+                id: InvocationId(88),
+                menu_id: MenuId::new("starter"),
+                cell_id,
+                gesture: ClickGesture::Primary,
+                scope: TriggerScope::MenuLocal,
+                source: crate::commands::ActivationSource::RadialShortcut,
+                trigger_still_down: true,
+            }],
+            false,
+        );
+        let envelope = selected
+            .into_iter()
+            .find_map(|event| match event {
+                ControllerEvent::DeferredResolutionRequested(envelope) => Some(envelope),
+                _ => None,
+            })
+            .expect("deferred cell selection should request controller resolution");
+        (controller, events, envelope, wake_rx)
+    }
+
+    fn query_resolution(
+        query: &str,
+        selected_action: Option<crate::actions::Action>,
+        explanation: Option<&str>,
+    ) -> DeferredResolutionResult {
+        let action = selected_action
+            .clone()
+            .unwrap_or_else(|| crate::actions::Action {
+                label: query.into(),
+                desc: "Saved launcher query".into(),
+                action: format!("query:{query}"),
+                args: None,
+            });
+        DeferredResolutionResult::Ready(ResolvedDeferredSelection {
+            binding: FrozenBinding::Runtime {
+                target: crate::universal_actions::ActionTarget::Generic {
+                    action: action.clone(),
+                },
+                selected_action: action,
+                action_id: crate::universal_actions::action_ids::RESULT_EXECUTE.clone(),
+                identity: None,
+            },
+            requirement: if selected_action.is_some() {
+                InteractionRequirement::None
+            } else {
+                InteractionRequirement::LauncherUi
+            },
+            origin: DeferredDispatchOrigin::Query {
+                query: query.into(),
+                mode: super::super::model::QueryRunMode::ExecuteFirst,
+                selected_action,
+                provider_revision: Some(10),
+                result_catalog_versions: Some(
+                    super::super::dynamic::MutableResultCatalogVersions::current(),
+                ),
+                explanation: explanation.map(str::to_owned),
+            },
+        })
+    }
+
+    fn send_deferred_reply(
+        envelope: &DeferredResolutionEnvelope,
+        result: DeferredResolutionResult,
+    ) {
+        envelope
+            .reply
+            .send(DeferredResolutionReply {
+                identity: envelope.identity.clone(),
+                attempt: envelope.attempt,
+                result,
+            })
+            .expect("controller deferred reply receiver should remain connected");
+        envelope
+            .wake
+            .send(())
+            .expect("controller deferred wake receiver should remain connected");
+    }
+
+    fn deferred_request(events: Vec<ControllerEvent>) -> DeferredResolutionEnvelope {
+        events
+            .into_iter()
+            .find_map(|event| match event {
+                ControllerEvent::DeferredResolutionRequested(envelope) => Some(envelope),
+                _ => None,
+            })
+            .expect("controller should emit the requested deferred attempt")
+    }
+
+    fn dispatch_request(events: &[ControllerEvent]) -> &RadialDispatchRequest {
+        events
+            .iter()
+            .find_map(|event| match event {
+                ControllerEvent::DispatchRequested(request) => Some(request),
+                _ => None,
+            })
+            .expect("completed deferred selection should dispatch after handoff gates")
+    }
+
+    fn finish_deferred_handoff(
+        controller: &mut RadialController,
+        native_events: &Arc<Mutex<VecDeque<NativeEvent>>>,
+        envelope: &DeferredResolutionEnvelope,
+    ) -> Vec<ControllerEvent> {
+        native_events
+            .lock()
+            .unwrap()
+            .push_back(NativeEvent::Closed {
+                session_id: envelope.identity.session_id.clone(),
+                reason: CloseReason::ActionHandoff,
+            });
+        let closed = controller.poll();
+        assert!(
+            closed
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        controller.handle_intents(
+            vec![InvocationIntent::TriggerReleased {
+                id: InvocationId(88),
+            }],
+            false,
+        )
+    }
+
+    #[test]
+    fn deferred_pending_retries_with_revision_and_ignores_old_and_duplicate_ready_replies() {
+        let (mut controller, native_events, first_attempt, _wake_rx) = deferred_query_controller();
+        send_deferred_reply(
+            &first_attempt,
+            DeferredResolutionResult::Pending {
+                provider_revision: 41,
+                wait_for_change: true,
+            },
+        );
+        let pending_events = controller.poll();
+        assert!(
+            pending_events
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        assert!(first_attempt.cancellation.load(Ordering::Acquire));
+        let pending = controller
+            .deferred_resolution
+            .as_ref()
+            .expect("Pending preserves the selected deferred request");
+        assert_eq!(pending.attempt, 2);
+        assert_eq!(pending.last_provider_revision, Some(41));
+        assert!(pending.wait_for_provider_change);
+        assert!(pending.force_open_query.is_none());
+
+        controller.deferred_resolution.as_mut().unwrap().retry_at_ms = Some(0);
+        let retry = deferred_request(controller.poll());
+        assert_eq!(retry.attempt, 2);
+        assert_eq!(retry.last_provider_revision, Some(41));
+        assert!(retry.wait_for_provider_change);
+        assert!(retry.force_open_query.is_none());
+
+        let stale = crate::actions::Action {
+            label: "Old result".into(),
+            desc: "stale attempt".into(),
+            action: "help:show".into(),
+            args: None,
+        };
+        send_deferred_reply(
+            &first_attempt,
+            query_resolution("saved query", Some(stale), None),
+        );
+        let selected = crate::actions::Action {
+            label: "Current result".into(),
+            desc: "retry attempt".into(),
+            action: "query:current".into(),
+            args: None,
+        };
+        send_deferred_reply(
+            &retry,
+            query_resolution("saved query", Some(selected.clone()), None),
+        );
+        let accepted = controller.poll();
+        assert!(
+            accepted
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        assert!(controller.deferred_resolution.is_none());
+        assert!(controller.handoff.is_some());
+
+        send_deferred_reply(
+            &retry,
+            query_resolution(
+                "saved query",
+                Some(crate::actions::Action {
+                    label: "Duplicate result".into(),
+                    desc: "duplicate attempt".into(),
+                    action: "help:show".into(),
+                    args: None,
+                }),
+                None,
+            ),
+        );
+        assert!(
+            controller
+                .poll()
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+
+        let dispatched = finish_deferred_handoff(&mut controller, &native_events, &retry);
+        assert_eq!(
+            dispatched
+                .iter()
+                .filter(|event| matches!(event, ControllerEvent::DispatchRequested(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            dispatch_request(&dispatched).deferred_origin.as_ref(),
+            Some(DeferredDispatchOrigin::Query {
+                selected_action: Some(action),
+                ..
+            }) if action == &selected
+        ));
+        assert!(
+            controller
+                .handle_intents(
+                    vec![InvocationIntent::TriggerReleased {
+                        id: InvocationId(88),
+                    }],
+                    false,
+                )
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+    }
+
+    #[test]
+    fn deferred_late_ready_and_failed_replies_are_rejected_after_cancellation() {
+        for cancellation in ["dismissal", "session replacement", "configuration revision"] {
+            for late_ready in [true, false] {
+                let (mut controller, _native_events, request, _wake_rx) =
+                    deferred_query_controller();
+                match cancellation {
+                    "dismissal" => {
+                        controller.close(CloseReason::Dismissed, Some(&request.identity.session_id))
+                    }
+                    "session replacement" => {
+                        controller.handle_intents(
+                            vec![InvocationIntent::OpenRadial {
+                                id: InvocationId(5),
+                                menu_id: MenuId::new("starter"),
+                                context_token: 0,
+                                interaction: InteractionMode::StickyClick,
+                                trigger_still_down: false,
+                            }],
+                            false,
+                        );
+                        assert_eq!(
+                            controller
+                                .active
+                                .as_ref()
+                                .map(|active| (active.invocation_id, active.closing)),
+                            Some((InvocationId(4), true)),
+                            "the old session remains until its correlated close ACK"
+                        );
+                        assert_eq!(
+                            controller
+                                .pending
+                                .as_ref()
+                                .map(|pending| pending.invocation_id),
+                            Some(InvocationId(5)),
+                            "the replacement request should be pending behind the old session"
+                        );
+                    }
+                    "configuration revision" => {
+                        let mut document = (*controller.document).clone();
+                        document.revision = super::super::model::ConfigRevision(
+                            document.revision.0.saturating_add(1),
+                        );
+                        controller.replace_document(Arc::new(document));
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(request.cancellation.load(Ordering::Acquire));
+
+                let result = if late_ready {
+                    query_resolution(
+                        "saved query",
+                        Some(crate::actions::Action {
+                            label: "Late result".into(),
+                            desc: "must be rejected".into(),
+                            action: "help:show".into(),
+                            args: None,
+                        }),
+                        None,
+                    )
+                } else {
+                    DeferredResolutionResult::Failed("late provider failure".into())
+                };
+                send_deferred_reply(&request, result);
+                let late_events = controller.poll();
+                assert!(late_events.iter().all(|event| !matches!(
+                    event,
+                    ControllerEvent::DispatchRequested(_)
+                        | ControllerEvent::DeferredResolutionRequested(_)
+                )));
+                assert!(controller.deferred_resolution.is_none());
+                assert!(controller.handoff.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_timeout_forces_explained_manual_query_and_rejects_old_worker_reply() {
+        let (mut controller, native_events, first_attempt, _wake_rx) = deferred_query_controller();
+        controller
+            .deferred_resolution
+            .as_mut()
+            .expect("active deferred selection")
+            .deadline_ms = 0;
+
+        let forced = deferred_request(controller.poll());
+        assert_eq!(forced.attempt, first_attempt.attempt + 1);
+        assert!(
+            forced
+                .force_open_query
+                .as_deref()
+                .is_some_and(|reason| reason.contains("bounded radial resolution deadline"))
+        );
+        assert!(first_attempt.cancellation.load(Ordering::Acquire));
+
+        let stale_action = crate::actions::Action {
+            label: "Late worker result".into(),
+            desc: "must not win the timeout".into(),
+            action: "help:show".into(),
+            args: None,
+        };
+        send_deferred_reply(
+            &first_attempt,
+            query_resolution("saved query", Some(stale_action), None),
+        );
+        let late = controller.poll();
+        assert!(late.iter().all(|event| !matches!(
+            event,
+            ControllerEvent::DispatchRequested(_) | ControllerEvent::DeferredResolutionRequested(_)
+        )));
+        assert!(controller.handoff.is_none());
+        assert_eq!(
+            controller
+                .deferred_resolution
+                .as_ref()
+                .map(|pending| pending.attempt),
+            Some(forced.attempt)
+        );
+
+        send_deferred_reply(
+            &forced,
+            query_resolution("saved query", None, forced.force_open_query.as_deref()),
+        );
+        controller.poll();
+        let dispatched = finish_deferred_handoff(&mut controller, &native_events, &forced);
+        assert!(matches!(
+            dispatch_request(&dispatched).deferred_origin.as_ref(),
+            Some(DeferredDispatchOrigin::Query {
+                query,
+                selected_action: None,
+                explanation: Some(explanation),
+                ..
+            }) if query == "saved query" && explanation.contains("bounded radial resolution deadline")
+        ));
+    }
+
+    #[test]
+    fn failed_provider_empty_results_and_cancellation_have_distinct_controller_paths() {
+        let (mut failed, native_events, first_attempt, _wake_rx) = deferred_query_controller();
+        send_deferred_reply(
+            &first_attempt,
+            DeferredResolutionResult::Failed("provider failed".into()),
+        );
+        let mut failed_events = failed.poll();
+        let fallback = if let Some(fallback) = failed_events.drain(..).find_map(|event| match event
+        {
+            ControllerEvent::DeferredResolutionRequested(envelope) => Some(envelope),
+            _ => None,
+        }) {
+            fallback
+        } else {
+            failed
+                .deferred_resolution
+                .as_mut()
+                .expect("failed provider should preserve a manual-query retry")
+                .retry_at_ms = Some(0);
+            deferred_request(failed.poll())
+        };
+        assert_eq!(fallback.attempt, first_attempt.attempt + 1);
+        assert_eq!(
+            fallback.force_open_query.as_deref(),
+            Some("provider failed")
+        );
+        assert!(first_attempt.cancellation.load(Ordering::Acquire));
+        send_deferred_reply(
+            &fallback,
+            query_resolution("saved query", None, Some("provider failed")),
+        );
+        failed.poll();
+        let failed_dispatch = finish_deferred_handoff(&mut failed, &native_events, &fallback);
+        assert!(matches!(
+            dispatch_request(&failed_dispatch).deferred_origin.as_ref(),
+            Some(DeferredDispatchOrigin::Query {
+                selected_action: None,
+                explanation: Some(explanation),
+                ..
+            }) if explanation == "provider failed"
+        ));
+
+        let (mut empty, empty_native_events, empty_attempt, _wake_rx) = deferred_query_controller();
+        send_deferred_reply(
+            &empty_attempt,
+            query_resolution(
+                "saved query",
+                None,
+                Some("No launcher result is currently available"),
+            ),
+        );
+        empty.poll();
+        let empty_dispatch =
+            finish_deferred_handoff(&mut empty, &empty_native_events, &empty_attempt);
+        assert!(matches!(
+            dispatch_request(&empty_dispatch).deferred_origin.as_ref(),
+            Some(DeferredDispatchOrigin::Query {
+                selected_action: None,
+                explanation: Some(explanation),
+                ..
+            }) if explanation.contains("No launcher result")
+        ));
+
+        let (mut cancelled, _cancel_native_events, cancelled_attempt, _wake_rx) =
+            deferred_query_controller();
+        send_deferred_reply(&cancelled_attempt, DeferredResolutionResult::Cancelled);
+        let cancelled_events = cancelled.poll();
+        assert!(cancelled_events.iter().all(|event| !matches!(
+            event,
+            ControllerEvent::DispatchRequested(_) | ControllerEvent::DeferredResolutionRequested(_)
+        )));
+        assert!(cancelled.deferred_resolution.is_none());
+        assert!(cancelled.handoff.is_none());
+    }
+
+    #[test]
+    fn deferred_selection_survives_action_handoff_but_lifecycle_cancel_revokes_it() {
+        let (mut controller, native_events, request, _wake_rx) = deferred_query_controller();
+        let selected = crate::actions::Action {
+            label: "Selected result".into(),
+            desc: "frozen through handoff".into(),
+            action: "query:current".into(),
+            args: None,
+        };
+        send_deferred_reply(
+            &request,
+            query_resolution("saved query", Some(selected.clone()), None),
+        );
+        let ready_events = controller.poll();
+        assert!(
+            ready_events
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
+        assert_eq!(
+            controller
+                .handoff
+                .as_ref()
+                .map(PendingRadialDispatch::phase),
+            Some(super::super::handoff::DispatchPhase::AwaitingClose)
+        );
+        let dispatched = finish_deferred_handoff(&mut controller, &native_events, &request);
+        assert_eq!(
+            dispatched
+                .iter()
+                .filter(|event| matches!(event, ControllerEvent::DispatchRequested(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            dispatch_request(&dispatched).deferred_origin.as_ref(),
+            Some(DeferredDispatchOrigin::Query {
+                selected_action: Some(action),
+                ..
+            }) if action == &selected
+        ));
+
+        let (mut cancelled, cancelled_native_events, cancelled_request, _wake_rx) =
+            deferred_query_controller();
+        send_deferred_reply(
+            &cancelled_request,
+            query_resolution("saved query", Some(selected), None),
+        );
+        cancelled.poll();
+        assert!(cancelled.handoff.is_some());
+        cancelled.close(
+            CloseReason::SettingsReload,
+            Some(&cancelled_request.identity.session_id),
+        );
+        assert!(cancelled.handoff.is_none());
+        cancelled_native_events
+            .lock()
+            .unwrap()
+            .push_back(NativeEvent::Closed {
+                session_id: cancelled_request.identity.session_id.clone(),
+                reason: CloseReason::SettingsReload,
+            });
+        cancelled.poll();
+        let release = cancelled.handle_intents(
+            vec![InvocationIntent::TriggerReleased {
+                id: InvocationId(88),
+            }],
+            false,
+        );
+        assert!(
+            release
+                .iter()
+                .all(|event| !matches!(event, ControllerEvent::DispatchRequested(_)))
+        );
     }
 
     #[test]
