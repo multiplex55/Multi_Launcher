@@ -33,6 +33,15 @@ pub enum WatchEvent {
         envelope: crate::radial::handoff::DeferredResolutionEnvelope,
         result: crate::plugin::PluginSearchSnapshotResult,
     },
+    RadialAuthoringSearchReady {
+        request: AuthoringProviderSearchRequest,
+        result: crate::plugin::PluginSearchSnapshotResult,
+    },
+    RadialAuthoringSearchFailed {
+        request: AuthoringProviderSearchRequest,
+        reason: String,
+    },
+    AuthoringProviderCapacityAvailable,
     RadialInvalidate,
     RadialConfigDiagnostic(Option<String>),
     RadialRuntimeDiagnostic(String),
@@ -56,6 +65,26 @@ pub enum WatchEvent {
     ScreenDrawEmergency,
     ClipboardModify(ClipboardModifyGuiEvent),
     VirtualDesktop(VirtualDesktopGuiCompletion),
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct AuthoringProviderSearchRequest {
+    pub(crate) identity: crate::gui::radial_editor::action_editor::AuthoringBindingEditorIdentity,
+    pub(crate) query: String,
+    pub(crate) purpose: AuthoringProviderSearchPurpose,
+    pub(crate) retry_attempt: u8,
+    pub(crate) cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum AuthoringProviderSearchPurpose {
+    Preview,
+    Test {
+        binding: crate::radial::model::ActionBinding,
+        invocation: crate::radial::context::InvocationContext,
+        history_query: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -273,6 +302,14 @@ pub(crate) struct AuthoringActionRevalidation {
     pub(crate) invocation: crate::radial::context::InvocationContext,
     pub(crate) captured_identity: Option<crate::window_catalog::WindowTargetIdentity>,
     pub(crate) window_catalog_generation: u64,
+    pub(crate) runtime_target: crate::universal_actions::ActionTarget,
+    pub(crate) runtime_identity: Option<crate::radial::dynamic::RuntimeTargetIdentity>,
+    pub(crate) editor_identity:
+        Option<crate::gui::radial_editor::action_editor::AuthoringBindingEditorIdentity>,
+    pub(crate) selected_query_action: Option<crate::actions::Action>,
+    pub(crate) provider_revision: Option<u64>,
+    pub(crate) result_catalog_versions:
+        Option<crate::radial::dynamic::MutableResultCatalogVersions>,
 }
 
 #[derive(Clone)]
@@ -312,6 +349,9 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::RadialPrepare(_) => TestWatchEvent::Actions,
             WatchEvent::RadialResolveDeferred(_) => TestWatchEvent::Actions,
             WatchEvent::RadialDeferredSearchReady { .. } => TestWatchEvent::Actions,
+            WatchEvent::RadialAuthoringSearchReady { .. } => TestWatchEvent::Actions,
+            WatchEvent::RadialAuthoringSearchFailed { .. } => TestWatchEvent::Actions,
+            WatchEvent::AuthoringProviderCapacityAvailable => TestWatchEvent::Actions,
             WatchEvent::RadialInvalidate => TestWatchEvent::Actions,
             WatchEvent::RadialConfigDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialRuntimeDiagnostic(_) => TestWatchEvent::Actions,

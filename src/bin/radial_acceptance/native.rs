@@ -5,8 +5,8 @@
 mod suite;
 use super::{AcceptanceHotkey, foreign_edge_indices_interfering_owned_spans, owned_gesture_spans};
 pub(super) use suite::{
-    CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_hotkey_suite,
-    run_query_suite, run_suite,
+    CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_gate_c_suite,
+    run_hotkey_suite, run_query_suite, run_suite,
 };
 
 use std::fmt::Write as _;
@@ -20,7 +20,7 @@ use windows::Win32::Foundation::{
     BOOL, CloseHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, HWND, LPARAM,
     POINT, RECT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
-use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -40,16 +40,18 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern,
     IUIAutomationTogglePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern, ToggleState,
-    TreeScope_Descendants, UIA_EditControlTypeId, UIA_NamePropertyId, UIA_SelectionItemPatternId,
-    UIA_TogglePatternId, UIA_ValuePatternId,
+    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_CONTROLTYPE_ID, UIA_ComboBoxControlTypeId,
+    UIA_EditControlTypeId, UIA_ListItemControlTypeId, UIA_NamePropertyId,
+    UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE,
-    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY,
-    VK_CONTROL, VK_END, VK_F4, VK_F11, VK_F24, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
-    VK_LWIN, VK_MENU, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
+    MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_END,
+    VK_F4, VK_F11, VK_F24, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
+    VK_RBUTTON, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
@@ -80,13 +82,18 @@ struct RunnerHookEdge {
 }
 
 const TRACE_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE";
+const TRACE_BUDGET_PROFILE_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE_PROFILE";
 const QUERY_OBSERVATION_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_OBSERVATION_FILE";
 const PREPARE_HOLD_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE";
 const PREPARE_HOLD_FILE_NAME: &str = "radial-acceptance-prepare.hold";
+const AUTHORING_SEARCH_HOLD_ENV: &str =
+    "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_AUTHORING_SEARCH_HOLD_FILE";
+pub(super) const AUTHORING_SEARCH_HOLD_FILE_NAME: &str = "radial-acceptance-authoring-search.hold";
 const ROOT_TITLE: &str = "Multi Lnchr";
 const DESIGNER_TITLE: &str = "Radial Designer";
 pub(super) const RADIAL_HOST_WINDOW_CLASS: &str = "MultiLauncherRadialHost";
 const WINDOW_POLL: Duration = Duration::from_millis(25);
+const ACTION_EDITOR_SCROLL_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
 const FOREGROUND_TRANSITION_TIMEOUT: Duration = Duration::from_millis(500);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const CASE_TIMEOUT: Duration = Duration::from_secs(4);
@@ -99,6 +106,21 @@ const ACCEPTANCE_HOTKEY_ID: i32 = 0x4D4C;
 // native_service::WM_HOOK_PUMP_PROBE in hotkey/launcher_invocation.rs.
 const HOOK_PUMP_PROBE_MESSAGE: u32 = WM_APP + 0x54;
 const FOCUS_ANCHOR_COMMAND_MESSAGE: u32 = WM_APP + 0x55;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AcceptanceTraceBudgetProfile {
+    Standard,
+    GateC,
+}
+
+impl AcceptanceTraceBudgetProfile {
+    fn environment_value(self) -> Option<&'static str> {
+        match self {
+            Self::Standard => None,
+            Self::GateC => Some("gate_c_v1"),
+        }
+    }
+}
 
 pub(super) struct InputDesktopAttachment {
     previous: HDESK,
@@ -938,11 +960,12 @@ pub(super) struct PointerClickEvidence {
     pub pointer_move_acknowledged: bool,
     pub down: NativeInputEdgeEvidence,
     pub down_acknowledged: bool,
-    pub left_button_state_after_down: i16,
-    pub left_button_state_before_up: i16,
+    pub button: PointerButton,
+    pub button_state_after_down: i16,
+    pub button_state_before_up: i16,
     pub up: NativeInputEdgeEvidence,
     pub up_acknowledged: bool,
-    pub left_button_state_after_up: i16,
+    pub button_state_after_up: i16,
     pub target_hwnd: HWND,
     pub nudge_under_cursor_hwnd: HWND,
     pub under_cursor_hwnd: HWND,
@@ -950,16 +973,66 @@ pub(super) struct PointerClickEvidence {
     pub screen_point: (i32, i32),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PointerClickPreDownError {
+    StaleGeometry(String),
+    Input(String),
+}
+
+impl From<String> for PointerClickPreDownError {
+    fn from(error: String) -> Self {
+        Self::Input(error)
+    }
+}
+
+impl From<&'static str> for PointerClickPreDownError {
+    fn from(error: &'static str) -> Self {
+        Self::Input(error.to_owned())
+    }
+}
+
+impl PointerClickPreDownError {
+    fn into_message(self) -> String {
+        match self {
+            Self::StaleGeometry(error) | Self::Input(error) => error,
+        }
+    }
+}
+
+pub(super) fn dispatch_pointer_down_after_preflight<T>(
+    preflight: impl FnOnce() -> Result<(), PointerClickPreDownError>,
+    send_down: impl FnOnce() -> Result<T, String>,
+) -> Result<T, PointerClickPreDownError> {
+    preflight()?;
+    send_down().map_err(PointerClickPreDownError::Input)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PointerButton {
+    Left,
+    Right,
+}
+
+impl PointerButton {
+    fn virtual_key(self) -> u16 {
+        match self {
+            Self::Left => VK_LBUTTON.0,
+            Self::Right => VK_RBUTTON.0,
+        }
+    }
+}
+
 impl PointerClickEvidence {
     pub fn describe(&self) -> String {
         format!(
-            "screen_point=({},{}), target_hwnd={}, nudge_under_cursor_hwnd={}, under_cursor_hwnd={}, foreground_hwnd={}, preexisting_egui_pointer_ack={}, fresh_egui_pointer_move_ack={}, nudge_move=[{}], move=[{}], pointer_correction_events={}, down=[{}], root_or_designer_down_ack={}, left_button_async_after_down=0x{:04x}, left_button_async_before_up=0x{:04x}, up=[{}], root_or_designer_up_ack={}, left_button_async_after_up=0x{:04x}",
+            "screen_point=({},{}), target_hwnd={}, nudge_under_cursor_hwnd={}, under_cursor_hwnd={}, foreground_hwnd={}, button={:?}, preexisting_egui_pointer_ack={}, fresh_egui_pointer_move_ack={}, nudge_move=[{}], move=[{}], pointer_correction_events={}, down=[{}], root_or_designer_down_ack={}, button_async_after_down=0x{:04x}, button_async_before_up=0x{:04x}, up=[{}], root_or_designer_up_ack={}, button_async_after_up=0x{:04x}",
             self.screen_point.0,
             self.screen_point.1,
             hwnd_id(self.target_hwnd),
             hwnd_id(self.nudge_under_cursor_hwnd),
             hwnd_id(self.under_cursor_hwnd),
             hwnd_id(self.foreground_hwnd),
+            self.button,
             self.pointer_position_preexisting_ack,
             self.pointer_move_acknowledged,
             self.nudge_movement.describe(),
@@ -967,11 +1040,11 @@ impl PointerClickEvidence {
             self.pointer_correction_events,
             self.down.describe(),
             self.down_acknowledged,
-            self.left_button_state_after_down as u16,
-            self.left_button_state_before_up as u16,
+            self.button_state_after_down as u16,
+            self.button_state_before_up as u16,
             self.up.describe(),
             self.up_acknowledged,
-            self.left_button_state_after_up as u16
+            self.button_state_after_up as u16
         )
     }
 }
@@ -988,8 +1061,12 @@ impl InputDesktopAttachment {
 }
 
 pub(super) fn close_input_desktop_after_driver_exit(handle: isize) -> Result<(), String> {
+    close_input_desktop_after_thread_exit(handle, "native driver thread")
+}
+
+fn close_input_desktop_after_thread_exit(handle: isize, thread_name: &str) -> Result<(), String> {
     unsafe { CloseDesktop(HDESK(handle as *mut std::ffi::c_void)) }
-        .map_err(|error| format!("close input desktop after driver thread exit: {error}"))
+        .map_err(|error| format!("close input desktop after {thread_name} exit: {error}"))
 }
 
 impl Drop for InputDesktopAttachment {
@@ -1081,6 +1158,23 @@ fn desktop_name(desktop: HDESK) -> Result<String, String> {
         .position(|unit| *unit == 0)
         .unwrap_or(name.len());
     Ok(String::from_utf16_lossy(&name[..length]))
+}
+
+fn active_input_desktop_name() -> Result<String, String> {
+    let desktop = unsafe {
+        OpenInputDesktop(
+            Default::default(),
+            false,
+            DESKTOP_ACCESS_FLAGS(DESKTOP_READOBJECTS.0),
+        )
+    }
+    .map_err(|error| format!("open active input desktop for focus-anchor verification: {error}"))?;
+    let name_result = desktop_name(desktop);
+    let close_result = unsafe { CloseDesktop(desktop) }
+        .map_err(|error| format!("close focus-anchor input desktop verification handle: {error}"));
+    let name = name_result?;
+    close_result?;
+    Ok(name)
 }
 
 pub(super) fn preflight_acceptance_hotkey(hotkey: AcceptanceHotkey) -> Result<(), String> {
@@ -1241,7 +1335,20 @@ pub(super) struct FocusAnchor {
     display_bounds: Vec<[i32; 4]>,
     ui_thread_id: u32,
     command_tx: std::sync::mpsc::SyncSender<FocusAnchorCommand>,
-    ui_thread: Option<std::thread::JoinHandle<()>>,
+    ui_thread: Option<std::thread::JoinHandle<FocusAnchorThreadExit>>,
+}
+
+#[derive(Debug)]
+struct FocusAnchorWindowReady {
+    hwnd: usize,
+    thread_id: u32,
+    owner_desktop_name: String,
+    input_desktop_name: String,
+}
+
+struct FocusAnchorThreadExit {
+    attached_desktop_handle: Option<isize>,
+    teardown_error: Option<String>,
 }
 
 enum FocusAnchorCommandKind {
@@ -1261,11 +1368,27 @@ impl FocusAnchor {
     pub fn create() -> Result<Self, String> {
         let display_bounds = suite::native_display_bounds()?;
         let process_id = std::process::id();
-        let (hwnd, ui_thread_id, command_tx, ui_thread) = spawn_focus_anchor_window(process_id)?;
+        let (ready, command_tx, ui_thread) = spawn_focus_anchor_window(process_id)?;
+        let hwnd = HWND(ready.hwnd as *mut std::ffi::c_void);
+        let ui_thread_id = ready.thread_id;
+        if !ready.owner_desktop_name.eq_ignore_ascii_case("Default")
+            || !ready
+                .owner_desktop_name
+                .eq_ignore_ascii_case(&ready.input_desktop_name)
+        {
+            let _ = unsafe { PostThreadMessageW(ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+            let cleanup = finish_focus_anchor_ui_thread(ui_thread);
+            return Err(format!(
+                "focus anchor owner desktop '{}' did not match active input desktop '{}'; cleanup={cleanup:?}",
+                ready.owner_desktop_name, ready.input_desktop_name
+            ));
+        }
         if window_process_id(hwnd) != process_id {
             let _ = unsafe { PostThreadMessageW(ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
-            let _ = ui_thread.join();
-            return Err("focus anchor HWND is not owned by the acceptance runner".into());
+            let cleanup = finish_focus_anchor_ui_thread(ui_thread);
+            return Err(format!(
+                "focus anchor HWND is not owned by the acceptance runner; cleanup={cleanup:?}"
+            ));
         }
         let anchor = Self {
             hwnd,
@@ -1351,7 +1474,8 @@ impl FocusAnchor {
             candidate_evidence = evidence;
             unsafe { SetCursorPos(point.x, point.y) }
                 .map_err(|error| format!("move pointer onto runner anchor: {error}"))?;
-            let mut button_guard = MouseButtonGuard::new(self.hwnd, self.process_id);
+            let mut button_guard =
+                MouseButtonGuard::new(self.hwnd, self.process_id, PointerButton::Left);
             let (inserted, down_error) = send_input_checked_prefix(
                 &[mouse_input(true)],
                 "runner focus-anchor activation mouse down",
@@ -1568,25 +1692,93 @@ fn spawn_focus_anchor_window(
     process_id: u32,
 ) -> Result<
     (
-        HWND,
-        u32,
+        FocusAnchorWindowReady,
         std::sync::mpsc::SyncSender<FocusAnchorCommand>,
-        std::thread::JoinHandle<()>,
+        std::thread::JoinHandle<FocusAnchorThreadExit>,
     ),
     String,
 > {
-    let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel(1);
+    spawn_focus_anchor_window_with_startup_hooks(
+        process_id,
+        Duration::from_secs(2),
+        || {},
+        || {},
+        || {},
+    )
+}
+
+fn spawn_focus_anchor_window_with_startup_hooks<BeforeAttach, BeforeCreate, OnTimeout>(
+    process_id: u32,
+    startup_timeout: Duration,
+    before_attach: BeforeAttach,
+    before_create: BeforeCreate,
+    on_startup_timeout: OnTimeout,
+) -> Result<
+    (
+        FocusAnchorWindowReady,
+        std::sync::mpsc::SyncSender<FocusAnchorCommand>,
+        std::thread::JoinHandle<FocusAnchorThreadExit>,
+    ),
+    String,
+>
+where
+    BeforeAttach: FnOnce() + Send + 'static,
+    BeforeCreate: FnOnce() + Send + 'static,
+    OnTimeout: FnOnce(),
+{
+    let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel::<Result<u32, String>>(1);
     let (window_tx, window_rx) = std::sync::mpsc::sync_channel(1);
     let (command_tx, command_rx) = std::sync::mpsc::sync_channel::<FocusAnchorCommand>(1);
+    let mut on_startup_timeout = Some(on_startup_timeout);
     let ui_thread = std::thread::Builder::new()
         .name("radial-acceptance-focus-anchor".into())
         .spawn(move || {
             let thread_id = unsafe { GetCurrentThreadId() };
+            before_attach();
+            let (attachment_observation, desktop_attachment) =
+                match attach_to_input_desktop() {
+                    Ok(attached) => attached,
+                    Err(error) => {
+                        let _ = thread_id_tx.send(Err(format!(
+                            "focus anchor could not attach to the active input desktop before USER initialization: {error}"
+                        )));
+                        return FocusAnchorThreadExit {
+                            attached_desktop_handle: None,
+                            teardown_error: None,
+                        };
+                    }
+                };
+
+            let desktop_identity = (|| {
+                let owner_desktop = unsafe { GetThreadDesktop(thread_id) }
+                    .map_err(|error| format!("read focus-anchor owner thread desktop: {error}"))?;
+                let owner_desktop_name = desktop_name(owner_desktop)?;
+                let input_desktop_name = active_input_desktop_name()?;
+                if !owner_desktop_name.eq_ignore_ascii_case("Default")
+                    || !owner_desktop_name.eq_ignore_ascii_case(&input_desktop_name)
+                {
+                    return Err(format!(
+                        "focus-anchor owner thread desktop '{owner_desktop_name}' does not match active input desktop '{input_desktop_name}' (attachment={attachment_observation})"
+                    ));
+                }
+                Ok((owner_desktop_name, input_desktop_name))
+            })();
+            let (owner_desktop_name, input_desktop_name) = match desktop_identity {
+                Ok(names) => names,
+                Err(error) => {
+                    let _ = thread_id_tx.send(Err(error));
+                    return focus_anchor_thread_exit(desktop_attachment, None);
+                }
+            };
+
+            // SetThreadDesktop must happen before this thread creates its USER queue or
+            // any HWND. Keep the attachment guard alive until the anchor is destroyed.
             let mut queue_probe = windows::Win32::UI::WindowsAndMessaging::MSG::default();
             let _ = unsafe { PeekMessageW(&mut queue_probe, None, 0, 0, PM_NOREMOVE) };
-            if thread_id_tx.send(thread_id).is_err() {
-                return;
+            if thread_id_tx.send(Ok(thread_id)).is_err() {
+                return focus_anchor_thread_exit(desktop_attachment, None);
             }
+            before_create();
 
             let hwnd = unsafe {
                 CreateWindowExW(
@@ -1607,18 +1799,37 @@ fn spawn_focus_anchor_window(
             let hwnd = match hwnd {
                 Ok(hwnd) => hwnd,
                 Err(error) => {
-                    let _ =
-                        window_tx.send(Err(format!("create runner-owned focus anchor: {error}")));
-                    return;
+                    let _ = window_tx.send(Err(format!(
+                        "create runner-owned focus anchor on active input desktop '{input_desktop_name}': {error}"
+                    )));
+                    return focus_anchor_thread_exit(desktop_attachment, None);
                 }
             };
-            if window_tx.send(Ok(hwnd.0 as usize)).is_err() {
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return;
+            let ready = FocusAnchorWindowReady {
+                hwnd: hwnd.0 as usize,
+                thread_id,
+                owner_desktop_name,
+                input_desktop_name,
+            };
+            if window_tx.send(Ok(ready)).is_err() {
+                let teardown_error = destroy_focus_anchor_window(hwnd, process_id).err();
+                return focus_anchor_thread_exit(desktop_attachment, teardown_error);
             }
 
             let mut message = windows::Win32::UI::WindowsAndMessaging::MSG::default();
-            while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+            let mut pump_error = None;
+            loop {
+                let result = unsafe { GetMessageW(&mut message, None, 0, 0) };
+                if result.0 == 0 {
+                    break;
+                }
+                if result.0 < 0 {
+                    pump_error = Some(format!(
+                        "focus anchor message pump failed: {:?}",
+                        unsafe { GetLastError() }
+                    ));
+                    break;
+                }
                 if message.message == FOCUS_ANCHOR_COMMAND_MESSAGE {
                     if let Ok(command) = command_rx.try_recv() {
                         let (result, should_exit) =
@@ -1633,33 +1844,104 @@ fn spawn_focus_anchor_window(
                 let _ = unsafe { TranslateMessage(&message) };
                 unsafe { DispatchMessageW(&message) };
             }
-            if window_process_id(hwnd) == process_id {
-                let _ = unsafe { DestroyWindow(hwnd) };
-            }
+            let teardown_error = destroy_focus_anchor_window(hwnd, process_id)
+                .err()
+                .or(pump_error);
+            focus_anchor_thread_exit(desktop_attachment, teardown_error)
         })
         .map_err(|error| format!("start focus anchor UI thread: {error}"))?;
 
-    let thread_id = match thread_id_rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(thread_id) => thread_id,
+    let thread_id = match thread_id_rx.recv_timeout(startup_timeout) {
+        Ok(Ok(thread_id)) => thread_id,
+        Ok(Err(error)) => {
+            drop(window_rx);
+            let cleanup = finish_focus_anchor_ui_thread(ui_thread);
+            return Err(format!("{error}; cleanup={cleanup:?}"));
+        }
         Err(error) => {
-            let _ = ui_thread.join();
-            return Err(format!("focus anchor UI thread did not start: {error}"));
+            drop(window_rx);
+            drop(thread_id_rx);
+            if let Some(on_timeout) = on_startup_timeout.take() {
+                on_timeout();
+            }
+            let cleanup = finish_focus_anchor_ui_thread(ui_thread);
+            return Err(format!(
+                "focus anchor UI thread did not start: {error}; cleanup={cleanup:?}"
+            ));
         }
     };
-    let hwnd = match window_rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(Ok(hwnd)) => HWND(hwnd as *mut std::ffi::c_void),
+    drop(thread_id_rx);
+    let ready = match window_rx.recv_timeout(startup_timeout) {
+        Ok(Ok(ready)) => ready,
         Ok(Err(error)) => {
-            let _ = ui_thread.join();
-            return Err(error);
+            let cleanup = finish_focus_anchor_ui_thread(ui_thread);
+            return Err(format!("{error}; cleanup={cleanup:?}"));
         }
         Err(error) => {
+            drop(window_rx);
             let _ = unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
-            let _ = ui_thread.join();
-            return Err(format!("focus anchor window creation timed out: {error}"));
+            if let Some(on_timeout) = on_startup_timeout.take() {
+                on_timeout();
+            }
+            let cleanup = finish_focus_anchor_ui_thread(ui_thread);
+            return Err(format!(
+                "focus anchor window creation timed out: {error}; cleanup={cleanup:?}"
+            ));
         }
     };
 
-    Ok((hwnd, thread_id, command_tx, ui_thread))
+    Ok((ready, command_tx, ui_thread))
+}
+
+fn focus_anchor_thread_exit(
+    desktop_attachment: InputDesktopAttachment,
+    teardown_error: Option<String>,
+) -> FocusAnchorThreadExit {
+    FocusAnchorThreadExit {
+        attached_desktop_handle: desktop_attachment.release_for_thread_exit(),
+        teardown_error,
+    }
+}
+
+fn finish_focus_anchor_ui_thread(
+    ui_thread: std::thread::JoinHandle<FocusAnchorThreadExit>,
+) -> Result<(), String> {
+    let exit = ui_thread
+        .join()
+        .map_err(|_| "focus anchor UI thread panicked during cleanup".to_string())?;
+    let mut errors = Vec::new();
+    if let Some(error) = exit.teardown_error {
+        errors.push(error);
+    }
+    if let Some(handle) = exit.attached_desktop_handle {
+        if let Err(error) = close_input_desktop_after_thread_exit(handle, "focus anchor UI thread")
+        {
+            errors.push(error);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn destroy_focus_anchor_window(hwnd: HWND, process_id: u32) -> Result<(), String> {
+    match window_process_id(hwnd) {
+        0 => return Ok(()),
+        owner if owner == process_id => {}
+        owner => {
+            return Err(format!(
+                "refused to destroy focus-anchor HWND owned by process {owner}"
+            ));
+        }
+    }
+    unsafe { DestroyWindow(hwnd) }
+        .map_err(|error| format!("destroy runner-owned focus anchor HWND: {error}"))?;
+    if window_process_id(hwnd) != 0 {
+        return Err("focus anchor HWND remained after DestroyWindow".into());
+    }
+    Ok(())
 }
 
 fn execute_focus_anchor_command(
@@ -1734,8 +2016,8 @@ impl Drop for FocusAnchor {
                 let _ =
                     unsafe { PostThreadMessageW(self.ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
             }
-            if join.join().is_err() {
-                tracing::warn!("focus anchor UI thread panicked during cleanup");
+            if let Err(error) = finish_focus_anchor_ui_thread(join) {
+                tracing::warn!(%error, "focus anchor UI thread cleanup was incomplete");
             }
         }
     }
@@ -1749,13 +2031,49 @@ impl NativeChild {
         stdout_path: &Path,
         stderr_path: &Path,
     ) -> Result<Self, NativeLaunchFailure> {
+        Self::launch_with_trace_profile(
+            executable,
+            profile,
+            log_path,
+            stdout_path,
+            stderr_path,
+            AcceptanceTraceBudgetProfile::Standard,
+        )
+    }
+
+    pub fn launch_gate_c(
+        executable: &Path,
+        profile: &Path,
+        log_path: &Path,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) -> Result<Self, NativeLaunchFailure> {
+        Self::launch_with_trace_profile(
+            executable,
+            profile,
+            log_path,
+            stdout_path,
+            stderr_path,
+            AcceptanceTraceBudgetProfile::GateC,
+        )
+    }
+
+    fn launch_with_trace_profile(
+        executable: &Path,
+        profile: &Path,
+        log_path: &Path,
+        stdout_path: &Path,
+        stderr_path: &Path,
+        trace_profile: AcceptanceTraceBudgetProfile,
+    ) -> Result<Self, NativeLaunchFailure> {
         let stdout = File::create(stdout_path)
             .map_err(|error| launch_failure(format!("create child stdout log: {error}")))?;
         let stderr = File::create(stderr_path)
             .map_err(|error| launch_failure(format!("create child stderr log: {error}")))?;
         let started = SystemTime::now();
-        let process_information = create_acceptance_process(executable, profile, &stdout, &stderr)
-            .map_err(|error| launch_failure(format!("launch isolated candidate: {error}")))?;
+        let process_information =
+            create_acceptance_process(executable, profile, &stdout, &stderr, trace_profile)
+                .map_err(|error| launch_failure(format!("launch isolated candidate: {error}")))?;
         let process_id = process_information.dwProcessId;
         let process = ChildProcessHandle {
             handle: process_information.hProcess,
@@ -1904,6 +2222,33 @@ impl NativeChild {
             return Err("refused input to a window not owned by the acceptance child".to_string());
         }
         Ok(())
+    }
+
+    pub fn request_designer_repaint(&self, designer: &WindowSnapshot) -> Result<[i32; 2], String> {
+        self.validate_window(designer.hwnd)?;
+        if designer.role != WindowRole::Designer || designer.process_id != self.process_id {
+            return Err("refused repaint for a window outside the owned Designer".into());
+        }
+        let current = self
+            .designer()
+            .filter(|current| current.hwnd == designer.hwnd)
+            .ok_or_else(|| "owned Designer changed before repaint request".to_string())?;
+        let before = self.client_bounds(&current)?;
+        let client_size = [before[2] - before[0], before[3] - before[1]];
+        if client_size[0] <= 0 || client_size[1] <= 0 || !current.visible || current.minimized {
+            return Err("refused repaint for a hidden or zero-sized Designer".into());
+        }
+        if !unsafe { InvalidateRect(designer.hwnd, None, BOOL(0)) }.as_bool() {
+            return Err("could not request an owned Designer repaint".into());
+        }
+        self.validate_window(designer.hwnd)?;
+        let after = self.client_bounds(designer)?;
+        if [after[2] - after[0], after[3] - after[1]] != client_size {
+            return Err(
+                "Designer client size changed while requesting a fresh canvas observation".into(),
+            );
+        }
+        Ok(client_size)
     }
 
     pub fn send_f11(
@@ -2195,6 +2540,7 @@ fn create_acceptance_process(
     profile: &Path,
     stdout: &File,
     stderr: &File,
+    trace_profile: AcceptanceTraceBudgetProfile,
 ) -> Result<PROCESS_INFORMATION, String> {
     let executable = executable
         .canonicalize()
@@ -2205,7 +2551,7 @@ fn create_acceptance_process(
     let application = wide_null(executable.as_os_str());
     let current_directory = wide_null(current_directory.as_os_str());
     let mut command_line = quoted_command_line_argument(executable.as_os_str());
-    let mut environment = acceptance_environment_block(profile);
+    let mut environment = acceptance_environment_block(profile, trace_profile);
     let mut desktop = "WinSta0\\Default"
         .encode_utf16()
         .chain([0])
@@ -2276,7 +2622,10 @@ fn quoted_command_line_argument(value: &std::ffi::OsStr) -> Vec<u16> {
     command_line
 }
 
-fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
+fn acceptance_environment_block(
+    profile: &Path,
+    trace_profile: AcceptanceTraceBudgetProfile,
+) -> Vec<u16> {
     const COPY_CONTROLLED_ENV: [&str; 4] = [
         "ML_NOTES_DIR",
         "ML_NOTE_TEMPLATES_DIR",
@@ -2287,8 +2636,10 @@ fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
         .filter_map(|(name, value)| {
             let wide_name = name.encode_wide().collect::<Vec<_>>();
             if wide_key_eq_ascii(&wide_name, TRACE_ENV)
+                || wide_key_eq_ascii(&wide_name, TRACE_BUDGET_PROFILE_ENV)
                 || wide_key_eq_ascii(&wide_name, QUERY_OBSERVATION_ENV)
                 || wide_key_eq_ascii(&wide_name, PREPARE_HOLD_ENV)
+                || wide_key_eq_ascii(&wide_name, AUTHORING_SEARCH_HOLD_ENV)
                 || COPY_CONTROLLED_ENV
                     .iter()
                     .any(|key| wide_key_eq_ascii(&wide_name, key))
@@ -2300,6 +2651,12 @@ fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
         })
         .collect::<Vec<_>>();
     entries.push((TRACE_ENV.encode_utf16().collect(), vec![b'1' as u16]));
+    if let Some(value) = trace_profile.environment_value() {
+        entries.push((
+            TRACE_BUDGET_PROFILE_ENV.encode_utf16().collect(),
+            value.encode_utf16().collect(),
+        ));
+    }
     entries.push((
         QUERY_OBSERVATION_ENV.encode_utf16().collect(),
         profile
@@ -2312,6 +2669,14 @@ fn acceptance_environment_block(profile: &Path) -> Vec<u16> {
         PREPARE_HOLD_ENV.encode_utf16().collect(),
         profile
             .join(PREPARE_HOLD_FILE_NAME)
+            .as_os_str()
+            .encode_wide()
+            .collect(),
+    ));
+    entries.push((
+        AUTHORING_SEARCH_HOLD_ENV.encode_utf16().collect(),
+        profile
+            .join(AUTHORING_SEARCH_HOLD_FILE_NAME)
             .as_os_str()
             .encode_wide()
             .collect(),
@@ -3483,6 +3848,91 @@ pub(super) struct SemanticControl {
     pub enabled: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum VisibleTextLookupError {
+    TransientElementUnavailable(String),
+    Other(String),
+}
+
+impl VisibleTextLookupError {
+    fn into_message(self) -> String {
+        match self {
+            Self::TransientElementUnavailable(message) | Self::Other(message) => message,
+        }
+    }
+}
+
+const UIA_ELEMENT_NOT_AVAILABLE_HRESULT: u32 = 0x8004_0201;
+const UIA_NOT_SUPPORTED_HRESULT: u32 = 0x8004_0200;
+
+fn classify_element_property_error(
+    error: windows::core::Error,
+    property: &str,
+) -> VisibleTextLookupError {
+    classify_element_property_hresult(
+        error.code().0 as u32,
+        format!("read UIA {property}: {error}"),
+    )
+}
+
+fn classify_element_property_hresult(code: u32, message: String) -> VisibleTextLookupError {
+    if code == UIA_ELEMENT_NOT_AVAILABLE_HRESULT {
+        VisibleTextLookupError::TransientElementUnavailable(message)
+    } else {
+        VisibleTextLookupError::Other(message)
+    }
+}
+
+fn validate_uia_root_owner(
+    root: &IUIAutomationElement,
+    expected_pid: u32,
+) -> Result<(), VisibleTextLookupError> {
+    let process_id = unsafe { root.CurrentProcessId() }
+        .map_err(|error| classify_element_property_error(error, "root process ID"))?;
+    if process_id != expected_pid as i32 {
+        return Err(VisibleTextLookupError::Other(format!(
+            "UIA root belongs to process {process_id}, expected candidate process {expected_pid}"
+        )));
+    }
+    Ok(())
+}
+
+fn wait_visible_text_with<T>(
+    expected: &str,
+    timeout: Duration,
+    mut lookup: impl FnMut() -> Result<Option<T>, VisibleTextLookupError>,
+) -> Result<(), String> {
+    wait_uia_control_with(&format!("owned visible text {expected:?}"), timeout, || {
+        lookup().map(|found| found.map(|_| ()))
+    })
+}
+
+fn wait_uia_control_with<T>(
+    description: &str,
+    timeout: Duration,
+    mut lookup: impl FnMut() -> Result<Option<T>, VisibleTextLookupError>,
+) -> Result<T, String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_transient = None;
+    loop {
+        match lookup() {
+            Ok(Some(control)) => return Ok(control),
+            Ok(None) => {}
+            Err(VisibleTextLookupError::TransientElementUnavailable(error)) => {
+                last_transient = Some(error);
+            }
+            Err(VisibleTextLookupError::Other(error)) => return Err(error),
+        }
+        if Instant::now() >= deadline {
+            let base = format!("{description} was not exposed");
+            return Err(last_transient.map_or(base.clone(), |error| {
+                format!("{base}; last transient UIA property failure: {error}")
+            }));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AuthoringControlTarget {
     NewMenu,
@@ -3539,6 +3989,7 @@ pub(super) struct AuthoringControlSnapshot {
     pub target: AuthoringControlTarget,
     pub role: AuthoringControlRole,
     pub index: Option<usize>,
+    pub trace_sequence: u64,
     pub bounds: [i32; 4],
     pub client_size: [i32; 2],
     pub enabled: bool,
@@ -3550,6 +4001,225 @@ pub(super) struct AuthoringControlSnapshot {
     pub menu_cell_ids_digest: Option<u64>,
     pub ring_index: Option<usize>,
     pub slot_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ActionEditorTraceIdentity {
+    pub surface: ActionEditorSurface,
+    pub session_id: u64,
+    pub draft_generation: u64,
+    pub stable_target_digest: u64,
+    pub editor_epoch: u64,
+    pub edit_generation: u64,
+    pub query_generation: u64,
+    pub query_request_generation: u64,
+    pub search_request_generation: u64,
+    pub test_request_generation: u64,
+    pub query_digest: u64,
+    pub assigned_binding_digest: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActionEditorSurface {
+    Properties,
+    Inspector,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ActionEditorControlSnapshot {
+    pub identity: ActionEditorTraceIdentity,
+    pub control: String,
+    pub index: Option<usize>,
+    pub target_digest: u64,
+    pub title_digest: u64,
+    pub type_digest: u64,
+    pub disambiguator_digest: u64,
+    pub action_digest: u64,
+    pub binding_digest: u64,
+    pub value_digest: u64,
+    pub displayed_text_digest: u64,
+    pub trace_sequence: u64,
+    pub bounds: [i32; 4],
+    pub full_bounds: [i32; 4],
+    pub client_size: [i32; 2],
+    pub fully_visible: bool,
+    pub enabled: bool,
+    pub selected: bool,
+    pub focused: bool,
+    pub clicked: bool,
+    pub changed: bool,
+    pub enter_pressed: bool,
+    pub visible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ActionEditorScrollSnapshot {
+    pub identity: ActionEditorTraceIdentity,
+    pub scroll_id: u64,
+    pub frame_nr: u64,
+    pub trace_sequence: u64,
+    pub offset_y_milli: i64,
+    pub velocity_y_milli: i64,
+    pub content_height_milli: i64,
+    pub inner_height_milli: i64,
+    pub pixels_per_point_milli: i64,
+    pub handle_min_length_milli: i64,
+    pub inner_bounds: [i32; 4],
+    pub inner_visible_bounds: [i32; 4],
+    pub track_bounds: [i32; 4],
+    pub track_visible_bounds: [i32; 4],
+    pub thumb_bounds: [i32; 4],
+    pub thumb_visible_bounds: [i32; 4],
+    pub painted_thumb_bounds: [i32; 4],
+    pub painted_thumb_visible_bounds: [i32; 4],
+    pub paint_clip_bounds: [i32; 4],
+    pub client_size: [i32; 2],
+}
+
+impl ActionEditorScrollSnapshot {
+    fn is_well_formed(&self) -> bool {
+        let positive = |rect: [i32; 4]| rect[2] > rect[0] && rect[3] > rect[1];
+        let contains = |outer: [i32; 4], inner: [i32; 4]| {
+            outer[0] <= inner[0]
+                && outer[1] <= inner[1]
+                && outer[2] >= inner[2]
+                && outer[3] >= inner[3]
+        };
+        let client = [0, 0, self.client_size[0], self.client_size[1]];
+        if self.identity.session_id == 0
+            || self.identity.stable_target_digest == 0
+            || self.identity.editor_epoch == 0
+            || self.scroll_id == 0
+            || self.trace_sequence == 0
+            || self.client_size[0] <= 0
+            || self.client_size[1] <= 0
+            || self.content_height_milli <= self.inner_height_milli
+            || self.inner_height_milli <= 0
+            || self.pixels_per_point_milli <= 0
+            || self.handle_min_length_milli <= 0
+            || self.offset_y_milli < 0
+            || self.offset_y_milli > self.content_height_milli - self.inner_height_milli
+            || !positive(self.inner_bounds)
+            || !positive(self.inner_visible_bounds)
+            || !positive(self.track_bounds)
+            || !positive(self.track_visible_bounds)
+            || !positive(self.thumb_bounds)
+            || !positive(self.thumb_visible_bounds)
+            || !positive(self.painted_thumb_bounds)
+            || !positive(self.painted_thumb_visible_bounds)
+            || !positive(self.paint_clip_bounds)
+            || !contains(self.inner_bounds, self.inner_visible_bounds)
+            || !contains(self.track_bounds, self.track_visible_bounds)
+            || !contains(self.thumb_bounds, self.thumb_visible_bounds)
+            || !contains(self.track_visible_bounds, self.thumb_visible_bounds)
+            || !contains(self.painted_thumb_bounds, self.painted_thumb_visible_bounds)
+            || !contains(client, self.inner_visible_bounds)
+            || !contains(client, self.track_visible_bounds)
+            || !contains(client, self.thumb_visible_bounds)
+            || !contains(client, self.painted_thumb_visible_bounds)
+            || !contains(client, self.paint_clip_bounds)
+            || !contains(self.paint_clip_bounds, self.painted_thumb_visible_bounds)
+            || self.track_bounds[1] != self.inner_bounds[1]
+            || self.track_bounds[3] != self.inner_bounds[3]
+            || self.thumb_bounds[0] != self.track_bounds[0]
+            || self.thumb_bounds[2] != self.track_bounds[2]
+            || self.painted_thumb_bounds[0] != self.track_bounds[0]
+            || self.painted_thumb_bounds[2] != self.track_bounds[2]
+        {
+            return false;
+        }
+        let inner_height_px = i128::from(self.inner_bounds[3] - self.inner_bounds[1]);
+        let content_height = i128::from(self.content_height_milli);
+        let expected_top = i128::from(self.inner_bounds[1])
+            + (i128::from(self.offset_y_milli) * inner_height_px + content_height / 2)
+                / content_height;
+        let expected_bottom = i128::from(self.inner_bounds[1])
+            + ((i128::from(self.offset_y_milli) + i128::from(self.inner_height_milli))
+                * inner_height_px
+                + content_height / 2)
+                / content_height;
+        let raw_height = i128::from(self.thumb_bounds[3] - self.thumb_bounds[1]);
+        let min_height_px = (i128::from(self.handle_min_length_milli)
+            * i128::from(self.pixels_per_point_milli)
+            + 500_000)
+            / 1_000_000;
+        let expected_painted_height = raw_height.max(min_height_px);
+        let painted_height =
+            i128::from(self.painted_thumb_bounds[3] - self.painted_thumb_bounds[1]);
+        let expected_painted_visible = [
+            self.painted_thumb_bounds[0].max(self.paint_clip_bounds[0]),
+            self.painted_thumb_bounds[1].max(self.paint_clip_bounds[1]),
+            self.painted_thumb_bounds[2].min(self.paint_clip_bounds[2]),
+            self.painted_thumb_bounds[3].min(self.paint_clip_bounds[3]),
+        ];
+        (i128::from(self.thumb_bounds[1]) - expected_top).abs() <= 2
+            && (i128::from(self.thumb_bounds[3]) - expected_bottom).abs() <= 2
+            && (i128::from(self.painted_thumb_bounds[1]) + i128::from(self.painted_thumb_bounds[3])
+                - i128::from(self.thumb_bounds[1])
+                - i128::from(self.thumb_bounds[3]))
+            .abs()
+                <= 2
+            && (painted_height - expected_painted_height).abs() <= 2
+            && self.painted_thumb_visible_bounds == expected_painted_visible
+    }
+
+    fn same_scroll_owner(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.scroll_id == other.scroll_id
+            && self.client_size == other.client_size
+            && self.content_height_milli == other.content_height_milli
+            && self.inner_height_milli == other.inner_height_milli
+            && self.pixels_per_point_milli == other.pixels_per_point_milli
+            && self.handle_min_length_milli == other.handle_min_length_milli
+            && self.inner_bounds == other.inner_bounds
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct InspectorCellTextEditSnapshot {
+    pub target_digest: u64,
+    pub session_id: u64,
+    pub generation: u64,
+    pub value_digest: u64,
+    pub trace_sequence: u64,
+    pub bounds: [i32; 4],
+    pub clip_bounds: [i32; 4],
+    pub client_size: [i32; 2],
+    pub visible: bool,
+    pub fully_visible: bool,
+    pub focused: bool,
+    pub clicked: bool,
+    pub changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ActionEditorProviderTraceSnapshot {
+    pub identity: ActionEditorTraceIdentity,
+    pub edge: ActionEditorProviderEdge,
+    pub kind: ActionEditorProviderKind,
+    pub query_digest: u64,
+    pub binding_digest: u64,
+    pub provider_revision: Option<u64>,
+    pub trace_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActionEditorProviderEdge {
+    Queued,
+    WorkerStarted,
+    WorkerCompleted,
+    WorkerFailed,
+    Applied,
+    Rejected,
+    Retired,
+    Cancelled,
+    RetryQueued,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActionEditorProviderKind {
+    Search,
+    Test,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3670,6 +4340,36 @@ impl UiAutomation {
         Ok(snapshot)
     }
 
+    /// Capture private, bounded structure/value diagnostics for a single
+    /// candidate-owned HWND. Callers must retain this only as a private case
+    /// artifact; raw UIA text is intentionally excluded from the public report.
+    pub(super) fn describe_candidate_private_tree(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+    ) -> Result<String, String> {
+        let root = unsafe { self.automation.ElementFromHandle(hwnd) }
+            .map_err(|error| format!("query candidate UIA root: {error}"))?;
+        let root_pid = unsafe { root.CurrentProcessId() }
+            .map_err(|error| format!("read candidate UIA root process: {error}"))?;
+        if root_pid != expected_pid as i32 {
+            return Err("private UIA diagnostic root is not owned by the candidate".into());
+        }
+        let walker = unsafe { self.automation.ControlViewWalker() }
+            .map_err(|error| format!("create candidate UIA diagnostic walker: {error}"))?;
+        let mut snapshot = String::from("private candidate-owned UIA control tree\n");
+        let mut visited = 0usize;
+        append_candidate_private_uia_tree(
+            &walker,
+            &root,
+            expected_pid,
+            1,
+            &mut visited,
+            &mut snapshot,
+        );
+        Ok(snapshot)
+    }
+
     pub fn find_named(
         &self,
         hwnd: HWND,
@@ -3733,6 +4433,221 @@ impl UiAutomation {
             }
             std::thread::sleep(WINDOW_POLL);
         }
+    }
+
+    /// Return one current, visible, candidate-owned text control whose name contains
+    /// the requested fixture label. Duplicate UIA descendants with the same bounds
+    /// are aliases for one rendered control; distinct bounds are ambiguous.
+    pub fn find_visible_text_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
+        self.find_visible_named_containing_classified(hwnd, expected_pid, name_fragment, None)
+    }
+
+    /// Return one current, visible Button whose name contains the requested
+    /// fixture label. This is intended for unique fixture rows and never picks
+    /// one of several separately rendered matching buttons.
+    pub fn find_visible_button_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+    ) -> Result<Option<SemanticControl>, String> {
+        self.find_visible_named_containing(
+            hwnd,
+            expected_pid,
+            name_fragment,
+            Some(UIA_ButtonControlTypeId),
+        )
+    }
+
+    pub fn find_visible_combo_box_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+    ) -> Result<Option<SemanticControl>, String> {
+        self.find_visible_named_containing(
+            hwnd,
+            expected_pid,
+            name_fragment,
+            Some(UIA_ComboBoxControlTypeId),
+        )
+    }
+
+    pub fn find_visible_list_item_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+    ) -> Result<Option<SemanticControl>, String> {
+        self.find_visible_named_containing(
+            hwnd,
+            expected_pid,
+            name_fragment,
+            Some(UIA_ListItemControlTypeId),
+        )
+    }
+
+    pub fn wait_visible_button_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+        timeout: Duration,
+    ) -> Result<SemanticControl, String> {
+        self.wait_visible_named_containing_type(
+            hwnd,
+            expected_pid,
+            name_fragment,
+            Some(UIA_ButtonControlTypeId),
+            timeout,
+        )
+    }
+
+    pub fn wait_visible_combo_box_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+        timeout: Duration,
+    ) -> Result<SemanticControl, String> {
+        self.wait_visible_named_containing_type(
+            hwnd,
+            expected_pid,
+            name_fragment,
+            Some(UIA_ComboBoxControlTypeId),
+            timeout,
+        )
+    }
+
+    pub fn wait_visible_list_item_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+        timeout: Duration,
+    ) -> Result<SemanticControl, String> {
+        self.wait_visible_named_containing_type(
+            hwnd,
+            expected_pid,
+            name_fragment,
+            Some(UIA_ListItemControlTypeId),
+            timeout,
+        )
+    }
+
+    fn wait_visible_named_containing_type(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+        control_type: Option<UIA_CONTROLTYPE_ID>,
+        timeout: Duration,
+    ) -> Result<SemanticControl, String> {
+        let description = format!("owned visible UIA control {name_fragment:?}");
+        wait_uia_control_with(&description, timeout, || {
+            self.find_visible_named_containing_classified(
+                hwnd,
+                expected_pid,
+                name_fragment,
+                control_type,
+            )
+        })
+    }
+
+    fn find_visible_named_containing(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+        required_control_type: Option<UIA_CONTROLTYPE_ID>,
+    ) -> Result<Option<SemanticControl>, String> {
+        self.find_visible_named_containing_classified(
+            hwnd,
+            expected_pid,
+            name_fragment,
+            required_control_type,
+        )
+        .map_err(VisibleTextLookupError::into_message)
+    }
+
+    fn find_visible_named_containing_classified(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        name_fragment: &str,
+        required_control_type: Option<UIA_CONTROLTYPE_ID>,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
+        let root = unsafe { self.automation.ElementFromHandle(hwnd) }
+            .map_err(|error| classify_element_property_error(error, "visible-name root"))?;
+        validate_uia_root_owner(&root, expected_pid)?;
+        let condition = unsafe { self.automation.CreateTrueCondition() }.map_err(|error| {
+            VisibleTextLookupError::Other(format!("create visible-name UIA condition: {error}"))
+        })?;
+        let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
+            .map_err(|error| classify_element_property_error(error, "visible-name descendants"))?;
+        let count = unsafe { matches.Length() }
+            .map_err(|error| classify_element_property_error(error, "visible-name count"))?
+            .min(2_048);
+        let expected = name_fragment.to_lowercase();
+        let mut found: Option<SemanticControl> = None;
+        for index in 0..count {
+            let element = unsafe { matches.GetElement(index) }
+                .map_err(|error| classify_element_property_error(error, "visible-name element"))?;
+            let process_id = unsafe { element.CurrentProcessId() }
+                .map_err(|error| classify_element_property_error(error, "process ID"))?;
+            if process_id != expected_pid as i32 {
+                continue;
+            }
+            let name = unsafe { element.CurrentName() }
+                .map_err(|error| classify_element_property_error(error, "name"))?
+                .to_string();
+            if !semantic_name_contains(&name, &expected) {
+                continue;
+            }
+            if unsafe { element.CurrentIsOffscreen() }
+                .map_err(|error| classify_element_property_error(error, "offscreen state"))?
+                .as_bool()
+            {
+                continue;
+            }
+            let control_type = unsafe { element.CurrentControlType() }
+                .map_err(|error| classify_element_property_error(error, "control type"))?;
+            let enabled = unsafe { element.CurrentIsEnabled() }
+                .map_err(|error| classify_element_property_error(error, "enabled state"))?
+                .as_bool();
+            if required_control_type.is_some_and(|expected| expected != control_type)
+                || (required_control_type == Some(UIA_ButtonControlTypeId) && !enabled)
+            {
+                continue;
+            }
+            let bounds = unsafe { element.CurrentBoundingRectangle() }
+                .map_err(|error| classify_element_property_error(error, "bounding rectangle"))?;
+            let bounds = [bounds.left, bounds.top, bounds.right, bounds.bottom];
+            if bounds[2] <= bounds[0] || bounds[3] <= bounds[1] {
+                continue;
+            }
+            let candidate = SemanticControl {
+                element,
+                bounds,
+                process_id: expected_pid,
+                enabled,
+            };
+            if found
+                .as_ref()
+                .is_some_and(|previous| previous.bounds != candidate.bounds)
+            {
+                return Err(VisibleTextLookupError::Other(format!(
+                    "visible UIA label fragment {name_fragment:?} matched multiple distinct controls"
+                )));
+            }
+            found = Some(candidate);
+        }
+        Ok(found)
     }
 
     fn find_named_containing(
@@ -3801,19 +4716,9 @@ impl UiAutomation {
         expected: &str,
         timeout: Duration,
     ) -> Result<(), String> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if self
-                .find_visible_named(hwnd, expected_pid, expected, false)?
-                .is_some()
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(format!("owned visible text {expected:?} was not exposed"));
-            }
-            std::thread::sleep(WINDOW_POLL);
-        }
+        wait_visible_text_with(expected, timeout, || {
+            self.find_visible_named_classified(hwnd, expected_pid, expected, false)
+        })
     }
 
     pub fn find_visible_button(
@@ -3832,35 +4737,47 @@ impl UiAutomation {
         expected: &str,
         require_button: bool,
     ) -> Result<Option<SemanticControl>, String> {
+        self.find_visible_named_classified(hwnd, expected_pid, expected, require_button)
+            .map_err(VisibleTextLookupError::into_message)
+    }
+
+    fn find_visible_named_classified(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        expected: &str,
+        require_button: bool,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
         let root = unsafe { self.automation.ElementFromHandle(hwnd) }
-            .map_err(|error| format!("query semantic root: {error}"))?;
+            .map_err(|error| classify_element_property_error(error, "semantic root"))?;
+        validate_uia_root_owner(&root, expected_pid)?;
         let condition = unsafe {
             self.automation
                 .CreatePropertyCondition(UIA_NamePropertyId, &VARIANT::from(expected))
         }
-        .map_err(|error| format!("create visible name condition: {error}"))?;
+        .map_err(|error| classify_element_property_error(error, "visible name condition"))?;
         let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
-            .map_err(|error| format!("find visible name: {error}"))?;
+            .map_err(|error| classify_element_property_error(error, "visible name descendants"))?;
         let count = unsafe { matches.Length() }
-            .map_err(|error| format!("read visible name count: {error}"))?
+            .map_err(|error| classify_element_property_error(error, "visible name count"))?
             .min(2_048);
         let mut found: Option<SemanticControl> = None;
         for index in 0..count {
             let element = unsafe { matches.GetElement(index) }
-                .map_err(|error| format!("read visible name element: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "visible name element"))?;
             let process_id = unsafe { element.CurrentProcessId() }
-                .map_err(|error| format!("read visible name process: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "process ID"))?;
             let name = unsafe { element.CurrentName() }
-                .map_err(|error| format!("read visible name: {error}"))?
+                .map_err(|error| classify_element_property_error(error, "name"))?
                 .to_string();
             let offscreen = unsafe { element.CurrentIsOffscreen() }
-                .map_err(|error| format!("read visible name presentation: {error}"))?
+                .map_err(|error| classify_element_property_error(error, "offscreen state"))?
                 .as_bool();
             let enabled = unsafe { element.CurrentIsEnabled() }
-                .map_err(|error| format!("read visible name enabled: {error}"))?
+                .map_err(|error| classify_element_property_error(error, "enabled state"))?
                 .as_bool();
             let bounds = unsafe { element.CurrentBoundingRectangle() }
-                .map_err(|error| format!("read visible name bounds: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "bounding rectangle"))?;
             let bounds = [bounds.left, bounds.top, bounds.right, bounds.bottom];
             if !owned_visible_name_matches(
                 &name,
@@ -3872,7 +4789,7 @@ impl UiAutomation {
             ) || (require_button
                 && (!enabled
                     || unsafe { element.CurrentControlType() }
-                        .map_err(|error| format!("read button type: {error}"))?
+                        .map_err(|error| classify_element_property_error(error, "button type"))?
                         != windows::Win32::UI::Accessibility::UIA_ButtonControlTypeId))
             {
                 continue;
@@ -3884,9 +4801,9 @@ impl UiAutomation {
                 enabled,
             };
             if require_button && found.as_ref().is_some_and(|prior| prior.bounds != bounds) {
-                return Err(format!(
+                return Err(VisibleTextLookupError::Other(format!(
                     "multiple distinct visible buttons named {expected:?}"
-                ));
+                )));
             }
             found = Some(candidate);
         }
@@ -3898,14 +4815,23 @@ impl UiAutomation {
         control: &SemanticControl,
         expected: &str,
     ) -> Result<bool, String> {
+        self.edit_value_matches_classified(control, expected)
+            .map_err(VisibleTextLookupError::into_message)
+    }
+
+    pub(super) fn edit_value_matches_classified(
+        &self,
+        control: &SemanticControl,
+        expected: &str,
+    ) -> Result<bool, VisibleTextLookupError> {
         let pattern = unsafe {
             control
                 .element
                 .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
         }
-        .map_err(|error| format!("read UIA edit value pattern: {error}"))?;
+        .map_err(|error| classify_element_property_error(error, "edit value pattern"))?;
         let value = unsafe { pattern.CurrentValue() }
-            .map_err(|error| format!("read UIA edit value: {error}"))?;
+            .map_err(|error| classify_element_property_error(error, "edit value"))?;
         Ok(value.to_string() == expected)
     }
 
@@ -3932,32 +4858,55 @@ impl UiAutomation {
         hwnd: HWND,
         expected_pid: u32,
     ) -> Result<Option<SemanticControl>, String> {
+        self.find_first_edit_classified(hwnd, expected_pid)
+            .map_err(VisibleTextLookupError::into_message)
+    }
+
+    pub fn wait_first_edit(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        timeout: Duration,
+    ) -> Result<SemanticControl, String> {
+        wait_uia_control_with("owned UIA Edit", timeout, || {
+            self.find_first_edit_classified(hwnd, expected_pid)
+        })
+    }
+
+    fn find_first_edit_classified(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
         let root = unsafe { self.automation.ElementFromHandle(hwnd) }
-            .map_err(|error| format!("query UI Automation root: {error}"))?;
+            .map_err(|error| classify_element_property_error(error, "first edit root"))?;
+        validate_uia_root_owner(&root, expected_pid)?;
         let condition = unsafe {
             self.automation.CreatePropertyCondition(
                 windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
                 &VARIANT::from(UIA_EditControlTypeId.0),
             )
         }
-        .map_err(|error| format!("create UIA edit condition: {error}"))?;
+        .map_err(|error| classify_element_property_error(error, "first edit condition"))?;
         let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
-            .map_err(|error| format!("find UIA edit control: {error}"))?;
+            .map_err(|error| classify_element_property_error(error, "first edit controls"))?;
         let count = unsafe { matches.Length() }
-            .map_err(|error| format!("read UIA edit-control count: {error}"))?
+            .map_err(|error| classify_element_property_error(error, "first edit count"))?
             .min(2_048);
         for index in 0..count {
             let element = unsafe { matches.GetElement(index) }
-                .map_err(|error| format!("read UIA edit element: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "first edit element"))?;
             let process_id = unsafe { element.CurrentProcessId() }
-                .map_err(|error| format!("read UIA edit process: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "first edit process ID"))?;
             if process_id != expected_pid as i32 {
                 continue;
             }
             let bounds = unsafe { element.CurrentBoundingRectangle() }
-                .map_err(|error| format!("read UIA edit bounds: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "first edit bounds"))?;
             let enabled = unsafe { element.CurrentIsEnabled() }
-                .map_err(|error| format!("read UIA edit enabled state: {error}"))?
+                .map_err(|error| {
+                    classify_element_property_error(error, "first edit enabled state")
+                })?
                 .as_bool();
             return Ok(Some(SemanticControl {
                 element,
@@ -3975,26 +4924,39 @@ impl UiAutomation {
         expected_pid: u32,
         fragment: &str,
     ) -> Result<Option<SemanticControl>, String> {
+        self.find_edit_with_value_fragment_classified(hwnd, expected_pid, fragment)
+            .map_err(VisibleTextLookupError::into_message)
+    }
+
+    pub(super) fn find_edit_with_value_fragment_classified(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        fragment: &str,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
         let root = unsafe { self.automation.ElementFromHandle(hwnd) }
-            .map_err(|error| format!("query UI Automation root: {error}"))?;
+            .map_err(|error| classify_element_property_error(error, "edit root"))?;
+        validate_uia_root_owner(&root, expected_pid)?;
         let condition = unsafe {
             self.automation.CreatePropertyCondition(
                 windows::Win32::UI::Accessibility::UIA_ControlTypePropertyId,
                 &VARIANT::from(UIA_EditControlTypeId.0),
             )
         }
-        .map_err(|error| format!("create UIA edit condition: {error}"))?;
+        .map_err(|error| {
+            VisibleTextLookupError::Other(format!("create UIA edit condition: {error}"))
+        })?;
         let matches = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
-            .map_err(|error| format!("find UIA edit controls: {error}"))?;
+            .map_err(|error| classify_element_property_error(error, "edit controls"))?;
         let count = unsafe { matches.Length() }
-            .map_err(|error| format!("read UIA edit-control count: {error}"))?
+            .map_err(|error| classify_element_property_error(error, "edit-control count"))?
             .min(2_048);
         let mut found = None;
         for index in 0..count {
             let element = unsafe { matches.GetElement(index) }
-                .map_err(|error| format!("read UIA edit element: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "edit element"))?;
             let process_id = unsafe { element.CurrentProcessId() }
-                .map_err(|error| format!("read UIA edit process: {error}"))?;
+                .map_err(|error| classify_element_property_error(error, "edit process ID"))?;
             if process_id != expected_pid as i32 {
                 continue;
             }
@@ -4002,19 +4964,28 @@ impl UiAutomation {
                 element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             } {
                 Ok(pattern) => pattern,
-                Err(_) => continue,
+                Err(error) if error.code().0 as u32 == UIA_NOT_SUPPORTED_HRESULT => continue,
+                Err(error) => {
+                    return Err(classify_element_property_error(error, "edit value pattern"));
+                }
             };
             let value = unsafe { value_pattern.CurrentValue() }
-                .map_err(|error| format!("read UIA edit value: {error}"))?
+                .map_err(|error| classify_element_property_error(error, "edit value"))?
                 .to_string();
             if !value.contains(fragment) {
                 continue;
             }
             let bounds = unsafe { element.CurrentBoundingRectangle() }
-                .map_err(|error| format!("read UIA edit bounds: {error}"))?;
-            let enabled = unsafe { element.CurrentIsEnabled() }
-                .map_err(|error| format!("read UIA edit enabled state: {error}"))?
+                .map_err(|error| classify_element_property_error(error, "edit bounds"))?;
+            let offscreen = unsafe { element.CurrentIsOffscreen() }
+                .map_err(|error| classify_element_property_error(error, "edit offscreen state"))?
                 .as_bool();
+            let enabled = unsafe { element.CurrentIsEnabled() }
+                .map_err(|error| classify_element_property_error(error, "edit enabled state"))?
+                .as_bool();
+            if offscreen || !enabled || bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+                continue;
+            }
             let candidate = SemanticControl {
                 element,
                 bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
@@ -4022,7 +4993,9 @@ impl UiAutomation {
                 enabled,
             };
             if found.is_some() {
-                return Err("UIA value fragment matched multiple owned edit controls".into());
+                return Err(VisibleTextLookupError::Other(
+                    "UIA value fragment matched multiple owned edit controls".into(),
+                ));
             }
             found = Some(candidate);
         }
@@ -4204,6 +5177,102 @@ fn describe_uia_element(element: &IUIAutomationElement) -> String {
     )
 }
 
+fn append_candidate_private_uia_tree(
+    walker: &IUIAutomationTreeWalker,
+    parent: &IUIAutomationElement,
+    expected_pid: u32,
+    depth: usize,
+    visited: &mut usize,
+    snapshot: &mut String,
+) {
+    const MAX_PRIVATE_UIA_NODES: usize = 128;
+    const MAX_PRIVATE_UIA_DEPTH: usize = 8;
+    const MAX_PRIVATE_UIA_BYTES: usize = 32 * 1024;
+    if *visited >= MAX_PRIVATE_UIA_NODES || depth > MAX_PRIVATE_UIA_DEPTH {
+        return;
+    }
+    let Ok(mut element) = (unsafe { walker.GetFirstChildElement(parent) }) else {
+        return;
+    };
+    loop {
+        if *visited >= MAX_PRIVATE_UIA_NODES || snapshot.len() >= MAX_PRIVATE_UIA_BYTES {
+            break;
+        }
+        *visited += 1;
+        let process_id = unsafe { element.CurrentProcessId() }
+            .map(|value| value as u32)
+            .unwrap_or_default();
+        if process_id == expected_pid {
+            let control_type = unsafe { element.CurrentControlType() }
+                .map(|value| value.0)
+                .unwrap_or_default();
+            let bounds = unsafe { element.CurrentBoundingRectangle() }
+                .map(|value| [value.left, value.top, value.right, value.bottom])
+                .unwrap_or_default();
+            let offscreen = unsafe { element.CurrentIsOffscreen() }
+                .map(|value| value.as_bool())
+                .unwrap_or(true);
+            let name = unsafe { element.CurrentName() }
+                .map(|value| value.to_string())
+                .unwrap_or_else(|error| format!("<uia-error-{:08x}>", error.code().0 as u32));
+            let value = match unsafe {
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            } {
+                Ok(pattern) => unsafe { pattern.CurrentValue() }
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|error| format!("<uia-error-{:08x}>", error.code().0 as u32)),
+                Err(error) if error.code().0 as u32 == UIA_NOT_SUPPORTED_HRESULT => {
+                    "<no-value-pattern>".to_owned()
+                }
+                Err(error) => format!("<uia-error-{:08x}>", error.code().0 as u32),
+            };
+            let indent = "  ".repeat(depth);
+            let line = format!(
+                "{indent}pid={process_id} type={control_type} bounds={bounds:?} offscreen={offscreen} name={:?} value={:?}\n",
+                bounded_private_uia_field(&name),
+                bounded_private_uia_field(&value),
+            );
+            if snapshot.len().saturating_add(line.len()) <= MAX_PRIVATE_UIA_BYTES {
+                snapshot.push_str(&line);
+            } else {
+                const CAP_MARKER: &str = "<diagnostic byte cap reached>\n";
+                let remaining = MAX_PRIVATE_UIA_BYTES.saturating_sub(snapshot.len());
+                snapshot.push_str(&CAP_MARKER[..remaining.min(CAP_MARKER.len())]);
+                break;
+            }
+            append_candidate_private_uia_tree(
+                walker,
+                &element,
+                expected_pid,
+                depth + 1,
+                visited,
+                snapshot,
+            );
+        }
+        if *visited >= MAX_PRIVATE_UIA_NODES || snapshot.len() >= MAX_PRIVATE_UIA_BYTES {
+            break;
+        }
+        let Ok(next) = (unsafe { walker.GetNextSiblingElement(&element) }) else {
+            break;
+        };
+        element = next;
+    }
+}
+
+fn bounded_private_uia_field(value: &str) -> String {
+    value
+        .chars()
+        .take(160)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn format_uia_element_snapshot(
     process_id: i32,
@@ -4266,6 +5335,62 @@ pub(super) fn click_semantic_control(
     control: &SemanticControl,
     trace_path: &Path,
 ) -> Result<PointerClickEvidence, String> {
+    click_semantic_control_with_button(child, target, control, trace_path, PointerButton::Left)
+}
+
+pub(super) fn click_semantic_control_secondary(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    control: &SemanticControl,
+    trace_path: &Path,
+) -> Result<PointerClickEvidence, String> {
+    click_semantic_control_with_button(child, target, control, trace_path, PointerButton::Right)
+}
+
+pub(super) fn click_designer_semantic_control(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    control: &SemanticControl,
+    trace_path: &Path,
+) -> Result<PointerClickEvidence, String> {
+    child.validate_window(target.hwnd)?;
+    if target.role != WindowRole::Designer
+        || target.process_id != child.process_id()
+        || control.process_id != child.process_id()
+        || !control.enabled
+        || control.bounds[2] <= control.bounds[0]
+        || control.bounds[3] <= control.bounds[1]
+    {
+        return Err("refused Designer click for a disabled, invalid, or foreign control".into());
+    }
+    let mut top_left = POINT {
+        x: control.bounds[0],
+        y: control.bounds[1],
+    };
+    let mut bottom_right = POINT {
+        x: control.bounds[2],
+        y: control.bounds[3],
+    };
+    if !unsafe { ScreenToClient(target.hwnd, &mut top_left) }.as_bool()
+        || !unsafe { ScreenToClient(target.hwnd, &mut bottom_right) }.as_bool()
+    {
+        return Err("could not convert Designer UIA screen bounds to client coordinates".into());
+    }
+    click_designer_client_bounds(
+        child,
+        target,
+        [top_left.x, top_left.y, bottom_right.x, bottom_right.y],
+        trace_path,
+    )
+}
+
+fn click_semantic_control_with_button(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    control: &SemanticControl,
+    trace_path: &Path,
+    button: PointerButton,
+) -> Result<PointerClickEvidence, String> {
     child.validate_window(target.hwnd)?;
     if control.process_id != child.process_id || !control.enabled {
         return Err("refused semantic click for disabled or foreign-process control".into());
@@ -4290,7 +5415,8 @@ pub(super) fn click_semantic_control(
         child,
         target,
         point,
-        "semantic click",
+        button,
+        "semantic UIA control click",
         PointerMoveAcknowledgement {
             trace_path,
             kind: PointerTraceKind::RootScreen,
@@ -4307,6 +5433,123 @@ pub(super) fn click_designer_client_bounds(
     bounds: [i32; 4],
     trace_path: &Path,
 ) -> Result<PointerClickEvidence, String> {
+    click_designer_client_bounds_with_button(child, target, bounds, trace_path, PointerButton::Left)
+}
+
+pub(super) fn click_designer_secondary_bounds(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+) -> Result<PointerClickEvidence, String> {
+    click_designer_client_bounds_with_button(
+        child,
+        target,
+        bounds,
+        trace_path,
+        PointerButton::Right,
+    )
+}
+
+pub(super) fn scroll_designer_client_bounds(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    delta: i16,
+) -> Result<usize, String> {
+    child.validate_window(target.hwnd)?;
+    if target.role != WindowRole::Designer
+        || target.process_id != child.process_id()
+        || !target.visible
+        || target.minimized
+        || bounds[2] <= bounds[0]
+        || bounds[3] <= bounds[1]
+        || delta == 0
+    {
+        return Err("refused scroll outside a visible candidate-owned Designer control".into());
+    }
+    let mut client = RECT::default();
+    unsafe { GetClientRect(target.hwnd, &mut client) }
+        .map_err(|error| format!("read Designer client bounds before scroll: {error}"))?;
+    let point = semantic_client_center(
+        bounds,
+        [client.left, client.top, client.right, client.bottom],
+    )?;
+    let mut screen_point = point;
+    if !unsafe { ClientToScreen(target.hwnd, &mut screen_point) }.as_bool() {
+        return Err("could not convert Designer scroll point to screen coordinates".into());
+    }
+    child.focus_window(target)?;
+    unsafe { SetCursorPos(screen_point.x, screen_point.y) }
+        .map_err(|error| format!("position pointer over owned Designer result list: {error}"))?;
+    let hit = unsafe { WindowFromPoint(screen_point) };
+    if hit.is_invalid() || window_process_id(hit) != child.process_id() {
+        return Err(
+            "refused scroll because the hit-tested window is not owned by the candidate".into(),
+        );
+    }
+    input_modifiers_clear()?;
+    send_input_checked(
+        &[INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: i32::from(delta) as u32,
+                    dwFlags: MOUSEEVENTF_WHEEL,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }],
+        "owned Designer result-list scroll",
+    )
+}
+
+fn click_designer_client_bounds_with_button(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+    button: PointerButton,
+) -> Result<PointerClickEvidence, String> {
+    click_designer_client_bounds_with_pre_down_check_and_button(
+        child,
+        target,
+        bounds,
+        trace_path,
+        button,
+        |_, _| Ok(()),
+    )
+    .map_err(PointerClickPreDownError::into_message)
+}
+
+pub(super) fn click_designer_client_bounds_with_pre_down_check(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+    pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
+) -> Result<PointerClickEvidence, PointerClickPreDownError> {
+    click_designer_client_bounds_with_pre_down_check_and_button(
+        child,
+        target,
+        bounds,
+        trace_path,
+        PointerButton::Left,
+        pre_down_check,
+    )
+}
+
+fn click_designer_client_bounds_with_pre_down_check_and_button(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+    button: PointerButton,
+    pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
+) -> Result<PointerClickEvidence, PointerClickPreDownError> {
     child.validate_window(target.hwnd)?;
     let mut client = RECT::default();
     unsafe { GetClientRect(target.hwnd, &mut client) }
@@ -4325,10 +5568,11 @@ pub(super) fn click_designer_client_bounds(
     if !unsafe { ClientToScreen(target.hwnd, &mut screen_point) }.as_bool() {
         return Err("could not convert Designer semantic point to screen coordinates".into());
     }
-    click_screen_point(
+    click_screen_point_with_pre_down_check(
         child,
         target,
         screen_point,
+        button,
         "Designer semantic click",
         PointerMoveAcknowledgement {
             trace_path,
@@ -4337,6 +5581,7 @@ pub(super) fn click_designer_client_bounds(
             nudge_trace_point: (nudge_client.x, nudge_client.y),
             target_trace_point: client_point,
         },
+        pre_down_check,
     )
 }
 
@@ -4377,7 +5622,8 @@ pub(super) fn click_owned_radial_point(
         return Err("refused radial click without a production layout generation".into());
     }
     focus_is_validated(surface.hwnd, child.process_id())?;
-    let mut button_guard = MouseButtonGuard::new(surface.hwnd, child.process_id());
+    let mut button_guard =
+        MouseButtonGuard::new(surface.hwnd, child.process_id(), PointerButton::Left);
     let down = match send_validated_input_allowing_owned_keys(
         surface.hwnd,
         child.process_id(),
@@ -4585,9 +5831,31 @@ fn click_screen_point(
     child: &NativeChild,
     target: &WindowSnapshot,
     point: POINT,
+    button: PointerButton,
     operation: &str,
     pointer_move_ack: PointerMoveAcknowledgement<'_>,
 ) -> Result<PointerClickEvidence, String> {
+    click_screen_point_with_pre_down_check(
+        child,
+        target,
+        point,
+        button,
+        operation,
+        pointer_move_ack,
+        |_, _| Ok(()),
+    )
+    .map_err(PointerClickPreDownError::into_message)
+}
+
+fn click_screen_point_with_pre_down_check(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    point: POINT,
+    button: PointerButton,
+    operation: &str,
+    pointer_move_ack: PointerMoveAcknowledgement<'_>,
+    pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
+) -> Result<PointerClickEvidence, PointerClickPreDownError> {
     child.validate_window(target.hwnd)?;
     let root_screen_click = matches!(pointer_move_ack.kind, PointerTraceKind::RootScreen);
     if root_screen_click {
@@ -4634,7 +5902,8 @@ fn click_screen_point(
         return Err(format!(
             "{operation} pointer nudge {:?} lies outside the target client area",
             (nudge_screen_point.x, nudge_screen_point.y)
-        ));
+        )
+        .into());
     }
     let trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
     if root_screen_click {
@@ -4666,6 +5935,7 @@ fn click_screen_point(
         &pointer_move_ack,
         trace_cursor,
         pointer_move_ack.nudge_trace_point,
+        nudge_screen_point,
         Duration::from_secs(3),
     )?;
 
@@ -4695,6 +5965,7 @@ fn click_screen_point(
         &pointer_move_ack,
         target_move_cursor,
         pointer_move_ack.target_trace_point,
+        point,
         Duration::from_secs(3),
     )?;
     let foreground_hwnd = unsafe { GetForegroundWindow() };
@@ -4703,16 +5974,57 @@ fn click_screen_point(
             "blocked precondition: target HWND={} is not foreground before {operation} (foreground HWND={})",
             hwnd_id(target.hwnd),
             hwnd_id(foreground_hwnd)
-        ));
+        )
+        .into());
     }
     if root_screen_click {
         validate_root_pointer_geometry(target)?;
     }
-    let down = [mouse_input(true)];
-    let down_trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
-    let down = send_validated_input(target.hwnd, child.process_id(), &down, operation)?;
-    let left_button_state_after_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
-    let mut button_guard = MouseButtonGuard::new(target.hwnd, child.process_id());
+    let down = [mouse_button_input(button, true)];
+    let (down_trace_cursor, down) = dispatch_pointer_down_after_preflight(
+        || pre_down_check(pointer_move_ack.target_trace_point, target_move_cursor),
+        || {
+            child.validate_window(target.hwnd)?;
+            if unsafe { GetForegroundWindow() } != target.hwnd {
+                return Err(format!(
+                    "blocked precondition: target HWND={} lost foreground before {operation} button-down",
+                    hwnd_id(target.hwnd)
+                ));
+            }
+            if root_screen_click {
+                validate_root_pointer_geometry(target)?;
+            }
+            let mut current_client = RECT::default();
+            unsafe { GetClientRect(target.hwnd, &mut current_client) }.map_err(|error| {
+                format!("refresh target client bounds before {operation} down: {error}")
+            })?;
+            let mut current_top_left = POINT {
+                x: current_client.left,
+                y: current_client.top,
+            };
+            let mut current_bottom_right = POINT {
+                x: current_client.right,
+                y: current_client.bottom,
+            };
+            if !unsafe { ClientToScreen(target.hwnd, &mut current_top_left) }.as_bool()
+                || !unsafe { ClientToScreen(target.hwnd, &mut current_bottom_right) }.as_bool()
+                || point.x < current_top_left.x
+                || point.y < current_top_left.y
+                || point.x >= current_bottom_right.x
+                || point.y >= current_bottom_right.y
+            {
+                return Err(format!(
+                    "{operation} target client geometry changed before button-down"
+                ));
+            }
+            validate_pointer_coverage(target.hwnd, child.process_id(), point, operation)?;
+            let trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
+            let evidence = send_validated_input(target.hwnd, child.process_id(), &down, operation)?;
+            Ok((trace_cursor, evidence))
+        },
+    )?;
+    let button_state_after_down = unsafe { GetAsyncKeyState(button.virtual_key() as i32) };
+    let mut button_guard = MouseButtonGuard::new(target.hwnd, child.process_id(), button);
     button_guard.armed = true;
     wait_for_pointer_button_ack(
         &pointer_move_ack,
@@ -4723,15 +6035,16 @@ fn click_screen_point(
     )
     .map_err(|error| {
         format!(
-            "{error}; checked down=[{}], VK_LBUTTON async=0x{:04x}",
+            "{error}; checked {:?} down=[{}], async=0x{:04x}",
+            button,
             down.describe(),
-            left_button_state_after_down as u16
+            button_state_after_down as u16
         )
     })?;
-    let left_button_state_before_up = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+    let button_state_before_up = unsafe { GetAsyncKeyState(button.virtual_key() as i32) };
     let up_trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
     let up = button_guard.release()?;
-    let left_button_state_after_up = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+    let button_state_after_up = unsafe { GetAsyncKeyState(button.virtual_key() as i32) };
     wait_for_pointer_button_ack(
         &pointer_move_ack,
         up_trace_cursor,
@@ -4741,9 +6054,10 @@ fn click_screen_point(
     )
     .map_err(|error| {
         format!(
-            "{error}; checked up=[{}], VK_LBUTTON async after up=0x{:04x}",
+            "{error}; checked {:?} up=[{}], async after up=0x{:04x}",
+            button,
             up.describe(),
-            left_button_state_after_up as u16
+            button_state_after_up as u16
         )
     })?;
     Ok(PointerClickEvidence {
@@ -4754,11 +6068,12 @@ fn click_screen_point(
         pointer_move_acknowledged: true,
         down,
         down_acknowledged: true,
-        left_button_state_after_down,
-        left_button_state_before_up,
+        button,
+        button_state_after_down,
+        button_state_before_up,
         up,
         up_acknowledged: true,
-        left_button_state_after_up,
+        button_state_after_up,
         target_hwnd: target.hwnd,
         nudge_under_cursor_hwnd: nudge_under_cursor,
         under_cursor_hwnd: under_cursor,
@@ -4795,47 +6110,116 @@ fn wait_for_pointer_move_ack(
     acknowledgement: &PointerMoveAcknowledgement<'_>,
     cursor: usize,
     expected_point: (i32, i32),
+    expected_screen_point: POINT,
     timeout: Duration,
 ) -> Result<usize, String> {
-    let deadline = Instant::now() + timeout;
-    let mut event_cursor = cursor;
-    let mut correction_events = 0;
-    let mut last_observed = None;
-    loop {
-        if let Some(observed) = latest_pointer_move_after(
-            acknowledgement.trace_path,
-            event_cursor,
-            acknowledgement.kind,
-        )? {
-            last_observed = Some(observed);
-            let Some((dx, dy)) = pointer_correction_delta(observed, expected_point)? else {
-                return Ok(correction_events);
-            };
-            if correction_events >= MAX_POINTER_CORRECTIONS {
+    let surface = match acknowledgement.kind {
+        PointerTraceKind::RootScreen => "ROOT screen point",
+        PointerTraceKind::DesignerClient => "Designer client point",
+    };
+    let event_cursor = std::cell::Cell::new(cursor);
+    wait_for_pointer_move_ack_with(
+        operation,
+        surface,
+        expected_point,
+        timeout,
+        || {
+            latest_pointer_move_after(
+                acknowledgement.trace_path,
+                event_cursor.get(),
+                acknowledgement.kind,
+            )
+        },
+        || {
+            child.validate_window(target_window.hwnd)?;
+            let cursor_position = cursor_position()?;
+            if cursor_position.x != expected_screen_point.x
+                || cursor_position.y != expected_screen_point.y
+            {
                 return Err(format!(
-                    "{operation} pointer move remained inexact after {correction_events} bounded corrections: expected={expected_point:?} observed={observed:?}"
+                    "{operation} exact pointer trace did not match physical cursor position: expected screen point=({},{}), current=({},{})",
+                    expected_screen_point.x,
+                    expected_screen_point.y,
+                    cursor_position.x,
+                    cursor_position.y
                 ));
             }
-            event_cursor = trace_line_count(acknowledgement.trace_path)?;
-            let correction = relative_mouse_move_input(dx, dy);
-            let evidence = send_validated_input(
+            validate_pointer_coverage(
                 target_window.hwnd,
                 child.process_id(),
-                &[correction],
-                &format!("{operation} exact pointer correction"),
+                expected_screen_point,
+                operation,
             )?;
-            correction_events = correction_events.saturating_add(evidence.inserted);
+            Ok(())
+        },
+        |dx, dy| {
+            let correction = relative_mouse_move_input(dx, dy);
+            send_pointer_correction_after_cursor(acknowledgement.trace_path, &event_cursor, || {
+                send_validated_input(
+                    target_window.hwnd,
+                    child.process_id(),
+                    &[correction],
+                    &format!("{operation} exact pointer correction"),
+                )
+                .map(|evidence| evidence.inserted)
+            })
+        },
+        std::thread::sleep,
+    )
+}
+
+fn send_pointer_correction_after_cursor(
+    trace_path: &Path,
+    event_cursor: &std::cell::Cell<usize>,
+    send: impl FnOnce() -> Result<usize, String>,
+) -> Result<usize, String> {
+    event_cursor.set(trace_line_count(trace_path)?);
+    send()
+}
+
+fn wait_for_pointer_move_ack_with(
+    operation: &str,
+    surface: &str,
+    expected_point: (i32, i32),
+    timeout: Duration,
+    mut read_latest: impl FnMut() -> Result<Option<(i32, i32)>, String>,
+    mut verify_physical_owner: impl FnMut() -> Result<(), String>,
+    mut send_correction: impl FnMut(i32, i32) -> Result<usize, String>,
+    mut wait: impl FnMut(Duration),
+) -> Result<usize, String> {
+    let deadline = Instant::now() + timeout;
+    let mut correction_events = 0usize;
+    let mut last_observed = None;
+    loop {
+        if let Some(observed) = read_latest()? {
+            last_observed = Some(observed);
+            match pointer_correction_delta(observed, expected_point) {
+                Ok(None) => {
+                    verify_physical_owner()?;
+                    return Ok(correction_events);
+                }
+                Ok(Some((dx, dy))) => {
+                    if correction_events >= MAX_POINTER_CORRECTIONS {
+                        return Err(format!(
+                            "{operation} pointer move remained inexact after {correction_events} bounded corrections: expected={expected_point:?} observed={observed:?}"
+                        ));
+                    }
+                    correction_events = correction_events.saturating_add(send_correction(dx, dy)?);
+                }
+                // Large changes belong to another physical move or to a stale
+                // surface coordinate frame. They are not a rounding error to
+                // correct. Keep waiting for the exact owner trace; the physical
+                // cursor is checked only when that exact trace arrives.
+                Err(_) => {}
+            }
         }
-        if Instant::now() >= deadline {
-            let surface = match acknowledgement.kind {
-                PointerTraceKind::RootScreen => "ROOT screen point",
-                PointerTraceKind::DesignerClient => "Designer client point",
-            };
+        let now = Instant::now();
+        if now >= deadline {
             return Err(format!(
                 "production {surface} pointer move did not reach exact point {expected_point:?} before click; last observed={last_observed:?}, bounded correction events={correction_events}"
             ));
         }
-        std::thread::sleep(Duration::from_millis(10));
+        wait(Duration::from_millis(10).min(deadline.saturating_duration_since(now)));
     }
 }
 
@@ -4896,35 +6280,9 @@ fn wait_for_pointer_button_ack(
     loop {
         let trace = std::fs::read_to_string(acknowledgement.trace_path)
             .map_err(|error| format!("read production pointer-button trace: {error}"))?;
-        let acknowledged = trace
-            .lines()
-            .skip(cursor)
-            .any(|line| match acknowledgement.kind {
-                PointerTraceKind::RootScreen => {
-                    line.contains("trace_event=\"root_pointer_button\"")
-                        && if pressed {
-                            line.contains("pressed=true")
-                        } else {
-                            line.contains("released=true")
-                        }
-                        && trace_i32_field(line, "screen_x=")
-                            .is_some_and(|x| x.abs_diff(screen_point.0) <= 1)
-                        && trace_i32_field(line, "screen_y=")
-                            .is_some_and(|y| y.abs_diff(screen_point.1) <= 1)
-                }
-                PointerTraceKind::DesignerClient => {
-                    line.contains("trace_event=\"designer_pointer\"")
-                        && if pressed {
-                            line.contains("pointer_down=true")
-                        } else {
-                            line.contains("pointer_up=true")
-                        }
-                        && trace_i32_field(line, "cursor_screen_x=")
-                            .is_some_and(|x| x.abs_diff(screen_point.0) <= 1)
-                        && trace_i32_field(line, "cursor_screen_y=")
-                            .is_some_and(|y| y.abs_diff(screen_point.1) <= 1)
-                }
-            });
+        let acknowledged = trace.lines().skip(cursor).any(|line| {
+            pointer_button_ack_matches(line, acknowledgement.kind, screen_point, pressed)
+        });
         if acknowledged {
             return Ok(());
         }
@@ -4940,6 +6298,185 @@ fn wait_for_pointer_button_ack(
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointerButtonAckOrder {
+    Pending,
+    Down,
+    UpBeforeDown,
+    UpAfterDown,
+}
+
+fn pointer_button_ack_matches(
+    line: &str,
+    kind: PointerTraceKind,
+    screen_point: (i32, i32),
+    pressed: bool,
+) -> bool {
+    match kind {
+        PointerTraceKind::RootScreen => {
+            line.contains("trace_event=\"root_pointer_button\"")
+                && if pressed {
+                    line.contains("pressed=true")
+                } else {
+                    line.contains("released=true")
+                }
+                && trace_i32_field(line, "screen_x=")
+                    .is_some_and(|x| x.abs_diff(screen_point.0) <= 1)
+                && trace_i32_field(line, "screen_y=")
+                    .is_some_and(|y| y.abs_diff(screen_point.1) <= 1)
+        }
+        PointerTraceKind::DesignerClient => {
+            line.contains("trace_event=\"designer_pointer\"")
+                && if pressed {
+                    line.contains("pointer_down=true")
+                } else {
+                    line.contains("pointer_up=true")
+                }
+                && trace_i32_field(line, "cursor_screen_x=")
+                    .is_some_and(|x| x.abs_diff(screen_point.0) <= 1)
+                && trace_i32_field(line, "cursor_screen_y=")
+                    .is_some_and(|y| y.abs_diff(screen_point.1) <= 1)
+        }
+    }
+}
+
+fn pointer_button_ack_order_after(
+    trace: &str,
+    cursor: usize,
+    kind: PointerTraceKind,
+    screen_point: (i32, i32),
+) -> PointerButtonAckOrder {
+    let mut down = None;
+    let mut up = None;
+    for (index, line) in trace.lines().skip(cursor).enumerate() {
+        if down.is_none() && pointer_button_ack_matches(line, kind, screen_point, true) {
+            down = Some(index);
+        }
+        if up.is_none() && pointer_button_ack_matches(line, kind, screen_point, false) {
+            up = Some(index);
+        }
+    }
+    match (down, up) {
+        (None, None) => PointerButtonAckOrder::Pending,
+        (Some(_), None) => PointerButtonAckOrder::Down,
+        (None, Some(_)) => PointerButtonAckOrder::UpBeforeDown,
+        (Some(down), Some(up)) if up < down => PointerButtonAckOrder::UpBeforeDown,
+        (Some(_), Some(_)) => PointerButtonAckOrder::UpAfterDown,
+    }
+}
+
+fn pointer_button_down_acknowledged(order: PointerButtonAckOrder) -> Result<bool, String> {
+    match order {
+        PointerButtonAckOrder::Pending => Ok(false),
+        PointerButtonAckOrder::Down => Ok(true),
+        PointerButtonAckOrder::UpBeforeDown => {
+            Err("production pointer-button up arrived before its fresh down acknowledgement".into())
+        }
+        PointerButtonAckOrder::UpAfterDown => Err(
+            "production pointer-button was already released after its fresh down acknowledgement"
+                .into(),
+        ),
+    }
+}
+
+fn wait_for_pointer_button_down_ack(
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
+    cursor: usize,
+    screen_point: (i32, i32),
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let trace = std::fs::read_to_string(acknowledgement.trace_path)
+            .map_err(|error| format!("read production pointer-button trace: {error}"))?;
+        match pointer_button_down_acknowledged(pointer_button_ack_order_after(
+            &trace,
+            cursor,
+            acknowledgement.kind,
+            screen_point,
+        ))? {
+            true => return Ok(()),
+            false => {}
+        }
+        if Instant::now() >= deadline {
+            let surface = match acknowledgement.kind {
+                PointerTraceKind::RootScreen => "production ROOT",
+                PointerTraceKind::DesignerClient => "production Designer",
+            };
+            return Err(format!(
+                "{surface} did not acknowledge pointer-button down at screen point {screen_point:?}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_pointer_button_async_down_with(
+    timeout: Duration,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+    mut sample: impl FnMut() -> Result<(i16, bool), String>,
+) -> Result<i16, String> {
+    let deadline = now() + timeout;
+    loop {
+        let (async_state, release_acknowledged) = sample()?;
+        if release_acknowledged {
+            return Err(format!(
+                "production pointer-button up arrived before physical down was verified (async=0x{:04x})",
+                async_state as u16
+            ));
+        }
+        if async_state < 0 {
+            return Ok(async_state);
+        }
+        let current = now();
+        if current >= deadline {
+            return Err(format!(
+                "physical pointer-button down was not observed before timeout (async=0x{:04x})",
+                async_state as u16
+            ));
+        }
+        sleep(WINDOW_POLL.min(deadline.saturating_duration_since(current)));
+    }
+}
+
+fn wait_for_pointer_button_down_ready_with(
+    wait_for_acknowledgement: impl FnOnce() -> Result<(), String>,
+    timeout: Duration,
+    now: impl FnMut() -> Instant,
+    sleep: impl FnMut(Duration),
+    sample: impl FnMut() -> Result<(i16, bool), String>,
+) -> Result<i16, String> {
+    wait_for_acknowledgement()?;
+    wait_for_pointer_button_async_down_with(timeout, now, sleep, sample)
+}
+
+fn wait_for_pointer_button_down_ready(
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
+    cursor: usize,
+    screen_point: (i32, i32),
+    virtual_key: i32,
+    timeout: Duration,
+) -> Result<i16, String> {
+    wait_for_pointer_button_down_ready_with(
+        || wait_for_pointer_button_down_ack(acknowledgement, cursor, screen_point, timeout),
+        timeout,
+        Instant::now,
+        std::thread::sleep,
+        || {
+            let trace = std::fs::read_to_string(acknowledgement.trace_path)
+                .map_err(|error| format!("read production pointer-button trace: {error}"))?;
+            let order =
+                pointer_button_ack_order_after(&trace, cursor, acknowledgement.kind, screen_point);
+            let released = matches!(
+                order,
+                PointerButtonAckOrder::UpBeforeDown | PointerButtonAckOrder::UpAfterDown
+            );
+            Ok((unsafe { GetAsyncKeyState(virtual_key) }, released))
+        },
+    )
 }
 
 fn trace_line_count(trace_path: &Path) -> Result<usize, String> {
@@ -5044,12 +6581,526 @@ fn trace_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
         .find_map(|part| part.strip_prefix(&format!("{name}=")))
 }
 
+pub(super) fn trace_static_enum_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    let value = trace_field(line, name)?;
+    if let Some(quoted) = value.strip_prefix('"') {
+        let value = quoted.strip_suffix('"')?;
+        (!value.contains('"')).then_some(value)
+    } else if value.contains('"') {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 fn trace_bool_field(line: &str, name: &str) -> Option<bool> {
     match trace_field(line, name)? {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
     }
+}
+
+fn parse_action_editor_surface(value: &str) -> Option<ActionEditorSurface> {
+    match value {
+        "properties" => Some(ActionEditorSurface::Properties),
+        "inspector" => Some(ActionEditorSurface::Inspector),
+        _ => None,
+    }
+}
+
+fn parse_action_editor_control_name(value: &str) -> Option<&'static str> {
+    const CONTROLS: &[&str] = &[
+        "query_tab",
+        "query",
+        "query_field",
+        "search",
+        "query_mode",
+        "result_count",
+        "result",
+        "result_target",
+        "pin",
+        "pin_result",
+        "save_query",
+        "mode",
+        "test_query",
+        "test_result",
+        "contextual_target",
+        "pin_contextual",
+        "test_assigned",
+        "advanced",
+        "advanced_tab",
+        "exact_command",
+        "arguments",
+        "exact_command_field",
+        "exact_args_field",
+        "use_exact_command",
+        "test_exact_command",
+        "test",
+        "apply",
+        "open_inspector",
+        "close",
+        "save",
+        "undo",
+        "redo",
+        "keep_editing",
+        "discard",
+        "reopen",
+        "add_to_radial",
+        "menu",
+        "ring",
+        "cell",
+        "spacer",
+        "append",
+        "replace",
+        "cancel",
+        "confirm_close_tree",
+    ];
+    CONTROLS.iter().copied().find(|control| *control == value)
+}
+
+fn parse_action_editor_identity(line: &str) -> Option<ActionEditorTraceIdentity> {
+    Some(ActionEditorTraceIdentity {
+        surface: parse_action_editor_surface(trace_static_enum_field(line, "editor_surface")?)?,
+        session_id: trace_field(line, "editor_session_id")?.parse().ok()?,
+        draft_generation: trace_field(line, "draft_generation")?.parse().ok()?,
+        stable_target_digest: trace_field(line, "stable_target_digest")?.parse().ok()?,
+        editor_epoch: trace_field(line, "editor_epoch")?.parse().ok()?,
+        edit_generation: trace_field(line, "edit_generation")?.parse().ok()?,
+        query_generation: trace_field(line, "query_generation")?.parse().ok()?,
+        query_request_generation: trace_field(line, "query_request_generation")?
+            .parse()
+            .ok()?,
+        search_request_generation: trace_field(line, "search_request_generation")?
+            .parse()
+            .ok()?,
+        test_request_generation: trace_field(line, "test_request_generation")?.parse().ok()?,
+        query_digest: trace_field(line, "query_digest")?.parse().ok()?,
+        assigned_binding_digest: trace_field(line, "editor_assigned_binding_digest")?
+            .parse()
+            .ok()?,
+    })
+}
+
+pub(super) fn parse_action_editor_control(line: &str) -> Option<ActionEditorControlSnapshot> {
+    if !line.contains("trace_event=\"designer_action_editor_control\"") {
+        return None;
+    }
+    let index = trace_i32_field(line, "control_index=")?;
+    Some(ActionEditorControlSnapshot {
+        identity: parse_action_editor_identity(line)?,
+        control: parse_action_editor_control_name(trace_static_enum_field(
+            line,
+            "editor_control",
+        )?)?
+        .to_owned(),
+        index: usize::try_from(index).ok(),
+        target_digest: trace_field(line, "target_digest")?.parse().ok()?,
+        title_digest: trace_field(line, "title_digest")?.parse().ok()?,
+        type_digest: trace_field(line, "type_digest")?.parse().ok()?,
+        disambiguator_digest: trace_field(line, "disambiguator_digest")?.parse().ok()?,
+        action_digest: trace_field(line, "action_digest")?.parse().ok()?,
+        binding_digest: trace_field(line, "binding_digest")?.parse().ok()?,
+        value_digest: trace_field(line, "value_digest")?.parse().ok()?,
+        displayed_text_digest: trace_field(line, "displayed_text_digest")?.parse().ok()?,
+        trace_sequence: multi_launcher::radial::acceptance_trace::trace_line_sequence(line)?,
+        bounds: [
+            trace_i32_field(line, "left_px=")?,
+            trace_i32_field(line, "top_px=")?,
+            trace_i32_field(line, "right_px=")?,
+            trace_i32_field(line, "bottom_px=")?,
+        ],
+        full_bounds: [
+            trace_i32_field(line, "full_left_px=")?,
+            trace_i32_field(line, "full_top_px=")?,
+            trace_i32_field(line, "full_right_px=")?,
+            trace_i32_field(line, "full_bottom_px=")?,
+        ],
+        client_size: [
+            trace_i32_field(line, "client_width_px=")?,
+            trace_i32_field(line, "client_height_px=")?,
+        ],
+        fully_visible: trace_bool_field(line, "fully_visible")?,
+        enabled: trace_bool_field(line, "enabled")?,
+        selected: trace_bool_field(line, "selected")?,
+        focused: trace_bool_field(line, "focused")?,
+        clicked: trace_bool_field(line, "clicked")?,
+        changed: trace_bool_field(line, "changed")?,
+        enter_pressed: trace_bool_field(line, "enter_pressed")?,
+        visible: trace_bool_field(line, "visible")?,
+    })
+}
+
+pub(super) fn parse_action_editor_scroll(line: &str) -> Option<ActionEditorScrollSnapshot> {
+    if !line.contains("trace_event=\"designer_action_editor_scroll\"") {
+        return None;
+    }
+    let snapshot = ActionEditorScrollSnapshot {
+        identity: parse_action_editor_identity(line)?,
+        scroll_id: trace_field(line, "scroll_id")?.parse().ok()?,
+        frame_nr: trace_field(line, "frame_nr")?.parse().ok()?,
+        trace_sequence: trace_field(line, "trace_sequence")?.parse().ok()?,
+        offset_y_milli: trace_field(line, "offset_y_milli")?.parse().ok()?,
+        velocity_y_milli: trace_field(line, "velocity_y_milli")?.parse().ok()?,
+        content_height_milli: trace_field(line, "content_height_milli")?.parse().ok()?,
+        inner_height_milli: trace_field(line, "inner_height_milli")?.parse().ok()?,
+        pixels_per_point_milli: trace_field(line, "pixels_per_point_milli")?.parse().ok()?,
+        handle_min_length_milli: trace_field(line, "handle_min_length_milli")?.parse().ok()?,
+        inner_bounds: [
+            trace_i32_field(line, "inner_left_px=")?,
+            trace_i32_field(line, "inner_top_px=")?,
+            trace_i32_field(line, "inner_right_px=")?,
+            trace_i32_field(line, "inner_bottom_px=")?,
+        ],
+        inner_visible_bounds: [
+            trace_i32_field(line, "inner_visible_left_px=")?,
+            trace_i32_field(line, "inner_visible_top_px=")?,
+            trace_i32_field(line, "inner_visible_right_px=")?,
+            trace_i32_field(line, "inner_visible_bottom_px=")?,
+        ],
+        track_bounds: [
+            trace_i32_field(line, "track_left_px=")?,
+            trace_i32_field(line, "track_top_px=")?,
+            trace_i32_field(line, "track_right_px=")?,
+            trace_i32_field(line, "track_bottom_px=")?,
+        ],
+        track_visible_bounds: [
+            trace_i32_field(line, "track_visible_left_px=")?,
+            trace_i32_field(line, "track_visible_top_px=")?,
+            trace_i32_field(line, "track_visible_right_px=")?,
+            trace_i32_field(line, "track_visible_bottom_px=")?,
+        ],
+        thumb_bounds: [
+            trace_i32_field(line, "thumb_left_px=")?,
+            trace_i32_field(line, "thumb_top_px=")?,
+            trace_i32_field(line, "thumb_right_px=")?,
+            trace_i32_field(line, "thumb_bottom_px=")?,
+        ],
+        thumb_visible_bounds: [
+            trace_i32_field(line, "thumb_visible_left_px=")?,
+            trace_i32_field(line, "thumb_visible_top_px=")?,
+            trace_i32_field(line, "thumb_visible_right_px=")?,
+            trace_i32_field(line, "thumb_visible_bottom_px=")?,
+        ],
+        painted_thumb_bounds: [
+            trace_i32_field(line, "painted_thumb_left_px=")?,
+            trace_i32_field(line, "painted_thumb_top_px=")?,
+            trace_i32_field(line, "painted_thumb_right_px=")?,
+            trace_i32_field(line, "painted_thumb_bottom_px=")?,
+        ],
+        painted_thumb_visible_bounds: [
+            trace_i32_field(line, "painted_thumb_visible_left_px=")?,
+            trace_i32_field(line, "painted_thumb_visible_top_px=")?,
+            trace_i32_field(line, "painted_thumb_visible_right_px=")?,
+            trace_i32_field(line, "painted_thumb_visible_bottom_px=")?,
+        ],
+        paint_clip_bounds: [
+            trace_i32_field(line, "paint_clip_left_px=")?,
+            trace_i32_field(line, "paint_clip_top_px=")?,
+            trace_i32_field(line, "paint_clip_right_px=")?,
+            trace_i32_field(line, "paint_clip_bottom_px=")?,
+        ],
+        client_size: [
+            trace_i32_field(line, "client_width_px=")?,
+            trace_i32_field(line, "client_height_px=")?,
+        ],
+    };
+    snapshot.is_well_formed().then_some(snapshot)
+}
+
+pub(super) fn parse_inspector_cell_text_edit(line: &str) -> Option<InspectorCellTextEditSnapshot> {
+    if !line.contains("trace_event=\"designer_inspector_cell_text_edit\"") {
+        return None;
+    }
+    Some(InspectorCellTextEditSnapshot {
+        target_digest: trace_field(line, "target_digest")?.parse().ok()?,
+        session_id: trace_field(line, "session_id")?.parse().ok()?,
+        generation: trace_field(line, "generation")?.parse().ok()?,
+        value_digest: trace_field(line, "value_digest")?.parse().ok()?,
+        trace_sequence: trace_field(line, "trace_sequence")?.parse().ok()?,
+        bounds: [
+            trace_i32_field(line, "left_px=")?,
+            trace_i32_field(line, "top_px=")?,
+            trace_i32_field(line, "right_px=")?,
+            trace_i32_field(line, "bottom_px=")?,
+        ],
+        clip_bounds: [
+            trace_i32_field(line, "clip_left_px=")?,
+            trace_i32_field(line, "clip_top_px=")?,
+            trace_i32_field(line, "clip_right_px=")?,
+            trace_i32_field(line, "clip_bottom_px=")?,
+        ],
+        client_size: [
+            trace_i32_field(line, "client_width_px=")?,
+            trace_i32_field(line, "client_height_px=")?,
+        ],
+        visible: trace_bool_field(line, "visible")?,
+        fully_visible: trace_bool_field(line, "fully_visible")?,
+        focused: trace_bool_field(line, "focused")?,
+        clicked: trace_bool_field(line, "clicked")?,
+        changed: trace_bool_field(line, "changed")?,
+    })
+}
+
+pub(super) fn inspector_cell_text_edits_after(
+    trace_path: &Path,
+    first_line: usize,
+) -> Result<Vec<InspectorCellTextEditSnapshot>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read Inspector text-edit trace: {error}"))?;
+    Ok(trace_event_lines(&trace)
+        .into_iter()
+        .skip(first_line)
+        .filter_map(|line| parse_inspector_cell_text_edit(&line))
+        .collect())
+}
+
+#[cfg(test)]
+#[test]
+fn inspector_cell_text_edit_reader_requires_complete_owned_identity_and_geometry() {
+    let line = "WARN target trace_event=\"designer_inspector_cell_text_edit\" target_digest=101 session_id=7 generation=9 value_digest=103 trace_sequence=105 left_px=1 top_px=2 right_px=91 bottom_px=30 clip_left_px=1 clip_top_px=2 clip_right_px=91 clip_bottom_px=30 client_width_px=640 client_height_px=480 visible=true fully_visible=true focused=true clicked=true changed=false";
+    let snapshot = parse_inspector_cell_text_edit(line).unwrap();
+    assert_eq!(snapshot.target_digest, 101);
+    assert_eq!(snapshot.session_id, 7);
+    assert_eq!(snapshot.generation, 9);
+    assert_eq!(snapshot.value_digest, 103);
+    assert_eq!(snapshot.trace_sequence, 105);
+    assert!(snapshot.visible && snapshot.fully_visible && snapshot.focused && snapshot.clicked);
+    assert!(!snapshot.changed);
+    for malformed in [
+        line.replace("target_digest=101", "target_digest=private"),
+        line.replace("generation=9", "generation=invalid"),
+        line.replace("trace_sequence=105", "trace_sequence=invalid"),
+        line.replace("fully_visible=true", "fully_visible=maybe"),
+        line.replace("clicked=true", "clicked=unknown"),
+    ] {
+        assert!(
+            parse_inspector_cell_text_edit(&malformed).is_none(),
+            "{malformed}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn action_editor_scroll_reader_requires_fresh_typed_thumb_geometry() {
+    let line = "WARN target trace_event=\"designer_action_editor_scroll\" editor_surface=\"inspector\" editor_session_id=7 draft_generation=3 stable_target_digest=11 editor_epoch=5 edit_generation=9 query_generation=4 query_request_generation=6 search_request_generation=8 test_request_generation=2 query_digest=13 editor_assigned_binding_digest=17 scroll_id=19 frame_nr=23 trace_sequence=29 offset_y_milli=210000 velocity_y_milli=0 content_height_milli=1000000 inner_height_milli=190000 pixels_per_point_milli=1000 handle_min_length_milli=12000 inner_left_px=20 inner_top_px=40 inner_right_px=300 inner_bottom_px=230 inner_visible_left_px=20 inner_visible_top_px=40 inner_visible_right_px=280 inner_visible_bottom_px=230 track_left_px=285 track_top_px=40 track_right_px=300 track_bottom_px=230 track_visible_left_px=285 track_visible_top_px=40 track_visible_right_px=300 track_visible_bottom_px=230 thumb_left_px=285 thumb_top_px=80 thumb_right_px=300 thumb_bottom_px=116 thumb_visible_left_px=285 thumb_visible_top_px=80 thumb_visible_right_px=300 thumb_visible_bottom_px=116 painted_thumb_left_px=285 painted_thumb_top_px=80 painted_thumb_right_px=300 painted_thumb_bottom_px=116 painted_thumb_visible_left_px=285 painted_thumb_visible_top_px=80 painted_thumb_visible_right_px=300 painted_thumb_visible_bottom_px=116 paint_clip_left_px=0 paint_clip_top_px=0 paint_clip_right_px=640 paint_clip_bottom_px=480 client_width_px=640 client_height_px=480";
+    let snapshot = parse_action_editor_scroll(line).unwrap();
+    assert_eq!(snapshot.identity.surface, ActionEditorSurface::Inspector);
+    assert_eq!(snapshot.identity.session_id, 7);
+    assert_eq!(snapshot.identity.query_digest, 13);
+    assert_eq!(snapshot.scroll_id, 19);
+    assert_eq!(snapshot.frame_nr, 23);
+    assert_eq!(snapshot.trace_sequence, 29);
+    assert_eq!(snapshot.offset_y_milli, 210_000);
+    assert_eq!(snapshot.thumb_bounds, [285, 80, 300, 116]);
+    assert_eq!(snapshot.handle_min_length_milli, 12_000);
+    assert_eq!(snapshot.painted_thumb_bounds, [285, 80, 300, 116]);
+
+    let dense_line = line
+        .replace(
+            "content_height_milli=1000000",
+            "content_height_milli=4000000",
+        )
+        .replace(" thumb_top_px=80 ", " thumb_top_px=50 ")
+        .replace(" thumb_bottom_px=116 ", " thumb_bottom_px=59 ")
+        .replace(" thumb_visible_top_px=80 ", " thumb_visible_top_px=50 ")
+        .replace(
+            " thumb_visible_bottom_px=116 ",
+            " thumb_visible_bottom_px=59 ",
+        )
+        .replace(" painted_thumb_top_px=80 ", " painted_thumb_top_px=48 ")
+        .replace(
+            " painted_thumb_bottom_px=116 ",
+            " painted_thumb_bottom_px=60 ",
+        )
+        .replace(
+            " painted_thumb_visible_top_px=80 ",
+            " painted_thumb_visible_top_px=48 ",
+        )
+        .replace(
+            " painted_thumb_visible_bottom_px=116 ",
+            " painted_thumb_visible_bottom_px=60 ",
+        );
+    let dense = parse_action_editor_scroll(&dense_line).unwrap();
+    assert!(dense.thumb_bounds[3] - dense.thumb_bounds[1] < 12);
+    assert_eq!(
+        dense.painted_thumb_bounds[3] - dense.painted_thumb_bounds[1],
+        12
+    );
+    assert!(
+        ((dense.thumb_bounds[1] + dense.thumb_bounds[3])
+            - (dense.painted_thumb_bounds[1] + dense.painted_thumb_bounds[3]))
+            .abs()
+            <= 1
+    );
+
+    for malformed in [
+        line.replace("frame_nr=23", "frame_nr=bad"),
+        line.replace("trace_sequence=29", "trace_sequence=0"),
+        line.replace(" trace_sequence=29", ""),
+        line.replace("offset_y_milli=210000", "offset_y_milli=900001"),
+        line.replace("thumb_top_px=80", "thumb_top_px=60"),
+        line.replace("thumb_visible_right_px=300", "thumb_visible_right_px=641"),
+        line.replace("painted_thumb_bottom_px=116", "painted_thumb_bottom_px=111"),
+        line.replace("editor_surface=\"inspector\"", "editor_surface=\"unknown\""),
+    ] {
+        assert!(
+            parse_action_editor_scroll(&malformed).is_none(),
+            "malformed scrollbar receipt accepted: {malformed}"
+        );
+    }
+
+    // Captured from candidate28's D04 private trace before the publication
+    // sequence field was added. Adding the sequence emitted by the production
+    // fence makes the real producer shape acceptable to this strict reader.
+    let candidate28_d04_scroll = "2026-09-29T05:03:26.267541Z WARN multi_launcher.radial_acceptance: radial acceptance trace trace_event=\"designer_action_editor_scroll\" elapsed_ms=72093 editor_surface=\"properties\" editor_session_id=6 draft_generation=2 stable_target_digest=10658348712107610701 editor_epoch=17 edit_generation=1 query_generation=1 query_request_generation=1 search_request_generation=2 test_request_generation=0 query_digest=16462946472559960157 editor_assigned_binding_digest=10622473845116688956 scroll_id=9840682517781602468 frame_nr=86 offset_y_milli=0 velocity_y_milli=0 content_height_milli=537000 inner_height_milli=190000 pixels_per_point_milli=1000 handle_min_length_milli=12000 inner_left_px=23 inner_top_px=318 inner_right_px=336 inner_bottom_px=508 inner_visible_left_px=23 inner_visible_top_px=318 inner_visible_right_px=336 inner_visible_bottom_px=508 track_left_px=335 track_top_px=318 track_right_px=336 track_bottom_px=508 track_visible_left_px=335 track_visible_top_px=318 track_visible_right_px=336 track_visible_bottom_px=508 thumb_left_px=335 thumb_top_px=318 thumb_right_px=336 thumb_bottom_px=385 thumb_visible_left_px=335 thumb_visible_top_px=318 thumb_visible_right_px=336 thumb_visible_bottom_px=385 painted_thumb_left_px=335 painted_thumb_top_px=318 painted_thumb_right_px=336 painted_thumb_bottom_px=385 painted_thumb_visible_left_px=335 painted_thumb_visible_top_px=318 painted_thumb_visible_right_px=336 painted_thumb_visible_bottom_px=385 paint_clip_left_px=20 paint_clip_top_px=52 paint_clip_right_px=339 paint_clip_bottom_px=630 client_width_px=900 client_height_px=650";
+    assert!(parse_action_editor_scroll(candidate28_d04_scroll).is_none());
+    let candidate28_with_sequence = format!("{candidate28_d04_scroll} trace_sequence=73");
+    let captured = parse_action_editor_scroll(&candidate28_with_sequence)
+        .expect("candidate28 D04 scroll record parses when publication sequence is present");
+    assert_eq!(captured.identity.surface, ActionEditorSurface::Properties);
+    assert_eq!(captured.identity.session_id, 6);
+    assert_eq!(captured.trace_sequence, 73);
+    assert!(
+        parse_action_editor_scroll(&format!("{candidate28_d04_scroll} trace_sequence=0")).is_none()
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn scrollbar_hover_revalidation_rejects_stale_owner_or_moving_geometry() {
+    let line = "WARN target trace_event=\"designer_action_editor_scroll\" editor_surface=\"inspector\" editor_session_id=7 draft_generation=3 stable_target_digest=11 editor_epoch=5 edit_generation=9 query_generation=4 query_request_generation=6 search_request_generation=8 test_request_generation=2 query_digest=13 editor_assigned_binding_digest=17 scroll_id=19 frame_nr=23 trace_sequence=29 offset_y_milli=210000 velocity_y_milli=0 content_height_milli=1000000 inner_height_milli=190000 pixels_per_point_milli=1000 handle_min_length_milli=12000 inner_left_px=20 inner_top_px=40 inner_right_px=300 inner_bottom_px=230 inner_visible_left_px=20 inner_visible_top_px=40 inner_visible_right_px=300 inner_visible_bottom_px=230 track_left_px=285 track_top_px=40 track_right_px=300 track_bottom_px=230 track_visible_left_px=285 track_visible_top_px=40 track_visible_right_px=300 track_visible_bottom_px=230 thumb_left_px=285 thumb_top_px=80 thumb_right_px=300 thumb_bottom_px=116 thumb_visible_left_px=285 thumb_visible_top_px=80 thumb_visible_right_px=300 thumb_visible_bottom_px=116 painted_thumb_left_px=285 painted_thumb_top_px=80 painted_thumb_right_px=300 painted_thumb_bottom_px=116 painted_thumb_visible_left_px=285 painted_thumb_visible_top_px=80 painted_thumb_visible_right_px=300 painted_thumb_visible_bottom_px=116 paint_clip_left_px=0 paint_clip_top_px=0 paint_clip_right_px=640 paint_clip_bottom_px=480 client_width_px=640 client_height_px=480";
+    let expected = parse_action_editor_scroll(line).unwrap();
+    let hovered = ActionEditorScrollSnapshot {
+        frame_nr: 24,
+        trace_sequence: 30,
+        ..expected.clone()
+    };
+    assert!(action_editor_scrollbar_hover_matches(
+        &expected,
+        &hovered,
+        [292, 90],
+        [292, 120]
+    ));
+    let wrong_owner = ActionEditorScrollSnapshot {
+        identity: ActionEditorTraceIdentity {
+            session_id: 8,
+            ..expected.identity
+        },
+        frame_nr: 24,
+        trace_sequence: 30,
+        ..expected.clone()
+    };
+    assert!(!action_editor_scrollbar_hover_matches(
+        &expected,
+        &wrong_owner,
+        [292, 90],
+        [292, 120]
+    ));
+    let moved_offset = ActionEditorScrollSnapshot {
+        offset_y_milli: 211_000,
+        frame_nr: 24,
+        trace_sequence: 30,
+        ..expected.clone()
+    };
+    assert!(!action_editor_scrollbar_hover_matches(
+        &expected,
+        &moved_offset,
+        [292, 90],
+        [292, 120]
+    ));
+    assert!(!async_button_is_released(i16::MIN));
+    assert!(async_button_is_released(0));
+}
+
+pub(super) fn parse_action_editor_provider_event(
+    line: &str,
+) -> Option<ActionEditorProviderTraceSnapshot> {
+    if !line.contains("trace_event=\"authoring_provider_search\"") {
+        return None;
+    }
+    let edge = match trace_static_enum_field(line, "authoring_request_edge")? {
+        "queued" => ActionEditorProviderEdge::Queued,
+        "worker_started" => ActionEditorProviderEdge::WorkerStarted,
+        "worker_completed" => ActionEditorProviderEdge::WorkerCompleted,
+        "worker_failed" => ActionEditorProviderEdge::WorkerFailed,
+        "applied" => ActionEditorProviderEdge::Applied,
+        "rejected" => ActionEditorProviderEdge::Rejected,
+        "retired" => ActionEditorProviderEdge::Retired,
+        "cancelled" => ActionEditorProviderEdge::Cancelled,
+        "retry_queued" => ActionEditorProviderEdge::RetryQueued,
+        _ => return None,
+    };
+    let kind = match trace_static_enum_field(line, "authoring_search_kind")? {
+        "search" => ActionEditorProviderKind::Search,
+        "test" => ActionEditorProviderKind::Test,
+        _ => return None,
+    };
+    let provider_revision = trace_field(line, "provider_revision")?
+        .parse::<i64>()
+        .ok()
+        .and_then(|revision| u64::try_from(revision).ok());
+    Some(ActionEditorProviderTraceSnapshot {
+        identity: parse_action_editor_identity(line)?,
+        edge,
+        kind,
+        query_digest: trace_field(line, "query_digest")?.parse().ok()?,
+        binding_digest: trace_field(line, "binding_digest")?.parse().ok()?,
+        provider_revision,
+        trace_sequence: trace_field(line, "trace_sequence")?.parse().ok()?,
+    })
+}
+
+pub(super) fn action_editor_controls_after(
+    trace_path: &Path,
+    first_line: usize,
+) -> Result<Vec<ActionEditorControlSnapshot>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read action-editor control trace: {error}"))?;
+    Ok(trace
+        .lines()
+        .filter(|line| line.contains("trace_event=\""))
+        .skip(first_line)
+        .filter_map(parse_action_editor_control)
+        .collect())
+}
+
+fn latest_action_editor_scroll_after(
+    trace_path: &Path,
+    first_event: usize,
+    surface: ActionEditorSurface,
+) -> Result<Option<ActionEditorScrollSnapshot>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read action-editor scrollbar trace: {error}"))?;
+    let mut latest = None;
+    for line in trace_event_lines(&trace).iter().skip(first_event) {
+        if !line.contains("trace_event=\"designer_action_editor_scroll\"") {
+            continue;
+        }
+        let snapshot = parse_action_editor_scroll(line).ok_or_else(|| {
+            "latest action-editor scrollbar receipt is malformed or outside its finite schema"
+                .to_string()
+        })?;
+        if snapshot.identity.surface == surface {
+            latest = Some(snapshot);
+        }
+    }
+    Ok(latest)
+}
+
+pub(super) fn action_editor_provider_events_after(
+    trace_path: &Path,
+    first_line: usize,
+) -> Result<Vec<ActionEditorProviderTraceSnapshot>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read action-editor provider trace: {error}"))?;
+    Ok(trace
+        .lines()
+        .filter(|line| line.contains("trace_event=\""))
+        .skip(first_line)
+        .filter_map(parse_action_editor_provider_event)
+        .collect())
 }
 
 fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
@@ -5097,7 +7148,7 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
         "KeepEditing" => AuthoringControlTarget::KeepEditing,
         _ => return None,
     };
-    let role = match trace_field(line, "role")?.trim_matches('"') {
+    let role = match trace_static_enum_field(line, "role")? {
         "Button" => AuthoringControlRole::Button,
         "Selectable" => AuthoringControlRole::Selectable,
         "ComboBox" => AuthoringControlRole::ComboBox,
@@ -5112,6 +7163,7 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
         target,
         role,
         index: usize::try_from(control_index).ok(),
+        trace_sequence: trace_field(line, "trace_sequence")?.parse().ok()?,
         bounds: [
             trace_i32_field(line, "left_px=")?,
             trace_i32_field(line, "top_px=")?,
@@ -5321,6 +7373,89 @@ fn trace_event_lines(trace: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AuthoringObservationBoundarySnapshot {
+    pub phase: &'static str,
+    pub request_id: u64,
+    pub baseline_request_id: Option<u64>,
+    pub captured_trace_sequence: u64,
+    pub trace_sequence: u64,
+}
+
+fn parse_authoring_observation_boundary(
+    line: &str,
+) -> Option<AuthoringObservationBoundarySnapshot> {
+    if !line.contains("trace_event=\"authoring_observation_boundary\"") {
+        return None;
+    }
+    let phase = match trace_static_enum_field(line, "phase")? {
+        "baseline" => "baseline",
+        "snapshot" => "snapshot",
+        "terminal" => "terminal",
+        _ => return None,
+    };
+    let request_id = trace_field(line, "request_id")?.parse().ok()?;
+    let baseline = trace_field(line, "baseline_request_id")?
+        .parse::<u64>()
+        .ok()?;
+    let captured_trace_sequence = trace_field(line, "captured_trace_sequence")?.parse().ok()?;
+    let trace_sequence = trace_field(line, "trace_sequence")?.parse().ok()?;
+    (request_id > 0 && captured_trace_sequence > 0 && trace_sequence > captured_trace_sequence)
+        .then_some(AuthoringObservationBoundarySnapshot {
+            phase,
+            request_id,
+            baseline_request_id: (baseline > 0).then_some(baseline),
+            captured_trace_sequence,
+            trace_sequence,
+        })
+}
+
+/// Wait until the candidate's buffered tracing sink has published the exact
+/// GUI-owner receipt referenced by the mailbox ACK. A receipt with the same
+/// request ID but a different phase, baseline, or cursor is a protocol error,
+/// not a stale record to skip.
+pub(super) fn wait_for_authoring_observation_boundary(
+    trace_path: &Path,
+    expected: AuthoringObservationBoundarySnapshot,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let trace = std::fs::read_to_string(trace_path)
+            .map_err(|error| format!("read authoring observation trace boundary: {error}"))?;
+        let mut matched = None;
+        for line in trace.lines() {
+            if !line.contains("trace_event=\"authoring_observation_boundary\"") {
+                continue;
+            }
+            let parsed = parse_authoring_observation_boundary(line).ok_or_else(|| {
+                "authoring observation trace contains a malformed boundary receipt".to_string()
+            })?;
+            if parsed.request_id != expected.request_id {
+                continue;
+            }
+            if parsed != expected {
+                return Err(
+                    "authoring observation boundary identity or cursor is stale or swapped".into(),
+                );
+            }
+            if matched.replace(parsed).is_some() {
+                return Err("authoring observation boundary receipt is duplicated".into());
+            }
+        }
+        if matched.is_some() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(
+                "timed out waiting for the mailbox-correlated authoring trace boundary".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10).min(deadline.saturating_duration_since(now)));
+    }
+}
+
 fn unique_authoring_control(
     controls: &[AuthoringControlSnapshot],
     target: AuthoringControlTarget,
@@ -5364,6 +7499,21 @@ pub(super) fn list_authoring_controls(
     ))
 }
 
+pub(super) fn authoring_control_events_after(
+    trace_path: &Path,
+    first_line: usize,
+    session_id: u64,
+) -> Result<Vec<AuthoringControlSnapshot>, String> {
+    let trace = std::fs::read_to_string(trace_path)
+        .map_err(|error| format!("read Designer control event trace: {error}"))?;
+    Ok(trace_event_lines(&trace)
+        .into_iter()
+        .skip(first_line)
+        .filter_map(|line| parse_authoring_control(&line))
+        .filter(|control| control.session_id == session_id)
+        .collect())
+}
+
 pub(super) fn fresh_canvas_cell_for_generation(
     controls: &[AuthoringControlSnapshot],
     session_id: u64,
@@ -5398,13 +7548,29 @@ pub(super) fn find_authoring_control_after(
     index: Option<usize>,
     role: AuthoringControlRole,
 ) -> Result<Option<AuthoringControlSnapshot>, String> {
+    authoring_control_after_snapshot(trace_path, first_line, session_id, target, index, role)
+        .map(|(_, control)| control)
+}
+
+pub(super) fn authoring_control_after_snapshot(
+    trace_path: &Path,
+    first_line: usize,
+    session_id: u64,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+) -> Result<(usize, Option<AuthoringControlSnapshot>), String> {
     let trace = std::fs::read_to_string(trace_path)
         .map_err(|error| format!("read Designer control trace: {error}"))?;
     // Suite cursors count trace records, not every logger line in the app log. Filter
     // first so the same cursor always denotes the same render epoch in both modules.
-    let controls =
-        latest_authoring_controls_after(&trace_event_lines(&trace), first_line, session_id);
-    unique_authoring_control(&controls, target, index, role)
+    let trace_records = trace_event_lines(&trace);
+    let next_cursor = trace_records.len();
+    let controls = latest_authoring_controls_after(&trace_records, first_line, session_id);
+    Ok((
+        next_cursor,
+        unique_authoring_control(&controls, target, index, role)?,
+    ))
 }
 
 pub(super) fn authoring_control_click_finished(
@@ -5592,6 +7758,16 @@ pub(super) fn send_alt_f4(child: &NativeChild, target: &WindowSnapshot) -> Resul
 }
 
 fn mouse_input(down: bool) -> INPUT {
+    mouse_button_input(PointerButton::Left, down)
+}
+
+fn mouse_button_input(button: PointerButton, down: bool) -> INPUT {
+    let dw_flags = match (button, down) {
+        (PointerButton::Left, true) => MOUSEEVENTF_LEFTDOWN,
+        (PointerButton::Left, false) => MOUSEEVENTF_LEFTUP,
+        (PointerButton::Right, true) => MOUSEEVENTF_RIGHTDOWN,
+        (PointerButton::Right, false) => MOUSEEVENTF_RIGHTUP,
+    };
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -5599,11 +7775,7 @@ fn mouse_input(down: bool) -> INPUT {
                 dx: 0,
                 dy: 0,
                 mouseData: 0,
-                dwFlags: if down {
-                    MOUSEEVENTF_LEFTDOWN
-                } else {
-                    MOUSEEVENTF_LEFTUP
-                },
+                dwFlags: dw_flags,
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -5659,14 +7831,16 @@ fn relative_mouse_move_input(dx: i32, dy: i32) -> INPUT {
 struct MouseButtonGuard {
     target_hwnd: HWND,
     target_process_id: u32,
+    button: PointerButton,
     armed: bool,
 }
 
 impl MouseButtonGuard {
-    fn new(target_hwnd: HWND, target_process_id: u32) -> Self {
+    fn new(target_hwnd: HWND, target_process_id: u32, button: PointerButton) -> Self {
         Self {
             target_hwnd,
             target_process_id,
+            button,
             armed: false,
         }
     }
@@ -5678,7 +7852,7 @@ impl MouseButtonGuard {
         if focus_is_validated(self.target_hwnd, self.target_process_id).is_err() {
             focus_owned_window(self.target_hwnd, self.target_process_id)?;
         }
-        let up = [mouse_input(false)];
+        let up = [mouse_button_input(self.button, false)];
         let evidence = send_validated_input(
             self.target_hwnd,
             self.target_process_id,
@@ -5698,6 +7872,645 @@ impl Drop for MouseButtonGuard {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DesignerScrollbarDragEvidence {
+    pub scroll_id: u64,
+    pub source_sequence: u64,
+    pub hover_sequence: u64,
+    pub hover_frame: u64,
+    pub start_client: [i32; 2],
+    pub end_client: [i32; 2],
+    pub down_inserted: usize,
+    pub movement_inserted: usize,
+    pub up_inserted: usize,
+    pub release_fallback_used: bool,
+    pub async_state_after_release: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VerifiedMouseRelease {
+    inserted: usize,
+    fallback_used: bool,
+    async_state_after: u16,
+}
+
+fn scrollbar_drag_activation_excursion(
+    scroll: &ActionEditorScrollSnapshot,
+    start_client: [i32; 2],
+    end_client: [i32; 2],
+) -> Option<[i32; 2]> {
+    const EXCURSION_POINTS_MILLI: i128 = 8_000;
+    const DRAG_THRESHOLD_POINTS_MILLI: i128 = 6_000;
+    const POINTS_MILLI_SCALE: i128 = 1_000_000;
+
+    if !scroll.is_well_formed()
+        || start_client[0] != end_client[0]
+        || start_client[1] == end_client[1]
+        || !point_in_rect(start_client, scroll.track_visible_bounds)
+        || !point_in_rect(end_client, scroll.track_visible_bounds)
+    {
+        return None;
+    }
+    let pixels_per_point_milli = i128::from(scroll.pixels_per_point_milli);
+    let required_pixels = EXCURSION_POINTS_MILLI
+        .saturating_mul(pixels_per_point_milli)
+        .saturating_add(POINTS_MILLI_SCALE - 1)
+        .checked_div(POINTS_MILLI_SCALE)?;
+    let required_pixels = i32::try_from(required_pixels).ok()?;
+    let preferred_direction = (end_client[1] - start_client[1]).signum();
+    let safe_client = [0, 0, scroll.client_size[0], scroll.client_size[1]];
+    for direction in [preferred_direction, -preferred_direction] {
+        let excursion = [
+            end_client[0],
+            end_client[1].saturating_add(direction.saturating_mul(required_pixels)),
+        ];
+        let movement_milli =
+            i128::from(excursion[1].abs_diff(start_client[1])) * POINTS_MILLI_SCALE;
+        if point_in_rect(excursion, scroll.track_visible_bounds)
+            && point_in_rect(excursion, safe_client)
+            && movement_milli > DRAG_THRESHOLD_POINTS_MILLI * pixels_per_point_milli
+        {
+            return Some(excursion);
+        }
+    }
+    None
+}
+
+fn finish_scrollbar_drag_with_verified_release<T>(
+    action: impl FnOnce() -> Result<T, String>,
+    before_release: impl FnOnce() -> Result<usize, String>,
+    release: impl FnOnce() -> Result<VerifiedMouseRelease, String>,
+) -> Result<(T, usize, VerifiedMouseRelease), String> {
+    let action_result = action();
+    let cursor_result = before_release();
+    let release_result = release();
+    match (action_result, cursor_result, release_result) {
+        (Ok(action), Ok(cursor), Ok(release)) => Ok((action, cursor, release)),
+        (action, cursor, Ok(release)) => {
+            let errors = [action.err(), cursor.err()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            Err(format!(
+                "{}; scrollbar left-up verified (fallback={}, async=0x{:04x})",
+                errors.join("; "),
+                release.fallback_used,
+                release.async_state_after
+            ))
+        }
+        (action, cursor, Err(release_error)) => {
+            let errors = [action.err(), cursor.err()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            if errors.is_empty() {
+                Err(release_error)
+            } else {
+                Err(format!(
+                    "{}; scrollbar cleanup failed: {release_error}",
+                    errors.join("; ")
+                ))
+            }
+        }
+    }
+}
+
+fn point_in_rect(point: [i32; 2], rect: [i32; 4]) -> bool {
+    point[0] >= rect[0] && point[1] >= rect[1] && point[0] < rect[2] && point[1] < rect[3]
+}
+
+fn action_editor_scrollbar_hover_matches(
+    expected: &ActionEditorScrollSnapshot,
+    latest: &ActionEditorScrollSnapshot,
+    start_client: [i32; 2],
+    end_client: [i32; 2],
+) -> bool {
+    latest.is_well_formed()
+        && latest.identity == expected.identity
+        && latest.scroll_id == expected.scroll_id
+        && latest.trace_sequence > expected.trace_sequence
+        && latest.frame_nr > expected.frame_nr
+        && latest.client_size == expected.client_size
+        && latest.same_scroll_owner(expected)
+        && latest.offset_y_milli == expected.offset_y_milli
+        && latest.velocity_y_milli.unsigned_abs() <= 5_000
+        && latest.thumb_bounds == latest.thumb_visible_bounds
+        && latest.track_bounds == latest.track_visible_bounds
+        && point_in_rect(start_client, latest.thumb_visible_bounds)
+        && point_in_rect(end_client, latest.track_visible_bounds)
+}
+
+fn async_button_is_released(async_state: i16) -> bool {
+    async_state >= 0
+}
+
+fn release_mouse_button_verified(
+    guard: &mut MouseButtonGuard,
+) -> Result<VerifiedMouseRelease, String> {
+    let mut normal_release_inserted = 0usize;
+    let mut normal_release_error = None;
+    match guard.release() {
+        Ok(evidence) => normal_release_inserted = evidence.inserted,
+        Err(error) => normal_release_error = Some(error),
+    }
+    // `release` records a successful SendInput edge, not yet a physical-up
+    // observation. Keep Drop armed until GetAsyncKeyState verifies the release.
+    guard.armed = true;
+
+    let mut state = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+    let mut fallback_used = false;
+    let mut fallback_inserted = 0usize;
+    if state < 0 {
+        fallback_used = true;
+        match send_input_checked(
+            &[mouse_button_input(PointerButton::Left, false)],
+            "best-effort scrollbar left-button cleanup",
+        ) {
+            Ok(inserted) => fallback_inserted = inserted,
+            Err(error) => {
+                normal_release_error.get_or_insert_with(|| {
+                    format!("best-effort left-button cleanup failed: {error}")
+                });
+            }
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    loop {
+        state = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) };
+        if async_button_is_released(state) {
+            // The explicit async-state observation disarms Drop's retry only
+            // after the system confirms that the physical button is up.
+            guard.armed = false;
+            return Ok(VerifiedMouseRelease {
+                inserted: normal_release_inserted.saturating_add(fallback_inserted),
+                fallback_used,
+                async_state_after: state as u16,
+            });
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep(WINDOW_POLL.min(deadline.saturating_duration_since(now)));
+    }
+    Err(format!(
+        "scrollbar drag left-button release could not be verified (normal_release={normal_release_error:?}, fallback_used={fallback_used}, fallback_inserted={fallback_inserted}, async_state=0x{:04x}); guarded Drop will retry",
+        state as u16
+    ))
+}
+
+fn designer_client_point_to_screen(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    point: [i32; 2],
+) -> Result<POINT, String> {
+    child.validate_window(target.hwnd)?;
+    let bounds = child.client_screen_bounds(target)?;
+    let client = child.client_bounds(target)?;
+    if !point_in_rect(point, [client[0], client[1], client[2], client[3]]) {
+        return Err("scrollbar pointer point is outside the live Designer client".into());
+    }
+    Ok(POINT {
+        x: bounds[0].saturating_add(point[0]),
+        y: bounds[1].saturating_add(point[1]),
+    })
+}
+
+fn send_designer_pointer_move(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    trace_path: &Path,
+    point: [i32; 2],
+    operation: &str,
+) -> Result<(usize, POINT), String> {
+    child.validate_window(target.hwnd)?;
+    if target.role != WindowRole::Designer || target.process_id != child.process_id() {
+        return Err("scrollbar pointer move is outside the candidate-owned Designer".into());
+    }
+    if unsafe { GetForegroundWindow() } != target.hwnd {
+        return Err("Designer lost foreground ownership before scrollbar pointer movement".into());
+    }
+    focus_is_validated(target.hwnd, child.process_id())?;
+    let screen = designer_client_point_to_screen(child, target, point)?;
+    validate_pointer_coverage(target.hwnd, child.process_id(), screen, operation)?;
+    let trace_cursor = trace_line_count(trace_path)?;
+    unsafe { SetCursorPos(screen.x, screen.y) }
+        .map_err(|error| format!("position pointer over measured scrollbar thumb: {error}"))?;
+    let movement = [mouse_move_input(screen)?];
+    let inserted =
+        send_validated_input(target.hwnd, child.process_id(), &movement, operation)?.inserted;
+    let acknowledgement = PointerMoveAcknowledgement {
+        trace_path,
+        kind: PointerTraceKind::DesignerClient,
+        nudge_screen_point: screen,
+        nudge_trace_point: (point[0], point[1]),
+        target_trace_point: (point[0], point[1]),
+    };
+    wait_for_pointer_move_ack(
+        child,
+        target,
+        operation,
+        &acknowledgement,
+        trace_cursor,
+        (point[0], point[1]),
+        screen,
+        Duration::from_secs(2),
+    )?;
+    Ok((inserted, screen))
+}
+
+fn designer_pointer_up_matches_owner(line: &str, session_id: u64, hwnd: u64) -> bool {
+    line.contains("trace_event=\"designer_pointer\"")
+        && trace_bool_field(line, "pointer_up") == Some(true)
+        && trace_field(line, "session_id").and_then(|value| value.parse::<u64>().ok())
+            == Some(session_id)
+        && trace_field(line, "window_under_cursor_hwnd").and_then(|value| value.parse::<u64>().ok())
+            == Some(hwnd)
+}
+
+fn scrollbar_pointer_button_ack_order_after(
+    trace: &str,
+    cursor: usize,
+    screen_point: (i32, i32),
+    owned_hwnd: u64,
+    expected_session_id: u64,
+    expected_draft_generation: u64,
+) -> Result<PointerButtonAckOrder, String> {
+    let mut down = None;
+    let mut up_before_down = false;
+    for (index, line) in trace.lines().enumerate().skip(cursor) {
+        if down.is_none() {
+            if pointer_button_ack_matches(
+                line,
+                PointerTraceKind::DesignerClient,
+                screen_point,
+                true,
+            ) {
+                let hwnd = trace_field(line, "window_under_cursor_hwnd")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| {
+                        "fresh Designer scrollbar down acknowledgement has no owned HWND".to_owned()
+                    })?;
+                if hwnd != owned_hwnd {
+                    return Err(format!(
+                        "fresh Designer scrollbar down acknowledgement belonged to HWND={hwnd}, expected owned HWND={owned_hwnd}"
+                    ));
+                }
+                let session_id = trace_field(line, "session_id")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| {
+                        "fresh Designer scrollbar down acknowledgement has no owned session"
+                            .to_owned()
+                    })?;
+                let draft_generation = trace_field(line, "generation")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .ok_or_else(|| {
+                        "fresh Designer scrollbar down acknowledgement has no draft generation"
+                            .to_owned()
+                    })?;
+                if session_id != expected_session_id
+                    || draft_generation != expected_draft_generation
+                {
+                    return Err(format!(
+                        "fresh Designer scrollbar down acknowledgement belonged to session={session_id} generation={draft_generation}, expected session={expected_session_id} generation={expected_draft_generation}"
+                    ));
+                }
+                down = Some((index, session_id, hwnd));
+                if designer_pointer_up_matches_owner(line, session_id, hwnd) {
+                    return Ok(PointerButtonAckOrder::UpAfterDown);
+                }
+            } else if pointer_button_ack_matches(
+                line,
+                PointerTraceKind::DesignerClient,
+                screen_point,
+                false,
+            ) {
+                up_before_down = true;
+            }
+            continue;
+        }
+
+        let Some((_, session_id, hwnd)) = down else {
+            continue;
+        };
+        if designer_pointer_up_matches_owner(line, session_id, hwnd) {
+            return Ok(PointerButtonAckOrder::UpAfterDown);
+        }
+    }
+
+    Ok(match (down, up_before_down) {
+        (Some(_), true) => PointerButtonAckOrder::UpBeforeDown,
+        (Some(_), false) => PointerButtonAckOrder::Down,
+        (None, true) => PointerButtonAckOrder::UpBeforeDown,
+        (None, false) => PointerButtonAckOrder::Pending,
+    })
+}
+
+fn ensure_scrollbar_button_still_down_with(
+    trace: &str,
+    cursor: usize,
+    screen_point: (i32, i32),
+    owned_hwnd: u64,
+    expected_session_id: u64,
+    expected_draft_generation: u64,
+    async_state: i16,
+) -> Result<(), String> {
+    match scrollbar_pointer_button_ack_order_after(
+        trace,
+        cursor,
+        screen_point,
+        owned_hwnd,
+        expected_session_id,
+        expected_draft_generation,
+    )? {
+        PointerButtonAckOrder::Down => {}
+        PointerButtonAckOrder::Pending => {
+            return Err("fresh production scrollbar down acknowledgement disappeared".into());
+        }
+        PointerButtonAckOrder::UpBeforeDown => {
+            return Err("production scrollbar up preceded its down acknowledgement".into());
+        }
+        PointerButtonAckOrder::UpAfterDown => {
+            return Err(
+                "production scrollbar button was externally released during the drag".into(),
+            );
+        }
+    }
+    if async_state >= 0 {
+        return Err(format!(
+            "physical scrollbar left-button was released during the drag (async=0x{:04x})",
+            async_state as u16
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_scrollbar_button_still_down(
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
+    cursor: usize,
+    screen_point: (i32, i32),
+    owned_hwnd: u64,
+    expected: &ActionEditorScrollSnapshot,
+) -> Result<(), String> {
+    let trace = std::fs::read_to_string(acknowledgement.trace_path)
+        .map_err(|error| format!("read production pointer-button trace: {error}"))?;
+    ensure_scrollbar_button_still_down_with(
+        &trace,
+        cursor,
+        screen_point,
+        owned_hwnd,
+        expected.identity.session_id,
+        expected.identity.draft_generation,
+        unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) },
+    )
+}
+
+fn send_held_scrollbar_drag_move(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
+    down_cursor: usize,
+    down_screen_point: (i32, i32),
+    owned_hwnd: u64,
+    expected: &ActionEditorScrollSnapshot,
+    trace_path: &Path,
+    point: [i32; 2],
+    operation: &str,
+) -> Result<(usize, POINT), String> {
+    child.validate_window(target.hwnd)?;
+    if unsafe { GetForegroundWindow() } != target.hwnd {
+        return Err("Designer lost foreground ownership during scrollbar thumb drag".into());
+    }
+    ensure_scrollbar_button_still_down(
+        acknowledgement,
+        down_cursor,
+        down_screen_point,
+        owned_hwnd,
+        expected,
+    )?;
+    let (inserted, screen) =
+        send_designer_pointer_move(child, target, trace_path, point, operation)?;
+    ensure_scrollbar_button_still_down(
+        acknowledgement,
+        down_cursor,
+        down_screen_point,
+        owned_hwnd,
+        expected,
+    )?;
+    Ok((inserted, screen))
+}
+
+pub(super) fn drag_designer_scrollbar_thumb(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    expected: &ActionEditorScrollSnapshot,
+    start_client: [i32; 2],
+    end_client: [i32; 2],
+    trace_path: &Path,
+    timeout: Duration,
+) -> Result<Option<DesignerScrollbarDragEvidence>, String> {
+    if !expected.is_well_formed()
+        || target.role != WindowRole::Designer
+        || target.process_id != child.process_id()
+        || !target.visible
+        || target.minimized
+        || expected.identity.surface != ActionEditorSurface::Inspector
+        || expected.thumb_bounds != expected.thumb_visible_bounds
+        || expected.track_bounds != expected.track_visible_bounds
+        || !point_in_rect(start_client, expected.thumb_visible_bounds)
+        || !point_in_rect(end_client, expected.track_visible_bounds)
+        || start_client == end_client
+    {
+        return Err("refused scrollbar drag without a complete owned thumb/track receipt".into());
+    }
+    child.validate_window(target.hwnd)?;
+    if child.designer().is_none_or(|live| live.hwnd != target.hwnd) {
+        return Err("the scrollbar owner is no longer the live child Designer window".into());
+    }
+    let initial_bounds = child.client_bounds(target)?;
+    let live_size = [
+        initial_bounds[2] - initial_bounds[0],
+        initial_bounds[3] - initial_bounds[1],
+    ];
+    if live_size != expected.client_size {
+        return Err("scrollbar receipt client size differs from the live Designer client".into());
+    }
+    if unsafe { GetForegroundWindow() } != target.hwnd {
+        return Err("Designer lost foreground ownership before scrollbar drag".into());
+    }
+    focus_is_validated(target.hwnd, child.process_id())?;
+    if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0 {
+        return Err("refused scrollbar drag while the left mouse button was already down".into());
+    }
+
+    let hover_event_cursor = trace_event_lines(
+        &std::fs::read_to_string(trace_path)
+            .map_err(|error| format!("read trace before scrollbar hover: {error}"))?,
+    )
+    .len();
+    let _ = send_designer_pointer_move(
+        child,
+        target,
+        trace_path,
+        start_client,
+        "hover measured scrollbar thumb",
+    )?;
+    let requested_size = child.request_designer_repaint(target)?;
+    if requested_size != expected.client_size {
+        return Err("Designer client changed during scrollbar hover refresh".into());
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut last_refresh = Instant::now();
+    let hovered = loop {
+        if let Some(latest) = latest_action_editor_scroll_after(
+            trace_path,
+            hover_event_cursor,
+            expected.identity.surface,
+        )? {
+            if !action_editor_scrollbar_hover_matches(expected, &latest, start_client, end_client) {
+                return Ok(None);
+            }
+            break latest;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        if last_refresh.elapsed() >= ACTION_EDITOR_SCROLL_REFRESH_INTERVAL {
+            child.validate_window(target.hwnd)?;
+            if !child.foreground_is_child() {
+                return Err(
+                    "Designer lost process foreground during scrollbar hover refresh".into(),
+                );
+            }
+            if child.request_designer_repaint(target)? != expected.client_size {
+                return Err("Designer client changed during scrollbar hover refresh".into());
+            }
+            last_refresh = Instant::now();
+        }
+        std::thread::sleep(WINDOW_POLL.min(deadline.saturating_duration_since(Instant::now())));
+    };
+
+    // Re-read the latest same-surface event immediately before button down so
+    // a newer frame that moved the floating bar cannot be hidden by the
+    // earlier hover receipt.
+    let latest_now = latest_action_editor_scroll_after(
+        trace_path,
+        hover_event_cursor,
+        expected.identity.surface,
+    )?
+    .ok_or_else(|| "fresh scrollbar hover receipt disappeared before button down".to_string())?;
+    if latest_now != hovered
+        || !action_editor_scrollbar_hover_matches(expected, &latest_now, start_client, end_client)
+    {
+        return Ok(None);
+    }
+    child.validate_window(target.hwnd)?;
+    if unsafe { GetForegroundWindow() } != target.hwnd {
+        return Err("Designer lost foreground ownership immediately before scrollbar down".into());
+    }
+    let start_screen = designer_client_point_to_screen(child, target, start_client)?;
+    let owned_pointer_hwnd = validate_pointer_coverage(
+        target.hwnd,
+        child.process_id(),
+        start_screen,
+        "scrollbar thumb down",
+    )?;
+    let button_ack = PointerMoveAcknowledgement {
+        trace_path,
+        kind: PointerTraceKind::DesignerClient,
+        nudge_screen_point: start_screen,
+        nudge_trace_point: (start_client[0], start_client[1]),
+        target_trace_point: (end_client[0], end_client[1]),
+    };
+    let down_cursor = trace_line_count(trace_path)?;
+    let mut guard = MouseButtonGuard::new(target.hwnd, child.process_id(), PointerButton::Left);
+    let down = send_validated_input(
+        target.hwnd,
+        child.process_id(),
+        &[mouse_button_input(PointerButton::Left, true)],
+        "measured scrollbar thumb down",
+    )?;
+    guard.armed = down.inserted > 0;
+    if down.inserted != 1 {
+        return Err(format!(
+            "scrollbar thumb down inserted {} events instead of one",
+            down.inserted
+        ));
+    }
+    let ((movement_inserted, end_screen), up_cursor, release) =
+        finish_scrollbar_drag_with_verified_release(
+            || {
+                wait_for_pointer_button_down_ready(
+                    &button_ack,
+                    down_cursor,
+                    (start_screen.x, start_screen.y),
+                    VK_LBUTTON.0 as i32,
+                    Duration::from_secs(2),
+                )?;
+                let excursion =
+                    scrollbar_drag_activation_excursion(expected, start_client, end_client)
+                        .ok_or_else(|| {
+                            "no safe scrollbar activation excursion exceeds the egui drag threshold"
+                                .to_owned()
+                        })?;
+                let (excursion_inserted, _) = send_held_scrollbar_drag_move(
+                    child,
+                    target,
+                    &button_ack,
+                    down_cursor,
+                    (start_screen.x, start_screen.y),
+                    hwnd_id(owned_pointer_hwnd),
+                    expected,
+                    trace_path,
+                    excursion,
+                    "decisive measured scrollbar drag excursion",
+                )?;
+                let (end_inserted, end_screen) = send_held_scrollbar_drag_move(
+                    child,
+                    target,
+                    &button_ack,
+                    down_cursor,
+                    (start_screen.x, start_screen.y),
+                    hwnd_id(owned_pointer_hwnd),
+                    expected,
+                    trace_path,
+                    end_client,
+                    "measured scrollbar drag endpoint",
+                )?;
+                Ok((excursion_inserted.saturating_add(end_inserted), end_screen))
+            },
+            || trace_line_count(trace_path),
+            || release_mouse_button_verified(&mut guard),
+        )?;
+    // The button-up trace must correspond to the final physical cursor point.
+    wait_for_pointer_button_ack(
+        &button_ack,
+        up_cursor,
+        (end_screen.x, end_screen.y),
+        false,
+        Duration::from_secs(2),
+    )?;
+    if release.async_state_after & 0x8000 != 0 {
+        return Err("left-button release returned with the async state still down".into());
+    }
+    Ok(Some(DesignerScrollbarDragEvidence {
+        scroll_id: expected.scroll_id,
+        source_sequence: expected.trace_sequence,
+        hover_sequence: hovered.trace_sequence,
+        hover_frame: hovered.frame_nr,
+        start_client,
+        end_client,
+        down_inserted: down.inserted,
+        movement_inserted,
+        up_inserted: release.inserted,
+        release_fallback_used: release.fallback_used,
+        async_state_after_release: release.async_state_after,
+    }))
+}
+
 fn bounded_label(text: &str) -> &str {
     const LIMIT: usize = 80;
     if text.len() <= LIMIT {
@@ -5713,26 +8526,616 @@ fn bounded_label(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACCEPTANCE_RUNNER_INPUT_COOKIE, ActionCatalogRankSnapshot, AuthoringControlRole,
-        AuthoringControlSnapshot, AuthoringControlTarget, FocusAnchorCommand,
-        FocusAnchorCommandKind, GetCurrentThreadId, INPUT_MOUSE, KEYEVENTF_KEYUP,
-        KEYEVENTF_UNICODE, LPARAM, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
-        MOUSEEVENTF_MOVE_NOCOALESCE, OwnedKeyboardKey, POINT, PointerReleaseWaitError,
-        PostThreadMessageW, RUNNER_HOOK_EVENTS, RadialPointerReleaseAck, RunnerChordEdge,
-        RunnerChordKeyObservation, RunnerChordObservation, RunnerHookEdge, RunnerHookObserver,
-        SS_NOTIFY, VK_END, VK_LMENU, VK_LSHIFT, VK_LWIN, WPARAM, adjacent_pointer_point,
-        authoring_control_click_finished, cursor_points_match, cursor_restore_input_target,
-        focus_anchor_candidate_positions, focus_anchor_window_style, format_uia_element_snapshot,
-        forward_runner_hook_edge, fresh_canvas_cell_for_generation,
-        keys_down_without_owned_keydowns, latest_authoring_controls_after,
-        normalized_absolute_coordinate, parse_action_catalog_rank, parse_authoring_control,
-        parse_geometry_state, pointer_correction_delta, radial_pointer_release_ack_after,
-        record_runner_chord_edge, relative_mouse_move_input, retire_inserted_keyboard_ups,
-        semantic_client_center, semantic_name_contains, spawn_focus_anchor_window,
-        trace_event_lines, unique_authoring_control, wait_for_pointer_release_settle,
-        window_process_id,
+        ACCEPTANCE_RUNNER_INPUT_COOKIE, AcceptanceTraceBudgetProfile, ActionCatalogRankSnapshot,
+        ActionEditorProviderEdge, ActionEditorProviderKind, ActionEditorSurface,
+        AuthoringControlRole, AuthoringControlSnapshot, AuthoringControlTarget,
+        AuthoringObservationBoundarySnapshot, FocusAnchorCommand, FocusAnchorCommandKind,
+        GetCurrentThreadId, INPUT_MOUSE, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, LPARAM,
+        MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, OwnedKeyboardKey,
+        POINT, PointerReleaseWaitError, PointerTraceKind, PostThreadMessageW, RUNNER_HOOK_EVENTS,
+        RadialPointerReleaseAck, RunnerChordEdge, RunnerChordKeyObservation,
+        RunnerChordObservation, RunnerHookEdge, RunnerHookObserver, SS_NOTIFY,
+        UIA_ELEMENT_NOT_AVAILABLE_HRESULT, UIA_NOT_SUPPORTED_HRESULT, VK_END, VK_LMENU, VK_LSHIFT,
+        VK_LWIN, VisibleTextLookupError, WPARAM, acceptance_environment_block,
+        active_input_desktop_name, adjacent_pointer_point, attach_to_input_desktop,
+        authoring_control_click_finished, authoring_control_events_after,
+        classify_element_property_hresult, cursor_points_match, cursor_restore_input_target,
+        desktop_name, finish_focus_anchor_ui_thread, focus_anchor_candidate_positions,
+        focus_anchor_window_style, format_uia_element_snapshot, forward_runner_hook_edge,
+        fresh_canvas_cell_for_generation, hwnd_id, keys_down_without_owned_keydowns,
+        latest_authoring_controls_after, latest_pointer_move_after, normalized_absolute_coordinate,
+        parse_action_catalog_rank, parse_action_editor_control, parse_action_editor_provider_event,
+        parse_authoring_control, parse_geometry_state, pointer_correction_delta,
+        radial_pointer_release_ack_after, record_runner_chord_edge, relative_mouse_move_input,
+        retire_inserted_keyboard_ups, semantic_client_center, semantic_name_contains,
+        send_pointer_correction_after_cursor, spawn_focus_anchor_window,
+        spawn_focus_anchor_window_with_startup_hooks, trace_event_lines, unique_authoring_control,
+        wait_for_authoring_observation_boundary, wait_for_pointer_move_ack_with,
+        wait_for_pointer_release_settle, wait_visible_text_with, window_process_id,
     };
     use std::time::Duration;
+
+    #[test]
+    fn scrollbar_down_waits_for_fresh_ack_then_accepts_delayed_physical_down() {
+        let started = std::time::Instant::now();
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let acknowledged = std::cell::Cell::new(false);
+        let mut samples = [0, 0, i16::MIN].into_iter();
+        let state = super::wait_for_pointer_button_down_ready_with(
+            || {
+                acknowledged.set(true);
+                Ok(())
+            },
+            Duration::from_millis(50),
+            || started + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+            || {
+                assert!(
+                    acknowledged.get(),
+                    "physical state is sampled after GUI ack"
+                );
+                Ok((samples.next().expect("three deterministic samples"), false))
+            },
+        )
+        .expect("a physical down that arrives after the production ack is accepted");
+        assert_eq!(state, i16::MIN);
+    }
+
+    #[test]
+    fn scrollbar_down_rejects_persistent_up_state_and_up_before_down_ack() {
+        let started = std::time::Instant::now();
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let acknowledged = std::cell::Cell::new(false);
+        let mut sample_count = 0;
+        let persistent_up = super::wait_for_pointer_button_down_ready_with(
+            || {
+                acknowledged.set(true);
+                Ok(())
+            },
+            Duration::from_millis(50),
+            || started + elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+            || {
+                assert!(acknowledged.get());
+                sample_count += 1;
+                Ok((0, false))
+            },
+        );
+        assert!(persistent_up.unwrap_err().contains("not observed"));
+        assert_eq!(sample_count, 3);
+
+        let release_before_down = concat!(
+            "trace_event=\"designer_pointer\" pointer_up=true cursor_screen_x=959 cursor_screen_y=604\n",
+            "trace_event=\"designer_pointer\" pointer_down=true cursor_screen_x=959 cursor_screen_y=604\n"
+        );
+        let order = super::pointer_button_ack_order_after(
+            release_before_down,
+            0,
+            super::PointerTraceKind::DesignerClient,
+            (959, 604),
+        );
+        assert_eq!(order, super::PointerButtonAckOrder::UpBeforeDown);
+        assert!(super::pointer_button_down_acknowledged(order).is_err());
+        assert_eq!(
+            super::pointer_button_ack_order_after(
+                release_before_down,
+                0,
+                super::PointerTraceKind::DesignerClient,
+                (961, 604),
+            ),
+            super::PointerButtonAckOrder::Pending,
+            "a fresh edge at another screen point is not this thumb's acknowledgement"
+        );
+    }
+
+    #[test]
+    fn failed_scrollbar_down_ack_still_runs_verified_release() {
+        let mut release_attempted = false;
+        let result = super::finish_scrollbar_drag_with_verified_release(
+            || Err::<(), _>("fresh down ack timed out".into()),
+            || Ok(12),
+            || {
+                release_attempted = true;
+                Ok(super::VerifiedMouseRelease {
+                    inserted: 1,
+                    fallback_used: false,
+                    async_state_after: 0,
+                })
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("fresh down ack timed out"));
+        assert!(error.contains("left-up verified"));
+        assert!(release_attempted);
+    }
+
+    #[test]
+    fn scrollbar_external_up_after_down_ack_fails_closed_and_releases() {
+        let mut release_attempted = false;
+        let started = std::time::Instant::now();
+        let result = super::finish_scrollbar_drag_with_verified_release(
+            || {
+                super::wait_for_pointer_button_down_ready_with(
+                    || Ok(()),
+                    Duration::from_secs(1),
+                    || started,
+                    |_| {},
+                    || Ok((i16::MIN, true)),
+                )
+            },
+            || Ok(13),
+            || {
+                release_attempted = true;
+                Ok(super::VerifiedMouseRelease {
+                    inserted: 1,
+                    fallback_used: false,
+                    async_state_after: 0,
+                })
+            },
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("pointer-button up arrived"));
+        assert!(error.contains("left-up verified"));
+        assert!(release_attempted);
+    }
+
+    #[test]
+    fn scrollbar_drag_rejects_mismatched_down_identity_and_releases_before_excursion() {
+        for (down_session, down_generation) in [(16, 3), (15, 4)] {
+            let trace = format!(
+                "trace_event=\"designer_pointer\" pointer_down=true pointer_up=false window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id={down_session} generation={down_generation}\n"
+            );
+            let mut excursion_started = false;
+            let mut release_attempted = false;
+            let result = super::finish_scrollbar_drag_with_verified_release(
+                || {
+                    super::ensure_scrollbar_button_still_down_with(
+                        &trace,
+                        0,
+                        (960, 600),
+                        41,
+                        15,
+                        3,
+                        i16::MIN,
+                    )?;
+                    excursion_started = true;
+                    Ok(())
+                },
+                || Ok(4),
+                || {
+                    release_attempted = true;
+                    Ok(super::VerifiedMouseRelease {
+                        inserted: 1,
+                        fallback_used: false,
+                        async_state_after: 0,
+                    })
+                },
+            );
+
+            let error = result.unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "belonged to session={down_session} generation={down_generation}, expected session=15 generation=3"
+                )),
+                "{error}"
+            );
+            assert!(error.contains("left-up verified"), "{error}");
+            assert!(
+                !excursion_started,
+                "mismatched Down must fail before movement"
+            );
+            assert!(
+                release_attempted,
+                "rejected Down must still trigger cleanup"
+            );
+        }
+    }
+
+    #[test]
+    fn scrollbar_drag_rejects_owned_up_at_excursion_or_endpoint_even_if_async_is_down() {
+        for (release_x, release_y) in [(964, 620), (970, 650)] {
+            let trace = format!(
+                concat!(
+                    "trace_event=\"designer_pointer\" pointer_down=true pointer_up=false ",
+                    "window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id=9 generation=3\n",
+                    "trace_event=\"designer_pointer_moved\" client_x=964 client_y=620\n",
+                    "trace_event=\"designer_pointer\" pointer_down=false pointer_up=true ",
+                    "window_under_cursor_hwnd=41 cursor_screen_x={} cursor_screen_y={} session_id=9 generation=3\n",
+                ),
+                release_x, release_y
+            );
+            let mut release_attempted = false;
+            let result = super::finish_scrollbar_drag_with_verified_release(
+                || {
+                    super::ensure_scrollbar_button_still_down_with(
+                        &trace,
+                        0,
+                        (960, 600),
+                        41,
+                        9,
+                        3,
+                        i16::MIN,
+                    )
+                },
+                || Ok(7),
+                || {
+                    release_attempted = true;
+                    Ok(super::VerifiedMouseRelease {
+                        inserted: 1,
+                        fallback_used: false,
+                        async_state_after: 0,
+                    })
+                },
+            );
+            let error = result.unwrap_err();
+            assert!(error.contains("externally released during the drag"));
+            assert!(error.contains("left-up verified"));
+            assert!(
+                release_attempted,
+                "failed hold validation must release the button"
+            );
+        }
+    }
+
+    #[test]
+    fn scrollbar_drag_accepts_held_move_and_ignores_other_pointer_owners() {
+        let trace = concat!(
+            "trace_event=\"designer_pointer\" pointer_down=true pointer_up=false window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id=9 generation=3\n",
+            "trace_event=\"designer_pointer_moved\" client_x=964 client_y=620\n",
+            "trace_event=\"designer_pointer\" pointer_down=false pointer_up=true window_under_cursor_hwnd=42 cursor_screen_x=964 cursor_screen_y=620 session_id=9 generation=3\n",
+            "trace_event=\"designer_pointer\" pointer_down=false pointer_up=true window_under_cursor_hwnd=41 cursor_screen_x=970 cursor_screen_y=650 session_id=8 generation=3\n",
+            "trace_event=\"designer_pointer_moved\" client_x=970 client_y=650\n",
+        );
+
+        super::ensure_scrollbar_button_still_down_with(trace, 0, (960, 600), 41, 9, 3, i16::MIN)
+            .expect("an exact-owner held move with no later Up remains valid");
+    }
+
+    #[test]
+    fn scrollbar_drag_preserves_pointer_edge_ordering() {
+        let trace = concat!(
+            "trace_event=\"designer_pointer\" pointer_down=false pointer_up=true window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id=9 generation=3\n",
+            "trace_event=\"designer_pointer\" pointer_down=true pointer_up=false window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id=9 generation=3\n",
+        );
+
+        assert_eq!(
+            super::scrollbar_pointer_button_ack_order_after(trace, 0, (960, 600), 41, 9, 3),
+            Ok(super::PointerButtonAckOrder::UpBeforeDown)
+        );
+
+        let same_sample = concat!(
+            "trace_event=\"designer_pointer\" pointer_down=true pointer_up=true window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id=9 generation=3\n",
+        );
+        assert_eq!(
+            super::scrollbar_pointer_button_ack_order_after(same_sample, 0, (960, 600), 41, 9, 3),
+            Ok(super::PointerButtonAckOrder::UpAfterDown)
+        );
+    }
+
+    #[test]
+    fn gate_c_trace_budget_profile_is_opt_in_only_for_its_child_environment() {
+        fn values(block: &[u16], key: &str) -> Vec<String> {
+            block
+                .split(|unit| *unit == 0)
+                .filter_map(|entry| {
+                    let value = String::from_utf16(entry).ok()?;
+                    let (name, value) = value.split_once('=')?;
+                    name.eq_ignore_ascii_case(key).then(|| value.to_owned())
+                })
+                .collect()
+        }
+
+        let profile = tempfile::tempdir().unwrap();
+        let standard =
+            acceptance_environment_block(profile.path(), AcceptanceTraceBudgetProfile::Standard);
+        let gate_c =
+            acceptance_environment_block(profile.path(), AcceptanceTraceBudgetProfile::GateC);
+        assert!(values(&standard, super::TRACE_BUDGET_PROFILE_ENV).is_empty());
+        assert_eq!(
+            values(&gate_c, super::TRACE_BUDGET_PROFILE_ENV),
+            vec!["gate_c_v1".to_owned()]
+        );
+        assert_eq!(
+            super::AcceptanceTraceBudgetProfile::Standard.environment_value(),
+            None
+        );
+    }
+
+    #[test]
+    fn authoring_boundary_wait_requires_exact_ordered_mailbox_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("acceptance.log");
+        let expected = AuthoringObservationBoundarySnapshot {
+            phase: "terminal",
+            request_id: 12,
+            baseline_request_id: Some(9),
+            captured_trace_sequence: 44,
+            trace_sequence: 45,
+        };
+        std::fs::write(
+            &path,
+            "trace_event=\"authoring_observation_boundary\" phase=\"terminal\" request_id=12 baseline_request_id=9 captured_trace_sequence=44 trace_sequence=45\n",
+        )
+        .unwrap();
+        wait_for_authoring_observation_boundary(&path, expected, Duration::from_millis(20))
+            .unwrap();
+
+        let snapshot = AuthoringObservationBoundarySnapshot {
+            phase: "snapshot",
+            request_id: 13,
+            baseline_request_id: None,
+            captured_trace_sequence: 47,
+            trace_sequence: 48,
+        };
+        std::fs::write(
+            &path,
+            "trace_event=\"authoring_observation_boundary\" phase=\"snapshot\" request_id=13 baseline_request_id=0 captured_trace_sequence=47 trace_sequence=48\n",
+        )
+        .unwrap();
+        wait_for_authoring_observation_boundary(&path, snapshot, Duration::from_millis(20))
+            .unwrap();
+
+        let write = |phase: &str, request: u64, baseline: u64, captured: u64, sequence: u64| {
+            std::fs::write(
+                &path,
+                format!(
+                    "trace_event=\"authoring_observation_boundary\" phase=\"{phase}\" request_id={request} baseline_request_id={baseline} captured_trace_sequence={captured} trace_sequence={sequence}\n"
+                ),
+            )
+            .unwrap();
+        };
+        for (line, needle) in [
+            (("terminal", 12, 8, 44, 45), "stale or swapped"),
+            (("baseline", 12, 0, 44, 45), "stale or swapped"),
+            (("terminal", 12, 9, 43, 45), "stale or swapped"),
+            (("terminal", 12, 9, 44, 44), "malformed"),
+        ] {
+            write(line.0, line.1, line.2, line.3, line.4);
+            let error =
+                wait_for_authoring_observation_boundary(&path, expected, Duration::from_millis(20))
+                    .unwrap_err();
+            assert!(error.contains(needle), "unexpected error: {error}");
+        }
+
+        write("terminal", 11, 9, 44, 45);
+        let error =
+            wait_for_authoring_observation_boundary(&path, expected, Duration::ZERO).unwrap_err();
+        assert!(error.contains("timed out"));
+
+        write("terminal", 12, 9, 44, 45);
+        let line = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{line}{line}")).unwrap();
+        let error =
+            wait_for_authoring_observation_boundary(&path, expected, Duration::from_millis(20))
+                .unwrap_err();
+        assert!(error.contains("duplicated"));
+
+        std::fs::write(
+            &path,
+            "trace_event=\"authoring_observation_boundary\" phase=\"terminal\" request_id=12 captured_trace_sequence=44 trace_sequence=45\n",
+        )
+        .unwrap();
+        let error =
+            wait_for_authoring_observation_boundary(&path, expected, Duration::from_millis(20))
+                .unwrap_err();
+        assert!(error.contains("malformed"));
+
+        for invalid_phase in ["unknown", "\"terminal", "terminal\""] {
+            std::fs::write(
+                &path,
+                format!(
+                    "trace_event=\"authoring_observation_boundary\" phase={invalid_phase} request_id=12 baseline_request_id=9 captured_trace_sequence=44 trace_sequence=45\n"
+                ),
+            )
+            .unwrap();
+            assert!(
+                wait_for_authoring_observation_boundary(&path, expected, Duration::ZERO).is_err(),
+                "invalid phase encoding {invalid_phase:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn action_editor_trace_readers_keep_semantic_identity_and_provider_lifecycle() {
+        let control_line = "WARN target trace_event=\"designer_action_editor_control\" editor_surface=\"properties\" editor_control=\"result_target\" control_index=2 target_digest=31 title_digest=36 type_digest=37 disambiguator_digest=38 action_digest=32 binding_digest=33 query_digest=34 value_digest=34 displayed_text_digest=45 editor_assigned_binding_digest=40 editor_session_id=7 draft_generation=9 stable_target_digest=35 editor_epoch=10 edit_generation=11 query_generation=12 query_request_generation=13 search_request_generation=14 test_request_generation=15 trace_sequence=16 left_px=1 top_px=2 right_px=90 bottom_px=30 full_left_px=1 full_top_px=2 full_right_px=90 full_bottom_px=30 client_width_px=800 client_height_px=600 fully_visible=true enabled=true selected=false focused=false clicked=true changed=false enter_pressed=false visible=true";
+        let control = parse_action_editor_control(control_line).unwrap();
+        assert_eq!(
+            control.identity.surface,
+            super::ActionEditorSurface::Properties
+        );
+        assert_eq!(control.identity.session_id, 7);
+        assert_eq!(control.identity.query_digest, 34);
+        assert_eq!(control.control, "result_target");
+        assert_eq!(control.index, Some(2));
+        assert_eq!(control.binding_digest, 33);
+        assert_eq!(control.value_digest, 34);
+        assert_eq!(control.displayed_text_digest, 45);
+        assert_eq!(control.full_bounds, [1, 2, 90, 30]);
+        assert!(control.fully_visible);
+        assert_eq!(control.title_digest, 36);
+        assert_eq!(control.type_digest, 37);
+        assert_eq!(control.disambiguator_digest, 38);
+        assert!(control.clicked && control.enabled && control.visible);
+        assert!(!control.changed && !control.enter_pressed);
+        for malformed in [
+            "editor_surface=\"properties",
+            "editor_surface=properties\"",
+            "editor_surface=\"properties\"\"",
+            "editor_surface=\"unknown\"",
+            "editor_control=\"query_field",
+            "editor_control=query_field\"",
+            "editor_control=\"unknown\"",
+        ] {
+            let line = if malformed.starts_with("editor_surface") {
+                control_line.replace("editor_surface=\"properties\"", malformed)
+            } else {
+                control_line.replace("editor_control=\"result_target\"", malformed)
+            };
+            assert!(parse_action_editor_control(&line).is_none(), "{malformed}");
+        }
+        let inspector_control_line = control_line.replace(
+            "editor_surface=\"properties\"",
+            "editor_surface=\"inspector\"",
+        );
+        assert_eq!(
+            parse_action_editor_control(&inspector_control_line)
+                .unwrap()
+                .identity
+                .surface,
+            ActionEditorSurface::Inspector
+        );
+        for control in ["query_tab", "test_query"] {
+            assert!(
+                parse_action_editor_control(&control_line.replace(
+                    "editor_control=\"result_target\"",
+                    &format!("editor_control=\"{control}\"")
+                ))
+                .is_some()
+            );
+        }
+
+        let lifecycle_line = "WARN target trace_event=\"authoring_provider_search\" authoring_request_edge=\"retry_queued\" authoring_search_kind=\"search\" editor_surface=\"properties\" editor_session_id=7 draft_generation=9 stable_target_digest=35 editor_epoch=10 edit_generation=11 query_generation=12 query_request_generation=13 search_request_generation=14 test_request_generation=15 query_digest=34 binding_digest=0 editor_assigned_binding_digest=40 provider_revision=-1 trace_sequence=17";
+        let lifecycle = parse_action_editor_provider_event(lifecycle_line).unwrap();
+        assert_eq!(lifecycle.edge, ActionEditorProviderEdge::RetryQueued);
+        assert_eq!(lifecycle.kind, ActionEditorProviderKind::Search);
+        assert_eq!(lifecycle.identity, control.identity);
+        assert_eq!(lifecycle.trace_sequence, 17);
+        assert_eq!(lifecycle.provider_revision, None);
+
+        let inspector_line = lifecycle_line.replace(
+            "editor_surface=\"properties\"",
+            "editor_surface=\"inspector\"",
+        );
+        let inspector = parse_action_editor_provider_event(&inspector_line).unwrap();
+        assert_eq!(inspector.identity.surface, ActionEditorSurface::Inspector);
+        assert_ne!(inspector.identity, control.identity);
+        assert!(
+            parse_action_editor_provider_event(
+                &lifecycle_line.replace("editor_surface=\"properties\" ", "")
+            )
+            .is_none()
+        );
+        for edge in [
+            "queued",
+            "worker_started",
+            "worker_completed",
+            "worker_failed",
+            "applied",
+            "rejected",
+            "retired",
+            "cancelled",
+            "retry_queued",
+        ] {
+            let line = lifecycle_line.replace("\"retry_queued\"", &format!("\"{edge}\""));
+            assert!(
+                parse_action_editor_provider_event(&line).is_some(),
+                "quoted producer edge {edge:?} should parse"
+            );
+        }
+        let test_kind = lifecycle_line.replace("\"search\"", "\"test\"");
+        assert_eq!(
+            parse_action_editor_provider_event(&test_kind).unwrap().kind,
+            ActionEditorProviderKind::Test
+        );
+        for malformed in [
+            lifecycle_line.replace("\"retry_queued\"", "\"unknown\""),
+            lifecycle_line.replace("\"retry_queued\"", "\"queued"),
+            lifecycle_line.replace("\"retry_queued\"", "queued\""),
+            lifecycle_line.replace("\"search\"", "\"unknown\""),
+        ] {
+            assert!(parse_action_editor_provider_event(&malformed).is_none());
+        }
+        let malformed_surface = lifecycle_line.replace(
+            "editor_surface=\"properties\"",
+            "editor_surface=\"properties",
+        );
+        assert!(parse_action_editor_provider_event(&malformed_surface).is_none());
+        let unknown_surface = lifecycle_line.replace(
+            "editor_surface=\"properties\"",
+            "editor_surface=\"unknown\"",
+        );
+        assert!(parse_action_editor_provider_event(&unknown_surface).is_none());
+    }
+
+    #[test]
+    fn uia_property_retry_classification_is_limited_to_element_not_available() {
+        for property in [
+            "process ID",
+            "name",
+            "offscreen state",
+            "control type",
+            "enabled state",
+            "bounding rectangle",
+            "edit value",
+        ] {
+            let message = format!("read UIA {property}: element was recycled");
+            assert_eq!(
+                classify_element_property_hresult(
+                    UIA_ELEMENT_NOT_AVAILABLE_HRESULT,
+                    message.clone()
+                ),
+                VisibleTextLookupError::TransientElementUnavailable(message),
+                "recognized stale-element HRESULT should be retryable for {property} reads"
+            );
+        }
+        assert_eq!(
+            classify_element_property_hresult(0x8007_0005, "access denied".into()),
+            VisibleTextLookupError::Other("access denied".into())
+        );
+        assert_eq!(
+            classify_element_property_hresult(
+                UIA_NOT_SUPPORTED_HRESULT,
+                "value pattern is not supported".into()
+            ),
+            VisibleTextLookupError::Other("value pattern is not supported".into())
+        );
+    }
+
+    #[test]
+    fn exact_visible_text_wait_reacquires_after_transient_owner_property_reads() {
+        let mut calls = 0;
+        wait_visible_text_with("Shared Acceptance Note", Duration::from_secs(1), || {
+            calls += 1;
+            if calls == 1 {
+                Err(classify_element_property_hresult(
+                    UIA_ELEMENT_NOT_AVAILABLE_HRESULT,
+                    "read UIA process ID: element was recycled".into(),
+                ))
+            } else {
+                Ok(Some(()))
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+
+        let mut unknown_calls = 0;
+        assert_eq!(
+            wait_visible_text_with::<()>("Shared Acceptance Note", Duration::from_secs(1), || {
+                unknown_calls += 1;
+                Err(classify_element_property_hresult(
+                    0x8007_0005,
+                    "read UIA process ID: access denied".into(),
+                ))
+            })
+            .unwrap_err(),
+            "read UIA process ID: access denied"
+        );
+        assert_eq!(unknown_calls, 1);
+
+        let mut timeout_calls = 0;
+        let timeout =
+            wait_visible_text_with::<()>("Shared Acceptance Note", Duration::ZERO, || {
+                timeout_calls += 1;
+                Err(classify_element_property_hresult(
+                    UIA_ELEMENT_NOT_AVAILABLE_HRESULT,
+                    "read UIA process ID: element disappeared".into(),
+                ))
+            })
+            .unwrap_err();
+        assert!(timeout.contains("last transient UIA property failure"));
+        assert!(timeout.contains("process ID"));
+        assert_eq!(timeout_calls, 1);
+    }
 
     #[test]
     fn explanation_match_requires_owned_visible_full_query_text() {
@@ -6110,20 +9513,22 @@ mod tests {
 
     #[test]
     fn focus_anchor_owns_a_live_message_pump_until_bounded_destroy() {
+        let (_caller_attachment_observation, caller_attachment) =
+            attach_to_input_desktop().expect("attach focus-anchor test caller to input desktop");
         let process_id = std::process::id();
-        let (hwnd, thread_id, command_tx, ui_thread) =
+        let (ready, command_tx, ui_thread) =
             spawn_focus_anchor_window(process_id).expect("create message-pumped focus anchor");
-        assert_eq!(window_process_id(hwnd), process_id);
-        assert_ne!(thread_id, unsafe { GetCurrentThreadId() });
+        let hwnd = super::HWND(ready.hwnd as *mut std::ffi::c_void);
+        let thread_id = ready.thread_id;
 
-        let send_command = |kind| {
+        let send_command = |kind| -> Result<(), String> {
             let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
             command_tx
                 .send(FocusAnchorCommand {
                     kind,
                     reply: reply_tx,
                 })
-                .expect("send bounded focus anchor UI command");
+                .map_err(|error| format!("send bounded focus anchor UI command: {error}"))?;
             unsafe {
                 PostThreadMessageW(
                     thread_id,
@@ -6132,21 +9537,113 @@ mod tests {
                     LPARAM(0),
                 )
             }
-            .expect("wake focus anchor UI message pump");
+            .map_err(|error| format!("wake focus anchor UI message pump: {error}"))?;
             reply_rx
                 .recv_timeout(std::time::Duration::from_secs(1))
-                .expect("focus anchor UI command reply")
-                .expect("focus anchor UI command succeeds")
+                .map_err(|error| format!("focus anchor UI command reply: {error}"))?
         };
 
-        send_command(FocusAnchorCommandKind::Raise);
-        send_command(FocusAnchorCommandKind::MoveTo { left: 64, top: 64 });
-        send_command(FocusAnchorCommandKind::RestoreNonTopmost);
-        send_command(FocusAnchorCommandKind::Destroy);
-        ui_thread
-            .join()
-            .expect("focus anchor UI thread exits after destroy");
-        assert_eq!(window_process_id(hwnd), 0);
+        let observation = (|| -> Result<(), String> {
+            if ready.owner_desktop_name != "Default"
+                || ready.input_desktop_name != "Default"
+                || active_input_desktop_name()? != ready.owner_desktop_name
+            {
+                return Err(format!(
+                    "focus-anchor ready desktop mismatch: owner='{}' input='{}'",
+                    ready.owner_desktop_name, ready.input_desktop_name
+                ));
+            }
+            let owner_desktop = unsafe { super::GetThreadDesktop(thread_id) }
+                .map_err(|error| format!("read focus-anchor thread desktop: {error}"))?;
+            if desktop_name(owner_desktop)? != ready.owner_desktop_name {
+                return Err("focus-anchor owner thread desktop changed after ready".into());
+            }
+            if window_process_id(hwnd) != process_id {
+                return Err("focus anchor HWND is not runner-owned".into());
+            }
+            if thread_id == unsafe { GetCurrentThreadId() } {
+                return Err("focus anchor unexpectedly shares the caller thread".into());
+            }
+
+            send_command(FocusAnchorCommandKind::Raise)?;
+            send_command(FocusAnchorCommandKind::MoveTo { left: 64, top: 64 })?;
+            let hit = unsafe { super::WindowFromPoint(POINT { x: 224, y: 112 }) };
+            if hit != hwnd {
+                return Err(format!(
+                    "caller WindowFromPoint did not see the input-desktop anchor: hit={} expected={}",
+                    hwnd_id(hit),
+                    hwnd_id(hwnd)
+                ));
+            }
+            send_command(FocusAnchorCommandKind::RestoreNonTopmost)?;
+            Ok(())
+        })();
+
+        let destroy_result = send_command(FocusAnchorCommandKind::Destroy);
+        if destroy_result.is_err() {
+            let _ = unsafe { PostThreadMessageW(thread_id, super::WM_QUIT, WPARAM(0), LPARAM(0)) };
+        }
+        let thread_result = finish_focus_anchor_ui_thread(ui_thread);
+        let window_gone = window_process_id(hwnd) == 0;
+        drop(caller_attachment);
+
+        assert!(observation.is_ok(), "{observation:?}");
+        assert!(destroy_result.is_ok(), "{destroy_result:?}");
+        assert!(thread_result.is_ok(), "{thread_result:?}");
+        assert!(window_gone, "focus anchor HWND survived owner-thread exit");
+    }
+
+    #[test]
+    fn focus_anchor_startup_timeout_drops_receivers_before_window_creation() {
+        let (before_attach_tx, before_attach_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        let (timeout_tx, timeout_rx) = std::sync::mpsc::sync_channel(1);
+        let window_creation_attempted =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let attempted = window_creation_attempted.clone();
+        let process_id = std::process::id();
+        let startup = std::thread::spawn(move || {
+            spawn_focus_anchor_window_with_startup_hooks(
+                process_id,
+                Duration::from_millis(40),
+                move || {
+                    before_attach_tx
+                        .send(())
+                        .expect("notify test before input desktop attachment");
+                    resume_rx
+                        .recv()
+                        .expect("resume delayed focus-anchor startup");
+                },
+                move || attempted.store(true, std::sync::atomic::Ordering::SeqCst),
+                move || {
+                    timeout_tx
+                        .send(())
+                        .expect("notify observed startup timeout")
+                },
+            )
+        });
+
+        let before_attach = before_attach_rx.recv_timeout(Duration::from_secs(1));
+        let timeout_observed = timeout_rx.recv_timeout(Duration::from_secs(1));
+        let release = resume_tx.send(());
+        let startup_result = startup.join().expect("startup waiter thread exits");
+
+        assert!(
+            before_attach.is_ok(),
+            "worker did not reach delayed startup"
+        );
+        assert!(
+            timeout_observed.is_ok(),
+            "startup did not take the bounded timeout path"
+        );
+        assert!(release.is_ok(), "delayed startup worker was already gone");
+        assert!(
+            startup_result
+                .as_ref()
+                .is_err_and(|error| error.contains("focus anchor UI thread did not start")),
+            "unexpected startup result: {startup_result:?}"
+        );
+        assert!(!window_creation_attempted.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     fn authoring_control() -> AuthoringControlSnapshot {
@@ -6154,6 +9651,7 @@ mod tests {
             target: AuthoringControlTarget::MenuRow,
             role: AuthoringControlRole::Selectable,
             index: Some(0),
+            trace_sequence: 1,
             bounds: [20, 30, 60, 50],
             client_size: [640, 480],
             enabled: true,
@@ -6273,24 +9771,36 @@ mod tests {
 
     #[test]
     fn authoring_parser_accepts_quoted_roles_and_unindexed_targets() {
-        let control = parse_authoring_control(
-            "trace_event=\"designer_authoring_control\" target=NewMenu role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 enabled=true selected=false focused=true clicked=false session_id=2 generation=2 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1",
-        )
-        .expect("serialized New Menu control should parse");
+        let line = "trace_event=\"designer_authoring_control\" target=NewMenu role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=8 enabled=true selected=false focused=true clicked=false session_id=2 generation=2 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1";
+        let control =
+            parse_authoring_control(line).expect("serialized New Menu control should parse");
 
         assert_eq!(control.target, AuthoringControlTarget::NewMenu);
         assert_eq!(control.role, AuthoringControlRole::Button);
         assert_eq!(control.index, None);
         assert!(control.focused);
+        assert_eq!(control.trace_sequence, 8);
         assert_eq!(control.session_id, 2);
         assert_eq!(control.bounds, [14, 116, 83, 134]);
         assert_eq!(control.client_size, [640, 480]);
+        for malformed_role in [
+            "role=Button\"",
+            "role=\"Button",
+            "role=\"Button\"\"",
+            "role=\"Unknown\"",
+        ] {
+            let malformed = line.replace("role=\"Button\"", malformed_role);
+            assert!(
+                parse_authoring_control(&malformed).is_none(),
+                "{malformed_role}"
+            );
+        }
     }
 
     #[test]
     fn canvas_cell_parser_retains_redacted_menu_ring_and_slot_scope() {
         let control = parse_authoring_control(
-            "trace_event=\"designer_authoring_control\" target=CanvasCell role=\"Region\" viewport=Deferred control_index=8 left_px=20 top_px=30 right_px=28 bottom_px=38 client_width_px=640 client_height_px=480 enabled=true selected=false focused=false clicked=false session_id=2 generation=7 menu_cell_ids_digest=123456 cell_ring_index=1 cell_slot_index=0",
+            "trace_event=\"designer_authoring_control\" target=CanvasCell role=\"Region\" viewport=Deferred control_index=8 left_px=20 top_px=30 right_px=28 bottom_px=38 client_width_px=640 client_height_px=480 trace_sequence=9 enabled=true selected=false focused=false clicked=false session_id=2 generation=7 menu_cell_ids_digest=123456 cell_ring_index=1 cell_slot_index=0",
         )
         .expect("scoped CanvasCell evidence should parse");
 
@@ -6301,9 +9811,31 @@ mod tests {
     }
 
     #[test]
+    fn authoring_control_event_reader_retains_clicked_owner_event_after_trace_cursor() {
+        let directory = tempfile::tempdir().unwrap();
+        let trace_path = directory.path().join("candidate.log");
+        std::fs::write(
+            &trace_path,
+            concat!(
+                "logger startup line\n",
+                "trace_event=\"designer_authoring_control\" target=KeepEditing role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=8 enabled=true selected=false focused=true clicked=false session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1\n",
+                "logger unrelated line\n",
+                "trace_event=\"designer_authoring_control\" target=KeepEditing role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=9 enabled=true selected=false focused=true clicked=true session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1\n"
+            ),
+        )
+        .unwrap();
+
+        let controls = authoring_control_events_after(&trace_path, 1, 2).unwrap();
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].target, AuthoringControlTarget::KeepEditing);
+        assert_eq!(controls[0].trace_sequence, 9);
+        assert!(controls[0].clicked);
+    }
+
+    #[test]
     fn post_resize_authoring_lookup_does_not_reuse_a_disappeared_control() {
-        let stale = "trace_event=\"designer_authoring_control\" target=Canvas role=\"Region\" viewport=Deferred control_index=-1 left_px=20 top_px=30 right_px=620 bottom_px=430 client_width_px=640 client_height_px=480 enabled=true selected=false focused=false clicked=false session_id=9 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
-        let fresh = "trace_event=\"designer_authoring_control\" target=Canvas role=\"Region\" viewport=Deferred control_index=-1 left_px=20 top_px=30 right_px=520 bottom_px=390 client_width_px=520 client_height_px=380 enabled=true selected=false focused=false clicked=false session_id=9 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
+        let stale = "trace_event=\"designer_authoring_control\" target=Canvas role=\"Region\" viewport=Deferred control_index=-1 left_px=20 top_px=30 right_px=620 bottom_px=430 client_width_px=640 client_height_px=480 trace_sequence=10 enabled=true selected=false focused=false clicked=false session_id=9 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
+        let fresh = "trace_event=\"designer_authoring_control\" target=Canvas role=\"Region\" viewport=Deferred control_index=-1 left_px=20 top_px=30 right_px=520 bottom_px=390 client_width_px=520 client_height_px=380 trace_sequence=11 enabled=true selected=false focused=false clicked=false session_id=9 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
         let post_resize_cursor = 1;
         let stale_trace = format!("logger startup line\n{stale}\n");
         let stale_events = trace_event_lines(&stale_trace);
@@ -6325,8 +9857,8 @@ mod tests {
 
     #[test]
     fn authoring_control_click_requires_a_later_frame_after_activation() {
-        let click = "trace_event=\"designer_authoring_control\" target=Slots role=\"DragValue\" viewport=Deferred control_index=-1 left_px=298 top_px=116 right_px=342 bottom_px=134 client_width_px=640 client_height_px=480 enabled=true selected=false focused=false clicked=true session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
-        let after_click = "trace_event=\"designer_authoring_control\" target=Slots role=\"DragValue\" viewport=Deferred control_index=-1 left_px=298 top_px=116 right_px=342 bottom_px=134 client_width_px=640 client_height_px=480 enabled=true selected=false focused=false clicked=false session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
+        let click = "trace_event=\"designer_authoring_control\" target=Slots role=\"DragValue\" viewport=Deferred control_index=-1 left_px=298 top_px=116 right_px=342 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=12 enabled=true selected=false focused=false clicked=true session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
+        let after_click = "trace_event=\"designer_authoring_control\" target=Slots role=\"DragValue\" viewport=Deferred control_index=-1 left_px=298 top_px=116 right_px=342 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=13 enabled=true selected=false focused=false clicked=false session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".to_owned();
 
         assert!(!authoring_control_click_finished(
             std::slice::from_ref(&click),
@@ -6359,6 +9891,142 @@ mod tests {
         );
         assert_eq!(pointer_correction_delta((88, 81), (88, 81)).unwrap(), None);
         assert!(pointer_correction_delta((100, 81), (88, 81)).is_err());
+    }
+
+    #[test]
+    fn pointer_correction_trace_cursor_precedes_the_send() {
+        let directory = tempfile::tempdir().unwrap();
+        let trace_path = directory.path().join("acceptance.log");
+        std::fs::write(
+            &trace_path,
+            "trace_event=\"designer_pointer_moved\" client_x=383 client_y=155\n",
+        )
+        .unwrap();
+        let cursor = std::cell::Cell::new(0);
+
+        let inserted = send_pointer_correction_after_cursor(&trace_path, &cursor, || {
+            use std::io::Write as _;
+
+            let mut trace = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&trace_path)
+                .unwrap();
+            writeln!(
+                trace,
+                "trace_event=\"designer_pointer_moved\" client_x=358 client_y=98"
+            )
+            .unwrap();
+            Ok(1)
+        })
+        .unwrap();
+
+        assert_eq!(inserted, 1);
+        assert_eq!(
+            cursor.get(),
+            1,
+            "cursor is captured before the send closure"
+        );
+        assert_eq!(
+            latest_pointer_move_after(&trace_path, cursor.get(), PointerTraceKind::DesignerClient,)
+                .unwrap(),
+            Some((358, 98)),
+            "the exact acknowledgment emitted during SendInput remains after the cursor"
+        );
+    }
+
+    #[test]
+    fn pointer_move_ack_ignores_stale_far_samples_until_exact_owned_point() {
+        let mut observations =
+            std::collections::VecDeque::from([Some((383, 155)), Some((358, 98))]);
+        let mut corrections = 0;
+        let mut physical_checks = 0;
+        let result = wait_for_pointer_move_ack_with(
+            "Designer test click",
+            "Designer client point",
+            (358, 98),
+            Duration::from_millis(100),
+            || Ok(observations.pop_front().flatten()),
+            || {
+                physical_checks += 1;
+                Ok(())
+            },
+            |_, _| {
+                corrections += 1;
+                Ok(1)
+            },
+            |_| {},
+        )
+        .expect("the fresh exact owner event follows the stale ROOT-coordinate sample");
+        assert_eq!(result, 0);
+        assert_eq!(corrections, 0, "a far stale sample is never corrected");
+        assert_eq!(
+            physical_checks, 1,
+            "physical ownership is checked on exact trace"
+        );
+    }
+
+    #[test]
+    fn pointer_move_ack_corrects_only_near_samples_and_requires_physical_match() {
+        let mut observations =
+            std::collections::VecDeque::from([Some((356, 100)), Some((358, 98))]);
+        let mut corrections = Vec::new();
+        let mut physical_checks = 0;
+        let result = wait_for_pointer_move_ack_with(
+            "ROOT test click",
+            "ROOT screen point",
+            (358, 98),
+            Duration::from_millis(100),
+            || Ok(observations.pop_front().flatten()),
+            || {
+                physical_checks += 1;
+                Ok(())
+            },
+            |dx, dy| {
+                corrections.push((dx, dy));
+                Ok(1)
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result, 1);
+        assert_eq!(corrections, [(2, -2)]);
+        assert_eq!(physical_checks, 1);
+
+        let mut exact = std::collections::VecDeque::from([Some((358, 98))]);
+        let mismatch = wait_for_pointer_move_ack_with(
+            "Designer test click",
+            "Designer client point",
+            (358, 98),
+            Duration::from_millis(100),
+            || Ok(exact.pop_front().flatten()),
+            || Err("physical cursor or owned hit did not match".into()),
+            |_, _| panic!("an exact trace must not generate a correction"),
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("physical cursor or owned hit"));
+    }
+
+    #[test]
+    fn pointer_move_ack_times_out_on_far_samples_without_correction() {
+        let mut corrections = 0;
+        let error = wait_for_pointer_move_ack_with(
+            "Designer test click",
+            "Designer client point",
+            (358, 98),
+            Duration::from_millis(15),
+            || Ok(Some((383, 155))),
+            || panic!("far samples are not physical acknowledgements"),
+            |_, _| {
+                corrections += 1;
+                Ok(1)
+            },
+            std::thread::sleep,
+        )
+        .unwrap_err();
+        assert!(error.contains("did not reach exact point"));
+        assert!(error.contains("last observed=Some((383, 155))"));
+        assert_eq!(corrections, 0);
     }
 
     #[test]

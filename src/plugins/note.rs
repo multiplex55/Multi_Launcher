@@ -1453,6 +1453,34 @@ pub struct NotePlugin {
 }
 
 impl NotePlugin {
+    #[cfg(test)]
+    pub(crate) fn fixture_for_authoring_search(notes: &[(&str, &str, &str)]) -> Self {
+        let notes = notes
+            .iter()
+            .map(|(title, slug, content)| Note {
+                title: (*title).to_owned(),
+                path: PathBuf::new(),
+                content: (*content).to_owned(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: (*slug).to_owned(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs: Vec::new(),
+            })
+            .collect();
+        Self {
+            matcher: SkimMatcherV2::default(),
+            data: Arc::new(Mutex::new(NoteCache::from_notes(notes))),
+            templates: TEMPLATE_CACHE.clone(),
+            external_open: NoteExternalOpen::Wezterm,
+            backlinks_enabled: true,
+            aliases_enabled: true,
+            templates_enabled: true,
+            watcher: None,
+        }
+    }
+
     pub fn new() -> Self {
         let _ = refresh_cache();
         let _ = refresh_template_cache();

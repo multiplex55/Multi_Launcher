@@ -11,6 +11,93 @@ pub(crate) const OBSERVATION_ENV: &str = "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_OBSER
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_SUMMARY_KEYS: usize = 4096;
+const AUTHORING_SCHEMA_VERSION: u16 = 1;
+const AUTHORING_REQUEST_SUFFIX: &str = ".authoring.request.json";
+const AUTHORING_RESPONSE_SUFFIX: &str = ".authoring.response.json";
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthoringObservationPhase {
+    Baseline,
+    Snapshot,
+    Terminal,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthoringObservationRequest {
+    pub schema_version: u16,
+    pub request_id: u64,
+    pub phase: AuthoringObservationPhase,
+    pub baseline_request_id: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthoringEditorObservation {
+    pub open: bool,
+    pub session_id: u64,
+    pub generation: u64,
+    pub selected_target_digest: u64,
+    pub selected_cell_digest: u64,
+    pub document_digest: u64,
+    pub assigned_binding_digest: u64,
+    pub properties_staged_digest: Option<u64>,
+    pub draft_dirty: bool,
+    pub properties_dirty: bool,
+    pub undo_depth: usize,
+    pub redo_depth: usize,
+    pub initial_snapshot_pending: bool,
+    pub action_editor: Option<ActionEditorObservation>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActionEditorObservation {
+    pub surface: String,
+    pub editor_session_id: u64,
+    pub draft_generation: u64,
+    pub stable_target_digest: u64,
+    pub editor_epoch: u64,
+    pub edit_generation: u64,
+    pub query_generation: u64,
+    pub query_request_generation: u64,
+    pub search_request_generation: u64,
+    pub test_request_generation: u64,
+    pub query_digest: u64,
+    pub authored_input_digest: u64,
+    pub assigned_binding_digest: u64,
+    pub selected_binding_digest: u64,
+    pub search_pending: bool,
+    pub test_pending: bool,
+    pub result_count: usize,
+    pub results_digest: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthoringObservationEvidence {
+    pub frame_ordinal: u64,
+    pub trace_sequence: u64,
+    pub trace_boundary_sequence: u64,
+    pub root: QueryOrdinaryRootCapture,
+    pub effects: QueryObservationCountSummary,
+    pub editor: AuthoringEditorObservation,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthoringObservationResponse {
+    pub schema_version: u16,
+    pub request_id: u64,
+    pub phase: AuthoringObservationPhase,
+    pub status: String,
+    pub error: Option<String>,
+    pub baseline_request_id: Option<u64>,
+    pub observed_frame_ordinal: u64,
+    pub before: Option<AuthoringObservationEvidence>,
+    pub after: Option<AuthoringObservationEvidence>,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,7 +168,8 @@ pub(crate) struct QueryRootStateEvidence {
     pub usage_count: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct QueryOrdinaryRootCapture {
     pub state_digest: u64,
     pub query_digest: u64,
@@ -101,6 +189,16 @@ pub(crate) struct QueryOrdinaryRootCapture {
     pub query_history_digest: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QueryObservationCountSummary {
+    pub history_entries: usize,
+    pub history_keys: usize,
+    pub history_digest: u64,
+    pub usage_entries: usize,
+    pub usage_digest: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct HistoryKey {
     query_digest: u64,
@@ -108,19 +206,62 @@ struct HistoryKey {
     source_digest: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct QueryObservationCounts {
     history: BTreeMap<HistoryKey, usize>,
     usage: BTreeMap<u64, u32>,
+    full_history_entries: usize,
+    full_history_digest: u64,
+    full_usage_entries: usize,
+    full_usage_digest: u64,
+}
+
+impl Default for QueryObservationCounts {
+    fn default() -> Self {
+        Self {
+            history: BTreeMap::new(),
+            usage: BTreeMap::new(),
+            full_history_entries: 0,
+            full_history_digest: 0xcbf29ce484222325,
+            full_usage_entries: 0,
+            full_usage_digest: 0xcbf29ce484222325,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AuthoringCapturedBaseline {
+    request_id: u64,
+    frame_ordinal: u64,
+    trace_sequence: u64,
+    trace_boundary_sequence: u64,
+    root: QueryOrdinaryRootCapture,
+    effects: QueryObservationCountSummary,
+    editor: AuthoringEditorObservation,
 }
 
 impl QueryObservationCounts {
+    pub(crate) fn capture_available_history(
+        history: Option<Vec<crate::history::HistoryEntry>>,
+        usage: &HashMap<String, u32>,
+    ) -> Result<Self, String> {
+        let history = history
+            .ok_or_else(|| "history is unavailable for acceptance observation".to_string())?;
+        Self::capture(&history, usage)
+    }
+
     pub(crate) fn capture(
         history: &[crate::history::HistoryEntry],
         usage: &HashMap<String, u32>,
     ) -> Result<Self, String> {
-        let mut counts = Self::default();
-        for entry in history {
+        let mut counts = Self {
+            full_history_entries: history.len(),
+            full_history_digest: 0xcbf29ce484222325,
+            full_usage_entries: usage.len(),
+            full_usage_digest: 0xcbf29ce484222325,
+            ..Self::default()
+        };
+        for (index, entry) in history.iter().enumerate() {
             let key = HistoryKey {
                 query_digest: digest(&[entry.query.as_str()]),
                 action_digest: history_action_digest(&entry.action),
@@ -133,14 +274,44 @@ impl QueryObservationCounts {
             if counts.history.len() > MAX_SUMMARY_KEYS {
                 return Err("history observation exceeded its bounded key capacity".into());
             }
+            counts.full_history_digest =
+                digest_feed(counts.full_history_digest, &(index as u64).to_le_bytes());
+            counts.full_history_digest = digest_text(counts.full_history_digest, &entry.query);
+            counts.full_history_digest = digest_text(counts.full_history_digest, &entry.query_lc);
+            counts.full_history_digest =
+                digest_text(counts.full_history_digest, &entry.action.label);
+            counts.full_history_digest =
+                digest_text(counts.full_history_digest, &entry.action.desc);
+            counts.full_history_digest =
+                digest_text(counts.full_history_digest, &entry.action.action);
+            counts.full_history_digest =
+                digest_optional_text(counts.full_history_digest, entry.action.args.as_deref());
+            counts.full_history_digest =
+                digest_optional_text(counts.full_history_digest, entry.source.as_deref());
+            counts.full_history_digest =
+                digest_feed(counts.full_history_digest, &entry.timestamp.to_le_bytes());
         }
-        for (action, count) in usage {
-            counts.usage.insert(digest(&[action]), *count);
+        let mut usage_entries = usage.iter().collect::<Vec<_>>();
+        usage_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (action, count) in usage_entries {
+            counts.usage.insert(digest(&[action.as_str()]), *count);
             if counts.usage.len() > MAX_SUMMARY_KEYS {
                 return Err("usage observation exceeded its bounded key capacity".into());
             }
+            counts.full_usage_digest = digest_text(counts.full_usage_digest, action);
+            counts.full_usage_digest = digest_feed(counts.full_usage_digest, &count.to_le_bytes());
         }
         Ok(counts)
+    }
+
+    fn summary(&self) -> QueryObservationCountSummary {
+        QueryObservationCountSummary {
+            history_entries: self.full_history_entries,
+            history_keys: self.history.len(),
+            history_digest: self.full_history_digest,
+            usage_entries: self.full_usage_entries,
+            usage_digest: self.full_usage_digest,
+        }
     }
 
     fn matching_history(&self, query_digest: u64, action_digest: u64) -> usize {
@@ -203,6 +374,8 @@ pub(crate) struct QueryObservationMailbox {
     baseline: Option<CapturedBaseline>,
     selection: Option<BoundSelection>,
     binding_error: Option<String>,
+    authoring_baseline: Option<AuthoringCapturedBaseline>,
+    last_authoring_request_id: u64,
 }
 
 impl QueryObservationMailbox {
@@ -231,6 +404,12 @@ impl QueryObservationMailbox {
         self.base_path
             .as_ref()
             .is_some_and(|base| std::fs::metadata(path_with_suffix(base, ".request.json")).is_ok())
+    }
+
+    pub(crate) fn has_authoring_request(&self) -> bool {
+        self.base_path.as_ref().is_some_and(|base| {
+            std::fs::metadata(path_with_suffix(base, AUTHORING_REQUEST_SUFFIX)).is_ok()
+        })
     }
 
     pub(crate) fn bind_selection(
@@ -315,6 +494,259 @@ impl QueryObservationMailbox {
         });
         let _ = write_response(&response_path, &response);
         true
+    }
+
+    pub(crate) fn poll_authoring(
+        &mut self,
+        root: QueryOrdinaryRootCapture,
+        counts: Result<QueryObservationCounts, String>,
+        editor: Result<AuthoringEditorObservation, String>,
+    ) -> bool {
+        self.poll_authoring_with_boundary(root, counts, editor, |phase, request_id, baseline_id| {
+            crate::radial::acceptance_trace::emit_authoring_observation_boundary(
+                phase,
+                request_id,
+                baseline_id,
+            )
+        })
+    }
+
+    fn poll_authoring_with_boundary(
+        &mut self,
+        root: QueryOrdinaryRootCapture,
+        counts: Result<QueryObservationCounts, String>,
+        editor: Result<AuthoringEditorObservation, String>,
+        mut publish_boundary: impl FnMut(&'static str, u64, Option<u64>) -> Option<(u64, u64)>,
+    ) -> bool {
+        let Some(base) = self.base_path.as_ref() else {
+            return false;
+        };
+        let request_path = path_with_suffix(base, AUTHORING_REQUEST_SUFFIX);
+        let response_path = path_with_suffix(base, AUTHORING_RESPONSE_SUFFIX);
+        let Ok(metadata) = std::fs::metadata(&request_path) else {
+            return true;
+        };
+        let mut response = None;
+        if metadata.len() as usize <= MAX_REQUEST_BYTES {
+            if let Ok(bytes) = std::fs::read(&request_path) {
+                if let Ok(request) = serde_json::from_slice::<AuthoringObservationRequest>(&bytes) {
+                    response = Some(self.apply_authoring_request(request, root, counts, editor));
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&request_path);
+        let mut response = response.unwrap_or_else(|| AuthoringObservationResponse {
+            schema_version: AUTHORING_SCHEMA_VERSION,
+            request_id: 0,
+            phase: AuthoringObservationPhase::Baseline,
+            status: "failed".into(),
+            error: Some("authoring observation request was malformed or exceeded its bound".into()),
+            baseline_request_id: None,
+            observed_frame_ordinal: self.frame_ordinal,
+            before: None,
+            after: None,
+        });
+        if response.status == "captured" {
+            let phase = match response.phase {
+                AuthoringObservationPhase::Baseline => "baseline",
+                AuthoringObservationPhase::Snapshot => "snapshot",
+                AuthoringObservationPhase::Terminal => "terminal",
+            };
+            let boundary =
+                publish_boundary(phase, response.request_id, response.baseline_request_id);
+            if let Some((captured_trace_sequence, trace_boundary_sequence)) = boundary {
+                match response.phase {
+                    AuthoringObservationPhase::Baseline => {
+                        if let Some(evidence) = response.before.as_mut() {
+                            evidence.trace_sequence = captured_trace_sequence;
+                            evidence.trace_boundary_sequence = trace_boundary_sequence;
+                        }
+                        if let Some(baseline) = self.authoring_baseline.as_mut() {
+                            baseline.trace_sequence = captured_trace_sequence;
+                            baseline.trace_boundary_sequence = trace_boundary_sequence;
+                        }
+                    }
+                    AuthoringObservationPhase::Snapshot => {
+                        if let Some(evidence) = response.before.as_mut() {
+                            evidence.trace_sequence = captured_trace_sequence;
+                            evidence.trace_boundary_sequence = trace_boundary_sequence;
+                        }
+                    }
+                    AuthoringObservationPhase::Terminal => {
+                        if let Some(evidence) = response.after.as_mut() {
+                            evidence.trace_sequence = captured_trace_sequence;
+                            evidence.trace_boundary_sequence = trace_boundary_sequence;
+                        }
+                    }
+                }
+            } else {
+                if response.phase != AuthoringObservationPhase::Snapshot {
+                    self.authoring_baseline = None;
+                }
+                response.status = "failed".into();
+                response.error = Some(
+                    "authoring trace boundary could not be published; observation was not acknowledged"
+                        .into(),
+                );
+                response.before = None;
+                response.after = None;
+            }
+        }
+        let _ = write_response(&response_path, &response);
+        true
+    }
+
+    fn apply_authoring_request(
+        &mut self,
+        request: AuthoringObservationRequest,
+        root: QueryOrdinaryRootCapture,
+        counts: Result<QueryObservationCounts, String>,
+        editor: Result<AuthoringEditorObservation, String>,
+    ) -> AuthoringObservationResponse {
+        let failed = |error: String| AuthoringObservationResponse {
+            schema_version: AUTHORING_SCHEMA_VERSION,
+            request_id: request.request_id,
+            phase: request.phase,
+            status: "failed".into(),
+            error: Some(error),
+            baseline_request_id: request.baseline_request_id,
+            observed_frame_ordinal: self.frame_ordinal,
+            before: None,
+            after: None,
+        };
+        if request.schema_version != AUTHORING_SCHEMA_VERSION || request.request_id == 0 {
+            return failed("authoring observation request identity is invalid".into());
+        }
+        if request.request_id <= self.last_authoring_request_id {
+            return failed("authoring observation request ID is stale or duplicated".into());
+        }
+        self.last_authoring_request_id = request.request_id;
+
+        match request.phase {
+            AuthoringObservationPhase::Baseline => {
+                if request.baseline_request_id.is_some() {
+                    return failed("authoring baseline contains terminal-only fields".into());
+                }
+                let effects = match counts {
+                    Ok(counts) => counts.summary(),
+                    Err(error) => return failed(error),
+                };
+                let editor = match editor {
+                    Ok(editor) => editor,
+                    Err(error) => return failed(error),
+                };
+                let trace_sequence = crate::radial::acceptance_trace::trace_sequence();
+                let evidence = AuthoringObservationEvidence {
+                    frame_ordinal: self.frame_ordinal,
+                    trace_sequence,
+                    trace_boundary_sequence: 0,
+                    root,
+                    effects: effects.clone(),
+                    editor: editor.clone(),
+                };
+                self.authoring_baseline = Some(AuthoringCapturedBaseline {
+                    request_id: request.request_id,
+                    frame_ordinal: self.frame_ordinal,
+                    trace_sequence,
+                    trace_boundary_sequence: 0,
+                    root: evidence.root.clone(),
+                    effects,
+                    editor,
+                });
+                AuthoringObservationResponse {
+                    schema_version: AUTHORING_SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    phase: request.phase,
+                    status: "captured".into(),
+                    error: None,
+                    baseline_request_id: None,
+                    observed_frame_ordinal: self.frame_ordinal,
+                    before: Some(evidence),
+                    after: None,
+                }
+            }
+            AuthoringObservationPhase::Snapshot => {
+                if request.baseline_request_id.is_some() {
+                    return failed("authoring snapshot contains baseline-only fields".into());
+                }
+                let effects = match counts {
+                    Ok(counts) => counts.summary(),
+                    Err(error) => return failed(error),
+                };
+                let editor = match editor {
+                    Ok(editor) => editor,
+                    Err(error) => return failed(error),
+                };
+                let evidence = AuthoringObservationEvidence {
+                    frame_ordinal: self.frame_ordinal,
+                    trace_sequence: crate::radial::acceptance_trace::trace_sequence(),
+                    trace_boundary_sequence: 0,
+                    root,
+                    effects,
+                    editor,
+                };
+                AuthoringObservationResponse {
+                    schema_version: AUTHORING_SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    phase: request.phase,
+                    status: "captured".into(),
+                    error: None,
+                    baseline_request_id: None,
+                    observed_frame_ordinal: self.frame_ordinal,
+                    before: Some(evidence),
+                    after: None,
+                }
+            }
+            AuthoringObservationPhase::Terminal => {
+                let Some(baseline) = self.authoring_baseline.as_ref() else {
+                    return failed("authoring terminal request has no captured baseline".into());
+                };
+                if request.baseline_request_id != Some(baseline.request_id)
+                    || request.request_id <= baseline.request_id
+                    || self.frame_ordinal <= baseline.frame_ordinal
+                {
+                    return failed(
+                        "authoring terminal request did not match a later baseline".into(),
+                    );
+                }
+                let effects = match counts {
+                    Ok(counts) => counts.summary(),
+                    Err(error) => return failed(error),
+                };
+                let editor = match editor {
+                    Ok(editor) => editor,
+                    Err(error) => return failed(error),
+                };
+                let before = AuthoringObservationEvidence {
+                    frame_ordinal: baseline.frame_ordinal,
+                    trace_sequence: baseline.trace_sequence,
+                    trace_boundary_sequence: baseline.trace_boundary_sequence,
+                    root: baseline.root.clone(),
+                    effects: baseline.effects.clone(),
+                    editor: baseline.editor.clone(),
+                };
+                let after = AuthoringObservationEvidence {
+                    frame_ordinal: self.frame_ordinal,
+                    trace_sequence: crate::radial::acceptance_trace::trace_sequence(),
+                    trace_boundary_sequence: 0,
+                    root,
+                    effects,
+                    editor,
+                };
+                self.authoring_baseline = None;
+                AuthoringObservationResponse {
+                    schema_version: AUTHORING_SCHEMA_VERSION,
+                    request_id: request.request_id,
+                    phase: request.phase,
+                    status: "captured".into(),
+                    error: None,
+                    baseline_request_id: request.baseline_request_id,
+                    observed_frame_ordinal: self.frame_ordinal,
+                    before: Some(before),
+                    after: Some(after),
+                }
+            }
+        }
     }
 
     fn apply_request(
@@ -508,7 +940,7 @@ fn root_evidence(
     }
 }
 
-fn write_response(path: &Path, response: &QueryObservationResponse) -> Result<(), String> {
+fn write_response<T: Serialize>(path: &Path, response: &T) -> Result<(), String> {
     let bytes = serde_json::to_vec(response).map_err(|error| error.to_string())?;
     if bytes.len() > MAX_RESPONSE_BYTES {
         return Err("observation response exceeded its byte bound".into());
@@ -522,6 +954,25 @@ fn write_response(path: &Path, response: &QueryObservationResponse) -> Result<()
         let _ = std::fs::remove_file(&temp);
         error.to_string()
     })
+}
+
+fn digest_feed(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn digest_text(hash: u64, value: &str) -> u64 {
+    let hash = digest_feed(hash, &(value.len() as u64).to_le_bytes());
+    digest_feed(hash, value.as_bytes())
+}
+
+fn digest_optional_text(hash: u64, value: Option<&str>) -> u64 {
+    match value {
+        Some(value) => digest_text(digest_feed(hash, &[1]), value),
+        None => digest_feed(hash, &[0]),
+    }
 }
 
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -695,6 +1146,57 @@ mod tests {
         }
     }
 
+    fn authoring_editor() -> AuthoringEditorObservation {
+        AuthoringEditorObservation {
+            open: true,
+            session_id: 7,
+            generation: 11,
+            selected_target_digest: 13,
+            selected_cell_digest: 17,
+            document_digest: 19,
+            assigned_binding_digest: 23,
+            properties_staged_digest: None,
+            draft_dirty: true,
+            properties_dirty: false,
+            undo_depth: 2,
+            redo_depth: 0,
+            initial_snapshot_pending: false,
+            action_editor: Some(ActionEditorObservation {
+                surface: "properties".into(),
+                editor_session_id: 7,
+                draft_generation: 11,
+                stable_target_digest: 13,
+                editor_epoch: 29,
+                edit_generation: 31,
+                query_generation: 37,
+                query_request_generation: 41,
+                search_request_generation: 43,
+                test_request_generation: 47,
+                query_digest: digest(&["private authoring query"]),
+                authored_input_digest: 53,
+                assigned_binding_digest: 23,
+                selected_binding_digest: 0,
+                search_pending: false,
+                test_pending: false,
+                result_count: 0,
+                results_digest: 53,
+            }),
+        }
+    }
+
+    fn authoring_request(
+        phase: AuthoringObservationPhase,
+        request_id: u64,
+        baseline_request_id: Option<u64>,
+    ) -> AuthoringObservationRequest {
+        AuthoringObservationRequest {
+            schema_version: AUTHORING_SCHEMA_VERSION,
+            request_id,
+            phase,
+            baseline_request_id,
+        }
+    }
+
     #[test]
     fn baseline_is_frozen_and_terminal_captures_late_history_usage_and_root_state() {
         let identity = identity();
@@ -817,6 +1319,18 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_history_does_not_become_an_empty_successful_snapshot() {
+        let error = QueryObservationCounts::capture_available_history(None, &HashMap::new())
+            .expect_err("an unavailable history lock must fail the effect snapshot");
+        assert!(error.contains("history is unavailable"));
+
+        let empty =
+            QueryObservationCounts::capture_available_history(Some(Vec::new()), &HashMap::new())
+                .expect("a genuinely empty available history is a valid snapshot");
+        assert_eq!(empty.summary().history_entries, 0);
+    }
+
+    #[test]
     fn disabled_mailbox_does_not_poll_or_schedule_observation_work() {
         let mut mailbox = QueryObservationMailbox::from_environment(false);
         assert!(!mailbox.enabled());
@@ -850,5 +1364,404 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("exceeded its bound"))
         );
+    }
+
+    #[test]
+    fn authoring_file_mailbox_captures_full_baseline_and_terminal_without_runtime_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("observation");
+        let mut mailbox = QueryObservationMailbox {
+            base_path: Some(base.clone()),
+            ..QueryObservationMailbox::default()
+        };
+        let action = action();
+        let history = vec![matching_history_entry(&action)];
+        let usage = HashMap::from([(action.action.clone(), 3), ("other:usage".into(), 5)]);
+
+        let request_path = path_with_suffix(&base, AUTHORING_REQUEST_SUFFIX);
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&authoring_request(
+                AuthoringObservationPhase::Baseline,
+                68,
+                None,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!mailbox.has_request());
+        assert!(mailbox.has_authoring_request());
+        mailbox.advance_frame();
+        assert!(mailbox.poll_authoring(
+            root(10),
+            QueryObservationCounts::capture(&history, &usage),
+            Ok(authoring_editor()),
+        ));
+        let baseline: AuthoringObservationResponse = serde_json::from_slice(
+            &std::fs::read(path_with_suffix(&base, AUTHORING_RESPONSE_SUFFIX)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(baseline.status, "captured");
+        assert_eq!(baseline.phase, AuthoringObservationPhase::Baseline);
+        assert_eq!(baseline.baseline_request_id, None);
+        assert_eq!(baseline.after, None);
+        let frozen = baseline.before.expect("full GUI-owner baseline");
+        assert!(frozen.trace_boundary_sequence > frozen.trace_sequence);
+        assert_eq!(frozen.effects.history_entries, 1);
+        assert_eq!(frozen.effects.history_keys, 1);
+        assert_eq!(frozen.effects.usage_entries, 2);
+        assert_eq!(frozen.editor, authoring_editor());
+        let serialized = serde_json::to_string(&frozen).unwrap();
+        assert!(!serialized.contains("private authoring query"));
+
+        let mut snapshot_history = history.clone();
+        snapshot_history[0].timestamp += 1;
+        let mut snapshot_editor = authoring_editor();
+        snapshot_editor.generation += 1;
+        snapshot_editor.draft_dirty = false;
+        snapshot_editor.assigned_binding_digest += 1;
+        snapshot_editor.properties_dirty = false;
+        snapshot_editor.properties_staged_digest = None;
+        let snapshot_generation = snapshot_editor.generation;
+        let snapshot_binding_digest = snapshot_editor.assigned_binding_digest;
+        let action_editor = snapshot_editor.action_editor.as_mut().unwrap();
+        action_editor.surface = "inspector".into();
+        action_editor.draft_generation = snapshot_generation;
+        action_editor.assigned_binding_digest = snapshot_binding_digest;
+
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&authoring_request(
+                AuthoringObservationPhase::Snapshot,
+                69,
+                None,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        mailbox.advance_frame();
+        assert!(mailbox.poll_authoring(
+            root(20),
+            QueryObservationCounts::capture(
+                &snapshot_history,
+                &HashMap::from([(action.action.clone(), 4)]),
+            ),
+            Ok(snapshot_editor.clone()),
+        ));
+        let snapshot: AuthoringObservationResponse = serde_json::from_slice(
+            &std::fs::read(path_with_suffix(&base, AUTHORING_RESPONSE_SUFFIX)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.status, "captured");
+        assert_eq!(snapshot.phase, AuthoringObservationPhase::Snapshot);
+        assert_eq!(snapshot.request_id, 69);
+        assert_eq!(snapshot.baseline_request_id, None);
+        assert_eq!(snapshot.after, None);
+        let live_after_apply = snapshot.before.expect("live post-Apply owner snapshot");
+        assert!(live_after_apply.trace_boundary_sequence > live_after_apply.trace_sequence);
+        assert_ne!(live_after_apply.root, frozen.root);
+        assert_ne!(live_after_apply.effects, frozen.effects);
+        assert_eq!(live_after_apply.editor, snapshot_editor);
+        let retained = mailbox
+            .authoring_baseline
+            .as_ref()
+            .expect("snapshot must leave the browsing baseline pending");
+        assert_eq!(retained.request_id, 68);
+        assert_eq!(retained.frame_ordinal, frozen.frame_ordinal);
+        assert_eq!(retained.trace_sequence, frozen.trace_sequence);
+        assert_eq!(
+            retained.trace_boundary_sequence,
+            frozen.trace_boundary_sequence
+        );
+        assert_eq!(retained.root, frozen.root);
+        assert_eq!(retained.effects, frozen.effects);
+        assert_eq!(retained.editor, frozen.editor);
+
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&authoring_request(
+                AuthoringObservationPhase::Terminal,
+                70,
+                Some(68),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        mailbox.advance_frame();
+        assert!(mailbox.poll_authoring(
+            root(10),
+            QueryObservationCounts::capture(&history, &usage),
+            Ok(authoring_editor()),
+        ));
+        let terminal: AuthoringObservationResponse = serde_json::from_slice(
+            &std::fs::read(path_with_suffix(&base, AUTHORING_RESPONSE_SUFFIX)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(terminal.status, "captured");
+        assert_eq!(terminal.phase, AuthoringObservationPhase::Terminal);
+        assert_eq!(terminal.request_id, 70);
+        assert_eq!(terminal.baseline_request_id, Some(68));
+        assert!(terminal.observed_frame_ordinal > frozen.frame_ordinal);
+        assert_eq!(terminal.before, Some(frozen.clone()));
+        let after = terminal.after.expect("later GUI-owner terminal evidence");
+        assert!(after.trace_boundary_sequence > after.trace_sequence);
+        assert!(after.trace_sequence >= frozen.trace_boundary_sequence);
+        assert!(after.trace_boundary_sequence > frozen.trace_boundary_sequence);
+        assert_eq!(after.frame_ordinal, terminal.observed_frame_ordinal);
+        assert!(after.frame_ordinal > frozen.frame_ordinal);
+        assert_eq!(after.root, frozen.root);
+        assert_eq!(after.effects, frozen.effects);
+        assert_eq!(after.editor, frozen.editor);
+        assert!(!path_with_suffix(&base, ".response.json").exists());
+    }
+
+    #[test]
+    fn authoring_terminal_rejects_wrong_baseline_without_losing_frozen_evidence() {
+        let mut mailbox = QueryObservationMailbox {
+            base_path: Some(PathBuf::from("enabled-authoring-observation-test")),
+            ..QueryObservationMailbox::default()
+        };
+        mailbox.advance_frame();
+        let baseline = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Baseline, 10, None),
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(baseline.status, "captured");
+        mailbox.advance_frame();
+        let snapshot = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Snapshot, 11, None),
+            root(20),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(snapshot.status, "captured");
+        assert_eq!(snapshot.phase, AuthoringObservationPhase::Snapshot);
+        assert_eq!(mailbox.authoring_baseline.as_ref().unwrap().request_id, 10);
+        mailbox.advance_frame();
+        let stale = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Terminal, 12, Some(9)),
+            root(20),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(stale.status, "failed");
+        assert!(mailbox.authoring_baseline.is_some());
+        assert!(
+            stale
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("baseline"))
+        );
+
+        let snapshot_as_baseline = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Terminal, 13, Some(11)),
+            root(20),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(snapshot_as_baseline.status, "failed");
+        assert!(mailbox.authoring_baseline.is_some());
+
+        let replay = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Baseline, 10, None),
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(replay.status, "failed");
+        assert!(
+            replay
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("stale"))
+        );
+
+        mailbox.advance_frame();
+        let terminal = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Terminal, 14, Some(10)),
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(terminal.status, "captured");
+        assert_eq!(terminal.baseline_request_id, Some(10));
+        let before = terminal.before.expect("baseline evidence retained");
+        let after = terminal.after.expect("terminal evidence captured");
+        assert!(after.frame_ordinal > before.frame_ordinal);
+    }
+
+    #[test]
+    fn authoring_protocol_fails_closed_for_schema_and_live_state_overflow() {
+        let mut mailbox = QueryObservationMailbox {
+            base_path: Some(PathBuf::from("enabled-authoring-observation-test")),
+            ..QueryObservationMailbox::default()
+        };
+        mailbox.advance_frame();
+        let mut wrong_schema = authoring_request(AuthoringObservationPhase::Baseline, 1, None);
+        wrong_schema.schema_version = AUTHORING_SCHEMA_VERSION + 1;
+        let malformed = mailbox.apply_authoring_request(
+            wrong_schema,
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(malformed.status, "failed");
+        assert!(mailbox.authoring_baseline.is_none());
+
+        let overflow = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Baseline, 2, None),
+            root(10),
+            Err("history observation exceeded its bounded key capacity".into()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(overflow.status, "failed");
+        assert!(
+            overflow
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("bounded"))
+        );
+        assert!(mailbox.authoring_baseline.is_none());
+
+        let unavailable_editor = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Baseline, 3, None),
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Err("Designer owner is unavailable".into()),
+        );
+        assert_eq!(unavailable_editor.status, "failed");
+        assert!(mailbox.authoring_baseline.is_none());
+
+        let baseline = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Baseline, 4, None),
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(baseline.status, "captured");
+        mailbox.advance_frame();
+        let terminal_overflow = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Terminal, 5, Some(4)),
+            root(10),
+            Err("usage observation exceeded its bounded key capacity".into()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(terminal_overflow.status, "failed");
+        assert!(mailbox.authoring_baseline.is_some());
+
+        let terminal = mailbox.apply_authoring_request(
+            authoring_request(AuthoringObservationPhase::Terminal, 6, Some(4)),
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        );
+        assert_eq!(terminal.status, "captured");
+        assert!(mailbox.authoring_baseline.is_none());
+    }
+
+    #[test]
+    fn authoring_effect_summary_covers_each_history_key_and_usage_entry() {
+        let action = action();
+        let history = vec![matching_history_entry(&action)];
+        let usage = HashMap::from([(action.action.clone(), 3), ("other:usage".into(), 5)]);
+        let initial = QueryObservationCounts::capture(&history, &usage)
+            .unwrap()
+            .summary();
+
+        let mut changed_history = history.clone();
+        changed_history[0].source = Some("keyboard".into());
+        changed_history[0].timestamp += 1;
+        changed_history[0].action.label.push_str(" changed");
+        let changed = QueryObservationCounts::capture(&changed_history, &usage)
+            .unwrap()
+            .summary();
+        assert_ne!(initial.history_digest, changed.history_digest);
+        assert_eq!(initial.usage_digest, changed.usage_digest);
+
+        let mut changed_usage = usage;
+        changed_usage.insert("other:usage".into(), 6);
+        let changed = QueryObservationCounts::capture(&history, &changed_usage)
+            .unwrap()
+            .summary();
+        assert_eq!(initial.history_digest, changed.history_digest);
+        assert_ne!(initial.usage_digest, changed.usage_digest);
+    }
+
+    #[test]
+    fn oversized_authoring_request_is_removed_and_acknowledged_as_failed() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("authoring-observation");
+        let request_path = path_with_suffix(&base, AUTHORING_REQUEST_SUFFIX);
+        std::fs::write(&request_path, vec![b'x'; MAX_REQUEST_BYTES + 1]).unwrap();
+        let mut mailbox = QueryObservationMailbox {
+            base_path: Some(base.clone()),
+            ..QueryObservationMailbox::default()
+        };
+        mailbox.advance_frame();
+        assert!(mailbox.has_authoring_request());
+        assert!(mailbox.poll_authoring(
+            root(10),
+            Ok(QueryObservationCounts::default()),
+            Ok(authoring_editor()),
+        ));
+        assert!(!request_path.exists());
+        let response: AuthoringObservationResponse = serde_json::from_slice(
+            &std::fs::read(path_with_suffix(&base, AUTHORING_RESPONSE_SUFFIX)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response.status, "failed");
+        assert!(
+            response
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("bound"))
+        );
+    }
+
+    #[test]
+    fn authoring_history_digest_preserves_order_and_full_entry_identity() {
+        let first = matching_history_entry(&action());
+        let mut second = first.clone();
+        second.query = "second history query".into();
+        second.query_lc = second.query.to_lowercase();
+        second.action.label = "Second action label".into();
+        second.timestamp = 2;
+
+        let forward =
+            QueryObservationCounts::capture(&[first.clone(), second.clone()], &HashMap::new())
+                .unwrap()
+                .summary();
+        let reversed =
+            QueryObservationCounts::capture(&[second.clone(), first.clone()], &HashMap::new())
+                .unwrap()
+                .summary();
+        assert_eq!(forward.history_entries, 2);
+        assert_ne!(forward.history_digest, reversed.history_digest);
+
+        let mut timestamp_changed = first.clone();
+        timestamp_changed.timestamp += 1;
+        let timestamp = QueryObservationCounts::capture(&[timestamp_changed], &HashMap::new())
+            .unwrap()
+            .summary();
+        let original = QueryObservationCounts::capture(&[first.clone()], &HashMap::new())
+            .unwrap()
+            .summary();
+        assert_ne!(original.history_digest, timestamp.history_digest);
+
+        let mut label_changed = first.clone();
+        label_changed.action.label.push_str(" different");
+        let label = QueryObservationCounts::capture(&[label_changed], &HashMap::new())
+            .unwrap()
+            .summary();
+        assert_ne!(original.history_digest, label.history_digest);
+
+        let mut args_presence_changed = first;
+        args_presence_changed.action.args = Some(String::new());
+        let args = QueryObservationCounts::capture(&[args_presence_changed], &HashMap::new())
+            .unwrap()
+            .summary();
+        assert_ne!(original.history_digest, args.history_digest);
     }
 }

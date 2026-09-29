@@ -60,6 +60,15 @@ impl LauncherApp {
                 WatchEvent::RadialDeferredSearchReady { envelope, result } => {
                     self.complete_deferred_radial_search(envelope, result)
                 }
+                WatchEvent::RadialAuthoringSearchReady { request, result } => {
+                    self.complete_authoring_provider_search(request, result)
+                }
+                WatchEvent::RadialAuthoringSearchFailed { request, reason } => {
+                    self.fail_authoring_provider_search_from_provider(request, reason)
+                }
+                WatchEvent::AuthoringProviderCapacityAvailable => {
+                    self.start_next_authoring_provider_search()
+                }
                 WatchEvent::RadialInvalidate => {
                     self.radial_expected_diagnostics.clear();
                     self.invalidate_radial_leases();

@@ -59,6 +59,12 @@ pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
 
+pub(crate) use radial_editor::{
+    AuthoringBindingEditorIdentity, BindingEditorScope, BindingEditorSlot, BindingEditorSurface,
+};
+pub(crate) use state::AuthoringProviderSearchPurpose;
+pub use state::AuthoringProviderSearchRequest;
+
 pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
 
 pub use add_action_dialog::AddActionDialog;
@@ -3872,6 +3878,9 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::RadialPrepare(_)
             | WatchEvent::RadialResolveDeferred(_)
             | WatchEvent::RadialDeferredSearchReady { .. }
+            | WatchEvent::RadialAuthoringSearchReady { .. }
+            | WatchEvent::RadialAuthoringSearchFailed { .. }
+            | WatchEvent::AuthoringProviderCapacityAvailable
             | WatchEvent::RadialInvalidate
             | WatchEvent::RadialConfigDiagnostic(_)
             | WatchEvent::RadialRuntimeDiagnostic(_)

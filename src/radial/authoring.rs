@@ -166,7 +166,7 @@ impl AuthoringSnapshot {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum StableSelection {
     Menu(MenuId),
     Ring {
@@ -1345,6 +1345,10 @@ impl RadialAuthoringSession {
 
     pub fn is_initial_snapshot_pending(&self) -> bool {
         self.authoritative_snapshot_required
+    }
+
+    pub(crate) fn acceptance_history_depths(&self) -> (usize, usize) {
+        (self.history.undo.len(), self.history.redo.len())
     }
 
     /// A GUI session seeded from the starter document must stay read-only

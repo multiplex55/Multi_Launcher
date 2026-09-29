@@ -47,6 +47,23 @@ impl UniversalActionCatalogSnapshot {
         PersistedActionCatalog::new(self.entries.clone())
     }
 
+    pub(crate) fn resolve_persisted_action(
+        &self,
+        reference: &PersistedUniversalActionRef,
+        surface: ActionSurface,
+        query: &str,
+    ) -> Result<
+        crate::universal_actions::ResolvedPersistedAction,
+        crate::universal_actions::PersistedActionUnavailable,
+    > {
+        PersistedActionCatalog::resolve_from_entries_with_context(
+            &self.entries,
+            reference,
+            &UniversalActionRegistry,
+            |target| action_resolution_context_for_target(target, surface, query),
+        )
+    }
+
     pub(super) fn extend(&mut self, entries: impl IntoIterator<Item = ResolvedActionTarget>) {
         self.entries.extend(entries);
     }
@@ -93,6 +110,11 @@ impl AfterActionCompatibility {
 pub(crate) struct UniversalActionPickerRow {
     /// Exact legacy command identifying the target shown in this row.
     pub(crate) target_command: String,
+    /// Human-readable target identity, rendered inline so duplicate action
+    /// names never depend on a hover tooltip for disambiguation.
+    pub(crate) target_title: String,
+    pub(crate) target_type: String,
+    pub(crate) target_disambiguator: String,
     /// Runtime-only source position used by the native acceptance harness to
     /// identify a custom action without exposing its private label or command.
     pub(crate) custom_action_index: Option<usize>,
@@ -125,6 +147,15 @@ impl UniversalActionPickerRow {
             }),
         })
     }
+
+    pub(crate) fn display_label(&self) -> String {
+        target_action_display_label(
+            &self.target_title,
+            &self.target_type,
+            &self.target_disambiguator,
+            &self.presentation.label,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -145,37 +176,39 @@ impl UniversalActionAuthoringCatalog {
         let registry = UniversalActionRegistry;
         let mut rows = Vec::new();
         for target in &snapshot.entries {
-            let persistent = target.target.persistent_ref();
-            let search_text = [
-                target.selected_action.label.as_str(),
-                target.selected_action.desc.as_str(),
-                target.selected_action.action.as_str(),
-                target.selected_action.args.as_deref().unwrap_or_default(),
-            ]
-            .join(" ");
-            let context = ActionResolutionContext::new(ActionSurface::RadialMenu, query);
-            for action in registry.resolve(target, &context) {
-                let binding = persistent.clone().map(|target| ActionBinding::Persisted {
-                    action: PersistedUniversalActionRef {
-                        target: Some(target),
-                        action_id: action.id.clone(),
-                    },
-                });
-                rows.push(picker_row(
-                    target.selected_action.action.clone(),
-                    target.custom_action_index,
-                    search_text.clone(),
-                    action,
-                    binding,
-                    if persistent.is_some() {
-                        PickerPersistence::Persisted
-                    } else {
-                        PickerPersistence::Ephemeral
-                    },
-                ));
-            }
+            let context = action_resolution_context_for_target(
+                &target.target,
+                ActionSurface::RadialMenu,
+                query,
+            );
+            rows.extend(rows_for_target(target, &registry, &context));
         }
 
+        rows.extend(Self::contextual_window_rows(invocation));
+
+        rows.retain(|row| matches_query(row, query));
+        rows.sort_by(|left, right| {
+            left.presentation
+                .label
+                .to_lowercase()
+                .cmp(&right.presentation.label.to_lowercase())
+                .then_with(|| left.target_command.cmp(&right.target_command))
+                .then_with(|| left.action_id.cmp(&right.action_id))
+        });
+        rows.dedup_by(|left, right| {
+            left.binding == right.binding
+                && left.target_command == right.target_command
+                && left.action_id == right.action_id
+        });
+        Self { rows }
+    }
+
+    pub(crate) fn contextual_window_rows(
+        invocation: &InvocationContext,
+    ) -> Vec<UniversalActionPickerRow> {
+        let registry = UniversalActionRegistry;
+        let context = ActionResolutionContext::new(ActionSurface::RadialMenu, "");
+        let mut rows = Vec::new();
         for selector in [
             TargetSelector::CapturedForeground,
             TargetSelector::UnderPointer,
@@ -195,7 +228,6 @@ impl UniversalActionAuthoringCatalog {
                 },
                 resolved_window,
             );
-            let context = ActionResolutionContext::new(ActionSurface::RadialMenu, query);
             for action in registry.resolve(&target, &context) {
                 let binding = Some(ActionBinding::Contextual {
                     selector: selector.clone(),
@@ -208,6 +240,12 @@ impl UniversalActionAuthoringCatalog {
                     action,
                     binding,
                     PickerPersistence::Contextual,
+                );
+                row.target_title = target.selected_action.label.clone();
+                row.target_type = "Contextual window".into();
+                row.target_disambiguator = window.map_or_else(
+                    || selector_label(&selector).to_owned(),
+                    |window| format!("{} · PID {}", selector_label(&selector), window.pid),
                 );
                 if window.is_none() {
                     let reason = format!(
@@ -222,23 +260,188 @@ impl UniversalActionAuthoringCatalog {
                 rows.push(row);
             }
         }
+        rows
+    }
 
-        rows.retain(|row| matches_query(row, query));
-        rows.sort_by(|left, right| {
-            left.presentation
-                .label
-                .to_lowercase()
-                .cmp(&right.presentation.label.to_lowercase())
-                .then_with(|| left.target_command.cmp(&right.target_command))
-                .then_with(|| left.action_id.cmp(&right.action_id))
-        });
-        rows.dedup_by(|left, right| {
-            left.binding == right.binding
-                && left.target_command == right.target_command
-                && left.action_id == right.action_id
-        });
+    fn from_ranked_targets(
+        targets: impl IntoIterator<Item = ResolvedActionTarget>,
+        query: &str,
+    ) -> Self {
+        let registry = UniversalActionRegistry;
+        let mut rows = Vec::new();
+        for target in targets {
+            let context = action_resolution_context_for_target(
+                &target.target,
+                ActionSurface::RadialMenu,
+                query,
+            );
+            rows.extend(rows_for_target(&target, &registry, &context));
+        }
         Self { rows }
     }
+
+    pub(crate) fn row_for_semantic_action(
+        target: &ResolvedActionTarget,
+        action_id: &crate::universal_actions::ActionId,
+        query: &str,
+    ) -> Option<UniversalActionPickerRow> {
+        let context =
+            action_resolution_context_for_target(&target.target, ActionSurface::RadialMenu, query);
+        rows_for_target(target, &UniversalActionRegistry, &context)
+            .into_iter()
+            .find(|row| &row.action_id == action_id)
+    }
+}
+
+fn rows_for_target(
+    target: &ResolvedActionTarget,
+    registry: &UniversalActionRegistry,
+    context: &ActionResolutionContext<'_>,
+) -> Vec<UniversalActionPickerRow> {
+    let persistent = target.target.persistent_ref();
+    let search_text = [
+        target.selected_action.label.as_str(),
+        target.selected_action.desc.as_str(),
+        target.selected_action.action.as_str(),
+        target.selected_action.args.as_deref().unwrap_or_default(),
+    ]
+    .join(" ");
+    let target_title = target_title(target);
+    let target_type = target_type(&target.target).to_owned();
+    let target_disambiguator = target_disambiguator(target);
+    registry
+        .resolve(target, context)
+        .into_iter()
+        .map(|action| {
+            let binding = persistent.clone().map(|target| ActionBinding::Persisted {
+                action: PersistedUniversalActionRef {
+                    target: Some(target),
+                    action_id: action.id.clone(),
+                },
+            });
+            let mut row = picker_row(
+                target.selected_action.action.clone(),
+                target.custom_action_index,
+                search_text.clone(),
+                action,
+                binding,
+                if persistent.is_some() {
+                    PickerPersistence::Persisted
+                } else {
+                    PickerPersistence::Ephemeral
+                },
+            );
+            row.target_title = target_title.clone();
+            row.target_type = target_type.clone();
+            row.target_disambiguator = target_disambiguator.clone();
+            row
+        })
+        .collect()
+}
+
+fn target_title(target: &ResolvedActionTarget) -> String {
+    match &target.target {
+        ActionTarget::Generic { .. } | ActionTarget::CustomAction { .. } => {
+            target.selected_action.label.clone()
+        }
+        ActionTarget::Folder { .. } | ActionTarget::Tempfile { .. } => {
+            target.selected_action.label.clone()
+        }
+        ActionTarget::Bookmark { .. } => target.selected_action.label.clone(),
+        ActionTarget::Timer { .. } | ActionTarget::Stopwatch { .. } => {
+            target.selected_action.label.clone()
+        }
+        ActionTarget::Snippet { alias } => alias.clone(),
+        ActionTarget::Note { .. } => target.selected_action.label.clone(),
+        ActionTarget::ClipboardEntry { .. } => target.selected_action.label.clone(),
+        ActionTarget::Todo { .. } => target.selected_action.label.clone(),
+        ActionTarget::Window { .. } => target.selected_action.label.clone(),
+        ActionTarget::MkMacro { .. } => target.selected_action.label.clone(),
+        ActionTarget::BrowserTab { .. } => target.selected_action.label.clone(),
+    }
+}
+
+fn target_type(target: &ActionTarget) -> &'static str {
+    match target {
+        ActionTarget::Generic { .. } => "Action",
+        ActionTarget::CustomAction { .. } => "Custom action",
+        ActionTarget::Folder { .. } => "Folder",
+        ActionTarget::Bookmark { .. } => "Bookmark",
+        ActionTarget::Timer { .. } => "Timer",
+        ActionTarget::Stopwatch { .. } => "Stopwatch",
+        ActionTarget::Snippet { .. } => "Snippet",
+        ActionTarget::Tempfile { .. } => "Temporary file",
+        ActionTarget::Note { .. } => "Note",
+        ActionTarget::ClipboardEntry { .. } => "Clipboard entry",
+        ActionTarget::Todo { .. } => "Todo",
+        ActionTarget::Window { .. } => "Window",
+        ActionTarget::MkMacro { .. } => "Macro",
+        ActionTarget::BrowserTab { .. } => "Browser tab",
+    }
+}
+
+fn target_disambiguator(target: &ResolvedActionTarget) -> String {
+    match &target.target {
+        ActionTarget::Note { slug } => format!("slug {slug}"),
+        ActionTarget::Timer { id } => format!("timer {id}"),
+        ActionTarget::Stopwatch { id } => format!("stopwatch {id}"),
+        ActionTarget::ClipboardEntry { index } => format!("live slot {}", index + 1),
+        ActionTarget::Todo { index } => format!("live item {}", index + 1),
+        ActionTarget::Window { .. } => "live window".into(),
+        ActionTarget::MkMacro { id } => format!("macro {id}"),
+        ActionTarget::BrowserTab { url, .. } => url
+            .as_ref()
+            .map(|url| format!("URL {url}"))
+            .unwrap_or_else(|| "live tab".into()),
+        ActionTarget::CustomAction { index, .. } => format!("custom action {}", index + 1),
+        ActionTarget::Folder { path } | ActionTarget::Tempfile { path } => path.clone(),
+        ActionTarget::Bookmark { url } => url.clone(),
+        ActionTarget::Generic { .. } | ActionTarget::Snippet { .. } => String::new(),
+    }
+}
+
+fn target_action_display_label(
+    title: &str,
+    target_type: &str,
+    disambiguator: &str,
+    action_label: &str,
+) -> String {
+    let mut target = format!("{title} · {target_type}");
+    if !disambiguator.is_empty() {
+        target.push_str(&format!(" · {disambiguator}"));
+    }
+    format!("{target} — {action_label}")
+}
+
+pub(super) fn resolved_action_display_label(
+    target: &ResolvedActionTarget,
+    action: &UniversalAction,
+    surface: ActionSurface,
+) -> String {
+    target_action_display_label(
+        &target_title(target),
+        target_type(&target.target),
+        &target_disambiguator(target),
+        &action.effective_presentation(surface).label,
+    )
+}
+
+pub(super) fn action_resolution_context_for_target<'a>(
+    target: &ActionTarget,
+    surface: ActionSurface,
+    query: &'a str,
+) -> ActionResolutionContext<'a> {
+    let mut context = ActionResolutionContext::new(surface, query);
+    match target {
+        ActionTarget::Timer { id } => {
+            context.timer_paused = crate::plugins::timer::timer_paused(*id);
+        }
+        ActionTarget::Stopwatch { id } => {
+            context.stopwatch_paused = crate::plugins::stopwatch::stopwatch_paused(*id);
+        }
+        _ => {}
+    }
+    context
 }
 
 fn picker_row(
@@ -261,6 +464,9 @@ fn picker_row(
     let interaction = interaction_requirement(&action);
     UniversalActionPickerRow {
         target_command,
+        target_title: String::new(),
+        target_type: String::new(),
+        target_disambiguator: String::new(),
         custom_action_index,
         search_text,
         action_id: action.id,
@@ -338,6 +544,143 @@ fn resolved_window(window: &WindowIdentity) -> ResolvedActionTarget {
 }
 
 impl LauncherApp {
+    pub(super) fn authoring_catalog_for_ranked_actions(
+        &self,
+        actions: &[Action],
+        query: &str,
+    ) -> UniversalActionAuthoringCatalog {
+        let custom_len = self.custom_len.min(self.actions.len());
+        let resolver_context = ActionTargetResolverContext::new(
+            &self.folder_aliases,
+            &self.bookmark_aliases,
+            &self.actions[..custom_len],
+        );
+        let targets = actions
+            .iter()
+            .map(|action| ActionTargetResolver.resolve(action, &resolver_context));
+        UniversalActionAuthoringCatalog::from_ranked_targets(targets, query)
+    }
+
+    pub(super) fn resolve_launcher_result_action(
+        &self,
+        selected: &Action,
+        query: &str,
+    ) -> Result<(ResolvedActionTarget, UniversalAction), String> {
+        let custom_len = self.custom_len.min(self.actions.len());
+        let resolver_context = ActionTargetResolverContext::new(
+            &self.folder_aliases,
+            &self.bookmark_aliases,
+            &self.actions[..custom_len],
+        );
+        let resolved = ActionTargetResolver.resolve(selected, &resolver_context);
+        let resolution_context = action_resolution_context_for_target(
+            &resolved.target,
+            ActionSurface::RadialMenu,
+            query,
+        );
+        let actions = UniversalActionRegistry.resolve(&resolved, &resolution_context);
+        let parsed = crate::commands::parse_action(selected).ok();
+        let action = actions
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    (&candidate.operation, parsed.as_ref()),
+                    (
+                        crate::universal_actions::UniversalActionOperation::Command {
+                            command,
+                            original_action,
+                        },
+                        Some(parsed),
+                    ) if command == parsed && original_action == selected
+                )
+            })
+            .or_else(|| {
+                actions.iter().find(|candidate| {
+                    candidate.id == crate::universal_actions::action_ids::RESULT_EXECUTE
+                })
+            })
+            .cloned()
+            .ok_or_else(|| {
+                "The first launcher result has no executable primary action".to_owned()
+            })?;
+        if let Some(reason) = action.availability.disabled_reason() {
+            return Err(reason.to_owned());
+        }
+        Ok((resolved, action))
+    }
+
+    pub(super) fn resolve_exact_command_action(
+        &self,
+        command: &str,
+        args: Option<&str>,
+        query: &str,
+    ) -> Result<(ResolvedActionTarget, UniversalAction), String> {
+        let binding = ActionBinding::ExactCommand {
+            command: command.to_owned(),
+            args: args.map(str::to_owned),
+        };
+        let preparation = crate::radial::bindings::prepare_deferred_binding(&binding)
+            .ok_or_else(|| "Exact command is not a deferred radial binding".to_owned())?;
+        let (parsed, disposition) = match preparation.binding {
+            crate::radial::dynamic::FrozenBinding::Deferred {
+                kind: crate::radial::dynamic::DeferredBindingKind::ExactCommand { disposition, .. },
+                parsed_command: Some(parsed),
+                ..
+            } => (parsed, disposition),
+            _ => {
+                return Err(format!(
+                    "Saved exact command could not be parsed: {command}"
+                ));
+            }
+        };
+        if disposition == crate::radial::dynamic::ExactCommandDisposition::Invalid {
+            return Err(format!(
+                "Saved exact command could not be parsed: {command}"
+            ));
+        }
+        let action = Action {
+            label: command.to_owned(),
+            desc: "Saved exact command".into(),
+            action: command.to_owned(),
+            args: args.map(str::to_owned),
+        };
+        let custom_len = self.custom_len.min(self.actions.len());
+        let resolver_context = ActionTargetResolverContext::new(
+            &self.folder_aliases,
+            &self.bookmark_aliases,
+            &self.actions[..custom_len],
+        );
+        let resolved = ActionTargetResolver.resolve(&action, &resolver_context);
+        let resolution_context = action_resolution_context_for_target(
+            &resolved.target,
+            ActionSurface::RadialMenu,
+            query,
+        );
+        let actions = UniversalActionRegistry.resolve(&resolved, &resolution_context);
+        let selected = actions
+            .iter()
+            .find(|candidate| {
+                matches!(
+                    &candidate.operation,
+                    crate::universal_actions::UniversalActionOperation::Command {
+                        command: candidate_command,
+                        original_action,
+                    } if candidate_command == &parsed && original_action == &action
+                )
+            })
+            .or_else(|| {
+                actions.iter().find(|candidate| {
+                    candidate.id == crate::universal_actions::action_ids::RESULT_EXECUTE
+                })
+            })
+            .cloned()
+            .ok_or_else(|| "Saved exact command has no safe radial execution route".to_owned())?;
+        if let Some(reason) = selected.availability.disabled_reason() {
+            return Err(reason.to_owned());
+        }
+        Ok((resolved, selected))
+    }
+
     fn authoring_catalog_demand(&self) -> AuthoringCatalogDemand {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         crate::actions::actions_version().hash(&mut hasher);
@@ -583,80 +926,265 @@ impl LauncherApp {
         )
     }
 
+    pub(crate) fn resolve_authoring_binding_action(
+        &self,
+        binding: &ActionBinding,
+        invocation: &InvocationContext,
+        history_query: &str,
+        selected_query_action: Option<&Action>,
+    ) -> Result<UniversalAction, String> {
+        match binding {
+            ActionBinding::Persisted { .. } | ActionBinding::Contextual { .. } => {
+                let catalog = self.universal_action_catalog_snapshot().persisted_catalog();
+                RadialBindingResolver::new(&catalog, &UniversalActionRegistry)
+                    .resolve_with_context(
+                        binding,
+                        invocation,
+                        history_query,
+                        action_resolution_context_for_target,
+                    )
+                    .map(|prepared| prepared.action)
+                    .map_err(|reason| format!("Action is no longer available: {reason:?}"))
+            }
+            ActionBinding::LauncherQuery {
+                query,
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            } => {
+                let action = Action {
+                    label: query.clone(),
+                    desc: "Saved launcher query".into(),
+                    action: format!("query:{query}"),
+                    args: None,
+                };
+                self.resolve_launcher_result_action(&action, query)
+                    .map(|(_, action)| action)
+            }
+            ActionBinding::LauncherQuery {
+                mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+                ..
+            } => selected_query_action
+                .ok_or_else(|| "Auto Submit Test requires a current first search result".to_owned())
+                .and_then(|selected| {
+                    self.resolve_launcher_result_action(selected, history_query)
+                        .map(|(_, action)| action)
+                }),
+            ActionBinding::ExactCommand { command, args } => self
+                .resolve_exact_command_action(command, args.as_deref(), history_query)
+                .map(|(_, action)| action),
+        }
+    }
+
     pub(crate) fn test_radial_authoring_action(
         &mut self,
         binding: &ActionBinding,
         invocation: &InvocationContext,
         history_query: &str,
     ) -> super::universal_action_executor::UniversalActionExecution {
-        let snapshot = self.universal_action_catalog_snapshot();
-        let catalog = snapshot.persisted_catalog();
-        let registry = UniversalActionRegistry;
-        let prepared = RadialBindingResolver {
-            catalog: &catalog,
-            registry: &registry,
+        self.test_radial_authoring_action_correlated(
+            binding,
+            invocation,
+            history_query,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn test_radial_authoring_action_for_editor(
+        &mut self,
+        binding: &ActionBinding,
+        invocation: &InvocationContext,
+        history_query: &str,
+        identity: &crate::gui::radial_editor::action_editor::AuthoringBindingEditorIdentity,
+        selected_query_action: Option<&Action>,
+        provider_revision: Option<u64>,
+        result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+    ) -> super::universal_action_executor::UniversalActionExecution {
+        self.test_radial_authoring_action_correlated(
+            binding,
+            invocation,
+            history_query,
+            Some(identity),
+            selected_query_action,
+            provider_revision,
+            result_catalog_versions,
+        )
+    }
+
+    fn test_radial_authoring_action_correlated(
+        &mut self,
+        binding: &ActionBinding,
+        invocation: &InvocationContext,
+        history_query: &str,
+        identity: Option<&crate::gui::radial_editor::action_editor::AuthoringBindingEditorIdentity>,
+        selected_query_action: Option<&Action>,
+        provider_revision: Option<u64>,
+        result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+    ) -> super::universal_action_executor::UniversalActionExecution {
+        if let Some(identity) = identity
+            && !self
+                .radial_editor
+                .lock()
+                .ok()
+                .is_some_and(|editor| editor.action_test_request_is_current(identity, binding))
+        {
+            return super::universal_action_executor::UniversalActionExecution::Unavailable;
         }
-        .resolve(binding, invocation, history_query);
-        match prepared {
-            Ok(prepared) => {
-                let captured_identity = match binding {
-                    ActionBinding::Contextual { selector, .. } => {
-                        selected_window(invocation, selector).map(|window| {
-                            crate::window_catalog::WindowTargetIdentity {
-                                hwnd: window.hwnd,
-                                pid: window.pid,
-                                executable: window.process_name.clone(),
-                                process_path: window.process_path.clone(),
-                                class_name: window.class_name.clone(),
-                            }
-                        })
-                    }
-                    ActionBinding::Persisted { .. } => None,
-                    ActionBinding::LauncherQuery { .. } | ActionBinding::ExactCommand { .. } => {
-                        None
-                    }
-                };
-                if let Some(identity) = captured_identity.as_ref()
-                    && !self
-                        .plugins
-                        .internal_services()
-                        .window_catalog
-                        .describe_current(identity.hwnd)
-                        .is_some_and(|window| identity.matches(&window))
-                {
-                    self.report_error_message(
-                        "radial_authoring.test_action",
-                        "Sampled contextual window is no longer available",
-                    );
-                    return super::universal_action_executor::UniversalActionExecution::Unavailable;
-                }
-                let window_catalog_generation =
-                    self.plugins.internal_services().window_catalog.generation();
-                let result = self.execute_radial_authoring_test_action(
-                    prepared.action,
-                    persisted_request(binding),
-                    history_query,
-                );
-                if result
-                    == super::universal_action_executor::UniversalActionExecution::ConfirmationRequired
-                    && let Some(pending) = self.pending_universal_confirm.as_mut()
-                {
-                    pending.authoring_revalidation = Some(super::AuthoringActionRevalidation {
-                        binding: binding.clone(),
-                        invocation: invocation.clone(),
-                        captured_identity,
-                        window_catalog_generation,
-                    });
-                }
-                result
-            }
+        let resolved = self.resolve_authoring_binding_action(
+            binding,
+            invocation,
+            history_query,
+            selected_query_action,
+        );
+        let action = match resolved {
+            Ok(action) => action,
             Err(reason) => {
-                self.report_error_message(
-                    "radial_authoring.test_action",
-                    format!("Action is no longer available: {reason:?}"),
-                );
-                super::universal_action_executor::UniversalActionExecution::Unavailable
+                self.fallback_authoring_execute_first_query(binding, &reason);
+                self.report_error_message("radial_authoring.test_action", reason.clone());
+                if let Some(identity) = identity {
+                    self.finish_authoring_test_editor(identity, binding, Err(reason));
+                }
+                return super::universal_action_executor::UniversalActionExecution::Unavailable;
             }
+        };
+        let runtime_identity = match super::radial_actions::runtime_identity_for_target(
+            &action.target,
+            &self.plugins,
+            result_catalog_versions,
+        ) {
+            Ok(identity) => identity,
+            Err(reason) => {
+                let reason = reason.to_owned();
+                self.fallback_authoring_execute_first_query(binding, &reason);
+                self.report_error_message("radial_authoring.test_action", &reason);
+                if let Some(identity) = identity {
+                    self.finish_authoring_test_editor(identity, binding, Err(reason));
+                }
+                return super::universal_action_executor::UniversalActionExecution::Unavailable;
+            }
+        };
+        let captured_identity = match binding {
+            ActionBinding::Contextual { selector, .. } => selected_window(invocation, selector)
+                .map(|window| crate::window_catalog::WindowTargetIdentity {
+                    hwnd: window.hwnd,
+                    pid: window.pid,
+                    executable: window.process_name.clone(),
+                    process_path: window.process_path.clone(),
+                    class_name: window.class_name.clone(),
+                }),
+            ActionBinding::Persisted { .. }
+            | ActionBinding::LauncherQuery { .. }
+            | ActionBinding::ExactCommand { .. } => None,
+        };
+        if let Some(captured) = captured_identity.as_ref()
+            && !self
+                .plugins
+                .internal_services()
+                .window_catalog
+                .describe_current(captured.hwnd)
+                .is_some_and(|window| captured.matches(&window))
+        {
+            let reason = "Sampled contextual window is no longer available".to_owned();
+            self.report_error_message("radial_authoring.test_action", reason.clone());
+            if let Some(identity) = identity {
+                self.finish_authoring_test_editor(identity, binding, Err(reason));
+            }
+            return super::universal_action_executor::UniversalActionExecution::Unavailable;
+        }
+        if let Some(identity) = identity
+            && !self
+                .radial_editor
+                .lock()
+                .ok()
+                .is_some_and(|editor| editor.action_test_request_is_current(identity, binding))
+        {
+            return super::universal_action_executor::UniversalActionExecution::Unavailable;
+        }
+        if !super::radial_actions::runtime_identity_is_current(
+            &action.target,
+            runtime_identity.as_ref(),
+            &self.plugins,
+        ) {
+            let reason = "The selected runtime target changed before Test could run";
+            self.fallback_authoring_execute_first_query(binding, reason);
+            self.report_error_message("radial_authoring.test_action", reason);
+            if let Some(identity) = identity {
+                self.finish_authoring_test_editor(identity, binding, Err(reason.into()));
+            }
+            return super::universal_action_executor::UniversalActionExecution::Unavailable;
+        }
+        let window_catalog_generation =
+            self.plugins.internal_services().window_catalog.generation();
+        let execution = self.execute_radial_authoring_test_action(
+            action,
+            persisted_request(binding),
+            history_query,
+            matches!(
+                binding,
+                ActionBinding::LauncherQuery { .. } | ActionBinding::ExactCommand { .. }
+            ),
+        );
+        if execution
+            == super::universal_action_executor::UniversalActionExecution::ConfirmationRequired
+            && let Some(pending) = self.pending_universal_confirm.as_mut()
+        {
+            pending.authoring_revalidation = Some(super::AuthoringActionRevalidation {
+                binding: binding.clone(),
+                invocation: invocation.clone(),
+                captured_identity,
+                window_catalog_generation,
+                runtime_target: pending.action.target.clone(),
+                runtime_identity,
+                editor_identity: identity.cloned(),
+                selected_query_action: selected_query_action.cloned(),
+                provider_revision,
+                result_catalog_versions,
+            });
+        }
+        if let Some(identity) = identity {
+            if execution
+                == super::universal_action_executor::UniversalActionExecution::ConfirmationRequired
+            {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    let _ = editor.await_action_editor_confirmation(identity, binding);
+                }
+            } else {
+                let result = match execution {
+                    super::universal_action_executor::UniversalActionExecution::Executed => Ok(()),
+                    super::universal_action_executor::UniversalActionExecution::Unavailable => {
+                        Err("Action was not available for testing".into())
+                    }
+                    super::universal_action_executor::UniversalActionExecution::ConfirmationRequired => unreachable!(),
+                };
+                self.finish_authoring_test_editor(identity, binding, result);
+            }
+        }
+        execution
+    }
+
+    fn finish_authoring_test_editor(
+        &self,
+        identity: &crate::gui::radial_editor::action_editor::AuthoringBindingEditorIdentity,
+        binding: &ActionBinding,
+        result: Result<(), String>,
+    ) {
+        if let Ok(mut editor) = self.radial_editor.lock() {
+            let _ = editor.finish_action_editor_test(identity, binding, result);
+        }
+    }
+
+    pub(super) fn fallback_authoring_execute_first_query(
+        &mut self,
+        binding: &ActionBinding,
+        reason: &str,
+    ) {
+        if let ActionBinding::LauncherQuery {
+            query,
+            mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+        } = binding
+        {
+            self.open_deferred_query_fallback(query, super::ActivationSource::Click, reason);
         }
     }
 
@@ -665,6 +1193,7 @@ impl LauncherApp {
         action: UniversalAction,
         stable_request: Option<PersistedUniversalActionRef>,
         history_query: &str,
+        primary_invocation: bool,
     ) -> super::universal_action_executor::UniversalActionExecution {
         let root_policy = if matches!(
             interaction_requirement(&action),
@@ -682,7 +1211,7 @@ impl LauncherApp {
                 stable_request,
                 history_query: history_query.to_owned(),
                 root_policy,
-                primary_invocation: false,
+                primary_invocation,
             },
             None,
         )
@@ -757,6 +1286,215 @@ mod tests {
             recent_entries: Vec::new(),
             dashboard: std::sync::Arc::new(DashboardDataSnapshot::default()),
         }
+    }
+
+    struct TimerCleanup(u64);
+
+    impl Drop for TimerCleanup {
+        fn drop(&mut self) {
+            crate::plugins::timer::cancel_timer(self.0);
+        }
+    }
+
+    struct StopwatchCleanup(u64);
+
+    impl Drop for StopwatchCleanup {
+        fn drop(&mut self) {
+            let _ = crate::plugins::stopwatch::try_stop_stopwatch(self.0);
+        }
+    }
+
+    fn live_state_target(target: ActionTarget, selected_action: Action) -> ResolvedActionTarget {
+        ResolvedActionTarget {
+            target,
+            selected_action,
+            custom_action_index: None,
+        }
+    }
+
+    fn picker_action<'a>(
+        catalog: &'a UniversalActionAuthoringCatalog,
+        action_id: &crate::universal_actions::ActionId,
+    ) -> &'a UniversalActionPickerRow {
+        catalog
+            .rows()
+            .iter()
+            .find(|row| &row.action_id == action_id)
+            .expect("live timer or stopwatch action is in the picker")
+    }
+
+    fn frozen_runtime_binding(
+        target: &ResolvedActionTarget,
+        action_id: crate::universal_actions::ActionId,
+    ) -> crate::radial::dynamic::FrozenBinding {
+        crate::radial::dynamic::FrozenBinding::Runtime {
+            target: target.target.clone(),
+            selected_action: target.selected_action.clone(),
+            action_id,
+            identity: None,
+        }
+    }
+
+    fn prepared_disabled_reason(
+        result: Result<
+            crate::radial::bindings::PreparedBinding,
+            crate::radial::bindings::BindingUnavailable,
+        >,
+    ) -> Option<String> {
+        match result {
+            Ok(prepared) => {
+                assert!(prepared.action.availability.is_available());
+                None
+            }
+            Err(crate::radial::bindings::BindingUnavailable::DisabledAction { reason, .. }) => {
+                Some(reason)
+            }
+            Err(other) => panic!("unexpected target resolution failure: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn picker_and_runtime_resolver_follow_live_timer_and_stopwatch_state() {
+        let timer_name = format!("radial-action-context-{}", std::process::id());
+        crate::plugins::timer::start_timer_named(
+            std::time::Duration::from_secs(600),
+            Some(timer_name.clone()),
+            String::new(),
+        );
+        let timer_id = crate::plugins::timer::active_timers()
+            .into_iter()
+            .find_map(|(id, name, _, _)| (name == timer_name).then_some(id))
+            .expect("started timer is in the live catalog");
+        let _timer_cleanup = TimerCleanup(timer_id);
+        let timer = live_state_target(
+            ActionTarget::Timer { id: timer_id },
+            Action {
+                label: timer_name,
+                desc: "Timer".into(),
+                action: format!("timer:show:{timer_id}"),
+                args: None,
+            },
+        );
+        assert_eq!(timer.target.persistent_ref(), None);
+
+        let stopwatch_id = crate::plugins::stopwatch::start_stopwatch_named(Some(format!(
+            "radial-action-context-{}",
+            std::process::id()
+        )));
+        let _stopwatch_cleanup = StopwatchCleanup(stopwatch_id);
+        let stopwatch = live_state_target(
+            ActionTarget::Stopwatch { id: stopwatch_id },
+            Action {
+                label: "Live Stopwatch".into(),
+                desc: "Stopwatch".into(),
+                action: format!("timer:stopwatch:show:{stopwatch_id}"),
+                args: None,
+            },
+        );
+        assert_eq!(stopwatch.target.persistent_ref(), None);
+
+        let registry = UniversalActionRegistry;
+        let invocation = InvocationContext::empty(1);
+        let verify_target = |target: &ResolvedActionTarget,
+                             pause_id: &crate::universal_actions::ActionId,
+                             resume_id: &crate::universal_actions::ActionId,
+                             expected_pause: Option<&str>,
+                             expected_resume: Option<&str>| {
+            let authoring = UniversalActionAuthoringCatalog::build(
+                &snapshot(vec![target.clone()]),
+                &invocation,
+                "",
+            );
+            assert_eq!(
+                picker_action(&authoring, pause_id)
+                    .availability
+                    .disabled_reason(),
+                expected_pause
+            );
+            assert_eq!(
+                picker_action(&authoring, resume_id)
+                    .availability
+                    .disabled_reason(),
+                expected_resume
+            );
+
+            let runtime_catalog = PersistedActionCatalog::new(vec![target.clone()]);
+            let resolver = RadialBindingResolver::new(&runtime_catalog, &registry);
+            let pause = frozen_runtime_binding(target, pause_id.clone());
+            let resume = frozen_runtime_binding(target, resume_id.clone());
+            assert_eq!(
+                prepared_disabled_reason(resolver.resolve_frozen_with_context(
+                    &pause,
+                    &invocation,
+                    "",
+                    action_resolution_context_for_target,
+                )),
+                expected_pause.map(str::to_owned)
+            );
+            assert_eq!(
+                prepared_disabled_reason(resolver.resolve_frozen_with_context(
+                    &resume,
+                    &invocation,
+                    "",
+                    action_resolution_context_for_target,
+                )),
+                expected_resume.map(str::to_owned)
+            );
+        };
+
+        verify_target(
+            &timer,
+            &action_ids::TIMER_PAUSE,
+            &action_ids::TIMER_RESUME,
+            None,
+            Some("Timer is already running"),
+        );
+        assert_eq!(
+            crate::plugins::timer::try_pause_timer(timer_id),
+            crate::plugins::timer::TimerMutation::Updated
+        );
+        verify_target(
+            &timer,
+            &action_ids::TIMER_PAUSE,
+            &action_ids::TIMER_RESUME,
+            Some("Timer is already paused"),
+            None,
+        );
+        crate::plugins::timer::cancel_timer(timer_id);
+        verify_target(
+            &timer,
+            &action_ids::TIMER_PAUSE,
+            &action_ids::TIMER_RESUME,
+            Some("Timer is no longer available"),
+            Some("Timer is no longer available"),
+        );
+
+        verify_target(
+            &stopwatch,
+            &action_ids::STOPWATCH_PAUSE,
+            &action_ids::STOPWATCH_RESUME,
+            None,
+            Some("Stopwatch is already running"),
+        );
+        assert_eq!(
+            crate::plugins::stopwatch::try_pause_stopwatch(stopwatch_id),
+            crate::plugins::stopwatch::StopwatchMutation::Updated
+        );
+        verify_target(
+            &stopwatch,
+            &action_ids::STOPWATCH_PAUSE,
+            &action_ids::STOPWATCH_RESUME,
+            Some("Stopwatch is already paused"),
+            None,
+        );
+        let _ = crate::plugins::stopwatch::try_stop_stopwatch(stopwatch_id);
+        verify_target(
+            &stopwatch,
+            &action_ids::STOPWATCH_PAUSE,
+            &action_ids::STOPWATCH_RESUME,
+            Some("Stopwatch is no longer available"),
+            Some("Stopwatch is no longer available"),
+        );
     }
 
     fn install_live_window_catalog(
@@ -841,12 +1579,9 @@ mod tests {
             ..InvocationContext::empty(2)
         };
         let persisted = PersistedActionCatalog::new(Vec::new());
-        let prepared = RadialBindingResolver {
-            catalog: &persisted,
-            registry: &UniversalActionRegistry,
-        }
-        .resolve(&binding, &invocation, "")
-        .unwrap();
+        let prepared = RadialBindingResolver::new(&persisted, &UniversalActionRegistry)
+            .resolve(&binding, &invocation, "")
+            .unwrap();
         assert_eq!(prepared.action.target, ActionTarget::Window { hwnd: 808 });
     }
 
@@ -958,6 +1693,172 @@ mod tests {
         assert!(!filtered.rows().iter().any(|row| {
             row.custom_action_index != Some(63) && row.target_command == "zz_radial_acceptance_063"
         }));
+    }
+
+    #[test]
+    fn acceptance_fixture_queries_reach_real_ranked_actions_and_authoring_rows() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        let mut custom_actions = vec![
+            action("QMarker Alpha", "qmarker-alpha"),
+            action("QMarker Beta", "qmarker-beta"),
+        ];
+        custom_actions.extend((0..64).map(|index| {
+            action(
+                &format!("Radial Acceptance Harmless Action {index:03}"),
+                &format!("radial_acceptance_harmless_{index:03}"),
+            )
+        }));
+        for (index, custom_action) in custom_actions.iter_mut().enumerate().skip(34) {
+            custom_action.label = format!("Radial Acceptance Secondary Action {:03}", index - 2);
+        }
+        app.custom_len = custom_actions.len();
+        app.actions = std::sync::Arc::new(custom_actions);
+        app.update_action_cache();
+        app.plugins.register(Box::new(
+            crate::plugins::note::NotePlugin::fixture_for_authoring_search(&[
+                (
+                    "Shared Acceptance Note",
+                    "radial-acceptance-shared-a",
+                    "First duplicate-title target for radial authoring.",
+                ),
+                (
+                    "Shared Acceptance Note",
+                    "radial-acceptance-shared-b",
+                    "Second duplicate-title target for radial authoring.",
+                ),
+            ]),
+        ));
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.respect_plugin_capability = true;
+
+        let history_before =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap())
+                .expect("serialize the pre-search history snapshot");
+        let usage_before = app.usage.clone();
+        let activations_before = app.test_activation_trace.clone();
+
+        let app_query = "app Radial Acceptance Harmless Action";
+        app.query = app_query.into();
+        app.search();
+        assert!(app.resolved_grid_layout);
+        let app_outcome = app.search_read_only_outcome(app_query);
+        assert_eq!(
+            app_outcome.state,
+            crate::gui::search::LauncherSearchState::Results
+        );
+        assert_eq!(app_outcome.actions.len(), 32);
+        assert!(
+            app_outcome
+                .actions
+                .iter()
+                .all(|candidate| { candidate.action.starts_with("radial_acceptance_harmless_") })
+        );
+        let app_catalog = app.authoring_catalog_for_ranked_actions(&app_outcome.actions, app_query);
+        assert!(app_catalog.rows().len() > 50);
+        assert!(app_catalog.rows().len() <= 96);
+        let beyond_fifty_rank = app_outcome
+            .actions
+            .iter()
+            .position(|candidate| candidate.action == "radial_acceptance_harmless_030")
+            .expect("fixture custom action 030 should survive shared app ranking");
+        assert_eq!(beyond_fifty_rank, 30);
+        let ranked_custom = app_catalog
+            .rows()
+            .iter()
+            .find(|row| {
+                row.custom_action_index == Some(32)
+                    && row.target_command == "radial_acceptance_harmless_030"
+                    && row.action_id == action_ids::RESULT_EXECUTE
+            })
+            .expect("ranked Gate C custom target should expose its real primary action");
+        let ranked_custom_row = app_catalog
+            .rows()
+            .iter()
+            .position(|row| std::ptr::eq(row, ranked_custom))
+            .expect("selected action row should belong to the bounded catalog");
+        assert_eq!(
+            ranked_custom_row, 60,
+            "Execute row rank was {ranked_custom_row}"
+        );
+        assert_eq!(
+            ranked_custom.target_title,
+            "Radial Acceptance Harmless Action 030"
+        );
+        assert_eq!(ranked_custom.target_disambiguator, "custom action 33");
+        assert_eq!(ranked_custom.action_id, action_ids::RESULT_EXECUTE);
+        assert_eq!(
+            ranked_custom.presentation.label, "Execute",
+            "Gate C's readable custom-action label must follow the shared presentation"
+        );
+        assert_eq!(
+            ranked_custom.display_label(),
+            "Radial Acceptance Harmless Action 030 · Custom action · custom action 33 — Execute"
+        );
+        assert!(ranked_custom.assignment().is_ok());
+
+        let adjacent_edit_row = &app_catalog.rows()[61];
+        assert_eq!(adjacent_edit_row.custom_action_index, Some(32));
+        assert_eq!(
+            adjacent_edit_row.target_command,
+            "radial_acceptance_harmless_030"
+        );
+        assert_eq!(
+            adjacent_edit_row.target_title,
+            "Radial Acceptance Harmless Action 030"
+        );
+        assert_eq!(adjacent_edit_row.target_type, "Custom action");
+        assert_eq!(adjacent_edit_row.target_disambiguator, "custom action 33");
+        assert_eq!(adjacent_edit_row.action_id, action_ids::CUSTOM_ACTION_EDIT);
+        assert_eq!(adjacent_edit_row.presentation.label, "Edit App");
+        assert_eq!(
+            adjacent_edit_row.display_label(),
+            "Radial Acceptance Harmless Action 030 · Custom action · custom action 33 — Edit App"
+        );
+        assert!(adjacent_edit_row.assignment().is_ok());
+
+        let note_query = "note search Shared Acceptance";
+        app.query = note_query.into();
+        app.search();
+        assert!(!app.resolved_grid_layout);
+        let note_outcome = app.search_read_only_outcome(note_query);
+        assert_eq!(
+            note_outcome.state,
+            crate::gui::search::LauncherSearchState::Results
+        );
+        assert_eq!(
+            note_outcome
+                .actions
+                .iter()
+                .filter(|candidate| candidate
+                    .action
+                    .starts_with("note:open:radial-acceptance-shared-"))
+                .count(),
+            2
+        );
+        let note_catalog =
+            app.authoring_catalog_for_ranked_actions(&note_outcome.actions, note_query);
+        for slug in ["radial-acceptance-shared-a", "radial-acceptance-shared-b"] {
+            let row = note_catalog
+                .rows()
+                .iter()
+                .find(|row| {
+                    row.action_id == action_ids::NOTE_EDIT
+                        && row.target_disambiguator == format!("slug {slug}")
+                })
+                .expect("each duplicate note should expose the shared secondary Edit action");
+            assert_eq!(row.target_title, "Shared Acceptance Note");
+            assert_eq!(row.target_type, "Note");
+            assert!(row.display_label().contains(&format!("slug {slug}")));
+            assert!(row.assignment().is_ok());
+        }
+
+        let history_after =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap())
+                .expect("serialize the post-search history snapshot");
+        assert_eq!(history_after, history_before);
+        assert_eq!(app.usage, usage_before);
+        assert_eq!(app.test_activation_trace, activations_before);
     }
 
     #[test]
@@ -1149,7 +2050,12 @@ mod tests {
             operation: UniversalActionOperation::InvokePrimary(selected),
         };
         assert_eq!(
-            app.execute_radial_authoring_test_action(destructive, Some(stable), "authoring test"),
+            app.execute_radial_authoring_test_action(
+                destructive,
+                Some(stable),
+                "authoring test",
+                false,
+            ),
             super::super::universal_action_executor::UniversalActionExecution::ConfirmationRequired
         );
         assert!(app.resolve_pending_universal_action_confirmation(true));
@@ -1184,7 +2090,12 @@ mod tests {
             operation: UniversalActionOperation::InvokePrimary(selected),
         };
         assert_eq!(
-            app.execute_radial_authoring_test_action(destructive, Some(stable), "authoring test"),
+            app.execute_radial_authoring_test_action(
+                destructive,
+                Some(stable),
+                "authoring test",
+                false,
+            ),
             super::super::universal_action_executor::UniversalActionExecution::ConfirmationRequired
         );
 
@@ -1215,7 +2126,7 @@ mod tests {
             operation: UniversalActionOperation::InvokePrimary(selected),
         };
         assert_eq!(
-            app.execute_radial_authoring_test_action(destructive, None, "authoring test"),
+            app.execute_radial_authoring_test_action(destructive, None, "authoring test", false),
             super::super::universal_action_executor::UniversalActionExecution::ConfirmationRequired
         );
         assert!(app.resolve_pending_universal_action_confirmation(false));

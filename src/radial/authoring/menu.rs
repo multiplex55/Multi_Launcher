@@ -79,6 +79,12 @@ pub enum ResizeResolution {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ActionInsertDestination {
+    Cell(CellId),
+    Append,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MenuEditError {
     MissingEntity,
     DuplicateId,
@@ -92,6 +98,7 @@ pub enum MenuEditError {
     DynamicCell,
     StaleGeneration,
     LimitExceeded(&'static str),
+    KeepOpenIncompatible(crate::radial::handoff::InteractionRequirement),
     InvalidGeometry(String),
 }
 
@@ -282,6 +289,121 @@ pub fn set_cell_content(
     session
         .replace_document_atomic(document)
         .map_err(|_| MenuEditError::MissingEntity)
+}
+
+/// Add a semantic action binding to one explicit cell or append a new cell.
+/// The full candidate is validated before it crosses the session boundary,
+/// creating one atomic undo entry.
+pub fn action_insert_after_action_policy(
+    document: &RadialDocument,
+    menu: &MenuDefinition,
+    cell_policy: AfterActionPolicy,
+    binding: &crate::radial::model::ActionBinding,
+    confirm_close_tree: bool,
+) -> Result<AfterActionPolicy, crate::radial::handoff::InteractionRequirement> {
+    if crate::radial::model::effective_after_action(document, menu, cell_policy)
+        != AfterActionPolicy::KeepOpen
+    {
+        return Ok(cell_policy);
+    }
+    let Some(requirement) =
+        crate::radial::validation::keep_open_incompatibility_requirement(binding)
+    else {
+        return Ok(cell_policy);
+    };
+    if cell_policy == AfterActionPolicy::Inherit || confirm_close_tree {
+        Ok(AfterActionPolicy::CloseTree)
+    } else {
+        Err(requirement)
+    }
+}
+
+pub fn add_action_binding(
+    session: &mut RadialAuthoringSession,
+    menu_id: &MenuId,
+    ring_id: &RingId,
+    destination: ActionInsertDestination,
+    binding: crate::radial::model::ActionBinding,
+    suggested_label: &str,
+    replace_occupied: bool,
+    confirm_close_tree: bool,
+) -> Result<CellId, MenuEditError> {
+    let mut document = (*session.draft).clone();
+    let menu = document
+        .menus
+        .iter()
+        .find(|menu| &menu.id == menu_id)
+        .ok_or(MenuEditError::MissingEntity)?;
+    let cell_policy = match &destination {
+        ActionInsertDestination::Cell(cell_id) => {
+            let cell = find_ring(&document, menu_id, ring_id)?
+                .cells
+                .iter()
+                .find(|cell| &cell.id == cell_id)
+                .ok_or(MenuEditError::MissingEntity)?;
+            if !matches!(&cell.content, CellContent::Spacer) && !replace_occupied {
+                return Err(MenuEditError::DestinationOccupied);
+            }
+            cell.after_action
+        }
+        ActionInsertDestination::Append => {
+            if find_ring(&document, menu_id, ring_id)?.cells.len()
+                >= crate::radial::model::limits::MAX_CELLS_PER_RING
+            {
+                return Err(MenuEditError::LimitExceeded("cells per ring"));
+            }
+            AfterActionPolicy::Inherit
+        }
+    };
+    let after_action = action_insert_after_action_policy(
+        &document,
+        menu,
+        cell_policy,
+        &binding,
+        confirm_close_tree,
+    )
+    .map_err(MenuEditError::KeepOpenIncompatible)?;
+    let cell_id = match destination {
+        ActionInsertDestination::Cell(cell_id) => {
+            let cell = find_ring_mut(&mut document, menu_id, ring_id)?
+                .cells
+                .iter_mut()
+                .find(|cell| cell.id == cell_id)
+                .ok_or(MenuEditError::MissingEntity)?;
+            if !matches!(&cell.content, CellContent::Spacer) && !replace_occupied {
+                return Err(MenuEditError::DestinationOccupied);
+            }
+            if cell.label == "Spacer" || replace_occupied {
+                cell.label = suggested_label.to_owned();
+            }
+            cell.content = CellContent::Action { binding };
+            cell.after_action = after_action;
+            cell.id.clone()
+        }
+        ActionInsertDestination::Append => {
+            let id = session.allocate_cell_id("action");
+            let ring = find_ring_mut(&mut document, menu_id, ring_id)?;
+            if ring.cells.len() >= crate::radial::model::limits::MAX_CELLS_PER_RING {
+                return Err(MenuEditError::LimitExceeded("cells per ring"));
+            }
+            let mut cell = spacer_cell(id.clone());
+            cell.label = suggested_label.to_owned();
+            cell.content = CellContent::Action { binding };
+            cell.after_action = after_action;
+            ring.cells.push(cell);
+            id
+        }
+    };
+    validate_candidate(&document)?;
+    session
+        .replace_document_atomic(document)
+        .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
+    session.select(Some(StableSelection::Cell {
+        menu_id: menu_id.clone(),
+        ring_id: ring_id.clone(),
+        cell_id: cell_id.clone(),
+    }));
+    Ok(cell_id)
 }
 
 pub fn delete_menu(session: &mut RadialAuthoringSession, id: &MenuId) -> Result<(), MenuEditError> {
@@ -1558,6 +1680,281 @@ mod tests {
         cell.label = "Spacer".into();
         cell.content = CellContent::Spacer;
         session.draft = std::sync::Arc::new(document);
+    }
+
+    #[test]
+    fn add_action_binding_uses_one_atomic_edit_for_spacer_append_and_replace() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let menu_id = session.draft.menus[0].id.clone();
+        let ring_id = session.draft.menus[0].rings[0].id.clone();
+        let spacer_id = session.draft.menus[0].rings[0].cells[7].id.clone();
+        let original = session.draft.clone();
+        let binding = crate::radial::model::ActionBinding::ExactCommand {
+            command: "launcher:show".into(),
+            args: Some("--raw value".into()),
+        };
+
+        add_action_binding(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            ActionInsertDestination::Cell(spacer_id.clone()),
+            binding.clone(),
+            "Show launcher",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[7].label,
+            "Show launcher"
+        );
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[7].content,
+            CellContent::Action {
+                binding: binding.clone()
+            }
+        );
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[7].after_action,
+            AfterActionPolicy::CloseTree,
+            "an inherited StickyClick KeepOpen policy must close for launcher UI"
+        );
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*original);
+        assert!(!session.undo(), "insertion is one atomic history entry");
+
+        let occupied_id = session.draft.menus[0].rings[0].cells[0].id.clone();
+        let before_cancelled_replace = session.draft.clone();
+        assert_eq!(
+            add_action_binding(
+                &mut session,
+                &menu_id,
+                &ring_id,
+                ActionInsertDestination::Cell(occupied_id.clone()),
+                binding.clone(),
+                "Show launcher",
+                false,
+                false,
+            ),
+            Err(MenuEditError::DestinationOccupied)
+        );
+        assert_eq!(&*session.draft, &*before_cancelled_replace);
+
+        add_action_binding(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            ActionInsertDestination::Cell(occupied_id),
+            binding.clone(),
+            "Show launcher",
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[0].content,
+            CellContent::Action { binding }
+        );
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*before_cancelled_replace);
+        assert!(!session.undo(), "replace is one atomic history entry");
+
+        let mut append_fixture = (*session.draft).clone();
+        append_fixture.menus[0].rings[0].cell_radius = 24.0;
+        crate::radial::validation::validate(&append_fixture)
+            .expect("fixture geometry must support one appended cell");
+        session.draft = std::sync::Arc::new(append_fixture);
+        let before_append = session.draft.clone();
+        let original_len = session.draft.menus[0].rings[0].cells.len();
+        add_action_binding(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            ActionInsertDestination::Append,
+            crate::radial::model::ActionBinding::LauncherQuery {
+                query: "notes".into(),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            },
+            "Notes",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells.len(),
+            original_len + 1
+        );
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[original_len].after_action,
+            AfterActionPolicy::CloseTree
+        );
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*before_append);
+        assert!(!session.undo(), "append is one atomic history entry");
+    }
+
+    #[test]
+    fn add_action_binding_requires_explicit_close_choice_for_explicit_keep_open() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let menu_id = session.draft.menus[0].id.clone();
+        let ring_id = session.draft.menus[0].rings[0].id.clone();
+        let cell_id = session.draft.menus[0].rings[0].cells[7].id.clone();
+        let mut explicit_keep_open = (*session.draft).clone();
+        explicit_keep_open.menus[0].rings[0].cells[7].after_action = AfterActionPolicy::KeepOpen;
+        session.draft = std::sync::Arc::new(explicit_keep_open);
+        let before = session.draft.clone();
+        let binding = crate::radial::model::ActionBinding::LauncherQuery {
+            query: "notes".into(),
+            mode: crate::radial::model::QueryRunMode::OpenLauncher,
+        };
+
+        assert_eq!(
+            add_action_binding(
+                &mut session,
+                &menu_id,
+                &ring_id,
+                ActionInsertDestination::Cell(cell_id.clone()),
+                binding.clone(),
+                "Notes",
+                false,
+                false,
+            ),
+            Err(MenuEditError::KeepOpenIncompatible(
+                crate::radial::handoff::InteractionRequirement::Deferred
+            ))
+        );
+        assert_eq!(&*session.draft, &*before);
+        assert!(!session.undo());
+
+        add_action_binding(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            ActionInsertDestination::Cell(cell_id.clone()),
+            binding.clone(),
+            "Notes",
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[7].content,
+            CellContent::Action { binding }
+        );
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[7].after_action,
+            AfterActionPolicy::CloseTree
+        );
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*before);
+        assert!(
+            !session.undo(),
+            "policy override and insertion are one atomic edit"
+        );
+    }
+
+    #[test]
+    fn replacing_inherited_keep_open_action_sets_cell_close_policy_atomically() {
+        let mut session = session();
+        let menu_id = session.draft.menus[0].id.clone();
+        let ring_id = session.draft.menus[0].rings[0].id.clone();
+        let cell_id = session.draft.menus[0].rings[0].cells[0].id.clone();
+        let mut inherited_cell = (*session.draft).clone();
+        inherited_cell.menus[0].rings[0].cells[0].after_action = AfterActionPolicy::Inherit;
+        session.draft = std::sync::Arc::new(inherited_cell);
+        let before = session.draft.clone();
+        let binding = crate::radial::model::ActionBinding::LauncherQuery {
+            query: "notes".into(),
+            mode: crate::radial::model::QueryRunMode::OpenLauncher,
+        };
+
+        add_action_binding(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            ActionInsertDestination::Cell(cell_id),
+            binding.clone(),
+            "Notes",
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[0].content,
+            CellContent::Action { binding }
+        );
+        assert_eq!(
+            session.draft.menus[0].rings[0].cells[0].after_action,
+            AfterActionPolicy::CloseTree
+        );
+        assert!(session.undo());
+        assert_eq!(&*session.draft, &*before);
+        assert!(
+            !session.undo(),
+            "replacement policy is part of the same edit"
+        );
+    }
+
+    #[test]
+    fn add_action_binding_rejects_invalid_append_geometry_without_history_mutation() {
+        let mut session = session();
+        let menu_id = session.draft.menus[0].id.clone();
+        let ring_id = session.draft.menus[0].rings[0].id.clone();
+        let before = session.draft.clone();
+        assert_eq!(session.draft.menus[0].rings[0].cells.len(), 9);
+
+        assert!(matches!(
+            add_action_binding(
+                &mut session,
+                &menu_id,
+                &ring_id,
+                ActionInsertDestination::Append,
+                crate::radial::model::ActionBinding::LauncherQuery {
+                    query: "notes".into(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                },
+                "Notes",
+                false,
+                false,
+            ),
+            Err(MenuEditError::InvalidGeometry(_))
+        ));
+        assert_eq!(&*session.draft, &*before);
+        assert!(!session.undo());
+    }
+
+    #[test]
+    fn add_action_binding_rejects_invalid_candidate_without_history_mutation() {
+        let mut session = session();
+        make_root_slot_spacer(&mut session, 7);
+        let menu_id = session.draft.menus[0].id.clone();
+        let ring_id = session.draft.menus[0].rings[0].id.clone();
+        let spacer_id = session.draft.menus[0].rings[0].cells[7].id.clone();
+        let original = session.draft.clone();
+
+        let result = add_action_binding(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            ActionInsertDestination::Cell(spacer_id),
+            crate::radial::model::ActionBinding::LauncherQuery {
+                query: "q".repeat(crate::radial::model::limits::MAX_SAVED_LAUNCHER_QUERY_BYTES + 1),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            },
+            "Too long",
+            false,
+            false,
+        );
+
+        assert!(matches!(result, Err(MenuEditError::InvalidGeometry(_))));
+        assert_eq!(&*session.draft, &*original);
+        assert!(
+            !session.undo(),
+            "rejected candidate creates no history entry"
+        );
     }
 
     #[test]

@@ -21,14 +21,180 @@ use crate::universal_actions::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use super::{ActivationSource, DestructiveAction, LauncherApp};
 
+fn trace_authoring_provider_search(
+    request: &crate::gui::AuthoringProviderSearchRequest,
+    edge: &'static str,
+    provider_revision: Option<u64>,
+) {
+    let (kind, binding) = match &request.purpose {
+        crate::gui::AuthoringProviderSearchPurpose::Preview => ("search", None),
+        crate::gui::AuthoringProviderSearchPurpose::Test { binding, .. } => ("test", Some(binding)),
+    };
+    crate::radial::acceptance_trace::emit_authoring_provider_search(
+        &request.identity,
+        edge,
+        kind,
+        &request.query,
+        binding,
+        provider_revision,
+    );
+}
+
+fn notify_provider_search_capacity_available(
+    event_tx: &std::sync::mpsc::Sender<crate::gui::WatchEvent>,
+    repaint: &eframe::egui::Context,
+) {
+    let _ = event_tx.send(crate::gui::WatchEvent::AuthoringProviderCapacityAvailable);
+    repaint.request_repaint();
+    repaint.request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
+}
+
+fn release_provider_search_capacity_and_wake<T>(
+    permit: T,
+    event_tx: &std::sync::mpsc::Sender<crate::gui::WatchEvent>,
+    repaint: &eframe::egui::Context,
+) {
+    drop(permit);
+    notify_provider_search_capacity_available(event_tx, repaint);
+}
+
 const RADIAL_DISPATCH_TOMBSTONE_LIMIT: usize = 64;
+const ACCEPTANCE_AUTHORING_SEARCH_HOLD_ENV: &str =
+    "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_AUTHORING_SEARCH_HOLD_FILE";
+const ACCEPTANCE_AUTHORING_SEARCH_HOLD_TIMEOUT: Duration = Duration::from_secs(20);
+static ACCEPTANCE_AUTHORING_RECEIPT_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 const ACCEPTANCE_RUNTIME_PREPARE_HOLD_ENV: &str =
     "MULTI_LAUNCHER_RADIAL_ACCEPTANCE_PREPARE_HOLD_FILE";
 const ACCEPTANCE_RUNTIME_PREPARE_HOLD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(4);
+
+fn acceptance_authoring_search_hold_receipt(
+    request: &crate::gui::AuthoringProviderSearchRequest,
+    kind: &str,
+) -> String {
+    let identity = &request.identity;
+    let surface = match identity.scope.surface {
+        crate::gui::radial_editor::action_editor::BindingEditorSurface::Properties => "properties",
+        crate::gui::radial_editor::action_editor::BindingEditorSurface::Inspector => "inspector",
+    };
+    let mut target_hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    identity.scope.target.hash(&mut target_hasher);
+    format!(
+        "v1|{kind}|{surface}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        identity.scope.editor_session.0,
+        identity.scope.draft_generation.0,
+        target_hasher.finish(),
+        identity.assigned_binding_digest,
+        identity.editor_epoch,
+        identity.edit_generation,
+        identity.query_generation,
+        identity.query_request_generation,
+        identity.search_request_generation,
+        identity.test_request_generation,
+        crate::radial::acceptance_trace::private_trace_text_digest(&request.query),
+    )
+}
+
+fn publish_acceptance_authoring_receipt(
+    path: &std::path::Path,
+    receipt: &str,
+) -> std::io::Result<()> {
+    publish_acceptance_authoring_receipt_with_hook(path, receipt, || {})
+}
+
+fn publish_acceptance_authoring_receipt_with_hook(
+    path: &std::path::Path,
+    receipt: &str,
+    before_publish: impl FnOnce(),
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "receipt path has no file name",
+        )
+    })?;
+    let sequence = ACCEPTANCE_AUTHORING_RECEIPT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = file_name.to_os_string();
+    temporary_name.push(format!(".{}.{}.tmp", std::process::id(), sequence));
+    let temporary_path = path.with_file_name(temporary_name);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        file.write_all(receipt.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        before_publish();
+        std::fs::rename(&temporary_path, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary_path);
+    }
+    result
+}
+
+fn wait_for_acceptance_authoring_search_release(
+    hold_path: &std::path::Path,
+    request: &crate::gui::AuthoringProviderSearchRequest,
+    kind: &str,
+    timeout: Duration,
+) -> bool {
+    let Ok(expected_receipt) = std::fs::read_to_string(hold_path) else {
+        return false;
+    };
+    let actual_receipt = acceptance_authoring_search_hold_receipt(request, kind);
+    if expected_receipt != actual_receipt {
+        return false;
+    }
+    let entered_path = hold_path.with_extension("entered");
+    if publish_acceptance_authoring_receipt(&entered_path, &actual_receipt).is_err() {
+        return false;
+    }
+
+    let deadline = Instant::now() + timeout;
+    while hold_path.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let released = !hold_path.is_file();
+    if released {
+        let released_path = hold_path.with_extension("released");
+        let receipt_written =
+            publish_acceptance_authoring_receipt(&released_path, &actual_receipt).is_ok();
+        if !receipt_written {
+            let _ = std::fs::remove_file(&entered_path);
+            return false;
+        }
+    }
+    let _ = std::fs::remove_file(entered_path);
+    released
+}
+
+fn hold_acceptance_authoring_provider_result(
+    request: &crate::gui::AuthoringProviderSearchRequest,
+    kind: &str,
+) -> bool {
+    if !crate::radial::acceptance_trace::enabled() {
+        return false;
+    }
+    let Some(path) = std::env::var_os(ACCEPTANCE_AUTHORING_SEARCH_HOLD_ENV) else {
+        return false;
+    };
+    wait_for_acceptance_authoring_search_release(
+        std::path::Path::new(&path),
+        request,
+        kind,
+        ACCEPTANCE_AUTHORING_SEARCH_HOLD_TIMEOUT,
+    )
+}
 
 fn radial_acceptance_digest(parts: &[&str]) -> u64 {
     parts
@@ -211,10 +377,7 @@ impl LauncherApp {
         let entries = action_snapshot.entries;
         let catalog = PersistedActionCatalog::new(entries.clone());
         let registry = UniversalActionRegistry;
-        let binding_resolver = RadialBindingResolver {
-            catalog: &catalog,
-            registry: &registry,
-        };
+        let binding_resolver = RadialBindingResolver::new(&catalog, &registry);
         let mut unavailable = BTreeMap::new();
         let mut dynamic = BTreeMap::new();
         let mut static_cells = BTreeMap::new();
@@ -433,10 +596,11 @@ impl LauncherApp {
             for cell in menu.rings.iter().flat_map(|ring| &ring.cells) {
                 match &cell.content {
                     CellContent::Action { binding } => {
-                        let resolved = binding_resolver.resolve(
+                        let resolved = binding_resolver.resolve_with_context(
                             binding,
                             &request.context,
                             &request.invocation_query,
+                            super::universal_action_catalog::action_resolution_context_for_target,
                         );
                         if let Err(reason) = &resolved {
                             unavailable.insert(cell.id.clone(), reason.clone());
@@ -466,10 +630,11 @@ impl LauncherApp {
                 ("__background", menu.background_action.as_ref()),
             ] {
                 if let Some(binding) = binding {
-                    let resolved = binding_resolver.resolve(
+                    let resolved = binding_resolver.resolve_with_context(
                         binding,
                         &request.context,
                         &request.invocation_query,
+                        super::universal_action_catalog::action_resolution_context_for_target,
                     );
                     static_cells.insert(
                         crate::radial::model::CellId::new(id),
@@ -518,7 +683,12 @@ impl LauncherApp {
             ("__background", menu.background_secondary_action.as_ref()),
         ] {
             if let Some(binding) = binding {
-                let resolved = binding_resolver.resolve(binding, &request.context, &captured_query);
+                let resolved = binding_resolver.resolve_with_context(
+                    binding,
+                    &request.context,
+                    &captured_query,
+                    super::universal_action_catalog::action_resolution_context_for_target,
+                );
                 let policy = if id == "__center" {
                     menu.center_secondary_after_action
                 } else {
@@ -541,10 +711,11 @@ impl LauncherApp {
         }
         for cell in menu.rings.iter().flat_map(|ring| &ring.cells) {
             for alternate in &cell.alternate_clicks {
-                let resolved = binding_resolver.resolve(
+                let resolved = binding_resolver.resolve_with_context(
                     &alternate.action,
                     &request.context,
                     &request.invocation_query,
+                    super::universal_action_catalog::action_resolution_context_for_target,
                 );
                 frame.alternates.insert(
                     (cell.id.clone(), alternate.gesture),
@@ -578,10 +749,11 @@ impl LauncherApp {
                 );
             }
             if prepared.availability == FrozenAvailability::Available {
-                match binding_resolver.resolve_frozen(
+                match binding_resolver.resolve_frozen_with_context(
                     &prepared.binding,
                     &request.context,
                     &prepared.history_query,
+                    super::universal_action_catalog::action_resolution_context_for_target,
                 ) {
                     Ok(binding) => {
                         prepared.requirement = self
@@ -618,10 +790,11 @@ impl LauncherApp {
             for cell in child.rings.iter().flat_map(|ring| &ring.cells) {
                 match &cell.content {
                     CellContent::Action { binding } => {
-                        let resolved = binding_resolver.resolve(
+                        let resolved = binding_resolver.resolve_with_context(
                             binding,
                             &request.context,
                             &request.invocation_query,
+                            super::universal_action_catalog::action_resolution_context_for_target,
                         );
                         child_static.insert(
                             cell.id.clone(),
@@ -648,10 +821,11 @@ impl LauncherApp {
                 ("__background", child.background_action.as_ref()),
             ] {
                 if let Some(binding) = binding {
-                    let resolved = binding_resolver.resolve(
+                    let resolved = binding_resolver.resolve_with_context(
                         binding,
                         &request.context,
                         &request.invocation_query,
+                        super::universal_action_catalog::action_resolution_context_for_target,
                     );
                     let policy = if id == "__center" {
                         child.center_primary_after_action
@@ -690,8 +864,12 @@ impl LauncherApp {
                 ("__background", child.background_secondary_action.as_ref()),
             ] {
                 if let Some(binding) = binding {
-                    let resolved =
-                        binding_resolver.resolve(binding, &request.context, &captured_query);
+                    let resolved = binding_resolver.resolve_with_context(
+                        binding,
+                        &request.context,
+                        &captured_query,
+                        super::universal_action_catalog::action_resolution_context_for_target,
+                    );
                     let policy = if id == "__center" {
                         child.center_secondary_after_action
                     } else {
@@ -714,10 +892,11 @@ impl LauncherApp {
             }
             for cell in child.rings.iter().flat_map(|ring| &ring.cells) {
                 for alternate in &cell.alternate_clicks {
-                    let resolved = binding_resolver.resolve(
+                    let resolved = binding_resolver.resolve_with_context(
                         &alternate.action,
                         &request.context,
                         &request.invocation_query,
+                        super::universal_action_catalog::action_resolution_context_for_target,
                     );
                     child_frame.alternates.insert(
                         (cell.id.clone(), alternate.gesture),
@@ -752,10 +931,11 @@ impl LauncherApp {
                     );
                 }
                 if prepared.availability == FrozenAvailability::Available {
-                    if let Ok(binding) = binding_resolver.resolve_frozen(
+                    if let Ok(binding) = binding_resolver.resolve_frozen_with_context(
                         &prepared.binding,
                         &request.context,
                         &prepared.history_query,
+                        super::universal_action_catalog::action_resolution_context_for_target,
                     ) {
                         prepared.requirement = radial_requirement_for_settings(
                             &binding.action,
@@ -794,6 +974,602 @@ impl LauncherApp {
             );
             let _ = envelope.wake.send(());
         }
+    }
+
+    pub(super) fn process_radial_designer_intents(&mut self) {
+        for intent in self
+            .radial_editor
+            .lock()
+            .map(|editor| editor.intent_bridge())
+            .map(|bridge| bridge.drain())
+            .unwrap_or_default()
+        {
+            match intent {
+                crate::gui::radial_editor::DesignerUiIntent::ActionSearch { identity, query } => {
+                    let current = self.radial_editor.lock().ok().is_some_and(|editor| {
+                        editor.action_editor_search_request_is_current(&identity)
+                    });
+                    if current {
+                        self.start_authoring_provider_search(
+                            identity,
+                            query,
+                            crate::gui::AuthoringProviderSearchPurpose::Preview,
+                        );
+                    }
+                }
+                crate::gui::radial_editor::DesignerUiIntent::TestAction {
+                    identity,
+                    binding,
+                    invocation,
+                    history_query,
+                } => {
+                    let current = self.radial_editor.lock().ok().is_some_and(|editor| {
+                        editor.action_test_request_is_current(&identity, &binding)
+                    });
+                    if !current {
+                        continue;
+                    }
+                    if matches!(
+                        &binding,
+                        crate::radial::model::ActionBinding::LauncherQuery {
+                            mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+                            ..
+                        }
+                    ) {
+                        let crate::radial::model::ActionBinding::LauncherQuery { query, .. } =
+                            &binding
+                        else {
+                            continue;
+                        };
+                        self.start_authoring_provider_search(
+                            identity,
+                            query.clone(),
+                            crate::gui::AuthoringProviderSearchPurpose::Test {
+                                binding,
+                                invocation,
+                                history_query,
+                            },
+                        );
+                    } else {
+                        if let Some(bridge) = self
+                            .radial_editor
+                            .lock()
+                            .ok()
+                            .map(|editor| editor.intent_bridge())
+                        {
+                            let cancellation = bridge.begin_action_test(identity.clone());
+                            bridge.finish_action_search(
+                                &identity,
+                                crate::gui::radial_editor::AuthoringProviderRequestKind::Test,
+                                &cancellation,
+                            );
+                        }
+                        let _ = self.test_radial_authoring_action_for_editor(
+                            &binding,
+                            &invocation,
+                            &history_query,
+                            &identity,
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn start_authoring_provider_search(
+        &mut self,
+        identity: crate::gui::radial_editor::action_editor::AuthoringBindingEditorIdentity,
+        query: String,
+        purpose: crate::gui::AuthoringProviderSearchPurpose,
+    ) {
+        use crate::gui::AuthoringProviderSearchPurpose;
+        use crate::gui::AuthoringProviderSearchRequest;
+        let Some(bridge) = self
+            .radial_editor
+            .lock()
+            .ok()
+            .map(|editor| editor.intent_bridge())
+        else {
+            return;
+        };
+        let kind = match purpose {
+            AuthoringProviderSearchPurpose::Preview => {
+                crate::gui::radial_editor::AuthoringProviderRequestKind::Search
+            }
+            AuthoringProviderSearchPurpose::Test { .. } => {
+                crate::gui::radial_editor::AuthoringProviderRequestKind::Test
+            }
+        };
+        let cancellation = match kind {
+            crate::gui::radial_editor::AuthoringProviderRequestKind::Search => {
+                bridge.begin_action_search(identity.clone())
+            }
+            crate::gui::radial_editor::AuthoringProviderRequestKind::Test => {
+                bridge.begin_action_test(identity.clone())
+            }
+        };
+        let request = AuthoringProviderSearchRequest {
+            identity: identity.clone(),
+            query: query.clone(),
+            purpose,
+            retry_attempt: 0,
+            cancellation: Arc::clone(&cancellation),
+        };
+        trace_authoring_provider_search(&request, "queued", None);
+        if let Err(request) = bridge.queue_authoring_search(request, Duration::ZERO) {
+            trace_authoring_provider_search(&request, "rejected", None);
+            bridge.finish_action_search(&identity, kind, &cancellation);
+            self.fail_authoring_provider_search(
+                request,
+                "Too many launcher searches are already queued".into(),
+            );
+            return;
+        }
+        self.start_next_authoring_provider_search();
+    }
+
+    pub(super) fn start_next_authoring_provider_search(&mut self) {
+        use crate::gui::AuthoringProviderSearchPurpose;
+        use crate::gui::radial_editor::AuthoringProviderRequestKind;
+
+        let Some(bridge) = self
+            .radial_editor
+            .lock()
+            .ok()
+            .map(|editor| editor.intent_bridge())
+        else {
+            return;
+        };
+        loop {
+            let (request, next_due) = bridge.take_ready_authoring_search(Instant::now());
+            let Some(request) = request else {
+                if let Some(delay) = next_due {
+                    self.egui_ctx.request_repaint_after(delay);
+                    self.egui_ctx.request_repaint_of(
+                        crate::gui::radial_editor::radial_designer_viewport_id(),
+                    );
+                }
+                return;
+            };
+            let kind = match &request.purpose {
+                AuthoringProviderSearchPurpose::Preview => AuthoringProviderRequestKind::Search,
+                AuthoringProviderSearchPurpose::Test { .. } => AuthoringProviderRequestKind::Test,
+            };
+            let current =
+                self.radial_editor
+                    .lock()
+                    .ok()
+                    .is_some_and(|editor| match &request.purpose {
+                        AuthoringProviderSearchPurpose::Preview => {
+                            editor.action_editor_search_request_is_current(&request.identity)
+                        }
+                        AuthoringProviderSearchPurpose::Test { binding, .. } => {
+                            editor.action_test_request_is_current(&request.identity, binding)
+                        }
+                    });
+            if request.cancellation.load(Ordering::Acquire) || !current {
+                trace_authoring_provider_search(&request, "rejected", None);
+                bridge.finish_action_search(&request.identity, kind, &request.cancellation);
+                continue;
+            }
+            let Some(permit) = self.radial_provider_search_capacity.try_acquire() else {
+                let _ = bridge.queue_authoring_search(request, Duration::ZERO);
+                return;
+            };
+            let snapshot = self.plugins.search_snapshot(
+                self.enabled_plugins.as_ref(),
+                self.enabled_capabilities.as_ref(),
+            );
+            let query = request.query.clone();
+            let event_tx = self.event_tx.clone();
+            let repaint = self.egui_ctx.clone();
+            let worker_bridge = Arc::clone(&bridge);
+            let failure_request = request.clone();
+            let worker_trace_request = request.clone();
+            let failure_identity = request.identity.clone();
+            let failure_cancellation = Arc::clone(&request.cancellation);
+            let worker_identity = request.identity.clone();
+            let worker_cancellation = Arc::clone(&request.cancellation);
+            let spawn = std::thread::Builder::new()
+                .name("radial-authoring-provider-search".into())
+                .spawn(move || {
+                    trace_authoring_provider_search(&worker_trace_request, "worker_started", None);
+                    let searched = if worker_cancellation.load(Ordering::Acquire) {
+                        None
+                    } else {
+                        Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || snapshot.search(&query),
+                        )))
+                    };
+                    // Gate C can hold a real, already-computed provider reply
+                    // until the native runner retires its editor identity. The
+                    // worker keeps its normal permit and request lifetime while
+                    // held; on release the ordinary GUI owner still decides
+                    // whether the stale reply can be applied.
+                    let hold_kind = match &request.purpose {
+                        crate::gui::AuthoringProviderSearchPurpose::Preview => "search",
+                        crate::gui::AuthoringProviderSearchPurpose::Test { .. } => "test",
+                    };
+                    let held_result = searched.is_some()
+                        && hold_acceptance_authoring_provider_result(&request, hold_kind);
+                    release_provider_search_capacity_and_wake(permit, &event_tx, &repaint);
+                    worker_bridge.finish_action_search(
+                        &worker_identity,
+                        kind,
+                        &worker_cancellation,
+                    );
+                    // Capacity is released and ROOT is woken before checking
+                    // cancellation. A canceled worker must still start the
+                    // newest queued demand.
+                    if worker_cancellation.load(Ordering::Acquire) && !held_result {
+                        trace_authoring_provider_search(&worker_trace_request, "cancelled", None);
+                        return;
+                    }
+                    let Some(searched) = searched else {
+                        trace_authoring_provider_search(&worker_trace_request, "cancelled", None);
+                        return;
+                    };
+                    let event = match searched {
+                        Ok(result) => {
+                            trace_authoring_provider_search(
+                                &worker_trace_request,
+                                "worker_completed",
+                                Some(result.provider_revision),
+                            );
+                            crate::gui::WatchEvent::RadialAuthoringSearchReady { request, result }
+                        }
+                        Err(_) => {
+                            trace_authoring_provider_search(
+                                &worker_trace_request,
+                                "worker_failed",
+                                None,
+                            );
+                            crate::gui::WatchEvent::RadialAuthoringSearchFailed {
+                                request,
+                                reason: "A launcher provider failed during authoring search".into(),
+                            }
+                        }
+                    };
+                    if event_tx.send(event).is_ok() {
+                        repaint.request_repaint();
+                        repaint.request_repaint_of(
+                            crate::gui::radial_editor::radial_designer_viewport_id(),
+                        );
+                    } else {
+                        trace_authoring_provider_search(&worker_trace_request, "rejected", None);
+                    }
+                });
+            if let Err(error) = spawn {
+                bridge.finish_action_search(&failure_identity, kind, &failure_cancellation);
+                self.fail_authoring_provider_search(
+                    failure_request,
+                    format!("Could not start bounded authoring search: {error}"),
+                );
+                let _ = self
+                    .event_tx
+                    .send(crate::gui::WatchEvent::AuthoringProviderCapacityAvailable);
+            }
+            return;
+        }
+    }
+
+    fn retry_authoring_provider_search(
+        &mut self,
+        mut request: crate::gui::AuthoringProviderSearchRequest,
+    ) {
+        use crate::gui::AuthoringProviderSearchPurpose;
+        use crate::gui::radial_editor::AuthoringProviderRequestKind;
+
+        let kind = match &request.purpose {
+            AuthoringProviderSearchPurpose::Preview => AuthoringProviderRequestKind::Search,
+            AuthoringProviderSearchPurpose::Test { .. } => AuthoringProviderRequestKind::Test,
+        };
+        let current = self
+            .radial_editor
+            .lock()
+            .ok()
+            .is_some_and(|editor| match &request.purpose {
+                AuthoringProviderSearchPurpose::Preview => {
+                    editor.action_editor_search_request_is_current(&request.identity)
+                }
+                AuthoringProviderSearchPurpose::Test { binding, .. } => {
+                    editor.action_test_request_is_current(&request.identity, binding)
+                }
+            });
+        if !current {
+            trace_authoring_provider_search(&request, "rejected", None);
+            return;
+        }
+        let Some(bridge) = self
+            .radial_editor
+            .lock()
+            .ok()
+            .map(|editor| editor.intent_bridge())
+        else {
+            return;
+        };
+        let cancellation = match kind {
+            AuthoringProviderRequestKind::Search => {
+                bridge.begin_action_search(request.identity.clone())
+            }
+            AuthoringProviderRequestKind::Test => {
+                bridge.begin_action_test(request.identity.clone())
+            }
+        };
+        request.retry_attempt = request.retry_attempt.saturating_add(1);
+        request.cancellation = cancellation.clone();
+        let exponent = u32::from(request.retry_attempt.saturating_sub(1).min(4));
+        let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+        let delay =
+            Duration::from_millis(160u64.saturating_mul(multiplier)).min(Duration::from_secs(2));
+        let retry_trace_request = request.clone();
+        if let Err(request) = bridge.queue_authoring_search(request, delay) {
+            trace_authoring_provider_search(&request, "rejected", None);
+            bridge.finish_action_search(&request.identity, kind, &cancellation);
+            self.fail_authoring_provider_search(
+                request,
+                "Too many launcher searches are already queued".into(),
+            );
+            return;
+        }
+        trace_authoring_provider_search(&retry_trace_request, "retry_queued", None);
+        self.egui_ctx.request_repaint_after(delay);
+        self.egui_ctx
+            .request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
+        self.start_next_authoring_provider_search();
+    }
+
+    pub(super) fn complete_authoring_provider_search(
+        &mut self,
+        request: crate::gui::AuthoringProviderSearchRequest,
+        result: crate::plugin::PluginSearchSnapshotResult,
+    ) {
+        use crate::gui::AuthoringProviderSearchPurpose;
+        if request.cancellation.load(Ordering::Acquire) {
+            trace_authoring_provider_search(&request, "rejected", None);
+            return;
+        }
+        let current = self
+            .radial_editor
+            .lock()
+            .ok()
+            .is_some_and(|editor| match &request.purpose {
+                AuthoringProviderSearchPurpose::Preview => {
+                    editor.action_editor_search_request_is_current(&request.identity)
+                }
+                AuthoringProviderSearchPurpose::Test { binding, .. } => {
+                    editor.action_test_request_is_current(&request.identity, binding)
+                }
+            });
+        if !current {
+            trace_authoring_provider_search(&request, "rejected", None);
+            return;
+        }
+
+        let start_revision = result.start_revision;
+        let provider_revision = result.provider_revision;
+        let versions_at_start = result.catalog_versions_at_start;
+        let result_versions = result.catalog_versions;
+        let outcome = self.search_read_only_outcome_with_plugin_snapshot(&request.query, result);
+        let source_is_current = start_revision == provider_revision
+            && provider_revision == self.plugins.search_generation()
+            && versions_at_start == result_versions
+            && result_versions == crate::radial::dynamic::MutableResultCatalogVersions::current()
+            && outcome.result_catalog_versions_stable;
+
+        if let crate::gui::AuthoringProviderSearchPurpose::Test {
+            binding,
+            invocation,
+            history_query,
+        } = &request.purpose
+        {
+            // A provider that is still refreshing, or any result whose
+            // revision changed while it was being assembled, is not a stable
+            // no-result outcome. Keep the explicit Test pending and retry
+            // this latest live demand through the bounded provider queue.
+            if !source_is_current || outcome.state == super::search::LauncherSearchState::Pending {
+                self.retry_authoring_provider_search(request);
+                return;
+            }
+
+            if let Some(first) = outcome.actions.first() {
+                let versions = outcome.result_catalog_versions;
+                if versions != Some(crate::radial::dynamic::MutableResultCatalogVersions::current())
+                    || outcome.provider_revision != self.plugins.search_generation()
+                {
+                    self.retry_authoring_provider_search(request);
+                    return;
+                }
+                self.test_radial_authoring_action_for_editor(
+                    binding,
+                    invocation,
+                    history_query,
+                    &request.identity,
+                    Some(first),
+                    Some(outcome.provider_revision),
+                    versions,
+                );
+                trace_authoring_provider_search(
+                    &request,
+                    "applied",
+                    Some(outcome.provider_revision),
+                );
+                return;
+            }
+
+            // Auto Submit Test follows the saved-query fallback rule when a
+            // stable provider snapshot contains no result. Recheck identity
+            // immediately before reopening so close/discard cannot revive a
+            // retired authoring request.
+            let reason = "The query has no first launcher result to test";
+            let still_current = self.radial_editor.lock().ok().is_some_and(|editor| {
+                editor.action_test_request_is_current(&request.identity, binding)
+            });
+            if still_current {
+                self.fallback_authoring_execute_first_query(binding, reason);
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    let _ = editor.finish_action_editor_test(
+                        &request.identity,
+                        binding,
+                        Err(reason.into()),
+                    );
+                }
+                trace_authoring_provider_search(
+                    &request,
+                    "applied",
+                    Some(outcome.provider_revision),
+                );
+            } else {
+                trace_authoring_provider_search(&request, "rejected", None);
+            }
+            self.egui_ctx
+                .request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
+            return;
+        }
+
+        match request.purpose {
+            AuthoringProviderSearchPurpose::Preview => {
+                let (state, actions) = if !source_is_current
+                    || outcome.state == super::search::LauncherSearchState::Pending
+                {
+                    (
+                        crate::gui::radial_editor::ActionSearchCompletionState::Pending,
+                        Vec::new(),
+                    )
+                } else {
+                    match outcome.state {
+                        super::search::LauncherSearchState::Results => (
+                            crate::gui::radial_editor::ActionSearchCompletionState::Results,
+                            outcome.actions,
+                        ),
+                        super::search::LauncherSearchState::NoResults => (
+                            crate::gui::radial_editor::ActionSearchCompletionState::NoResults,
+                            Vec::new(),
+                        ),
+                        super::search::LauncherSearchState::Pending => (
+                            crate::gui::radial_editor::ActionSearchCompletionState::Pending,
+                            Vec::new(),
+                        ),
+                    }
+                };
+                let rows = self
+                    .authoring_catalog_for_ranked_actions(&actions, &request.query)
+                    .rows()
+                    .to_vec();
+                let mut preview = None;
+                let mut preview_unavailable = None;
+                if let Some(first) = actions.first() {
+                    match self.resolve_launcher_result_action(first, &request.query) {
+                        Ok((_, action)) => {
+                            preview = rows
+                                .iter()
+                                .find(|row| {
+                                    row.target_command == first.action && row.action_id == action.id
+                                })
+                                .map(|row| row.display_label())
+                                .or_else(|| {
+                                    Some(format!("{} — {}", first.label, action.presentation.label))
+                                });
+                        }
+                        Err(reason) => preview_unavailable = Some(reason),
+                    }
+                }
+                let completion = crate::gui::radial_editor::ActionSearchCompletion {
+                    identity: request.identity.clone(),
+                    state,
+                    rows,
+                    preview,
+                    preview_unavailable,
+                };
+                let applied = self
+                    .radial_editor
+                    .lock()
+                    .ok()
+                    .is_some_and(|mut editor| editor.complete_action_editor_search(completion));
+                trace_authoring_provider_search(
+                    &request,
+                    if applied { "applied" } else { "rejected" },
+                    Some(outcome.provider_revision),
+                );
+            }
+            AuthoringProviderSearchPurpose::Test { .. } => unreachable!("handled above"),
+        }
+        self.egui_ctx
+            .request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
+    }
+
+    pub(super) fn fail_authoring_provider_search(
+        &mut self,
+        request: crate::gui::AuthoringProviderSearchRequest,
+        reason: String,
+    ) {
+        self.fail_authoring_provider_search_inner(request, reason, false);
+    }
+
+    pub(super) fn fail_authoring_provider_search_from_provider(
+        &mut self,
+        request: crate::gui::AuthoringProviderSearchRequest,
+        reason: String,
+    ) {
+        self.fail_authoring_provider_search_inner(request, reason, true);
+    }
+
+    fn fail_authoring_provider_search_inner(
+        &mut self,
+        request: crate::gui::AuthoringProviderSearchRequest,
+        reason: String,
+        provider_failed: bool,
+    ) {
+        use crate::gui::AuthoringProviderSearchPurpose;
+        if request.cancellation.load(Ordering::Acquire) {
+            trace_authoring_provider_search(&request, "rejected", None);
+            return;
+        }
+        match &request.purpose {
+            AuthoringProviderSearchPurpose::Preview => {
+                let applied = self.radial_editor.lock().ok().is_some_and(|mut editor| {
+                    editor.complete_action_editor_search(
+                        crate::gui::radial_editor::ActionSearchCompletion {
+                            identity: request.identity.clone(),
+                            state:
+                                crate::gui::radial_editor::ActionSearchCompletionState::Unavailable(
+                                    reason,
+                                ),
+                            rows: Vec::new(),
+                            preview: None,
+                            preview_unavailable: None,
+                        },
+                    )
+                });
+                trace_authoring_provider_search(
+                    &request,
+                    if applied { "applied" } else { "rejected" },
+                    None,
+                );
+            }
+            AuthoringProviderSearchPurpose::Test { binding, .. } => {
+                let still_current = self.radial_editor.lock().ok().is_some_and(|editor| {
+                    editor.action_test_request_is_current(&request.identity, binding)
+                });
+                if !still_current {
+                    trace_authoring_provider_search(&request, "rejected", None);
+                    return;
+                }
+                if provider_failed {
+                    self.fallback_authoring_execute_first_query(binding, &reason);
+                }
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    let _ =
+                        editor.finish_action_editor_test(&request.identity, binding, Err(reason));
+                }
+                trace_authoring_provider_search(&request, "applied", None);
+            }
+        }
+        self.egui_ctx
+            .request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
     }
 
     pub(super) fn resolve_deferred_radial(&mut self, envelope: DeferredResolutionEnvelope) {
@@ -852,16 +1628,24 @@ impl LauncherApp {
         let spawn = std::thread::Builder::new()
             .name("radial-query-provider-search".into())
             .spawn(move || {
-                let _permit = permit;
+                let searched = if envelope.cancellation.load(Ordering::Acquire) {
+                    None
+                } else {
+                    Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        snapshot.search(&query)
+                    })))
+                };
+                release_provider_search_capacity_and_wake(
+                    permit,
+                    &event_tx,
+                    &repaint,
+                );
                 if envelope.cancellation.load(Ordering::Acquire) {
                     return;
                 }
-                let searched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    snapshot.search(&query)
-                }));
-                if envelope.cancellation.load(Ordering::Acquire) {
+                let Some(searched) = searched else {
                     return;
-                }
+                };
                 match searched {
                     Ok(result) => {
                         if event_tx
@@ -899,6 +1683,7 @@ impl LauncherApp {
                     "Could not start bounded launcher provider search: {error}"
                 )),
             );
+            notify_provider_search_capacity_available(&self.event_tx, &self.egui_ctx);
         }
     }
 
@@ -1153,45 +1938,14 @@ impl LauncherApp {
                         "Saved exact command changed after radial preparation".into(),
                     );
                 }
-                let resolved = ActionTargetResolver.resolve(
-                    &action,
-                    &ActionTargetResolverContext::new(
-                        &self.folder_aliases,
-                        &self.bookmark_aliases,
-                        &self.actions[..self.custom_len.min(self.actions.len())],
-                    ),
-                );
-                let registry = UniversalActionRegistry;
-                let available = registry.resolve(
-                    &resolved,
-                    &self.action_resolution_context_for_target(
-                        &resolved.target,
-                        ActionSurface::RadialMenu,
-                        &envelope.history_query,
-                    ),
-                );
-                let exact_primary = available.iter().find(|candidate| {
-                    matches!(
-                        &candidate.operation,
-                        crate::universal_actions::UniversalActionOperation::Command {
-                            command,
-                            original_action,
-                        } if command == parsed && original_action == &action
-                    )
-                });
-                let selected_universal_action = exact_primary.or_else(|| {
-                    available.iter().find(|candidate| {
-                        candidate.id == crate::universal_actions::action_ids::RESULT_EXECUTE
-                    })
-                });
-                let Some(universal_action) = selected_universal_action else {
-                    return DeferredResolutionResult::Failed(
-                        "Saved exact command has no safe radial execution route".into(),
-                    );
+                let (resolved, universal_action) = match self.resolve_exact_command_action(
+                    command,
+                    args.as_deref(),
+                    &envelope.history_query,
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(reason) => return DeferredResolutionResult::Failed(reason),
                 };
-                if let Some(reason) = universal_action.availability.disabled_reason() {
-                    return DeferredResolutionResult::Failed(reason.to_owned());
-                }
                 let identity = runtime_identity_for_target(&resolved.target, &self.plugins, None)
                     .map_err(|reason| reason.to_owned());
                 let identity = match identity {
@@ -1232,8 +1986,8 @@ impl LauncherApp {
                         identity,
                     ),
                     requirement: self.radial_interaction_requirement(
-                        universal_action,
-                        interaction_requirement(universal_action),
+                        &universal_action,
+                        interaction_requirement(&universal_action),
                     ),
                     origin: DeferredDispatchOrigin::ExactCommand {
                         command: command.clone(),
@@ -1257,45 +2011,7 @@ impl LauncherApp {
         query: &str,
         catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
     ) -> Result<(FrozenBinding, InteractionRequirement), String> {
-        let custom_len = self.custom_len.min(self.actions.len());
-        let resolver_context = ActionTargetResolverContext::new(
-            &self.folder_aliases,
-            &self.bookmark_aliases,
-            &self.actions[..custom_len],
-        );
-        let resolved = ActionTargetResolver.resolve(selected, &resolver_context);
-        let resolution_context = self.action_resolution_context_for_target(
-            &resolved.target,
-            ActionSurface::RadialMenu,
-            query,
-        );
-        let actions = UniversalActionRegistry.resolve(&resolved, &resolution_context);
-        let parsed = crate::commands::parse_action(selected).ok();
-        let universal_action = actions
-            .iter()
-            .find(|candidate| {
-                matches!(
-                    (&candidate.operation, parsed.as_ref()),
-                    (
-                        crate::universal_actions::UniversalActionOperation::Command {
-                            command,
-                            original_action,
-                        },
-                        Some(parsed),
-                    ) if command == parsed && original_action == selected
-                )
-            })
-            .or_else(|| {
-                actions.iter().find(|action| {
-                    action.id == crate::universal_actions::action_ids::RESULT_EXECUTE
-                })
-            })
-            .ok_or_else(|| {
-                "The first launcher result has no executable primary action".to_owned()
-            })?;
-        if let Some(reason) = universal_action.availability.disabled_reason() {
-            return Err(reason.to_owned());
-        }
+        let (resolved, universal_action) = self.resolve_launcher_result_action(selected, query)?;
         let identity =
             runtime_identity_for_target(&resolved.target, &self.plugins, catalog_versions)?;
         Ok((
@@ -1641,11 +2357,13 @@ impl LauncherApp {
         let snapshot = self.universal_action_catalog_snapshot();
         let catalog = snapshot.persisted_catalog();
         let registry = UniversalActionRegistry;
-        let mut prepared = RadialBindingResolver {
-            catalog: &catalog,
-            registry: &registry,
-        }
-        .resolve_frozen(&request.binding, &request.context, &request.history_query)?;
+        let mut prepared = RadialBindingResolver::new(&catalog, &registry)
+            .resolve_frozen_with_context(
+                &request.binding,
+                &request.context,
+                &request.history_query,
+                super::universal_action_catalog::action_resolution_context_for_target,
+            )?;
         prepared.requirement =
             self.radial_interaction_requirement(&prepared.action, prepared.requirement);
         Ok(prepared)
@@ -1708,7 +2426,7 @@ impl LauncherApp {
             .ok_or_else(|| BindingUnavailable::ContextActionMissing {
                 action_id: action_id.clone(),
             })?;
-        Ok(PreparedBinding {
+        PreparedBinding {
             binding: crate::radial::model::ActionBinding::Contextual {
                 selector: crate::radial::model::TargetSelector::CapturedForeground,
                 action_id: action_id.clone(),
@@ -1716,26 +2434,19 @@ impl LauncherApp {
             requirement: self
                 .radial_interaction_requirement(&action, interaction_requirement(&action)),
             action,
-        })
+        }
+        .ensure_available()
     }
 
-    fn action_resolution_context_for_target<'a>(
+    pub(super) fn action_resolution_context_for_target<'a>(
         &self,
         target: &crate::universal_actions::ActionTarget,
         surface: ActionSurface,
         query: &'a str,
     ) -> crate::universal_actions::ActionResolutionContext<'a> {
-        let mut context = crate::universal_actions::ActionResolutionContext::new(surface, query);
-        match target {
-            crate::universal_actions::ActionTarget::Timer { id } => {
-                context.timer_paused = crate::plugins::timer::timer_paused(*id);
-            }
-            crate::universal_actions::ActionTarget::Stopwatch { id } => {
-                context.stopwatch_paused = crate::plugins::stopwatch::stopwatch_paused(*id);
-            }
-            _ => {}
-        }
-        context
+        super::universal_action_catalog::action_resolution_context_for_target(
+            target, surface, query,
+        )
     }
 
     pub(super) fn deferred_query_result_is_current(
@@ -1830,7 +2541,7 @@ fn runtime_binding(
     }
 }
 
-fn runtime_identity_for_target(
+pub(super) fn runtime_identity_for_target(
     target: &crate::universal_actions::ActionTarget,
     plugins: &crate::plugin::PluginManager,
     result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
@@ -1963,7 +2674,7 @@ fn frozen_window_identity_is_current(
     }
 }
 
-fn runtime_identity_is_current(
+pub(super) fn runtime_identity_is_current(
     target: &crate::universal_actions::ActionTarget,
     identity: Option<&crate::radial::dynamic::RuntimeTargetIdentity>,
     plugins: &crate::plugin::PluginManager,
@@ -2021,7 +2732,12 @@ fn prepare_dynamic_bindings(
             let Some(binding) = entry.binding.as_ref() else {
                 continue;
             };
-            match resolver.resolve_frozen(binding, context, &entry.history_query) {
+            match resolver.resolve_frozen_with_context(
+                binding,
+                context,
+                &entry.history_query,
+                super::universal_action_catalog::action_resolution_context_for_target,
+            ) {
                 Ok(prepared) => {
                     entry.requirement = radial_requirement_for_settings(
                         &prepared.action,
@@ -2056,6 +2772,7 @@ fn prepared_cell(
         };
     }
     let frozen = freeze_action_binding(binding, invocation);
+    let resolved = resolved.and_then(PreparedBinding::ensure_available);
     let unavailable = resolved
         .as_ref()
         .err()
@@ -2136,7 +2853,12 @@ fn finalize_alternates(
 ) {
     for prepared in frame.alternates.values_mut() {
         if prepared.availability == FrozenAvailability::Available {
-            match resolver.resolve_frozen(&prepared.binding, context, &prepared.history_query) {
+            match resolver.resolve_frozen_with_context(
+                &prepared.binding,
+                context,
+                &prepared.history_query,
+                super::universal_action_catalog::action_resolution_context_for_target,
+            ) {
                 Ok(binding) => {
                     prepared.requirement = radial_requirement_for_settings(
                         &binding.action,
@@ -2325,6 +3047,182 @@ mod tests {
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
         mpsc,
     };
+
+    #[test]
+    fn cancelled_provider_worker_releases_capacity_and_wakes_root_queue() {
+        struct TestPermit(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for TestPermit {
+            fn drop(&mut self) {
+                self.0.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+
+        let (event_tx, event_rx) = mpsc::channel();
+        let repaint = eframe::egui::Context::default();
+        let repaint_count = Arc::new(AtomicUsize::new(0));
+        let callback_count = Arc::clone(&repaint_count);
+        let permit_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_permit_released = Arc::clone(&permit_released);
+        repaint.set_request_repaint_callback(move |info| {
+            if info.viewport_id == eframe::egui::ViewportId::ROOT {
+                assert!(callback_permit_released.load(AtomicOrdering::SeqCst));
+                callback_count.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        });
+        let was_cancelled = std::sync::atomic::AtomicBool::new(true);
+
+        release_provider_search_capacity_and_wake(
+            TestPermit(Arc::clone(&permit_released)),
+            &event_tx,
+            &repaint,
+        );
+        if was_cancelled.load(Ordering::Acquire) {
+            // This is the production worker's cancellation exit: capacity
+            // notification and ROOT repaint have already happened.
+        }
+
+        assert!(permit_released.load(AtomicOrdering::SeqCst));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(crate::gui::WatchEvent::AuthoringProviderCapacityAvailable)
+        ));
+        assert!(repaint_count.load(AtomicOrdering::SeqCst) > 0);
+    }
+
+    fn acceptance_authoring_search_hold_request() -> crate::gui::AuthoringProviderSearchRequest {
+        use crate::gui::radial_editor::action_editor::{
+            AuthoringBindingEditorIdentity, BindingEditorScope, BindingEditorSlot,
+            BindingEditorSurface,
+        };
+        use crate::radial::authoring::StableSelection;
+        use crate::radial::authoring::{AuthoringSessionId, DraftGeneration};
+        use crate::radial::model::{CellId, MenuId, RingId};
+
+        crate::gui::AuthoringProviderSearchRequest {
+            identity: AuthoringBindingEditorIdentity {
+                scope: BindingEditorScope {
+                    surface: BindingEditorSurface::Properties,
+                    editor_session: AuthoringSessionId(7),
+                    draft_generation: DraftGeneration(3),
+                    target: StableSelection::Cell {
+                        menu_id: MenuId::new("main"),
+                        ring_id: RingId::new("root"),
+                        cell_id: CellId::new("cell-a"),
+                    },
+                    slot: BindingEditorSlot::CellPrimary,
+                },
+                assigned_binding_digest: 11,
+                editor_epoch: 13,
+                edit_generation: 17,
+                query_generation: 19,
+                query_request_generation: 23,
+                search_request_generation: 29,
+                test_request_generation: 31,
+            },
+            query: "Shared Acceptance".into(),
+            purpose: crate::gui::AuthoringProviderSearchPurpose::Preview,
+            retry_attempt: 0,
+            cancellation: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn acceptance_authoring_search_hold_waits_for_matching_request_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let hold_path = directory.path().join("authoring-search.hold");
+        let entered_path = hold_path.with_extension("entered");
+        let released_path = hold_path.with_extension("released");
+        let request = acceptance_authoring_search_hold_request();
+        let receipt = acceptance_authoring_search_hold_receipt(&request, "search");
+        std::fs::write(&hold_path, &receipt).unwrap();
+
+        let worker_path = hold_path.clone();
+        let worker_request = request.clone();
+        let waiter = std::thread::spawn(move || {
+            wait_for_acceptance_authoring_search_release(
+                &worker_path,
+                &worker_request,
+                "search",
+                Duration::from_secs(2),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !entered_path.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(entered_path.is_file(), "worker never announced its hold");
+        assert_eq!(std::fs::read_to_string(&entered_path).unwrap(), receipt);
+        assert!(hold_path.is_file(), "worker released without runner input");
+
+        std::fs::remove_file(&hold_path).unwrap();
+        assert!(waiter.join().unwrap());
+        assert!(!entered_path.exists(), "worker left a stale entered marker");
+        assert_eq!(std::fs::read_to_string(&released_path).unwrap(), receipt);
+    }
+
+    #[test]
+    fn acceptance_authoring_receipts_are_published_as_complete_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("worker.entered");
+        let receipt = format!("v1|{}", "x".repeat(128 * 1024));
+        let mut unpublished_was_hidden = false;
+
+        publish_acceptance_authoring_receipt_with_hook(&path, &receipt, || {
+            unpublished_was_hidden = !path.exists();
+            assert!(unpublished_was_hidden);
+            let staged = std::fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|candidate| candidate != &path)
+                .expect("complete receipt must be staged before it is published");
+            assert_eq!(std::fs::read_to_string(staged).unwrap(), receipt);
+        })
+        .unwrap();
+
+        assert!(unpublished_was_hidden);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), receipt);
+        let files = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![std::ffi::OsString::from("worker.entered")]);
+    }
+
+    #[test]
+    fn acceptance_authoring_search_hold_rejects_competing_request_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let hold_path = directory.path().join("authoring-search.hold");
+        let entered_path = hold_path.with_extension("entered");
+        let expected = acceptance_authoring_search_hold_request();
+        let receipt = acceptance_authoring_search_hold_receipt(&expected, "search");
+        std::fs::write(&hold_path, &receipt).unwrap();
+
+        let mut competing = expected.clone();
+        competing.identity.search_request_generation += 1;
+        assert!(!wait_for_acceptance_authoring_search_release(
+            &hold_path,
+            &competing,
+            "search",
+            Duration::from_secs(1),
+        ));
+        assert!(!entered_path.exists(), "unrelated work claimed the hold");
+        assert!(hold_path.exists(), "unrelated work consumed runner consent");
+
+        std::fs::remove_file(&hold_path).unwrap();
+    }
+
+    #[test]
+    fn acceptance_authoring_search_hold_does_not_wait_without_runner_hold_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let hold_path = directory.path().join("authoring-search.hold");
+        assert!(!wait_for_acceptance_authoring_search_release(
+            &hold_path,
+            &acceptance_authoring_search_hold_request(),
+            "search",
+            Duration::from_secs(1)
+        ));
+        assert!(!hold_path.with_extension("entered").exists());
+    }
 
     struct MutableSearchPlugin(Arc<RwLock<Vec<crate::actions::Action>>>);
 
@@ -3541,14 +4439,75 @@ mod tests {
         let catalog = crate::universal_actions::PersistedActionCatalog::new(vec![]);
         let registry = crate::universal_actions::UniversalActionRegistry;
         assert!(matches!(
-            crate::radial::bindings::RadialBindingResolver {
-                catalog: &catalog,
-                registry: &registry
-            }
-            .resolve(&binding, &InvocationContext::empty(1), ""),
+            crate::radial::bindings::RadialBindingResolver::new(&catalog, &registry,).resolve(
+                &binding,
+                &InvocationContext::empty(1),
+                ""
+            ),
             Err(BindingUnavailable::ContextTargetMissing {
                 selector: TargetSelector::UnderPointer
             })
+        ));
+    }
+
+    #[test]
+    fn disabled_provider_action_cannot_be_prepared_as_available() {
+        let selected = crate::actions::Action {
+            label: "Shared Note".into(),
+            desc: "Note".into(),
+            action: "note:open:radial-disabled-preparation".into(),
+            args: None,
+        };
+        let target = crate::universal_actions::ResolvedActionTarget {
+            target: crate::universal_actions::ActionTarget::Note {
+                slug: "radial-disabled-preparation".into(),
+            },
+            selected_action: selected,
+            custom_action_index: None,
+        };
+        let mut action = UniversalActionRegistry
+            .resolve(
+                &target,
+                &crate::universal_actions::ActionResolutionContext::new(
+                    ActionSurface::RadialMenu,
+                    "",
+                ),
+            )
+            .into_iter()
+            .find(|action| action.id == crate::universal_actions::action_ids::NOTE_EDIT)
+            .expect("note provider exposes Edit Note");
+        let reason = "The live provider disabled this pinned action";
+        action.availability = crate::universal_actions::ActionAvailability::Disabled {
+            reason: reason.into(),
+        };
+        let binding = ActionBinding::Persisted {
+            action: crate::universal_actions::PersistedUniversalActionRef {
+                target: Some(crate::universal_actions::PersistableActionTargetRef::Note {
+                    slug: "radial-disabled-preparation".into(),
+                }),
+                action_id: crate::universal_actions::action_ids::NOTE_EDIT,
+            },
+        };
+        let prepared = PreparedBinding {
+            binding: binding.clone(),
+            requirement: interaction_requirement(&action),
+            action,
+        };
+
+        let cell = prepared_cell(
+            &binding,
+            Ok(prepared),
+            &InvocationContext::empty(1),
+            crate::radial::model::AfterActionPolicy::CloseTree,
+            "",
+        );
+
+        assert!(matches!(
+            cell.availability,
+            FrozenAvailability::Unavailable {
+                reason: unavailable
+            }
+                if unavailable.contains(reason)
         ));
     }
 
@@ -3583,10 +4542,7 @@ mod tests {
             },
         ]);
         let registry = crate::universal_actions::UniversalActionRegistry;
-        let resolver = RadialBindingResolver {
-            catalog: &action_catalog,
-            registry: &registry,
-        };
+        let resolver = RadialBindingResolver::new(&action_catalog, &registry);
         let descriptor = crate::window_catalog::WindowDescriptor {
             title: "Editor".into(),
             hwnd: 44,

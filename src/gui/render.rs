@@ -18,6 +18,25 @@ struct DeferredUniversalAction {
     source: ActivationSource,
 }
 
+#[derive(Clone, Debug)]
+enum ContextMenuChoice {
+    Execute(crate::universal_actions::UniversalAction),
+    AddToRadial {
+        binding: crate::radial::model::ActionBinding,
+        label: String,
+        source_query: String,
+        trace_identity: acceptance_trace::RadialInsertionTraceIdentity,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct DeferredRadialAuthoringAdd {
+    binding: crate::radial::model::ActionBinding,
+    label: String,
+    source_query: String,
+    trace_identity: acceptance_trace::RadialInsertionTraceIdentity,
+}
+
 fn defer_universal_context_action(
     deferred: &mut Option<DeferredUniversalAction>,
     action: crate::universal_actions::UniversalAction,
@@ -39,6 +58,13 @@ pub(crate) fn deferred_activation_from_results(
         query_override: None,
         source,
     })
+}
+
+fn deferred_activation_unless_radial_add(
+    activation: Option<DeferredActivation>,
+    radial_add_pending: bool,
+) -> Option<DeferredActivation> {
+    if radial_add_pending { None } else { activation }
 }
 
 fn trace_root_result_pointer(
@@ -143,8 +169,11 @@ fn trace_root_pointer_moves(ctx: &egui::Context, hwnd: windows::Win32::Foundatio
 
 fn render_universal_context_menu(
     ui: &mut egui::Ui,
+    target: &crate::universal_actions::ResolvedActionTarget,
     actions: &[crate::universal_actions::UniversalAction],
-) -> Option<crate::universal_actions::UniversalAction> {
+    source_query: &str,
+    primary_add: Result<crate::gui::universal_action_catalog::UniversalActionPickerRow, String>,
+) -> Option<ContextMenuChoice> {
     let surface = crate::universal_actions::ActionSurface::ContextMenu;
     let mut previous_group = None;
     let mut selected = None;
@@ -168,11 +197,215 @@ fn render_universal_context_menu(
             None => response,
         };
         if response.clicked() {
-            selected = Some(action.clone());
+            selected = Some(ContextMenuChoice::Execute(action.clone()));
         }
     }
 
+    ui.separator();
+    ui.menu_button("Add to radial", |ui| {
+        ui.label("Primary action");
+        let primary_action_id = match &primary_add {
+            Ok(row) => {
+                add_radial_action_choice(ui, row, "Add primary", source_query, &mut selected);
+                Some(row.action_id.clone())
+            }
+            Err(reason) => {
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(format!("Primary action unavailable: {reason}")),
+                )
+                .on_disabled_hover_text(reason);
+                None
+            }
+        };
+
+        ui.separator();
+        ui.label("Secondary actions");
+        for action in actions {
+            if primary_action_id.as_ref() == Some(&action.id) {
+                continue;
+            }
+            let row = crate::gui::universal_action_catalog::UniversalActionAuthoringCatalog::row_for_semantic_action(
+                target,
+                &action.id,
+                source_query,
+            );
+            match row {
+                Some(row) => {
+                    add_radial_action_choice(
+                        ui,
+                        &row,
+                        "Add secondary",
+                        source_query,
+                        &mut selected,
+                    );
+                }
+                None => {
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(format!(
+                            "Secondary action unavailable: {}",
+                            action.presentation.label
+                        )),
+                    )
+                    .on_disabled_hover_text("This action has no radial-menu presentation");
+                }
+            }
+        }
+        if !source_query.trim().is_empty() {
+            ui.separator();
+            if ui.button(format!("Save live query {:?}", source_query.trim())).clicked() {
+                let binding = crate::radial::model::ActionBinding::LauncherQuery {
+                    query: source_query.trim().to_owned(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                };
+                let trace_identity = acceptance_trace::RadialInsertionTraceIdentity {
+                    request_id: acceptance_trace::next_radial_insertion_request_id(),
+                    source_target_digest: acceptance_trace::private_trace_parts_digest(&[
+                        "launcher_query",
+                        source_query.trim(),
+                    ]),
+                    source_action_digest: acceptance_trace::private_trace_parts_digest(&[
+                        "launcher_query",
+                        "save_query",
+                    ]),
+                    source_binding_digest:
+                        crate::gui::radial_editor::action_editor::trace_binding_digest(Some(
+                            &binding,
+                        )),
+                    source_query_digest: acceptance_trace::private_trace_text_digest(
+                        source_query.trim(),
+                    ),
+                };
+                acceptance_trace::emit_radial_insertion_control(
+                    trace_identity,
+                    acceptance_trace::RadialInsertionControl::SourceAdd,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    true,
+                    false,
+                    true,
+                    0,
+                    trace_identity.source_binding_digest,
+                );
+                selected = Some(ContextMenuChoice::AddToRadial {
+                    binding,
+                    label: source_query.trim().to_owned(),
+                    source_query: source_query.trim().to_owned(),
+                    trace_identity,
+                });
+                ui.close_menu();
+            }
+        } else {
+            ui.add_enabled(false, egui::Button::new("Save live query"))
+                .on_disabled_hover_text("Enter a query to save it to the radial menu");
+        }
+    });
+
     selected
+}
+
+fn add_radial_action_choice(
+    ui: &mut egui::Ui,
+    row: &crate::gui::universal_action_catalog::UniversalActionPickerRow,
+    label_prefix: &str,
+    source_query: &str,
+    selected: &mut Option<ContextMenuChoice>,
+) {
+    let unavailable_reason = radial_add_unavailable_reason(row);
+    let label = format!("{label_prefix}: {}", row.display_label());
+    let response = ui.add_enabled(
+        unavailable_reason.is_none(),
+        egui::Button::new(unavailable_reason.as_ref().map_or_else(
+            || label,
+            |reason| format!("Unavailable: {} — {reason}", row.display_label()),
+        )),
+    );
+    let response = match unavailable_reason.as_deref() {
+        Some(reason) => response.on_disabled_hover_text(reason),
+        None => response,
+    };
+    if unavailable_reason.is_some() || !response.clicked() {
+        return;
+    }
+    let Some(choice) = radial_add_choice_for_row(row, source_query) else {
+        return;
+    };
+    *selected = Some(choice);
+    ui.close_menu();
+}
+
+fn radial_add_unavailable_reason(
+    row: &crate::gui::universal_action_catalog::UniversalActionPickerRow,
+) -> Option<String> {
+    row.availability
+        .disabled_reason()
+        .map(str::to_owned)
+        .or_else(|| {
+            (!row.presentation.visible)
+                .then(|| "This action is not available on the radial menu surface".into())
+        })
+        .or_else(|| row.assignment().err().map(|reason| reason.reason))
+}
+
+fn radial_add_choice_for_row(
+    row: &crate::gui::universal_action_catalog::UniversalActionPickerRow,
+    source_query: &str,
+) -> Option<ContextMenuChoice> {
+    if radial_add_unavailable_reason(row).is_some() {
+        return None;
+    }
+    let binding = row.assignment().ok()?;
+    let row_identity = crate::gui::radial_editor::action_editor::trace_picker_row_identity(row);
+    let trace_identity = acceptance_trace::RadialInsertionTraceIdentity {
+        request_id: acceptance_trace::next_radial_insertion_request_id(),
+        source_target_digest: row_identity.target,
+        source_action_digest: row_identity.action,
+        source_binding_digest: row_identity.binding,
+        source_query_digest: acceptance_trace::private_trace_text_digest(source_query),
+    };
+    acceptance_trace::emit_radial_insertion_control(
+        trace_identity,
+        acceptance_trace::RadialInsertionControl::SourceAdd,
+        0,
+        0,
+        0,
+        0,
+        0,
+        true,
+        false,
+        true,
+        0,
+        row_identity.binding,
+    );
+    Some(ContextMenuChoice::AddToRadial {
+        binding,
+        label: row.target_title.clone(),
+        source_query: source_query.trim().to_owned(),
+        trace_identity,
+    })
+}
+
+fn resolve_primary_radial_add_row(
+    app: &LauncherApp,
+    selected: &Action,
+    query: &str,
+) -> Result<crate::gui::universal_action_catalog::UniversalActionPickerRow, String> {
+    let (target, action) = app
+        .resolve_launcher_result_action(selected, query)
+        .map_err(|reason| format!("{} — {reason}", selected.label))?;
+    crate::gui::universal_action_catalog::UniversalActionAuthoringCatalog::row_for_semantic_action(
+        &target, &action.id, query,
+    )
+    .ok_or_else(|| {
+        format!(
+            "{} — the launcher primary action has no stable radial binding",
+            selected.label
+        )
+    })
 }
 
 impl LauncherApp {
@@ -426,17 +659,43 @@ impl LauncherApp {
         _refresh: &mut bool,
         _set_focus: &mut bool,
         deferred: &mut Option<DeferredUniversalAction>,
+        deferred_radial_add: &mut Option<DeferredRadialAuthoringAdd>,
     ) -> egui::Response {
         // egui only invokes this closure while the popup is open. Keep target
         // resolution and pin I/O here so ordinary list/grid rendering remains
         // on the legacy primary-action fast path.
         menu_resp.clone().context_menu(|ui| {
             let pin = self.pin_capability_for(action);
-            let actions = self.resolve_context_menu_actions(action, pin);
+            let (target, actions) = self.resolve_universal_actions(
+                action,
+                pin,
+                crate::universal_actions::ActionSurface::ContextMenu,
+            );
+            let primary_add = resolve_primary_radial_add_row(self, action, &self.query);
 
-            if let Some(action) = render_universal_context_menu(ui, &actions) {
-                defer_universal_context_action(deferred, action);
-                ui.close_menu();
+            if let Some(choice) =
+                render_universal_context_menu(ui, &target, &actions, &self.query, primary_add)
+            {
+                match choice {
+                    ContextMenuChoice::Execute(action) => {
+                        defer_universal_context_action(deferred, action);
+                        ui.close_menu();
+                    }
+                    ContextMenuChoice::AddToRadial {
+                        binding,
+                        label,
+                        source_query,
+                        trace_identity,
+                    } => {
+                        *deferred_radial_add = Some(DeferredRadialAuthoringAdd {
+                            binding,
+                            label,
+                            source_query,
+                            trace_identity,
+                        });
+                        ui.close_menu();
+                    }
+                }
             }
         });
 
@@ -1115,6 +1374,7 @@ impl eframe::App for LauncherApp {
         });
 
         self.process_watch_events();
+        self.start_next_authoring_provider_search();
         self.show_radial_placement_failure(ctx);
 
         let trimmed = self.query.trim().to_string();
@@ -1154,6 +1414,7 @@ impl eframe::App for LauncherApp {
         let action_sheet_blocks_launcher_input = self.action_sheet.is_open();
 
         let mut deferred_universal_action = None;
+        let mut deferred_radial_authoring_add = None;
         CentralPanel::default().show(ctx, |ui| {
             let mut deferred_activation: Option<DeferredActivation> = None;
             ui.heading("🚀 Multi Lnchr");
@@ -1427,6 +1688,7 @@ impl eframe::App for LauncherApp {
                                                 &mut refresh,
                                                 &mut set_focus,
                                                 &mut deferred_universal_action,
+                                                &mut deferred_radial_authoring_add,
                                             );
                                             trace_root_result_pointer(
                                                 ui,
@@ -1479,8 +1741,14 @@ impl eframe::App for LauncherApp {
                                     } else {
                                         a.action.clone()
                                     };
-                                    let menu_resp =
-                                        self.attach_result_context_menu(&a, resp.on_hover_text(tooltip), &mut refresh, &mut set_focus, &mut deferred_universal_action);
+                                    let menu_resp = self.attach_result_context_menu(
+                                        &a,
+                                        resp.on_hover_text(tooltip),
+                                        &mut refresh,
+                                        &mut set_focus,
+                                        &mut deferred_universal_action,
+                                        &mut deferred_radial_authoring_add,
+                                    );
                                     trace_root_result_pointer(
                                         ui,
                                         &menu_resp,
@@ -1514,7 +1782,11 @@ impl eframe::App for LauncherApp {
                         });
                     });
             }
-            if let Some(deferred) = deferred_activation.take() {
+            if let Some(deferred) = deferred_activation_unless_radial_add(
+                deferred_activation.take(),
+                deferred_radial_authoring_add.is_some(),
+            )
+            {
                 self.activate_action(
                     deferred.action,
                     deferred.query_override,
@@ -1523,6 +1795,18 @@ impl eframe::App for LauncherApp {
             }
         });
         self.execute_deferred_result_action(deferred_universal_action);
+        if let Some(add) = deferred_radial_authoring_add {
+            if let Ok(mut editor) = self.radial_editor.lock() {
+                editor.add_action_to_radial(
+                    add.binding,
+                    add.label,
+                    add.source_query,
+                    add.trace_identity,
+                );
+            }
+            ctx.request_repaint();
+            ctx.request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
+        }
         let show_editor = self.show_editor;
         if show_editor {
             let mut editor = std::mem::take(&mut self.editor);
@@ -1552,24 +1836,7 @@ impl eframe::App for LauncherApp {
                 &self.radial_editor,
             );
         }
-        let designer_intents = self
-            .radial_editor
-            .lock()
-            .map(|editor| editor.intent_bridge())
-            .map(|bridge| bridge.drain())
-            .unwrap_or_default();
-        for intent in designer_intents {
-            match intent {
-                crate::gui::radial_editor::DesignerUiIntent::TestAction {
-                    binding,
-                    invocation,
-                    history_query,
-                } => {
-                    let _ =
-                        self.test_radial_authoring_action(&binding, &invocation, &history_query);
-                }
-            }
-        }
+        self.process_radial_designer_intents();
         let designer_preferences = self
             .radial_editor
             .lock()
@@ -2322,6 +2589,107 @@ mod tests {
     };
 
     static MACRO_ACTIVATION_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn choosing_add_to_radial_suppresses_the_parent_result_activation() {
+        let activation = DeferredActivation {
+            action: Action {
+                label: "Close".into(),
+                desc: "Selected window".into(),
+                action: "window:close".into(),
+                args: None,
+            },
+            query_override: None,
+            source: ActivationSource::Click,
+        };
+        let suppressed = deferred_activation_unless_radial_add(Some(activation.clone()), true);
+        assert!(suppressed.is_none());
+
+        let ordinary_click = deferred_activation_unless_radial_add(Some(activation.clone()), false);
+        assert_eq!(
+            ordinary_click.as_ref().map(|activation| &activation.action),
+            Some(&activation.action)
+        );
+    }
+
+    #[test]
+    fn radial_add_primary_uses_launcher_resolution_and_keeps_secondary_choices_clear() {
+        let context = egui::Context::default();
+        let app = new_app(&context);
+        let query = "macro add primary fixture";
+        let selected = Action {
+            label: "Automation Fixture".into(),
+            desc: "Mouse/keyboard macro".into(),
+            action: "mkmacro:run:74".into(),
+            args: None,
+        };
+
+        let primary = resolve_primary_radial_add_row(&app, &selected, query)
+            .expect("launcher primary is a stable macro action");
+        let ranked_rows =
+            app.authoring_catalog_for_ranked_actions(std::slice::from_ref(&selected), query);
+        assert_eq!(
+            ranked_rows.rows().first().map(|row| &row.action_id),
+            Some(&crate::universal_actions::action_ids::RESULT_EXECUTE),
+            "the registry's first row is the generic Execute action"
+        );
+        assert_eq!(
+            primary.action_id,
+            crate::universal_actions::action_ids::MKMACRO_RUN,
+            "Add primary must use the resolved launcher action"
+        );
+        assert_ne!(
+            primary.action_id,
+            ranked_rows.rows()[0].action_id,
+            "the fixture distinguishes launcher primary from registry row zero"
+        );
+        assert!(primary.assignment().is_ok());
+
+        let (target, actions) = app.resolve_universal_actions(
+            &selected,
+            crate::universal_actions::PinCapability::Writable { is_pinned: false },
+            crate::universal_actions::ActionSurface::ContextMenu,
+        );
+        let secondary_ids = actions
+            .iter()
+            .filter(|action| action.id != primary.action_id)
+            .filter_map(|action| {
+                crate::gui::universal_action_catalog::UniversalActionAuthoringCatalog::row_for_semantic_action(
+                    &target,
+                    &action.id,
+                    query,
+                )
+            })
+            .map(|row| row.action_id)
+            .collect::<Vec<_>>();
+        assert!(
+            secondary_ids.contains(&crate::universal_actions::action_ids::MKMACRO_EDIT),
+            "the macro editor remains an explicit secondary Add choice"
+        );
+        assert!(!secondary_ids.contains(&primary.action_id));
+
+        let choice = radial_add_choice_for_row(&primary, query)
+            .expect("the selected primary row becomes an Add choice");
+        assert!(matches!(
+            choice,
+            ContextMenuChoice::AddToRadial { binding, source_query, .. }
+                if binding == primary.assignment().unwrap() && source_query == query
+        ));
+
+        let mut disabled_primary = primary;
+        let disabled_reason = "the live macro is no longer available";
+        disabled_primary.availability = crate::universal_actions::ActionAvailability::Disabled {
+            reason: disabled_reason.into(),
+        };
+        assert_eq!(
+            radial_add_unavailable_reason(&disabled_primary).as_deref(),
+            Some(disabled_reason)
+        );
+        assert!(
+            radial_add_choice_for_row(&disabled_primary, query).is_none(),
+            "a disabled primary cannot be converted into another Add choice"
+        );
+    }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(

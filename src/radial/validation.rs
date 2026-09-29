@@ -1289,10 +1289,25 @@ fn validate_keep_open(
     if effective_after_action(document, menu, policy) != AfterActionPolicy::KeepOpen {
         return;
     }
+    let Some(requirement) = keep_open_incompatibility_requirement(binding) else {
+        return;
+    };
+    errors.push(issue(
+        format!("{path}.after_action"),
+        format!("KeepOpen is incompatible with {requirement:?}"),
+    ));
+}
+
+/// Returns the action handoff that makes an effective KeepOpen policy unsafe.
+/// Insertion uses the same classification to choose a compatible cell-level
+/// default without duplicating validation semantics.
+pub(crate) fn keep_open_incompatibility_requirement(
+    binding: &ActionBinding,
+) -> Option<crate::radial::handoff::InteractionRequirement> {
+    use crate::radial::handoff::InteractionRequirement;
+
     let requirement = match binding {
-        ActionBinding::LauncherQuery { .. } => {
-            crate::radial::handoff::InteractionRequirement::Deferred
-        }
+        ActionBinding::LauncherQuery { .. } => InteractionRequirement::Deferred,
         ActionBinding::ExactCommand { .. } => {
             crate::radial::bindings::prepare_deferred_binding(binding)
                 .and_then(|prepared| match prepared.availability {
@@ -1301,28 +1316,23 @@ fn validate_keep_open(
                     }
                     _ => None,
                 })
-                .unwrap_or(crate::radial::handoff::InteractionRequirement::Deferred)
+                .unwrap_or(InteractionRequirement::Deferred)
         }
-        ActionBinding::Contextual { .. } => return,
+        ActionBinding::Contextual { .. } => return None,
         ActionBinding::Persisted { action } => match action.target.as_ref() {
             Some(
                 PersistableActionTargetRef::LegacyAction { action }
                 | PersistableActionTargetRef::CustomAction { action },
             ) => crate::commands::parse_action(action)
                 .map(|command| crate::radial::handoff::command_requirement(&command))
-                .unwrap_or(crate::radial::handoff::InteractionRequirement::ExternalInput),
+                .unwrap_or(InteractionRequirement::ExternalInput),
             _ => match crate::radial::handoff::action_id_requirement(&action.action_id) {
                 Some(requirement) => requirement,
-                None => return,
+                None => return None,
             },
         },
     };
-    if requirement != crate::radial::handoff::InteractionRequirement::None {
-        errors.push(issue(
-            format!("{path}.after_action"),
-            format!("KeepOpen is incompatible with {requirement:?}"),
-        ));
-    }
+    (requirement != InteractionRequirement::None).then_some(requirement)
 }
 
 fn validate_content(

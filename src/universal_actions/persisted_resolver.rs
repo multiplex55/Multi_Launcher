@@ -61,21 +61,34 @@ impl PersistedActionCatalog {
         registry: &UniversalActionRegistry,
         context: &ActionResolutionContext<'_>,
     ) -> Result<ResolvedPersistedAction, PersistedActionUnavailable> {
+        Self::resolve_from_entries_with_context(&self.entries, reference, registry, |_| {
+            context.clone()
+        })
+    }
+
+    /// Resolve against an existing snapshot while constructing the provider
+    /// context only after the exact saved target has been found.
+    pub(crate) fn resolve_from_entries_with_context<'a>(
+        entries: &[ResolvedActionTarget],
+        reference: &PersistedUniversalActionRef,
+        registry: &UniversalActionRegistry,
+        context_for_target: impl FnOnce(&ActionTarget) -> ActionResolutionContext<'a>,
+    ) -> Result<ResolvedPersistedAction, PersistedActionUnavailable> {
         let saved = reference
             .target
             .as_ref()
             .ok_or(PersistedActionUnavailable::GlobalTargetUnsupported)?;
         validate_saved_target(saved)?;
-        let target = self
-            .entries
+        let target = entries
             .iter()
             .find(|entry| target_matches(&entry.target, saved))
             .cloned()
             .ok_or(PersistedActionUnavailable::TargetMissing {
                 kind: target_kind(saved),
             })?;
+        let context = context_for_target(&target.target);
         let action = registry
-            .resolve(&target, context)
+            .resolve(&target, &context)
             .into_iter()
             .find(|action| action.id == reference.action_id)
             .ok_or_else(|| PersistedActionUnavailable::ActionMissing {

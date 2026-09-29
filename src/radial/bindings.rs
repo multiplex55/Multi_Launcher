@@ -308,6 +308,10 @@ pub struct RadialPrepareEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingUnavailable {
     Stable(PersistedActionUnavailable),
+    DisabledAction {
+        action_id: crate::universal_actions::ActionId,
+        reason: String,
+    },
     ContextTargetMissing {
         selector: TargetSelector,
     },
@@ -389,32 +393,79 @@ pub struct PreparedBinding {
     pub requirement: InteractionRequirement,
 }
 
+impl PreparedBinding {
+    /// Keep disabled provider results out of every dispatchable preparation
+    /// path, even when a caller has already resolved the binding.
+    pub fn ensure_available(self) -> Result<Self, BindingUnavailable> {
+        if let Some(reason) = self.action.availability.disabled_reason() {
+            return Err(BindingUnavailable::DisabledAction {
+                action_id: self.action.id.clone(),
+                reason: reason.to_owned(),
+            });
+        }
+        Ok(self)
+    }
+}
+
+pub type ActionResolutionContextFactory =
+    for<'query> fn(&ActionTarget, ActionSurface, &'query str) -> ActionResolutionContext<'query>;
+
+fn context_without_live_target_state<'query>(
+    _target: &ActionTarget,
+    surface: ActionSurface,
+    query: &'query str,
+) -> ActionResolutionContext<'query> {
+    ActionResolutionContext::new(surface, query)
+}
+
 pub struct RadialBindingResolver<'a> {
     pub catalog: &'a PersistedActionCatalog,
     pub registry: &'a UniversalActionRegistry,
 }
 
-impl RadialBindingResolver<'_> {
+impl<'a> RadialBindingResolver<'a> {
+    pub fn new(catalog: &'a PersistedActionCatalog, registry: &'a UniversalActionRegistry) -> Self {
+        Self { catalog, registry }
+    }
+
     pub fn resolve_frozen(
         &self,
         binding: &FrozenBinding,
         invocation: &InvocationContext,
         query: &str,
     ) -> Result<PreparedBinding, BindingUnavailable> {
+        self.resolve_frozen_with_context(
+            binding,
+            invocation,
+            query,
+            context_without_live_target_state,
+        )
+    }
+
+    pub fn resolve_frozen_with_context(
+        &self,
+        binding: &FrozenBinding,
+        invocation: &InvocationContext,
+        query: &str,
+        context_for_target: ActionResolutionContextFactory,
+    ) -> Result<PreparedBinding, BindingUnavailable> {
         match binding {
-            FrozenBinding::Stable(binding) => self.resolve(binding, invocation, query),
+            FrozenBinding::Stable(binding) => {
+                self.resolve_with_context(binding, invocation, query, context_for_target)
+            }
             FrozenBinding::Deferred { kind, .. } => Err(BindingUnavailable::Deferred(*kind)),
             FrozenBinding::Contextual {
                 selector,
                 action_id,
                 ..
-            } => self.resolve(
+            } => self.resolve_with_context(
                 &ActionBinding::Contextual {
                     selector: selector.clone(),
                     action_id: action_id.clone(),
                 },
                 invocation,
                 query,
+                context_for_target,
             ),
             FrozenBinding::Informational => Err(BindingUnavailable::Informational),
             FrozenBinding::Runtime {
@@ -438,21 +489,22 @@ impl RadialBindingResolver<'_> {
                     .registry
                     .resolve(
                         &resolved,
-                        &ActionResolutionContext::new(ActionSurface::RadialMenu, query),
+                        &context_for_target(&resolved.target, ActionSurface::RadialMenu, query),
                     )
                     .into_iter()
                     .find(|action| &action.id == action_id)
                     .ok_or_else(|| BindingUnavailable::ContextActionMissing {
                         action_id: action_id.clone(),
                     })?;
-                Ok(PreparedBinding {
+                PreparedBinding {
                     binding: ActionBinding::Contextual {
                         selector: TargetSelector::CapturedForeground,
                         action_id: action_id.clone(),
                     },
                     requirement: interaction_requirement(&action),
                     action,
-                })
+                }
+                .ensure_available()
             }
         }
     }
@@ -463,6 +515,21 @@ impl RadialBindingResolver<'_> {
         invocation: &InvocationContext,
         query: &str,
     ) -> Result<PreparedBinding, BindingUnavailable> {
+        self.resolve_with_context(
+            binding,
+            invocation,
+            query,
+            context_without_live_target_state,
+        )
+    }
+
+    pub fn resolve_with_context(
+        &self,
+        binding: &ActionBinding,
+        invocation: &InvocationContext,
+        query: &str,
+        context_for_target: ActionResolutionContextFactory,
+    ) -> Result<PreparedBinding, BindingUnavailable> {
         if let Some(deferred) = prepare_deferred_binding(binding) {
             if let FrozenAvailability::Deferred { kind } = deferred.availability {
                 return Err(BindingUnavailable::Deferred(kind));
@@ -471,14 +538,14 @@ impl RadialBindingResolver<'_> {
         }
         let action = match binding {
             ActionBinding::Persisted { action } => {
-                self.catalog
-                    .resolve(
-                        action,
-                        self.registry,
-                        &ActionResolutionContext::new(ActionSurface::RadialMenu, query),
-                    )
-                    .map_err(BindingUnavailable::Stable)?
-                    .action
+                PersistedActionCatalog::resolve_from_entries_with_context(
+                    self.catalog.entries(),
+                    action,
+                    self.registry,
+                    |target| context_for_target(target, ActionSurface::RadialMenu, query),
+                )
+                .map_err(BindingUnavailable::Stable)?
+                .action
             }
             ActionBinding::Contextual {
                 selector,
@@ -505,7 +572,7 @@ impl RadialBindingResolver<'_> {
                 self.registry
                     .resolve(
                         &target,
-                        &ActionResolutionContext::new(ActionSurface::RadialMenu, query),
+                        &context_for_target(&target.target, ActionSurface::RadialMenu, query),
                     )
                     .into_iter()
                     .find(|action| &action.id == action_id)
@@ -528,11 +595,12 @@ impl RadialBindingResolver<'_> {
                 return Err(BindingUnavailable::Informational);
             }
         };
-        Ok(PreparedBinding {
+        PreparedBinding {
             binding: binding.clone(),
             requirement: interaction_requirement(&action),
             action,
-        })
+        }
+        .ensure_available()
     }
 }
 
@@ -572,14 +640,71 @@ mod tests {
         }
     }
 
+    fn sampled_live_state_context<'query>(
+        target: &ActionTarget,
+        surface: ActionSurface,
+        query: &'query str,
+    ) -> ActionResolutionContext<'query> {
+        let mut context = ActionResolutionContext::new(surface, query);
+        match target {
+            ActionTarget::Timer { id } => {
+                context.timer_paused = match id {
+                    1 => Some(false),
+                    2 => Some(true),
+                    _ => None,
+                };
+            }
+            ActionTarget::Stopwatch { id } => {
+                context.stopwatch_paused = match id {
+                    4 => Some(false),
+                    5 => Some(true),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+        context
+    }
+
+    fn runtime_target(target: ActionTarget, selected_action: Action) -> ResolvedActionTarget {
+        ResolvedActionTarget {
+            target,
+            selected_action,
+            custom_action_index: None,
+        }
+    }
+
+    fn runtime_binding(
+        target: &ResolvedActionTarget,
+        action_id: crate::universal_actions::ActionId,
+    ) -> FrozenBinding {
+        FrozenBinding::Runtime {
+            target: target.target.clone(),
+            selected_action: target.selected_action.clone(),
+            action_id,
+            identity: None,
+        }
+    }
+
+    fn assert_disabled_action(
+        result: Result<PreparedBinding, BindingUnavailable>,
+        action_id: crate::universal_actions::ActionId,
+        reason: &str,
+    ) {
+        assert!(matches!(
+            result,
+            Err(BindingUnavailable::DisabledAction {
+                action_id: found,
+                reason: found_reason,
+            }) if found == action_id && found_reason == reason
+        ));
+    }
+
     #[test]
     fn contextual_target_is_runtime_only_and_missing_target_is_typed() {
         let catalog = PersistedActionCatalog::default();
         let registry = UniversalActionRegistry;
-        let resolver = RadialBindingResolver {
-            catalog: &catalog,
-            registry: &registry,
-        };
+        let resolver = RadialBindingResolver::new(&catalog, &registry);
         let foreground = ActionBinding::Contextual {
             selector: TargetSelector::CapturedForeground,
             action_id: action_ids::WINDOW_ACTIVATE,
@@ -603,10 +728,7 @@ mod tests {
     fn authored_query_and_exact_command_prepare_as_typed_non_dispatchable_work() {
         let catalog = PersistedActionCatalog::default();
         let registry = UniversalActionRegistry;
-        let resolver = RadialBindingResolver {
-            catalog: &catalog,
-            registry: &registry,
-        };
+        let resolver = RadialBindingResolver::new(&catalog, &registry);
         let query = ActionBinding::LauncherQuery {
             query: "  saved query  ".into(),
             mode: super::super::model::QueryRunMode::ExecuteFirst,
@@ -1165,12 +1287,9 @@ mod tests {
         }]);
         let registry = UniversalActionRegistry;
         assert!(
-            RadialBindingResolver {
-                catalog: &catalog,
-                registry: &registry,
-            }
-            .resolve_frozen(&binding, &context(), "")
-            .is_ok()
+            RadialBindingResolver::new(&catalog, &registry)
+                .resolve_frozen(&binding, &context(), "")
+                .is_ok()
         );
 
         let mutated = PersistedActionCatalog::new(vec![ResolvedActionTarget {
@@ -1182,21 +1301,127 @@ mod tests {
             custom_action_index: None,
         }]);
         assert!(matches!(
-            RadialBindingResolver {
-                catalog: &mutated,
-                registry: &registry,
-            }
-            .resolve_frozen(&binding, &context(), ""),
+            RadialBindingResolver::new(&mutated, &registry).resolve_frozen(
+                &binding,
+                &context(),
+                ""
+            ),
             Err(BindingUnavailable::ContextActionMissing { .. })
         ));
         assert!(matches!(
-            RadialBindingResolver {
-                catalog: &PersistedActionCatalog::default(),
-                registry: &registry,
-            }
-            .resolve_frozen(&binding, &context(), ""),
+            RadialBindingResolver::new(&PersistedActionCatalog::default(), &registry)
+                .resolve_frozen(&binding, &context(), ""),
             Err(BindingUnavailable::ContextActionMissing { .. })
         ));
+    }
+
+    #[test]
+    fn runtime_timer_and_stopwatch_bindings_sample_current_availability() {
+        let timer_targets = [
+            (1, "Timer is already running", true),
+            (2, "Timer is already paused", false),
+            (3, "Timer is no longer available", false),
+        ];
+        let stopwatch_targets = [
+            (4, "Stopwatch is already running", true),
+            (5, "Stopwatch is already paused", false),
+            (6, "Stopwatch is no longer available", false),
+        ];
+        let invocation = context();
+        let registry = UniversalActionRegistry;
+
+        for (id, disabled_reason, is_running) in timer_targets {
+            let target = runtime_target(
+                ActionTarget::Timer { id },
+                Action {
+                    label: format!("Timer {id}"),
+                    desc: "Timer".into(),
+                    action: format!("timer:show:{id}"),
+                    args: None,
+                },
+            );
+            assert_eq!(target.target.persistent_ref(), None);
+            let catalog = PersistedActionCatalog::new(vec![target.clone()]);
+            let resolver = RadialBindingResolver::new(&catalog, &registry);
+            let pause = runtime_binding(&target, action_ids::TIMER_PAUSE);
+            let resume = runtime_binding(&target, action_ids::TIMER_RESUME);
+            let pause_result = resolver.resolve_frozen_with_context(
+                &pause,
+                &invocation,
+                "timer query",
+                sampled_live_state_context,
+            );
+            let resume_result = resolver.resolve_frozen_with_context(
+                &resume,
+                &invocation,
+                "timer query",
+                sampled_live_state_context,
+            );
+
+            if is_running {
+                assert!(pause_result.is_ok());
+                assert_disabled_action(resume_result, action_ids::TIMER_RESUME, disabled_reason);
+            } else if id == 2 {
+                assert_disabled_action(pause_result, action_ids::TIMER_PAUSE, disabled_reason);
+                assert!(resume_result.is_ok());
+            } else {
+                assert_disabled_action(pause_result, action_ids::TIMER_PAUSE, disabled_reason);
+                assert_disabled_action(resume_result, action_ids::TIMER_RESUME, disabled_reason);
+            }
+        }
+
+        for (id, disabled_reason, is_running) in stopwatch_targets {
+            let target = runtime_target(
+                ActionTarget::Stopwatch { id },
+                Action {
+                    label: format!("Stopwatch {id}"),
+                    desc: "Stopwatch".into(),
+                    action: format!("timer:stopwatch:show:{id}"),
+                    args: None,
+                },
+            );
+            assert_eq!(target.target.persistent_ref(), None);
+            let catalog = PersistedActionCatalog::new(vec![target.clone()]);
+            let resolver = RadialBindingResolver::new(&catalog, &registry);
+            let pause = runtime_binding(&target, action_ids::STOPWATCH_PAUSE);
+            let resume = runtime_binding(&target, action_ids::STOPWATCH_RESUME);
+            let pause_result = resolver.resolve_frozen_with_context(
+                &pause,
+                &invocation,
+                "stopwatch query",
+                sampled_live_state_context,
+            );
+            let resume_result = resolver.resolve_frozen_with_context(
+                &resume,
+                &invocation,
+                "stopwatch query",
+                sampled_live_state_context,
+            );
+
+            if is_running {
+                assert!(pause_result.is_ok());
+                assert_disabled_action(
+                    resume_result,
+                    action_ids::STOPWATCH_RESUME,
+                    disabled_reason,
+                );
+            } else if id == 5 {
+                assert_disabled_action(pause_result, action_ids::STOPWATCH_PAUSE, disabled_reason);
+                assert!(resume_result.is_ok());
+            } else {
+                assert_disabled_action(pause_result, action_ids::STOPWATCH_PAUSE, disabled_reason);
+                assert_disabled_action(
+                    resolver.resolve_frozen_with_context(
+                        &runtime_binding(&target, action_ids::STOPWATCH_COPY_TIME),
+                        &invocation,
+                        "stopwatch query",
+                        sampled_live_state_context,
+                    ),
+                    action_ids::STOPWATCH_COPY_TIME,
+                    disabled_reason,
+                );
+            }
+        }
     }
 
     #[test]
@@ -1251,12 +1476,9 @@ mod tests {
                 custom_action_index: None,
             }]);
             assert!(
-                RadialBindingResolver {
-                    catalog: &exact,
-                    registry: &registry,
-                }
-                .resolve_frozen(&binding, &context(), "captured query")
-                .is_ok(),
+                RadialBindingResolver::new(&exact, &registry)
+                    .resolve_frozen(&binding, &context(), "captured query")
+                    .is_ok(),
                 "exact target should remain resolvable: {target:?}"
             );
 
@@ -1266,10 +1488,7 @@ mod tests {
                 custom_action_index: None,
             }]);
             assert!(matches!(
-                RadialBindingResolver {
-                    catalog: &churned,
-                    registry: &registry,
-                }
+                RadialBindingResolver::new(&churned, &registry)
                 .resolve_frozen(&binding, &context(), "captured query"),
                 Err(BindingUnavailable::ContextActionMissing { action_id: missing })
                     if missing == action_id
@@ -1284,11 +1503,11 @@ mod tests {
                 custom_action_index: None,
             }]);
             assert!(matches!(
-                RadialBindingResolver {
-                    catalog: &changed_content,
-                    registry: &registry,
-                }
-                .resolve_frozen(&binding, &context(), "captured query"),
+                RadialBindingResolver::new(&changed_content, &registry).resolve_frozen(
+                    &binding,
+                    &context(),
+                    "captured query"
+                ),
                 Err(BindingUnavailable::ContextActionMissing { .. })
             ));
         }
