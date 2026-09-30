@@ -1,15 +1,10 @@
 name = "implementer"
-description = "Luna Max implementation agent for one approved, explicitly scoped pipeline milestone at a time."
+description = "implementation agent for one approved, explicitly scoped pipeline milestone at a time."
 
 # Luna Max = GPT-5.6 Luna with maximum reasoning effort.
-model = "gpt-6-luna"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "max"
 
-# Previous / alternative configuration:
-# model = "gpt-5.6-sol"
-# model_reasoning_effort = "medium"
-# model = "gpt-6-astra"
-# model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 
 developer_instructions = """

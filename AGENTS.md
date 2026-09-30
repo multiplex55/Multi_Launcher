@@ -960,3 +960,25 @@ The objective is not simply:
 The objective is:
 
 > make the requested behavior work through an architecture that remains understandable, testable, maintainable, and difficult to misuse.
+
+---
+
+# Post-M4 Orchestration Policy for M5–M7
+
+This policy governs the radial reliability and action-authoring initiative after M4. It changes orchestration cadence only. The approved requirements, acceptance matrix, Gate C contract, and final verification remain binding.
+
+## Coherent Candidate Cycle
+
+After a native candidate fails, inspect every failed applicable case and use retained evidence to diagnose all reasonably investigable failures before changing source. Classify each cause as product, runner/oracle, fixture, evidence, or environment. Group compatible corrections into one coherent batch, review the entire batch independently, and run the complete affected deterministic/focused tests before building another candidate. Fix a shared infrastructure assumption at its owner instead of adding case-specific retries when failures share that cause.
+
+Do not build while known compatible failures remain undiagnosed or while a known correction can be included in the same reviewed batch. Before each new candidate, record the answers to: what failed; which failures were investigated; each cause class; the combined fixes; focused verification; review closure; and what materially new evidence the candidate can provide. If three consecutive native candidates fail without a meaningful reduction in failing cases or distinct root-cause classes, stop candidate cycling for a bounded root-cause and acceptance-contract audit before another build.
+
+## Implementation and Qualification Order
+
+For M5 and M6, implement substantial functionality, perform source review, correct findings in coherent batches, run focused deterministic tests, stabilize, then run the broad affected Rust suite before starting native acceptance. Use intermediate native runs for the changed area and its actual diagnosis. Rerun unrelated H/Q/full regression only when changed production code can affect them, their evidence is needed for the diagnosis, or the candidate is the intended final source-matched milestone candidate. Every required same-source gate still runs on the final milestone candidate. M7 remains exhaustive under its approved plan.
+
+Required acceptance comes from the approved requirements, matrix, milestone handoff, or a concrete defect/ambiguity that would otherwise allow a false pass. Useful diagnostics do not silently create new mandatory gates. Do not weaken acceptance to reduce work.
+
+## Ownership and Waiting
+
+Keep one source writer per coherent batch. Use other agents for bounded read-only diagnosis, review, contract inspection, and independent verification. Prefer completion, blocker, failure, and input notifications to routine polling. If a status check is necessary, wait about ten minutes between ordinary checks and about fifteen to twenty minutes for long builds, Nextest, native runs, or substantial reviews. Handle actual completion or blockers immediately; do not spend turns restating that work is still running.
