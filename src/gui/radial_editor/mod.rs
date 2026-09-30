@@ -16,7 +16,10 @@ use crate::radial::acceptance_trace::{
     DesignerSemanticTarget, Event, FocusEdge, RadialInsertionControl, RadialInsertionTraceIdentity,
     RequestKind, ViewportClass, WidgetCategory, WidgetResponse,
 };
-use crate::radial::authoring::menu::{self, ResizeResolution, SubmenuDuplication};
+use crate::radial::authoring::menu::{
+    self, BulkAfterActionSlot, BulkCellEdit, BulkCellEditRequest, ResizeResolution,
+    SubmenuDuplication,
+};
 use crate::radial::authoring::{
     AuthoringClient, AuthoringError, AuthoringSnapshot, CloseIntent, CommitDisposition,
     ConflictResolution, DiskSha256, EditKey, EditPhase, PendingRequestKind, RadialAuthoringSession,
@@ -24,17 +27,18 @@ use crate::radial::authoring::{
 };
 use crate::radial::context::InvocationContext;
 use crate::radial::model::{
-    AfterActionPolicy, CellContent, CellId, Control, DynamicSource, InteractionMode, LayoutKind,
-    MenuDefinition, MenuId, RadialDocument, RingId, SubmenuPresentation,
+    ActionBinding, AfterActionPolicy, CellContent, CellId, Control, DynamicSource, InteractionMode,
+    LayoutKind, MenuDefinition, MenuId, RadialDocument, RingId, SubmenuPresentation,
 };
 pub(crate) use action_editor::{
     ActionBindingEditorIntent, ActionBindingEditorState, AuthoringBindingEditorIdentity,
-    BindingEditorScope, BindingEditorSlot, BindingEditorSurface,
+    BindingAssignmentKind, BindingEditorScope, BindingEditorSlot, BindingEditorSurface,
 };
 pub(crate) use action_editor::{ActionSearchCompletion, ActionSearchCompletionState};
 use canvas::{
-    CanvasPoint, CanvasTransform, DesignerMode, DragPayload, PlacementDraft, PreferenceDebounce,
-    ProjectedCellProvenance, ProjectedSelection, VisitedMenuPath, WindowGeometry,
+    CanvasPoint, CanvasTransform, DesignerMode, DesignerNavigationIntent, DragPayload,
+    PlacementDraft, PreferenceDebounce, ProjectedCellProvenance, ProjectedSelection,
+    SubmenuPathEdge, VisitedMenuPath, WindowGeometry,
 };
 use eframe::egui;
 use import_export::PendingImport;
@@ -250,6 +254,64 @@ fn trace_designer_authoring_control_rect(
     correlation: Correlation,
     canvas_scope: Option<acceptance_trace::DesignerCanvasCellScope>,
 ) {
+    trace_designer_authoring_control_scoped_rect(
+        ui,
+        rect,
+        clicked,
+        target,
+        role,
+        index,
+        enabled,
+        selected,
+        focused,
+        viewport,
+        correlation,
+        canvas_scope.map(acceptance_trace::DesignerAuthoringControlScope::CanvasCell),
+    );
+}
+
+fn trace_designer_authoring_control_with_scope(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    target: DesignerAuthoringTarget,
+    role: DesignerAuthoringRole,
+    index: Option<usize>,
+    enabled: bool,
+    selected: bool,
+    viewport: ViewportClass,
+    correlation: Correlation,
+    scope: acceptance_trace::DesignerAuthoringControlScope,
+) {
+    trace_designer_authoring_control_scoped_rect(
+        ui,
+        response.rect,
+        response.clicked(),
+        target,
+        role,
+        index,
+        enabled,
+        selected,
+        response.has_focus(),
+        viewport,
+        correlation,
+        Some(scope),
+    );
+}
+
+fn trace_designer_authoring_control_scoped_rect(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    clicked: bool,
+    target: DesignerAuthoringTarget,
+    role: DesignerAuthoringRole,
+    index: Option<usize>,
+    enabled: bool,
+    selected: bool,
+    focused: bool,
+    viewport: ViewportClass,
+    correlation: Correlation,
+    scope: Option<acceptance_trace::DesignerAuthoringControlScope>,
+) {
     if !acceptance_trace::enabled() {
         return;
     }
@@ -286,12 +348,16 @@ fn trace_designer_authoring_control_rect(
     if right <= left || bottom <= top {
         return;
     }
+    let Some(clip_bounds) = designer_authoring_clip_bounds(ui, viewport_rect.size()) else {
+        return;
+    };
     acceptance_trace::emit_designer_authoring_control(
         target,
         role,
         viewport,
         index,
         [left, top, right, bottom],
+        clip_bounds,
         [client_width_px, client_height_px],
         enabled,
         selected,
@@ -299,8 +365,82 @@ fn trace_designer_authoring_control_rect(
         clicked,
         correlation.session_id,
         correlation.generation,
-        canvas_scope,
+        scope,
     );
+}
+
+fn designer_authoring_clip_bounds(ui: &egui::Ui, client_size: egui::Vec2) -> Option<[i32; 4]> {
+    // Ui owns the ScrollArea clip; viewport.inner_rect itself uses screen coordinates.
+    let clip = ui
+        .clip_rect()
+        .intersect(egui::Rect::from_min_size(egui::Pos2::ZERO, client_size));
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    if !clip.is_positive() || !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return None;
+    }
+    let scale = |coordinate: f32| {
+        let value = coordinate * pixels_per_point;
+        (value.is_finite() && value >= i32::MIN as f32 && value <= i32::MAX as f32)
+            .then(|| value.round() as i32)
+    };
+    Some([
+        scale(clip.left())?,
+        scale(clip.top())?,
+        scale(clip.right())?,
+        scale(clip.bottom())?,
+    ])
+}
+
+fn designer_tree_search_undo_scope(
+    context: &egui::Context,
+    field_id: egui::Id,
+    value: &str,
+) -> Option<acceptance_trace::DesignerAuthoringControlScope> {
+    // Read the state stored by the actual TextEdit after it has fed this frame.
+    // The framework alone owns its undo timing and committed checkpoints.
+    let state = egui::text_edit::TextEditState::load(context, field_id)?;
+    Some(
+        acceptance_trace::DesignerAuthoringControlScope::TreeSearchUndo {
+            field_id_digest: field_id.value(),
+            value_digest: acceptance_observation_digest(value.as_bytes()),
+            in_flux: state.undoer().is_in_flux(),
+        },
+    )
+}
+
+fn designer_rendered_text(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    galley: &egui::Galley,
+) -> Option<acceptance_trace::DesignerRenderedText> {
+    let viewport = ui.ctx().input(|input| input.viewport().inner_rect)?;
+    let text_rect = ui.layout().align_size_within_rect(
+        galley.size(),
+        response.rect.shrink2(ui.spacing().button_padding),
+    );
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return None;
+    }
+    let scale = |coordinate: f32| {
+        let value = coordinate * pixels_per_point;
+        (value.is_finite() && value >= i32::MIN as f32 && value <= i32::MAX as f32)
+            .then(|| value.round() as i32)
+    };
+    Some(acceptance_trace::DesignerRenderedText {
+        digest: acceptance_observation_digest(galley.text().as_bytes()),
+        bounds: [
+            scale(text_rect.left())?,
+            scale(text_rect.top())?,
+            scale(text_rect.right())?,
+            scale(text_rect.bottom())?,
+        ],
+        fully_visible: ui.is_rect_visible(response.rect)
+            && ui.clip_rect().contains_rect(text_rect)
+            && egui::Rect::from_min_size(egui::Pos2::ZERO, viewport.size())
+                .contains_rect(text_rect),
+        elided: galley.elided,
+    })
 }
 
 fn trace_inspector_cell_text_edit(
@@ -520,6 +660,12 @@ enum DesignerFileDialogRequest {
         media_kind: crate::radial::model::MediaKind,
         managed: bool,
     },
+    BulkStyleMedia {
+        request: BulkCellEditRequest,
+        field: crate::radial::skin::StyleField,
+        media_kind: crate::radial::model::MediaKind,
+        managed: bool,
+    },
     CellExternalIcon {
         menu_id: MenuId,
         ring_id: RingId,
@@ -551,6 +697,78 @@ enum DesignerFileDialogResult {
     Cancelled,
     File(std::path::PathBuf),
     Files(Vec<std::path::PathBuf>),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BulkStyleMode {
+    Inherit,
+    Clear,
+    #[default]
+    Set,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BulkEditStageScope {
+    editor_session: crate::radial::authoring::AuthoringSessionId,
+    generation: crate::radial::authoring::DraftGeneration,
+    targets: Vec<crate::radial::authoring::AuthoredCellTarget>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PropertiesNavigationDecision {
+    Apply,
+    Discard,
+    Cancel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesignerSearchHit {
+    label: String,
+    context: String,
+    target: StableSelection,
+}
+
+fn authored_search_hits(document: &RadialDocument, query: &str) -> Vec<DesignerSearchHit> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for menu in &document.menus {
+        if format!("{} {}", menu.name, menu.id)
+            .to_lowercase()
+            .contains(&query)
+        {
+            hits.push(DesignerSearchHit {
+                label: menu.name.clone(),
+                context: format!("Menu · {}", menu.id),
+                target: StableSelection::Menu(menu.id.clone()),
+            });
+        }
+        for ring in &menu.rings {
+            for cell in &ring.cells {
+                if format!("{} {}", cell.label, cell.id)
+                    .to_lowercase()
+                    .contains(&query)
+                {
+                    hits.push(DesignerSearchHit {
+                        label: if cell.label.trim().is_empty() {
+                            cell.id.to_string()
+                        } else {
+                            cell.label.clone()
+                        },
+                        context: format!("{} · Ring {} · Cell {}", menu.name, ring.id, cell.id),
+                        target: StableSelection::Cell {
+                            menu_id: menu.id.clone(),
+                            ring_id: ring.id.clone(),
+                            cell_id: cell.id.clone(),
+                        },
+                    });
+                }
+            }
+        }
+    }
+    hits
 }
 
 #[derive(Clone, Debug)]
@@ -923,6 +1141,115 @@ struct PendingCellDrop {
     generation: crate::radial::authoring::DraftGeneration,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScopeChangeAnchor {
+    editor_session: crate::radial::authoring::AuthoringSessionId,
+    generation: crate::radial::authoring::DraftGeneration,
+    selection: Option<StableSelection>,
+}
+
+#[derive(Clone, Debug)]
+enum ScopeChangeIntent {
+    Navigation(DesignerNavigationIntent),
+    Operation(DeferredEditorOperation),
+}
+
+#[derive(Clone, Debug)]
+struct PendingScopeChange {
+    anchor: ScopeChangeAnchor,
+    intent: ScopeChangeIntent,
+}
+
+#[derive(Clone, Debug)]
+enum DeferredEditorOperation {
+    CreateMenu {
+        interaction: crate::radial::model::InteractionMode,
+        submenu_presentation: crate::radial::model::SubmenuPresentation,
+    },
+    ApplyRingProposal {
+        proposal: menu::RingEditProposal,
+        nonce: u64,
+    },
+    CopyCell {
+        menu_id: MenuId,
+        ring_id: RingId,
+        cell_id: CellId,
+    },
+    DeleteCell {
+        menu_id: MenuId,
+        ring_id: RingId,
+        cell_id: CellId,
+    },
+    CreateSubmenuAndLink {
+        menu_id: MenuId,
+        ring_id: RingId,
+        cell_id: CellId,
+        name: String,
+    },
+    LinkExistingSubmenu {
+        menu_id: MenuId,
+        ring_id: RingId,
+        cell_id: CellId,
+        linked_menu: MenuId,
+    },
+    CloneSubmenuAndLink {
+        menu_id: MenuId,
+        ring_id: RingId,
+        cell_id: CellId,
+        linked_menu: MenuId,
+    },
+    MoveCell {
+        pending: PendingCellDrop,
+        resolution: menu::CellDropResolution,
+    },
+    SetCellContent {
+        menu_id: MenuId,
+        ring_id: RingId,
+        cell_id: CellId,
+        content: CellContent,
+    },
+    Undo,
+    Redo,
+    ResolveConflict(ConflictResolution),
+}
+
+impl ScopeChangeIntent {
+    fn apply_and_continue_is_safe(&self) -> bool {
+        match self {
+            Self::Navigation(_) => true,
+            Self::Operation(
+                DeferredEditorOperation::SetCellContent { .. }
+                | DeferredEditorOperation::CreateSubmenuAndLink { .. }
+                | DeferredEditorOperation::LinkExistingSubmenu { .. }
+                | DeferredEditorOperation::CloneSubmenuAndLink { .. }
+                | DeferredEditorOperation::ApplyRingProposal { .. }
+                | DeferredEditorOperation::Undo
+                | DeferredEditorOperation::Redo
+                | DeferredEditorOperation::ResolveConflict(_),
+            ) => false,
+            Self::Operation(_) => true,
+        }
+    }
+}
+
+fn queue_scope_change(
+    pending: &mut Option<PendingScopeChange>,
+    session: &RadialAuthoringSession,
+    intent: ScopeChangeIntent,
+) {
+    if pending.is_some() {
+        return;
+    }
+    *pending = Some(PendingScopeChange {
+        anchor: ScopeChangeAnchor {
+            editor_session: session.editor_session,
+            generation: session.generation,
+            selection: session.selection.clone(),
+        },
+        intent,
+    });
+}
+
 /// The popup is a multi-frame editor, not a one-frame command.  Keep all
 /// editable values together with the generation and target from which they
 /// were initialized so a delayed Apply can never merge stale fields into a
@@ -1000,6 +1327,7 @@ impl PropertiesDraft {
                     crate::radial::model::Override::Clear => 1,
                     crate::radial::model::Override::Value(_) => 2,
                 }
+            || self.action_editor.has_unassigned_text()
     }
 
     #[cfg(test)]
@@ -1184,6 +1512,18 @@ pub(crate) struct RadialEditorState {
     ring_proposal_nonce: Option<u64>,
     next_ring_proposal_nonce: u64,
     properties_handoff_prompt: bool,
+    pending_scope_change: Option<PendingScopeChange>,
+    tree_filter: String,
+    bulk_label_value: String,
+    bulk_edit_stage_scope: Option<BulkEditStageScope>,
+    bulk_style_field: String,
+    bulk_style_text: String,
+    bulk_style_mode: BulkStyleMode,
+    bulk_style_stage_key: String,
+    bulk_style_staged_value: Option<serde_json::Value>,
+    bulk_after_action_slot: BulkAfterActionSlot,
+    bulk_after_action_policy: AfterActionPolicy,
+    bulk_feedback: Option<String>,
     submenu_name: String,
     submenu_link_target: Option<MenuId>,
     drag_source: Option<(
@@ -1258,6 +1598,18 @@ impl Default for RadialEditorState {
             ring_proposal_nonce: None,
             next_ring_proposal_nonce: 1,
             properties_handoff_prompt: false,
+            pending_scope_change: None,
+            tree_filter: String::new(),
+            bulk_label_value: String::new(),
+            bulk_edit_stage_scope: None,
+            bulk_style_field: "text.bold".into(),
+            bulk_style_text: String::new(),
+            bulk_style_mode: BulkStyleMode::Set,
+            bulk_style_stage_key: String::new(),
+            bulk_style_staged_value: None,
+            bulk_after_action_slot: BulkAfterActionSlot::Primary,
+            bulk_after_action_policy: AfterActionPolicy::Inherit,
+            bulk_feedback: None,
             submenu_name: "New submenu".into(),
             submenu_link_target: None,
             drag_source: None,
@@ -1317,20 +1669,22 @@ struct DesignerPaneLayout {
     height: f32,
 }
 
+const DESIGNER_PANE_GAP: f32 = 6.0;
+
 /// Allocate every Designer pane from the actual remaining viewport.  Side
 /// panes yield width before the canvas does, and the final widths always fit
-/// within the caller's bounded rect (including compact 720px windows). Reserve
-/// trailing egui item spacing and a small native-client rounding guard below
+/// within the caller's bounded rect (including compact 720px windows). Each
+/// explicit horizontal gap follows egui's automatic item spacing. Reserve
+/// trailing vertical spacing and a small native-client rounding guard below
 /// the row so its response rect stays inside the client at compact heights.
 fn designer_pane_layout(
     available: egui::Vec2,
-    trailing_item_spacing: f32,
+    item_spacing: egui::Vec2,
     tree_visible: bool,
     inspector_visible: bool,
     tree_width: f32,
     inspector_width: f32,
 ) -> DesignerPaneLayout {
-    const GAP: f32 = 6.0;
     const MIN_CANVAS: f32 = 140.0;
     const MIN_TREE: f32 = 120.0;
     const MIN_INSPECTOR: f32 = 220.0;
@@ -1341,9 +1695,8 @@ fn designer_pane_layout(
     } else {
         1.0
     };
-    let height = if available.y.is_finite() && trailing_item_spacing.is_finite() {
-        (available.y - trailing_item_spacing.max(0.0) - CLIENT_EDGE_ROUNDING_GUARD)
-            .clamp(1.0, 10_000.0)
+    let height = if available.y.is_finite() && item_spacing.y.is_finite() {
+        (available.y - item_spacing.y.max(0.0) - CLIENT_EDGE_ROUNDING_GUARD).clamp(1.0, 10_000.0)
     } else {
         1.0
     };
@@ -1351,7 +1704,12 @@ fn designer_pane_layout(
         .into_iter()
         .filter(|visible| *visible)
         .count();
-    let gaps = GAP * gap_count as f32;
+    let horizontal_item_spacing = if item_spacing.x.is_finite() {
+        item_spacing.x.max(0.0)
+    } else {
+        0.0
+    };
+    let gaps = (DESIGNER_PANE_GAP + horizontal_item_spacing) * gap_count as f32;
     let mut tree = tree_visible
         .then(|| tree_width.clamp(MIN_TREE, 420.0))
         .unwrap_or(0.0);
@@ -1499,6 +1857,60 @@ impl RadialEditorState {
                 cell_id.hash(&mut hasher);
                 hasher.finish()
             }
+            StableSelection::CellSet(cells) => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                cells.primary.cell_id.hash(&mut hasher);
+                hasher.finish()
+            }
+            _ => 0,
+        });
+        let selection = session.and_then(|session| session.selection.as_ref());
+        let selected_members = selection
+            .map(StableSelection::selected_cells)
+            .unwrap_or_default();
+        let selected_member_target_digests = selected_members
+            .iter()
+            .map(acceptance_authored_target_digest)
+            .collect::<Vec<_>>();
+        let digest_cells = |cells: &[crate::radial::authoring::AuthoredCellTarget]| {
+            if cells.is_empty() {
+                return 0;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            cells.hash(&mut hasher);
+            hasher.finish()
+        };
+        let primary_cell_digest = selection
+            .and_then(StableSelection::primary_cell)
+            .map_or(0, |selection| digest_selection(Some(&selection)));
+        let range_anchor_digest = selection.map_or(0, |selection| match selection {
+            StableSelection::CellSet(cells) => {
+                digest_cells(std::slice::from_ref(&cells.range_anchor))
+            }
+            _ => digest_cells(&selected_members[..selected_members.len().min(1)]),
+        });
+        let primary_target_digest = selection.map_or(0, |selection| match selection {
+            StableSelection::Cell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => {
+                acceptance_identity_digest(&[menu_id.as_str(), ring_id.as_str(), cell_id.as_str()])
+            }
+            StableSelection::CellSet(cells) => acceptance_authored_target_digest(&cells.primary),
+            _ => 0,
+        });
+        let range_anchor_target_digest = selection.map_or(0, |selection| match selection {
+            StableSelection::Cell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => {
+                acceptance_identity_digest(&[menu_id.as_str(), ring_id.as_str(), cell_id.as_str()])
+            }
+            StableSelection::CellSet(cells) => {
+                acceptance_authored_target_digest(&cells.range_anchor)
+            }
             _ => 0,
         });
         let document_digest = session
@@ -1509,12 +1921,23 @@ impl RadialEditorState {
             })
             .transpose()?
             .unwrap_or(0);
+        let pending_assets_digest = session.map_or(0, |session| {
+            acceptance_observation_digest(format!("{:?}", session.pending_assets).as_bytes())
+        });
+        let designer_filter_digest = if self.tree_filter.is_empty() {
+            0
+        } else {
+            acceptance_observation_digest(self.tree_filter.as_bytes())
+        };
+        let designer_search_hit_count = session.map_or(0, |session| {
+            authored_search_hits(&session.draft, &self.tree_filter).len()
+        });
         let mut assigned_binding = target.and_then(|selection| {
-            let StableSelection::Cell {
+            let Some(StableSelection::Cell {
                 menu_id,
                 ring_id,
                 cell_id,
-            } = selection
+            }) = selection.primary_cell()
             else {
                 return None;
             };
@@ -1523,9 +1946,9 @@ impl RadialEditorState {
                 .draft
                 .menus
                 .iter()
-                .find(|menu| &menu.id == menu_id)
-                .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
-                .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+                .find(|menu| &menu.id == &menu_id)
+                .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == &ring_id))
+                .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == &cell_id))
                 .and_then(|cell| match &cell.content {
                     CellContent::Action { binding } => Some(binding.clone()),
                     _ => None,
@@ -1602,10 +2025,25 @@ impl RadialEditorState {
             generation: session.map_or(0, |session| session.generation.0),
             selected_target_digest,
             selected_cell_digest,
+            selection_kind: selection.into(),
+            selected_member_count: selected_members.len(),
+            selected_members_digest: digest_cells(&selected_members),
+            selected_member_target_digests,
+            primary_cell_digest,
+            range_anchor_digest,
+            primary_target_digest,
+            range_anchor_target_digest,
+            navigation_path_digest: self.visited_path.acceptance_digest(),
+            navigation_menu_id_digests: self.visited_path.acceptance_menu_id_digests(),
+            navigation_edge_digests: self.visited_path.acceptance_edge_digests(),
+            pending_assets_digest,
+            designer_filter_digest,
+            designer_search_hit_count,
             document_digest,
             assigned_binding_digest: binding_digest(assigned_binding.as_ref()),
             properties_staged_digest,
             draft_dirty: session.is_some_and(RadialAuthoringSession::is_dirty),
+            properties_popup_open: self.open && self.properties_popup.is_some(),
             properties_dirty: self.properties_popup_dirty(),
             undo_depth,
             redo_depth,
@@ -1830,6 +2268,53 @@ impl RadialEditorState {
                         self.resource_notice = Some(ResourceNotice::error(error));
                     }
                 }
+            }
+            DesignerFileDialogRequest::BulkStyleMedia {
+                request,
+                field,
+                media_kind,
+                managed,
+            } => {
+                let Some(path) = file else { return };
+                let selected =
+                    asset_picker::read_bounded(&path, crate::radial::assets::MAX_SOURCE_BYTES)
+                        .and_then(|bytes| {
+                            asset_picker::ResourceChoice::from_selected_file(
+                                &path, bytes, media_kind, managed,
+                            )
+                        });
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                let result = selected.and_then(|choice| {
+                    let value = serde_json::to_value(crate::radial::model::Override::Value(
+                        choice.media_reference(),
+                    ))
+                    .map_err(|error| error.to_string())?;
+                    let mut assets = session.pending_assets.clone();
+                    choice.stage(&mut assets);
+                    let asset_records = match &choice {
+                        asset_picker::ResourceChoice::Managed { record, .. } => {
+                            vec![record.clone()]
+                        }
+                        _ => Vec::new(),
+                    };
+                    menu::apply_bulk_cell_edit_with_assets(
+                        session,
+                        &request,
+                        BulkCellEdit::SetStyleOverride { field, value },
+                        assets,
+                        asset_records,
+                    )
+                    .map_err(|error| format!("{error:?}"))
+                });
+                self.bulk_feedback = Some(match result {
+                    Ok(()) => format!(
+                        "Applied one atomic media override to {} cells.",
+                        request.targets.len()
+                    ),
+                    Err(error) => format!("Bulk media edit rejected: {error}"),
+                });
             }
             DesignerFileDialogRequest::CellExternalIcon {
                 menu_id,
@@ -2203,6 +2688,7 @@ impl RadialEditorState {
         self.pending_drop = None;
         self.properties_popup = None;
         self.properties_draft = None;
+        self.pending_scope_change = None;
         self.radial_add_request = None;
         self.radial_add_menu = None;
         self.radial_add_ring = None;
@@ -2449,7 +2935,7 @@ impl RadialEditorState {
     fn finish_close(&mut self) {
         self.preview.dispose();
         self.release_authoring_resources();
-        self.inspector_action_editor.invalidate_visit();
+        self.inspector_action_editor.dispose();
         self.inspector_action_editor_scope = None;
         self.properties_popup = None;
         self.properties_draft = None;
@@ -2514,8 +3000,7 @@ impl RadialEditorState {
         if let Some(draft) = self.properties_draft.as_mut() {
             draft.action_editor.invalidate_pending_requests();
         }
-        self.inspector_action_editor.invalidate_pending_requests();
-        self.inspector_action_editor.invalidate_visit();
+        self.inspector_action_editor.dispose();
         self.inspector_action_editor_scope = None;
         self.intent_bridge.clear();
         self.stop_native_preview();
@@ -2600,29 +3085,749 @@ impl RadialEditorState {
     }
 
     fn properties_popup_dirty(&self) -> bool {
+        let inspector_dirty = self.inspector_action_editor.has_unassigned_text();
         let Some(draft) = self.properties_draft.as_ref() else {
-            return false;
+            return inspector_dirty;
         };
-        let StableSelection::Cell {
+        let target_differs = if let StableSelection::Cell {
             menu_id,
             ring_id,
             cell_id,
         } = &draft.target
-        else {
-            return false;
+        {
+            self.session
+                .as_ref()
+                .and_then(|session| {
+                    session
+                        .draft
+                        .menus
+                        .iter()
+                        .find(|menu| &menu.id == menu_id)
+                        .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                        .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+                })
+                .is_some_and(|cell| draft.differs_from(cell))
+        } else {
+            false
         };
-        self.session
-            .as_ref()
-            .and_then(|session| {
-                session
-                    .draft
+        target_differs || draft.action_editor.has_unassigned_text() || inspector_dirty
+    }
+
+    fn pending_inspector_action_buffer(&self) -> Option<(BindingEditorScope, ActionBinding)> {
+        if !self.inspector_action_editor.has_unassigned_text() {
+            return None;
+        }
+        let scope = self.inspector_action_editor_scope.as_ref()?.clone();
+        let session = self.session.as_ref()?;
+        if scope.surface != BindingEditorSurface::Inspector
+            || scope.editor_session != session.editor_session
+            || scope.draft_generation != session.generation
+            || session.selection.as_ref() != Some(&scope.target)
+        {
+            return None;
+        }
+        let StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } = &scope.target
+        else {
+            return None;
+        };
+        let cell = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+            .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))?;
+        let _assigned_binding = match &cell.content {
+            CellContent::Action { binding } => Some(binding),
+            _ => None,
+        };
+        Some((
+            scope,
+            self.inspector_action_editor.binding_for_explicit_apply()?,
+        ))
+    }
+
+    fn pending_inspector_action_buffer_for_target(
+        &self,
+        target: &StableSelection,
+    ) -> Option<(BindingEditorScope, ActionBinding)> {
+        self.pending_inspector_action_buffer()
+            .filter(|(scope, _)| &scope.target == target)
+    }
+
+    fn apply_inspector_action_buffer(&mut self) -> Result<(), String> {
+        let (scope, binding) = self
+            .pending_inspector_action_buffer()
+            .ok_or_else(|| "Inspector action input is stale or incomplete".to_owned())?;
+        let StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } = &scope.target
+        else {
+            return Err("Inspector action input no longer targets a cell".into());
+        };
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| "Authoring session is no longer available".to_owned())?;
+        if session.editor_session != scope.editor_session
+            || session.generation != scope.draft_generation
+            || session.selection.as_ref() != Some(&scope.target)
+        {
+            return Err("Inspector action input is stale; keep editing or discard it".into());
+        }
+        menu::set_cell_content(
+            session,
+            &menu_id,
+            &ring_id,
+            &cell_id,
+            CellContent::Action {
+                binding: binding.clone(),
+            },
+        )
+        .map_err(|error| format!("Action assignment failed: {error:?}"))?;
+        self.inspector_action_editor
+            .set_assigned_binding(Some(binding));
+        Ok(())
+    }
+
+    fn discard_inspector_action_buffer(&mut self) {
+        let Some(scope) = self.inspector_action_editor_scope.clone() else {
+            return;
+        };
+        let assigned_binding = self.session.as_ref().and_then(|session| {
+            if session.editor_session != scope.editor_session {
+                return None;
+            }
+            let StableSelection::Cell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } = &scope.target
+            else {
+                return None;
+            };
+            session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| &menu.id == menu_id)
+                .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+                .and_then(|cell| match &cell.content {
+                    CellContent::Action { binding } => Some(binding.clone()),
+                    _ => None,
+                })
+        });
+        self.inspector_action_editor
+            .discard_unassigned_changes(scope, assigned_binding.as_ref());
+    }
+
+    fn reconcile_bulk_edit_stage(&mut self, scope: Option<BulkEditStageScope>) {
+        if self.bulk_edit_stage_scope == scope {
+            return;
+        }
+        self.bulk_edit_stage_scope = scope;
+        self.bulk_label_value.clear();
+        self.bulk_style_stage_key.clear();
+        self.bulk_style_mode = BulkStyleMode::Set;
+        self.bulk_style_staged_value = None;
+        self.bulk_style_text.clear();
+        self.bulk_after_action_slot = BulkAfterActionSlot::Primary;
+        self.bulk_after_action_policy = AfterActionPolicy::Inherit;
+        self.bulk_feedback = None;
+    }
+
+    fn inspector_scope_change_guard_ui(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_scope_change.as_ref() else {
+            return;
+        };
+        let current = self.scope_change_is_current(pending);
+        let dirty = self.inspector_action_editor.has_unassigned_text();
+        if !dirty {
+            if let Some(pending) = self.pending_scope_change.take() {
+                self.apply_pending_scope_change(pending);
+            }
+            return;
+        }
+        let can_apply = current
+            && pending.intent.apply_and_continue_is_safe()
+            && self.pending_inspector_action_buffer().is_some();
+        let apply_only = current
+            && !pending.intent.apply_and_continue_is_safe()
+            && self.pending_inspector_action_buffer().is_some();
+        let title = if current {
+            "Unsaved Inspector action"
+        } else {
+            "Stale Inspector action"
+        };
+        let window_message = if current {
+            "Save or discard the Inspector action input before changing the target or draft."
+        } else {
+            "The requested change no longer matches the session, generation, or selected target."
+        };
+        let mut decision = None;
+        let correlation = trace_correlation(self.session.as_ref());
+        egui::Window::new(title)
+            .id(egui::Id::new("radial-designer-scope-change-guard"))
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(window_message);
+                if current && !can_apply && !apply_only {
+                    ui.small("The action input is incomplete or its target has changed.");
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(
+                            can_apply || apply_only,
+                            egui::Button::new(if apply_only {
+                                "Apply action"
+                            } else {
+                                "Apply and continue"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        decision = Some(PropertiesNavigationDecision::Apply);
+                    }
+                    let response = ui.button(if current {
+                        "Discard and continue"
+                    } else {
+                        "Discard action and cancel stale change"
+                    });
+                    if current {
+                        trace_designer_authoring_control(
+                            ui,
+                            &response,
+                            DesignerAuthoringTarget::InspectorDiscardAndContinue,
+                            DesignerAuthoringRole::Button,
+                            None,
+                            true,
+                            false,
+                            ViewportClass::Deferred,
+                            correlation,
+                        );
+                    }
+                    if response.clicked() {
+                        decision = Some(PropertiesNavigationDecision::Discard);
+                    }
+                    if current && ui.button("Cancel change").clicked() {
+                        decision = Some(PropertiesNavigationDecision::Cancel);
+                    }
+                });
+            });
+        match decision {
+            Some(PropertiesNavigationDecision::Cancel) => {
+                self.pending_scope_change = None;
+            }
+            Some(PropertiesNavigationDecision::Discard) => {
+                self.discard_inspector_action_buffer();
+                if current {
+                    if let Some(pending) = self.pending_scope_change.take() {
+                        self.apply_pending_scope_change(pending);
+                    }
+                } else {
+                    self.pending_scope_change = None;
+                }
+            }
+            Some(PropertiesNavigationDecision::Apply) => {
+                match self.apply_inspector_action_buffer() {
+                    Ok(()) => {
+                        if let Some(mut pending) = self.pending_scope_change.take() {
+                            if pending.intent.apply_and_continue_is_safe() {
+                                self.rebase_scope_change_after_explicit_apply(&mut pending);
+                                self.apply_pending_scope_change(pending);
+                            } else {
+                                self.resource_notice = Some(ResourceNotice::info(
+                                    "The action was applied. Repeat the requested change to confirm it.",
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.resource_notice = Some(ResourceNotice::warning(error));
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn invalidate_binding_editor_scope(&mut self) {
+        if let Some(draft) = self.properties_draft.as_mut() {
+            draft.action_editor.invalidate_pending_requests();
+            draft.action_editor.invalidate_visit();
+        }
+        self.inspector_action_editor.invalidate_pending_requests();
+        self.inspector_action_editor.invalidate_visit();
+        self.inspector_action_editor_scope = None;
+    }
+
+    fn queue_navigation_intent(&mut self, intent: DesignerNavigationIntent) {
+        if let Some(session) = self.session.as_ref() {
+            queue_scope_change(
+                &mut self.pending_scope_change,
+                session,
+                ScopeChangeIntent::Navigation(intent),
+            );
+        }
+    }
+
+    fn queue_editor_operation(&mut self, operation: DeferredEditorOperation) {
+        if let Some(session) = self.session.as_ref() {
+            queue_scope_change(
+                &mut self.pending_scope_change,
+                session,
+                ScopeChangeIntent::Operation(operation),
+            );
+        }
+    }
+
+    fn scope_change_is_current(&self, pending: &PendingScopeChange) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session.editor_session == pending.anchor.editor_session
+                && session.generation == pending.anchor.generation
+                && session.selection == pending.anchor.selection
+        })
+    }
+
+    fn rebase_scope_change_after_explicit_apply(&self, pending: &mut PendingScopeChange) {
+        let previous_generation = pending.anchor.generation;
+        if let Some(session) = self.session.as_ref()
+            && session.editor_session == pending.anchor.editor_session
+            && session.selection == pending.anchor.selection
+        {
+            pending.anchor.generation = session.generation;
+            if let ScopeChangeIntent::Operation(DeferredEditorOperation::MoveCell {
+                pending: cell_drop,
+                ..
+            }) = &mut pending.intent
+                && cell_drop.generation == previous_generation
+            {
+                cell_drop.generation = session.generation;
+            }
+        }
+    }
+
+    fn apply_pending_scope_change(&mut self, pending: PendingScopeChange) {
+        if !self.scope_change_is_current(&pending) {
+            self.resource_notice = Some(ResourceNotice::warning(
+                "The requested change is stale; review the current selection and try again",
+            ));
+            return;
+        }
+        match pending.intent {
+            ScopeChangeIntent::Navigation(intent) => self.apply_navigation_intent(intent),
+            ScopeChangeIntent::Operation(operation) => {
+                self.apply_editor_operation(operation, pending.anchor.generation)
+            }
+        }
+    }
+
+    fn apply_editor_operation(
+        &mut self,
+        operation: DeferredEditorOperation,
+        expected_generation: crate::radial::authoring::DraftGeneration,
+    ) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        if session.generation != expected_generation {
+            self.resource_notice = Some(ResourceNotice::warning(
+                "The requested edit is stale; review the current draft and try again",
+            ));
+            return;
+        }
+        let before_selection = session.selection.clone();
+        let before_generation = session.generation;
+        let mut failure = None;
+        let mut radial_insertion_trace = None;
+        let mut conflict_resolved = false;
+        match operation {
+            DeferredEditorOperation::CreateMenu {
+                interaction,
+                submenu_presentation,
+            } => {
+                if let Err(error) = menu::create_menu_with_defaults(
+                    session,
+                    "menu",
+                    "New menu",
+                    interaction,
+                    submenu_presentation,
+                ) {
+                    failure = Some(format!("New menu failed: {error:?}"));
+                }
+            }
+            DeferredEditorOperation::ApplyRingProposal { proposal, nonce } => {
+                let current_proposal = self.ring_proposal.as_ref();
+                if self.ring_proposal_nonce != Some(nonce)
+                    || current_proposal != Some(&proposal)
+                    || proposal.base_generation != session.generation
+                {
+                    failure = Some("Ring proposal is stale; prepare it again".into());
+                } else {
+                    self.ring_proposal = None;
+                    self.ring_proposal_nonce = None;
+                    if let Err(error) = menu::apply_ring_proposal(session, proposal) {
+                        failure = Some(format!("Proposal apply failed: {error:?}"));
+                    }
+                }
+            }
+            DeferredEditorOperation::CopyCell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => {
+                if let Err(error) = menu::copy_cell(session, &menu_id, &ring_id, &cell_id) {
+                    failure = Some(format!("Copy failed: {error:?}"));
+                }
+            }
+            DeferredEditorOperation::DeleteCell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => {
+                if let Err(error) = menu::delete_cell(session, &menu_id, &ring_id, &cell_id) {
+                    failure = Some(format!("Delete failed: {error:?}"));
+                }
+            }
+            DeferredEditorOperation::CreateSubmenuAndLink {
+                menu_id,
+                ring_id,
+                cell_id,
+                name,
+            } => {
+                if let Err(error) =
+                    menu::create_submenu_and_link(session, &menu_id, &ring_id, &cell_id, &name)
+                {
+                    failure = Some(format!("Create submenu failed: {error:?}"));
+                }
+            }
+            DeferredEditorOperation::LinkExistingSubmenu {
+                menu_id,
+                ring_id,
+                cell_id,
+                linked_menu,
+            } => {
+                if let Err(error) =
+                    menu::link_existing_submenu(session, &menu_id, &ring_id, &cell_id, &linked_menu)
+                {
+                    failure = Some(format!("Link submenu failed: {error:?}"));
+                }
+            }
+            DeferredEditorOperation::CloneSubmenuAndLink {
+                menu_id,
+                ring_id,
+                cell_id,
+                linked_menu,
+            } => match menu::duplicate_menu(
+                session,
+                &linked_menu,
+                SubmenuDuplication::CloneSubmenuClosure,
+            ) {
+                Ok(cloned) => {
+                    if let Err(error) = menu::set_cell_content(
+                        session,
+                        &menu_id,
+                        &ring_id,
+                        &cell_id,
+                        CellContent::Submenu { menu_id: cloned },
+                    ) {
+                        failure = Some(format!("Clone submenu link failed: {error:?}"));
+                    }
+                }
+                Err(error) => failure = Some(format!("Clone submenu failed: {error:?}")),
+            },
+            DeferredEditorOperation::MoveCell {
+                pending,
+                resolution,
+            } => {
+                if pending.generation != session.generation {
+                    failure = Some("Cell move is stale; release the drag and try again".into());
+                } else {
+                    match menu::move_cell_to_slot(
+                        session,
+                        (
+                            &pending.source_menu,
+                            &pending.source_ring,
+                            &pending.source_cell,
+                        ),
+                        (
+                            &pending.destination_menu,
+                            &pending.destination_ring,
+                            pending.destination_index,
+                        ),
+                        resolution,
+                        pending.generation,
+                    ) {
+                        Ok(()) => {
+                            self.projected_selection = None;
+                            if resolution == menu::CellDropResolution::Swap {
+                                self.pending_drop = None;
+                            }
+                        }
+                        Err(menu::MenuEditError::DestinationOccupied)
+                            if resolution == menu::CellDropResolution::MoveIntoSpacer =>
+                        {
+                            self.pending_drop = Some(pending);
+                        }
+                        Err(error) => {
+                            failure = Some(format!("Cell move failed: {error:?}"));
+                        }
+                    }
+                }
+            }
+            DeferredEditorOperation::SetCellContent {
+                menu_id,
+                ring_id,
+                cell_id,
+                content,
+            } => {
+                if let Err(error) =
+                    menu::set_cell_content(session, &menu_id, &ring_id, &cell_id, content)
+                {
+                    failure = Some(format!("Cell content change failed: {error:?}"));
+                } else {
+                    self.placement_draft = None;
+                }
+            }
+            DeferredEditorOperation::Undo => {
+                if session.undo() {
+                    radial_insertion_trace = Some(RadialInsertionControl::Undo);
+                } else {
+                    failure = Some("Nothing to undo".into());
+                }
+            }
+            DeferredEditorOperation::Redo => {
+                if session.redo() {
+                    radial_insertion_trace = Some(RadialInsertionControl::Redo);
+                } else {
+                    failure = Some("Nothing to redo".into());
+                }
+            }
+            DeferredEditorOperation::ResolveConflict(resolution) => {
+                if let Err(error) = session.resolve_conflict(resolution) {
+                    failure = Some(format!("Conflict resolution failed: {error:?}"));
+                } else {
+                    conflict_resolved = true;
+                }
+            }
+        }
+        if let Some(message) = failure {
+            self.resource_notice = Some(ResourceNotice::warning(message));
+            return;
+        }
+        let after_generation = session.generation;
+        let after_selection = session.selection.clone();
+        let after_document = session.draft.clone();
+        if let Some(control) = radial_insertion_trace {
+            self.trace_last_radial_add_operation(control);
+        }
+        if conflict_resolved {
+            self.preview.cancel_tooltip();
+        }
+        if after_generation != before_generation || after_selection != before_selection {
+            self.invalidate_binding_editor_scope();
+            self.properties_popup = None;
+            self.properties_draft = None;
+            self.properties_handoff_prompt = false;
+            self.placement_draft = None;
+            self.reconcile_bulk_edit_stage(None);
+            self.projected_selection = None;
+            self.focus_restore = after_selection;
+            self.visited_path.validate_document_path(&after_document);
+        }
+    }
+
+    fn apply_navigation_intent(&mut self, intent: DesignerNavigationIntent) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let before = session.selection.clone();
+        let document = session.draft.clone();
+        let generation = session.generation;
+        let mut open_properties = false;
+        let mut focus_target = None;
+        let mut next_selection = None;
+        match intent {
+            DesignerNavigationIntent::Select {
+                target,
+                control,
+                shift,
+                force_history,
+                open_properties: should_open_properties,
+            } => {
+                let target_menu = match &target {
+                    StableSelection::Menu(menu_id)
+                    | StableSelection::Ring { menu_id, .. }
+                    | StableSelection::Cell { menu_id, .. } => Some(menu_id.clone()),
+                    StableSelection::CellSet(cells) => Some(cells.primary.menu_id.clone()),
+                    _ => None,
+                };
+                if let Some(menu_id) = target_menu {
+                    let previous_menu = self.visited_path.current().cloned();
+                    if force_history || previous_menu.as_ref() != Some(&menu_id) {
+                        self.visited_path
+                            .direct_reveal(menu_id, before.clone(), force_history);
+                    }
+                }
+                if let StableSelection::Cell {
+                    menu_id,
+                    ring_id,
+                    cell_id,
+                } = &target
+                {
+                    session.select_authored_cell(
+                        crate::radial::authoring::AuthoredCellTarget {
+                            menu_id: menu_id.clone(),
+                            ring_id: ring_id.clone(),
+                            cell_id: cell_id.clone(),
+                        },
+                        control,
+                        shift,
+                    );
+                } else {
+                    session.select(Some(target.clone()));
+                }
+                self.projected_selection = None;
+                open_properties =
+                    should_open_properties && matches!(target, StableSelection::Cell { .. });
+                focus_target = Some(target);
+                next_selection = session.selection.clone();
+            }
+            DesignerNavigationIntent::ClearSelection => {
+                session.select(None);
+                next_selection = session.selection.clone();
+            }
+            DesignerNavigationIntent::CreateSkin => {
+                match skin_editor::create_skin(session, "New skin") {
+                    Ok(skin_id) => {
+                        let target = StableSelection::Skin(skin_id);
+                        focus_target = Some(target.clone());
+                        next_selection = Some(target);
+                    }
+                    Err(error) => {
+                        self.resource_notice = Some(ResourceNotice::error(error));
+                        next_selection = session.selection.clone();
+                    }
+                }
+            }
+            DesignerNavigationIntent::DuplicateSkin(skin_id) => {
+                match skin_editor::duplicate_skin(session, &skin_id) {
+                    Ok(duplicate_id) => {
+                        let target = StableSelection::Skin(duplicate_id);
+                        focus_target = Some(target.clone());
+                        next_selection = Some(target);
+                    }
+                    Err(error) => {
+                        self.resource_notice = Some(ResourceNotice::error(error));
+                        next_selection = session.selection.clone();
+                    }
+                }
+            }
+            DesignerNavigationIntent::EnterSubmenu {
+                edge,
+                return_selection,
+            } => {
+                if self
+                    .visited_path
+                    .enter_submenu(edge.clone(), Some(return_selection))
+                {
+                    let target = StableSelection::Menu(edge.child_menu);
+                    session.select(Some(target.clone()));
+                    focus_target = Some(target);
+                    next_selection = session.selection.clone();
+                }
+            }
+            DesignerNavigationIntent::Back => {
+                if let Some((menu_id, selection)) = self.visited_path.back_location(before.clone())
+                {
+                    session.select(Some(
+                        selection.unwrap_or_else(|| StableSelection::Menu(menu_id)),
+                    ));
+                    next_selection = session.selection.clone();
+                    focus_target = next_selection.clone();
+                }
+            }
+            DesignerNavigationIntent::Breadcrumb(index) => {
+                if let Some((menu_id, selection)) = self.visited_path.go_to_breadcrumb(index) {
+                    session.select(Some(
+                        selection.unwrap_or_else(|| StableSelection::Menu(menu_id)),
+                    ));
+                    next_selection = session.selection.clone();
+                    focus_target = next_selection.clone();
+                }
+            }
+        }
+        self.visited_path.validate_document_path(&document);
+        let scope_changed = before != next_selection;
+        if scope_changed {
+            self.invalidate_binding_editor_scope();
+            self.properties_popup = None;
+            self.properties_draft = None;
+            self.properties_handoff_prompt = false;
+            self.ring_proposal = None;
+            self.ring_proposal_nonce = None;
+            self.reconcile_bulk_edit_stage(None);
+        }
+        if let Some(target) = focus_target {
+            if let Some(menu_id) = match &target {
+                StableSelection::Menu(menu_id)
+                | StableSelection::Ring { menu_id, .. }
+                | StableSelection::Cell { menu_id, .. } => Some(menu_id),
+                StableSelection::CellSet(cells) => Some(&cells.primary.menu_id),
+                _ => None,
+            } {
+                let expansion_key = format!("menu:{menu_id}");
+                let was_open = self
+                    .preferences
+                    .expanded_sections
+                    .insert(expansion_key, true);
+                if was_open != Some(true) {
+                    self.mark_preferences_changed();
+                }
+                if was_open == Some(false) {
+                    // egui retains an explicit collapsed value under the old
+                    // widget ID. Re-keying the tree lets the recorded open
+                    // preference become the new widget's default state.
+                    self.tree_widget_epoch = self.tree_widget_epoch.wrapping_add(1);
+                }
+            }
+            self.focus_restore = Some(target.clone());
+            if open_properties
+                && let StableSelection::Cell {
+                    menu_id,
+                    ring_id,
+                    cell_id,
+                } = target
+            {
+                let selection = StableSelection::Cell {
+                    menu_id: menu_id.clone(),
+                    ring_id: ring_id.clone(),
+                    cell_id: cell_id.clone(),
+                };
+                self.properties_popup = Some(selection);
+                if document
                     .menus
                     .iter()
-                    .find(|menu| &menu.id == menu_id)
-                    .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
-                    .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
-            })
-            .is_some_and(|cell| draft.differs_from(cell))
+                    .find(|menu| menu.id == menu_id)
+                    .and_then(|menu| menu.rings.iter().find(|ring| ring.id == ring_id))
+                    .and_then(|ring| ring.cells.iter().find(|cell| cell.id == cell_id))
+                    .is_some_and(|cell| matches!(&cell.content, CellContent::Spacer))
+                {
+                    self.placement_draft =
+                        Some(PlacementDraft::new(menu_id, ring_id, cell_id, generation));
+                } else {
+                    self.placement_draft = None;
+                }
+            }
+        }
     }
 
     fn poll_replies(&mut self) {
@@ -2836,10 +4041,7 @@ impl RadialEditorState {
             return;
         }
         if let Some(document) = self.session.as_ref().map(|session| session.draft.clone()) {
-            self.visited_path
-                .ensure_root(document.default_menu_id.clone(), |id| {
-                    document.menus.iter().any(|menu| &menu.id == id)
-                });
+            self.visited_path.validate_document_path(&document);
         }
         let selection_before = self
             .session
@@ -2871,13 +4073,16 @@ impl RadialEditorState {
                                 StableSelection::Menu(menu_id) => Some(menu_id.clone()),
                                 StableSelection::Ring { menu_id, .. }
                                 | StableSelection::Cell { menu_id, .. } => Some(menu_id.clone()),
+                                StableSelection::CellSet(cells) => {
+                                    Some(cells.primary.menu_id.clone())
+                                }
                                 _ => None,
                             });
                     if let Some(selected_menu) = selected_menu.filter(|menu_id| {
                         session.draft.menus.iter().any(|menu| &menu.id == menu_id)
-                    }) {
-                        self.visited_path
-                            .select_menu(session.draft.default_menu_id.clone(), selected_menu);
+                    }) && self.visited_path.current() != Some(&selected_menu)
+                    {
+                        self.visited_path.direct_reveal(selected_menu, None, false);
                     }
                 }
                 let proposal = self
@@ -3023,7 +4228,9 @@ impl RadialEditorState {
                 "runtime",
             );
             ui.add_enabled_ui(
-                !initial_snapshot_pending && conflict_reason.is_none(),
+                !initial_snapshot_pending
+                    && conflict_reason.is_none()
+                    && self.pending_scope_change.is_none(),
                 |ui| {
                     self.designer_controls(ui, trace_viewport_class(viewport_class));
                     if !self.show_resources && self.designer_mode == DesignerMode::Design {
@@ -3036,19 +4243,13 @@ impl RadialEditorState {
                     self.pending_drop_ui(ui);
                     let pane = designer_pane_layout(
                         ui.available_size(),
-                        ui.spacing().item_spacing.y,
+                        ui.spacing().item_spacing,
                         self.tree_visible,
                         self.inspector_visible,
                         self.tree_width,
                         self.inspector_width,
                     );
-                    if !self.inspector_visible {
-                        self.inspector_action_editor.invalidate_visit();
-                        self.inspector_action_editor_scope = None;
-                    }
                     if self.show_resources {
-                        self.inspector_action_editor.invalidate_visit();
-                        self.inspector_action_editor_scope = None;
                         // Skins/assets are the main bounded content in Skins
                         // mode.  They replace the full-height canvas rather
                         // than being appended below it, so every control is
@@ -3074,12 +4275,13 @@ impl RadialEditorState {
                                         );
                                     },
                                 );
-                                ui.add_space(6.0);
+                                ui.add_space(DESIGNER_PANE_GAP);
                             }
                             let canvas_response = ui.allocate_ui_with_layout(
                                 egui::vec2(pane.canvas_width, pane.height),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
+                                    let mut navigation_intent = None;
                                     self.preview.ui(
                                         ui,
                                         &draft,
@@ -3096,11 +4298,20 @@ impl RadialEditorState {
                                         &mut self.drag_payload,
                                         &mut self.placement_draft,
                                         &mut self.pending_drop,
-                                        &mut self.properties_popup,
+                                        &mut navigation_intent,
                                         &mut self.visited_path,
                                         &mut self.canvas_pan,
                                         &mut self.pan_drag_start,
                                     );
+                                    if let (Some(intent), Some(session)) =
+                                        (navigation_intent, self.session.as_ref())
+                                    {
+                                        queue_scope_change(
+                                            &mut self.pending_scope_change,
+                                            session,
+                                            ScopeChangeIntent::Navigation(intent),
+                                        );
+                                    }
                                 },
                             );
                             trace_designer_authoring_control(
@@ -3121,7 +4332,7 @@ impl RadialEditorState {
                                 correlation,
                             );
                             if pane.inspector_width > 0.0 {
-                                ui.add_space(6.0);
+                                ui.add_space(DESIGNER_PANE_GAP);
                                 ui.allocate_ui_with_layout(
                                     egui::vec2(pane.inspector_width, pane.height),
                                     egui::Layout::top_down(egui::Align::Min),
@@ -3264,12 +4475,22 @@ impl RadialEditorState {
     }
 
     fn properties_popup_ui(&mut self, ctx: &egui::Context, frame: &DesignerFrameContext) {
+        if self.pending_scope_change.is_some()
+            && !self.properties_popup_dirty()
+            && !self.inspector_action_editor.has_unassigned_text()
+        {
+            if let Some(pending) = self.pending_scope_change.take() {
+                self.apply_pending_scope_change(pending);
+            }
+            return;
+        }
         let Some(StableSelection::Cell {
             menu_id,
             ring_id,
             cell_id,
         }) = self.properties_popup.clone()
         else {
+            self.inspector_scope_change_guard_ui(ctx);
             return;
         };
         let cell = self
@@ -3315,6 +4536,13 @@ impl RadialEditorState {
                 &cell,
             ));
         }
+        let inspector_dirty = self.inspector_action_editor.has_unassigned_text();
+        let inspector_buffer = self.pending_inspector_action_buffer_for_target(&target);
+        let has_pending_scope_change = self.pending_scope_change.is_some();
+        let pending_scope_change_current = self
+            .pending_scope_change
+            .as_ref()
+            .is_some_and(|pending| self.scope_change_is_current(pending));
         let Some(draft) = self.properties_draft.as_mut() else {
             return;
         };
@@ -3322,6 +4550,7 @@ impl RadialEditorState {
         let mut open_inspector_after_apply = false;
         let mut discard_and_open = false;
         let mut cancel = false;
+        let mut navigate_after_apply = false;
         let mut popup_open = true;
         let invocation_context = self
             .session
@@ -3482,20 +4711,29 @@ impl RadialEditorState {
                 ui.small(
                     "Action bindings and advanced appearance options are available in Inspector.",
                 );
+                if draft.action_editor.has_unassigned_text() {
+                    ui.small(
+                        "Save query or Use exact command before applying, or discard the pending action input.",
+                    );
+                }
                 ui.horizontal(|ui| {
-                    let response = ui.button("Apply");
+                    let can_apply_popup = !draft.action_editor.has_unassigned_text();
+                    let response = ui.add_enabled(
+                        can_apply_popup,
+                        egui::Button::new("Apply"),
+                    );
                     trace_designer_authoring_control(
                         ui,
                         &response,
                         DesignerAuthoringTarget::PopupApply,
                         DesignerAuthoringRole::Button,
                         None,
-                        true,
+                        can_apply_popup,
                         false,
                         ViewportClass::Deferred,
                         correlation,
                     );
-                    if response.clicked() {
+                    if response.clicked() && can_apply_popup && !has_pending_scope_change {
                         apply = true;
                     }
                     let response = ui.button("Cancel");
@@ -3510,7 +4748,7 @@ impl RadialEditorState {
                         ViewportClass::Deferred,
                         correlation,
                     );
-                    if response.clicked() {
+                    if response.clicked() && !has_pending_scope_change {
                         cancel = true;
                     }
                     let response = ui.button("Open in Inspector");
@@ -3525,7 +4763,7 @@ impl RadialEditorState {
                         ViewportClass::Deferred,
                         correlation,
                     );
-                    if response.clicked() {
+                    if response.clicked() && !has_pending_scope_change {
                         if draft.differs_from(&cell) {
                             self.properties_handoff_prompt = true;
                         } else {
@@ -3533,23 +4771,27 @@ impl RadialEditorState {
                         }
                     }
                 });
-                if self.properties_handoff_prompt {
+                if self.properties_handoff_prompt && !has_pending_scope_change {
                     ui.separator();
                     ui.label("Apply popup edits before opening Inspector?");
                     ui.horizontal_wrapped(|ui| {
-                        let response = ui.button("Apply and open");
+                        let can_apply_popup = !draft.action_editor.has_unassigned_text();
+                        let response = ui.add_enabled(
+                            can_apply_popup,
+                            egui::Button::new("Apply and open"),
+                        );
                         trace_designer_authoring_control(
                             ui,
                             &response,
                             DesignerAuthoringTarget::PopupApplyAndOpen,
                             DesignerAuthoringRole::Button,
                             None,
-                            true,
+                            can_apply_popup,
                             false,
                             ViewportClass::Deferred,
                             correlation,
                         );
-                        if response.clicked() {
+                        if response.clicked() && can_apply_popup {
                             apply = true;
                             open_inspector_after_apply = true;
                             self.properties_handoff_prompt = false;
@@ -3588,12 +4830,80 @@ impl RadialEditorState {
                     });
                 }
             });
+        let properties_action_pending = draft.action_editor.has_unassigned_text();
+        let navigation_dirty = draft.differs_from(&cell)
+            || draft.action_editor.has_unassigned_text()
+            || inspector_dirty;
+        let can_apply_navigation = pending_scope_change_current
+            && !properties_action_pending
+            && (!inspector_dirty || inspector_buffer.is_some());
+        let mut navigation_decision = None;
+        if has_pending_scope_change && navigation_dirty {
+            egui::Window::new("Unsaved cell properties")
+                .id(egui::Id::new("radial-designer-navigation-guard"))
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(if pending_scope_change_current {
+                        "Apply or discard the current edits before continuing."
+                    } else {
+                        "The requested change is stale. Cancel it and review the current draft."
+                    });
+                    if properties_action_pending {
+                        ui.small(
+                            "Save query or Use exact command before applying; Discard and continue abandons this action input.",
+                        );
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        let apply_only = self
+                            .pending_scope_change
+                            .as_ref()
+                            .is_some_and(|pending| {
+                                !pending.intent.apply_and_continue_is_safe()
+                            });
+                        if ui
+                            .add_enabled(
+                                can_apply_navigation,
+                                egui::Button::new(if apply_only {
+                                    "Apply edits"
+                                } else {
+                                    "Apply and continue"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            navigation_decision = Some(PropertiesNavigationDecision::Apply);
+                        }
+                        if ui
+                            .button(if pending_scope_change_current {
+                                "Discard and continue"
+                            } else {
+                                "Discard edits and cancel stale change"
+                            })
+                            .clicked()
+                        {
+                            navigation_decision = Some(PropertiesNavigationDecision::Discard);
+                        }
+                        if ui.button("Cancel navigation").clicked() {
+                            navigation_decision = Some(PropertiesNavigationDecision::Cancel);
+                        }
+                    });
+                });
+        }
         for intent in binding_editor_intents {
             match intent {
-                ActionBindingEditorIntent::Pin { binding }
-                | ActionBindingEditorIntent::SaveQuery { binding }
+                ActionBindingEditorIntent::Pin { binding } => {
+                    draft.action_binding = Some(binding.clone());
+                    draft
+                        .action_editor
+                        .accept_committed_assignment(binding, BindingAssignmentKind::Pinned);
+                }
+                ActionBindingEditorIntent::SaveQuery { binding }
                 | ActionBindingEditorIntent::SetCommand { binding } => {
-                    draft.action_binding = Some(binding);
+                    draft.action_binding = Some(binding.clone());
+                    draft
+                        .action_editor
+                        .accept_committed_assignment(binding, BindingAssignmentKind::Explicit);
                 }
                 ActionBindingEditorIntent::Search { identity, query } => {
                     frame
@@ -3612,16 +4922,52 @@ impl RadialEditorState {
                 }),
             }
         }
+        match navigation_decision {
+            Some(PropertiesNavigationDecision::Cancel) => {
+                self.pending_scope_change = None;
+                self.properties_handoff_prompt = false;
+                return;
+            }
+            Some(PropertiesNavigationDecision::Discard) => {
+                if let Some(draft) = self.properties_draft.as_mut() {
+                    draft.action_editor.invalidate_pending_requests();
+                    draft.action_editor.invalidate_visit();
+                }
+                self.discard_inspector_action_buffer();
+                let pending = self.pending_scope_change.take();
+                self.properties_popup = None;
+                self.properties_draft = None;
+                self.properties_handoff_prompt = false;
+                if pending_scope_change_current {
+                    if let Some(pending) = pending {
+                        self.apply_pending_scope_change(pending);
+                    }
+                }
+                return;
+            }
+            Some(PropertiesNavigationDecision::Apply) => {
+                apply = true;
+                navigate_after_apply = true;
+            }
+            None => {}
+        }
         if !popup_open {
+            if has_pending_scope_change {
+                // Window close while navigation is pending follows the same
+                // explicit discard guard as an in-editor navigation request.
+                return;
+            }
             cancel = true;
         }
         if cancel {
+            self.invalidate_binding_editor_scope();
             self.properties_popup = None;
             self.properties_draft = None;
             self.properties_handoff_prompt = false;
             return;
         }
         if discard_and_open {
+            self.invalidate_binding_editor_scope();
             if let Some(session) = self.session.as_mut() {
                 session.select(Some(target));
             }
@@ -3636,7 +4982,14 @@ impl RadialEditorState {
                 .properties_draft
                 .clone()
                 .expect("draft initialized above");
-            let content = match draft.content_kind {
+            let inspector_buffer = self.pending_inspector_action_buffer_for_target(&target);
+            if self.inspector_action_editor.has_unassigned_text() && inspector_buffer.is_none() {
+                self.resource_notice = Some(ResourceNotice::warning(
+                    "Inspector action input is stale or incomplete; keep editing or discard it",
+                ));
+                return;
+            }
+            let mut content = match draft.content_kind {
                 0 => CellContent::Spacer,
                 1 => match &draft.original_content {
                     CellContent::Action { .. } => draft
@@ -3672,6 +5025,11 @@ impl RadialEditorState {
                     },
                 },
             };
+            if let Some((_, binding)) = &inspector_buffer {
+                content = CellContent::Action {
+                    binding: binding.clone(),
+                };
+            }
             let Some(session) = self.session.as_mut() else {
                 return;
             };
@@ -3705,6 +5063,10 @@ impl RadialEditorState {
                         "Cell properties failed: {error:?}"
                     )));
                 } else {
+                    if let Some((_, binding)) = inspector_buffer {
+                        self.inspector_action_editor
+                            .set_assigned_binding(Some(binding));
+                    }
                     if open_inspector_after_apply {
                         session.select(Some(target));
                         self.inspector_visible = true;
@@ -3713,22 +5075,25 @@ impl RadialEditorState {
                     self.properties_popup = None;
                     self.properties_draft = None;
                     self.placement_draft = None;
+                    if navigate_after_apply
+                        && let Some(mut pending) = self.pending_scope_change.take()
+                    {
+                        if pending.intent.apply_and_continue_is_safe() {
+                            self.rebase_scope_change_after_explicit_apply(&mut pending);
+                            self.apply_pending_scope_change(pending);
+                        } else {
+                            self.resource_notice = Some(ResourceNotice::info(
+                                "The action was applied. Repeat the requested change to confirm it.",
+                            ));
+                        }
+                    }
                 }
             }
         }
     }
 
     fn resolve_conflict(&mut self, resolution: ConflictResolution) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        if let Err(error) = session.resolve_conflict(resolution) {
-            session.last_error = Some(format!("{error:?}"));
-        } else {
-            self.preview.cancel_tooltip();
-            self.visited_path
-                .replace_invalid_tail(|id| session.draft.menus.iter().any(|menu| &menu.id == id));
-        }
+        self.queue_editor_operation(DeferredEditorOperation::ResolveConflict(resolution));
     }
 
     fn designer_controls(&mut self, ui: &mut egui::Ui, viewport: ViewportClass) {
@@ -3903,41 +5268,10 @@ impl RadialEditorState {
                 ui.label("Destination occupied");
                 ui.small("Choose Swap to exchange both authored slots, or Cancel.");
                 if ui.button("Swap").clicked() {
-                    let result = self
-                        .session
-                        .as_mut()
-                        .ok_or(crate::radial::authoring::menu::MenuEditError::MissingEntity)
-                        .and_then(|session| {
-                            crate::radial::authoring::menu::move_cell_to_slot(
-                                session,
-                                (
-                                    &pending.source_menu,
-                                    &pending.source_ring,
-                                    &pending.source_cell,
-                                ),
-                                (
-                                    &pending.destination_menu,
-                                    &pending.destination_ring,
-                                    pending.destination_index,
-                                ),
-                                crate::radial::authoring::menu::CellDropResolution::Swap,
-                                pending.generation,
-                            )
-                        });
-                    match result {
-                        Ok(()) => self.projected_selection = None,
-                        Err(error) => {
-                            self.projected_selection = Some(ProjectedSelection {
-                                label: format!("Swap cancelled: {error:?}"),
-                                provenance: ProjectedCellProvenance::Authored {
-                                    menu_id: pending.destination_menu.clone(),
-                                    ring_id: pending.destination_ring.clone(),
-                                    cell_id: pending.destination_cell.clone(),
-                                },
-                            });
-                        }
-                    }
-                    self.pending_drop = None;
+                    self.queue_editor_operation(DeferredEditorOperation::MoveCell {
+                        pending: pending.clone(),
+                        resolution: menu::CellDropResolution::Swap,
+                    });
                 }
                 if ui.button("Cancel").clicked() {
                     self.pending_drop = None;
@@ -3967,13 +5301,7 @@ impl RadialEditorState {
                 trace_correlation(self.session.as_ref()),
             );
             if undo.clicked() {
-                let changed = self
-                    .session
-                    .as_mut()
-                    .is_some_and(RadialAuthoringSession::undo);
-                if changed {
-                    self.trace_last_radial_add_operation(RadialInsertionControl::Undo);
-                }
+                self.queue_editor_operation(DeferredEditorOperation::Undo);
             }
             let redo = ui
                 .add_enabled(!pending, egui::Button::new("Redo"))
@@ -3990,13 +5318,7 @@ impl RadialEditorState {
                 trace_correlation(self.session.as_ref()),
             );
             if redo.clicked() {
-                let changed = self
-                    .session
-                    .as_mut()
-                    .is_some_and(RadialAuthoringSession::redo);
-                if changed {
-                    self.trace_last_radial_add_operation(RadialInsertionControl::Redo);
-                }
+                self.queue_editor_operation(DeferredEditorOperation::Redo);
             }
             ui.separator();
             let validation = self
@@ -4107,6 +5429,32 @@ impl RadialEditorState {
         if pending || modal_open {
             return;
         }
+        let escape =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if escape {
+            if self.pending_scope_change.take().is_some() {
+                return;
+            }
+            if !self.tree_filter.is_empty() {
+                self.tree_filter.clear();
+                return;
+            }
+            if self.properties_popup.is_some() {
+                self.invalidate_binding_editor_scope();
+                self.properties_popup = None;
+                self.properties_draft = None;
+                self.properties_handoff_prompt = false;
+                return;
+            }
+            self.request_close();
+            return;
+        }
+        // TextEdit owns Ctrl+A, Shift selection, and platform text undo. The
+        // document history shortcuts are only active when no text widget has
+        // claimed keyboard focus.
+        if ctx.wants_keyboard_input() {
+            return;
+        }
         let (redo, undo, save) = ctx.input_mut(|input| {
             let redo =
                 input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::Z);
@@ -4115,15 +5463,9 @@ impl RadialEditorState {
             (redo, undo, save)
         });
         if undo {
-            let _ = self
-                .session
-                .as_mut()
-                .is_some_and(RadialAuthoringSession::undo);
+            self.queue_editor_operation(DeferredEditorOperation::Undo);
         } else if redo {
-            let _ = self
-                .session
-                .as_mut()
-                .is_some_and(RadialAuthoringSession::redo);
+            self.queue_editor_operation(DeferredEditorOperation::Redo);
         }
         if save
             && self
@@ -4254,12 +5596,13 @@ impl RadialEditorState {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        let mut navigation = None;
         ui.heading("Skins, assets, import and export");
         ui.small("Application defaults (read-only) → user defaults → skin → menu → ring → cell");
         ui.horizontal(|ui| {
             ui.label("Skin:");
             if ui.button("User defaults").clicked() {
-                session.select(None);
+                navigation = Some(DesignerNavigationIntent::ClearSelection);
             }
             for (skin_index, skin) in session.draft.skins.clone().into_iter().enumerate() {
                 let response = ui.button(&skin.name);
@@ -4275,11 +5618,17 @@ impl RadialEditorState {
                     trace_correlation(Some(session)),
                 );
                 if response.clicked() {
-                    session.select(Some(StableSelection::Skin(skin.id)));
+                    navigation = Some(DesignerNavigationIntent::Select {
+                        target: StableSelection::Skin(skin.id),
+                        control: false,
+                        shift: false,
+                        force_history: false,
+                        open_properties: false,
+                    });
                 }
             }
             if ui.button("New skin").clicked() {
-                let _ = skin_editor::create_skin(session, "New skin");
+                navigation = Some(DesignerNavigationIntent::CreateSkin);
             }
         });
         if let Some(StableSelection::Skin(skin_id)) = session.selection.clone() {
@@ -4295,7 +5644,7 @@ impl RadialEditorState {
                     );
                 }
                 if ui.button("Duplicate skin").clicked() {
-                    let _ = skin_editor::duplicate_skin(session, &skin_id);
+                    navigation = Some(DesignerNavigationIntent::DuplicateSkin(skin_id.clone()));
                 }
                 let impact = crate::radial::store::references_to_skin(&session.draft, &skin_id);
                 if impact.paths.is_empty() {
@@ -4552,6 +5901,13 @@ impl RadialEditorState {
         if let Some(path) = session.last_backup_path.as_ref() {
             ui.label(format!("Verified replacement backup: {}", path.display()));
         }
+        if let Some(intent) = navigation {
+            queue_scope_change(
+                &mut self.pending_scope_change,
+                session,
+                ScopeChangeIntent::Navigation(intent),
+            );
+        }
         self.package_controls(ui);
         if let Some(notice) = &self.resource_notice {
             show_resource_notice(ui, notice);
@@ -4729,6 +6085,9 @@ impl RadialEditorState {
                 | Some(StableSelection::Cell {
                     menu_id, ring_id, ..
                 }) => Some((menu_id.clone(), ring_id.clone())),
+                Some(StableSelection::CellSet(cells)) => {
+                    Some((cells.primary.menu_id.clone(), cells.primary.ring_id.clone()))
+                }
                 _ => selected_menu.as_ref().and_then(|menu_id| {
                     session
                         .draft
@@ -4945,28 +6304,21 @@ impl RadialEditorState {
             }
         });
 
-        if let (Some(session), Some(selection)) = (self.session.as_mut(), choose_ring) {
-            session.select(Some(selection));
-            self.ring_proposal = None;
-            self.ring_proposal_nonce = None;
+        if let Some(selection) = choose_ring {
+            self.queue_navigation_intent(DesignerNavigationIntent::Select {
+                target: selection,
+                control: false,
+                shift: false,
+                force_history: false,
+                open_properties: false,
+            });
         }
 
         if create_menu {
-            if let Some(session) = self.session.as_mut() {
-                match menu::create_menu_with_defaults(
-                    session,
-                    "menu",
-                    "New menu",
-                    defaults.default_interaction,
-                    defaults.default_submenu_presentation,
-                ) {
-                    Ok(_) => {
-                        self.ring_proposal = None;
-                        self.ring_proposal_nonce = None;
-                    }
-                    Err(error) => session.last_error = Some(format!("New menu failed: {error:?}")),
-                }
-            }
+            self.queue_editor_operation(DeferredEditorOperation::CreateMenu {
+                interaction: defaults.default_interaction,
+                submenu_presentation: defaults.default_submenu_presentation,
+            });
         }
         if propose_new_ring {
             if let (Some(session), Some(menu_id)) = (self.session.as_mut(), selected_menu.as_ref())
@@ -5035,15 +6387,13 @@ impl RadialEditorState {
             }
         }
         if apply_proposal {
-            if let (Some(session), Some(proposal)) =
-                (self.session.as_mut(), self.ring_proposal.take())
+            if let (Some(proposal), Some(nonce)) =
+                (self.ring_proposal.clone(), self.ring_proposal_nonce)
             {
-                self.ring_proposal_nonce = None;
-                if let Err(error) = menu::apply_ring_proposal(session, proposal) {
-                    session.last_error = Some(format!("Proposal apply failed: {error:?}"));
-                } else {
-                    self.focus_restore = session.selection.clone();
-                }
+                self.queue_editor_operation(DeferredEditorOperation::ApplyRingProposal {
+                    proposal,
+                    nonce,
+                });
             }
         }
         if cancel_proposal {
@@ -5080,6 +6430,7 @@ impl RadialEditorState {
                 StableSelection::Menu(menu_id)
                 | StableSelection::Ring { menu_id, .. }
                 | StableSelection::Cell { menu_id, .. } => Some(menu_id),
+                StableSelection::CellSet(cells) => Some(&cells.primary.menu_id),
                 _ => None,
             });
         let selected_menu_index = selected_menu_id.and_then(|menu_id| {
@@ -5098,6 +6449,7 @@ impl RadialEditorState {
                 StableSelection::Ring { ring_id, .. } | StableSelection::Cell { ring_id, .. } => {
                     Some(ring_id)
                 }
+                StableSelection::CellSet(cells) => Some(&cells.primary.ring_id),
                 _ => None,
             });
         let selected_ring_index = selected_menu.and_then(|menu| {
@@ -5122,6 +6474,21 @@ impl RadialEditorState {
                     .find(|menu| &menu.id == menu_id)
                     .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
                     .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id)),
+                StableSelection::CellSet(cells) => session
+                    .draft
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == cells.primary.menu_id)
+                    .and_then(|menu| {
+                        menu.rings
+                            .iter()
+                            .find(|ring| ring.id == cells.primary.ring_id)
+                    })
+                    .and_then(|ring| {
+                        ring.cells
+                            .iter()
+                            .find(|cell| cell.id == cells.primary.cell_id)
+                    }),
                 _ => None,
             });
         let selected_cell_index = selected_cell.and_then(|cell| {
@@ -5321,20 +6688,150 @@ impl RadialEditorState {
         viewport: ViewportClass,
     ) {
         ui.heading("Menus and rings");
+        let pending_scope_change = &mut self.pending_scope_change;
+        let filter = &mut self.tree_filter;
         let drag_source = &mut self.drag_source;
         let post_render = &mut self.post_render;
         let focus_restore = &mut self.focus_restore;
         let expanded_sections = &mut self.preferences.expanded_sections;
         let preferences_dirty = &mut self.preferences_dirty;
-        let visited_path = &mut self.visited_path;
-        let Some(session) = self.session.as_mut() else {
+        let Some(session) = self.session.as_ref() else {
             return;
         };
         let menus = session.draft.menus.clone();
+        ui.horizontal(|ui| {
+            ui.label("Search");
+            let response = ui.add(
+                egui::TextEdit::singleline(filter)
+                    .hint_text("Authored menus, labels, or IDs")
+                    .desired_width(f32::INFINITY),
+            );
+            let undo_scope = acceptance_trace::enabled()
+                .then(|| designer_tree_search_undo_scope(ui.ctx(), response.id, filter))
+                .flatten();
+            trace_designer_authoring_control_scoped_rect(
+                ui,
+                response.rect,
+                response.clicked(),
+                DesignerAuthoringTarget::TreeSearch,
+                DesignerAuthoringRole::TextEdit,
+                None,
+                true,
+                false,
+                response.has_focus(),
+                viewport,
+                trace_correlation(Some(session)),
+                undo_scope,
+            );
+            if !filter.is_empty() {
+                let clear = ui.small_button("Clear");
+                trace_designer_authoring_control(
+                    ui,
+                    &clear,
+                    DesignerAuthoringTarget::TreeSearchClear,
+                    DesignerAuthoringRole::Button,
+                    None,
+                    true,
+                    false,
+                    viewport,
+                    trace_correlation(Some(session)),
+                );
+                if clear.clicked() {
+                    filter.clear();
+                }
+            }
+        });
+        if !filter.trim().is_empty() {
+            let hits = authored_search_hits(&session.draft, filter);
+            ui.small(format!("{} authored results", hits.len()));
+            egui::ScrollArea::vertical()
+                .id_source("radial-designer-search-results")
+                .show(ui, |ui| {
+                    for (hit_index, hit) in hits.into_iter().enumerate() {
+                        // Reuse the widget's actual Galley so diagnostic text geometry
+                        // describes what is painted, including wrapping and elision.
+                        let galley = egui::WidgetText::from(format!("{}  ·  {}", hit.label, hit.context))
+                            .into_galley(ui, None, ui.available_width() - 2.0 * ui.spacing().button_padding.x, egui::TextStyle::Button);
+                        let selected = session.selection.as_ref() == Some(&hit.target)
+                            || session.selection.as_ref().is_some_and(|selection| {
+                                matches!(
+                                    (&hit.target, selection),
+                                    (
+                                        StableSelection::Cell { menu_id: target_menu, ring_id: target_ring, cell_id: target_cell },
+                                        StableSelection::CellSet(cells)
+                                    ) if target_menu == &cells.primary.menu_id
+                                        && cells.members.iter().any(|member| member.menu_id == *target_menu && member.ring_id == *target_ring && member.cell_id == *target_cell)
+                                )
+                            });
+                        let response = ui
+                            .selectable_label(selected, std::sync::Arc::clone(&galley))
+                            .on_hover_text(format!("{} · {}", hit.label, hit.context));
+                        let search_scope = match &hit.target {
+                            StableSelection::Cell { menu_id, ring_id, cell_id } => designer_rendered_text(ui, &response, &galley).map(|rendered_text|
+                                acceptance_trace::DesignerAuthoringControlScope::AuthoredSearchResult {
+                                    menu_id_digest: acceptance_identity_digest(&[menu_id.as_str()]),
+                                    ring_id_digest: acceptance_identity_digest(&[ring_id.as_str()]),
+                                    cell_id_digest: acceptance_identity_digest(&[cell_id.as_str()]),
+                                    authored_target_digest: acceptance_identity_digest(&[
+                                        menu_id.as_str(), ring_id.as_str(), cell_id.as_str(),
+                                    ]),
+                                    rendered_text,
+                                },
+                            ),
+                            _ => None,
+                        };
+                        trace_designer_authoring_control_scoped_rect(
+                            ui,
+                            response.rect,
+                            response.clicked(),
+                            DesignerAuthoringTarget::TreeSearchResult,
+                            DesignerAuthoringRole::Selectable,
+                            Some(hit_index),
+                            true,
+                            selected,
+                            response.has_focus(),
+                            viewport,
+                            trace_correlation(Some(session)),
+                            search_scope,
+                        );
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::SelectableLabel,
+                                selected,
+                                format!("{} · {}", hit.label, hit.context),
+                            )
+                        });
+                        if response.clicked() {
+                            queue_scope_change(
+                                pending_scope_change,
+                                session,
+                                ScopeChangeIntent::Navigation(DesignerNavigationIntent::Select {
+                                    target: hit.target,
+                                    control: false,
+                                    shift: false,
+                                    force_history: true,
+                                    open_properties: false,
+                                }),
+                            );
+                            filter.clear();
+                        }
+                    }
+                });
+            return;
+        }
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (menu_index, menu) in menus.iter().enumerate() {
-                let menu_selected =
-                    session.selection == Some(StableSelection::Menu(menu.id.clone()));
+                let menu_selected = session.selection.as_ref().is_some_and(|selection| {
+                    match selection {
+                        StableSelection::Menu(id) => id == &menu.id,
+                        StableSelection::Ring { menu_id, .. }
+                        | StableSelection::Cell { menu_id, .. } => menu_id == &menu.id,
+                        StableSelection::CellSet(cells) => {
+                            cells.primary.menu_id == menu.id
+                        }
+                        _ => false,
+                    }
+                });
                 let expansion_key = format!("menu:{}", menu.id);
                 let default_open = expanded_sections
                     .get(&expansion_key)
@@ -5381,8 +6878,17 @@ impl RadialEditorState {
                                 *focus_restore = None;
                             }
                             if ring_response.clicked() {
-                                visited_path.select_direct(menu.id.clone());
-                                session.select(Some(ring_selection));
+                                queue_scope_change(
+                                    pending_scope_change,
+                                    session,
+                                    ScopeChangeIntent::Navigation(DesignerNavigationIntent::Select {
+                                        target: ring_selection,
+                                        control: false,
+                                        shift: false,
+                                        force_history: false,
+                                        open_properties: false,
+                                    }),
+                                );
                             }
                             ui.indent(
                                 menu::widget_key(
@@ -5405,8 +6911,15 @@ impl RadialEditorState {
                                                     "tree",
                                                 ),
                                                 |ui| {
-                                                    let selected = session.selection.as_ref()
-                                                        == Some(&selection);
+                                                    let selected = session.selection.as_ref().is_some_and(|selection| {
+                                                        selection.is_authored_cell_selected(
+                                                            &crate::radial::authoring::AuthoredCellTarget {
+                                                                menu_id: menu.id.clone(),
+                                                                ring_id: ring.id.clone(),
+                                                                cell_id: cell.id.clone(),
+                                                            },
+                                                        )
+                                                    });
                                                     let accessible_name =
                                                         cell_tree_accessible_name(cell, index);
                                                     let response = ui
@@ -5427,13 +6940,32 @@ impl RadialEditorState {
                                                 },
                                             )
                                             .inner;
-                                        if focus_restore.as_ref() == Some(&selection) {
+                                        if focus_restore
+                                            .as_ref()
+                                            .and_then(StableSelection::primary_cell)
+                                            .as_ref()
+                                            == Some(&selection)
+                                        {
                                             response.request_focus();
                                             *focus_restore = None;
                                         }
                                         if response.clicked() {
-                                            visited_path.select_direct(menu.id.clone());
-                                            session.select(Some(selection));
+                                            let modifiers = ui.input(|input| input.modifiers);
+                                            queue_scope_change(
+                                                pending_scope_change,
+                                                session,
+                                                ScopeChangeIntent::Navigation(DesignerNavigationIntent::Select {
+                                                    target: StableSelection::Cell {
+                                                        menu_id: menu.id.clone(),
+                                                        ring_id: ring.id.clone(),
+                                                        cell_id: cell.id.clone(),
+                                                    },
+                                                    control: modifiers.ctrl,
+                                                    shift: modifiers.shift,
+                                                    force_history: false,
+                                                    open_properties: false,
+                                                }),
+                                            );
                                         }
                                         if response.drag_started() {
                                             *drag_source = Some((
@@ -5510,8 +7042,17 @@ impl RadialEditorState {
                 }
                 if header.header_response.clicked() || menu_selected && session.selection.is_none()
                 {
-                    visited_path.select_direct(menu.id.clone());
-                    session.select(Some(StableSelection::Menu(menu.id.clone())));
+                    queue_scope_change(
+                        pending_scope_change,
+                        session,
+                        ScopeChangeIntent::Navigation(DesignerNavigationIntent::Select {
+                            target: StableSelection::Menu(menu.id.clone()),
+                            control: false,
+                            shift: false,
+                            force_history: false,
+                            open_properties: false,
+                        }),
+                    );
                 }
             }
         });
@@ -5524,6 +7065,22 @@ impl RadialEditorState {
         frame: &DesignerFrameContext,
         viewport: ViewportClass,
     ) {
+        let bulk_stage_scope = self.session.as_ref().and_then(|session| {
+            matches!(
+                session.selection.as_ref(),
+                Some(StableSelection::CellSet(_))
+            )
+            .then(|| BulkEditStageScope {
+                editor_session: session.editor_session,
+                generation: session.generation,
+                targets: session
+                    .selection
+                    .as_ref()
+                    .map(StableSelection::selected_cells)
+                    .unwrap_or_default(),
+            })
+        });
+        self.reconcile_bulk_edit_stage(bulk_stage_scope);
         ui.heading("Inspector");
         if let Some(selection) = self.projected_selection.clone() {
             self.projected_selection_ui(ui, &selection);
@@ -5560,6 +7117,7 @@ impl RadialEditorState {
                 ring_id,
                 cell_id,
             } => self.cell_inspector(ui, frame, menu_id, ring_id, cell_id),
+            StableSelection::CellSet(selection) => self.bulk_cells_inspector(ui, selection),
             _ => {
                 self.inspector_action_editor.invalidate_visit();
                 self.inspector_action_editor_scope = None;
@@ -5768,11 +7326,38 @@ impl RadialEditorState {
                     })
             });
             if let Some(source_selection) = source_selection {
-                if ui.button("Edit dynamic source definition").clicked() {
-                    if let Some(session) = self.session.as_mut() {
-                        session.select(Some(source_selection));
-                    }
-                    self.projected_selection = None;
+                let edit_source = ui.button("Edit dynamic source definition");
+                if let Some(session) = self.session.as_ref() {
+                    trace_designer_authoring_control_with_scope(
+                        ui,
+                        &edit_source,
+                        DesignerAuthoringTarget::EditDynamicSource,
+                        DesignerAuthoringRole::Button,
+                        None,
+                        true,
+                        false,
+                        ViewportClass::Deferred,
+                        trace_correlation(Some(session)),
+                        acceptance_trace::DesignerAuthoringControlScope::DynamicSourceEdit(
+                            acceptance_trace::DesignerDynamicSourceEditScope {
+                                source_target_digest: acceptance_identity_digest(&[
+                                    menu_id.as_str(),
+                                    ring_id.as_str(),
+                                    source_cell_id.as_str(),
+                                ]),
+                                result_index: *result_index,
+                            },
+                        ),
+                    );
+                }
+                if edit_source.clicked() {
+                    self.queue_navigation_intent(DesignerNavigationIntent::Select {
+                        target: source_selection,
+                        control: false,
+                        shift: false,
+                        force_history: false,
+                        open_properties: false,
+                    });
                 }
             } else {
                 ui.small("The authored source definition is not present in this menu.");
@@ -5886,6 +7471,438 @@ impl RadialEditorState {
         }
     }
 
+    fn bulk_cells_inspector(
+        &mut self,
+        ui: &mut egui::Ui,
+        selection: crate::radial::authoring::AuthoredCellSelection,
+    ) {
+        let Some((document, correlation, editor_session, generation)) =
+            self.session.as_ref().map(|session| {
+                (
+                    (*session.draft).clone(),
+                    trace_correlation(Some(session)),
+                    session.editor_session,
+                    session.generation,
+                )
+            })
+        else {
+            return;
+        };
+        let targets = selection.members.clone();
+        if targets.is_empty() {
+            ui.label("Select authored cells to edit them together.");
+            return;
+        }
+        ui.label(format!("{} authored cells selected", targets.len()));
+        ui.small("Bulk selection stays within one menu. Ring order and cell order define ranges.");
+        let labels = targets
+            .iter()
+            .filter_map(|target| {
+                document
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == target.menu_id)
+                    .and_then(|menu| menu.rings.iter().find(|ring| ring.id == target.ring_id))
+                    .and_then(|ring| ring.cells.iter().find(|cell| cell.id == target.cell_id))
+                    .map(|cell| cell.label.clone())
+            })
+            .collect::<Vec<_>>();
+        let labels_are_mixed = labels.windows(2).any(|pair| pair[0] != pair[1]);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(if labels_are_mixed {
+                "Mixed labels"
+            } else {
+                "Set label for every selected cell"
+            });
+            let label_response = ui.text_edit_singleline(&mut self.bulk_label_value);
+            trace_designer_authoring_control(
+                ui,
+                &label_response,
+                DesignerAuthoringTarget::BulkLabel,
+                DesignerAuthoringRole::TextEdit,
+                None,
+                true,
+                false,
+                ViewportClass::Deferred,
+                correlation,
+            );
+            let apply_label = ui.button(format!("Set label on {} cells", targets.len()));
+            trace_designer_authoring_control(
+                ui,
+                &apply_label,
+                DesignerAuthoringTarget::BulkSetLabel,
+                DesignerAuthoringRole::Button,
+                None,
+                true,
+                false,
+                ViewportClass::Deferred,
+                correlation,
+            );
+            if apply_label.clicked() {
+                self.commit_bulk_edit(
+                    &targets,
+                    BulkCellEdit::SetLabel(self.bulk_label_value.clone()),
+                );
+            }
+        });
+
+        let primary = &targets[0];
+        let style_scope = skin_editor::StyleScope::Cell {
+            menu_id: primary.menu_id.clone(),
+            ring_id: primary.ring_id.clone(),
+            cell_id: primary.cell_id.clone(),
+        };
+        let style_rows = skin_editor::rows(&document, &style_scope).unwrap_or_default();
+        let fields = style_rows
+            .iter()
+            .filter_map(|row| {
+                let field = skin_editor::style_field(&row.section, &row.field)?;
+                (menu::supports_bulk_cell_style_field(field)
+                    && skin_editor::control_kind(&row.section, &row.field).is_some())
+                .then(|| (row.section.clone(), row.field.clone(), field))
+            })
+            .collect::<Vec<_>>();
+        if !fields.is_empty() {
+            if !fields
+                .iter()
+                .any(|(section, field, _)| self.bulk_style_field == format!("{section}.{field}"))
+            {
+                self.bulk_style_field = format!("{}.{}", fields[0].0, fields[0].1);
+                self.bulk_style_staged_value = None;
+                self.bulk_style_text.clear();
+            }
+            ui.separator();
+            ui.label("One style field");
+            let selected_field_key = self.bulk_style_field.clone();
+            egui::ComboBox::from_id_source("radial-bulk-style-field")
+                .selected_text(&selected_field_key)
+                .show_ui(ui, |ui| {
+                    for (section, field, _) in &fields {
+                        let key = format!("{section}.{field}");
+                        if ui
+                            .selectable_value(&mut self.bulk_style_field, key.clone(), &key)
+                            .changed()
+                        {
+                            self.bulk_style_stage_key.clear();
+                        }
+                    }
+                });
+            let Some((section, field, style_field)) = fields
+                .iter()
+                .find(|(section, field, _)| self.bulk_style_field == format!("{section}.{field}"))
+                .cloned()
+            else {
+                return;
+            };
+            let stage_key = format!(
+                "{:?}|{:?}|{}|{}|{}",
+                editor_session,
+                generation,
+                targets
+                    .iter()
+                    .map(|target| format!(
+                        "{}/{}/{}",
+                        target.menu_id, target.ring_id, target.cell_id
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                section,
+                field,
+            );
+            if self.bulk_style_stage_key != stage_key {
+                self.bulk_style_stage_key = stage_key;
+                self.bulk_style_staged_value = None;
+                self.bulk_style_text.clear();
+            }
+            let style_values = targets
+                .iter()
+                .filter_map(|target| {
+                    let cell = document
+                        .menus
+                        .iter()
+                        .find(|menu| menu.id == target.menu_id)?
+                        .rings
+                        .iter()
+                        .find(|ring| ring.id == target.ring_id)?
+                        .cells
+                        .iter()
+                        .find(|cell| cell.id == target.cell_id)?;
+                    serde_json::to_value(&cell.style)
+                        .ok()?
+                        .get(&section)?
+                        .get(&field)
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            let style_is_mixed = style_values.windows(2).any(|pair| pair[0] != pair[1]);
+            let primary_row = style_rows
+                .iter()
+                .find(|row| row.section == section && row.field == field);
+            if let Some(row) = primary_row {
+                ui.label(if style_is_mixed {
+                    "Mixed style override · set a new value for this field"
+                } else {
+                    "Same style override on all selected cells"
+                });
+                let mode_before = self.bulk_style_mode;
+                enum_combo(
+                    ui,
+                    "Override",
+                    &mut self.bulk_style_mode,
+                    &[
+                        ("Set value", BulkStyleMode::Set),
+                        ("Inherit", BulkStyleMode::Inherit),
+                        ("Clear", BulkStyleMode::Clear),
+                    ],
+                );
+                if self.bulk_style_mode != mode_before {
+                    self.bulk_style_staged_value = match self.bulk_style_mode {
+                        BulkStyleMode::Inherit => Some(skin_editor::inherit_value()),
+                        BulkStyleMode::Clear => Some(skin_editor::clear_value()),
+                        BulkStyleMode::Set => None,
+                    };
+                }
+                if self.bulk_style_mode == BulkStyleMode::Set {
+                    let kind = skin_editor::control_kind(&section, &field);
+                    if kind == Some(skin_editor::StyleControlKind::Resource) {
+                        let media_kind = if section == "sounds" {
+                            crate::radial::model::MediaKind::Sound
+                        } else {
+                            crate::radial::model::MediaKind::Image
+                        };
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Managed file…").clicked() {
+                                self.enqueue_bulk_style_media(
+                                    &targets,
+                                    style_field,
+                                    media_kind,
+                                    true,
+                                );
+                            }
+                            if ui.button("External file…").clicked() {
+                                self.enqueue_bulk_style_media(
+                                    &targets,
+                                    style_field,
+                                    media_kind,
+                                    false,
+                                );
+                            }
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.text_edit_singleline(&mut self.bulk_style_text);
+                            if ui.button("Set search-path value").clicked()
+                                && !self.bulk_style_text.trim().is_empty()
+                            {
+                                let value = crate::radial::model::Override::Value(
+                                    crate::radial::model::MediaReference::SearchPath {
+                                        file_name: self.bulk_style_text.trim().to_owned(),
+                                    },
+                                );
+                                match serde_json::to_value(value) {
+                                    Ok(value) => {
+                                        self.commit_bulk_style(&targets, style_field, value);
+                                    }
+                                    Err(error) => self.bulk_feedback = Some(error.to_string()),
+                                }
+                            }
+                        });
+                        if section == "images" {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Set icon resource").clicked()
+                                    && !self.bulk_style_text.trim().is_empty()
+                                {
+                                    let value = crate::radial::model::Override::Value(
+                                        crate::radial::model::MediaReference::IconResource {
+                                            path: self.bulk_style_text.trim().to_owned(),
+                                            index: 1,
+                                        },
+                                    );
+                                    match serde_json::to_value(value) {
+                                        Ok(value) => {
+                                            self.commit_bulk_style(&targets, style_field, value);
+                                        }
+                                        Err(error) => self.bulk_feedback = Some(error.to_string()),
+                                    }
+                                }
+                            });
+                        }
+                    } else if let Some(kind) = kind {
+                        let current = self.bulk_style_staged_value.clone().unwrap_or_else(|| {
+                            if style_is_mixed {
+                                skin_editor::inherit_value()
+                            } else {
+                                style_values
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(skin_editor::inherit_value)
+                            }
+                        });
+                        if let Some((value, _)) = style_value_widget(
+                            ui,
+                            kind,
+                            &current,
+                            &row.inherited,
+                            &mut self.bulk_style_text,
+                            &[],
+                            &format!("{section}.{field}"),
+                            None,
+                        ) {
+                            self.bulk_style_staged_value = Some(value);
+                        }
+                    }
+                }
+                if self.bulk_style_mode != BulkStyleMode::Set {
+                    self.bulk_style_staged_value = Some(match self.bulk_style_mode {
+                        BulkStyleMode::Inherit => skin_editor::inherit_value(),
+                        BulkStyleMode::Clear => skin_editor::clear_value(),
+                        BulkStyleMode::Set => unreachable!(),
+                    });
+                }
+                if ui
+                    .add_enabled(
+                        self.bulk_style_staged_value.is_some()
+                            && self.bulk_style_mode == BulkStyleMode::Set,
+                        egui::Button::new(format!(
+                            "Apply {section}.{field} to {} cells",
+                            targets.len()
+                        )),
+                    )
+                    .clicked()
+                    && let Some(value) = self.bulk_style_staged_value.clone()
+                {
+                    self.commit_bulk_style(&targets, style_field, value);
+                }
+                if self.bulk_style_mode != BulkStyleMode::Set
+                    && ui
+                        .button(format!("Apply override choice to {} cells", targets.len()))
+                        .clicked()
+                    && let Some(value) = self.bulk_style_staged_value.clone()
+                {
+                    self.commit_bulk_style(&targets, style_field, value);
+                }
+            }
+        }
+
+        ui.separator();
+        ui.label("After-action policy");
+        let policies = targets
+            .iter()
+            .filter_map(|target| {
+                let cell = document
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == target.menu_id)?
+                    .rings
+                    .iter()
+                    .find(|ring| ring.id == target.ring_id)?
+                    .cells
+                    .iter()
+                    .find(|cell| cell.id == target.cell_id)?;
+                Some(match self.bulk_after_action_slot {
+                    BulkAfterActionSlot::Primary => cell.after_action,
+                    BulkAfterActionSlot::Secondary => cell.secondary_after_action,
+                })
+            })
+            .collect::<Vec<_>>();
+        let policy_is_mixed = policies.windows(2).any(|pair| pair[0] != pair[1]);
+        ui.horizontal_wrapped(|ui| {
+            enum_combo(
+                ui,
+                "Slot",
+                &mut self.bulk_after_action_slot,
+                &[
+                    ("Primary", BulkAfterActionSlot::Primary),
+                    ("Secondary", BulkAfterActionSlot::Secondary),
+                ],
+            );
+            enum_combo(
+                ui,
+                "New policy",
+                &mut self.bulk_after_action_policy,
+                &AFTER_ACTION_CHOICES,
+            );
+        });
+        ui.label(if policy_is_mixed {
+            "Mixed policies · applying sets only the chosen slot"
+        } else {
+            "Same policy on all selected cells"
+        });
+        if ui
+            .button(format!("Set policy on {} cells", targets.len()))
+            .clicked()
+        {
+            self.commit_bulk_edit(
+                &targets,
+                BulkCellEdit::SetAfterAction {
+                    slot: self.bulk_after_action_slot,
+                    policy: self.bulk_after_action_policy,
+                },
+            );
+        }
+        if let Some(feedback) = self.bulk_feedback.as_deref() {
+            ui.colored_label(ui.visuals().error_fg_color, feedback);
+        }
+    }
+
+    fn commit_bulk_edit(
+        &mut self,
+        targets: &[crate::radial::authoring::AuthoredCellTarget],
+        edit: BulkCellEdit,
+    ) {
+        let result = self.session.as_mut().map_or_else(
+            || Err(menu::BulkCellEditError::StaleSession),
+            |session| {
+                let request = BulkCellEditRequest::capture(session)?;
+                if request.targets != targets {
+                    return Err(menu::BulkCellEditError::StaleGeneration);
+                }
+                let assets = session.pending_assets.clone();
+                menu::apply_bulk_cell_edit_with_assets(session, &request, edit, assets, Vec::new())
+            },
+        );
+        self.bulk_feedback = Some(match result {
+            Ok(()) => format!("Applied one atomic edit to {} cells.", targets.len()),
+            Err(error) => format!("Bulk edit rejected: {error:?}"),
+        });
+    }
+
+    fn commit_bulk_style(
+        &mut self,
+        targets: &[crate::radial::authoring::AuthoredCellTarget],
+        field: crate::radial::skin::StyleField,
+        value: serde_json::Value,
+    ) {
+        self.commit_bulk_edit(targets, BulkCellEdit::SetStyleOverride { field, value });
+        self.bulk_style_staged_value = None;
+    }
+
+    fn enqueue_bulk_style_media(
+        &mut self,
+        targets: &[crate::radial::authoring::AuthoredCellTarget],
+        field: crate::radial::skin::StyleField,
+        media_kind: crate::radial::model::MediaKind,
+        managed: bool,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        match BulkCellEditRequest::capture(session) {
+            Ok(request) if request.targets == targets => {
+                self.intent_bridge
+                    .enqueue_file_dialog(DesignerFileDialogRequest::BulkStyleMedia {
+                        request,
+                        field,
+                        media_kind,
+                        managed,
+                    })
+            }
+            Ok(_) => {
+                self.bulk_feedback = Some("Selection changed before media selection began.".into())
+            }
+            Err(error) => self.bulk_feedback = Some(format!("Cannot select media: {error:?}")),
+        }
+    }
+
     fn cell_inspector(
         &mut self,
         ui: &mut egui::Ui,
@@ -5902,6 +7919,7 @@ impl RadialEditorState {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        let mut deferred_operation = None;
         let Some(cell) = session
             .draft
             .menus
@@ -6028,7 +8046,14 @@ impl RadialEditorState {
                 &mut self.preferences.expanded_sections,
             );
             let continuous = content_edit.or(media_edit).or(trigger_edit);
-            if edited != original || continuous.is_some() {
+            if primary_content_replaced(&original.content, &edited.content) {
+                deferred_operation = Some(DeferredEditorOperation::SetCellContent {
+                    menu_id: menu_id.clone(),
+                    ring_id: ring_id.clone(),
+                    cell_id: cell_id.clone(),
+                    content: edited.content.clone(),
+                });
+            } else if edited != original || continuous.is_some() {
                 let mut document = (*session.draft).clone();
                 if let Some(slot) = document
                     .menus
@@ -6044,7 +8069,52 @@ impl RadialEditorState {
                     let completes_placement = matches!(&original.content, CellContent::Spacer)
                         && !matches!(&edited.content, CellContent::Spacer);
                     *slot = edited;
-                    if let Err(error) = menu::validate_submenu_graph(&document) {
+                    let policy_issue = document
+                        .menus
+                        .iter()
+                        .find(|menu| menu.id == menu_id)
+                        .and_then(|candidate_menu| {
+                            let candidate_cell = candidate_menu
+                                .rings
+                                .iter()
+                                .find(|ring| ring.id == ring_id)
+                                .and_then(|ring| {
+                                    ring.cells.iter().find(|candidate| candidate.id == cell_id)
+                                })?;
+                            let primary_touched = original.after_action != candidate_cell.after_action
+                                || original.content != candidate_cell.content;
+                            let secondary_touched = original.secondary_after_action
+                                != candidate_cell.secondary_after_action
+                                || original.alternate_clicks != candidate_cell.alternate_clicks;
+                            primary_touched
+                                .then(|| {
+                                    crate::radial::validation::cell_policy_incompatibility(
+                                        &document,
+                                        candidate_menu,
+                                        candidate_cell,
+                                        crate::radial::validation::CellAfterActionSlot::Primary,
+                                        candidate_cell.after_action,
+                                    )
+                                })
+                                .flatten()
+                                .or_else(|| {
+                                    secondary_touched.then(|| {
+                                        crate::radial::validation::cell_policy_incompatibility(
+                                            &document,
+                                            candidate_menu,
+                                            candidate_cell,
+                                            crate::radial::validation::CellAfterActionSlot::Secondary,
+                                            candidate_cell.secondary_after_action,
+                                        )
+                                    })
+                                    .flatten()
+                                })
+                        });
+                    if let Some(requirement) = policy_issue {
+                        self.delete_message = Some(format!(
+                            "Cell edit blocked: KeepOpen is incompatible with {requirement:?}"
+                        ));
+                    } else if let Err(error) = menu::validate_submenu_graph(&document) {
                         self.delete_message = Some(format!("Cell edit blocked: {error:?}"));
                     } else {
                         if let Some(edit) = continuous {
@@ -6070,15 +8140,12 @@ impl RadialEditorState {
             ui.label("Empty authored slot");
             ui.text_edit_singleline(&mut self.submenu_name);
             if ui.button("Create and link new submenu").clicked() {
-                if let Err(error) = menu::create_submenu_and_link(
-                    session,
-                    &menu_id,
-                    &ring_id,
-                    &cell_id,
-                    &self.submenu_name,
-                ) {
-                    self.delete_message = Some(format!("Create submenu failed: {error:?}"));
-                }
+                deferred_operation = Some(DeferredEditorOperation::CreateSubmenuAndLink {
+                    menu_id: menu_id.clone(),
+                    ring_id: ring_id.clone(),
+                    cell_id: cell_id.clone(),
+                    name: self.submenu_name.clone(),
+                });
             }
             let mut linked_menu = self.submenu_link_target.clone();
             if linked_menu
@@ -6111,48 +8178,46 @@ impl RadialEditorState {
                 .clicked()
             {
                 if let Some(linked_menu) = linked_menu {
-                    if let Err(error) = menu::link_existing_submenu(
-                        session,
-                        &menu_id,
-                        &ring_id,
-                        &cell_id,
-                        &linked_menu,
-                    ) {
-                        self.delete_message = Some(format!("Link submenu failed: {error:?}"));
-                    }
+                    deferred_operation = Some(DeferredEditorOperation::LinkExistingSubmenu {
+                        menu_id: menu_id.clone(),
+                        ring_id: ring_id.clone(),
+                        cell_id: cell_id.clone(),
+                        linked_menu,
+                    });
                 }
             }
         }
         if ui.button("Copy cell").clicked() {
-            if let Err(error) = menu::copy_cell(session, &menu_id, &ring_id, &cell_id) {
-                self.delete_message = Some(format!("Copy failed: {error:?}"));
-            }
-        }
-        if let CellContent::Submenu { menu_id: linked } = &cell.content
-            && ui.button("Clone reusable submenu graph").clicked()
-            && let Ok(cloned) =
-                menu::duplicate_menu(session, linked, SubmenuDuplication::CloneSubmenuClosure)
-        {
-            let _ = menu::set_cell_content(
-                session,
-                &menu_id,
-                &ring_id,
-                &cell_id,
-                CellContent::Submenu { menu_id: cloned },
-            );
-            session.select(Some(StableSelection::Cell {
+            deferred_operation = Some(DeferredEditorOperation::CopyCell {
                 menu_id: menu_id.clone(),
                 ring_id: ring_id.clone(),
                 cell_id: cell_id.clone(),
-            }));
+            });
+        }
+        if let CellContent::Submenu { menu_id: linked } = &cell.content
+            && ui.button("Clone reusable submenu graph").clicked()
+        {
+            deferred_operation = Some(DeferredEditorOperation::CloneSubmenuAndLink {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: cell_id.clone(),
+                linked_menu: linked.clone(),
+            });
         }
         if ui.button("Make spacer").clicked() {
-            let _ =
-                menu::set_cell_content(session, &menu_id, &ring_id, &cell_id, CellContent::Spacer);
+            deferred_operation = Some(DeferredEditorOperation::SetCellContent {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: cell_id.clone(),
+                content: CellContent::Spacer,
+            });
         }
         if ui.button("Delete cell").clicked() {
-            let _ = menu::delete_cell(session, &menu_id, &ring_id, &cell_id);
-            return;
+            deferred_operation = Some(DeferredEditorOperation::DeleteCell {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: cell_id.clone(),
+            });
         }
         ui.separator();
         ui.label("Universal Action");
@@ -6186,18 +8251,43 @@ impl RadialEditorState {
             &invocation_context,
             Some(frame.action_catalog.as_ref()),
         );
-        let selected_binding = self.inspector_action_editor.selected_binding();
         for intent in editor_intents {
             match intent {
-                ActionBindingEditorIntent::Pin { binding }
-                | ActionBindingEditorIntent::SaveQuery { binding }
-                | ActionBindingEditorIntent::SetCommand { binding } => {
-                    if let Err(error) = menu::set_cell_content(
+                ActionBindingEditorIntent::Pin { binding } => {
+                    let result = menu::set_cell_content(
                         session,
                         &menu_id,
                         &ring_id,
                         &cell_id,
-                        CellContent::Action { binding },
+                        CellContent::Action {
+                            binding: binding.clone(),
+                        },
+                    );
+                    if let Err(error) = self.inspector_action_editor.finish_assignment(
+                        binding,
+                        BindingAssignmentKind::Pinned,
+                        result,
+                    ) {
+                        self.delete_message = Some(format!("Action assignment failed: {error:?}"));
+                    } else {
+                        self.placement_draft = None;
+                    }
+                }
+                ActionBindingEditorIntent::SaveQuery { binding }
+                | ActionBindingEditorIntent::SetCommand { binding } => {
+                    let result = menu::set_cell_content(
+                        session,
+                        &menu_id,
+                        &ring_id,
+                        &cell_id,
+                        CellContent::Action {
+                            binding: binding.clone(),
+                        },
+                    );
+                    if let Err(error) = self.inspector_action_editor.finish_assignment(
+                        binding,
+                        BindingAssignmentKind::Explicit,
+                        result,
                     ) {
                         self.delete_message = Some(format!("Action assignment failed: {error:?}"));
                     } else {
@@ -6221,6 +8311,7 @@ impl RadialEditorState {
                 }),
             }
         }
+        let selected_binding = self.inspector_action_editor.selected_binding();
         if let Some(binding) = selected_binding {
             ui.separator();
             ui.small("Assign the selected result to another slot:");
@@ -6238,7 +8329,7 @@ impl RadialEditorState {
                     ("Cell Alt", crate::radial::model::ClickGesture::AltPrimary),
                 ] {
                     if ui.button(label).clicked() {
-                        assign_alternate_click(
+                        let result = assign_alternate_click(
                             session,
                             &menu_id,
                             &ring_id,
@@ -6246,6 +8337,7 @@ impl RadialEditorState {
                             gesture,
                             binding.clone(),
                         );
+                        report_action_assignment_result(session, result);
                     }
                 }
                 for (label, target) in [
@@ -6255,18 +8347,24 @@ impl RadialEditorState {
                     ("Background R", MenuActionSlot::BackgroundSecondary),
                 ] {
                     if ui.button(label).clicked() {
-                        assign_menu_action(session, &menu_id, target, binding.clone());
+                        let result = assign_menu_action(session, &menu_id, target, binding.clone());
+                        report_action_assignment_result(session, result);
                     }
                 }
             });
         }
+        if let Some(operation) = deferred_operation {
+            queue_scope_change(
+                &mut self.pending_scope_change,
+                session,
+                ScopeChangeIntent::Operation(operation),
+            );
+        }
     }
 
     fn apply_post_render(&mut self) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
-        for command in self.post_render.drain(..) {
+        let commands = std::mem::take(&mut self.post_render);
+        for command in commands {
             match command {
                 EditorCommand::MoveCell {
                     source_menu,
@@ -6277,52 +8375,91 @@ impl RadialEditorState {
                     index,
                     expected_generation,
                 } => {
-                    let destination_cell = session
+                    let Some(session) = self.session.as_ref() else {
+                        continue;
+                    };
+                    if session.generation != expected_generation {
+                        self.resource_notice = Some(ResourceNotice::warning(
+                            "Cell move is stale; release the drag and try again",
+                        ));
+                        continue;
+                    }
+                    let Some(destination_cell) = session
                         .draft
                         .menus
                         .iter()
                         .find(|menu| menu.id == destination_menu)
                         .and_then(|menu| menu.rings.iter().find(|ring| ring.id == destination_ring))
                         .and_then(|ring| ring.cells.get(index))
-                        .map(|cell| cell.id.clone());
-                    match menu::move_cell_to_slot(
-                        session,
-                        (&source_menu, &source_ring, &cell),
-                        (&destination_menu, &destination_ring, index),
-                        menu::CellDropResolution::MoveIntoSpacer,
-                        expected_generation,
-                    ) {
+                        .map(|cell| cell.id.clone())
+                    else {
+                        self.resource_notice = Some(ResourceNotice::warning(
+                            "Cell move destination no longer exists",
+                        ));
+                        continue;
+                    };
+                    let pending = PendingCellDrop {
+                        source_menu: source_menu.clone(),
+                        source_ring: source_ring.clone(),
+                        source_cell: cell.clone(),
+                        destination_menu: destination_menu.clone(),
+                        destination_ring: destination_ring.clone(),
+                        destination_cell,
+                        destination_index: index,
+                        generation: expected_generation,
+                    };
+                    let source_is_current_selection = session.selection.as_ref()
+                        == Some(&StableSelection::Cell {
+                            menu_id: source_menu.clone(),
+                            ring_id: source_ring.clone(),
+                            cell_id: cell.clone(),
+                        });
+                    if source_menu != destination_menu
+                        || source_ring != destination_ring
+                        || !source_is_current_selection
+                    {
+                        self.queue_editor_operation(DeferredEditorOperation::MoveCell {
+                            pending,
+                            resolution: menu::CellDropResolution::MoveIntoSpacer,
+                        });
+                        continue;
+                    }
+                    let result = self.session.as_mut().map_or_else(
+                        || Err(menu::MenuEditError::MissingEntity),
+                        |session| {
+                            menu::move_cell_to_slot(
+                                session,
+                                (&source_menu, &source_ring, &cell),
+                                (&destination_menu, &destination_ring, index),
+                                menu::CellDropResolution::MoveIntoSpacer,
+                                expected_generation,
+                            )
+                        },
+                    );
+                    match result {
                         Ok(()) => {
-                            self.focus_restore = session.selection.clone();
+                            self.focus_restore = self
+                                .session
+                                .as_ref()
+                                .and_then(|session| session.selection.clone());
                             acceptance_trace::emit(Event::DesignerWidget {
                                 category: WidgetCategory::Canvas,
                                 response: WidgetResponse::Accepted,
-                                correlation: trace_correlation(Some(session)),
+                                correlation: trace_correlation(self.session.as_ref()),
                             });
                         }
                         Err(menu::MenuEditError::DestinationOccupied) => {
                             acceptance_trace::emit(Event::DesignerWidget {
                                 category: WidgetCategory::Canvas,
                                 response: WidgetResponse::Rejected,
-                                correlation: trace_correlation(Some(session)),
+                                correlation: trace_correlation(self.session.as_ref()),
                             });
-                            if let Some(destination_cell) = destination_cell {
-                                self.pending_drop = Some(PendingCellDrop {
-                                    source_menu,
-                                    source_ring,
-                                    source_cell: cell,
-                                    destination_menu,
-                                    destination_ring,
-                                    destination_cell,
-                                    destination_index: index,
-                                    generation: expected_generation,
-                                });
-                            }
+                            self.pending_drop = Some(pending);
                         }
                         Err(_) => acceptance_trace::emit(Event::DesignerWidget {
                             category: WidgetCategory::Canvas,
                             response: WidgetResponse::Rejected,
-                            correlation: trace_correlation(Some(session)),
+                            correlation: trace_correlation(self.session.as_ref()),
                         }),
                     }
                 }
@@ -7430,6 +9567,23 @@ fn cell_content_kind(content: &CellContent) -> &'static str {
     }
 }
 
+fn primary_content_replaced(before: &CellContent, after: &CellContent) -> bool {
+    match (before, after) {
+        (CellContent::Spacer, CellContent::Spacer)
+        | (CellContent::Dynamic { .. }, CellContent::Dynamic { .. }) => false,
+        (CellContent::Submenu { menu_id: before }, CellContent::Submenu { menu_id: after }) => {
+            before != after
+        }
+        (CellContent::Control { control: before }, CellContent::Control { control: after }) => {
+            before != after
+        }
+        (CellContent::Action { binding: before }, CellContent::Action { binding: after }) => {
+            before != after
+        }
+        _ => true,
+    }
+}
+
 fn radial_add_destination_digest<T: std::fmt::Display>(id: Option<&T>) -> u64 {
     id.map(|id| acceptance_trace::private_trace_text_digest(&id.to_string()))
         .unwrap_or(0)
@@ -7621,6 +9775,7 @@ fn selected_menu_id(session: &RadialAuthoringSession) -> Option<MenuId> {
         StableSelection::Menu(id)
         | StableSelection::Ring { menu_id: id, .. }
         | StableSelection::Cell { menu_id: id, .. } => Some(id.clone()),
+        StableSelection::CellSet(cells) => Some(cells.primary.menu_id.clone()),
         _ => None,
     }
 }
@@ -8990,29 +11145,32 @@ fn assign_menu_action(
     menu_id: &MenuId,
     slot: MenuActionSlot,
     binding: crate::radial::model::ActionBinding,
-) {
+) -> Result<(), AuthoringError> {
     let mut document = (*session.draft).clone();
-    if let Some(menu) = document.menus.iter_mut().find(|menu| &menu.id == menu_id) {
-        match slot {
-            MenuActionSlot::CenterPrimary => {
-                menu.center_action = Some(binding);
-                menu.center_control = None;
-            }
-            MenuActionSlot::CenterSecondary => {
-                menu.center_secondary_action = Some(binding);
-                menu.center_secondary_control = None;
-            }
-            MenuActionSlot::BackgroundPrimary => {
-                menu.background_action = Some(binding);
-                menu.background_control = None;
-            }
-            MenuActionSlot::BackgroundSecondary => {
-                menu.background_secondary_action = Some(binding);
-                menu.background_secondary_control = None;
-            }
+    let menu = document
+        .menus
+        .iter_mut()
+        .find(|menu| &menu.id == menu_id)
+        .ok_or(AuthoringError::MissingEntity)?;
+    match slot {
+        MenuActionSlot::CenterPrimary => {
+            menu.center_action = Some(binding);
+            menu.center_control = None;
         }
-        let _ = session.replace_document_atomic(document);
+        MenuActionSlot::CenterSecondary => {
+            menu.center_secondary_action = Some(binding);
+            menu.center_secondary_control = None;
+        }
+        MenuActionSlot::BackgroundPrimary => {
+            menu.background_action = Some(binding);
+            menu.background_control = None;
+        }
+        MenuActionSlot::BackgroundSecondary => {
+            menu.background_secondary_action = Some(binding);
+            menu.background_secondary_control = None;
+        }
     }
+    session.replace_document_atomic(document)
 }
 
 fn assign_alternate_click(
@@ -9022,32 +11180,40 @@ fn assign_alternate_click(
     cell_id: &CellId,
     gesture: crate::radial::model::ClickGesture,
     action: crate::radial::model::ActionBinding,
-) {
+) -> Result<(), AuthoringError> {
     let mut document = (*session.draft).clone();
-    if let Some(cell) = document
+    let cell = document
         .menus
         .iter_mut()
         .find(|menu| &menu.id == menu_id)
         .and_then(|menu| menu.rings.iter_mut().find(|ring| &ring.id == ring_id))
         .and_then(|ring| ring.cells.iter_mut().find(|cell| &cell.id == cell_id))
+        .ok_or(AuthoringError::MissingEntity)?;
+    cell.alternate_controls
+        .retain(|entry| entry.gesture != gesture);
+    if let Some(existing) = cell
+        .alternate_clicks
+        .iter_mut()
+        .find(|entry| entry.gesture == gesture)
     {
-        cell.alternate_controls
-            .retain(|entry| entry.gesture != gesture);
-        if let Some(existing) = cell
-            .alternate_clicks
-            .iter_mut()
-            .find(|entry| entry.gesture == gesture)
-        {
-            existing.action = action;
-        } else {
-            cell.alternate_clicks
-                .push(crate::radial::model::ClickBinding {
-                    gesture,
-                    action,
-                    after_action: AfterActionPolicy::Inherit,
-                });
-        }
-        let _ = session.replace_document_atomic(document);
+        existing.action = action;
+    } else {
+        cell.alternate_clicks
+            .push(crate::radial::model::ClickBinding {
+                gesture,
+                action,
+                after_action: AfterActionPolicy::Inherit,
+            });
+    }
+    session.replace_document_atomic(document)
+}
+
+fn report_action_assignment_result(
+    session: &mut RadialAuthoringSession,
+    result: Result<(), AuthoringError>,
+) {
+    if let Err(error) = result {
+        session.last_error = Some(format!("Action assignment failed: {error:?}"));
     }
 }
 
@@ -9111,6 +11277,7 @@ fn preview_legacy_files(
 fn open_designer_file_dialog(request: &DesignerFileDialogRequest) -> DesignerFileDialogResult {
     match request {
         DesignerFileDialogRequest::StyleMedia { .. }
+        | DesignerFileDialogRequest::BulkStyleMedia { .. }
         | DesignerFileDialogRequest::CellExternalIcon { .. } => {
             rfd::FileDialog::new().pick_file().map_or(
                 DesignerFileDialogResult::Cancelled,
@@ -9183,6 +11350,27 @@ fn acceptance_observation_digest(bytes: &[u8]) -> u64 {
     })
 }
 
+fn acceptance_authored_target_digest(target: &crate::radial::authoring::AuthoredCellTarget) -> u64 {
+    acceptance_identity_digest(&[
+        target.menu_id.as_str(),
+        target.ring_id.as_str(),
+        target.cell_id.as_str(),
+    ])
+}
+
+fn acceptance_identity_digest(parts: &[&str]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            hash = (hash ^ 0).wrapping_mul(0x100000001b3);
+        }
+        for byte in part.as_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
 fn acceptance_staged_properties_digest(
     session_id: u64,
     target_digest: u64,
@@ -9212,6 +11400,169 @@ fn acceptance_staged_properties_digest(
 mod tests {
     use super::*;
 
+    fn retained_tree_search_undo_scenario(settle_starter: bool) {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = true;
+        editor.inspector_visible = false;
+        let session = editor.session.as_mut().unwrap();
+        let menu_id = session.draft.menus[0].id.clone();
+        menu::rename_menu(
+            session,
+            menu_id.clone(),
+            "Unsaved local undo fixture".into(),
+            EditPhase::Atomic,
+        )
+        .unwrap();
+        session.select(Some(StableSelection::Menu(menu_id)));
+        assert!(session.is_dirty());
+        assert_eq!(session.acceptance_history_depths(), (1, 0));
+        let before = (
+            session.draft.clone(),
+            session.editor_session,
+            session.generation,
+            session.selection.clone(),
+            session.acceptance_history_depths(),
+            session.pending_assets.clone(),
+        );
+        let driver = RetainedDesignerDriver::new(editor);
+        let context = driver.context;
+        let frame_context = driver.frame;
+        let mut editor = driver.editor;
+        let frame = |editor: &mut RadialEditorState, time, events, modifiers| {
+            let client_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(520.0, 380.0));
+            let mut input = egui::RawInput {
+                screen_rect: Some(client_rect),
+                time: Some(time),
+                events,
+                modifiers,
+                ..Default::default()
+            };
+            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.inner_rect = Some(client_rect);
+            viewport.native_pixels_per_point = Some(1.0);
+            context.run(input, |ctx| {
+                editor.viewport_ui(ctx, &frame_context, egui::ViewportClass::Deferred);
+            })
+        };
+        let output = frame(&mut editor, 0.0, Vec::new(), egui::Modifiers::default());
+        let point = accesskit_value_bounds(&output, egui::accesskit::Role::TextInput, "").center();
+        let _ = frame(
+            &mut editor,
+            0.01,
+            vec![egui::Event::PointerMoved(point)],
+            egui::Modifiers::default(),
+        );
+        let _ = frame(
+            &mut editor,
+            0.02,
+            vec![pointer_button_event(point, true)],
+            egui::Modifiers::default(),
+        );
+        let _ = frame(
+            &mut editor,
+            0.03,
+            vec![pointer_button_event(point, false)],
+            egui::Modifiers::default(),
+        );
+        let field_id = context
+            .memory(|memory| memory.focused())
+            .expect("actual TreeSearch has focus");
+        assert!(
+            designer_tree_search_undo_scope(&context, egui::Id::new("absent field"), "starter")
+                .is_none()
+        );
+        let scope = |editor: &RadialEditorState, in_flux| {
+            assert_eq!(context.memory(|memory| memory.focused()), Some(field_id));
+            assert_eq!(
+                designer_tree_search_undo_scope(&context, field_id, &editor.tree_filter),
+                Some(
+                    acceptance_trace::DesignerAuthoringControlScope::TreeSearchUndo {
+                        field_id_digest: field_id.value(),
+                        value_digest: acceptance_observation_digest(editor.tree_filter.as_bytes()),
+                        in_flux,
+                    }
+                )
+            );
+        };
+        scope(&editor, false);
+        let _ = frame(
+            &mut editor,
+            0.1,
+            vec![egui::Event::Text("starter".into())],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(editor.tree_filter, "starter");
+        scope(&editor, true);
+        let replacement_time = if settle_starter {
+            let _ = frame(&mut editor, 1.2, Vec::new(), egui::Modifiers::default());
+            assert_eq!(editor.tree_filter, "starter");
+            scope(&editor, false);
+            1.3
+        } else {
+            0.2
+        };
+        let control = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let _ = frame(
+            &mut editor,
+            replacement_time,
+            vec![
+                key_event(egui::Key::A, control, true),
+                key_event(egui::Key::A, control, false),
+            ],
+            control,
+        );
+        let _ = frame(
+            &mut editor,
+            replacement_time + 0.05,
+            vec![egui::Event::Text("replacement authored label".into())],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(editor.tree_filter, "replacement authored label");
+        scope(&editor, true);
+        let _ = frame(
+            &mut editor,
+            replacement_time + 0.1,
+            vec![
+                key_event(egui::Key::Z, control, true),
+                key_event(egui::Key::Z, control, false),
+            ],
+            control,
+        );
+        assert_eq!(
+            editor.tree_filter,
+            if settle_starter { "starter" } else { "" }
+        );
+        scope(&editor, false);
+        let session = editor.session.as_ref().unwrap();
+        assert!(session.is_dirty());
+        assert_eq!(
+            before,
+            (
+                session.draft.clone(),
+                session.editor_session,
+                session.generation,
+                session.selection.clone(),
+                session.acceptance_history_depths(),
+                session.pending_assets.clone(),
+            )
+        );
+    }
+
+    #[test]
+    fn actual_tree_search_rapid_edits_coalesce_to_the_seeded_empty_checkpoint() {
+        retained_tree_search_undo_scenario(false);
+    }
+
+    #[test]
+    fn actual_tree_search_settled_starter_checkpoint_restores_starter_on_ctrl_z() {
+        retained_tree_search_undo_scenario(true);
+    }
+
     #[test]
     fn designer_viewport_matches_launcher_topmost_policy() {
         assert_eq!(
@@ -9219,6 +11570,1471 @@ mod tests {
             Some(egui::viewport::WindowLevel::AlwaysOnTop)
         );
         assert_eq!(designer_viewport_builder(true, false).window_level, None);
+    }
+
+    #[test]
+    fn bulk_edit_buffers_are_bound_to_exact_selection_and_generation() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_ref().expect("test session");
+        let menu = &session.draft.menus[0];
+        let ring = &menu.rings[0];
+        let target = crate::radial::authoring::AuthoredCellTarget {
+            menu_id: menu.id.clone(),
+            ring_id: ring.id.clone(),
+            cell_id: ring.cells[0].id.clone(),
+        };
+        let other_target = crate::radial::authoring::AuthoredCellTarget {
+            cell_id: ring.cells[1].id.clone(),
+            ..target.clone()
+        };
+        let scope = BulkEditStageScope {
+            editor_session: session.editor_session,
+            generation: session.generation,
+            targets: vec![target.clone()],
+        };
+
+        editor.reconcile_bulk_edit_stage(Some(scope.clone()));
+        editor.bulk_label_value = "staged for first cell".into();
+        editor.bulk_style_text = "staged media".into();
+        editor.bulk_style_staged_value = Some(serde_json::json!(true));
+        editor.bulk_style_mode = BulkStyleMode::Clear;
+        editor.bulk_after_action_policy = AfterActionPolicy::CloseTree;
+
+        editor.reconcile_bulk_edit_stage(Some(BulkEditStageScope {
+            targets: vec![other_target],
+            ..scope.clone()
+        }));
+        assert!(editor.bulk_label_value.is_empty());
+        assert!(editor.bulk_style_text.is_empty());
+        assert_eq!(editor.bulk_style_mode, BulkStyleMode::Set);
+        assert!(editor.bulk_style_staged_value.is_none());
+        assert_eq!(editor.bulk_after_action_policy, AfterActionPolicy::Inherit);
+
+        editor.bulk_label_value = "staged at old generation".into();
+        editor.reconcile_bulk_edit_stage(Some(BulkEditStageScope {
+            generation: crate::radial::authoring::DraftGeneration(scope.generation.0 + 1),
+            ..scope
+        }));
+        assert!(editor.bulk_label_value.is_empty());
+    }
+
+    #[test]
+    fn search_reveal_reopens_a_retained_collapsed_tree_header_and_restores_focus() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_ref().expect("test session");
+        let menu_id = session.draft.default_menu_id.clone();
+        let menu = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| menu.id == menu_id)
+            .expect("default menu");
+        let target = StableSelection::Cell {
+            menu_id: menu_id.clone(),
+            ring_id: menu.rings[0].id.clone(),
+            cell_id: menu.rings[0].cells[0].id.clone(),
+        };
+        let expansion_key = format!("menu:{menu_id}");
+        editor
+            .preferences
+            .expanded_sections
+            .insert(expansion_key, false);
+
+        let context = egui::Context::default();
+        let defaults = crate::radial::model::RadialFeatureSettings::default();
+        let rendered_header_id = std::cell::Cell::new(None);
+        let render_tree = |editor: &mut RadialEditorState| {
+            let is_open = std::cell::Cell::new(false);
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(720.0, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let header_id = ui.make_persistent_id(egui::Id::new((
+                            editor.tree_widget_epoch,
+                            menu::widget_key("menu", menu_id.as_str(), "tree"),
+                        )));
+                        let default_open = editor
+                            .preferences
+                            .expanded_sections
+                            .get(&format!("menu:{menu_id}"))
+                            .copied()
+                            .unwrap_or(false);
+                        rendered_header_id.set(Some(header_id));
+                        editor.tree(ui, &defaults, ViewportClass::Deferred);
+                        is_open.set(
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ctx,
+                                header_id,
+                                default_open,
+                            )
+                            .is_open(),
+                        );
+                    });
+                },
+            );
+            is_open.get()
+        };
+
+        assert!(!render_tree(&mut editor));
+        let collapsed_header_id = rendered_header_id.get().expect("rendered header ID");
+        let mut retained_collapsed =
+            egui::collapsing_header::CollapsingState::load_with_default_open(
+                &context,
+                collapsed_header_id,
+                false,
+            );
+        retained_collapsed.set_open(true);
+        retained_collapsed.store(&context);
+        assert!(render_tree(&mut editor));
+        retained_collapsed.set_open(false);
+        retained_collapsed.store(&context);
+        assert!(!render_tree(&mut editor));
+        assert!(
+            !egui::collapsing_header::CollapsingState::load(&context, collapsed_header_id)
+                .expect("test installed a retained collapsed state")
+                .is_open()
+        );
+
+        let previous_epoch = editor.tree_widget_epoch;
+        editor.apply_navigation_intent(DesignerNavigationIntent::Select {
+            target: target.clone(),
+            control: false,
+            shift: false,
+            force_history: true,
+            open_properties: false,
+        });
+        assert_eq!(editor.tree_widget_epoch, previous_epoch.wrapping_add(1));
+        assert!(editor.preferences.expanded_sections[&format!("menu:{menu_id}")]);
+        assert!(render_tree(&mut editor));
+        let revealed_header_id = rendered_header_id.get().expect("re-rendered header ID");
+        assert_ne!(revealed_header_id, collapsed_header_id);
+        assert!(
+            egui::collapsing_header::CollapsingState::load_with_default_open(
+                &context,
+                revealed_header_id,
+                true,
+            )
+            .is_open()
+        );
+        assert_eq!(editor.focus_restore, None);
+    }
+
+    #[test]
+    fn tree_search_navigation_guard_supports_cancel_discard_and_apply() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = true;
+        editor.tree_width = 300.0;
+        editor.inspector_visible = true;
+        editor.inspector_width = 320.0;
+        editor.tree_filter = "Screen Draw".into();
+        editor
+            .preferences
+            .expanded_sections
+            .insert("menu:starter".into(), true);
+        let (target, scope) = {
+            let session = editor.session.as_mut().expect("test session");
+            let menu = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == MenuId::new("starter"))
+                .expect("root menu");
+            let target = StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: menu.rings[0].id.clone(),
+                cell_id: menu.rings[0].cells[0].id.clone(),
+            };
+            session.select(Some(target.clone()));
+            let scope = BindingEditorScope {
+                surface: BindingEditorSurface::Inspector,
+                editor_session: session.editor_session,
+                draft_generation: session.generation,
+                target: target.clone(),
+                slot: BindingEditorSlot::CellPrimary,
+            };
+            (target, scope)
+        };
+        editor.inspector_action_editor_scope = Some(scope.clone());
+        editor
+            .inspector_action_editor
+            .seed_unassigned_query_for_test(scope, None, "unassigned query");
+        let mut driver = RetainedDesignerDriver::new(editor);
+
+        let guarded = click_tree_search_result(&mut driver, "Screen Draw");
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        let destination = authored_search_hits(&session.draft, "Screen Draw")
+            .into_iter()
+            .find_map(|hit| match hit.target {
+                target @ StableSelection::Cell { .. } => Some(target),
+                _ => None,
+            })
+            .expect("Screen Draw cell search result");
+        assert_eq!(session.selection.as_ref(), Some(&target));
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert!(
+            accesskit_named_bounds(&guarded, "Cancel change", egui::accesskit::Role::Button,)
+                .is_positive()
+        );
+        let identity_before_cancel = driver
+            .editor
+            .inspector_action_editor
+            .identity()
+            .expect("active Inspector identity");
+
+        let cancel =
+            accesskit_named_bounds(&guarded, "Cancel change", egui::accesskit::Role::Button)
+                .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(cancel)]);
+        let _ = driver.frame(vec![pointer_button_event(cancel, true)]);
+        let _ = driver.frame(vec![pointer_button_event(cancel, false)]);
+
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert_eq!(
+            driver.editor.inspector_action_editor.identity(),
+            Some(identity_before_cancel)
+        );
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+
+        let guarded = click_tree_search_result(&mut driver, "Screen Draw");
+        let discard = accesskit_named_bounds(
+            &guarded,
+            "Discard and continue",
+            egui::accesskit::Role::Button,
+        )
+        .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(discard)]);
+        let _ = driver.frame(vec![pointer_button_event(discard, true)]);
+        let _ = driver.frame(vec![pointer_button_event(discard, false)]);
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&destination)
+        );
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+
+        let (generation, editor_session) = {
+            let session = driver.editor.session.as_mut().unwrap();
+            session.select(Some(target.clone()));
+            (session.generation, session.editor_session)
+        };
+        let scope = BindingEditorScope {
+            surface: BindingEditorSurface::Inspector,
+            editor_session,
+            draft_generation: generation,
+            target: target.clone(),
+            slot: BindingEditorSlot::CellPrimary,
+        };
+        driver.editor.inspector_action_editor_scope = Some(scope.clone());
+        driver
+            .editor
+            .inspector_action_editor
+            .seed_unassigned_query_for_test(scope, None, "apply this action");
+
+        let guarded = click_tree_search_result(&mut driver, "Screen Draw");
+        let apply = accesskit_named_bounds(
+            &guarded,
+            "Apply and continue",
+            egui::accesskit::Role::Button,
+        )
+        .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, false)]);
+        let session = driver.editor.session.as_ref().unwrap();
+        assert_eq!(session.selection.as_ref(), Some(&destination));
+        let StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } = &target
+        else {
+            unreachable!();
+        };
+        let cell = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+            .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+            .expect("source cell remains authored");
+        assert!(matches!(
+            &cell.content,
+            CellContent::Action {
+                binding: ActionBinding::LauncherQuery { query, .. }
+            } if query == "apply this action"
+        ));
+    }
+
+    #[test]
+    fn properties_query_must_be_saved_before_navigation_apply_and_continue() {
+        let (mut driver, target, initial) = retained_properties_popup();
+        let typed = replace_retained_text(&mut driver, &initial, "", "saved only on request");
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "saved only on request"
+        );
+        let popup_apply =
+            accesskit_named_bounds(&typed, "Apply", egui::accesskit::Role::Button).center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(popup_apply)]);
+        let _ = driver.frame(vec![pointer_button_event(popup_apply, true)]);
+        let _ = driver.frame(vec![pointer_button_event(popup_apply, false)]);
+        assert_eq!(driver.editor.properties_popup.as_ref(), Some(&target));
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "saved only on request",
+            "Properties Apply cannot close over pending action text"
+        );
+
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+        let apply = accesskit_named_bounds(
+            &guarded,
+            "Apply and continue",
+            egui::accesskit::Role::Button,
+        )
+        .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        let still_guarded = driver.frame(vec![pointer_button_event(apply, false)]);
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "saved only on request",
+            "Apply and continue cannot erase unsaved Properties text"
+        );
+
+        let cancelled = click_retained_button(&mut driver, &still_guarded, "Cancel navigation");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "saved only on request",
+            "Cancel navigation keeps the Properties buffer"
+        );
+        assert!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .has_unassigned_text()
+        );
+
+        let _saved = click_retained_button(&mut driver, &cancelled, "Save query");
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_binding,
+            Some(ActionBinding::LauncherQuery {
+                query: "saved only on request".into(),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            })
+        );
+        assert!(
+            !driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .has_unassigned_text()
+        );
+
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        let apply = accesskit_named_bounds(
+            &guarded,
+            "Apply and continue",
+            egui::accesskit::Role::Button,
+        )
+        .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, false)]);
+        let session = driver.editor.session.as_ref().unwrap();
+        assert_ne!(session.selection.as_ref(), Some(&target));
+        let StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } = &target
+        else {
+            unreachable!();
+        };
+        let cell = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+            .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+            .expect("Properties target remains in the draft");
+        assert!(matches!(
+            &cell.content,
+            CellContent::Action {
+                binding: ActionBinding::LauncherQuery { query, .. }
+            } if query == "saved only on request"
+        ));
+    }
+
+    #[test]
+    fn properties_command_must_be_set_before_navigation_apply_and_continue() {
+        let (mut driver, target, initial) = retained_properties_popup();
+        let advanced = click_retained_named_control(&mut driver, &initial, "Advanced");
+        assert!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .advanced_for_test()
+        );
+        let command_bounds = accesskit_value_bounds_by_vertical_order(
+            &advanced,
+            egui::accesskit::Role::TextInput,
+            "",
+            0,
+        );
+        let _typed = replace_retained_text_at(&mut driver, command_bounds.center(), "window:close");
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .command_for_test(),
+            "window:close"
+        );
+
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        let apply = accesskit_named_bounds(
+            &guarded,
+            "Apply and continue",
+            egui::accesskit::Role::Button,
+        )
+        .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        let still_guarded = driver.frame(vec![pointer_button_event(apply, false)]);
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .command_for_test(),
+            "window:close"
+        );
+
+        let cancelled = click_retained_button(&mut driver, &still_guarded, "Cancel navigation");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .command_for_test(),
+            "window:close"
+        );
+
+        let _set = click_retained_button(&mut driver, &cancelled, "Use exact command");
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_binding,
+            Some(ActionBinding::ExactCommand {
+                command: "window:close".into(),
+                args: None,
+            })
+        );
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        let apply = accesskit_named_bounds(
+            &guarded,
+            "Apply and continue",
+            egui::accesskit::Role::Button,
+        )
+        .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, false)]);
+        let session = driver.editor.session.as_ref().unwrap();
+        assert_ne!(session.selection.as_ref(), Some(&target));
+        let StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } = &target
+        else {
+            unreachable!();
+        };
+        let cell = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+            .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+            .expect("Properties target remains in the draft");
+        assert!(matches!(
+            &cell.content,
+            CellContent::Action {
+                binding: ActionBinding::ExactCommand { command, args }
+            } if command == "window:close" && args.is_none()
+        ));
+    }
+
+    #[test]
+    fn properties_action_text_is_discarded_only_by_explicit_discard() {
+        let (mut driver, target, initial) = retained_properties_popup();
+        let _ = replace_retained_text(&mut driver, &initial, "", "discard this draft");
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        let _discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
+
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(driver.editor.properties_draft.is_none());
+        assert!(driver.editor.properties_popup.is_none());
+        assert_ne!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert!(matches!(
+            &authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: ActionBinding::Persisted { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn pinned_search_text_does_not_guard_navigation() {
+        let (mut driver, target, _) = retained_properties_popup();
+        let pin = test_pinned_binding();
+        let search_query = "find help before pinning";
+        seed_pinned_properties_draft(&mut driver, &target, pin.clone(), search_query);
+        let _ = driver.frame(Vec::new());
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            search_query
+        );
+        queue_navigation_to_screenshot_region(&mut driver);
+        let _ = driver.frame(Vec::new());
+        assert!(
+            driver.editor.pending_scope_change.is_none(),
+            "a Pin's retained search text stays outside the dirty guard"
+        );
+        assert_ne!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action { binding: pin }
+        );
+    }
+
+    #[test]
+    fn editing_query_after_pin_restores_the_dirty_navigation_guard() {
+        let (mut driver, target, _) = retained_properties_popup();
+        let pin = test_pinned_binding();
+        let search_query = "find help before pinning";
+        seed_pinned_properties_draft(&mut driver, &target, pin.clone(), search_query);
+        let current = driver.frame(Vec::new());
+        let _ = replace_retained_text(
+            &mut driver,
+            &current,
+            search_query,
+            "query authored after pin",
+        );
+        assert!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .has_unassigned_text()
+        );
+
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        assert!(driver.editor.pending_scope_change.is_some());
+        let apply = accesskit_named_bounds(
+            &guarded,
+            "Apply and continue",
+            egui::accesskit::Role::Button,
+        )
+        .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
+        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        let still_guarded = driver.frame(vec![pointer_button_event(apply, false)]);
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .query_for_test(),
+            "query authored after pin"
+        );
+        let _ = click_retained_button(&mut driver, &still_guarded, "Cancel navigation");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_binding,
+            Some(pin)
+        );
+    }
+
+    #[test]
+    fn properties_pin_control_stages_exact_binding_then_apply_continues_navigation() {
+        let (mut driver, target, _) = retained_properties_popup();
+        let pin = test_pinned_binding();
+        seed_properties_search_result(&mut driver, &target, pin.clone(), "find a result to pin");
+        let shown = driver.frame(Vec::new());
+        let selected = click_retained_named_fragment(
+            &mut driver,
+            &shown,
+            "Fixture action",
+            egui::accesskit::Role::Button,
+        );
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .selected_binding(),
+            Some(pin.clone())
+        );
+        let pinned = click_retained_button(&mut driver, &selected, "Pin this action");
+        assert_eq!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_binding,
+            Some(pin.clone()),
+            "the real Pin control stages its exact row binding"
+        );
+        assert!(
+            !driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .has_unassigned_text()
+        );
+
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        assert!(driver.editor.pending_scope_change.is_some());
+        let continued = click_retained_button(&mut driver, &guarded, "Apply and continue");
+        assert!(driver.editor.properties_popup.is_none());
+        assert!(driver.editor.pending_scope_change.is_none());
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert_ne!(session.selection.as_ref(), Some(&target));
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action { binding: pin },
+            "Apply and continue persists the exact pinned binding before navigating"
+        );
+        assert!(continued.platform_output.accesskit_update.is_some());
+        let _ = pinned;
+    }
+
+    #[test]
+    fn saving_query_after_selecting_result_clears_candidate_before_navigation_apply() {
+        let (mut driver, target, _) = retained_properties_popup();
+        let stale_candidate = test_pinned_binding();
+        let saved_query = "keep this query after choosing a result";
+        seed_properties_search_result(&mut driver, &target, stale_candidate.clone(), saved_query);
+        let shown = driver.frame(Vec::new());
+        let selected = click_retained_named_fragment(
+            &mut driver,
+            &shown,
+            "Fixture action",
+            egui::accesskit::Role::Button,
+        );
+        assert!(
+            driver
+                .editor
+                .properties_draft
+                .as_ref()
+                .unwrap()
+                .action_editor
+                .has_unassigned_text()
+        );
+        let saved = click_retained_button(&mut driver, &selected, "Save query");
+        let draft = driver.editor.properties_draft.as_ref().unwrap();
+        assert_eq!(
+            draft.action_binding,
+            Some(ActionBinding::LauncherQuery {
+                query: saved_query.into(),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            })
+        );
+        assert_eq!(draft.action_editor.selected_binding(), None);
+        assert!(
+            !draft.action_editor.has_unassigned_text(),
+            "explicit query assignment reconciles the highlighted result"
+        );
+
+        queue_navigation_to_screenshot_region(&mut driver);
+        let guarded = driver.frame(Vec::new());
+        let continued = click_retained_button(&mut driver, &guarded, "Apply and continue");
+        assert!(driver.editor.properties_popup.is_none());
+        assert!(driver.editor.pending_scope_change.is_none());
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: ActionBinding::LauncherQuery {
+                    query: saved_query.into(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                },
+            },
+            "navigation Apply keeps the query selected by Save query, not the stale row"
+        );
+        assert!(continued.platform_output.accesskit_update.is_some());
+        let _ = saved;
+        assert_ne!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: stale_candidate,
+            }
+        );
+    }
+
+    #[test]
+    fn skins_tab_preserves_inspector_text_and_skin_navigation_can_be_cancelled() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = true;
+        editor.inspector_visible = true;
+        editor.tree_width = 300.0;
+        editor.inspector_width = 320.0;
+        let (target, scope, assigned_binding) = {
+            let session = editor.session.as_mut().expect("authoring session");
+            let menu = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == MenuId::new("starter-screen-tools"))
+                .expect("screen tools menu");
+            let ring = &menu.rings[0];
+            let cell = ring
+                .cells
+                .iter()
+                .find(|cell| cell.id == CellId::new("starter-screen-tools-draw"))
+                .expect("screen draw action");
+            let CellContent::Action { binding } = &cell.content else {
+                panic!("screen draw cell is an action")
+            };
+            let assigned_binding = binding.clone();
+            let target = StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            };
+            session.select(Some(target.clone()));
+            let scope = BindingEditorScope {
+                surface: BindingEditorSurface::Inspector,
+                editor_session: session.editor_session,
+                draft_generation: session.generation,
+                target: target.clone(),
+                slot: BindingEditorSlot::CellPrimary,
+            };
+            (target, scope, assigned_binding)
+        };
+        editor.inspector_action_editor_scope = Some(scope.clone());
+        editor
+            .inspector_action_editor
+            .seed_unassigned_query_for_test(
+                scope.clone(),
+                Some(&assigned_binding),
+                "unsaved action text",
+            );
+        let mut driver = RetainedDesignerDriver::new(editor);
+
+        let initial = driver.frame(Vec::new());
+        let skins = accesskit_named_bounds(&initial, "Skins", egui::accesskit::Role::ToggleButton);
+        let point = skins.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
+        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        let in_skins = driver.frame(vec![pointer_button_event(point, false)]);
+        assert!(driver.editor.show_resources);
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert_eq!(
+            driver.editor.inspector_action_editor_scope,
+            Some(scope.clone())
+        );
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+
+        let skin = accesskit_named_bounds(&in_skins, "Carbon", egui::accesskit::Role::Button);
+        let point = skin.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
+        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        let guarded = driver.frame(vec![pointer_button_event(point, false)]);
+        let cancel =
+            accesskit_named_bounds(&guarded, "Cancel change", egui::accesskit::Role::Button)
+                .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(cancel)]);
+        let _ = driver.frame(vec![pointer_button_event(cancel, true)]);
+        let cancelled = driver.frame(vec![pointer_button_event(cancel, false)]);
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(driver.editor.show_resources);
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert_eq!(
+            driver.editor.inspector_action_editor_scope,
+            Some(scope.clone())
+        );
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().selection.as_ref(),
+            Some(&target)
+        );
+        assert!(
+            accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::ToggleButton)
+                .is_positive()
+        );
+
+        let menus =
+            accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::ToggleButton)
+                .center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(menus)]);
+        let _ = driver.frame(vec![pointer_button_event(menus, true)]);
+        let back_in_menus = driver.frame(vec![pointer_button_event(menus, false)]);
+        assert!(!driver.editor.show_resources);
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert_eq!(driver.editor.inspector_action_editor_scope, Some(scope));
+        assert!(
+            accesskit_named_bounds(&back_in_menus, "Apply", egui::accesskit::Role::Button)
+                .is_positive()
+        );
+    }
+
+    #[test]
+    fn inspector_dynamic_source_replacement_requires_explicit_action_decision() {
+        let query = "keep this action before replacing its source";
+        let (mut driver, target, original_binding, initial) = retained_dirty_inspector(query);
+        let queued = click_retained_button(&mut driver, &initial, "Dynamic source");
+        assert!(matches!(
+            driver
+                .editor
+                .pending_scope_change
+                .as_ref()
+                .map(|pending| &pending.intent),
+            Some(ScopeChangeIntent::Operation(
+                DeferredEditorOperation::SetCellContent {
+                    content: CellContent::Dynamic {
+                        source: DynamicSource::Favorites
+                    },
+                    ..
+                }
+            ))
+        ));
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert!(
+            accesskit_named_bounds(&queued, "Apply action", egui::accesskit::Role::Button)
+                .is_positive(),
+            "a same-cell content replacement offers Apply action, not Apply and continue"
+        );
+
+        let applied = click_retained_button(&mut driver, &queued, "Apply action");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: ActionBinding::LauncherQuery {
+                    query: query.into(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                },
+            },
+            "Apply action saves the authored query but leaves the requested replacement unapplied"
+        );
+        assert_ne!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: original_binding,
+            }
+        );
+
+        let ready = driver.frame(Vec::new());
+        let replaced = click_retained_button(&mut driver, &ready, "Dynamic source");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Dynamic {
+                source: DynamicSource::Favorites,
+            },
+            "repeating the source change after applying replaces the binding explicitly"
+        );
+        assert!(replaced.platform_output.accesskit_update.is_some());
+        assert!(applied.platform_output.accesskit_update.is_some());
+    }
+
+    #[test]
+    fn retained_dirty_inspector_properties_handoff_requires_explicit_discard() {
+        let (editor, target) = retained_inspector_editor();
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let initial = driver.frame(Vec::new());
+        let query = "Inspector browse query remains unassigned";
+        let _ = replace_retained_text(&mut driver, &initial, "", query);
+        let before = driver.editor.acceptance_observation().unwrap();
+        let draft = driver.editor.session.as_ref().unwrap().draft.clone();
+        assert!(before.properties_dirty && !before.properties_popup_open);
+        let request_properties = |driver: &mut RetainedDesignerDriver| {
+            driver
+                .editor
+                .queue_navigation_intent(DesignerNavigationIntent::Select {
+                    target: target.clone(),
+                    control: false,
+                    shift: false,
+                    force_history: false,
+                    open_properties: true,
+                });
+            driver.frame(Vec::new())
+        };
+        let guarded = request_properties(&mut driver);
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert!(driver.editor.properties_popup.is_none());
+        let _ = click_retained_button(&mut driver, &guarded, "Cancel change");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(
+            driver.editor.inspector_action_editor.query_for_test(),
+            query
+        );
+        assert!(driver.editor.properties_popup_dirty());
+        assert!(driver.editor.properties_popup.is_none());
+
+        let guarded = request_properties(&mut driver);
+        let _ = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        let _ = driver.frame(Vec::new());
+        let after = driver.editor.acceptance_observation().unwrap();
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(driver.editor.properties_popup, Some(target));
+        assert!(after.properties_popup_open && after.properties_staged_digest.is_some());
+        assert!(!after.properties_dirty);
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+        let local_owner = after.action_editor.as_ref().unwrap();
+        assert_eq!(local_owner.surface, "properties");
+        assert_eq!(local_owner.editor_session_id, before.session_id);
+        assert_eq!(local_owner.draft_generation, before.generation);
+        assert_eq!(
+            local_owner.assigned_binding_digest,
+            before.assigned_binding_digest
+        );
+        assert!(!local_owner.search_pending && !local_owner.test_pending);
+        assert_eq!(driver.editor.session.as_ref().unwrap().draft, draft);
+        assert_eq!(
+            (
+                (
+                    after.session_id,
+                    after.generation,
+                    after.document_digest,
+                    after.assigned_binding_digest,
+                    after.selected_target_digest,
+                    after.selected_cell_digest,
+                    after.selected_members_digest
+                ),
+                (
+                    after.primary_target_digest,
+                    after.range_anchor_target_digest,
+                    after.navigation_path_digest,
+                    after.pending_assets_digest,
+                    after.undo_depth,
+                    after.redo_depth,
+                    after.draft_dirty
+                )
+            ),
+            (
+                (
+                    before.session_id,
+                    before.generation,
+                    before.document_digest,
+                    before.assigned_binding_digest,
+                    before.selected_target_digest,
+                    before.selected_cell_digest,
+                    before.selected_members_digest
+                ),
+                (
+                    before.primary_target_digest,
+                    before.range_anchor_target_digest,
+                    before.navigation_path_digest,
+                    before.pending_assets_digest,
+                    before.undo_depth,
+                    before.redo_depth,
+                    before.draft_dirty
+                )
+            ),
+        );
+        assert_eq!(
+            after.selected_member_target_digests,
+            before.selected_member_target_digests
+        );
+        assert_eq!(
+            after.navigation_menu_id_digests,
+            before.navigation_menu_id_digests
+        );
+        assert_eq!(
+            after.navigation_edge_digests,
+            before.navigation_edge_digests
+        );
+    }
+
+    #[test]
+    fn inspector_delete_guard_cancel_keeps_text_and_discard_continues_without_saving() {
+        let query = "discard only after explicit choice";
+        let (mut driver, target, original_binding, initial) = retained_dirty_inspector(query);
+        let guarded = click_retained_button(&mut driver, &initial, "Delete cell");
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        let cancelled = click_retained_button(&mut driver, &guarded, "Cancel change");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert_eq!(
+            driver.editor.inspector_action_editor.query_for_test(),
+            query,
+            "Cancel keeps the action input intact"
+        );
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: original_binding.clone(),
+            }
+        );
+        assert!(cancelled.platform_output.accesskit_update.is_some());
+
+        let ready = driver.frame(Vec::new());
+        let guarded = click_retained_button(&mut driver, &ready, "Delete cell");
+        let _discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        let ring = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| menu.id == menu_id)
+            .and_then(|menu| menu.rings.iter().find(|ring| ring.id == ring_id))
+            .expect("source ring remains authored");
+        assert!(
+            ring.cells.iter().all(|cell| cell.id != cell_id),
+            "Discard and continue deletes the cell without assigning its unsaved query"
+        );
+    }
+
+    #[test]
+    fn inspector_cross_ring_swap_applies_query_to_the_moved_source_cell() {
+        let query = "query follows the dragged cell";
+        let (mut editor, target) = retained_inspector_editor();
+        let (menu_id, source_ring_id, source_cell_id) = cell_target_parts(&target);
+        let (destination_ring_id, destination_cell_id) = {
+            let session = editor.session.as_mut().expect("authoring session");
+            let destination_ring_id =
+                menu::add_ring(session, &menu_id).expect("fixture can add an outer ring");
+            let destination_cell_id = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == menu_id)
+                .and_then(|menu| {
+                    menu.rings
+                        .iter()
+                        .find(|ring| ring.id == destination_ring_id)
+                })
+                .and_then(|ring| ring.cells.first())
+                .expect("new ring has a destination slot")
+                .id
+                .clone();
+            menu::set_cell_content(
+                session,
+                &menu_id,
+                &destination_ring_id,
+                &destination_cell_id,
+                CellContent::Action {
+                    binding: ActionBinding::ExactCommand {
+                        command: "window:close".into(),
+                        args: None,
+                    },
+                },
+            )
+            .expect("occupied slot fixture remains valid");
+            session.select(Some(target.clone()));
+            (destination_ring_id, destination_cell_id)
+        };
+        let original_binding = seed_inspector_query(&mut editor, &target, query);
+        let generation = editor
+            .session
+            .as_ref()
+            .expect("authoring session")
+            .generation;
+        editor.pending_drop = Some(PendingCellDrop {
+            source_menu: menu_id.clone(),
+            source_ring: source_ring_id.clone(),
+            source_cell: source_cell_id.clone(),
+            destination_menu: menu_id.clone(),
+            destination_ring: destination_ring_id.clone(),
+            destination_cell: destination_cell_id.clone(),
+            destination_index: 0,
+            generation,
+        });
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let initial = driver.frame(Vec::new());
+        let swap_confirmation = click_retained_button(&mut driver, &initial, "Swap");
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        let _continued =
+            click_retained_button(&mut driver, &swap_confirmation, "Apply and continue");
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+
+        let moved = authored_cell(
+            &driver.editor,
+            &menu_id,
+            &destination_ring_id,
+            &source_cell_id,
+        );
+        assert_eq!(
+            moved.content,
+            CellContent::Action {
+                binding: ActionBinding::LauncherQuery {
+                    query: query.into(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                },
+            },
+            "the applied action belongs to the source cell after the cross-ring swap"
+        );
+        assert_ne!(
+            moved.content,
+            CellContent::Action {
+                binding: original_binding
+            }
+        );
+        assert_eq!(
+            authored_cell(
+                &driver.editor,
+                &menu_id,
+                &source_ring_id,
+                &destination_cell_id,
+            )
+            .content,
+            CellContent::Action {
+                binding: ActionBinding::ExactCommand {
+                    command: "window:close".into(),
+                    args: None,
+                },
+            },
+            "the occupied destination action travels to the source slot"
+        );
+    }
+
+    #[test]
+    fn inspector_guard_defers_undo_and_redo_until_the_action_is_resolved() {
+        let (mut editor, target) = retained_inspector_editor();
+        let (menu_id, _, _) = cell_target_parts(&target);
+        menu::rename_menu(
+            editor.session.as_mut().expect("authoring session"),
+            menu_id.clone(),
+            "Undo must wait for the action decision".into(),
+            EditPhase::Atomic,
+        )
+        .expect("fixture creates undo history");
+        editor
+            .session
+            .as_mut()
+            .expect("authoring session")
+            .select(Some(target.clone()));
+        let query = "preserve query while undo is pending";
+        seed_inspector_query(&mut editor, &target, query);
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let _ = driver.frame(Vec::new());
+        driver
+            .editor
+            .queue_editor_operation(DeferredEditorOperation::Undo);
+        let guarded = driver.frame(Vec::new());
+        assert!(driver.editor.pending_scope_change.is_some());
+        let _applied = click_retained_button(&mut driver, &guarded, "Apply action");
+        assert!(driver.editor.pending_scope_change.is_none());
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert_eq!(
+            session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == menu_id)
+                .expect("menu remains")
+                .name,
+            "Undo must wait for the action decision",
+            "the first click saves the action without running Undo"
+        );
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: ActionBinding::LauncherQuery {
+                    query: query.into(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                },
+            }
+        );
+
+        let (mut editor, target) = retained_inspector_editor();
+        let (menu_id, _, _) = cell_target_parts(&target);
+        let original_name = editor
+            .session
+            .as_ref()
+            .expect("authoring session")
+            .draft
+            .menus
+            .iter()
+            .find(|menu| menu.id == menu_id)
+            .expect("screen tools menu")
+            .name
+            .clone();
+        menu::rename_menu(
+            editor.session.as_mut().expect("authoring session"),
+            menu_id.clone(),
+            "Redo must wait for the action decision".into(),
+            EditPhase::Atomic,
+        )
+        .expect("fixture creates redo history");
+        let session = editor.session.as_mut().expect("authoring session");
+        assert!(session.undo(), "fixture creates a redo entry");
+        session.select(Some(target.clone()));
+        let query = "preserve query while redo is pending";
+        seed_inspector_query(&mut editor, &target, query);
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let _ = driver.frame(Vec::new());
+        driver
+            .editor
+            .queue_editor_operation(DeferredEditorOperation::Redo);
+        let guarded = driver.frame(Vec::new());
+        assert!(driver.editor.pending_scope_change.is_some());
+        let _applied = click_retained_button(&mut driver, &guarded, "Apply action");
+        assert!(driver.editor.pending_scope_change.is_none());
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert_eq!(
+            session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == menu_id)
+                .expect("menu remains")
+                .name,
+            original_name,
+            "the first click saves the action without running Redo"
+        );
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        assert_eq!(
+            authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
+            CellContent::Action {
+                binding: ActionBinding::LauncherQuery {
+                    query: query.into(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn scope_change_anchor_rejects_a_stale_session_generation_or_target() {
+        let (mut editor, target) = retained_inspector_editor();
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        editor.queue_editor_operation(DeferredEditorOperation::CopyCell {
+            menu_id: menu_id.clone(),
+            ring_id,
+            cell_id,
+        });
+        let pending = editor
+            .pending_scope_change
+            .as_ref()
+            .expect("operation captures its anchor")
+            .clone();
+        assert!(editor.scope_change_is_current(&pending));
+
+        let session = editor.session.as_mut().expect("authoring session");
+        session.select(Some(StableSelection::Menu(menu_id)));
+        assert!(
+            !editor.scope_change_is_current(&pending),
+            "target is part of the anchor"
+        );
+
+        let session = editor.session.as_mut().expect("authoring session");
+        session.select(pending.anchor.selection.clone());
+        session.generation =
+            crate::radial::authoring::DraftGeneration(pending.anchor.generation.0.wrapping_add(1));
+        assert!(
+            !editor.scope_change_is_current(&pending),
+            "draft generation is part of the anchor"
+        );
+
+        let session = editor.session.as_mut().expect("authoring session");
+        session.generation = pending.anchor.generation;
+        session.editor_session = crate::radial::authoring::AuthoringSessionId(
+            pending.anchor.editor_session.0.wrapping_add(1),
+        );
+        assert!(
+            !editor.scope_change_is_current(&pending),
+            "editor session identity is part of the anchor"
+        );
+    }
+
+    #[test]
+    fn stale_inspector_scope_change_cannot_run_after_generation_changes() {
+        let (mut driver, target, _, _initial) =
+            retained_dirty_inspector("stale edit must remain local");
+        let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
+        let before_count = authored_cell_count(&driver.editor, &menu_id, &ring_id);
+        driver
+            .editor
+            .queue_editor_operation(DeferredEditorOperation::CopyCell {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id,
+            });
+        menu::rename_menu(
+            driver.editor.session.as_mut().expect("authoring session"),
+            menu_id.clone(),
+            "Concurrent generation change".into(),
+            EditPhase::Atomic,
+        )
+        .expect("fixture changes generation while the operation waits");
+        let stale = driver.frame(Vec::new());
+        assert!(driver.editor.pending_scope_change.is_some());
+        assert!(driver.editor.inspector_action_editor.has_unassigned_text());
+        assert!(
+            accesskit_named_bounds(
+                &stale,
+                "Discard action and cancel stale change",
+                egui::accesskit::Role::Button,
+            )
+            .is_positive()
+        );
+        let _discarded = click_retained_button(
+            &mut driver,
+            &stale,
+            "Discard action and cancel stale change",
+        );
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+        assert_eq!(
+            authored_cell_count(&driver.editor, &menu_id, &ring_id),
+            before_count,
+            "the stale Copy operation is discarded instead of targeting the newer draft"
+        );
+    }
+
+    fn authored_cell_count(
+        editor: &RadialEditorState,
+        menu_id: &MenuId,
+        ring_id: &RingId,
+    ) -> usize {
+        editor
+            .session
+            .as_ref()
+            .expect("authoring session")
+            .draft
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+            .expect("authored ring")
+            .cells
+            .len()
     }
 
     fn test_radial_add_trace_identity() -> RadialInsertionTraceIdentity {
@@ -9376,6 +13192,183 @@ mod tests {
         assert_eq!((session, generation, digest), (73, 4, expected_digest));
         assert!(visible && fully_visible && focused);
         assert!(!clicked);
+    }
+
+    #[test]
+    fn authoring_control_clip_uses_the_actual_scroll_area_in_client_coordinates() {
+        let client_size = egui::vec2(520.0, 380.0);
+        let client = egui::Rect::from_min_size(egui::Pos2::ZERO, client_size);
+        let mut snapshots = Vec::new();
+        let ctx = egui::Context::default();
+        ctx.style_mut(|style| style.animation_time = 0.0);
+        // ScrollArea learns its content overflow on the first rendered frame.
+        for (offset, observe) in [(0.0, false), (0.0, true), (120.0, true)] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(client),
+                ..Default::default()
+            };
+            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.native_pixels_per_point = Some(1.5);
+            viewport.inner_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(241.0, -180.0),
+                client_size,
+            ));
+            ctx.begin_frame(input);
+            egui::TopBottomPanel::top("pane-clip-toolbar")
+                .exact_height(64.0)
+                .show(&ctx, |ui| {
+                    ui.label("Designer toolbar");
+                });
+            egui::SidePanel::right("pane-clip-inspector")
+                .exact_width(200.0)
+                .show(&ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0)
+                        .auto_shrink([false, false])
+                        .vertical_scroll_offset(offset)
+                        .show(ui, |ui| {
+                            ui.add_space(160.0);
+                            let mut label = String::from("Bulk label");
+                            let response =
+                                ui.add(egui::TextEdit::singleline(&mut label).desired_width(150.0));
+                            let bounds = designer_authoring_clip_bounds(ui, client_size).unwrap();
+                            let clip = ui.clip_rect().intersect(client);
+                            let scale =
+                                |value: f32| (value * ui.ctx().pixels_per_point()).round() as i32;
+                            assert_eq!(
+                                bounds,
+                                [
+                                    scale(clip.left()),
+                                    scale(clip.top()),
+                                    scale(clip.right()),
+                                    scale(clip.bottom())
+                                ]
+                            );
+                            assert!(
+                                client.contains_rect(response.rect),
+                                "offset={offset} response={:?} clip={clip:?} client={client:?}",
+                                response.rect,
+                            );
+                            if observe {
+                                assert!(clip.top() > 0.0 && clip.bottom() < client.bottom());
+                                assert_eq!(clip.contains_rect(response.rect), offset > 0.0);
+                                snapshots.push((response.rect, bounds));
+                            }
+                            ui.add_space(400.0);
+                        });
+                });
+            let _ = ctx.end_frame();
+        }
+        assert_eq!(
+            snapshots[0].1, snapshots[1].1,
+            "scrolling retains the measured pane clip"
+        );
+        assert!(
+            snapshots[1].0.top() < snapshots[0].0.top(),
+            "the real control moves into its clip"
+        );
+    }
+
+    #[test]
+    fn rendered_search_text_observation_uses_the_painted_galley_and_rejects_clipping() {
+        let text = "A distinguishable long authored label  ·  Child · Ring ring-id · Cell cell-id";
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(520.0, 380.0));
+        for (clipped, elided) in [(false, false), (true, false), (false, true)] {
+            let ctx = egui::Context::default();
+            let mut input = egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            };
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .inner_rect = Some(viewport);
+            ctx.begin_frame(input);
+            let mut observed = None;
+            egui::SidePanel::left("search-results-test")
+                .exact_width(180.0)
+                .show(&ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_source("radial-designer-search-results")
+                        .show(ui, |ui| {
+                            if clipped {
+                                ui.set_clip_rect(egui::Rect::from_min_size(
+                                    ui.min_rect().min,
+                                    egui::vec2(ui.available_width(), 16.0),
+                                ));
+                            }
+                            let galley = egui::WidgetText::from(text).into_galley(
+                                ui,
+                                None,
+                                ui.available_width() - 2.0 * ui.spacing().button_padding.x,
+                                egui::TextStyle::Button,
+                            );
+                            assert!(
+                                galley.rows.len() > 1,
+                                "the actual search layout wraps the long result"
+                            );
+                            let galley = if elided {
+                                let mut job = galley.job.as_ref().clone();
+                                job.wrap.max_rows = 1;
+                                ui.fonts(|fonts| fonts.layout_job(job))
+                            } else {
+                                galley
+                            };
+                            let response =
+                                ui.selectable_label(false, std::sync::Arc::clone(&galley));
+                            observed = designer_rendered_text(ui, &response, &galley);
+                        });
+                });
+            let _ = ctx.end_frame();
+            let observation = observed.expect("painted text owner observation");
+            assert_eq!(
+                observation.digest,
+                acceptance_observation_digest(text.as_bytes())
+            );
+            assert!(observation.bounds[2] > observation.bounds[0]);
+            assert!(observation.bounds[3] > observation.bounds[1]);
+            assert_eq!(observation.fully_visible, !clipped);
+            assert_eq!(observation.elided, elided);
+        }
+    }
+
+    #[test]
+    fn acceptance_observation_distinguishes_menu_selection_from_no_selection() {
+        use crate::gui::query_observation::AuthoringSelectionKind;
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_mut().expect("authoring owner");
+        let menu_id = session.draft.menus[0].id.clone();
+        session.select(Some(StableSelection::Menu(menu_id)));
+        let menu = editor.acceptance_observation().unwrap();
+        assert_eq!(menu.selection_kind, AuthoringSelectionKind::Menu);
+        assert_ne!(menu.selected_target_digest, 0);
+        assert_eq!(menu.selected_member_count, 0);
+        assert!(menu.selected_member_target_digests.is_empty());
+        assert_eq!(
+            (
+                menu.selected_members_digest,
+                menu.primary_cell_digest,
+                menu.range_anchor_digest
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (
+                menu.primary_target_digest,
+                menu.range_anchor_target_digest,
+                menu.selected_cell_digest
+            ),
+            (0, 0, 0)
+        );
+
+        editor.session.as_mut().unwrap().select(None);
+        let none = editor.acceptance_observation().unwrap();
+        assert_eq!(none.selection_kind, AuthoringSelectionKind::None);
+        assert_eq!(none.selected_target_digest, 0);
+        assert_eq!(none.selected_member_count, 0);
+        assert!(none.selected_member_target_digests.is_empty());
     }
 
     #[test]
@@ -10037,12 +14030,21 @@ mod tests {
         }
 
         fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            self.frame_with_modifiers(events, egui::Modifiers::default())
+        }
+
+        fn frame_with_modifiers(
+            &mut self,
+            events: Vec<egui::Event>,
+            modifiers: egui::Modifiers,
+        ) -> egui::FullOutput {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(1000.0, 720.0),
                 )),
                 events,
+                modifiers,
                 ..Default::default()
             };
             let frame = &self.frame;
@@ -10051,6 +14053,63 @@ mod tests {
                 editor.viewport_ui(ctx, frame, egui::ViewportClass::Deferred);
             })
         }
+
+        fn frame_in_client(
+            &mut self,
+            client_size: egui::Vec2,
+            time: f64,
+            events: Vec<egui::Event>,
+        ) -> egui::FullOutput {
+            let client_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, client_size);
+            let mut input = egui::RawInput {
+                screen_rect: Some(client_rect),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.inner_rect = Some(client_rect.translate(egui::vec2(240.0, 120.0)));
+            viewport.native_pixels_per_point = Some(1.0);
+            let frame = &self.frame;
+            let editor = &mut self.editor;
+            self.context.run(input, |ctx| {
+                editor.viewport_ui(ctx, frame, egui::ViewportClass::Deferred);
+            })
+        }
+    }
+
+    fn click_tree_search_result(
+        driver: &mut RetainedDesignerDriver,
+        query: &str,
+    ) -> egui::FullOutput {
+        driver.editor.tree_filter = query.into();
+        let results = driver.frame(Vec::new());
+        let update = results
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("retained Designer exposes AccessKit");
+        let names = update
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.name())
+            .collect::<Vec<_>>();
+        let result = update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.name().is_some_and(|name| name.contains(query)))
+            .map(|(_, node)| node.bounds().expect("search result bounds"))
+            .map(|bounds| {
+                egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                )
+            })
+            .unwrap_or_else(|| panic!("missing {query:?} search result: {names:?}"));
+        let point = result.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
+        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver.frame(vec![pointer_button_event(point, false)])
     }
 
     fn accesskit_named_bounds(
@@ -10097,6 +14156,521 @@ mod tests {
         )
     }
 
+    fn accesskit_value_bounds_by_vertical_order(
+        output: &egui::FullOutput,
+        role: egui::accesskit::Role,
+        value: &str,
+        order: usize,
+    ) -> egui::Rect {
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("AccessKit tree update");
+        let mut bounds = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == role && node.value() == Some(value))
+            .filter_map(|(_, node)| node.bounds())
+            .map(|bounds| {
+                egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                )
+            })
+            .collect::<Vec<_>>();
+        bounds.sort_by(|left, right| left.top().total_cmp(&right.top()));
+        *bounds
+            .get(order)
+            .unwrap_or_else(|| panic!("missing text input {value:?} at vertical order {order}"))
+    }
+
+    fn accesskit_any_named_bounds(output: &egui::FullOutput, name: &str) -> egui::Rect {
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("AccessKit tree update");
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, node)| node.name() == Some(name))
+            .unwrap_or_else(|| panic!("missing control named {name:?} in AccessKit tree"));
+        let bounds = node.bounds().expect("semantic control bounds");
+        egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+        )
+    }
+
+    fn accesskit_named_bounds_containing(
+        output: &egui::FullOutput,
+        fragment: &str,
+        role: egui::accesskit::Role,
+    ) -> egui::Rect {
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("AccessKit tree update");
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == role && node.name().is_some_and(|name| name.contains(fragment))
+            })
+            .unwrap_or_else(|| panic!("missing {role:?} name containing {fragment:?}"));
+        let bounds = node.bounds().expect("semantic control bounds");
+        egui::Rect::from_min_max(
+            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+        )
+    }
+
+    fn click_retained_button(
+        driver: &mut RetainedDesignerDriver,
+        output: &egui::FullOutput,
+        name: &str,
+    ) -> egui::FullOutput {
+        let point = accesskit_named_bounds(output, name, egui::accesskit::Role::Button).center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
+        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver.frame(vec![pointer_button_event(point, false)])
+    }
+
+    fn click_retained_named_control(
+        driver: &mut RetainedDesignerDriver,
+        output: &egui::FullOutput,
+        name: &str,
+    ) -> egui::FullOutput {
+        let point = accesskit_any_named_bounds(output, name).center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
+        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver.frame(vec![pointer_button_event(point, false)])
+    }
+
+    fn replace_retained_text(
+        driver: &mut RetainedDesignerDriver,
+        output: &egui::FullOutput,
+        existing: &str,
+        replacement: &str,
+    ) -> egui::FullOutput {
+        let point =
+            accesskit_value_bounds(output, egui::accesskit::Role::TextInput, existing).center();
+        replace_retained_text_at(driver, point, replacement)
+    }
+
+    fn replace_retained_text_at(
+        driver: &mut RetainedDesignerDriver,
+        point: egui::Pos2,
+        replacement: &str,
+    ) -> egui::FullOutput {
+        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
+        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        let _ = driver.frame(vec![pointer_button_event(point, false)]);
+        let _ = driver.frame(vec![key_event(
+            egui::Key::Home,
+            egui::Modifiers::default(),
+            true,
+        )]);
+        let _ = driver.frame(vec![key_event(
+            egui::Key::End,
+            egui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            true,
+        )]);
+        let _ = driver.frame(vec![egui::Event::Text(replacement.into())]);
+        driver.frame(Vec::new())
+    }
+
+    fn retained_properties_popup() -> (RetainedDesignerDriver, StableSelection, egui::FullOutput) {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = true;
+        editor.tree_width = 300.0;
+        editor.tree_filter = "Screen Draw".into();
+        let target = {
+            let session = editor.session.as_mut().expect("authoring session");
+            let menu = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == MenuId::new("starter-screen-tools"))
+                .expect("screen tools menu");
+            let ring = &menu.rings[0];
+            let cell = ring
+                .cells
+                .iter()
+                .find(|cell| cell.id == CellId::new("starter-screen-tools-draw"))
+                .expect("screen draw action");
+            let target = StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            };
+            session.select(Some(target.clone()));
+            target
+        };
+        editor.properties_popup = Some(target.clone());
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let initial = driver.frame(Vec::new());
+        assert!(driver.editor.properties_draft.is_some());
+        (driver, target, initial)
+    }
+
+    fn retained_inspector_editor() -> (RadialEditorState, StableSelection) {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.inspector_visible = true;
+        editor.inspector_width = 320.0;
+        let target = {
+            let session = editor.session.as_mut().expect("authoring session");
+            let menu = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == MenuId::new("starter-screen-tools"))
+                .expect("screen tools menu");
+            let ring = &menu.rings[0];
+            let cell = ring
+                .cells
+                .iter()
+                .find(|cell| cell.id == CellId::new("starter-screen-tools-draw"))
+                .expect("screen draw action");
+            let target = StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            };
+            session.select(Some(target.clone()));
+            target
+        };
+        (editor, target)
+    }
+
+    fn retained_bulk_style_driver(field: &str) -> RetainedDesignerDriver {
+        use crate::radial::authoring::{AuthoredCellTarget, AuthoringSnapshot};
+
+        let mut document = RadialDocument::starter();
+        let menu = &mut document.menus[0];
+        let ring = &mut menu.rings[0];
+        ring.cells[0].style.text.bold = crate::radial::model::Override::Value(false);
+        ring.cells[1].style.text.bold = crate::radial::model::Override::Inherit;
+        ring.cells[0].style.text.font_size = crate::radial::model::Override::Value(12.0);
+        ring.cells[1].style.text.font_size = crate::radial::model::Override::Value(24.0);
+        let targets = ring.cells[..2]
+            .iter()
+            .map(|cell| AuthoredCellTarget {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let mut session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::new(document),
+            "retained-bulk-style",
+        ));
+        session.select_authored_cell(targets[0].clone(), false, false);
+        session.select_authored_cell(targets[1].clone(), true, false);
+        editor.session = Some(session);
+        editor.inspector_visible = true;
+        editor.inspector_width = 360.0;
+        editor.tree_visible = false;
+        editor.bulk_style_field = field.into();
+        RetainedDesignerDriver::new(editor)
+    }
+
+    fn assert_retained_bulk_style_applied(
+        driver: &mut RetainedDesignerDriver,
+        before: &RadialDocument,
+        expected: &RadialDocument,
+        generation: crate::radial::authoring::DraftGeneration,
+        apply_name: &str,
+    ) {
+        let selection = driver.editor.session.as_ref().unwrap().selection.clone();
+        let controls = driver.frame(Vec::new());
+        assert_eq!(*driver.editor.session.as_ref().unwrap().draft, *before);
+        assert_eq!(
+            driver.editor.session.as_ref().unwrap().generation,
+            generation
+        );
+        let _ = click_retained_button(driver, &controls, apply_name);
+        let _ = driver.frame(Vec::new());
+        let session = driver.editor.session.as_mut().unwrap();
+        assert_eq!(*session.draft, *expected);
+        assert_eq!(session.generation.0, generation.0 + 1);
+        assert_eq!(session.acceptance_history_depths(), (1, 0));
+        assert_eq!(session.selection, selection);
+        assert!(session.undo());
+        assert_eq!(*session.draft, *before);
+        assert_eq!(session.selection, selection);
+        assert!(session.redo());
+        assert_eq!(*session.draft, *expected);
+        assert_eq!(session.selection, selection);
+    }
+
+    #[test]
+    fn retained_bulk_checkbox_stays_staged_across_frames_and_apply_focus_loss() {
+        let mut driver = retained_bulk_style_driver("text.bold");
+        let before = (*driver.editor.session.as_ref().unwrap().draft).clone();
+        let generation = driver.editor.session.as_ref().unwrap().generation;
+        let first = driver.frame(Vec::new());
+        let _ = click_retained_named_control(&mut driver, &first, "text.bold");
+        for _ in 0..3 {
+            let output = driver.frame(Vec::new());
+            assert!(
+                output
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| {
+                        node.name() == Some("text.bold")
+                            && node.checked() == Some(egui::accesskit::Checked::True)
+                    })
+            );
+            assert_eq!(
+                driver.editor.bulk_style_staged_value,
+                Some(skin_editor::with_payload(serde_json::json!(true)))
+            );
+        }
+        let mut expected = before.clone();
+        for cell in &mut expected.menus[0].rings[0].cells[..2] {
+            cell.style.text.bold = crate::radial::model::Override::Value(true);
+        }
+        assert_retained_bulk_style_applied(
+            &mut driver,
+            &before,
+            &expected,
+            generation,
+            "Apply text.bold to 2 cells",
+        );
+    }
+
+    #[test]
+    fn retained_bulk_scalar_stays_staged_across_frames_and_apply_focus_loss() {
+        let mut driver = retained_bulk_style_driver("text.font_size");
+        let before = (*driver.editor.session.as_ref().unwrap().draft).clone();
+        let generation = driver.editor.session.as_ref().unwrap().generation;
+        let first = driver.frame(Vec::new());
+        let point = accesskit_any_named_bounds(&first, "text.font_size").center();
+        let _ = replace_retained_text_at(&mut driver, point, "38.5");
+        // Commit the local DragValue text edit before checking retained frames.
+        let _ = driver.frame(vec![key_event(
+            egui::Key::Enter,
+            egui::Modifiers::default(),
+            true,
+        )]);
+        let staged = skin_editor::with_payload(serde_json::json!(38.5));
+        for _ in 0..3 {
+            let _ = driver.frame(Vec::new());
+            assert_eq!(driver.editor.bulk_style_staged_value, Some(staged.clone()));
+        }
+        let mut expected = before.clone();
+        for cell in &mut expected.menus[0].rings[0].cells[..2] {
+            cell.style.text.font_size = crate::radial::model::Override::Value(38.5);
+        }
+        assert_retained_bulk_style_applied(
+            &mut driver,
+            &before,
+            &expected,
+            generation,
+            "Apply text.font_size to 2 cells",
+        );
+    }
+
+    fn seed_inspector_query(
+        editor: &mut RadialEditorState,
+        target: &StableSelection,
+        query: &str,
+    ) -> ActionBinding {
+        let (scope, binding) = {
+            let session = editor.session.as_ref().expect("authoring session");
+            let StableSelection::Cell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } = target
+            else {
+                panic!("Inspector fixture must target a cell")
+            };
+            let binding = match &authored_cell(editor, menu_id, ring_id, cell_id).content {
+                CellContent::Action { binding } => binding.clone(),
+                content => panic!("Inspector fixture cell must be an action: {content:?}"),
+            };
+            let scope = BindingEditorScope {
+                surface: BindingEditorSurface::Inspector,
+                editor_session: session.editor_session,
+                draft_generation: session.generation,
+                target: target.clone(),
+                slot: BindingEditorSlot::CellPrimary,
+            };
+            (scope, binding)
+        };
+        editor.inspector_action_editor_scope = Some(scope.clone());
+        editor
+            .inspector_action_editor
+            .seed_unassigned_query_for_test(scope, Some(&binding), query);
+        binding
+    }
+
+    fn retained_dirty_inspector(
+        query: &str,
+    ) -> (
+        RetainedDesignerDriver,
+        StableSelection,
+        ActionBinding,
+        egui::FullOutput,
+    ) {
+        let (mut editor, target) = retained_inspector_editor();
+        let binding = seed_inspector_query(&mut editor, &target, query);
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let initial = driver.frame(Vec::new());
+        (driver, target, binding, initial)
+    }
+
+    fn queue_navigation_to_screenshot_region(driver: &mut RetainedDesignerDriver) {
+        let target = {
+            let session = driver.editor.session.as_ref().expect("authoring session");
+            let menu = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == MenuId::new("starter-screen-tools"))
+                .expect("screen tools menu");
+            let ring = menu
+                .rings
+                .iter()
+                .find(|ring| {
+                    ring.cells
+                        .iter()
+                        .any(|cell| cell.id == CellId::new("starter-screen-tools-screenshot"))
+                })
+                .expect("screen tools ring");
+            let cell = ring
+                .cells
+                .iter()
+                .find(|cell| cell.id == CellId::new("starter-screen-tools-screenshot"))
+                .expect("screenshot region cell");
+            StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            }
+        };
+        driver
+            .editor
+            .queue_navigation_intent(DesignerNavigationIntent::Select {
+                target,
+                control: false,
+                shift: false,
+                force_history: false,
+                open_properties: false,
+            });
+    }
+
+    fn test_pinned_binding() -> ActionBinding {
+        ActionBinding::Persisted {
+            action: crate::universal_actions::PersistedUniversalActionRef {
+                target: Some(
+                    crate::universal_actions::PersistableActionTargetRef::LegacyAction {
+                        action: crate::actions::Action {
+                            label: "Screenshot region".into(),
+                            desc: "Retained Properties Pin fixture".into(),
+                            action: "screenshot:region".into(),
+                            args: None,
+                        },
+                    },
+                ),
+                action_id: crate::universal_actions::action_ids::RESULT_EXECUTE,
+            },
+        }
+    }
+
+    fn cell_target_parts(target: &StableSelection) -> (MenuId, RingId, CellId) {
+        match target {
+            StableSelection::Cell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => (menu_id.clone(), ring_id.clone(), cell_id.clone()),
+            _ => unreachable!("Properties popup is scoped to a cell"),
+        }
+    }
+
+    fn seed_pinned_properties_draft(
+        driver: &mut RetainedDesignerDriver,
+        target: &StableSelection,
+        binding: ActionBinding,
+        query: &str,
+    ) {
+        let (menu_id, ring_id, cell_id) = cell_target_parts(target);
+        let (editor_session, generation) = {
+            let session = driver.editor.session.as_ref().expect("authoring session");
+            (session.editor_session, session.generation)
+        };
+        driver
+            .editor
+            .properties_draft
+            .as_mut()
+            .expect("Properties draft initialized by retained frame")
+            .action_binding = Some(binding.clone());
+        driver
+            .editor
+            .properties_draft
+            .as_mut()
+            .unwrap()
+            .action_editor
+            .seed_pinned_search_for_test(
+                BindingEditorScope {
+                    surface: BindingEditorSurface::Properties,
+                    editor_session,
+                    draft_generation: generation,
+                    target: target.clone(),
+                    slot: BindingEditorSlot::CellPrimary,
+                },
+                binding.clone(),
+                query,
+            );
+        menu::set_cell_content(
+            driver.editor.session.as_mut().expect("authoring session"),
+            &menu_id,
+            &ring_id,
+            &cell_id,
+            CellContent::Action {
+                binding: binding.clone(),
+            },
+        )
+        .expect("fixture cell accepts the pinned action");
+        let generation = driver.editor.session.as_ref().unwrap().generation;
+        driver.editor.properties_draft.as_mut().unwrap().generation = generation;
+    }
+
+    fn authored_cell<'a>(
+        editor: &'a RadialEditorState,
+        menu_id: &MenuId,
+        ring_id: &RingId,
+        cell_id: &CellId,
+    ) -> &'a crate::radial::model::CellDefinition {
+        editor
+            .session
+            .as_ref()
+            .expect("authoring session")
+            .draft
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+            .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
+            .expect("authored cell")
+    }
+
     fn key_event(key: egui::Key, modifiers: egui::Modifiers, pressed: bool) -> egui::Event {
         egui::Event::Key {
             key,
@@ -10123,7 +14697,7 @@ mod tests {
         assert!(!preferences.inspector_visible);
         let canvas_only = designer_pane_layout(
             egui::vec2(900.0, 650.0),
-            4.0,
+            egui::vec2(8.0, 4.0),
             preferences.tree_visible,
             preferences.inspector_visible,
             preferences.tree_width,
@@ -10132,7 +14706,7 @@ mod tests {
         assert!(canvas_only.canvas_width >= 899.0);
         let compact = designer_pane_layout(
             egui::vec2(700.0, 470.0),
-            4.0,
+            egui::vec2(8.0, 4.0),
             true,
             true,
             preferences.tree_width,
@@ -10141,17 +14715,17 @@ mod tests {
         assert!(compact.canvas_width > 0.0);
         assert!(compact.height + 4.0 <= 470.0);
         assert!(
-            compact.tree_width + compact.canvas_width + compact.inspector_width + 12.0 <= 700.01
+            compact.tree_width + compact.canvas_width + compact.inspector_width + 28.0 <= 700.01
         );
         let one_pane = designer_pane_layout(
             egui::vec2(700.0, 470.0),
-            4.0,
+            egui::vec2(8.0, 4.0),
             true,
             false,
             preferences.tree_width,
             preferences.inspector_width,
         );
-        assert!(one_pane.tree_width + one_pane.canvas_width + 6.0 <= 700.01);
+        assert!(one_pane.tree_width + one_pane.canvas_width + 14.0 <= 700.01);
     }
 
     #[test]
@@ -10159,7 +14733,7 @@ mod tests {
         let preferences = crate::settings::RadialDesignerPreferences::default();
         let layout = designer_pane_layout(
             egui::vec2(624.0, 299.0),
-            4.0,
+            egui::vec2(8.0, 4.0),
             true,
             true,
             preferences.tree_width,
@@ -10168,6 +14742,140 @@ mod tests {
 
         assert_eq!(layout.height, 291.0);
         assert!(layout.height + 8.0 <= 299.0);
+    }
+
+    #[test]
+    fn designer_pane_width_budget_includes_actual_horizontal_item_spacing() {
+        for horizontal_spacing in [0.0, 8.0, 17.0] {
+            for (tree_visible, inspector_visible) in [(true, true), (true, false), (false, true)] {
+                let layout = designer_pane_layout(
+                    egui::vec2(704.0, 460.0),
+                    egui::vec2(horizontal_spacing, 4.0),
+                    tree_visible,
+                    inspector_visible,
+                    180.0,
+                    300.0,
+                );
+                let gap_count = usize::from(tree_visible) + usize::from(inspector_visible);
+                let actual_width = layout.tree_width
+                    + layout.canvas_width
+                    + layout.inspector_width
+                    + (6.0 + horizontal_spacing) * gap_count as f32;
+                assert!((actual_width - 704.0).abs() < 0.01);
+                assert!(layout.canvas_width >= 140.0);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_designer_both_panes_fit_normal_and_compact_client_geometry() {
+        for client_size in [egui::vec2(900.0, 720.0), egui::vec2(720.0, 520.0)] {
+            let (mut editor, _) = retained_inspector_editor();
+            editor.tree_visible = true;
+            editor.inspector_visible = true;
+            editor.tree_width = 180.0;
+            editor.inspector_width = 300.0;
+            let session = editor.session.as_ref().unwrap();
+            let before = (
+                session.draft.clone(),
+                session.generation,
+                session.selection.clone(),
+                session.acceptance_history_depths(),
+                session.pending_assets.clone(),
+            );
+            let mut driver = RetainedDesignerDriver::new(editor);
+            let _ = acceptance_trace::take_action_editor_control_test_events();
+            let _ = driver.frame_in_client(client_size, 0.0, Vec::new());
+            let output = driver.frame_in_client(client_size, 0.05, Vec::new());
+            let search = accesskit_value_bounds(&output, egui::accesskit::Role::TextInput, "");
+            assert!(search.is_positive());
+            assert!(
+                search.right() < client_size.x / 2.0,
+                "Tree Search remains in its left pane"
+            );
+            let inspector_heading =
+                accesskit_named_bounds(&output, "Inspector", egui::accesskit::Role::StaticText);
+            let scroll_origin = egui::pos2(
+                inspector_heading.center().x,
+                inspector_heading.bottom() + 20.0,
+            );
+            let mut query_geometry = None;
+            for step in 0..12 {
+                let events = if step == 0 {
+                    Vec::new()
+                } else {
+                    vec![
+                        egui::Event::PointerMoved(scroll_origin),
+                        egui::Event::Scroll(egui::vec2(0.0, -40.0)),
+                    ]
+                };
+                let _ = acceptance_trace::take_action_editor_control_test_events();
+                let _ = driver.frame_in_client(client_size, 0.1 + step as f64 * 0.2, events);
+                let controls = acceptance_trace::take_action_editor_control_test_events();
+                for event in controls {
+                    if let Event::DesignerActionEditorControl {
+                        surface: "inspector",
+                        control: "query_field",
+                        left_px,
+                        top_px,
+                        right_px,
+                        bottom_px,
+                        full_left_px,
+                        full_top_px,
+                        full_right_px,
+                        full_bottom_px,
+                        client_width_px,
+                        client_height_px,
+                        fully_visible,
+                        ..
+                    } = event
+                    {
+                        let full = [full_left_px, full_top_px, full_right_px, full_bottom_px];
+                        let clipped = [left_px, top_px, right_px, bottom_px];
+                        assert_eq!(
+                            [client_width_px, client_height_px],
+                            [client_size.x as i32, client_size.y as i32]
+                        );
+                        assert_eq!(
+                            left_px, full_left_px,
+                            "left pane clip at {client_size:?}: {full:?} vs {clipped:?}"
+                        );
+                        assert_eq!(
+                            right_px, full_right_px,
+                            "right pane clip at {client_size:?}: {full:?} vs {clipped:?}"
+                        );
+                        assert!(full_left_px as f32 > search.right());
+                        assert!(
+                            full_right_px <= client_width_px,
+                            "field exceeds the actual client: {full:?}"
+                        );
+                        if fully_visible {
+                            assert_eq!(clipped, full);
+                            assert!(full_top_px >= 0 && full_bottom_px <= client_height_px);
+                            query_geometry = Some(full);
+                        }
+                    }
+                }
+                if query_geometry.is_some() {
+                    break;
+                }
+            }
+            assert!(
+                query_geometry.is_some(),
+                "the actual Inspector query field is fully reachable at {client_size:?}"
+            );
+            let session = driver.editor.session.as_ref().unwrap();
+            assert_eq!(
+                (
+                    session.draft.clone(),
+                    session.generation,
+                    session.selection.clone(),
+                    session.acceptance_history_depths(),
+                    session.pending_assets.clone(),
+                ),
+                before,
+            );
+        }
     }
 
     #[test]
@@ -10228,6 +14936,128 @@ mod tests {
         assert!(editor.is_dirty());
         editor.open_skins();
         assert!(editor.is_showing_resources());
+    }
+
+    #[test]
+    fn retained_inspector_keep_editing_preserves_buffers_and_discard_tears_down_owner() {
+        let (editor, target) = retained_inspector_editor();
+        let session = editor.session.as_ref().unwrap();
+        let before = (
+            session.draft.clone(),
+            session.editor_session,
+            session.generation,
+            session.selection.clone(),
+            session.acceptance_history_depths(),
+            session.pending_assets.clone(),
+        );
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let initial = driver.frame(Vec::new());
+        let query = "unassigned Inspector close fixture";
+        let _ = replace_retained_text(&mut driver, &initial, "", query);
+        assert_eq!(
+            driver.editor.inspector_action_editor.query_for_test(),
+            query
+        );
+        assert!(driver.editor.properties_popup_dirty());
+        let identity = driver.editor.inspector_action_editor.identity().unwrap();
+        assert!(driver.editor.action_editor_request_is_current(&identity));
+
+        driver.editor.request_close();
+        assert!(driver.editor.close_prompt);
+        assert!(!driver.editor.action_editor_request_is_current(&identity));
+        let prompt = driver.frame(Vec::new());
+        let _ = click_retained_button(&mut driver, &prompt, "Keep editing");
+        let _ = driver.frame(Vec::new());
+        assert!(driver.editor.open);
+        assert!(!driver.editor.close_prompt);
+        assert_eq!(
+            driver.editor.inspector_action_editor.query_for_test(),
+            query
+        );
+        assert!(driver.editor.properties_popup_dirty());
+        assert!(!driver.editor.action_editor_request_is_current(&identity));
+        let current_identity = driver.editor.inspector_action_editor.identity().unwrap();
+        assert_ne!(current_identity.editor_epoch, identity.editor_epoch);
+        assert!(
+            driver
+                .editor
+                .action_editor_request_is_current(&current_identity)
+        );
+        let session = driver.editor.session.as_ref().unwrap();
+        assert_eq!(
+            (
+                session.draft.clone(),
+                session.editor_session,
+                session.generation,
+                session.selection.clone(),
+                session.acceptance_history_depths(),
+                session.pending_assets.clone(),
+            ),
+            before,
+        );
+
+        driver.editor.request_close();
+        let prompt = driver.frame(Vec::new());
+        let _ = click_retained_button(&mut driver, &prompt, "Discard");
+        let closed = driver.editor.acceptance_observation().unwrap();
+        assert!(!closed.open && !closed.properties_dirty && !closed.properties_popup_open);
+        assert!(closed.action_editor.is_none());
+        assert_eq!((closed.session_id, closed.generation), (0, 0));
+        assert!(!closed.initial_snapshot_pending);
+        assert!(driver.editor.session.is_none());
+        assert!(driver.editor.inspector_action_editor_scope.is_none());
+        assert_eq!(driver.editor.inspector_action_editor.query_for_test(), "");
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+        assert!(driver.editor.inspector_action_editor.identity().is_none());
+        assert!(driver.editor.viewport_close_pending);
+        assert!(
+            !driver
+                .editor
+                .action_editor_request_is_current(&current_identity)
+        );
+
+        driver.editor.open_test_snapshot();
+        driver.editor.session.as_mut().unwrap().select(Some(target));
+        let _ = driver.frame(Vec::new());
+        let reopened = driver.editor.acceptance_observation().unwrap();
+        assert!(reopened.open);
+        assert!(!reopened.properties_dirty && !reopened.draft_dirty);
+        assert_eq!(driver.editor.session.as_ref().unwrap().draft, before.0);
+        assert_ne!(
+            driver.editor.session.as_ref().unwrap().editor_session,
+            before.1
+        );
+        assert_eq!(driver.editor.inspector_action_editor.query_for_test(), "");
+        assert!(
+            !driver
+                .editor
+                .action_editor_request_is_current(&current_identity)
+        );
+        assert_eq!((reopened.undo_depth, reopened.redo_depth), (0, 0));
+        assert!(
+            reopened
+                .action_editor
+                .is_some_and(|editor| !editor.search_pending && !editor.test_pending)
+        );
+    }
+
+    #[test]
+    fn force_close_disposes_unassigned_inspector_buffers_and_observation() {
+        let (mut driver, _, _, _) = retained_dirty_inspector("force-close local draft");
+        let identity = driver.editor.inspector_action_editor.identity().unwrap();
+        assert!(driver.editor.properties_popup_dirty());
+        driver.editor.force_close();
+        let closed = driver.editor.acceptance_observation().unwrap();
+        assert!(!closed.open && !closed.properties_dirty && !closed.properties_popup_open);
+        assert!(closed.action_editor.is_none());
+        assert_eq!((closed.session_id, closed.generation), (0, 0));
+        assert!(!closed.initial_snapshot_pending);
+        assert!(driver.editor.session.is_none());
+        assert!(driver.editor.inspector_action_editor_scope.is_none());
+        assert_eq!(driver.editor.inspector_action_editor.query_for_test(), "");
+        assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
+        assert!(!driver.editor.action_editor_request_is_current(&identity));
+        assert!(driver.editor.viewport_close_pending);
     }
 
     #[test]
@@ -10303,6 +15133,48 @@ mod tests {
                 .map(|pending| pending.kind),
             Some(crate::radial::authoring::PendingRequestKind::StopNativePreview)
         );
+    }
+
+    fn seed_properties_search_result(
+        driver: &mut RetainedDesignerDriver,
+        target: &StableSelection,
+        candidate: ActionBinding,
+        query: &str,
+    ) {
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        let assigned = driver
+            .editor
+            .properties_draft
+            .as_ref()
+            .expect("Properties draft")
+            .action_binding
+            .clone();
+        let scope = BindingEditorScope {
+            surface: BindingEditorSurface::Properties,
+            editor_session: session.editor_session,
+            draft_generation: session.generation,
+            target: target.clone(),
+            slot: BindingEditorSlot::CellPrimary,
+        };
+        driver
+            .editor
+            .properties_draft
+            .as_mut()
+            .expect("Properties draft")
+            .action_editor
+            .seed_search_result_for_test(scope, assigned.as_ref(), query, candidate);
+    }
+
+    fn click_retained_named_fragment(
+        driver: &mut RetainedDesignerDriver,
+        output: &egui::FullOutput,
+        fragment: &str,
+        role: egui::accesskit::Role,
+    ) -> egui::FullOutput {
+        let point = accesskit_named_bounds_containing(output, fragment, role).center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
+        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver.frame(vec![pointer_button_event(point, false)])
     }
 
     #[test]
@@ -10882,19 +15754,99 @@ mod tests {
             &cell_id,
             crate::radial::model::ClickGesture::Secondary,
             binding.clone(),
-        );
+        )
+        .expect("alternate action assignment succeeds");
         for slot in [
             MenuActionSlot::CenterPrimary,
             MenuActionSlot::CenterSecondary,
             MenuActionSlot::BackgroundPrimary,
             MenuActionSlot::BackgroundSecondary,
         ] {
-            assign_menu_action(&mut session, &menu_id, slot, binding.clone());
+            assign_menu_action(&mut session, &menu_id, slot, binding.clone())
+                .expect("menu action assignment succeeds");
         }
         let menu = &session.draft.menus[0];
         assert!(menu.center_action.is_some() && menu.center_secondary_action.is_some());
         assert!(menu.background_action.is_some() && menu.background_secondary_action.is_some());
         assert_eq!(menu.rings[0].cells[0].alternate_clicks.len(), 1);
+    }
+
+    #[test]
+    fn alternate_action_assignment_rejection_preserves_authoring_state_and_surfaces_error() {
+        use crate::radial::authoring::{AuthoringRequest, authoring_control_service};
+
+        let (client, endpoint) = authoring_control_service();
+        let snapshot = AuthoringSnapshot::new(
+            std::sync::Arc::new(RadialDocument::starter()),
+            "pending-alternate-assignment-test",
+        );
+        let mut session = RadialAuthoringSession::new(snapshot);
+        let menu_id = session.draft.menus[0].id.clone();
+        let ring_id = session.draft.menus[0].rings[0].id.clone();
+        let cell_id = session.draft.menus[0].rings[0].cells[0].id.clone();
+        let selection = StableSelection::Cell {
+            menu_id: menu_id.clone(),
+            ring_id: ring_id.clone(),
+            cell_id: cell_id.clone(),
+        };
+        session.select(Some(selection.clone()));
+        session.require_authoritative_snapshot();
+        let request = session.request_snapshot().expect("snapshot request");
+        client.send(request).expect("snapshot request is queued");
+        assert!(matches!(
+            endpoint.request_rx.try_recv(),
+            Ok(AuthoringRequest::Snapshot { .. })
+        ));
+        let pending = session.pending_request.expect("request remains pending");
+
+        let before_document = std::sync::Arc::clone(&session.draft);
+        let before_generation = session.generation;
+        let before_history = session.acceptance_history_depths();
+        let binding = crate::radial::model::ActionBinding::Persisted {
+            action: crate::universal_actions::PersistedUniversalActionRef {
+                target: None,
+                action_id: crate::universal_actions::ActionId::new("pending-test"),
+            },
+        };
+        let result = assign_alternate_click(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            &cell_id,
+            crate::radial::model::ClickGesture::Secondary,
+            binding,
+        );
+        assert_eq!(result, Err(AuthoringError::RequestPending));
+        report_action_assignment_result(&mut session, result);
+
+        assert!(std::sync::Arc::ptr_eq(&session.draft, &before_document));
+        assert_eq!(session.generation, before_generation);
+        assert_eq!(session.acceptance_history_depths(), before_history);
+        assert_eq!(session.selection.as_ref(), Some(&selection));
+        assert_eq!(session.pending_request, Some(pending));
+        assert_eq!(
+            session.last_error.as_deref(),
+            Some("Action assignment failed: RequestPending")
+        );
+
+        let mut editor = RadialEditorState::default();
+        editor.open = true;
+        editor.client = Some(client);
+        editor.session = Some(session);
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let output = driver.frame(Vec::new());
+        assert!(
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .expect("Designer exposes its feedback")
+                .nodes
+                .iter()
+                .any(|(_, node)| node.name().is_some_and(
+                    |name| name.contains("Error: Action assignment failed: RequestPending")
+                ))
+        );
     }
 
     #[test]
@@ -10907,7 +15859,7 @@ mod tests {
         assert!(production.contains("egui::WidgetType::ComboBox"));
         assert!(production.contains("info.label = Some(accessible_name.into())"));
         assert!(production.contains("focus_restore.as_ref() == Some(&ring_selection)"));
-        assert!(production.contains("focus_restore.as_ref() == Some(&selection)"));
+        assert!(production.contains(".and_then(StableSelection::primary_cell)"));
         assert!(production.contains("response.request_focus()"));
         assert!(production.contains("self.focus_restore = session.selection.clone()"));
         assert!(production.contains("ui.visuals().error_fg_color"));
@@ -11195,6 +16147,95 @@ mod tests {
     }
 
     #[test]
+    fn retained_filtered_tree_exposes_every_selected_cell_membership_to_accesskit() {
+        use crate::radial::authoring::AuthoredCellTarget;
+
+        let mut document = RadialDocument::starter();
+        let menu = &mut document.menus[0];
+        let ring = &mut menu.rings[0];
+        let labels = [
+            "selection-match-first",
+            "selection-match-second",
+            "selection-match-unselected",
+        ];
+        for (cell, label) in ring.cells.iter_mut().zip(labels) {
+            cell.label = label.into();
+        }
+        let targets = ring.cells[..2]
+            .iter()
+            .map(|cell| AuthoredCellTarget {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let mut session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::new(document),
+            "filtered-accesskit-membership",
+        ));
+        session.select_authored_cell(targets[0].clone(), false, false);
+        session.select_authored_cell(targets[1].clone(), true, false);
+        assert!(matches!(
+            session.selection,
+            Some(StableSelection::CellSet(_))
+        ));
+        let before = (
+            session.draft.clone(),
+            session.generation,
+            session.selection.clone(),
+            session.acceptance_history_depths(),
+            session.pending_assets.clone(),
+        );
+        editor.session = Some(session);
+        editor.tree_visible = true;
+        editor.inspector_visible = false;
+        editor.tree_filter = "selection-match".into();
+        let mut driver = RetainedDesignerDriver::new(editor);
+        let _ = driver.frame(Vec::new());
+        let output = driver.frame(Vec::new());
+        let update = output.platform_output.accesskit_update.as_ref().unwrap();
+        for (label, expected) in labels.into_iter().zip([true, true, false]) {
+            let matching = update
+                .nodes
+                .iter()
+                .filter(|(_, node)| {
+                    node.role() == egui::accesskit::Role::ToggleButton
+                        && node.name().is_some_and(|name| name.contains(label))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "one semantic filtered result for {label}"
+            );
+            assert_eq!(
+                matching[0].1.checked(),
+                Some(if expected {
+                    egui::accesskit::Checked::True
+                } else {
+                    egui::accesskit::Checked::False
+                }),
+                "membership for {label}"
+            );
+        }
+        let session = driver.editor.session.as_ref().unwrap();
+        assert_eq!(
+            (
+                session.draft.clone(),
+                session.generation,
+                session.selection.clone(),
+                session.acceptance_history_depths(),
+                session.pending_assets.clone(),
+            ),
+            before,
+        );
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert_eq!(driver.editor.tree_filter, "selection-match");
+    }
+
+    #[test]
     fn resource_notice_severity_keeps_success_and_portability_non_error_in_accesskit() {
         let notices = [
             ResourceNotice::info("Exported package"),
@@ -11281,6 +16322,15 @@ mod tests {
             ..Default::default()
         });
         editor.keyboard_shortcuts(&ctx);
+        let undo = editor
+            .pending_scope_change
+            .take()
+            .expect("Ctrl+Z queues an undo intent");
+        assert!(matches!(
+            &undo.intent,
+            ScopeChangeIntent::Operation(DeferredEditorOperation::Undo)
+        ));
+        editor.apply_pending_scope_change(undo);
         assert_eq!(
             editor.session.as_ref().unwrap().draft.menus[0].name,
             original
@@ -11293,10 +16343,189 @@ mod tests {
             ..Default::default()
         });
         editor.keyboard_shortcuts(&ctx);
+        let redo = editor
+            .pending_scope_change
+            .take()
+            .expect("Ctrl+Shift+Z queues a redo intent");
+        assert!(matches!(
+            &redo.intent,
+            ScopeChangeIntent::Operation(DeferredEditorOperation::Redo)
+        ));
+        editor.apply_pending_scope_change(redo);
         assert_eq!(
             editor.session.as_ref().unwrap().draft.menus[0].name,
             "Keyboard edit"
         );
         let _ = ctx.end_frame();
+    }
+
+    #[test]
+    fn retained_tree_search_keeps_text_shortcuts_local_and_escape_clears_only_the_filter() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.make_dirty_for_test();
+        editor.tree_visible = true;
+        editor.inspector_visible = false;
+        editor.tree_filter = "no-match".into();
+        let initial_selection = {
+            let session = editor.session.as_mut().expect("authoring session");
+            let menu = &session.draft.menus[0];
+            let ring = &menu.rings[0];
+            let cell = &ring.cells[0];
+            let selection = StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            };
+            session.select(Some(selection.clone()));
+            selection
+        };
+        let (draft, generation, history_depths) = {
+            let session = editor.session.as_ref().expect("authoring session");
+            assert!(session.is_dirty());
+            (
+                std::sync::Arc::clone(&session.draft),
+                session.generation,
+                session.acceptance_history_depths(),
+            )
+        };
+        let mut driver = RetainedDesignerDriver::new(editor);
+
+        let initial = driver.frame(Vec::new());
+        let search = accesskit_value_bounds(&initial, egui::accesskit::Role::TextInput, "no-match");
+        let click = search.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(click)]);
+        let _ = driver.frame(vec![pointer_button_event(click, true)]);
+        let _ = driver.frame(vec![pointer_button_event(click, false)]);
+        let control = egui::Modifiers::CTRL.plus(egui::Modifiers::COMMAND);
+        let _ = driver.frame_with_modifiers(vec![key_event(egui::Key::A, control, true)], control);
+        let _ = driver.frame_with_modifiers(vec![key_event(egui::Key::A, control, false)], control);
+        let _ = driver.frame(vec![egui::Event::Text("starter".into())]);
+        assert_eq!(driver.editor.tree_filter, "starter");
+
+        // Shift+Left selects the last character inside the focused TextEdit;
+        // typing replaces it without changing the authored selection.
+        let _ = driver.frame_with_modifiers(
+            vec![key_event(
+                egui::Key::ArrowLeft,
+                egui::Modifiers::SHIFT,
+                true,
+            )],
+            egui::Modifiers::SHIFT,
+        );
+        let _ = driver.frame_with_modifiers(
+            vec![key_event(
+                egui::Key::ArrowLeft,
+                egui::Modifiers::SHIFT,
+                false,
+            )],
+            egui::Modifiers::SHIFT,
+        );
+        let _ = driver.frame(vec![egui::Event::Text("x".into())]);
+        assert_eq!(driver.editor.tree_filter, "startex");
+
+        // Text undo is local to the filter even though the document has an
+        // older dirty edit that a Designer-level Ctrl+Z could otherwise undo.
+        let _ = driver.frame_with_modifiers(vec![key_event(egui::Key::Z, control, true)], control);
+        assert_eq!(driver.editor.tree_filter, "no-match");
+        let _ = driver.frame(vec![key_event(
+            egui::Key::Escape,
+            egui::Modifiers::default(),
+            true,
+        )]);
+
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert!(driver.editor.open, "Escape clears the local filter first");
+        assert!(driver.editor.tree_filter.is_empty());
+        assert!(session.is_dirty());
+        assert_eq!(session.generation, generation);
+        assert!(std::sync::Arc::ptr_eq(&session.draft, &draft));
+        assert_eq!(session.selection.as_ref(), Some(&initial_selection));
+        assert_eq!(session.acceptance_history_depths(), history_depths);
+    }
+
+    #[test]
+    fn explicit_generated_result_source_edit_selects_only_the_authored_source() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        editor.tree_visible = false;
+        editor.inspector_visible = true;
+        let (source_selection, source, fingerprint, draft, generation, history_depths) = {
+            let session = editor.session.as_mut().expect("authoring session");
+            let menu = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == MenuId::new("starter-favorites"))
+                .expect("starter dynamic source menu");
+            let ring = menu.rings.first().expect("source ring");
+            let source_cell = ring
+                .cells
+                .iter()
+                .find(|cell| matches!(cell.content, CellContent::Dynamic { .. }))
+                .expect("authored dynamic source cell");
+            let CellContent::Dynamic { source } = &source_cell.content else {
+                unreachable!("filtered dynamic source cell")
+            };
+            let source = source.clone();
+            let source_selection = StableSelection::Cell {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: source_cell.id.clone(),
+            };
+            (
+                source_selection,
+                source,
+                crate::radial::dynamic::SourceFingerprint {
+                    generation: 17,
+                    source: "headless-generated-result".into(),
+                    query: None,
+                },
+                std::sync::Arc::clone(&session.draft),
+                session.generation,
+                session.acceptance_history_depths(),
+            )
+        };
+        editor.projected_selection = Some(ProjectedSelection {
+            label: "Generated favorite result".into(),
+            provenance: ProjectedCellProvenance::Dynamic {
+                menu_id: match &source_selection {
+                    StableSelection::Cell { menu_id, .. } => menu_id.clone(),
+                    _ => unreachable!("source selection is a cell"),
+                },
+                ring_id: match &source_selection {
+                    StableSelection::Cell { ring_id, .. } => ring_id.clone(),
+                    _ => unreachable!("source selection is a cell"),
+                },
+                source_cell_id: match &source_selection {
+                    StableSelection::Cell { cell_id, .. } => cell_id.clone(),
+                    _ => unreachable!("source selection is a cell"),
+                },
+                source,
+                result_index: 0,
+                fingerprint,
+            },
+        });
+        let mut driver = RetainedDesignerDriver::new(editor);
+
+        let initial = driver.frame(Vec::new());
+        let button = accesskit_named_bounds(
+            &initial,
+            "Edit dynamic source definition",
+            egui::accesskit::Role::Button,
+        );
+        let click = button.center();
+        let _ = driver.frame(vec![egui::Event::PointerMoved(click)]);
+        let _ = driver.frame(vec![pointer_button_event(click, true)]);
+        let _ = driver.frame(vec![pointer_button_event(click, false)]);
+
+        let session = driver.editor.session.as_ref().expect("authoring session");
+        assert!(driver.editor.projected_selection.is_none());
+        assert_eq!(session.selection.as_ref(), Some(&source_selection));
+        assert!(source_selection.exists_in(&session.draft));
+        assert!(std::sync::Arc::ptr_eq(&session.draft, &draft));
+        assert_eq!(session.generation, generation);
+        assert!(!session.is_dirty());
+        assert_eq!(session.acceptance_history_depths(), history_depths);
     }
 }

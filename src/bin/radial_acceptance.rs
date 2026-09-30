@@ -18,7 +18,7 @@ use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[path = "radial_acceptance/copied_profile.rs"]
 mod copied_profile;
@@ -44,6 +44,20 @@ const MAX_HOTKEY_CASE_EVIDENCE_BYTES: usize = 256 * 1024;
 const MAX_QUERY_CASE_EVIDENCE_BYTES: usize = 64 * 1024;
 const MAX_QUERY_EVIDENCE_BYTES: usize = 192 * 1024;
 const ACCEPTANCE_HOTKEY: &str = "F11";
+
+#[derive(Clone, Copy)]
+struct HotkeyBurstFixtureTiming {
+    down: Duration,
+    released: Duration,
+}
+
+// These are scheduled intervals after each complete SendInput batch. Observed
+// primary-key holds/gaps also include insertion and modifier-edge overhead.
+const H04_BURST_FIXTURE_TIMING: HotkeyBurstFixtureTiming = HotkeyBurstFixtureTiming {
+    down: Duration::from_millis(25),
+    released: Duration::from_millis(50),
+};
+
 const HOTKEY_CASE_IDS: [&str; 15] = [
     "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17", "H18",
     "CLEANUP", "R0",
@@ -67,6 +81,15 @@ const MAX_GATE_C_INSERTION_CONTROLS: usize = 64;
 const MAX_GATE_C_BINDINGS: usize = 8;
 const MAX_GATE_C_INSERTIONS: usize = 4;
 const MAX_GATE_C_SCREENSHOTS: usize = 4;
+const GATE_D_CASE_IDS: [&str; 7] = ["D10", "D11", "D12", "D13", "D14", "CLEANUP", "R0"];
+const GATE_D_REQUIRED_CASES: usize = GATE_D_CASE_IDS.len() - 2;
+const GATE_D_REQUIRED_CASE_IDS: [&str; 5] = ["D10", "D11", "D12", "D13", "D14"];
+const GATE_D_BULK_LABEL: &str = "Gate D bulk label";
+const GATE_D_LONG_LABEL: &str = "Gate D Long Label 8Q4";
+const GATE_D_TEXT_ORIGINAL_FILTER: &str = "starter";
+const MAX_GATE_D_STEPS_PER_CASE: usize = 12;
+const MAX_GATE_D_CASE_EVIDENCE_BYTES: usize = 32 * 1024;
+const MAX_GATE_D_EVIDENCE_BYTES: usize = 128 * 1024;
 const ACCEPTANCE_ACTION_COUNT: usize = 64;
 const ACCEPTANCE_TARGET_ACTION_INDEX: usize = ACCEPTANCE_ACTION_COUNT - 1;
 pub(crate) const CASE_IDS: [&str; 32] = [
@@ -125,6 +148,7 @@ enum AcceptanceSuite {
     Hotkey,
     Query,
     GateC,
+    GateD,
 }
 
 impl AcceptanceSuite {
@@ -134,6 +158,7 @@ impl AcceptanceSuite {
             Self::Hotkey => "hotkey",
             Self::Query => "query",
             Self::GateC => "gate_c",
+            Self::GateD => "gate_d",
         }
     }
 }
@@ -2883,7 +2908,7 @@ fn validate_h04_burst_cadence(
             ));
         }
         if let Some(previous_up_us) = previous_release_us {
-            let gap_us = chunk[0].runner_relative_us.saturating_sub(previous_up_us);
+            let gap_us = down.saturating_sub(previous_up_us);
             if !(10_000..=100_000).contains(&gap_us) {
                 return Err(format!(
                     "H04 matrix burst group {group_id} tap {} has an out-of-band released gap",
@@ -2891,7 +2916,7 @@ fn validate_h04_burst_cadence(
                 ));
             }
         }
-        previous_release_us = chunk.last().map(|edge| edge.runner_relative_us);
+        previous_release_us = Some(up);
     }
     Ok(())
 }
@@ -3512,6 +3537,1054 @@ fn gate_c_packet_wire_bytes(packet: &GateCCaseEvidence) -> Result<usize, String>
     Ok(bytes)
 }
 
+fn gate_d_fixture_digest(profile: &ProfileIdentity) -> String {
+    sha256_bytes(
+        format!(
+            "gate-d-fixture-v1\0{}\0{}\0{}",
+            profile.settings_sha256, profile.radial_sha256, profile.actions_sha256,
+        )
+        .as_bytes(),
+    )
+}
+
+fn validate_gate_d_evidence_report(report: &AcceptanceReport) -> Result<(), String> {
+    if report.suite != AcceptanceSuite::GateD {
+        return if report.gate_d_evidence.is_empty() {
+            Ok(())
+        } else {
+            Err("Gate D evidence is present outside the Gate D suite".into())
+        };
+    }
+    if report.gate_d_evidence.len() != GATE_D_REQUIRED_CASES {
+        return Err(format!(
+            "Gate D requires exactly {GATE_D_REQUIRED_CASES} typed evidence packets"
+        ));
+    }
+    let expected_fixture_digest = gate_d_fixture_digest(&report.profile);
+    let mut aggregate_bytes = 0usize;
+    for (index, packet) in report.gate_d_evidence.iter().enumerate() {
+        if packet.case_id != GATE_D_REQUIRED_CASE_IDS[index]
+            || packet.schema_version != 2
+            || packet.fixture_digest != expected_fixture_digest
+            || !GATE_D_REQUIRED_CASE_IDS.contains(&packet.case_id.as_str())
+            || packet.steps.len() > MAX_GATE_D_STEPS_PER_CASE
+        {
+            return Err(format!(
+                "{} Gate D evidence has a mismatched identity or exceeds its typed bounds",
+                packet.case_id
+            ));
+        }
+        let bytes = serde_json::to_vec(packet)
+            .map_err(|error| {
+                format!(
+                    "{} Gate D evidence serialization failed: {error}",
+                    packet.case_id
+                )
+            })?
+            .len();
+        if bytes > MAX_GATE_D_CASE_EVIDENCE_BYTES {
+            return Err(format!(
+                "{} Gate D evidence exceeds its {}-byte case bound",
+                packet.case_id, MAX_GATE_D_CASE_EVIDENCE_BYTES
+            ));
+        }
+        aggregate_bytes = aggregate_bytes.saturating_add(bytes);
+        let case_status = report
+            .cases
+            .iter()
+            .find(|case| case.id == packet.case_id)
+            .map(|case| case.status);
+        if matches!(case_status, Some(CaseStatus::Passed))
+            && (!gate_d_case_contract_is_valid(packet)
+                || packet
+                    .hotkey_proof
+                    .as_ref()
+                    .is_some_and(|proof| proof.configured_hotkey != report.hotkey))
+        {
+            return Err(format!(
+                "{} passed without satisfying its Gate D owner and input evidence contract",
+                packet.case_id
+            ));
+        }
+    }
+    if aggregate_bytes > MAX_GATE_D_EVIDENCE_BYTES {
+        return Err(format!(
+            "Gate D evidence exceeds its {}-byte aggregate bound",
+            MAX_GATE_D_EVIDENCE_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn gate_d_case_contract_is_valid(packet: &GateDCaseEvidence) -> bool {
+    if packet.schema_version != 2
+        || packet
+            .no_action_proof
+            .as_ref()
+            .is_none_or(|proof| !gate_d_no_action_proof_is_valid(proof))
+        || packet.steps.first().is_none_or(|first| {
+            packet.steps.iter().any(|step| {
+                step.before.session_id != first.before.session_id
+                    || step.after.session_id != first.before.session_id
+            })
+        })
+    {
+        return false;
+    }
+    match packet.case_id.as_str() {
+        "D10" => {
+            let [plain, toggle, range] = packet.steps.as_slice() else {
+                return false;
+            };
+            let Some(proof) = packet.selection_proof.as_ref() else {
+                return false;
+            };
+            let controls = [
+                plain.control.as_ref(),
+                toggle.control.as_ref(),
+                range.control.as_ref(),
+            ];
+            let target_ids = proof.clicked_target_digests.as_slice();
+            [plain, toggle, range].iter().all(|step| {
+                step.result == GateDStepResult::Applied
+                    && gate_d_step_input_is_valid(step)
+                    && gate_d_same_document_state(&step.before, &step.after)
+            }) && plain.operation == GateDOperation::SelectPrimary
+                && toggle.operation == GateDOperation::ToggleMember
+                && range.operation == GateDOperation::ExtendRange
+                && proof.one_menu_digest > 0
+                && target_ids.len() == 3
+                && target_ids.iter().all(|digest| *digest > 0)
+                && proof.inclusive_range_target_digests.len() >= 2
+                && proof
+                    .inclusive_range_target_digests
+                    .iter()
+                    .all(|digest| *digest > 0)
+                && gate_d_digest_list_is_unique(&proof.inclusive_range_target_digests)
+                && proof.inclusive_range_target_digests.first() == target_ids.first()
+                && proof.inclusive_range_target_digests.last() == target_ids.last()
+                && proof
+                    .inclusive_range_target_digests
+                    .contains(&target_ids[1])
+                && controls.iter().enumerate().all(|(index, control)| {
+                    control.is_some_and(|control| {
+                        control.target == GateDControlTarget::CanvasCell
+                            && control.menu_id_digest == Some(proof.one_menu_digest)
+                            && control.authored_target_digest == Some(target_ids[index])
+                            && control.ring_index == Some([0, 0, 1][index])
+                            && control.slot_index == Some([0, 1, 0][index])
+                            && control
+                                .menu_cell_ids_digest
+                                .is_some_and(|digest| digest > 0)
+                            && control.menu_cell_ids_digest
+                                == controls[0].and_then(|first| first.menu_cell_ids_digest)
+                    })
+                })
+                && proof.clicked_target_digests
+                    == controls
+                        .iter()
+                        .map(|control| {
+                            control
+                                .and_then(|control| control.authored_target_digest)
+                                .unwrap_or(0)
+                        })
+                        .collect::<Vec<_>>()
+                && toggle.pointer.as_ref().is_some_and(|pointer| {
+                    pointer.modifier == Some(GateDModifier::Control)
+                        && pointer.button == GateDPointerButton::Primary
+                })
+                && plain.pointer.as_ref().is_some_and(|pointer| {
+                    pointer.modifier.is_none() && pointer.button == GateDPointerButton::Primary
+                })
+                && toggle
+                    .pointer
+                    .as_ref()
+                    .is_some_and(|pointer| pointer.modifier == Some(GateDModifier::Control))
+                && range.pointer.as_ref().is_some_and(|pointer| {
+                    pointer.modifier == Some(GateDModifier::Shift)
+                        && pointer.button == GateDPointerButton::Primary
+                })
+                && plain.after.selected_member_count == 1
+                && plain.after.selected_member_target_digests == [target_ids[0]]
+                && plain.after.primary_target_digest == target_ids[0]
+                && plain.after.range_anchor_target_digest == target_ids[0]
+                && toggle.after.selected_member_count == 2
+                && toggle.after.selected_member_target_digests == target_ids[..2]
+                && toggle.after.primary_target_digest == target_ids[0]
+                && toggle.after.range_anchor_target_digest == target_ids[0]
+                && range.after.selected_member_count == proof.inclusive_range_target_digests.len()
+                && range.after.selected_member_target_digests
+                    == proof.inclusive_range_target_digests
+                && range.after.primary_target_digest == target_ids[2]
+                && range.after.range_anchor_target_digest == target_ids[0]
+                && plain.after.session_id == toggle.after.session_id
+                && toggle.after.session_id == range.after.session_id
+                && plain.after.document_digest == toggle.after.document_digest
+                && toggle.after.document_digest == range.after.document_digest
+                && plain.after.generation == toggle.after.generation
+                && toggle.after.generation == range.after.generation
+                && gate_d_same_owner_effects(&plain.after, &toggle.after)
+                && gate_d_same_owner_effects(&toggle.after, &range.after)
+        }
+        "D11" => {
+            let [apply, undo, redo] = packet.steps.as_slice() else {
+                return false;
+            };
+            let Some(proof) = packet.bulk_label_proof.as_ref() else {
+                return false;
+            };
+            apply.operation == GateDOperation::SetLabel
+                && undo.operation == GateDOperation::Undo
+                && redo.operation == GateDOperation::Redo
+                && [apply, undo, redo].iter().all(|step| {
+                    step.result == GateDStepResult::Applied
+                        && gate_d_step_input_is_valid(step)
+                        && step.before.pending_assets_digest == apply.before.pending_assets_digest
+                        && step.after.pending_assets_digest == apply.before.pending_assets_digest
+                })
+                && apply
+                    .control
+                    .as_ref()
+                    .is_some_and(|control| control.target == GateDControlTarget::BulkSetLabel)
+                && apply
+                    .related_control
+                    .as_ref()
+                    .is_some_and(|control| control.target == GateDControlTarget::BulkLabel)
+                && proof.target_digests.len() >= 2
+                && gate_d_digest_list_is_unique(&proof.target_digests)
+                && proof.target_digests.iter().all(|digest| *digest > 0)
+                && proof.label_digest == gate_d_label_digest(GATE_D_BULK_LABEL)
+                && proof.expected_before_document_digest == apply.before.document_digest
+                && proof.expected_after_document_digest == apply.after.document_digest
+                && proof.expected_before_document_digest != proof.expected_after_document_digest
+                && apply.before.selected_member_target_digests == proof.target_digests
+                && apply.after.selected_member_target_digests == proof.target_digests
+                && apply.before.document_digest != apply.after.document_digest
+                && apply.after.generation == apply.before.generation.saturating_add(1)
+                && apply.after.undo_depth == apply.before.undo_depth.saturating_add(1)
+                && apply.after.redo_depth == 0
+                && !apply.before.draft_dirty
+                && apply.after.draft_dirty
+                && !apply.after.properties_popup_open
+                && gate_d_same_selection(&apply.before, &apply.after)
+                && gate_d_same_owner_effects(&apply.before, &apply.after)
+                && gate_d_same_document_state(&apply.after, &undo.before)
+                && undo.before.document_digest == proof.expected_after_document_digest
+                && undo.after.document_digest == proof.expected_before_document_digest
+                && undo.after.generation == undo.before.generation.saturating_add(1)
+                && undo.after.undo_depth == apply.before.undo_depth
+                && undo.after.redo_depth == apply.before.redo_depth.saturating_add(1)
+                && !undo.after.draft_dirty
+                && gate_d_same_selection(&apply.before, &undo.after)
+                && gate_d_same_owner_effects(&undo.before, &undo.after)
+                && gate_d_same_document_state(&undo.after, &redo.before)
+                && redo.before.document_digest == proof.expected_before_document_digest
+                && redo.after.document_digest == proof.expected_after_document_digest
+                && redo.after.generation == redo.before.generation.saturating_add(1)
+                && redo.after.undo_depth == apply.after.undo_depth
+                && redo.after.redo_depth == apply.before.redo_depth
+                && redo.after.draft_dirty
+                && gate_d_same_selection(&undo.after, &redo.after)
+                && gate_d_same_owner_effects(&redo.before, &redo.after)
+                && apply.inserted_key_events >= GATE_D_BULK_LABEL.len()
+        }
+        "D12" => {
+            packet.steps.len() == 3
+                && packet.selection_proof.is_none()
+                && packet.bulk_label_proof.is_none()
+                && packet.navigation_proof.is_none()
+                && packet.hotkey_proof.is_none()
+                && packet.local_ui_proof.is_none()
+                && packet.steps.iter().all(|step| {
+                    gate_d_observation_is_well_formed(&step.before, true)
+                        && step.before == step.after
+                        && step.control.is_none()
+                        && step.pointer.is_none()
+                        && step.related_control.is_none()
+                        && step.related_pointer.is_none()
+                        && step.inserted_key_events == 0
+                })
+                && packet.steps[0].operation == GateDOperation::RejectMissingTarget
+                && packet.steps[0].result == GateDStepResult::RejectedMissingTarget
+                && packet.steps[1].operation == GateDOperation::RejectStaleGeneration
+                && packet.steps[1].result == GateDStepResult::RejectedStaleGeneration
+                && packet.steps[2].operation == GateDOperation::RejectPolicyIncompatible
+                && packet.steps[2].result == GateDStepResult::RejectedPolicyIncompatible
+        }
+        "D13" => {
+            let Some(proof) = packet.navigation_proof.as_ref() else {
+                return false;
+            };
+            if packet.steps.len() != 9
+                || proof.breadcrumbs_after_steps.len() != 9
+                || proof.root_menu_digest == 0
+                || proof.shared_child_menu_digest == 0
+                || proof.second_parent_menu_digest == 0
+                || proof.direct_child_link_target_digest == 0
+                || proof.second_parent_link_target_digest == 0
+                || proof.nested_child_link_target_digest == 0
+                || proof.direct_child_edge_digest == 0
+                || proof.second_parent_edge_digest == 0
+                || proof.nested_child_edge_digest == 0
+                || proof.search_query_digest != gate_d_label_digest(GATE_D_LONG_LABEL)
+                || proof.search_target_ring_digest == 0
+                || proof.search_target_cell_digest == 0
+                || proof.search_target_digest == 0
+                || !gate_d_digest_list_is_unique(&[
+                    proof.root_menu_digest,
+                    proof.shared_child_menu_digest,
+                    proof.second_parent_menu_digest,
+                ])
+            {
+                return false;
+            }
+            let root = proof.root_menu_digest;
+            let shared = proof.shared_child_menu_digest;
+            let parent = proof.second_parent_menu_digest;
+            let paths = [
+                vec![root, shared],
+                vec![root],
+                vec![root, parent],
+                vec![root, parent, shared],
+                vec![root, parent],
+                vec![root],
+                vec![root],
+                vec![shared],
+                vec![root],
+            ];
+            let edge_paths = [
+                vec![proof.direct_child_edge_digest],
+                vec![],
+                vec![proof.second_parent_edge_digest],
+                vec![
+                    proof.second_parent_edge_digest,
+                    proof.nested_child_edge_digest,
+                ],
+                vec![proof.second_parent_edge_digest],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ];
+            let target_by_step = [
+                Some(proof.direct_child_link_target_digest),
+                None,
+                Some(proof.second_parent_link_target_digest),
+                Some(proof.nested_child_link_target_digest),
+                None,
+                None,
+                None,
+                Some(proof.search_target_digest),
+                None,
+            ];
+            packet.steps.iter().enumerate().all(|(index, step)| {
+                let entering = matches!(index, 0 | 2 | 3);
+                let current_path = if index == 0 {
+                    vec![root]
+                } else {
+                    paths[index - 1].clone()
+                };
+                let current_edges = if index == 0 {
+                    Vec::new()
+                } else {
+                    edge_paths[index - 1].clone()
+                };
+                let input_valid = step.result == GateDStepResult::Applied
+                    && gate_d_step_input_is_valid(step)
+                    && gate_d_same_document_state(&step.before, &step.after)
+                    && step.before.navigation_menu_id_digests == current_path
+                    && step.before.navigation_edge_digests == current_edges
+                    && step.after.navigation_menu_id_digests == paths[index]
+                    && step.after.navigation_edge_digests == edge_paths[index]
+                    && step.after.navigation_path_digest > 0
+                    && gate_d_breadcrumb_path_is_valid(
+                        &proof.breadcrumbs_after_steps[index],
+                        &paths[index],
+                    );
+                if !input_valid {
+                    return false;
+                }
+                if entering {
+                    step.operation == GateDOperation::EnterSubmenu
+                        && step.control.as_ref().is_some_and(|control| {
+                            control.target == GateDControlTarget::CanvasCell
+                                && control.authored_target_digest == target_by_step[index]
+                                && control.menu_id_digest
+                                    == Some(if index == 3 { parent } else { root })
+                        })
+                        && step.pointer.as_ref().is_some_and(|pointer| {
+                            pointer.button == GateDPointerButton::Primary
+                                && pointer.modifier.is_none()
+                        })
+                        && step.related_control == step.control
+                        && step.related_pointer.as_ref().is_some_and(|pointer| {
+                            pointer.button == GateDPointerButton::Primary
+                                && pointer.modifier.is_none()
+                        })
+                        && step.after.selection_kind == GateDSelectionKind::Menu
+                } else if index == 6 {
+                    step.operation == GateDOperation::TypeFilter
+                        && step
+                            .control
+                            .as_ref()
+                            .is_some_and(|control| control.target == GateDControlTarget::TreeSearch)
+                        && step.pointer.as_ref().is_some_and(|pointer| {
+                            pointer.button == GateDPointerButton::Primary
+                                && pointer.modifier.is_none()
+                        })
+                        && step.related_control.is_none()
+                        && step.related_pointer.is_none()
+                        && step.inserted_key_events >= GATE_D_LONG_LABEL.len()
+                        && step.before.designer_filter_digest == 0
+                        && step.after.designer_filter_digest == proof.search_query_digest
+                        && step.after.designer_search_hit_count == 1
+                        && step.before.selected_member_target_digests
+                            == [proof.second_parent_link_target_digest]
+                        && gate_d_same_selection(&step.before, &step.after)
+                } else if index == 7 {
+                    step.operation == GateDOperation::SearchReveal
+                        && step.control.as_ref().is_some_and(|control| {
+                            control.target == GateDControlTarget::TreeSearchResult
+                                && control.index == Some(0)
+                                && control.menu_id_digest == Some(shared)
+                                && control.ring_id_digest == Some(proof.search_target_ring_digest)
+                                && control.cell_id_digest == Some(proof.search_target_cell_digest)
+                                && control.authored_target_digest
+                                    == Some(proof.search_target_digest)
+                        })
+                        && step.pointer.as_ref().is_some_and(|pointer| {
+                            pointer.button == GateDPointerButton::Primary
+                                && pointer.modifier.is_none()
+                        })
+                        && step.related_control.is_none()
+                        && step.related_pointer.is_none()
+                        && step.before.designer_filter_digest == proof.search_query_digest
+                        && step.before.designer_search_hit_count == 1
+                        && step.after.designer_filter_digest == 0
+                        && step.after.designer_search_hit_count == 0
+                        && step.after.selection_kind == GateDSelectionKind::Cell
+                        && step.after.selected_member_target_digests == [proof.search_target_digest]
+                        && step.after.primary_target_digest == proof.search_target_digest
+                        && step.after.range_anchor_target_digest == proof.search_target_digest
+                } else {
+                    step.operation == GateDOperation::Back
+                        && step.control.as_ref().is_some_and(|control| {
+                            control.target == GateDControlTarget::DesignerBack
+                        })
+                        && step.pointer.as_ref().is_some_and(|pointer| {
+                            pointer.button == GateDPointerButton::Primary
+                                && pointer.modifier.is_none()
+                        })
+                        && step.related_control.is_none()
+                        && step.related_pointer.is_none()
+                        && (index != 8
+                            || (step.after.selection_kind == GateDSelectionKind::Cell
+                                && step.after.selected_member_target_digests
+                                    == [proof.second_parent_link_target_digest]
+                                && step.after.primary_target_digest
+                                    == proof.second_parent_link_target_digest
+                                && step.after.range_anchor_target_digest
+                                    == proof.second_parent_link_target_digest))
+                }
+            }) && packet.selection_proof.is_none()
+                && packet.bulk_label_proof.is_none()
+                && packet.hotkey_proof.is_none()
+                && packet.local_ui_proof.is_none()
+        }
+        "D14" => {
+            let Some(local) = packet.local_ui_proof.as_ref() else {
+                return false;
+            };
+            let Some(hotkey) = packet.hotkey_proof.as_ref() else {
+                return false;
+            };
+            let Some(checkpoint) = local.text_undo_checkpoint.as_ref() else {
+                return false;
+            };
+            if packet.steps.len() != 11
+                || local.compact_client_size[0] <= 0
+                || local.compact_client_size[1] <= 0
+                || local.compact_client_size[0] > 520
+                || local.compact_client_size[1] > 380
+                || local.long_label_digest != gate_d_label_digest(GATE_D_LONG_LABEL)
+                || local.expected_filter_digest != local.long_label_digest
+                || local.undo_restored_filter_digest
+                    != gate_d_label_digest(GATE_D_TEXT_ORIGINAL_FILTER)
+                || local.escape_cleared_filter_digest != 0
+                || local.shared_child_menu_digest == 0
+                || local.direct_child_link_target_digest == 0
+                || local.direct_child_edge_digest == 0
+                || local.popup_source_target_digest == 0
+                || local.generated_source_target_digest == 0
+                || local.generated_result_index != 0
+            {
+                return false;
+            }
+            let operation_order = [
+                GateDOperation::EnterSubmenu,
+                GateDOperation::TypeFilter,
+                GateDOperation::TextSelectAll,
+                GateDOperation::TypeFilter,
+                GateDOperation::TextUndo,
+                GateDOperation::EscapeFilter,
+                GateDOperation::OpenPropertiesPopup,
+                GateDOperation::EscapePopup,
+                GateDOperation::SelectProjectedResult,
+                GateDOperation::EditDynamicSource,
+                GateDOperation::LauncherChord,
+            ];
+            if !packet.steps.iter().enumerate().all(|(index, step)| {
+                step.operation == operation_order[index]
+                    && step.result == GateDStepResult::Applied
+                    && gate_d_step_input_is_valid(step)
+            }) {
+                return false;
+            }
+            let [
+                enter,
+                initial_filter,
+                select_all,
+                long_filter,
+                undo,
+                escape,
+                popup,
+                popup_escape,
+                projected,
+                edit_source,
+                chord,
+            ] = packet.steps.as_slice()
+            else {
+                return false;
+            };
+            let expected_edges = expected_setup_hotkey_edges(hotkey.configured_hotkey);
+            let expected_hotkey_digest = gate_d_hotkey_edges_digest(&expected_edges);
+            enter.before.navigation_menu_id_digests.len() == 1
+                && enter.before.navigation_menu_id_digests[0] != 0
+                && enter.after.navigation_menu_id_digests
+                    == [
+                        enter.before.navigation_menu_id_digests[0],
+                        local.shared_child_menu_digest,
+                    ]
+                && enter.after.navigation_edge_digests == [local.direct_child_edge_digest]
+                && enter.control.as_ref().is_some_and(|control| {
+                    control.authored_target_digest == Some(local.direct_child_link_target_digest)
+                        && control.menu_id_digest
+                            == Some(enter.before.navigation_menu_id_digests[0])
+                })
+                && enter.pointer.as_ref().is_some_and(|pointer| {
+                    pointer.button == GateDPointerButton::Primary && pointer.modifier.is_none()
+                })
+                && enter.related_pointer.as_ref().is_some_and(|pointer| {
+                    pointer.button == GateDPointerButton::Primary && pointer.modifier.is_none()
+                })
+                && gate_d_same_document_state(&enter.before, &enter.after)
+                && initial_filter.control.as_ref().is_some_and(|control| {
+                    control.target == GateDControlTarget::TreeSearch
+                        && control.client_size == local.compact_client_size
+                })
+                && initial_filter
+                    .pointer
+                    .as_ref()
+                    .is_some_and(|pointer| pointer.button == GateDPointerButton::Primary)
+                && initial_filter.inserted_key_events > 0
+                && initial_filter.after.designer_filter_digest == local.undo_restored_filter_digest
+                && initial_filter.after.designer_search_hit_count > 0
+                && gate_d_text_undo_checkpoint_is_valid(
+                    checkpoint,
+                    initial_filter,
+                    select_all,
+                    local.compact_client_size,
+                )
+                && select_all.inserted_key_events == 4
+                && select_all.before.designer_filter_digest == local.undo_restored_filter_digest
+                && select_all.after.designer_filter_digest == local.undo_restored_filter_digest
+                && long_filter.inserted_key_events >= GATE_D_LONG_LABEL.len()
+                && long_filter.after.designer_filter_digest == local.expected_filter_digest
+                && long_filter.after.designer_search_hit_count == 1
+                && gate_d_visible_label_is_valid(&local.visible_long_label)
+                && local.visible_long_label.session_id == long_filter.after.session_id
+                && local.visible_long_label.generation == long_filter.after.generation
+                && local.visible_long_label.trace_sequence > long_filter.before.trace_sequence
+                && local.visible_long_label.authored_target_digest
+                    == local.popup_source_target_digest
+                && local.visible_long_label.client_size == local.compact_client_size
+                && undo.inserted_key_events == 4
+                && undo.after.designer_filter_digest == local.undo_restored_filter_digest
+                && undo.after.designer_search_hit_count > 0
+                && escape.inserted_key_events == 2
+                && escape.after.designer_filter_digest == 0
+                && escape.after.designer_search_hit_count == 0
+                && [initial_filter, select_all, long_filter, undo, escape]
+                    .iter()
+                    .all(|step| {
+                        gate_d_same_document_state(&step.before, &step.after)
+                            && gate_d_same_selection(&step.before, &step.after)
+                    })
+                && popup.control.as_ref().is_some_and(|control| {
+                    control.target == GateDControlTarget::CanvasCell
+                        && control.cell_label_digest == Some(local.long_label_digest)
+                        && control.authored_target_digest == Some(local.popup_source_target_digest)
+                })
+                && popup.pointer.as_ref().is_some_and(|pointer| {
+                    pointer.button == GateDPointerButton::Secondary && pointer.modifier.is_none()
+                })
+                && popup.after.properties_popup_open
+                && popup.after.primary_target_digest == local.popup_source_target_digest
+                && popup_escape.inserted_key_events == 2
+                && popup_escape.before.properties_popup_open
+                && !popup_escape.after.properties_popup_open
+                && gate_d_same_document_state(&popup.before, &popup.after)
+                && gate_d_same_document_state(&popup_escape.before, &popup_escape.after)
+                && gate_d_same_selection(&popup_escape.before, &popup_escape.after)
+                && projected.control.as_ref().is_some_and(|control| {
+                    control.target == GateDControlTarget::ProjectedCell
+                        && control.projected_source_target_digest
+                            == Some(local.generated_source_target_digest)
+                        && control.projected_result_index == Some(local.generated_result_index)
+                })
+                && gate_d_same_document_state(&projected.before, &projected.after)
+                && gate_d_same_selection(&projected.before, &projected.after)
+                && edit_source.control.as_ref().is_some_and(|control| {
+                    control.target == GateDControlTarget::EditDynamicSource
+                        && control.edit_source_target_digest
+                            == Some(local.generated_source_target_digest)
+                        && control.edit_source_result_index == Some(local.generated_result_index)
+                })
+                && edit_source.after.selected_member_target_digests
+                    == [local.generated_source_target_digest]
+                && edit_source.after.primary_target_digest == local.generated_source_target_digest
+                && edit_source.after.range_anchor_target_digest
+                    == local.generated_source_target_digest
+                && edit_source.after.draft_dirty
+                && gate_d_same_document_state(&edit_source.before, &edit_source.after)
+                && hotkey.input_group_id > 0
+                && hotkey.invocation_id > 0
+                && hotkey.exact_key_edge_count == expected_edges.len()
+                && hotkey.exact_key_edge_digest == expected_hotkey_digest
+                && hotkey.exact_key_edge_digest != 0
+                && hotkey.designer_hwnd > 0
+                && hotkey.designer_process_id > 0
+                && hotkey.designer_hwnd_after == hotkey.designer_hwnd
+                && hotkey.designer_process_id_after == hotkey.designer_process_id
+                && hotkey.session_id == edit_source.after.session_id
+                && hotkey.session_id_after == hotkey.session_id
+                && hotkey.root_visible_before == chord.before.root_visible
+                && hotkey.root_visible_after == chord.after.root_visible
+                && hotkey.root_visible_before != hotkey.root_visible_after
+                && hotkey.draft_generation == chord.before.generation
+                && hotkey.draft_generation_after == chord.after.generation
+                && hotkey.document_digest == chord.before.document_digest
+                && hotkey.document_digest_after == chord.after.document_digest
+                && hotkey.selected_members_digest == chord.before.selected_members_digest
+                && hotkey.selected_members_digest_after == chord.after.selected_members_digest
+                && hotkey.selection_digest == chord.before.selection_digest
+                && hotkey.selection_digest_after == chord.after.selection_digest
+                && hotkey.draft_dirty
+                && hotkey.draft_dirty_after
+                && hotkey.draft_dirty == chord.before.draft_dirty
+                && hotkey.draft_dirty_after == chord.after.draft_dirty
+                && hotkey.properties_popup_open == chord.before.properties_popup_open
+                && hotkey.properties_popup_open_after == chord.after.properties_popup_open
+                && !hotkey.properties_popup_open
+                && gate_d_same_document_state(&chord.before, &chord.after)
+                && gate_d_same_selection(&chord.before, &chord.after)
+                && chord.inserted_key_events == hotkey.exact_key_edge_count
+                && packet.selection_proof.is_none()
+                && packet.bulk_label_proof.is_none()
+                && packet.navigation_proof.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn gate_d_no_action_proof_is_valid(proof: &GateDNoActionProof) -> bool {
+    let state_is_zero = |state: &GateDTraceDispatchState| {
+        [
+            &state.result_pointer,
+            &state.universal_action,
+            &state.radial_leaf,
+            &state.query,
+            &state.radial_dispatch_requested,
+        ]
+        .iter()
+        .all(|event| event.event_count == 0 && event.event_digest == 0)
+    };
+    proof.trace_before == proof.trace_after
+        && state_is_zero(&proof.trace_before)
+        && proof.marker_lines_before == 0
+        && proof.marker_lines_before == proof.marker_lines_after
+        && proof.marker_digest_before > 0
+        && proof.marker_digest_before == proof.marker_digest_after
+}
+
+fn gate_d_visible_label_is_valid(proof: &GateDVisibleLabelEvidence) -> bool {
+    let [left, top, right, bottom] = proof.text_bounds;
+    let [control_left, control_top, control_right, control_bottom] = proof.control_bounds;
+    let [width, height] = proof.client_size;
+    proof.session_id > 0
+        && proof.generation > 0
+        && proof.trace_sequence > 0
+        && proof.authored_target_digest > 0
+        && proof.expected_rendered_text_digest > 0
+        && proof.rendered_text_digest == proof.expected_rendered_text_digest
+        && proof.fully_visible
+        && !proof.elided
+        && width > 0
+        && height > 0
+        && control_left >= 0
+        && control_top >= 0
+        && control_right <= width
+        && control_bottom <= height
+        && left >= control_left
+        && top >= control_top
+        && right <= control_right
+        && bottom <= control_bottom
+        && right > left
+        && bottom > top
+}
+
+fn gate_d_text_undo_checkpoint_is_valid(
+    proof: &GateDTextUndoCheckpointEvidence,
+    initial_filter: &GateDStepEvidence,
+    select_all: &GateDStepEvidence,
+    client_size: [i32; 2],
+) -> bool {
+    let Some(initial_control) = initial_filter.control.as_ref() else {
+        return false;
+    };
+    let control = &proof.control;
+    let [left, top, right, bottom] = control.bounds;
+    let [clip_left, clip_top, clip_right, clip_bottom] = proof.clip_bounds;
+    let [width, height] = client_size;
+    control.target == GateDControlTarget::TreeSearch
+        && control.index.is_none()
+        && control.enabled
+        && !control.clicked
+        && proof.focused
+        && !proof.in_flux
+        && control
+            .text_edit_field_digest
+            .is_some_and(|digest| digest > 0)
+        && control.text_edit_field_digest == initial_control.text_edit_field_digest
+        && control.session_id == initial_filter.after.session_id
+        && control.session_id == select_all.before.session_id
+        && control.generation == initial_filter.after.generation
+        && control.generation == select_all.before.generation
+        && control.trace_sequence > initial_filter.after.trace_sequence
+        && control.trace_sequence <= select_all.before.trace_sequence
+        && proof.value_digest == gate_d_label_digest(GATE_D_TEXT_ORIGINAL_FILTER)
+        && control.client_size == client_size
+        && width > 0
+        && height > 0
+        && clip_left >= 0
+        && clip_top >= 0
+        && clip_right <= width
+        && clip_bottom <= height
+        && clip_right > clip_left
+        && clip_bottom > clip_top
+        && left >= clip_left
+        && top >= clip_top
+        && right <= clip_right
+        && bottom <= clip_bottom
+        && right > left
+        && bottom > top
+        && gate_d_same_document_state(&initial_filter.after, &select_all.before)
+        && gate_d_same_selection(&initial_filter.after, &select_all.before)
+        && initial_filter.after.navigation_path_digest == select_all.before.navigation_path_digest
+        && initial_filter.after.navigation_menu_id_digests
+            == select_all.before.navigation_menu_id_digests
+        && initial_filter.after.navigation_edge_digests == select_all.before.navigation_edge_digests
+        && initial_filter.after.designer_filter_digest == select_all.before.designer_filter_digest
+        && initial_filter.after.designer_search_hit_count
+            == select_all.before.designer_search_hit_count
+}
+
+fn gate_d_digest_list_is_unique(values: &[u64]) -> bool {
+    values.iter().all(|value| *value != 0)
+        && values
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == values.len()
+}
+
+fn gate_d_breadcrumb_path_is_valid(
+    breadcrumbs: &[GateDBreadcrumbEvidence],
+    expected_menu_ids: &[u64],
+) -> bool {
+    !expected_menu_ids.is_empty()
+        && breadcrumbs.len() == expected_menu_ids.len()
+        && breadcrumbs.iter().enumerate().all(|(index, breadcrumb)| {
+            let [left, top, right, bottom] = breadcrumb.bounds;
+            let [width, height] = breadcrumb.client_size;
+            breadcrumb.index == index
+                && breadcrumb.menu_id_digest == expected_menu_ids[index]
+                && breadcrumb.selected == (index + 1 == expected_menu_ids.len())
+                && breadcrumb.enabled
+                && left >= 0
+                && top >= 0
+                && right > left
+                && bottom > top
+                && width > 0
+                && height > 0
+                && right <= width
+                && bottom <= height
+        })
+}
+
+fn gate_d_step_input_is_valid(step: &GateDStepEvidence) -> bool {
+    let related_input_is_valid = match (&step.related_control, &step.related_pointer) {
+        (None, None) => true,
+        (Some(control), Some(pointer)) => {
+            gate_d_control_input_is_valid(control, &step.before)
+                && gate_d_pointer_input_is_valid(pointer, control)
+        }
+        _ => false,
+    };
+    if !related_input_is_valid {
+        return false;
+    }
+    if !gate_d_observation_is_well_formed(&step.before, false)
+        || !gate_d_observation_is_well_formed(&step.after, false)
+    {
+        return false;
+    }
+    if step.pointer.is_none() {
+        let keyboard_operation = matches!(
+            step.operation,
+            GateDOperation::TextSelectAll
+                | GateDOperation::TypeFilter
+                | GateDOperation::TextUndo
+                | GateDOperation::EscapeFilter
+                | GateDOperation::EscapePopup
+                | GateDOperation::LauncherChord
+        );
+        return keyboard_operation
+            && step
+                .control
+                .as_ref()
+                .is_none_or(|control| gate_d_control_input_is_valid(control, &step.before));
+    }
+    let (Some(control), Some(pointer)) = (&step.control, &step.pointer) else {
+        return false;
+    };
+    gate_d_observation_is_well_formed(&step.before, false)
+        && gate_d_observation_is_well_formed(&step.after, false)
+        && gate_d_control_input_is_valid(control, &step.before)
+        && gate_d_pointer_input_is_valid(pointer, control)
+}
+
+fn gate_d_control_input_is_valid(
+    control: &GateDControlEvidence,
+    before: &GateDObservationEvidence,
+) -> bool {
+    let scope_is_valid = match control.target {
+        GateDControlTarget::CanvasCell => {
+            control
+                .menu_cell_ids_digest
+                .is_some_and(|digest| digest > 0)
+                && control.menu_id_digest.is_some_and(|digest| digest > 0)
+                && control.ring_id_digest.is_some_and(|digest| digest > 0)
+                && control.cell_id_digest.is_some_and(|digest| digest > 0)
+                && control
+                    .authored_target_digest
+                    .is_some_and(|digest| digest > 0)
+                && control.ring_index.is_some()
+                && control.slot_index.is_some()
+        }
+        GateDControlTarget::ProjectedCell => {
+            control
+                .projected_source_target_digest
+                .is_some_and(|digest| digest > 0)
+                && control.projected_result_index.is_some()
+        }
+        GateDControlTarget::TreeSearchResult => {
+            control.index.is_some()
+                && control.menu_id_digest.is_some_and(|digest| digest > 0)
+                && control.ring_id_digest.is_some_and(|digest| digest > 0)
+                && control.cell_id_digest.is_some_and(|digest| digest > 0)
+                && control
+                    .authored_target_digest
+                    .is_some_and(|digest| digest > 0)
+        }
+        GateDControlTarget::EditDynamicSource => {
+            control
+                .edit_source_target_digest
+                .is_some_and(|digest| digest > 0)
+                && control.edit_source_result_index.is_some()
+        }
+        GateDControlTarget::DesignerBreadcrumb => {
+            control
+                .breadcrumb_menu_id_digest
+                .is_some_and(|digest| digest > 0)
+                && control.index.is_some()
+        }
+        _ => true,
+    };
+    scope_is_valid
+        && control.clicked
+        && control.enabled
+        && control.trace_sequence > 0
+        && control.session_id == before.session_id
+        && control.generation == before.generation
+        && control.bounds[2] > control.bounds[0]
+        && control.bounds[3] > control.bounds[1]
+        && control.client_size[0] > 0
+        && control.client_size[1] > 0
+        && control.bounds[0] >= 0
+        && control.bounds[1] >= 0
+        && control.bounds[2] <= control.client_size[0]
+        && control.bounds[3] <= control.client_size[1]
+}
+
+fn gate_d_pointer_input_is_valid(
+    pointer: &GateDPointerEvidence,
+    control: &GateDControlEvidence,
+) -> bool {
+    control.enabled
+        && control.trace_sequence > 0
+        && control.session_id > 0
+        && control.generation > 0
+        && control.bounds[2] > control.bounds[0]
+        && control.bounds[3] > control.bounds[1]
+        && control.client_size[0] > 0
+        && control.client_size[1] > 0
+        && control.bounds[0] >= 0
+        && control.bounds[1] >= 0
+        && control.bounds[2] <= control.client_size[0]
+        && control.bounds[3] <= control.client_size[1]
+        && pointer.target_hwnd > 0
+        && pointer.target_process_id > 0
+        && pointer.foreground_hwnd == pointer.target_hwnd
+        && pointer.nudge_under_cursor_hwnd > 0
+        && pointer.nudge_process_id == pointer.target_process_id
+        && pointer.under_cursor_hwnd > 0
+        && pointer.under_cursor_process_id == pointer.target_process_id
+        && pointer.nudge_inserted > 0
+        && pointer.movement_inserted > 0
+        && pointer.down_inserted > 0
+        && pointer.up_inserted > 0
+        && pointer.pointer_move_acknowledged
+        && pointer.down_acknowledged
+        && pointer.up_acknowledged
+        && match pointer.modifier {
+            Some(_) => pointer.modifier_down_inserted == 1 && pointer.modifier_up_inserted == 1,
+            None => pointer.modifier_down_inserted == 0 && pointer.modifier_up_inserted == 0,
+        }
+}
+
+fn gate_d_observation_is_well_formed(
+    state: &GateDObservationEvidence,
+    deterministic: bool,
+) -> bool {
+    let selected_targets_are_valid = state.selected_member_target_digests.len()
+        == state.selected_member_count
+        && state
+            .selection_kind
+            .accepts_member_count(state.selected_member_count)
+        && if state.selection_kind == GateDSelectionKind::None {
+            state.selection_digest == 0
+        } else {
+            state.selection_digest > 0
+        }
+        && if state.selected_member_count == 0 {
+            state.selected_members_digest == 0
+                && state.primary_cell_digest == 0
+                && state.range_anchor_digest == 0
+                && state.primary_target_digest == 0
+                && state.range_anchor_target_digest == 0
+        } else {
+            state.selected_members_digest > 0
+                && state.selection_digest > 0
+                && state.primary_cell_digest > 0
+                && state.range_anchor_digest > 0
+                && state.primary_target_digest > 0
+                && state.range_anchor_target_digest > 0
+                && gate_d_digest_list_is_unique(&state.selected_member_target_digests)
+                && state
+                    .selected_member_target_digests
+                    .contains(&state.primary_target_digest)
+                && state
+                    .selected_member_target_digests
+                    .contains(&state.range_anchor_target_digest)
+        };
+    let navigation_is_valid = if deterministic {
+        state.navigation_path_digest == 0
+            && state.navigation_menu_id_digests.is_empty()
+            && state.navigation_edge_digests.is_empty()
+    } else {
+        state.navigation_path_digest > 0
+            && !state.navigation_menu_id_digests.is_empty()
+            && state.navigation_menu_id_digests.len() <= 64
+            && state.navigation_edge_digests.len() + 1 == state.navigation_menu_id_digests.len()
+            && state
+                .navigation_menu_id_digests
+                .iter()
+                .all(|digest| *digest > 0)
+            && state
+                .navigation_edge_digests
+                .iter()
+                .all(|digest| *digest > 0)
+    };
+    state.session_id > 0
+        && state.generation > 0
+        && state.document_digest > 0
+        && state.pending_assets_digest > 0
+        && navigation_is_valid
+        && state.selected_member_count <= 8_192
+        && selected_targets_are_valid
+        && (deterministic
+            || (state.frame_ordinal > 0
+                && state.trace_sequence > 0
+                && state.root_history_digest > 0
+                && state.root_usage_digest > 0))
+}
+
+fn gate_d_no_mutation(before: &GateDObservationEvidence, after: &GateDObservationEvidence) -> bool {
+    gate_d_observation_is_well_formed(before, false)
+        && gate_d_observation_is_well_formed(after, false)
+        && gate_d_same_document_state(before, after)
+        && gate_d_same_selection(before, after)
+}
+
+fn gate_d_same_document_state(
+    left: &GateDObservationEvidence,
+    right: &GateDObservationEvidence,
+) -> bool {
+    left.generation == right.generation
+        && left.document_digest == right.document_digest
+        && left.undo_depth == right.undo_depth
+        && left.redo_depth == right.redo_depth
+        && left.pending_assets_digest == right.pending_assets_digest
+        && gate_d_same_owner_effects(left, right)
+}
+
+fn gate_d_same_selection(
+    left: &GateDObservationEvidence,
+    right: &GateDObservationEvidence,
+) -> bool {
+    left.selection_kind == right.selection_kind
+        && left.selection_digest == right.selection_digest
+        && left.selected_member_count == right.selected_member_count
+        && left.selected_members_digest == right.selected_members_digest
+        && left.selected_member_target_digests == right.selected_member_target_digests
+        && left.primary_cell_digest == right.primary_cell_digest
+        && left.range_anchor_digest == right.range_anchor_digest
+        && left.primary_target_digest == right.primary_target_digest
+        && left.range_anchor_target_digest == right.range_anchor_target_digest
+}
+
+fn gate_d_same_owner_effects(
+    left: &GateDObservationEvidence,
+    right: &GateDObservationEvidence,
+) -> bool {
+    left.root_history_entries == right.root_history_entries
+        && left.root_history_digest == right.root_history_digest
+        && left.root_usage_entries == right.root_usage_entries
+        && left.root_usage_digest == right.root_usage_digest
+}
+
 fn gate_c_case_collection_bounds_are_valid(packet: &GateCCaseEvidence) -> bool {
     packet.controls.len() <= MAX_GATE_C_CONTROLS
         && packet.ordered_results.len() <= MAX_GATE_C_RESULTS
@@ -3619,6 +4692,19 @@ fn gate_c_private_digest(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     })
+}
+
+fn gate_d_label_digest(label: &str) -> u64 {
+    gate_c_private_digest(label.as_bytes())
+}
+
+fn gate_d_hotkey_edges_digest(edges: &[(u32, bool)]) -> u64 {
+    let mut bytes = Vec::with_capacity(edges.len().saturating_mul(5));
+    for (virtual_key, down) in edges {
+        bytes.extend_from_slice(&virtual_key.to_le_bytes());
+        bytes.push(u8::from(*down));
+    }
+    gate_c_private_digest(&bytes)
 }
 
 fn gate_c_trace_text_digest(text: &str) -> u64 {
@@ -4288,7 +5374,7 @@ fn gate_c_d04_failed_completed_query_edit_is_observed(
         if stage.control != "save_query"
             || stage.trace_sequence <= edit.trace_sequence
             || stage.binding_digest != binding.expected_binding_digest
-            || stage.identity.binding_digest != binding.expected_binding_digest
+            || stage.identity.binding_digest != binding.previous_binding_digest
             || !packet.controls.iter().any(|observed| observed == edit)
             || !packet.controls.iter().any(|candidate| {
                 candidate.control == stage.control
@@ -4548,7 +5634,9 @@ fn gate_c_d04_query_mode_stage_transition_is_observed(
         || stage.control != "save_query"
         || stage.trace_sequence == 0
         || stage.binding_digest != expected_binding
-        || stage.identity.binding_digest != expected_binding
+        || stage.identity.binding_digest != previous_binding
+        || control.identity.edit_generation == 0
+        || control.identity.edit_generation != stage.identity.edit_generation
         || !gate_c_same_editor_visit_during_binding_edit(&control.identity, &stage.identity)
         || !packet.controls.iter().any(|observed| observed == control)
         || !packet.controls.iter().any(|observed| {
@@ -4609,7 +5697,7 @@ fn gate_c_d04_exact_command_transition_is_observed(
     if stage.control != "use_exact_command"
         || stage.trace_sequence == 0
         || stage.binding_digest != expected_binding
-        || stage.identity.binding_digest != expected_binding
+        || stage.identity.binding_digest != previous_binding
         || stage.identity.edit_generation == 0
         || !packet.controls.iter().any(|candidate| {
             candidate.control == "use_exact_command"
@@ -4668,7 +5756,7 @@ fn gate_c_d04_exact_command_transition_is_observed(
                     && candidate.identity.binding_digest == previous_binding
                     && candidate.binding_digest != 0
                     && candidate.binding_digest != candidate.identity.binding_digest
-                    && candidate.identity.edit_generation < stage.identity.edit_generation
+                    && candidate.identity.edit_generation <= stage.identity.edit_generation
                     && gate_c_same_editor_visit_during_binding_edit(
                         &candidate.identity,
                         &stage.identity,
@@ -4686,10 +5774,11 @@ fn gate_c_d04_exact_command_transition_is_observed(
     };
     if command.identity.binding_digest != arguments.identity.binding_digest
         // The pre-Stage field event fingerprints the draft binding; the
-        // clicked Stage receipt fingerprints the accepted binding. The editor
+        // clicked Stage receipt fingerprints the candidate binding. The editor
         // identity itself remains on the previously assigned binding until
         // that click is applied.
         || command.binding_digest == expected_binding
+        || arguments.binding_digest != expected_binding
         || !source_bindings.iter().any(|advanced| {
             advanced.identity.binding_digest == command.identity.binding_digest
                 && command.identity.binding_digest == arguments.identity.binding_digest
@@ -4705,6 +5794,7 @@ fn gate_c_d04_exact_command_transition_is_observed(
     let mut ordered_fields = [*command, *arguments];
     ordered_fields.sort_by_key(|candidate| candidate.trace_sequence);
     ordered_fields[0].identity.edit_generation <= ordered_fields[1].identity.edit_generation
+        && ordered_fields[1].identity.edit_generation == stage.identity.edit_generation
         && match control.control.as_str() {
             "advanced_tab" => source_bindings
                 .iter()
@@ -4843,9 +5933,6 @@ fn gate_c_compact_failed_d04_packet(
     else {
         return false;
     };
-    let Some(exact_source) = exact_binding.controls.first() else {
-        return false;
-    };
     let Some(exact_reopen) = exact_binding
         .controls
         .iter()
@@ -4861,12 +5948,15 @@ fn gate_c_compact_failed_d04_packet(
         return false;
     }
 
-    let retained_visits = vec![
-        exact_source.identity.clone(),
-        exact_reopen.identity.clone(),
-        direct_assignment.identity.clone(),
-        direct_reopen.identity.clone(),
-    ];
+    // Undo/Redo/Save can rebind the Inspector after a document generation
+    // change. Every retained transaction receipt owns a required control;
+    // select all of those visits before trimming their dependencies.
+    let retained_visits = exact_binding
+        .controls
+        .iter()
+        .chain(&direct_binding.controls)
+        .map(|receipt| receipt.identity.clone())
+        .collect::<Vec<_>>();
     let identity_is_in_tail = |identity: &GateCEditorIdentity| {
         retained_visits.iter().any(|retained| {
             identity.surface == retained.surface
@@ -7821,29 +8911,30 @@ fn gate_c_binding_control_links_are_valid(
             let command_digest = binding.command_digest.unwrap_or(0);
             let arguments_digest = binding.arguments_digest.unwrap_or(0);
             let reopened = receipt(GateCBindingControlKind::Reopen);
+            let source_input_is_correlated = |control: &GateCControlEvidence| {
+                if packet.case_id == "D04" && binding.route == GateCBindingRoute::PropertiesStaged {
+                    // The final arguments already fingerprint the candidate.
+                    // That event digest cannot bypass the ordered pre-accept
+                    // identity proof for either D04 source field.
+                    allow_d04_binding_transition
+                        && gate_c_d04_exact_command_transition_is_observed(control, binding, packet)
+                } else {
+                    control.binding_digest == binding.expected_binding_digest
+                }
+            };
             command_digest != 0
                 && arguments_digest != 0
                 && packet.controls.iter().any(|control| {
                     control.control == "exact_command_field"
                         && same_visit(&control.identity)
                         && control.value_digest == command_digest
-                        && (control.binding_digest == binding.expected_binding_digest
-                            || (allow_d04_binding_transition
-                                && packet.case_id == "D04"
-                                && gate_c_d04_exact_command_transition_is_observed(
-                                    control, binding, packet,
-                                )))
+                        && source_input_is_correlated(control)
                 })
                 && packet.controls.iter().any(|control| {
                     control.control == "exact_args_field"
                         && same_visit(&control.identity)
                         && control.value_digest == arguments_digest
-                        && (control.binding_digest == binding.expected_binding_digest
-                            || (allow_d04_binding_transition
-                                && packet.case_id == "D04"
-                                && gate_c_d04_exact_command_transition_is_observed(
-                                    control, binding, packet,
-                                )))
+                        && source_input_is_correlated(control)
                 })
                 && packet.controls.iter().any(|control| {
                     control.control == "use_exact_command"
@@ -9751,6 +10842,7 @@ struct AcceptanceReport {
     hotkey_evidence: Vec<HotkeyCaseEvidence>,
     query_evidence: Vec<QueryCaseEvidence>,
     gate_c_evidence: Vec<GateCCaseEvidence>,
+    gate_d_evidence: Vec<GateDCaseEvidence>,
     artifacts: Vec<String>,
     cleanup: CleanupResult,
     capacity_saturated: bool,
@@ -10598,6 +11690,401 @@ struct GateCCaseEvidence {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+enum GateDOperation {
+    SelectPrimary,
+    ToggleMember,
+    ExtendRange,
+    SetLabel,
+    Undo,
+    Redo,
+    RejectMissingTarget,
+    RejectStaleGeneration,
+    RejectPolicyIncompatible,
+    SearchReveal,
+    EnterSubmenu,
+    Back,
+    TextSelectAll,
+    TypeFilter,
+    TextUndo,
+    EscapeFilter,
+    OpenPropertiesPopup,
+    EscapePopup,
+    SelectProjectedResult,
+    EditDynamicSource,
+    LauncherChord,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateDStepResult {
+    Applied,
+    RejectedMissingTarget,
+    RejectedStaleGeneration,
+    RejectedPolicyIncompatible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateDControlTarget {
+    CanvasCell,
+    BulkLabel,
+    BulkSetLabel,
+    Undo,
+    Redo,
+    TreeSearch,
+    TreeSearchResult,
+    DesignerBack,
+    DesignerBreadcrumb,
+    PopupCancel,
+    ProjectedCell,
+    EditDynamicSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateDModifier {
+    Control,
+    Shift,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateDPointerButton {
+    Primary,
+    Secondary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GateDSelectionKind {
+    None,
+    Menu,
+    Ring,
+    Cell,
+    CellSet,
+    Skin,
+    Asset,
+}
+
+impl GateDSelectionKind {
+    fn accepts_member_count(self, count: usize) -> bool {
+        match self {
+            Self::None | Self::Menu | Self::Ring | Self::Skin | Self::Asset => count == 0,
+            Self::Cell => count == 1,
+            Self::CellSet => count > 0,
+        }
+    }
+}
+
+impl From<Option<&multi_launcher::radial::authoring::StableSelection>> for GateDSelectionKind {
+    fn from(selection: Option<&multi_launcher::radial::authoring::StableSelection>) -> Self {
+        use multi_launcher::radial::authoring::StableSelection;
+        match selection {
+            None => Self::None,
+            Some(StableSelection::Menu(_)) => Self::Menu,
+            Some(StableSelection::Ring { .. }) => Self::Ring,
+            Some(StableSelection::Cell { .. }) => Self::Cell,
+            Some(StableSelection::CellSet(_)) => Self::CellSet,
+            Some(StableSelection::Skin(_)) => Self::Skin,
+            Some(StableSelection::Asset(_)) => Self::Asset,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDObservationEvidence {
+    frame_ordinal: u64,
+    trace_sequence: u64,
+    session_id: u64,
+    generation: u64,
+    document_digest: u64,
+    selection_digest: u64,
+    selection_kind: GateDSelectionKind,
+    selected_member_count: usize,
+    selected_members_digest: u64,
+    selected_member_target_digests: Vec<u64>,
+    primary_cell_digest: u64,
+    range_anchor_digest: u64,
+    primary_target_digest: u64,
+    range_anchor_target_digest: u64,
+    navigation_path_digest: u64,
+    navigation_menu_id_digests: Vec<u64>,
+    navigation_edge_digests: Vec<u64>,
+    pending_assets_digest: u64,
+    designer_filter_digest: u64,
+    designer_search_hit_count: usize,
+    undo_depth: usize,
+    redo_depth: usize,
+    root_visible: bool,
+    draft_dirty: bool,
+    properties_popup_open: bool,
+    properties_dirty: bool,
+    root_history_entries: usize,
+    root_history_digest: u64,
+    root_usage_entries: usize,
+    root_usage_digest: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDControlEvidence {
+    target: GateDControlTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index: Option<usize>,
+    trace_sequence: u64,
+    session_id: u64,
+    generation: u64,
+    enabled: bool,
+    bounds: [i32; 4],
+    client_size: [i32; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_edit_field_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ring_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    slot_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    menu_cell_ids_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    menu_id_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ring_id_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cell_id_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authored_target_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cell_label_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    projected_source_target_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    projected_result_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edit_source_target_digest: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    edit_source_result_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    breadcrumb_menu_id_digest: Option<u64>,
+    selected: bool,
+    clicked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDPointerEvidence {
+    target_hwnd: u64,
+    target_process_id: u32,
+    foreground_hwnd: u64,
+    nudge_under_cursor_hwnd: u64,
+    nudge_process_id: u32,
+    under_cursor_hwnd: u64,
+    under_cursor_process_id: u32,
+    nudge_inserted: usize,
+    movement_inserted: usize,
+    down_inserted: usize,
+    up_inserted: usize,
+    pointer_move_acknowledged: bool,
+    down_acknowledged: bool,
+    up_acknowledged: bool,
+    button: GateDPointerButton,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modifier: Option<GateDModifier>,
+    modifier_down_inserted: usize,
+    modifier_up_inserted: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDStepEvidence {
+    operation: GateDOperation,
+    result: GateDStepResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    control: Option<GateDControlEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pointer: Option<GateDPointerEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    related_control: Option<GateDControlEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    related_pointer: Option<GateDPointerEvidence>,
+    inserted_key_events: usize,
+    before: GateDObservationEvidence,
+    after: GateDObservationEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDSelectionProof {
+    one_menu_digest: u64,
+    clicked_target_digests: Vec<u64>,
+    inclusive_range_target_digests: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDBulkLabelProof {
+    target_digests: Vec<u64>,
+    expected_before_document_digest: u64,
+    expected_after_document_digest: u64,
+    label_digest: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDNavigationProof {
+    root_menu_digest: u64,
+    shared_child_menu_digest: u64,
+    second_parent_menu_digest: u64,
+    direct_child_link_target_digest: u64,
+    direct_child_edge_digest: u64,
+    second_parent_link_target_digest: u64,
+    second_parent_edge_digest: u64,
+    nested_child_link_target_digest: u64,
+    nested_child_edge_digest: u64,
+    search_query_digest: u64,
+    search_target_ring_digest: u64,
+    search_target_cell_digest: u64,
+    search_target_digest: u64,
+    breadcrumbs_after_steps: Vec<Vec<GateDBreadcrumbEvidence>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDBreadcrumbEvidence {
+    index: usize,
+    menu_id_digest: u64,
+    selected: bool,
+    enabled: bool,
+    bounds: [i32; 4],
+    client_size: [i32; 2],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDDispatchEvidence {
+    event_count: usize,
+    event_digest: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDTraceDispatchState {
+    result_pointer: GateDDispatchEvidence,
+    universal_action: GateDDispatchEvidence,
+    radial_leaf: GateDDispatchEvidence,
+    query: GateDDispatchEvidence,
+    radial_dispatch_requested: GateDDispatchEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDNoActionProof {
+    trace_before: GateDTraceDispatchState,
+    trace_after: GateDTraceDispatchState,
+    marker_lines_before: usize,
+    marker_lines_after: usize,
+    marker_digest_before: u64,
+    marker_digest_after: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDHotkeyProof {
+    configured_hotkey: AcceptanceHotkey,
+    input_group_id: u32,
+    invocation_id: u64,
+    exact_key_edge_count: usize,
+    exact_key_edge_digest: u64,
+    designer_hwnd: u64,
+    designer_process_id: u32,
+    designer_hwnd_after: u64,
+    designer_process_id_after: u32,
+    session_id: u64,
+    session_id_after: u64,
+    root_visible_before: bool,
+    root_visible_after: bool,
+    draft_generation: u64,
+    draft_generation_after: u64,
+    document_digest: u64,
+    document_digest_after: u64,
+    selected_members_digest: u64,
+    selected_members_digest_after: u64,
+    selection_digest: u64,
+    selection_digest_after: u64,
+    draft_dirty: bool,
+    draft_dirty_after: bool,
+    properties_popup_open: bool,
+    properties_popup_open_after: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDLocalUiProof {
+    compact_client_size: [i32; 2],
+    long_label_digest: u64,
+    expected_filter_digest: u64,
+    undo_restored_filter_digest: u64,
+    escape_cleared_filter_digest: u64,
+    shared_child_menu_digest: u64,
+    direct_child_link_target_digest: u64,
+    direct_child_edge_digest: u64,
+    popup_source_target_digest: u64,
+    generated_source_target_digest: u64,
+    generated_result_index: usize,
+    visible_long_label: GateDVisibleLabelEvidence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text_undo_checkpoint: Option<GateDTextUndoCheckpointEvidence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDTextUndoCheckpointEvidence {
+    control: GateDControlEvidence,
+    clip_bounds: [i32; 4],
+    value_digest: u64,
+    focused: bool,
+    in_flux: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDVisibleLabelEvidence {
+    session_id: u64,
+    generation: u64,
+    trace_sequence: u64,
+    authored_target_digest: u64,
+    expected_rendered_text_digest: u64,
+    rendered_text_digest: u64,
+    text_bounds: [i32; 4],
+    control_bounds: [i32; 4],
+    client_size: [i32; 2],
+    fully_visible: bool,
+    elided: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDCaseEvidence {
+    schema_version: u16,
+    case_id: String,
+    fixture_digest: String,
+    steps: Vec<GateDStepEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection_proof: Option<GateDSelectionProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bulk_label_proof: Option<GateDBulkLabelProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    navigation_proof: Option<GateDNavigationProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    no_action_proof: Option<GateDNoActionProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hotkey_proof: Option<GateDHotkeyProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_ui_proof: Option<GateDLocalUiProof>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum GateCObservationPhase {
     Baseline,
     Terminal,
@@ -10706,6 +12193,8 @@ impl AcceptanceReport {
             &QUERY_CASE_IDS[..]
         } else if self.suite == AcceptanceSuite::GateC {
             &GATE_C_CASE_IDS[..]
+        } else if self.suite == AcceptanceSuite::GateD {
+            &GATE_D_CASE_IDS[..]
         } else {
             &CASE_IDS[..]
         };
@@ -10919,15 +12408,16 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
                 profile_copy = Some(next_path(&mut args, "--profile-copy")?);
             }
             Some("--suite") => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--suite requires all, hotkey, query, or gate-c".to_string())?;
+                let value = args.next().ok_or_else(|| {
+                    "--suite requires all, hotkey, query, gate-c, or gate-d".to_string()
+                })?;
                 suite = match value.to_str() {
                     Some("all") => AcceptanceSuite::All,
                     Some("hotkey") => AcceptanceSuite::Hotkey,
                     Some("query") => AcceptanceSuite::Query,
                     Some("gate-c") => AcceptanceSuite::GateC,
-                    _ => return Err("--suite must be all, hotkey, query, or gate-c".into()),
+                    Some("gate-d") => AcceptanceSuite::GateD,
+                    _ => return Err("--suite must be all, hotkey, query, gate-c, or gate-d".into()),
                 };
             }
             Some("--hotkey") => {
@@ -10986,8 +12476,10 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
     if output.is_some() == report_file.is_some() {
         return Err("specify exactly one of --output <directory> or --report <file>".into());
     }
-    if suite != AcceptanceSuite::Hotkey && hotkey != AcceptanceHotkey::F11 {
-        return Err("--hotkey shift-alt-win-end requires --suite hotkey".into());
+    if !matches!(suite, AcceptanceSuite::Hotkey | AcceptanceSuite::GateD)
+        && hotkey != AcceptanceHotkey::F11
+    {
+        return Err("--hotkey shift-alt-win-end requires --suite hotkey or gate-d".into());
     }
     if suite == AcceptanceSuite::Hotkey && profile_copy.is_some() {
         return Err("--suite hotkey cannot be combined with --profile-copy".into());
@@ -10997,6 +12489,9 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
     }
     if suite == AcceptanceSuite::GateC && profile_copy.is_some() {
         return Err("--suite gate-c cannot be combined with --profile-copy".into());
+    }
+    if suite == AcceptanceSuite::GateD && profile_copy.is_some() {
+        return Err("--suite gate-d cannot be combined with --profile-copy".into());
     }
     let source_revision = match source_revision {
         Some(revision) => Some(validate_source_revision(revision)?),
@@ -11763,6 +13258,7 @@ fn copied_report_seed(deterministic: &AcceptanceReport, started_unix_ms: u128) -
         hotkey_evidence: Vec::new(),
         query_evidence: Vec::new(),
         gate_c_evidence: Vec::new(),
+        gate_d_evidence: Vec::new(),
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
@@ -12362,6 +13858,17 @@ fn run_windows_deterministic(
             &std::env::current_exe()
                 .map_err(|error| format!("resolve runner for Gate C fixture: {error}"))?,
         )?
+    } else if arguments.suite == AcceptanceSuite::GateD {
+        let marker_path = profile_path.join("query-marker-ledger.txt");
+        write_new(&marker_path, b"radial-acceptance-marker-ledger:v1\n")?;
+        deterministic_gate_d_fixture(
+            &log_path,
+            arguments.mouse_gesture_mode,
+            arguments.hotkey,
+            &marker_path,
+            &std::env::current_exe()
+                .map_err(|error| format!("resolve runner for Gate D fixture: {error}"))?,
+        )?
     } else {
         deterministic_fixture_for_hotkey(&log_path, arguments.mouse_gesture_mode, arguments.hotkey)?
     };
@@ -12415,6 +13922,7 @@ fn run_windows_deterministic(
         hotkey_evidence: Vec::new(),
         query_evidence: Vec::new(),
         gate_c_evidence: Vec::new(),
+        gate_d_evidence: Vec::new(),
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
@@ -12491,6 +13999,17 @@ fn run_windows_deterministic(
                             &mut log,
                         ),
                         AcceptanceSuite::GateC => native::run_gate_c_suite(
+                            &candidate_executable,
+                            &driver_profile,
+                            &driver_output,
+                            &driver_trace,
+                            arguments.hotkey,
+                            before_cursor.as_ref().ok().copied(),
+                            &desktop_attachment,
+                            &mut report,
+                            &mut log,
+                        ),
+                        AcceptanceSuite::GateD => native::run_gate_d_suite(
                             &candidate_executable,
                             &driver_profile,
                             &driver_output,
@@ -12843,6 +14362,8 @@ fn validate_r0_report(
         &QUERY_CASE_IDS
     } else if report.suite == AcceptanceSuite::GateC {
         &GATE_C_CASE_IDS
+    } else if report.suite == AcceptanceSuite::GateD {
+        &GATE_D_CASE_IDS
     } else {
         &CASE_IDS
     };
@@ -12878,6 +14399,7 @@ fn validate_r0_report(
     validate_hotkey_evidence_report(report)?;
     validate_query_evidence_report(report)?;
     validate_gate_c_evidence_report(report)?;
+    validate_gate_d_evidence_report(report)?;
     if is_copied_profile {
         validate_private_artifact_report(report)?;
         validate_copied_style_evidence_relations(report)?;
@@ -13093,8 +14615,12 @@ fn validate_required_case_evidence(
                 != Some("owned_foreground_each_tap")
             || report_evidence_value(observed, "focused_root_hide=") != Some("true")
             || report_evidence_value(observed, "readable_refocus=") != Some("none")
-            || report_evidence_value(observed, "down_ms=") != Some("25")
-            || report_evidence_value(observed, "released_ms=") != Some("75")
+            || report_evidence_value(observed, "down_ms=")
+                .and_then(|value| value.parse::<u128>().ok())
+                != Some(H04_BURST_FIXTURE_TIMING.down.as_millis())
+            || report_evidence_value(observed, "released_ms=")
+                .and_then(|value| value.parse::<u128>().ok())
+                != Some(H04_BURST_FIXTURE_TIMING.released.as_millis())
             || report_evidence_value(observed, "inter_tap_ui_poll=") != Some("0")
             || report_evidence_value(observed, "inter_tap_refocus=") != Some("0")
             || report_evidence_value(observed, "inter_tap_preflight=") != Some("0")
@@ -13761,8 +15287,10 @@ fn format_h04_matrix_evidence(
     preflight_matching_edges: usize,
     foreign_matching_edges: usize,
 ) -> String {
+    let down_ms = H04_BURST_FIXTURE_TIMING.down.as_millis();
+    let released_ms = H04_BURST_FIXTURE_TIMING.released.as_millis();
     format!(
-        "evidence:v1; hotkey={}; matrix=hidden+visible:1,2,5,10,25; matrix_groups=10; decisions=86; unique_invocation_ids=86; invocation_ids_sha256={invocation_ids_sha256}; readable_cadence=3_individual_short_taps; readable_decisions=3; readable_target=owned_foreground_each_tap; focused_root_hide=true; readable_refocus=none; down_ms=25; released_ms=75; quiet_window_ms={quiet_min_ms}..{quiet_max_ms}; preflight_matching_edges={preflight_matching_edges}; foreign_matching_edges={foreign_matching_edges}; modifiers_clear_each_burst=true; uninterrupted=true; inter_tap_ui_poll=0; inter_tap_refocus=0; inter_tap_preflight=0; pointer_movement=0; per_gesture_correlation=release_short_tap_visibility; no_hold_promotion=true; observer=exact_injected_chord_edges; preflight=once_per_burst; input_desktop=thread=Default,active=Default; key_cleanup=verified",
+        "evidence:v1; hotkey={}; matrix=hidden+visible:1,2,5,10,25; matrix_groups=10; decisions=86; unique_invocation_ids=86; invocation_ids_sha256={invocation_ids_sha256}; readable_cadence=3_individual_short_taps; readable_decisions=3; readable_target=owned_foreground_each_tap; focused_root_hide=true; readable_refocus=none; fixture_timing=configured_intervals; down_ms={down_ms}; released_ms={released_ms}; observed_cadence=primary_edges_10..100ms; quiet_window_ms={quiet_min_ms}..{quiet_max_ms}; preflight_matching_edges={preflight_matching_edges}; foreign_matching_edges={foreign_matching_edges}; modifiers_clear_each_burst=true; uninterrupted=true; inter_tap_ui_poll=0; inter_tap_refocus=0; inter_tap_preflight=0; pointer_movement=0; per_gesture_correlation=release_short_tap_visibility; no_hold_promotion=true; observer=exact_injected_chord_edges; preflight=once_per_burst; input_desktop=thread=Default,active=Default; key_cleanup=verified",
         hotkey.as_str()
     )
 }
@@ -14415,6 +15943,170 @@ fn deterministic_gate_c_fixture(
             .map_err(|error| format!("serialize Gate C radial fixture: {error}"))?,
         actions_json: serde_json::to_vec_pretty(&actions)
             .map_err(|error| format!("serialize Gate C custom action fixture: {error}"))?,
+        hold_threshold_ms: fixture.hold_threshold_ms,
+    })
+}
+
+fn deterministic_gate_d_fixture(
+    log_path: &Path,
+    mouse_gesture_mode: MouseGestureMode,
+    hotkey: AcceptanceHotkey,
+    marker_path: &Path,
+    runner_path: &Path,
+) -> Result<DeterministicFixture, String> {
+    let fixture = deterministic_gate_c_fixture(
+        log_path,
+        mouse_gesture_mode,
+        hotkey,
+        marker_path,
+        runner_path,
+    )?;
+    let mut document: RadialDocument = serde_json::from_slice(&fixture.radial_json)
+        .map_err(|error| format!("decode Gate D radial fixture: {error}"))?;
+    let root_index = document
+        .menus
+        .iter()
+        .position(|menu| menu.id == document.default_menu_id)
+        .ok_or_else(|| "Gate D fixture has no default menu".to_string())?;
+    let shared_child = multi_launcher::radial::model::MenuId::new("starter-favorites");
+    let second_parent_id = multi_launcher::radial::model::MenuId::new("gate-d-second-parent");
+
+    {
+        let shared_menu = document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == shared_child)
+            .ok_or_else(|| "Gate D fixture has no starter-favorites shared child".to_string())?;
+        let dynamic_source = shared_menu
+            .rings
+            .iter_mut()
+            .flat_map(|ring| &mut ring.cells)
+            .find(|cell| matches!(&cell.content, CellContent::Dynamic { .. }))
+            .ok_or_else(|| "Gate D shared child has no authored dynamic source".to_string())?;
+        dynamic_source.label = "Gate D generated query source".into();
+        dynamic_source.content = CellContent::Dynamic {
+            source: multi_launcher::radial::model::DynamicSource::LauncherQuery {
+                query: "app QMarker".into(),
+                max_items: 8,
+            },
+        };
+        let dynamic_source_id = dynamic_source.id.clone();
+        let long_label_cell = shared_menu
+            .rings
+            .iter_mut()
+            .flat_map(|ring| &mut ring.cells)
+            .find(|cell| {
+                cell.id != dynamic_source_id
+                    && !matches!(&cell.content, CellContent::Dynamic { .. })
+            })
+            .ok_or_else(|| {
+                "Gate D shared child has no non-dynamic cell for its long-label fixture".to_string()
+            })?;
+        long_label_cell.label = GATE_D_LONG_LABEL.into();
+    }
+
+    let mut second_parent = document.menus[root_index].clone();
+    second_parent.id = second_parent_id.clone();
+    second_parent.name = "Gate D second parent".into();
+    second_parent.rings.truncate(1);
+    let parent_ring = second_parent
+        .rings
+        .first_mut()
+        .ok_or_else(|| "Gate D fixture root has no ring to form a second parent".to_string())?;
+    parent_ring.id = multi_launcher::radial::model::RingId::new("gate-d-second-parent-ring");
+    parent_ring.cells.truncate(1);
+    let parent_link = parent_ring
+        .cells
+        .first_mut()
+        .ok_or_else(|| "Gate D second parent could not allocate its shared link".to_string())?;
+    parent_link.id = multi_launcher::radial::model::CellId::new("gate-d-shared-child-link");
+    parent_link.label = "Gate D shared child link".into();
+    parent_link.content = CellContent::Submenu {
+        menu_id: shared_child.clone(),
+    };
+
+    let root = &mut document.menus[root_index];
+    let mut range_ring =
+        root.rings.first().cloned().ok_or_else(|| {
+            "Gate D fixture root has no ring for cross-ring selection".to_string()
+        })?;
+    range_ring.id = multi_launcher::radial::model::RingId::new("gate-d-range-ring");
+    range_ring.radius += 80.0;
+    range_ring.cells.truncate(3);
+    for (index, cell) in range_ring.cells.iter_mut().enumerate() {
+        cell.id = multi_launcher::radial::model::CellId::new(format!("gate-d-range-{index}"));
+        cell.label = format!("Gate D range cell {index}");
+    }
+    let direct_child_link = range_ring.cells.get_mut(1).ok_or_else(|| {
+        "Gate D range ring has no cell for its direct shared-child link".to_string()
+    })?;
+    direct_child_link.id = multi_launcher::radial::model::CellId::new("gate-d-direct-child-link");
+    direct_child_link.label = "Gate D direct shared child link".into();
+    direct_child_link.content = CellContent::Submenu {
+        menu_id: shared_child.clone(),
+    };
+    let mut second_parent_link = range_ring
+        .cells
+        .get(2)
+        .cloned()
+        .ok_or_else(|| "Gate D range ring has no cell for its parent link".to_string())?;
+    second_parent_link.id = multi_launcher::radial::model::CellId::new("gate-d-parent-link");
+    second_parent_link.label = "Gate D second parent link".into();
+    second_parent_link.content = CellContent::Submenu {
+        menu_id: second_parent_id.clone(),
+    };
+    range_ring.cells.push(second_parent_link);
+    root.rings.push(range_ring);
+    document.menus.push(second_parent);
+
+    let root = document
+        .menus
+        .iter()
+        .find(|menu| menu.id == document.default_menu_id)
+        .ok_or_else(|| "Gate D fixture lost its default menu".to_string())?;
+    let direct_links = root
+        .rings
+        .iter()
+        .flat_map(|ring| &ring.cells)
+        .filter(|cell| {
+            cell.id.as_str() == "gate-d-direct-child-link"
+                && matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &shared_child)
+        })
+        .count();
+    let second_parent_links = root
+        .rings
+        .iter()
+        .flat_map(|ring| &ring.cells)
+        .filter(|cell| {
+            cell.id.as_str() == "gate-d-parent-link"
+                && matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &second_parent_id)
+        })
+        .count();
+    let nested_child_links = document
+        .menus
+        .iter()
+        .find(|menu| menu.id == second_parent_id)
+        .into_iter()
+        .flat_map(|menu| menu.rings.iter())
+        .flat_map(|ring| &ring.cells)
+        .filter(|cell| {
+            cell.id.as_str() == "gate-d-shared-child-link"
+                && matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &shared_child)
+        })
+        .count();
+    if direct_links != 1 || second_parent_links != 1 || nested_child_links != 1 {
+        return Err(format!(
+            "Gate D fixture paths are ambiguous or missing: direct={direct_links}, second_parent={second_parent_links}, nested={nested_child_links}"
+        ));
+    }
+
+    validate_radial_document(&document)
+        .map_err(|error| format!("Gate D radial fixture is invalid: {error:?}"))?;
+    Ok(DeterministicFixture {
+        settings_json: fixture.settings_json,
+        radial_json: serde_json::to_vec_pretty(&document)
+            .map_err(|error| format!("serialize Gate D radial fixture: {error}"))?,
+        actions_json: fixture.actions_json,
         hold_threshold_ms: fixture.hold_threshold_ms,
     })
 }
@@ -15277,7 +16969,7 @@ fn is_reparse_point(metadata: &Metadata) -> bool {
 
 fn print_usage() {
     println!(
-        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey|query|gate-c] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]"
+        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey|query|gate-c|gate-d] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]"
     );
 }
 
@@ -15904,10 +17596,21 @@ mod tests {
                 }
 
                 let per_gesture_edges = configured_chord_edges(AcceptanceHotkey::ShiftAltWinEnd, 1);
+                let primary_up_us = 15_000 + H04_BURST_FIXTURE_TIMING.down.as_micros() as u64;
+                let chord_edge_offsets_us = [
+                    0,
+                    5_000,
+                    10_000,
+                    15_000,
+                    primary_up_us,
+                    primary_up_us + 5_000,
+                    primary_up_us + 10_000,
+                    primary_up_us + 15_000,
+                ];
+                let scheduled_cycle_us =
+                    chord_edge_offsets_us[7] + H04_BURST_FIXTURE_TIMING.released.as_micros() as u64;
                 let runner_start_us =
-                    u64::from(group_id) * 10_000_000 + group_gesture_index * 130_000;
-                let chord_edge_offsets_us =
-                    [0, 5_000, 10_000, 15_000, 40_000, 45_000, 50_000, 55_000];
+                    u64::from(group_id) * 10_000_000 + group_gesture_index * scheduled_cycle_us;
                 runner_edges.extend(per_gesture_edges.into_iter().enumerate().map(
                     |(edge_index, (virtual_key, down))| HotkeyRunnerEdgeEvidence {
                         runner_relative_us: runner_start_us + chord_edge_offsets_us[edge_index],
@@ -15984,6 +17687,117 @@ mod tests {
             capture_segment_overflow: false,
             runner_edge_overflow: false,
             gesture_overflow: false,
+        }
+    }
+
+    #[test]
+    fn h04_primary_edge_cadence_retains_strict_bounds_for_both_chords() {
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            let primary_down_index = if hotkey == AcceptanceHotkey::F11 {
+                0
+            } else {
+                3
+            };
+            let edges_per_tap = (primary_down_index + 1) * 2;
+            let timed_edges = |hold_us: u64, gap_us: u64| {
+                configured_chord_edges(hotkey, 2)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (virtual_key, down))| {
+                        let tap_index = index / edges_per_tap;
+                        let edge_index = index % edges_per_tap;
+                        let offset_us = if down {
+                            edge_index as u64 * 100
+                        } else {
+                            primary_down_index as u64 * 100
+                                + hold_us
+                                + (edge_index - primary_down_index - 1) as u64 * 100
+                        };
+                        HotkeyRunnerEdgeEvidence {
+                            runner_relative_us: tap_index as u64 * (hold_us + gap_us) + offset_us,
+                            input_group_id: 2,
+                            stream: HotkeyCandidateStream::MainCandidate,
+                            purpose: HotkeyRunnerInputPurpose::MatrixBurst,
+                            virtual_key,
+                            transition: if down {
+                                HotkeyEdgeTransition::Press
+                            } else {
+                                HotkeyEdgeTransition::Release
+                            },
+                            injected: true,
+                            runner_cookie_matched: true,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for (hold_us, gap_us, valid) in [
+                (10_000, 10_000, true),
+                (25_000, 50_000, true),
+                (100_000, 100_000, true),
+                (9_000, 50_000, false),
+                (100_001, 50_000, false),
+                (100_500, 50_000, false),
+                (101_000, 50_000, false),
+                (25_000, 9_000, false),
+                (25_000, 100_001, false),
+                (25_000, 100_500, false),
+                (25_000, 101_000, false),
+                (25_000, 103_000, false),
+            ] {
+                let edges = timed_edges(hold_us, gap_us);
+                assert_eq!(
+                    validate_h04_burst_cadence(&edges.iter().collect::<Vec<_>>(), hotkey, 2, 2)
+                        .is_ok(),
+                    valid,
+                    "{hotkey:?}: hold={hold_us}, primary gap={gap_us}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn h04_packet_rejects_primary_gap_overrun_hidden_by_modifier_edges() {
+        let validate = |packet: &HotkeyCaseEvidence| {
+            validate_hotkey_evidence_packet_with_context(
+                packet,
+                AcceptanceHotkey::ShiftAltWinEnd,
+                350,
+            )
+        };
+        validate(&h04_matrix_evidence_packet()).unwrap();
+        for observed_gap_us in [100_000, 100_001, 100_500, 101_000, 103_000] {
+            let mut packet = h04_matrix_evidence_packet();
+            let group_edges = packet
+                .runner_edges
+                .iter_mut()
+                .filter(|edge| edge.input_group_id == 2)
+                .collect::<Vec<_>>();
+            let original_primary_gap_us =
+                group_edges[11].runner_relative_us - group_edges[4].runner_relative_us;
+            let extra_us = observed_gap_us - original_primary_gap_us;
+            for edge in group_edges.into_iter().skip(8) {
+                edge.runner_relative_us += extra_us;
+            }
+            let edges = packet
+                .runner_edges
+                .iter()
+                .filter(|edge| edge.input_group_id == 2)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                edges[11].runner_relative_us - edges[4].runner_relative_us,
+                observed_gap_us,
+            );
+            assert!(
+                (10_000..=100_000)
+                    .contains(&(edges[8].runner_relative_us - edges[7].runner_relative_us)),
+                "complete-chord gap remains in range and cannot replace primary cadence",
+            );
+            if observed_gap_us == 100_000 {
+                validate(&packet).unwrap();
+            } else {
+                let error = validate(&packet).unwrap_err();
+                assert!(error.contains("out-of-band released gap"), "{error}");
+            }
         }
     }
 
@@ -17702,6 +19516,7 @@ mod tests {
             hotkey_evidence: Vec::new(),
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
+            gate_d_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
@@ -18390,7 +20205,9 @@ mod tests {
                 control_identity.draft_generation = 1;
                 control_identity.query_digest = binding.query_digest.unwrap_or(31);
             }
-            control_identity.binding_digest = if kind == GateCBindingControlKind::Undo {
+            control_identity.binding_digest = if kind == GateCBindingControlKind::Stage {
+                identity.binding_digest
+            } else if kind == GateCBindingControlKind::Undo {
                 binding.previous_binding_digest
             } else {
                 expected_binding_digest
@@ -19339,11 +21156,19 @@ mod tests {
                         gate_c_identity(surface, 1, 1, index as u64 + 2, 71 + index as u64)
                     };
                     identity.query_digest = binding.query_digest.unwrap_or(31);
-                    identity.binding_digest = if inspector_surface {
+                    identity.binding_digest = if inspector_surface
+                        || binding.kind == GateCBindingKind::ExactCommand
+                        || binding.query_mode == Some(GateCQueryMode::ExecuteFirst)
+                    {
                         binding.previous_binding_digest
                     } else {
                         binding.expected_binding_digest
                     };
+                    if binding.kind == GateCBindingKind::ExactCommand
+                        || binding.query_mode == Some(GateCQueryMode::ExecuteFirst)
+                    {
+                        identity.edit_generation = 2;
+                    }
                     let transaction_sequence = if inspector_direct && live_five_route_d04 {
                         85_000
                     } else {
@@ -19459,16 +21284,41 @@ mod tests {
                             packet.controls.push(mode);
                         }
                         GateCBindingKind::ExactCommand => {
+                            let stage_sequence = binding
+                                .controls
+                                .iter()
+                                .find(|receipt| receipt.kind == GateCBindingControlKind::Stage)
+                                .unwrap()
+                                .trace_sequence;
+                            let mut advanced_identity = identity.clone();
+                            advanced_identity.edit_generation = 0;
+                            let mut advanced = gate_c_control(
+                                "advanced_tab",
+                                &advanced_identity,
+                                None,
+                                0,
+                                0,
+                                true,
+                            );
+                            advanced.selected = true;
+                            advanced.trace_sequence = stage_sequence - 3;
+                            packet.controls.push(advanced);
+
                             let mut command =
                                 gate_c_control("exact_command_field", &identity, None, 0, 0, false);
-                            command.binding_digest = binding.expected_binding_digest;
+                            command.identity.edit_generation = 1;
+                            command.binding_digest = binding.expected_binding_digest + 100;
                             command.value_digest = binding.command_digest.unwrap_or(0);
+                            command.changed = true;
+                            command.trace_sequence = stage_sequence - 2;
                             packet.controls.push(command);
 
                             let mut arguments =
                                 gate_c_control("exact_args_field", &identity, None, 0, 0, false);
                             arguments.binding_digest = binding.expected_binding_digest;
                             arguments.value_digest = binding.arguments_digest.unwrap_or(0);
+                            arguments.changed = true;
+                            arguments.trace_sequence = stage_sequence - 1;
                             packet.controls.push(arguments);
                         }
                     }
@@ -20565,6 +22415,1504 @@ mod tests {
     }
 
     #[test]
+    fn gate_d_fixture_retains_two_shared_child_paths_and_local_ui_targets() {
+        let fixture_dir = tempfile::tempdir().unwrap();
+        let marker_path = fixture_dir.path().join("query-marker-ledger.txt");
+        write_new(&marker_path, b"radial-acceptance-marker-ledger:v1\n").unwrap();
+        let fixture = deterministic_gate_d_fixture(
+            &fixture_dir.path().join("acceptance.log"),
+            MouseGestureMode::Enabled,
+            AcceptanceHotkey::F11,
+            &marker_path,
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap();
+        let document: RadialDocument = serde_json::from_slice(&fixture.radial_json).unwrap();
+        validate_radial_document(&document).unwrap();
+        let root = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == document.default_menu_id)
+            .unwrap();
+        let shared_id = multi_launcher::radial::model::MenuId::new("starter-favorites");
+        let parent_id = multi_launcher::radial::model::MenuId::new("gate-d-second-parent");
+        fn find_cell<'a>(
+            menu: &'a multi_launcher::radial::model::MenuDefinition,
+            id: &str,
+        ) -> &'a multi_launcher::radial::model::CellDefinition {
+            menu.rings
+                .iter()
+                .flat_map(|ring| ring.cells.iter())
+                .find(|cell| cell.id.as_str() == id)
+                .unwrap()
+        }
+        let direct = find_cell(root, "gate-d-direct-child-link");
+        let parent_link = find_cell(root, "gate-d-parent-link");
+        assert!(matches!(
+            &direct.content,
+            CellContent::Submenu { menu_id } if menu_id == &shared_id
+        ));
+        assert!(matches!(
+            &parent_link.content,
+            CellContent::Submenu { menu_id } if menu_id == &parent_id
+        ));
+        let parent = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == parent_id)
+            .unwrap();
+        let nested = find_cell(parent, "gate-d-shared-child-link");
+        assert!(matches!(
+            &nested.content,
+            CellContent::Submenu { menu_id } if menu_id == &shared_id
+        ));
+        let child = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == shared_id)
+            .unwrap();
+        let dynamic_source = child
+            .rings
+            .iter()
+            .flat_map(|ring| ring.cells.iter())
+            .find(|cell| {
+                matches!(
+                    &cell.content,
+                    CellContent::Dynamic {
+                        source: multi_launcher::radial::model::DynamicSource::LauncherQuery {
+                            query,
+                            ..
+                        }
+                    } if query == "app QMarker"
+                )
+            })
+            .unwrap();
+        let long_labels = document
+            .menus
+            .iter()
+            .flat_map(|menu| menu.rings.iter())
+            .flat_map(|ring| ring.cells.iter())
+            .filter(|cell| cell.label == GATE_D_LONG_LABEL)
+            .collect::<Vec<_>>();
+        assert_eq!(long_labels.len(), 1);
+        assert_ne!(long_labels[0].id, dynamic_source.id);
+        assert!(!matches!(
+            &long_labels[0].content,
+            CellContent::Dynamic { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(marker_path).unwrap(),
+            "radial-acceptance-marker-ledger:v1\n"
+        );
+    }
+
+    fn gate_d_test_observation(
+        generation: u64,
+        document_digest: u64,
+        selected_targets: &[u64],
+        primary_target: u64,
+        anchor_target: u64,
+        undo_depth: usize,
+        redo_depth: usize,
+        draft_dirty: bool,
+    ) -> GateDObservationEvidence {
+        let has_selection = !selected_targets.is_empty();
+        GateDObservationEvidence {
+            frame_ordinal: 1,
+            trace_sequence: generation + 10,
+            session_id: 4,
+            generation,
+            document_digest,
+            selection_digest: if has_selection { 71 } else { 0 },
+            selection_kind: match selected_targets.len() {
+                0 => GateDSelectionKind::None,
+                1 => GateDSelectionKind::Cell,
+                _ => GateDSelectionKind::CellSet,
+            },
+            selected_member_count: selected_targets.len(),
+            selected_members_digest: if has_selection { 72 } else { 0 },
+            selected_member_target_digests: selected_targets.to_vec(),
+            primary_cell_digest: if has_selection { 73 } else { 0 },
+            range_anchor_digest: if has_selection { 74 } else { 0 },
+            primary_target_digest: primary_target,
+            range_anchor_target_digest: anchor_target,
+            navigation_path_digest: 75,
+            navigation_menu_id_digests: vec![76],
+            navigation_edge_digests: Vec::new(),
+            pending_assets_digest: 77,
+            designer_filter_digest: 0,
+            designer_search_hit_count: 0,
+            undo_depth,
+            redo_depth,
+            root_visible: true,
+            draft_dirty,
+            properties_popup_open: false,
+            properties_dirty: false,
+            root_history_entries: 0,
+            root_history_digest: 78,
+            root_usage_entries: 0,
+            root_usage_digest: 79,
+        }
+    }
+
+    fn gate_d_test_control(
+        target: GateDControlTarget,
+        generation: u64,
+        ring_index: Option<usize>,
+        slot_index: Option<usize>,
+        authored_target_digest: Option<u64>,
+    ) -> GateDControlEvidence {
+        GateDControlEvidence {
+            target,
+            index: None,
+            trace_sequence: 100 + generation,
+            session_id: 4,
+            generation,
+            enabled: true,
+            bounds: [10, 10, 30, 30],
+            client_size: [100, 100],
+            text_edit_field_digest: (target == GateDControlTarget::TreeSearch).then_some(84),
+            ring_index,
+            slot_index,
+            menu_cell_ids_digest: Some(80),
+            menu_id_digest: Some(81),
+            ring_id_digest: Some(82),
+            cell_id_digest: Some(83),
+            authored_target_digest,
+            cell_label_digest: None,
+            projected_source_target_digest: None,
+            projected_result_index: None,
+            edit_source_target_digest: None,
+            edit_source_result_index: None,
+            breadcrumb_menu_id_digest: None,
+            selected: true,
+            clicked: true,
+        }
+    }
+
+    fn gate_d_test_pointer(modifier: Option<GateDModifier>) -> GateDPointerEvidence {
+        GateDPointerEvidence {
+            target_hwnd: 21,
+            target_process_id: 42,
+            foreground_hwnd: 21,
+            nudge_under_cursor_hwnd: 21,
+            nudge_process_id: 42,
+            under_cursor_hwnd: 21,
+            under_cursor_process_id: 42,
+            nudge_inserted: 1,
+            movement_inserted: 1,
+            down_inserted: 1,
+            up_inserted: 1,
+            pointer_move_acknowledged: true,
+            down_acknowledged: true,
+            up_acknowledged: true,
+            button: GateDPointerButton::Primary,
+            modifier,
+            modifier_down_inserted: usize::from(modifier.is_some()),
+            modifier_up_inserted: usize::from(modifier.is_some()),
+        }
+    }
+
+    fn gate_d_test_no_action_proof() -> GateDNoActionProof {
+        let empty_dispatch = GateDDispatchEvidence {
+            event_count: 0,
+            event_digest: 0,
+        };
+        let empty_state = GateDTraceDispatchState {
+            result_pointer: empty_dispatch.clone(),
+            universal_action: empty_dispatch.clone(),
+            radial_leaf: empty_dispatch.clone(),
+            query: empty_dispatch.clone(),
+            radial_dispatch_requested: empty_dispatch,
+        };
+        GateDNoActionProof {
+            trace_before: empty_state.clone(),
+            trace_after: empty_state,
+            marker_lines_before: 0,
+            marker_lines_after: 0,
+            marker_digest_before: 91,
+            marker_digest_after: 91,
+        }
+    }
+
+    fn gate_d_test_packet(case_id: &str) -> GateDCaseEvidence {
+        GateDCaseEvidence {
+            schema_version: 2,
+            case_id: case_id.into(),
+            fixture_digest: String::new(),
+            steps: Vec::new(),
+            selection_proof: None,
+            bulk_label_proof: None,
+            navigation_proof: None,
+            no_action_proof: Some(gate_d_test_no_action_proof()),
+            hotkey_proof: None,
+            local_ui_proof: None,
+        }
+    }
+
+    fn gate_d_test_selection_packet() -> GateDCaseEvidence {
+        let targets = [101, 102, 103];
+        let states = [
+            gate_d_test_observation(2, 17, &targets[..1], 101, 101, 1, 0, false),
+            gate_d_test_observation(2, 17, &targets[..2], 101, 101, 1, 0, false),
+            gate_d_test_observation(2, 17, &targets, 103, 101, 1, 0, false),
+        ];
+        let controls = [
+            gate_d_test_control(
+                GateDControlTarget::CanvasCell,
+                2,
+                Some(0),
+                Some(0),
+                Some(101),
+            ),
+            gate_d_test_control(
+                GateDControlTarget::CanvasCell,
+                2,
+                Some(0),
+                Some(1),
+                Some(102),
+            ),
+            gate_d_test_control(
+                GateDControlTarget::CanvasCell,
+                2,
+                Some(1),
+                Some(0),
+                Some(103),
+            ),
+        ];
+        let mut packet = gate_d_test_packet("D10");
+        for (index, operation) in [
+            GateDOperation::SelectPrimary,
+            GateDOperation::ToggleMember,
+            GateDOperation::ExtendRange,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            packet.steps.push(GateDStepEvidence {
+                operation,
+                result: GateDStepResult::Applied,
+                control: Some(controls[index].clone()),
+                pointer: Some(gate_d_test_pointer(match index {
+                    1 => Some(GateDModifier::Control),
+                    2 => Some(GateDModifier::Shift),
+                    _ => None,
+                })),
+                related_control: None,
+                related_pointer: None,
+                inserted_key_events: 0,
+                before: gate_d_test_observation(
+                    2,
+                    17,
+                    if index == 0 {
+                        &[]
+                    } else {
+                        &states[index - 1].selected_member_target_digests
+                    },
+                    if index == 0 {
+                        0
+                    } else {
+                        states[index - 1].primary_target_digest
+                    },
+                    if index == 0 {
+                        0
+                    } else {
+                        states[index - 1].range_anchor_target_digest
+                    },
+                    1,
+                    0,
+                    false,
+                ),
+                after: states[index].clone(),
+            });
+        }
+        packet.selection_proof = Some(GateDSelectionProof {
+            one_menu_digest: 81,
+            clicked_target_digests: targets.to_vec(),
+            inclusive_range_target_digests: targets.to_vec(),
+        });
+        packet
+    }
+
+    fn gate_d_test_bulk_packet() -> GateDCaseEvidence {
+        let targets = [201, 202];
+        let before = gate_d_test_observation(2, 10, &targets, 201, 201, 1, 0, false);
+        let applied = gate_d_test_observation(3, 20, &targets, 201, 201, 2, 0, true);
+        let undone = gate_d_test_observation(4, 10, &targets, 201, 201, 1, 1, false);
+        let redone = gate_d_test_observation(5, 20, &targets, 201, 201, 2, 0, true);
+        let bulk_label = gate_d_test_control(GateDControlTarget::BulkLabel, 2, None, None, None);
+        let set_label = gate_d_test_control(GateDControlTarget::BulkSetLabel, 2, None, None, None);
+        let mut undo_control = gate_d_test_control(GateDControlTarget::Undo, 3, None, None, None);
+        undo_control.trace_sequence = 103;
+        let mut redo_control = gate_d_test_control(GateDControlTarget::Redo, 4, None, None, None);
+        redo_control.trace_sequence = 104;
+        let mut packet = gate_d_test_packet("D11");
+        packet.steps = vec![
+            GateDStepEvidence {
+                operation: GateDOperation::SetLabel,
+                result: GateDStepResult::Applied,
+                control: Some(set_label),
+                pointer: Some(gate_d_test_pointer(None)),
+                related_control: Some(bulk_label),
+                related_pointer: Some(gate_d_test_pointer(None)),
+                inserted_key_events: 4 + GATE_D_BULK_LABEL.len(),
+                before,
+                after: applied.clone(),
+            },
+            GateDStepEvidence {
+                operation: GateDOperation::Undo,
+                result: GateDStepResult::Applied,
+                control: Some(undo_control),
+                pointer: Some(gate_d_test_pointer(None)),
+                related_control: None,
+                related_pointer: None,
+                inserted_key_events: 0,
+                before: applied,
+                after: undone.clone(),
+            },
+            GateDStepEvidence {
+                operation: GateDOperation::Redo,
+                result: GateDStepResult::Applied,
+                control: Some(redo_control),
+                pointer: Some(gate_d_test_pointer(None)),
+                related_control: None,
+                related_pointer: None,
+                inserted_key_events: 0,
+                before: undone,
+                after: redone,
+            },
+        ];
+        packet.bulk_label_proof = Some(GateDBulkLabelProof {
+            target_digests: targets.to_vec(),
+            expected_before_document_digest: 10,
+            expected_after_document_digest: 20,
+            label_digest: gate_d_label_digest(GATE_D_BULK_LABEL),
+        });
+        packet
+    }
+
+    fn gate_d_test_report(passed_case: &str, passed_packet: GateDCaseEvidence) -> AcceptanceReport {
+        let mut report = acceptance_report("native_windows");
+        report.suite = AcceptanceSuite::GateD;
+        if let Some(hotkey) = passed_packet.hotkey_proof.as_ref() {
+            report.hotkey = hotkey.configured_hotkey;
+            report.profile.configured_hotkey = report.hotkey.as_str();
+        }
+        report.gate_d_evidence = GATE_D_REQUIRED_CASE_IDS
+            .iter()
+            .map(|case_id| {
+                let mut packet = if *case_id == passed_case {
+                    passed_packet.clone()
+                } else {
+                    gate_d_test_packet(case_id)
+                };
+                packet.case_id = (*case_id).to_owned();
+                packet.fixture_digest = gate_d_fixture_digest(&report.profile);
+                packet
+            })
+            .collect();
+        report.push_case(AcceptanceCaseResult {
+            id: passed_case.to_owned(),
+            status: CaseStatus::Passed,
+            elapsed_ms: 1,
+            expected: expected_final_case(passed_case).to_owned(),
+            observed: "bounded Gate D evidence".into(),
+            failure_stage: None,
+            artifacts: Vec::new(),
+        });
+        report
+    }
+
+    fn gate_d_test_fixture_session() -> multi_launcher::radial::authoring::RadialAuthoringSession {
+        use multi_launcher::radial::authoring::{AuthoringSnapshot, RadialAuthoringSession};
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = deterministic_gate_d_fixture(
+            &directory.path().join("acceptance.log"),
+            MouseGestureMode::Enabled,
+            AcceptanceHotkey::ShiftAltWinEnd,
+            &directory.path().join("query-marker-ledger.txt"),
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap();
+        let document: RadialDocument = serde_json::from_slice(&fixture.radial_json).unwrap();
+        let menu = &document.menus[0];
+        let ring = &menu.rings[0];
+        let (menu_id, ring_id, cell_id) =
+            (menu.id.clone(), ring.id.clone(), ring.cells[0].id.clone());
+        let mut session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::new(document),
+            "gate-d-packet-test",
+        ));
+        multi_launcher::radial::authoring::menu::set_cell_label(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            &cell_id,
+            GATE_D_BULK_LABEL.into(),
+            multi_launcher::radial::authoring::EditPhase::Atomic,
+        )
+        .unwrap();
+        assert!(session.is_dirty());
+        session
+    }
+
+    fn gate_d_test_authored_target(
+        document: &RadialDocument,
+        cell_id: &str,
+    ) -> multi_launcher::radial::authoring::AuthoredCellTarget {
+        document
+            .menus
+            .iter()
+            .find_map(|menu| {
+                menu.rings.iter().find_map(|ring| {
+                    ring.cells
+                        .iter()
+                        .find(|cell| cell.id.as_str() == cell_id)
+                        .map(
+                            |cell| multi_launcher::radial::authoring::AuthoredCellTarget {
+                                menu_id: menu.id.clone(),
+                                ring_id: ring.id.clone(),
+                                cell_id: cell.id.clone(),
+                            },
+                        )
+                })
+            })
+            .unwrap()
+    }
+
+    fn gate_d_test_target_digest(
+        target: &multi_launcher::radial::authoring::AuthoredCellTarget,
+    ) -> u64 {
+        gate_c_private_digest(
+            format!("{}\0{}\0{}", target.menu_id, target.ring_id, target.cell_id).as_bytes(),
+        )
+    }
+
+    fn gate_d_test_hash<T: std::hash::Hash + ?Sized>(value: &T) -> u64 {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn gate_d_test_live_state(
+        session: &multi_launcher::radial::authoring::RadialAuthoringSession,
+        menus: &[multi_launcher::radial::model::MenuId],
+        edges: &[u64],
+        frame: u64,
+    ) -> GateDObservationEvidence {
+        use multi_launcher::radial::authoring::StableSelection;
+        let selection = session.selection.as_ref();
+        let members = selection
+            .map(StableSelection::selected_cells)
+            .unwrap_or_default();
+        let primary = selection.and_then(StableSelection::primary_cell);
+        let anchor = match selection {
+            Some(StableSelection::CellSet(cells)) => Some(cells.range_anchor.clone()),
+            _ => members.first().cloned(),
+        };
+        let primary_target = primary
+            .as_ref()
+            .map(StableSelection::selected_cells)
+            .and_then(|members| members.first().cloned());
+        let (undo, redo) = session.acceptance_history_depths();
+        let targets = members
+            .iter()
+            .map(gate_d_test_target_digest)
+            .collect::<Vec<_>>();
+        let mut state = gate_d_test_observation(
+            session.generation.0,
+            gate_c_private_digest(&serde_json::to_vec(session.draft.as_ref()).unwrap()),
+            &targets,
+            primary_target.as_ref().map_or(0, gate_d_test_target_digest),
+            anchor.as_ref().map_or(0, gate_d_test_target_digest),
+            undo,
+            redo,
+            session.is_dirty(),
+        );
+        state.frame_ordinal = frame;
+        state.trace_sequence = frame * 10;
+        state.session_id = session.editor_session.0;
+        state.selection_kind = selection.into();
+        state.selection_digest = selection.map_or(0, gate_d_test_hash);
+        state.selected_members_digest = if members.is_empty() {
+            0
+        } else {
+            gate_d_test_hash(&members)
+        };
+        state.primary_cell_digest = primary.as_ref().map_or(0, gate_d_test_hash);
+        state.range_anchor_digest = anchor
+            .as_ref()
+            .map_or(0, |anchor| gate_d_test_hash(std::slice::from_ref(anchor)));
+        state.navigation_menu_id_digests = menus
+            .iter()
+            .map(|menu| gate_c_private_digest(menu.as_str().as_bytes()))
+            .collect();
+        state.navigation_edge_digests = edges.to_vec();
+        state.navigation_path_digest = gate_d_test_hash(&(menus, edges));
+        state.pending_assets_digest =
+            gate_c_private_digest(format!("{:?}", session.pending_assets).as_bytes());
+        state.root_history_digest = gate_c_private_digest(b"[]");
+        state.root_usage_digest = gate_c_private_digest(b"{}");
+        state
+    }
+
+    fn gate_d_test_live_control(
+        document: &RadialDocument,
+        before: &GateDObservationEvidence,
+        target: GateDControlTarget,
+        authored: Option<&multi_launcher::radial::authoring::AuthoredCellTarget>,
+        client_size: [i32; 2],
+    ) -> GateDControlEvidence {
+        let mut control = gate_d_test_control(target, before.generation, None, None, None);
+        control.session_id = before.session_id;
+        control.trace_sequence = before.trace_sequence + 1;
+        control.client_size = client_size;
+        control.menu_id_digest = None;
+        control.ring_id_digest = None;
+        control.cell_id_digest = None;
+        control.menu_cell_ids_digest = None;
+        if let Some(authored) = authored {
+            let menu = document
+                .menus
+                .iter()
+                .find(|menu| menu.id == authored.menu_id)
+                .unwrap();
+            let ring_index = menu
+                .rings
+                .iter()
+                .position(|ring| ring.id == authored.ring_id)
+                .unwrap();
+            let ring = &menu.rings[ring_index];
+            let slot_index = ring
+                .cells
+                .iter()
+                .position(|cell| cell.id == authored.cell_id)
+                .unwrap();
+            control.menu_cell_ids_digest = Some(gate_d_test_hash(
+                &menu
+                    .rings
+                    .iter()
+                    .flat_map(|ring| ring.cells.iter().map(|cell| &cell.id))
+                    .collect::<Vec<_>>(),
+            ));
+            control.menu_id_digest =
+                Some(gate_c_private_digest(authored.menu_id.as_str().as_bytes()));
+            control.ring_id_digest =
+                Some(gate_c_private_digest(authored.ring_id.as_str().as_bytes()));
+            control.cell_id_digest =
+                Some(gate_c_private_digest(authored.cell_id.as_str().as_bytes()));
+            control.authored_target_digest = Some(gate_d_test_target_digest(authored));
+            control.cell_label_digest = Some(gate_d_label_digest(&ring.cells[slot_index].label));
+            control.ring_index = Some(ring_index);
+            control.slot_index = Some(slot_index);
+        }
+        control
+    }
+
+    fn gate_d_test_breadcrumbs(menus: &[u64]) -> Vec<GateDBreadcrumbEvidence> {
+        menus
+            .iter()
+            .enumerate()
+            .map(|(index, menu)| GateDBreadcrumbEvidence {
+                index,
+                menu_id_digest: *menu,
+                selected: index + 1 == menus.len(),
+                enabled: true,
+                bounds: [10 + 40 * index as i32, 10, 45 + 40 * index as i32, 30],
+                client_size: [1000, 720],
+            })
+            .collect()
+    }
+
+    fn gate_d_test_select_target(
+        session: &mut multi_launcher::radial::authoring::RadialAuthoringSession,
+        target: &multi_launcher::radial::authoring::AuthoredCellTarget,
+    ) {
+        session.select_authored_cell(target.clone(), false, false);
+    }
+
+    fn gate_d_test_navigation_packet() -> GateDCaseEvidence {
+        use multi_launcher::radial::authoring::StableSelection;
+        use multi_launcher::radial::model::MenuId;
+        let mut session = gate_d_test_fixture_session();
+        let document = session.draft.clone();
+        let root = document.default_menu_id.clone();
+        let shared = MenuId::new("starter-favorites");
+        let parent = MenuId::new("gate-d-second-parent");
+        let direct = gate_d_test_authored_target(&document, "gate-d-direct-child-link");
+        let parent_link = gate_d_test_authored_target(&document, "gate-d-parent-link");
+        let nested = gate_d_test_authored_target(&document, "gate-d-shared-child-link");
+        let search = document
+            .menus
+            .iter()
+            .flat_map(|menu| &menu.rings)
+            .flat_map(|ring| &ring.cells)
+            .find(|cell| cell.label == GATE_D_LONG_LABEL)
+            .unwrap();
+        let search = gate_d_test_authored_target(&document, search.id.as_str());
+        let edge = |source: &multi_launcher::radial::authoring::AuthoredCellTarget,
+                    child: &MenuId| {
+            gate_c_private_digest(
+                format!(
+                    "{}\0{}\0{}\0{}",
+                    source.menu_id, source.ring_id, source.cell_id, child
+                )
+                .as_bytes(),
+            )
+        };
+        let (direct_edge, parent_edge, nested_edge) = (
+            edge(&direct, &shared),
+            edge(&parent_link, &parent),
+            edge(&nested, &shared),
+        );
+        let paths = [
+            vec![root.clone(), shared.clone()],
+            vec![root.clone()],
+            vec![root.clone(), parent.clone()],
+            vec![root.clone(), parent.clone(), shared.clone()],
+            vec![root.clone(), parent.clone()],
+            vec![root.clone()],
+            vec![root.clone()],
+            vec![shared.clone()],
+            vec![root.clone()],
+        ];
+        let edges = [
+            vec![direct_edge],
+            vec![],
+            vec![parent_edge],
+            vec![parent_edge, nested_edge],
+            vec![parent_edge],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        ];
+        let operations = [
+            GateDOperation::EnterSubmenu,
+            GateDOperation::Back,
+            GateDOperation::EnterSubmenu,
+            GateDOperation::EnterSubmenu,
+            GateDOperation::Back,
+            GateDOperation::Back,
+            GateDOperation::TypeFilter,
+            GateDOperation::SearchReveal,
+            GateDOperation::Back,
+        ];
+        let mut before = gate_d_test_live_state(&session, std::slice::from_ref(&root), &[], 10);
+        let mut packet = gate_d_test_packet("D13");
+        let mut breadcrumbs_after_steps = Vec::new();
+        for (index, operation) in operations.into_iter().enumerate() {
+            let authored = match index {
+                0 => Some(&direct),
+                2 => Some(&parent_link),
+                3 => Some(&nested),
+                7 => Some(&search),
+                _ => None,
+            };
+            let target = match index {
+                0 | 2 | 3 => GateDControlTarget::CanvasCell,
+                6 => GateDControlTarget::TreeSearch,
+                7 => GateDControlTarget::TreeSearchResult,
+                _ => GateDControlTarget::DesignerBack,
+            };
+            let mut control =
+                gate_d_test_live_control(&document, &before, target, authored, [1000, 720]);
+            if index == 7 {
+                control.index = Some(0);
+            }
+            match index {
+                0 | 2 | 3 => session.select(Some(StableSelection::Menu(
+                    paths[index].last().unwrap().clone(),
+                ))),
+                1 => gate_d_test_select_target(&mut session, &direct),
+                4 => gate_d_test_select_target(&mut session, &nested),
+                5 | 8 => gate_d_test_select_target(&mut session, &parent_link),
+                7 => gate_d_test_select_target(&mut session, &search),
+                _ => {}
+            }
+            let mut after =
+                gate_d_test_live_state(&session, &paths[index], &edges[index], 11 + index as u64);
+            if index == 6 {
+                after.designer_filter_digest = gate_d_label_digest(GATE_D_LONG_LABEL);
+                after.designer_search_hit_count = 1;
+            }
+            let entering = operation == GateDOperation::EnterSubmenu;
+            breadcrumbs_after_steps
+                .push(gate_d_test_breadcrumbs(&after.navigation_menu_id_digests));
+            packet.steps.push(GateDStepEvidence {
+                operation,
+                result: GateDStepResult::Applied,
+                related_control: entering.then(|| control.clone()),
+                related_pointer: entering.then(|| gate_d_test_pointer(None)),
+                control: Some(control),
+                pointer: Some(gate_d_test_pointer(None)),
+                inserted_key_events: if index == 6 {
+                    4 + GATE_D_LONG_LABEL.len() * 2
+                } else {
+                    0
+                },
+                before,
+                after: after.clone(),
+            });
+            before = after;
+        }
+        packet.navigation_proof = Some(GateDNavigationProof {
+            root_menu_digest: gate_c_private_digest(root.as_str().as_bytes()),
+            shared_child_menu_digest: gate_c_private_digest(shared.as_str().as_bytes()),
+            second_parent_menu_digest: gate_c_private_digest(parent.as_str().as_bytes()),
+            direct_child_link_target_digest: gate_d_test_target_digest(&direct),
+            direct_child_edge_digest: direct_edge,
+            second_parent_link_target_digest: gate_d_test_target_digest(&parent_link),
+            second_parent_edge_digest: parent_edge,
+            nested_child_link_target_digest: gate_d_test_target_digest(&nested),
+            nested_child_edge_digest: nested_edge,
+            search_query_digest: gate_d_label_digest(GATE_D_LONG_LABEL),
+            search_target_ring_digest: gate_c_private_digest(search.ring_id.as_str().as_bytes()),
+            search_target_cell_digest: gate_c_private_digest(search.cell_id.as_str().as_bytes()),
+            search_target_digest: gate_d_test_target_digest(&search),
+            breadcrumbs_after_steps,
+        });
+        packet
+    }
+
+    fn gate_d_test_local_ui_packet() -> GateDCaseEvidence {
+        use multi_launcher::radial::authoring::StableSelection;
+        use multi_launcher::radial::model::MenuId;
+        let mut session = gate_d_test_fixture_session();
+        let document = session.draft.clone();
+        let root = document.default_menu_id.clone();
+        let shared = MenuId::new("starter-favorites");
+        let direct = gate_d_test_authored_target(&document, "gate-d-direct-child-link");
+        let child = document
+            .menus
+            .iter()
+            .find(|menu| menu.id == shared)
+            .unwrap();
+        let long_cell = child
+            .rings
+            .iter()
+            .flat_map(|ring| &ring.cells)
+            .find(|cell| cell.label == GATE_D_LONG_LABEL)
+            .unwrap();
+        let long_target = gate_d_test_authored_target(&document, long_cell.id.as_str());
+        let dynamic_cell = child
+            .rings
+            .iter()
+            .flat_map(|ring| &ring.cells)
+            .find(|cell| matches!(cell.content, CellContent::Dynamic { .. }))
+            .unwrap();
+        let dynamic_target = gate_d_test_authored_target(&document, dynamic_cell.id.as_str());
+        let direct_edge = gate_c_private_digest(
+            format!(
+                "{}\0{}\0{}\0{}",
+                root, direct.ring_id, direct.cell_id, shared
+            )
+            .as_bytes(),
+        );
+        let operations = [
+            GateDOperation::EnterSubmenu,
+            GateDOperation::TypeFilter,
+            GateDOperation::TextSelectAll,
+            GateDOperation::TypeFilter,
+            GateDOperation::TextUndo,
+            GateDOperation::EscapeFilter,
+            GateDOperation::OpenPropertiesPopup,
+            GateDOperation::EscapePopup,
+            GateDOperation::SelectProjectedResult,
+            GateDOperation::EditDynamicSource,
+            GateDOperation::LauncherChord,
+        ];
+        let mut packet = gate_d_test_packet("D14");
+        let mut before = gate_d_test_live_state(&session, std::slice::from_ref(&root), &[], 30);
+        let mut filter = 0;
+        let mut hit_count = 0;
+        let mut popup_open = false;
+        for (index, operation) in operations.into_iter().enumerate() {
+            if index == 2 {
+                // A measured idle frame commits the starter before Ctrl+A.
+                before.trace_sequence += 2;
+                before.frame_ordinal += 2;
+            }
+            let control_target = match index {
+                0 | 6 => Some(GateDControlTarget::CanvasCell),
+                1 => Some(GateDControlTarget::TreeSearch),
+                8 => Some(GateDControlTarget::ProjectedCell),
+                9 => Some(GateDControlTarget::EditDynamicSource),
+                _ => None,
+            };
+            let authored = match index {
+                0 => Some(&direct),
+                6 => Some(&long_target),
+                _ => None,
+            };
+            let mut control = control_target.map(|target| {
+                gate_d_test_live_control(
+                    &document,
+                    &before,
+                    target,
+                    authored,
+                    if index == 0 { [1000, 720] } else { [520, 380] },
+                )
+            });
+            if let Some(control) = control.as_mut() {
+                match index {
+                    8 => {
+                        control.projected_source_target_digest =
+                            Some(gate_d_test_target_digest(&dynamic_target));
+                        control.projected_result_index = Some(0);
+                    }
+                    9 => {
+                        control.edit_source_target_digest =
+                            Some(gate_d_test_target_digest(&dynamic_target));
+                        control.edit_source_result_index = Some(0);
+                    }
+                    _ => {}
+                }
+            }
+            match index {
+                0 => session.select(Some(StableSelection::Menu(shared.clone()))),
+                1 | 4 => {
+                    filter = gate_d_label_digest("starter");
+                    hit_count = 5;
+                }
+                3 => {
+                    filter = gate_d_label_digest(GATE_D_LONG_LABEL);
+                    hit_count = 1;
+                }
+                5 => {
+                    filter = 0;
+                    hit_count = 0;
+                }
+                6 => {
+                    gate_d_test_select_target(&mut session, &long_target);
+                    popup_open = true;
+                }
+                7 => popup_open = false,
+                9 => gate_d_test_select_target(&mut session, &dynamic_target),
+                _ => {}
+            }
+            let mut after = gate_d_test_live_state(
+                &session,
+                &[root.clone(), shared.clone()],
+                &[direct_edge],
+                before.trace_sequence + 4,
+            );
+            after.designer_filter_digest = filter;
+            after.designer_search_hit_count = hit_count;
+            after.properties_popup_open = popup_open;
+            if index == 10 {
+                after.root_visible = false;
+            }
+            let mut pointer = control.as_ref().map(|_| gate_d_test_pointer(None));
+            if index == 6 {
+                pointer.as_mut().unwrap().button = GateDPointerButton::Secondary;
+            }
+            packet.steps.push(GateDStepEvidence {
+                operation,
+                result: GateDStepResult::Applied,
+                related_control: (index == 0).then(|| control.clone().unwrap()),
+                related_pointer: (index == 0).then(|| gate_d_test_pointer(None)),
+                control,
+                pointer,
+                inserted_key_events: match index {
+                    1 => 14,
+                    2 | 4 => 4,
+                    3 => 2 * GATE_D_LONG_LABEL.len(),
+                    5 | 7 => 2,
+                    10 => expected_setup_hotkey_edges(AcceptanceHotkey::ShiftAltWinEnd).len(),
+                    _ => 0,
+                },
+                before,
+                after: after.clone(),
+            });
+            before = after;
+        }
+        let chord = &packet.steps[10];
+        packet.hotkey_proof = Some(GateDHotkeyProof {
+            configured_hotkey: AcceptanceHotkey::ShiftAltWinEnd,
+            input_group_id: 7,
+            invocation_id: 9,
+            exact_key_edge_count: expected_setup_hotkey_edges(AcceptanceHotkey::ShiftAltWinEnd)
+                .len(),
+            exact_key_edge_digest: gate_d_hotkey_edges_digest(&expected_setup_hotkey_edges(
+                AcceptanceHotkey::ShiftAltWinEnd,
+            )),
+            designer_hwnd: 21,
+            designer_process_id: 42,
+            designer_hwnd_after: 21,
+            designer_process_id_after: 42,
+            session_id: chord.before.session_id,
+            session_id_after: chord.after.session_id,
+            root_visible_before: chord.before.root_visible,
+            root_visible_after: chord.after.root_visible,
+            draft_generation: chord.before.generation,
+            draft_generation_after: chord.after.generation,
+            document_digest: chord.before.document_digest,
+            document_digest_after: chord.after.document_digest,
+            selected_members_digest: chord.before.selected_members_digest,
+            selected_members_digest_after: chord.after.selected_members_digest,
+            selection_digest: chord.before.selection_digest,
+            selection_digest_after: chord.after.selection_digest,
+            draft_dirty: chord.before.draft_dirty,
+            draft_dirty_after: chord.after.draft_dirty,
+            properties_popup_open: chord.before.properties_popup_open,
+            properties_popup_open_after: chord.after.properties_popup_open,
+        });
+        let mut checkpoint_control = packet.steps[1].control.clone().unwrap();
+        checkpoint_control.clicked = false;
+        checkpoint_control.trace_sequence = packet.steps[1].after.trace_sequence + 1;
+        packet.local_ui_proof = Some(GateDLocalUiProof {
+            compact_client_size: [520, 380],
+            long_label_digest: gate_d_label_digest(GATE_D_LONG_LABEL),
+            expected_filter_digest: gate_d_label_digest(GATE_D_LONG_LABEL),
+            undo_restored_filter_digest: gate_d_label_digest("starter"),
+            escape_cleared_filter_digest: 0,
+            shared_child_menu_digest: gate_c_private_digest(shared.as_str().as_bytes()),
+            direct_child_link_target_digest: gate_d_test_target_digest(&direct),
+            direct_child_edge_digest: direct_edge,
+            popup_source_target_digest: gate_d_test_target_digest(&long_target),
+            generated_source_target_digest: gate_d_test_target_digest(&dynamic_target),
+            generated_result_index: 0,
+            text_undo_checkpoint: Some(GateDTextUndoCheckpointEvidence {
+                control: checkpoint_control,
+                clip_bounds: [0, 0, 520, 380],
+                value_digest: gate_d_label_digest(GATE_D_TEXT_ORIGINAL_FILTER),
+                focused: true,
+                in_flux: false,
+            }),
+            visible_long_label: GateDVisibleLabelEvidence {
+                session_id: session.editor_session.0,
+                generation: session.generation.0,
+                trace_sequence: packet.steps[3].before.trace_sequence + 1,
+                authored_target_digest: gate_d_test_target_digest(&long_target),
+                expected_rendered_text_digest: gate_d_label_digest(&format!(
+                    "{GATE_D_LONG_LABEL}  ·  {} · Ring {} · Cell {}",
+                    child.name, long_target.ring_id, long_target.cell_id,
+                )),
+                rendered_text_digest: gate_d_label_digest(&format!(
+                    "{GATE_D_LONG_LABEL}  ·  {} · Ring {} · Cell {}",
+                    child.name, long_target.ring_id, long_target.cell_id,
+                )),
+                text_bounds: [12, 42, 200, 145],
+                control_bounds: [10, 40, 204, 150],
+                client_size: [520, 380],
+                fully_visible: true,
+                elided: false,
+            },
+        });
+        packet
+    }
+
+    #[test]
+    fn gate_d_selection_shape_distinguishes_menu_none_and_invalid_cell_identities() {
+        use multi_launcher::radial::authoring::StableSelection;
+        let mut session = gate_d_test_fixture_session();
+        let root = session.draft.default_menu_id.clone();
+        session.select(Some(StableSelection::Menu(root.clone())));
+        let menu = gate_d_test_live_state(&session, std::slice::from_ref(&root), &[], 1);
+        assert_eq!(menu.selection_kind, GateDSelectionKind::Menu);
+        assert!(menu.selection_digest > 0);
+        assert_eq!(menu.selected_member_count, 0);
+        assert!(gate_d_observation_is_well_formed(&menu, false));
+        session.select(None);
+        let none = gate_d_test_live_state(&session, std::slice::from_ref(&root), &[], 2);
+        assert_eq!(none.selection_kind, GateDSelectionKind::None);
+        assert_eq!(none.selection_digest, 0);
+        assert!(gate_d_observation_is_well_formed(&none, false));
+        let mut empty_cell = menu.clone();
+        empty_cell.selection_kind = GateDSelectionKind::Cell;
+        assert!(!gate_d_observation_is_well_formed(&empty_cell, false));
+        let mut empty_cell_set = menu.clone();
+        empty_cell_set.selection_kind = GateDSelectionKind::CellSet;
+        assert!(!gate_d_observation_is_well_formed(&empty_cell_set, false));
+        let mut absent_selection_with_identity = none;
+        absent_selection_with_identity.selection_digest = 123;
+        assert!(!gate_d_observation_is_well_formed(
+            &absent_selection_with_identity,
+            false
+        ));
+        let mut missing_menu_identity = menu.clone();
+        missing_menu_identity.selection_digest = 0;
+        assert!(!gate_d_observation_is_well_formed(
+            &missing_menu_identity,
+            false
+        ));
+        let mut leaked_cell_identity = menu;
+        leaked_cell_identity.primary_target_digest = 999;
+        assert!(!gate_d_observation_is_well_formed(
+            &leaked_cell_identity,
+            false
+        ));
+    }
+
+    #[test]
+    fn gate_d_r0_accepts_production_shaped_two_parent_search_and_local_ui_packets() {
+        for packet in [
+            gate_d_test_navigation_packet(),
+            gate_d_test_local_ui_packet(),
+        ] {
+            let case_id = packet.case_id.clone();
+            assert!(
+                packet
+                    .steps
+                    .iter()
+                    .any(|step| step.after.selection_kind == GateDSelectionKind::Menu)
+            );
+            let serialized = serde_json::to_vec(&packet).unwrap();
+            assert!(
+                serialized.len() <= MAX_GATE_D_CASE_EVIDENCE_BYTES,
+                "{case_id} produced {} bytes against its {}-byte cap",
+                serialized.len(),
+                MAX_GATE_D_CASE_EVIDENCE_BYTES,
+            );
+            let decoded: GateDCaseEvidence = serde_json::from_slice(&serialized).unwrap();
+            assert_eq!(decoded, packet, "compaction preserves every observed value");
+            let mut legacy = serde_json::to_value(&packet).unwrap();
+            assert!(legacy.get("selection_proof").is_none());
+            legacy["selection_proof"] = serde_json::Value::Null;
+            legacy["steps"][1]["related_control"] = serde_json::Value::Null;
+            legacy["steps"][1]["related_pointer"] = serde_json::Value::Null;
+            assert_eq!(
+                serde_json::from_value::<GateDCaseEvidence>(legacy).unwrap(),
+                packet
+            );
+            validate_gate_d_evidence_report(&gate_d_test_report(&case_id, decoded)).unwrap();
+        }
+    }
+
+    fn assert_gate_d_corruption_rejected(
+        valid: &GateDCaseEvidence,
+        name: &str,
+        corrupt: impl FnOnce(&mut GateDCaseEvidence),
+    ) {
+        let mut packet = valid.clone();
+        corrupt(&mut packet);
+        assert!(
+            validate_gate_d_evidence_report(&gate_d_test_report(&valid.case_id, packet)).is_err(),
+            "accepted {name}"
+        );
+    }
+
+    #[test]
+    fn gate_d_r0_rejects_wrong_parent_paths_search_targets_and_back_locations() {
+        let valid = gate_d_test_navigation_packet();
+        validate_gate_d_evidence_report(&gate_d_test_report("D13", valid.clone())).unwrap();
+        let corruptions: &[(&str, fn(&mut GateDCaseEvidence))] = &[
+            ("missing search reveal", |packet| {
+                packet.steps.remove(7);
+            }),
+            ("invented shared-child parent", |packet| {
+                packet.steps[3].after.navigation_menu_id_digests.remove(1);
+                packet.steps[3].after.navigation_edge_digests.remove(0);
+            }),
+            ("wrong submenu edge", |packet| {
+                packet.steps[3].after.navigation_edge_digests[1] = 999
+            }),
+            ("unselected current breadcrumb", |packet| {
+                packet
+                    .navigation_proof
+                    .as_mut()
+                    .unwrap()
+                    .breadcrumbs_after_steps[3][2]
+                    .selected = false
+            }),
+            ("wrong search target ring", |packet| {
+                packet.steps[7].control.as_mut().unwrap().ring_id_digest = Some(999)
+            }),
+            ("wrong search target cell", |packet| {
+                packet.steps[7].control.as_mut().unwrap().cell_id_digest = Some(999)
+            }),
+            ("wrong search query", |packet| {
+                packet.steps[7].before.designer_filter_digest = 999
+            }),
+            ("ambiguous search result", |packet| {
+                packet.steps[6].after.designer_search_hit_count = 2
+            }),
+            ("wrong revealed target", |packet| {
+                let state = &mut packet.steps[7].after;
+                state.selected_member_target_digests = vec![999];
+                state.primary_target_digest = 999;
+                state.range_anchor_target_digest = 999;
+            }),
+            ("Back to another cell", |packet| {
+                let state = &mut packet.steps[8].after;
+                state.selected_member_target_digests = vec![999];
+                state.primary_target_digest = 999;
+                state.range_anchor_target_digest = 999;
+            }),
+            ("changed pending assets", |packet| {
+                packet.steps[7].after.pending_assets_digest = 999
+            }),
+            ("another Designer session", |packet| {
+                packet.steps[8].before.session_id += 1;
+                packet.steps[8].after.session_id += 1;
+                packet.steps[8].control.as_mut().unwrap().session_id += 1;
+            }),
+        ];
+        for (name, corrupt) in corruptions {
+            assert_gate_d_corruption_rejected(&valid, name, corrupt);
+        }
+    }
+
+    #[test]
+    fn gate_d_r0_rejects_generated_source_text_popup_and_hotkey_owner_corruption() {
+        let valid = gate_d_test_local_ui_packet();
+        validate_gate_d_evidence_report(&gate_d_test_report("D14", valid.clone())).unwrap();
+        let corruptions: &[(&str, fn(&mut GateDCaseEvidence))] = &[
+            ("wrong generated source", |packet| {
+                packet.steps[8]
+                    .control
+                    .as_mut()
+                    .unwrap()
+                    .projected_source_target_digest = Some(999)
+            }),
+            ("wrong generated index", |packet| {
+                packet.steps[8]
+                    .control
+                    .as_mut()
+                    .unwrap()
+                    .projected_result_index = Some(1)
+            }),
+            ("wrong Edit source", |packet| {
+                packet.steps[9]
+                    .control
+                    .as_mut()
+                    .unwrap()
+                    .edit_source_target_digest = Some(999)
+            }),
+            ("generated cell became bulk member", |packet| {
+                let state = &mut packet.steps[8].after;
+                state.selected_member_target_digests = vec![999];
+                state.primary_target_digest = 999;
+                state.range_anchor_target_digest = 999;
+            }),
+            ("Edit source selected synthetic ID", |packet| {
+                let state = &mut packet.steps[9].after;
+                state.selected_member_target_digests = vec![999];
+                state.primary_target_digest = 999;
+                state.range_anchor_target_digest = 999;
+            }),
+            ("incomplete Ctrl+A", |packet| {
+                packet.steps[2].inserted_key_events = 2
+            }),
+            ("long label hidden by clip", |packet| {
+                packet
+                    .local_ui_proof
+                    .as_mut()
+                    .unwrap()
+                    .visible_long_label
+                    .fully_visible = false
+            }),
+            ("long label truncated", |packet| {
+                packet
+                    .local_ui_proof
+                    .as_mut()
+                    .unwrap()
+                    .visible_long_label
+                    .elided = true
+            }),
+            ("wrong displayed long label", |packet| {
+                packet
+                    .local_ui_proof
+                    .as_mut()
+                    .unwrap()
+                    .visible_long_label
+                    .rendered_text_digest = 999
+            }),
+            ("long label extends outside control", |packet| {
+                packet
+                    .local_ui_proof
+                    .as_mut()
+                    .unwrap()
+                    .visible_long_label
+                    .text_bounds[2] = 600
+            }),
+            ("text undo failed", |packet| {
+                packet.steps[4].after.designer_filter_digest =
+                    gate_d_label_digest(GATE_D_LONG_LABEL)
+            }),
+            ("text undo reached document history", |packet| {
+                packet.steps[4].after.undo_depth = 0
+            }),
+            ("Escape left local filter", |packet| {
+                packet.steps[5].after.designer_filter_digest = gate_d_label_digest("starter")
+            }),
+            ("popup did not open", |packet| {
+                packet.steps[6].after.properties_popup_open = false
+            }),
+            ("popup Escape did not close", |packet| {
+                packet.steps[7].after.properties_popup_open = true
+            }),
+            ("wrong chord edges", |packet| {
+                packet.hotkey_proof.as_mut().unwrap().exact_key_edge_digest = 999
+            }),
+            ("incomplete chord release", |packet| {
+                packet.hotkey_proof.as_mut().unwrap().exact_key_edge_count -= 1
+            }),
+            ("Designer HWND replaced", |packet| {
+                packet.hotkey_proof.as_mut().unwrap().designer_hwnd_after += 1
+            }),
+            ("Designer PID replaced", |packet| {
+                packet
+                    .hotkey_proof
+                    .as_mut()
+                    .unwrap()
+                    .designer_process_id_after += 1
+            }),
+            ("Designer session replaced", |packet| {
+                packet.hotkey_proof.as_mut().unwrap().session_id_after += 1
+            }),
+            ("dirty draft lost", |packet| {
+                packet.steps[10].after.draft_dirty = false
+            }),
+            ("document changed during chord", |packet| {
+                packet.steps[10].after.document_digest += 1
+            }),
+            ("ROOT did not toggle", |packet| {
+                packet.hotkey_proof.as_mut().unwrap().root_visible_after =
+                    packet.hotkey_proof.as_ref().unwrap().root_visible_before
+            }),
+        ];
+        for (name, corrupt) in corruptions {
+            assert_gate_d_corruption_rejected(&valid, name, corrupt);
+        }
+
+        let mut wrong_configured_chord = gate_d_test_report("D14", valid);
+        let packet = wrong_configured_chord
+            .gate_d_evidence
+            .iter_mut()
+            .find(|packet| packet.case_id == "D14")
+            .unwrap();
+        let proof = packet.hotkey_proof.as_mut().unwrap();
+        proof.configured_hotkey = AcceptanceHotkey::F11;
+        proof.exact_key_edge_count = expected_setup_hotkey_edges(AcceptanceHotkey::F11).len();
+        proof.exact_key_edge_digest =
+            gate_d_hotkey_edges_digest(&expected_setup_hotkey_edges(AcceptanceHotkey::F11));
+        packet.steps[10].inserted_key_events = proof.exact_key_edge_count;
+        assert!(gate_d_case_contract_is_valid(packet));
+        assert!(
+            validate_gate_d_evidence_report(&wrong_configured_chord).is_err(),
+            "F11 evidence cannot prove the configured Shift+Alt+Win+End chord"
+        );
+    }
+
+    #[test]
+    fn gate_d_local_text_undo_contract_requires_the_owned_starter_checkpoint() {
+        let valid = gate_d_test_local_ui_packet();
+        validate_gate_d_evidence_report(&gate_d_test_report("D14", valid.clone())).unwrap();
+        assert_gate_d_corruption_rejected(&valid, "missing checkpoint", |packet| {
+            packet.local_ui_proof.as_mut().unwrap().text_undo_checkpoint = None;
+        });
+        let corruptions: &[(&str, fn(&mut GateDTextUndoCheckpointEvidence))] = &[
+            ("unsettled starter", |proof| proof.in_flux = true),
+            ("different value", |proof| proof.value_digest += 1),
+            ("unfocused field", |proof| proof.focused = false),
+            ("different field", |proof| {
+                proof.control.text_edit_field_digest = Some(999)
+            }),
+            ("missing field identity", |proof| {
+                proof.control.text_edit_field_digest = None
+            }),
+            ("zero field identity", |proof| {
+                proof.control.text_edit_field_digest = Some(0)
+            }),
+            ("different owner", |proof| proof.control.session_id += 1),
+            ("different generation", |proof| {
+                proof.control.generation += 1
+            }),
+            ("different target", |proof| {
+                proof.control.target = GateDControlTarget::BulkLabel
+            }),
+            ("different index", |proof| proof.control.index = Some(0)),
+            ("disabled field", |proof| proof.control.enabled = false),
+            ("input instead of settled frame", |proof| {
+                proof.control.clicked = true
+            }),
+            ("stale checkpoint", |proof| proof.control.trace_sequence = 1),
+            ("checkpoint after replacement", |proof| {
+                proof.control.trace_sequence = u64::MAX
+            }),
+            ("different client", |proof| {
+                proof.control.client_size[0] += 1
+            }),
+            ("pane clipped field", |proof| {
+                proof.clip_bounds[1] = proof.control.bounds[1] + 1
+            }),
+            ("invalid clip", |proof| proof.clip_bounds[2] = 521),
+            ("zero height", |proof| {
+                proof.control.bounds[3] = proof.control.bounds[1]
+            }),
+        ];
+        for (name, corrupt) in corruptions {
+            assert_gate_d_corruption_rejected(&valid, name, |packet| {
+                corrupt(
+                    packet
+                        .local_ui_proof
+                        .as_mut()
+                        .unwrap()
+                        .text_undo_checkpoint
+                        .as_mut()
+                        .unwrap(),
+                );
+            });
+        }
+        assert_gate_d_corruption_rejected(&valid, "draft changed while settling", |packet| {
+            packet.steps[2].before.document_digest += 1;
+        });
+        assert_gate_d_corruption_rejected(&valid, "selection changed while settling", |packet| {
+            packet.steps[2].before.selection_digest += 1;
+        });
+
+        let mut old = serde_json::to_value(&valid).unwrap();
+        old["local_ui_proof"]
+            .as_object_mut()
+            .unwrap()
+            .remove("text_undo_checkpoint");
+        old["steps"][1]["control"]
+            .as_object_mut()
+            .unwrap()
+            .remove("text_edit_field_digest");
+        let parsed: GateDCaseEvidence = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            parsed.local_ui_proof.as_ref().unwrap().text_undo_checkpoint,
+            None
+        );
+        assert_eq!(
+            parsed.steps[1]
+                .control
+                .as_ref()
+                .unwrap()
+                .text_edit_field_digest,
+            None
+        );
+        assert!(!gate_d_case_contract_is_valid(&parsed));
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(!serialized.contains("text_undo_checkpoint"));
+        assert!(!serialized.contains("text_edit_field_digest"));
+    }
+
+    #[test]
+    fn gate_d_r0_rejects_dispatch_marker_history_usage_and_bulk_asset_contamination() {
+        let valid = gate_d_test_local_ui_packet();
+        validate_gate_d_evidence_report(&gate_d_test_report("D14", valid.clone())).unwrap();
+        for index in 0..5 {
+            assert_gate_d_corruption_rejected(&valid, "dispatch contamination", |packet| {
+                let proof = packet.no_action_proof.as_mut().unwrap();
+                let event = match index {
+                    0 => &mut proof.trace_after.result_pointer,
+                    1 => &mut proof.trace_after.universal_action,
+                    2 => &mut proof.trace_after.radial_leaf,
+                    3 => &mut proof.trace_after.query,
+                    _ => &mut proof.trace_after.radial_dispatch_requested,
+                };
+                event.event_count = 1;
+                event.event_digest = 999;
+            });
+        }
+        let corruptions: &[(&str, fn(&mut GateDCaseEvidence))] = &[
+            ("marker executed", |packet| {
+                let proof = packet.no_action_proof.as_mut().unwrap();
+                proof.marker_lines_after = 1;
+                proof.marker_digest_after = 999;
+            }),
+            ("preexisting marker execution", |packet| {
+                let proof = packet.no_action_proof.as_mut().unwrap();
+                proof.marker_lines_before = 1;
+                proof.marker_lines_after = 1;
+            }),
+            ("marker digest changed without count", |packet| {
+                packet.no_action_proof.as_mut().unwrap().marker_digest_after += 1
+            }),
+            ("history count changed", |packet| {
+                packet.steps[8].after.root_history_entries += 1
+            }),
+            ("history digest changed", |packet| {
+                packet.steps[8].after.root_history_digest += 1
+            }),
+            ("usage count changed", |packet| {
+                packet.steps[8].after.root_usage_entries += 1
+            }),
+            ("usage digest changed", |packet| {
+                packet.steps[8].after.root_usage_digest += 1
+            }),
+        ];
+        for (name, corrupt) in corruptions {
+            assert_gate_d_corruption_rejected(&valid, name, corrupt);
+        }
+        let bulk = gate_d_test_bulk_packet();
+        validate_gate_d_evidence_report(&gate_d_test_report("D11", bulk.clone())).unwrap();
+        for step in 0..3 {
+            assert_gate_d_corruption_rejected(&bulk, "bulk pending assets changed", |packet| {
+                packet.steps[step].after.pending_assets_digest += 1;
+            });
+        }
+    }
+
+    #[test]
+    fn gate_d_r0_rejects_missing_or_wrong_exact_selection_and_document_proofs() {
+        let valid_selection = gate_d_test_report("D10", gate_d_test_selection_packet());
+        validate_gate_d_evidence_report(&valid_selection).unwrap();
+
+        let mut missing_selection = valid_selection.clone();
+        missing_selection
+            .gate_d_evidence
+            .iter_mut()
+            .find(|packet| packet.case_id == "D10")
+            .unwrap()
+            .selection_proof = None;
+        assert!(validate_gate_d_evidence_report(&missing_selection).is_err());
+
+        let mut missing_no_action = gate_d_test_report("D10", gate_d_test_selection_packet());
+        missing_no_action
+            .gate_d_evidence
+            .iter_mut()
+            .find(|packet| packet.case_id == "D10")
+            .unwrap()
+            .no_action_proof = None;
+        assert!(validate_gate_d_evidence_report(&missing_no_action).is_err());
+
+        let mut wrong_member = valid_selection;
+        wrong_member
+            .gate_d_evidence
+            .iter_mut()
+            .find(|packet| packet.case_id == "D10")
+            .unwrap()
+            .selection_proof
+            .as_mut()
+            .unwrap()
+            .clicked_target_digests[1] = 999;
+        assert!(validate_gate_d_evidence_report(&wrong_member).is_err());
+
+        let valid_bulk = gate_d_test_report("D11", gate_d_test_bulk_packet());
+        validate_gate_d_evidence_report(&valid_bulk).unwrap();
+        let mut wrong_document = valid_bulk;
+        let bulk_packet = wrong_document
+            .gate_d_evidence
+            .iter_mut()
+            .find(|packet| packet.case_id == "D11")
+            .unwrap();
+        bulk_packet.steps[0].after.document_digest = 21;
+        assert!(validate_gate_d_evidence_report(&wrong_document).is_err());
+
+        for (case_id, mutate) in [("D13", 0usize), ("D14", 1usize)] {
+            let mut missing_proof = gate_d_test_report(case_id, gate_d_test_packet(case_id));
+            let packet = missing_proof
+                .gate_d_evidence
+                .iter_mut()
+                .find(|packet| packet.case_id == case_id)
+                .unwrap();
+            if mutate == 0 {
+                packet.navigation_proof = None;
+            } else {
+                packet.local_ui_proof = None;
+                packet.hotkey_proof = None;
+            }
+            assert!(validate_gate_d_evidence_report(&missing_proof).is_err());
+        }
+    }
+
+    #[test]
     fn gate_c_persisted_reference_accepts_only_supported_fixture_target_actions() {
         let mut binding = gate_c_binding(27, GateCBindingKind::PersistedReference, None);
         binding.route = GateCBindingRoute::RadialInsertion;
@@ -21113,7 +24461,6 @@ mod tests {
 
         fn add_d04_exact_command_transition(packet: &mut GateCCaseEvidence) {
             const COMMAND_DRAFT_DIGEST: u64 = 211_810_165_986_386_231;
-            const ARGUMENTS_DRAFT_DIGEST: u64 = 211_810_165_986_386_232;
 
             let binding = packet
                 .bindings
@@ -21136,7 +24483,16 @@ mod tests {
             advanced.trace_sequence = stage.trace_sequence - 30;
             advanced.binding_digest = previous_binding;
             advanced.selected = true;
-            packet.controls.push(advanced);
+            *packet
+                .controls
+                .iter_mut()
+                .find(|control| {
+                    control.control == "advanced_tab"
+                        && control.identity.surface == stage.identity.surface
+                        && control.identity.session_id == stage.identity.session_id
+                        && control.identity.editor_epoch == stage.identity.editor_epoch
+                })
+                .unwrap() = advanced;
 
             for (name, value, draft_digest, edit_generation, offset) in [
                 (
@@ -21149,7 +24505,7 @@ mod tests {
                 (
                     "exact_args_field",
                     binding.arguments_digest.unwrap(),
-                    ARGUMENTS_DRAFT_DIGEST,
+                    binding.expected_binding_digest,
                     2,
                     10,
                 ),
@@ -22464,7 +25820,6 @@ mod tests {
     #[test]
     fn gate_c_passed_d04_accepts_the_ordered_exact_command_binding_transition() {
         const COMMAND_DRAFT_DIGEST: u64 = 211_810_165_986_386_231;
-        const ARGUMENTS_DRAFT_DIGEST: u64 = 211_810_165_986_386_232;
 
         fn add_transition(report: &mut AcceptanceReport) {
             let d04 = report
@@ -22495,7 +25850,15 @@ mod tests {
             advanced.trace_sequence = stage_sequence - 30;
             advanced.binding_digest = previous_binding;
             advanced.selected = true;
-            d04.controls.push(advanced);
+            *d04.controls
+                .iter_mut()
+                .find(|control| {
+                    control.control == "advanced_tab"
+                        && control.identity.surface == stage.identity.surface
+                        && control.identity.session_id == source_session
+                        && control.identity.editor_epoch == stage.identity.editor_epoch
+                })
+                .unwrap() = advanced;
 
             for (name, value, draft_digest, edit_generation, offset) in [
                 (
@@ -22508,7 +25871,7 @@ mod tests {
                 (
                     "exact_args_field",
                     binding.arguments_digest.unwrap(),
-                    ARGUMENTS_DRAFT_DIGEST,
+                    binding.expected_binding_digest,
                     2,
                     10,
                 ),
@@ -25137,6 +28500,12 @@ mod tests {
             ];
             for (index, (kind, mode)) in specifications.into_iter().enumerate() {
                 let mut binding = gate_c_binding(810 + index as u64, kind, mode);
+                if mode == Some(GateCQueryMode::ExecuteFirst) {
+                    binding.previous_binding_digest = 12_220_886_989_174_898_790;
+                    binding.expected_binding_digest = 5_403_336_813_692_373_665;
+                    binding.reopened_binding_digest = binding.expected_binding_digest;
+                    binding.inspector_binding_digest = binding.expected_binding_digest;
+                }
                 if kind == GateCBindingKind::ExactCommand {
                     binding.expected_binding_digest = 5_425_783_219_819_345_134;
                     binding.previous_binding_digest = 5_403_336_813_692_373_665;
@@ -25174,8 +28543,10 @@ mod tests {
                         710 + index as u64,
                     )
                 };
-                source_identity.edit_generation = if kind == GateCBindingKind::ExactCommand {
-                    3
+                source_identity.edit_generation = if kind == GateCBindingKind::ExactCommand
+                    || mode == Some(GateCQueryMode::ExecuteFirst)
+                {
+                    2
                 } else {
                     10 + index as u64
                 };
@@ -25184,7 +28555,10 @@ mod tests {
                 source_identity.search_request_generation = 2 + index as u64;
                 source_identity.test_request_generation = 0;
                 source_identity.query_digest = binding.query_digest.unwrap_or(31);
-                source_identity.binding_digest = if index == 4 {
+                source_identity.binding_digest = if index == 4
+                    || kind == GateCBindingKind::ExactCommand
+                    || mode == Some(GateCQueryMode::ExecuteFirst)
+                {
                     binding.previous_binding_digest
                 } else {
                     binding.expected_binding_digest
@@ -25196,6 +28570,21 @@ mod tests {
                     200_000 + index as u64 * 2_000,
                     &source_identity,
                 );
+                if index == 4 {
+                    for receipt in &mut binding.controls {
+                        let history_visit = match receipt.kind {
+                            GateCBindingControlKind::Undo => Some((55, 3)),
+                            GateCBindingControlKind::Redo => Some((57, 4)),
+                            GateCBindingControlKind::Save => Some((59, 5)),
+                            _ => None,
+                        };
+                        if let Some((epoch, generation)) = history_visit {
+                            receipt.identity.editor_epoch = epoch;
+                            receipt.identity.draft_generation = generation;
+                            receipt.owner_generation = Some(generation);
+                        }
+                    }
+                }
 
                 let (target_digest, action_digest, result_order) = if index == 4 {
                     (
@@ -25353,7 +28742,6 @@ mod tests {
                     GateCBindingKind::ExactCommand => {
                         const OLD_BINDING_DIGEST: u64 = 5_403_336_813_692_373_665;
                         const COMMAND_DRAFT_DIGEST: u64 = 211_810_165_986_386_231;
-                        const ARGUMENTS_DRAFT_DIGEST: u64 = 211_810_165_986_386_232;
 
                         let mut advanced_identity = source_identity.clone();
                         advanced_identity.edit_generation = 0;
@@ -25372,7 +28760,7 @@ mod tests {
                             let draft_digest = if name == "exact_command_field" {
                                 COMMAND_DRAFT_DIGEST
                             } else {
-                                ARGUMENTS_DRAFT_DIGEST
+                                binding.expected_binding_digest
                             };
                             let mut input_identity = source_identity.clone();
                             input_identity.edit_generation = edit_generation;
@@ -25536,6 +28924,155 @@ mod tests {
         validate_gate_c_evidence_report(&report)
             .expect("the complete live-shaped D04 failure is losslessly representable under cap");
 
+        let execute_first = d04
+            .bindings
+            .iter()
+            .find(|binding| binding.query_mode == Some(GateCQueryMode::ExecuteFirst))
+            .unwrap();
+        let query_stage = execute_first
+            .controls
+            .iter()
+            .find(|receipt| receipt.kind == GateCBindingControlKind::Stage)
+            .unwrap();
+        let mode = d04
+            .controls
+            .iter()
+            .find(|control| {
+                control.control == "query_mode"
+                    && control.clicked
+                    && control.changed
+                    && control.identity.session_id == query_stage.identity.session_id
+            })
+            .unwrap();
+        assert_eq!(mode.identity.edit_generation, 2);
+        assert_eq!(query_stage.identity.edit_generation, 2);
+        assert_eq!(
+            query_stage.identity.binding_digest,
+            12_220_886_989_174_898_790
+        );
+        assert_eq!(query_stage.binding_digest, 5_403_336_813_692_373_665);
+        assert!(mode.trace_sequence < query_stage.trace_sequence);
+        assert!(gate_c_d04_query_mode_stage_transition_is_observed(
+            mode,
+            execute_first,
+            d04
+        ));
+
+        for (kind, epoch, generation) in [
+            (GateCBindingControlKind::Undo, 55, 3),
+            (GateCBindingControlKind::Redo, 57, 4),
+            (GateCBindingControlKind::Save, 59, 5),
+        ] {
+            for missing in [true, false] {
+                let mut corrupted = report.clone();
+                let packet = corrupted
+                    .gate_c_evidence
+                    .iter_mut()
+                    .find(|packet| packet.case_id == "D04")
+                    .unwrap();
+                let receipt = packet.bindings[4]
+                    .controls
+                    .iter()
+                    .find(|receipt| receipt.kind == kind)
+                    .unwrap()
+                    .clone();
+                assert_eq!(
+                    (
+                        receipt.identity.editor_epoch,
+                        receipt.identity.draft_generation
+                    ),
+                    (epoch, generation)
+                );
+                if missing {
+                    packet
+                        .controls
+                        .retain(|control| control.trace_sequence != receipt.trace_sequence);
+                } else {
+                    packet
+                        .controls
+                        .iter_mut()
+                        .find(|control| control.trace_sequence == receipt.trace_sequence)
+                        .unwrap()
+                        .identity
+                        .editor_epoch -= 1;
+                }
+                assert!(gate_c_compact_failed_d04_packet(packet, CaseStatus::Failed));
+                assert_eq!(packet.bindings.len(), 2);
+                assert!(!gate_c_binding_control_links_are_valid(
+                    &packet.bindings[1],
+                    packet,
+                    true
+                ));
+                assert!(
+                    validate_gate_c_evidence_report(&corrupted).is_err(),
+                    "R0 must reject the {kind:?} missing={missing} exact historical link"
+                );
+            }
+        }
+
+        // Preserve the real pre-accept identity in both representations of the
+        // Stage receipt. A fabricated post-binding identity or extra edit must
+        // fail even when the receipt still links to the same clicked control.
+        for binding_index in [2, 3] {
+            for post_binding in [true, false] {
+                let mut corrupted = report.clone();
+                let packet = corrupted
+                    .gate_c_evidence
+                    .iter_mut()
+                    .find(|packet| packet.case_id == "D04")
+                    .unwrap();
+                let binding = &mut packet.bindings[binding_index];
+                let stage = binding
+                    .controls
+                    .iter_mut()
+                    .find(|receipt| receipt.kind == GateCBindingControlKind::Stage)
+                    .unwrap();
+                if post_binding {
+                    stage.identity.binding_digest = binding.expected_binding_digest;
+                } else {
+                    stage.identity.edit_generation += 1;
+                }
+                let stage = stage.clone();
+                packet
+                    .controls
+                    .iter_mut()
+                    .find(|control| control.trace_sequence == stage.trace_sequence)
+                    .unwrap()
+                    .identity = stage.identity;
+                assert!(!gate_c_binding_control_links_are_valid(
+                    &packet.bindings[binding_index],
+                    packet,
+                    true
+                ));
+                assert!(
+                    validate_gate_c_evidence_report(&corrupted).is_err(),
+                    "fabricated Stage identity for binding {binding_index}, post_binding={post_binding}"
+                );
+            }
+        }
+
+        let assignment_corruptions: &[fn(&mut GateCBindingEvidence)] = &[
+            |binding| binding.document_applied_digest = binding.document_before_digest,
+            |binding| binding.history_applied_digest = binding.history_before_digest,
+            |binding| binding.undo_depth_after = binding.undo_depth_before,
+            |binding| binding.mutation_count = 0,
+            |binding| binding.reopened_binding_digest = binding.previous_binding_digest,
+            |binding| binding.inspector_binding_digest = binding.previous_binding_digest,
+        ];
+        for corrupt in assignment_corruptions {
+            let mut corrupted = report.clone();
+            let packet = corrupted
+                .gate_c_evidence
+                .iter_mut()
+                .find(|packet| packet.case_id == "D04")
+                .unwrap();
+            corrupt(&mut packet.bindings[3]);
+            assert!(
+                validate_gate_c_evidence_report(&corrupted).is_err(),
+                "assignment remains independently proven after accepting the pre-Stage identity"
+            );
+        }
+
         let mut pre_assignment_failure = report.clone();
         let d04 = pre_assignment_failure
             .gate_c_evidence
@@ -25582,27 +29119,6 @@ mod tests {
         d04.draft_generation = final_reopen.draft_generation;
         d04.editor_surface = Some(final_reopen.surface);
         d04.editor_identity = Some(final_reopen);
-        for binding_index in 0..3 {
-            let stage = d04.bindings[binding_index]
-                .controls
-                .iter()
-                .find(|receipt| receipt.kind == GateCBindingControlKind::Stage)
-                .unwrap()
-                .clone();
-            let mut tabs = d04.controls.iter_mut().filter(|control| {
-                control.control == "query_tab" && control.identity == stage.identity
-            });
-            let mut tab_count = 0usize;
-            for (offset, tab) in tabs.by_ref().enumerate() {
-                tab_count += 1;
-                tab.identity.edit_generation = stage.identity.edit_generation.saturating_sub(1);
-                tab.trace_sequence = stage.trace_sequence - 6 + offset as u64;
-            }
-            assert!(
-                tab_count > 0,
-                "each preceding query tab is retained for transaction {binding_index}"
-            );
-        }
         let execute_first_binding = d04.bindings[2].clone();
         let execute_first_stage = execute_first_binding
             .controls
@@ -25666,6 +29182,55 @@ mod tests {
             &completed_edit,
             d04
         ));
+        for binding_index in 0..3 {
+            let stage = d04.bindings[binding_index]
+                .controls
+                .iter()
+                .find(|receipt| receipt.kind == GateCBindingControlKind::Stage)
+                .unwrap()
+                .clone();
+            let first_input_sequence = d04
+                .controls
+                .iter()
+                .filter(|control| {
+                    gate_c_same_editor_visit(&control.identity, &stage.identity)
+                        && (control.clicked || control.changed)
+                })
+                .map(|control| control.trace_sequence)
+                .min()
+                .unwrap();
+            let mut tab_count = 0usize;
+            for (offset, tab) in d04
+                .controls
+                .iter_mut()
+                .filter(|control| {
+                    control.control == "query_tab" && control.identity == stage.identity
+                })
+                .enumerate()
+            {
+                tab_count += 1;
+                tab.identity.edit_generation = stage.identity.edit_generation.saturating_sub(1);
+                tab.trace_sequence = first_input_sequence - 6 + offset as u64;
+                assert!(tab.trace_sequence < first_input_sequence);
+            }
+            assert_eq!(
+                tab_count, 6,
+                "all preceding query tabs remain for transaction {binding_index}"
+            );
+        }
+        let invalid_controls = d04
+            .controls
+            .iter()
+            .filter(|control| {
+                !gate_c_control_is_valid(control)
+                    || !gate_c_control_identity_is_observed(control, d04, Some(CaseStatus::Failed))
+                    || !gate_c_control_binding_is_correlated(control, d04)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            invalid_controls.is_empty(),
+            "invalid pre-assignment D04 controls: {invalid_controls:#?}"
+        );
         validate_gate_c_evidence_report(&pre_assignment_failure).expect(
             "Failed D04 before Inspector assignment retains its four Properties visits and the completed same-query edit/Search/Stage lineage",
         );
@@ -25941,6 +29506,33 @@ mod tests {
         assert_eq!(d04.bindings[0].kind, GateCBindingKind::ExactCommand);
         assert_eq!(d04.bindings[1].kind, GateCBindingKind::PersistedReference);
         assert_eq!(d04.bindings[1].route, GateCBindingRoute::InspectorDirect);
+        for (kind, epoch, generation) in [
+            (GateCBindingControlKind::Undo, 55, 3),
+            (GateCBindingControlKind::Redo, 57, 4),
+            (GateCBindingControlKind::Save, 59, 5),
+        ] {
+            let receipt = d04.bindings[1]
+                .controls
+                .iter()
+                .find(|receipt| receipt.kind == kind)
+                .unwrap();
+            let observed = d04
+                .controls
+                .iter()
+                .find(|control| control.trace_sequence == receipt.trace_sequence)
+                .unwrap();
+            assert_eq!(
+                (
+                    observed.identity.editor_epoch,
+                    observed.identity.draft_generation
+                ),
+                (epoch, generation)
+            );
+            assert_eq!(observed.identity, receipt.identity);
+            assert_eq!(observed.owner_generation, Some(generation));
+            assert_eq!(observed.owner_session_id, receipt.owner_session_id);
+            assert!(observed.clicked && observed.enabled);
+        }
         assert_eq!(d04.searches.len(), 3);
         assert_eq!(d04.provider_lifecycle.len(), 12);
         assert_eq!(d04.ordered_results.len(), 3);
@@ -25989,7 +29581,7 @@ mod tests {
         );
         assert_eq!(command_input.identity.edit_generation, 1);
         assert_eq!(arguments_input.identity.edit_generation, 2);
-        assert_eq!(stage_receipt.identity.edit_generation, 3);
+        assert_eq!(stage_receipt.identity.edit_generation, 2);
         assert_eq!(advanced.identity.binding_digest, 5_403_336_813_692_373_665);
         assert_eq!(
             command_input.identity.binding_digest,
@@ -26009,8 +29601,9 @@ mod tests {
         );
         assert_eq!(
             stage_receipt.identity.binding_digest,
-            5_425_783_219_819_345_134
+            5_403_336_813_692_373_665
         );
+        assert_eq!(arguments_input.binding_digest, stage_receipt.binding_digest);
         assert!(gate_c_d04_binding_input_is_observed(advanced, d04));
         assert!(gate_c_d04_binding_input_is_observed(command_input, d04));
         assert!(gate_c_d04_binding_input_is_observed(arguments_input, d04));
@@ -26173,6 +29766,10 @@ mod tests {
             .find(|binding| binding.kind == GateCBindingKind::ExactCommand)
             .unwrap();
         assert!(!gate_c_binding_control_links_are_valid(binding, d04, true));
+        assert!(
+            validate_gate_c_evidence_report(&command_skips_draft_binding).is_err(),
+            "R0 cannot replace the partial-command transition with two final event digests"
+        );
 
         let mut swapped_clicked_identity = report.clone();
         let d04 = swapped_clicked_identity
@@ -28040,6 +31637,158 @@ mod tests {
     }
 
     #[test]
+    fn gate_c_d09_accepts_exact_late_rejection_before_reopened_cell_qualification() {
+        let mut report = valid_gate_c_evidence_report();
+        let packet = report
+            .gate_c_evidence
+            .iter_mut()
+            .find(|packet| packet.case_id == "D09")
+            .unwrap();
+        let reopened = packet.initial_snapshots[0];
+        let retired = packet
+            .provider_lifecycle
+            .iter()
+            .find(|event| {
+                event.edge == GateCProviderEdge::WorkerStarted
+                    && event.trace_sequence > packet.authoring_states[1].trace_sequence
+                    && event.trace_sequence < packet.authoring_states[2].trace_sequence
+            })
+            .unwrap()
+            .identity
+            .clone();
+        for event in &mut packet.provider_lifecycle {
+            if event.identity == retired {
+                if event.edge == GateCProviderEdge::WorkerCompleted {
+                    event.trace_sequence = reopened.trace_sequence + 1;
+                } else if event.edge == GateCProviderEdge::Rejected {
+                    event.trace_sequence = reopened.trace_sequence + 2;
+                }
+            }
+        }
+        packet
+            .provider_lifecycle
+            .sort_by_key(|event| event.trace_sequence);
+        let first_reopened_cell = packet
+            .inspector_text_edits
+            .iter()
+            .filter(|edit| edit.session_id == reopened.session_id)
+            .map(|edit| edit.trace_sequence)
+            .min()
+            .unwrap();
+        assert!(reopened.trace_sequence + 2 < first_reopened_cell);
+        validate_gate_c_evidence_report(&report).expect(
+            "exact late rejection may precede the later reopened cell/Inspector qualification",
+        );
+
+        let corruptions: &[fn(&mut GateCCaseEvidence, &GateCEditorIdentity)] = &[
+            |packet, retired| {
+                let reopen_sequence = packet.initial_snapshots[0].trace_sequence;
+                packet
+                    .provider_lifecycle
+                    .iter_mut()
+                    .find(|event| {
+                        event.identity == *retired
+                            && event.edge == GateCProviderEdge::WorkerCompleted
+                    })
+                    .unwrap()
+                    .trace_sequence = reopen_sequence;
+            },
+            |packet, retired| {
+                let completed_sequence = packet
+                    .provider_lifecycle
+                    .iter()
+                    .find(|event| {
+                        event.identity == *retired
+                            && event.edge == GateCProviderEdge::WorkerCompleted
+                    })
+                    .unwrap()
+                    .trace_sequence;
+                packet
+                    .provider_lifecycle
+                    .iter_mut()
+                    .find(|event| {
+                        event.identity == *retired && event.edge == GateCProviderEdge::Rejected
+                    })
+                    .unwrap()
+                    .trace_sequence = completed_sequence;
+            },
+            |packet, retired| {
+                let terminal_boundary = packet.authoring_states[3].trace_boundary_sequence;
+                packet
+                    .provider_lifecycle
+                    .iter_mut()
+                    .find(|event| {
+                        event.identity == *retired && event.edge == GateCProviderEdge::Rejected
+                    })
+                    .unwrap()
+                    .trace_sequence = terminal_boundary;
+            },
+            |packet, retired| {
+                packet
+                    .provider_lifecycle
+                    .iter_mut()
+                    .find(|event| {
+                        event.identity == *retired && event.edge == GateCProviderEdge::Rejected
+                    })
+                    .unwrap()
+                    .identity
+                    .search_request_generation += 1;
+            },
+            |packet, retired| {
+                packet
+                    .provider_lifecycle
+                    .iter_mut()
+                    .find(|event| {
+                        event.identity == *retired && event.edge == GateCProviderEdge::Rejected
+                    })
+                    .unwrap()
+                    .identity
+                    .session_id = packet.initial_snapshots[0].session_id;
+            },
+            |packet, retired| {
+                packet
+                    .provider_lifecycle
+                    .iter_mut()
+                    .find(|event| {
+                        event.identity == *retired && event.edge == GateCProviderEdge::Rejected
+                    })
+                    .unwrap()
+                    .edge = GateCProviderEdge::Applied;
+            },
+            |packet, retired| {
+                packet.provider_lifecycle.retain(|event| {
+                    event.identity != *retired || event.edge != GateCProviderEdge::Rejected
+                });
+            },
+            |packet, _| packet.initial_snapshots[0].terminal = false,
+            |packet, _| {
+                packet.authoring_states[3].baseline_request_id =
+                    Some(packet.authoring_states[0].request_id)
+            },
+            |packet, _| packet.authoring_states[3].document_digest += 1,
+            |packet, _| packet.authoring_states[3].selected_cell_digest += 1,
+            |packet, _| {
+                packet
+                    .inspector_text_edits
+                    .retain(|edit| edit.session_id != packet.initial_snapshots[0].session_id)
+            },
+        ];
+        for corrupt in corruptions {
+            let mut wrong = report.clone();
+            let packet = wrong
+                .gate_c_evidence
+                .iter_mut()
+                .find(|packet| packet.case_id == "D09")
+                .unwrap();
+            corrupt(packet, &retired);
+            assert!(
+                validate_gate_c_evidence_report(&wrong).is_err(),
+                "early release must retain exact identity/order, terminal pairing, readback and selection proof"
+            );
+        }
+    }
+
+    #[test]
     fn gate_c_d09_accepts_rejection_at_terminal_capture_but_not_after_its_boundary() {
         let mut report = valid_gate_c_evidence_report();
         let packet = report
@@ -29885,6 +33634,64 @@ mod tests {
     }
 
     #[test]
+    fn gate_d_suite_accepts_exact_configured_chord() {
+        let arguments = parse(&[
+            "--output",
+            "gate-d-exact-chord",
+            "--suite",
+            "gate-d",
+            "--hotkey",
+            "shift-alt-win-end",
+            "--source-revision",
+            "gate-d-cli-test",
+        ])
+        .unwrap();
+        assert_eq!(arguments.suite, AcceptanceSuite::GateD);
+        assert_eq!(arguments.hotkey, AcceptanceHotkey::ShiftAltWinEnd);
+        assert!(arguments.profile_copy.is_none());
+        assert_eq!(
+            arguments.source_revision.as_deref(),
+            Some("gate-d-cli-test")
+        );
+    }
+
+    #[test]
+    fn exact_chord_rejects_unsupported_suites_and_copied_gate_d() {
+        for suite in ["all", "query", "gate-c"] {
+            let error = parse(&[
+                "--output",
+                "unsupported-chord",
+                "--suite",
+                suite,
+                "--hotkey",
+                "shift-alt-win-end",
+            ])
+            .err()
+            .expect("exact chord remains restricted to its supported suites");
+            assert_eq!(
+                error,
+                "--hotkey shift-alt-win-end requires --suite hotkey or gate-d"
+            );
+        }
+        let error = parse(&[
+            "--output",
+            "copied-gate-d-chord",
+            "--suite",
+            "gate-d",
+            "--hotkey",
+            "shift-alt-win-end",
+            "--profile-copy",
+            "supplied-profile",
+        ])
+        .err()
+        .expect("Gate D still requires its isolated deterministic fixture");
+        assert_eq!(
+            error,
+            "--suite gate-d cannot be combined with --profile-copy"
+        );
+    }
+
+    #[test]
     fn chord_fixture_uses_shift_alt_win_end_as_the_configured_launcher_hotkey() {
         let profile = tempfile::tempdir().unwrap();
         let fixture = deterministic_fixture_for_hotkey(
@@ -30153,8 +33960,31 @@ mod tests {
     fn hotkey_matrix_formatter_round_trips_through_report_validator() {
         let evidence = hotkey_matrix_case_evidence(AcceptanceHotkey::ShiftAltWinEnd);
         assert!(evidence.len() < MAX_RESULT_BYTES);
+        assert_eq!(
+            observed_field(&evidence, "fixture_timing="),
+            Some("configured_intervals")
+        );
+        assert_eq!(observed_field(&evidence, "down_ms="), Some("25"));
+        assert_eq!(observed_field(&evidence, "released_ms="), Some("50"));
+        assert_eq!(
+            observed_field(&evidence, "observed_cadence="),
+            Some("primary_edges_10..100ms")
+        );
         assert!(evidence.contains("input_desktop=thread=Default,active=Default"));
         assert!(validate_required_case_evidence("H04", CaseStatus::Passed, &evidence).is_ok());
+        for (from, to) in [
+            ("down_ms=25", "down_ms=50"),
+            ("released_ms=50", "released_ms=75"),
+            ("released_ms=50", "released_ms=100"),
+            ("decisions=86", "decisions=85"),
+            ("readable_decisions=3", "readable_decisions=2"),
+        ] {
+            let incorrect = evidence.replace(from, to);
+            assert!(
+                validate_required_case_evidence("H04", CaseStatus::Passed, &incorrect).is_err(),
+                "accepted incorrect fixture/matrix: {from} -> {to}",
+            );
+        }
         let missing_groups = evidence.replace("matrix_groups=10; ", "");
         assert!(
             validate_required_case_evidence("H04", CaseStatus::Passed, &missing_groups).is_err()
@@ -31402,6 +35232,7 @@ mod tests {
             hotkey_evidence: Vec::new(),
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
+            gate_d_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
@@ -31664,6 +35495,7 @@ mod tests {
             hotkey_evidence: Vec::new(),
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
+            gate_d_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,

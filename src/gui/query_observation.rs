@@ -40,15 +40,57 @@ pub(crate) struct AuthoringEditorObservation {
     pub generation: u64,
     pub selected_target_digest: u64,
     pub selected_cell_digest: u64,
+    pub selection_kind: AuthoringSelectionKind,
+    pub selected_member_count: usize,
+    pub selected_members_digest: u64,
+    pub selected_member_target_digests: Vec<u64>,
+    pub primary_cell_digest: u64,
+    pub range_anchor_digest: u64,
+    pub primary_target_digest: u64,
+    pub range_anchor_target_digest: u64,
+    pub navigation_path_digest: u64,
+    pub navigation_menu_id_digests: Vec<u64>,
+    pub navigation_edge_digests: Vec<u64>,
+    pub pending_assets_digest: u64,
+    pub designer_filter_digest: u64,
+    pub designer_search_hit_count: usize,
     pub document_digest: u64,
     pub assigned_binding_digest: u64,
     pub properties_staged_digest: Option<u64>,
     pub draft_dirty: bool,
+    pub properties_popup_open: bool,
     pub properties_dirty: bool,
     pub undo_depth: usize,
     pub redo_depth: usize,
     pub initial_snapshot_pending: bool,
     pub action_editor: Option<ActionEditorObservation>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthoringSelectionKind {
+    None,
+    Menu,
+    Ring,
+    Cell,
+    CellSet,
+    Skin,
+    Asset,
+}
+
+impl From<Option<&crate::radial::authoring::StableSelection>> for AuthoringSelectionKind {
+    fn from(selection: Option<&crate::radial::authoring::StableSelection>) -> Self {
+        use crate::radial::authoring::StableSelection;
+        match selection {
+            None => Self::None,
+            Some(StableSelection::Menu(_)) => Self::Menu,
+            Some(StableSelection::Ring { .. }) => Self::Ring,
+            Some(StableSelection::Cell { .. }) => Self::Cell,
+            Some(StableSelection::CellSet(_)) => Self::CellSet,
+            Some(StableSelection::Skin(_)) => Self::Skin,
+            Some(StableSelection::Asset(_)) => Self::Asset,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1153,10 +1195,25 @@ mod tests {
             generation: 11,
             selected_target_digest: 13,
             selected_cell_digest: 17,
+            selection_kind: AuthoringSelectionKind::Cell,
+            selected_member_count: 1,
+            selected_members_digest: 17,
+            selected_member_target_digests: vec![117],
+            primary_cell_digest: 17,
+            range_anchor_digest: 17,
+            primary_target_digest: 117,
+            range_anchor_target_digest: 117,
+            navigation_path_digest: 0,
+            navigation_menu_id_digests: Vec::new(),
+            navigation_edge_digests: Vec::new(),
+            pending_assets_digest: 0,
+            designer_filter_digest: 0,
+            designer_search_hit_count: 0,
             document_digest: 19,
             assigned_binding_digest: 23,
             properties_staged_digest: None,
             draft_dirty: true,
+            properties_popup_open: false,
             properties_dirty: false,
             undo_depth: 2,
             redo_depth: 0,

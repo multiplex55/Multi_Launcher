@@ -6,7 +6,7 @@ mod suite;
 use super::{AcceptanceHotkey, foreign_edge_indices_interfering_owned_spans, owned_gesture_spans};
 pub(super) use suite::{
     CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_gate_c_suite,
-    run_hotkey_suite, run_query_suite, run_suite,
+    run_gate_d_suite, run_hotkey_suite, run_query_suite, run_suite,
 };
 
 use std::fmt::Write as _;
@@ -50,8 +50,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE,
     MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
     MOUSEINPUT, RegisterHotKey, SendInput, UnregisterHotKey, VIRTUAL_KEY, VK_CONTROL, VK_END,
-    VK_F4, VK_F11, VK_F24, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-    VK_RBUTTON, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+    VK_ESCAPE, VK_F4, VK_F11, VK_F24, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    VK_MENU, VK_RBUTTON, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
@@ -111,6 +111,7 @@ const FOCUS_ANCHOR_COMMAND_MESSAGE: u32 = WM_APP + 0x55;
 enum AcceptanceTraceBudgetProfile {
     Standard,
     GateC,
+    GateD,
 }
 
 impl AcceptanceTraceBudgetProfile {
@@ -118,6 +119,7 @@ impl AcceptanceTraceBudgetProfile {
         match self {
             Self::Standard => None,
             Self::GateC => Some("gate_c_v1"),
+            Self::GateD => Some("gate_d_v1"),
         }
     }
 }
@@ -250,8 +252,10 @@ pub(super) struct RunnerChordEdge {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RunnerChordTiming {
-    pub primary_hold_ms: Vec<u128>,
-    pub released_gap_ms: Vec<u128>,
+    // Preserve physical-edge precision for admission. Millisecond conversion
+    // belongs to the bounded report summary after the timing checks pass.
+    pub primary_holds: Vec<Duration>,
+    pub released_gaps: Vec<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,8 +331,8 @@ impl RunnerChordObservation {
             AcceptanceHotkey::ShiftAltWinEnd => 3,
         };
         let primary_up_offset = primary_down_offset + 1;
-        let mut primary_hold_ms = Vec::with_capacity(taps);
-        let mut released_gap_ms = Vec::with_capacity(taps.saturating_sub(1));
+        let mut primary_holds = Vec::with_capacity(taps);
+        let mut released_gaps = Vec::with_capacity(taps.saturating_sub(1));
         for tap in 0..taps {
             let base = tap * edges_per_tap;
             let down = self.ordered_edges[base + primary_down_offset];
@@ -340,7 +344,7 @@ impl RunnerChordObservation {
                 .at
                 .checked_duration_since(down.at)
                 .ok_or_else(|| "primary key release preceded its press".to_string())?;
-            primary_hold_ms.push(hold.as_millis());
+            primary_holds.push(hold);
             if tap + 1 < taps {
                 let next_down = self.ordered_edges[(tap + 1) * edges_per_tap + primary_down_offset];
                 if !next_down.down || next_down.vk != down.vk {
@@ -350,12 +354,12 @@ impl RunnerChordObservation {
                     .at
                     .checked_duration_since(up.at)
                     .ok_or_else(|| "next primary press preceded the prior release".to_string())?;
-                released_gap_ms.push(gap.as_millis());
+                released_gaps.push(gap);
             }
         }
         Ok(RunnerChordTiming {
-            primary_hold_ms,
-            released_gap_ms,
+            primary_holds,
+            released_gaps,
         })
     }
 
@@ -2058,6 +2062,23 @@ impl NativeChild {
         )
     }
 
+    pub fn launch_gate_d(
+        executable: &Path,
+        profile: &Path,
+        log_path: &Path,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) -> Result<Self, NativeLaunchFailure> {
+        Self::launch_with_trace_profile(
+            executable,
+            profile,
+            log_path,
+            stdout_path,
+            stderr_path,
+            AcceptanceTraceBudgetProfile::GateD,
+        )
+    }
+
     fn launch_with_trace_profile(
         executable: &Path,
         profile: &Path,
@@ -3251,6 +3272,21 @@ impl OwnedKeyboardReleaseGuard {
     }
 
     fn release(&mut self) -> Result<NativeInputEdgeEvidence, String> {
+        self.release_with(
+            send_owned_keyboard_release,
+            verify_no_acceptance_hotkey_keys_held,
+            cleanup_owned_keyboard_keys,
+            keys_still_down,
+        )
+    }
+
+    fn release_with(
+        &mut self,
+        send_release: impl FnOnce(&[INPUT], &str) -> Result<NativeInputEdgeEvidence, (usize, String)>,
+        verify_release: impl FnOnce(&[OwnedKeyboardKey]) -> Result<String, String>,
+        cleanup: impl FnOnce(&mut Vec<OwnedKeyboardKey>) -> String,
+        physically_down: impl FnOnce(&[OwnedKeyboardKey]) -> Vec<OwnedKeyboardKey>,
+    ) -> Result<NativeInputEdgeEvidence, String> {
         if self.owned.is_empty() {
             return Err("owned keyboard release was requested with no inserted key-downs".into());
         }
@@ -3260,12 +3296,12 @@ impl OwnedKeyboardReleaseGuard {
             .copied()
             .map(OwnedKeyboardKey::up)
             .collect::<Vec<_>>();
-        match send_owned_keyboard_release(&events, "owned chord key-up") {
+        match send_release(&events, "owned chord key-up") {
             Ok(mut evidence) => {
                 let retired = retire_inserted_keyboard_ups(
                     &mut self.owned,
                     &release_order,
-                    release_order.len(),
+                    evidence.inserted,
                 );
                 if !self.owned.is_empty() {
                     return Err(format!(
@@ -3274,7 +3310,7 @@ impl OwnedKeyboardReleaseGuard {
                         describe_owned_keyboard_keys(&self.owned)
                     ));
                 }
-                let cleanup_status = verify_no_acceptance_hotkey_keys_held(&release_order)?;
+                let cleanup_status = verify_release(&release_order)?;
                 evidence.cleanup_status = cleanup_status;
                 Ok(evidence)
             }
@@ -3286,13 +3322,13 @@ impl OwnedKeyboardReleaseGuard {
                     .iter()
                     .map(|key| format!("{:?}", key.vk))
                     .collect::<Vec<_>>();
-                let cleanup = cleanup_owned_keyboard_keys(&mut self.owned);
+                let cleanup = cleanup(&mut self.owned);
                 let held_after_cleanup = self
                     .owned
                     .iter()
                     .map(|key| format!("{:?}", key.vk))
                     .collect::<Vec<_>>();
-                let physically_down = keys_still_down(&release_order);
+                let physically_down = physically_down(&release_order);
                 let external_interference =
                     keys_down_without_owned_keydowns(&release_order, &self.owned, &physically_down);
                 Err(format!(
@@ -3311,6 +3347,78 @@ impl Drop for OwnedKeyboardReleaseGuard {
         if !self.owned.is_empty() {
             let _ = self.release();
         }
+    }
+}
+
+struct OwnedModifierGuard {
+    modifier: OwnedKeyboardKey,
+    release_guard: OwnedKeyboardReleaseGuard,
+    down_evidence: NativeInputEdgeEvidence,
+}
+
+fn owned_selection_modifier(modifier: VIRTUAL_KEY) -> Result<OwnedKeyboardKey, String> {
+    let vk = match modifier {
+        VK_CONTROL => VK_LCONTROL,
+        VK_SHIFT => VK_LSHIFT,
+        _ => return Err("selection modifier must be Control or Shift".into()),
+    };
+    Ok(OwnedKeyboardKey {
+        vk,
+        extended: false,
+    })
+}
+
+impl OwnedModifierGuard {
+    fn press(
+        child: &NativeChild,
+        target: &WindowSnapshot,
+        modifier: VIRTUAL_KEY,
+    ) -> Result<Self, String> {
+        let modifier = owned_selection_modifier(modifier)?;
+        child.validate_window(target.hwnd)?;
+        if target.process_id != child.process_id() || target.role != WindowRole::Designer {
+            return Err("selection modifier target is not the candidate-owned Designer".into());
+        }
+        child.focus_window(target)?;
+        let mut release_guard = OwnedKeyboardReleaseGuard::new();
+        let down_evidence = match send_validated_input_allowing_owned_keys(
+            target.hwnd,
+            child.process_id(),
+            &[modifier.down()],
+            "owned Designer selection modifier down",
+            &[],
+        ) {
+            Ok(evidence) => {
+                release_guard.owned.push(modifier);
+                evidence
+            }
+            Err((inserted, error)) => {
+                release_guard
+                    .owned
+                    .extend(std::iter::once(modifier).take(inserted));
+                let cleanup = if release_guard.owned.is_empty() {
+                    "no_owned_keys".to_string()
+                } else {
+                    release_guard
+                        .release()
+                        .map(|evidence| format!("released={}", evidence.inserted))
+                        .unwrap_or_else(|cleanup_error| cleanup_error)
+                };
+                return Err(format!("{error}; cleanup={cleanup}"));
+            }
+        };
+        Ok(Self {
+            modifier,
+            release_guard,
+            down_evidence,
+        })
+    }
+
+    fn release(&mut self) -> Result<NativeInputEdgeEvidence, String> {
+        // An inserted key-down owns its key-up even if focus or foreign modifiers change.
+        let evidence = self.release_guard.release()?;
+        input_modifiers_clear()?;
+        Ok(evidence)
     }
 }
 
@@ -3348,19 +3456,23 @@ fn held_modifiers_except(allowed: &[VIRTUAL_KEY]) -> String {
         ("LeftWin", VK_LWIN),
         ("RightWin", VK_RWIN),
     ];
-    let is_allowed = |key: VIRTUAL_KEY| {
-        allowed.iter().any(|owned| {
-            owned.0 == key.0
-                || (key == VK_SHIFT && matches!(*owned, VK_LSHIFT | VK_RSHIFT))
-                || (key == VK_CONTROL && matches!(*owned, VK_LCONTROL | VK_RCONTROL))
-                || (key == VK_MENU && matches!(*owned, VK_LMENU | VK_RMENU))
-        })
-    };
     keys.iter()
-        .filter(|(_, key)| (unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0) && !is_allowed(*key))
+        .filter(|(_, key)| {
+            (unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0)
+                && !modifier_is_allowed_by_owned_keys(*key, allowed)
+        })
         .map(|(name, _)| *name)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn modifier_is_allowed_by_owned_keys(key: VIRTUAL_KEY, allowed: &[VIRTUAL_KEY]) -> bool {
+    allowed.iter().any(|owned| {
+        *owned == key
+            || (key == VK_SHIFT && matches!(*owned, VK_LSHIFT | VK_RSHIFT))
+            || (key == VK_CONTROL && matches!(*owned, VK_LCONTROL | VK_RCONTROL))
+            || (key == VK_MENU && matches!(*owned, VK_LMENU | VK_RMENU))
+    })
 }
 
 fn find_window(process_id: u32, role: WindowRole) -> Option<WindowSnapshot> {
@@ -3951,6 +4063,15 @@ pub(super) enum AuthoringControlTarget {
     DiscardCells,
     Canvas,
     CanvasCell,
+    ProjectedCell,
+    TreeSearch,
+    TreeSearchClear,
+    TreeSearchResult,
+    BulkLabel,
+    BulkSetLabel,
+    DesignerBack,
+    DesignerBreadcrumb,
+    EditDynamicSource,
     DiscardDraft,
     CellType,
     ActionTypeOption,
@@ -3962,6 +4083,7 @@ pub(super) enum AuthoringControlTarget {
     PopupApplyAndOpen,
     PopupDiscardAndOpen,
     PopupKeepEditing,
+    InspectorDiscardAndContinue,
     InspectorCell,
     SkinRow,
     SkinGlowEnabled,
@@ -3991,6 +4113,8 @@ pub(super) struct AuthoringControlSnapshot {
     pub index: Option<usize>,
     pub trace_sequence: u64,
     pub bounds: [i32; 4],
+    pub clip_bounds: Option<[i32; 4]>,
+    pub text_undo: Option<TextEditUndoSnapshot>,
     pub client_size: [i32; 2],
     pub enabled: bool,
     pub selected: bool,
@@ -3999,8 +4123,25 @@ pub(super) struct AuthoringControlSnapshot {
     pub session_id: u64,
     pub generation: u64,
     pub menu_cell_ids_digest: Option<u64>,
+    pub menu_id_digest: Option<u64>,
+    pub ring_id_digest: Option<u64>,
+    pub cell_id_digest: Option<u64>,
+    pub authored_target_digest: Option<u64>,
+    pub cell_label_digest: Option<u64>,
+    pub projected_source_target_digest: Option<u64>,
+    pub projected_result_index: Option<usize>,
+    pub edit_source_target_digest: Option<u64>,
+    pub edit_source_result_index: Option<usize>,
+    pub breadcrumb_menu_id_digest: Option<u64>,
     pub ring_index: Option<usize>,
     pub slot_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TextEditUndoSnapshot {
+    pub field_id_digest: u64,
+    pub value_digest: u64,
+    pub in_flux: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5436,6 +5577,58 @@ pub(super) fn click_designer_client_bounds(
     click_designer_client_bounds_with_button(child, target, bounds, trace_path, PointerButton::Left)
 }
 
+pub(super) fn click_designer_client_bounds_with_modifier(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+    modifier: VIRTUAL_KEY,
+) -> Result<
+    (
+        PointerClickEvidence,
+        NativeInputEdgeEvidence,
+        NativeInputEdgeEvidence,
+    ),
+    String,
+> {
+    let mut modifier_guard = OwnedModifierGuard::press(child, target, modifier)?;
+    let down = modifier_guard.down_evidence.clone();
+    let owned_vk = modifier_guard.modifier.vk;
+    let (click, up) = finish_designer_click_with_modifier_release(
+        || {
+            click_designer_client_bounds_with_button_and_owned_keys(
+                child,
+                target,
+                bounds,
+                trace_path,
+                PointerButton::Left,
+                &[owned_vk],
+            )
+            .map_err(PointerClickPreDownError::into_message)
+        },
+        || modifier_guard.release(),
+    )?;
+    Ok((click, down, up))
+}
+
+fn finish_designer_click_with_modifier_release<T>(
+    click: impl FnOnce() -> Result<T, String>,
+    release: impl FnOnce() -> Result<NativeInputEdgeEvidence, String>,
+) -> Result<(T, NativeInputEdgeEvidence), String> {
+    let click_result = click();
+    let up_result = release();
+    match (click_result, up_result) {
+        (Ok(click), Ok(up)) => Ok((click, up)),
+        (Err(error), Ok(_)) => Err(format!("{error}; owned selection modifier released")),
+        (Ok(_), Err(error)) => Err(format!(
+            "Designer pointer click completed but owned selection modifier cleanup failed: {error}"
+        )),
+        (Err(click_error), Err(release_error)) => Err(format!(
+            "{click_error}; owned selection modifier cleanup failed: {release_error}"
+        )),
+    }
+}
+
 pub(super) fn click_designer_secondary_bounds(
     child: &NativeChild,
     target: &WindowSnapshot,
@@ -5514,15 +5707,34 @@ fn click_designer_client_bounds_with_button(
     trace_path: &Path,
     button: PointerButton,
 ) -> Result<PointerClickEvidence, String> {
-    click_designer_client_bounds_with_pre_down_check_and_button(
+    click_designer_client_bounds_with_button_and_owned_keys(
         child,
         target,
         bounds,
         trace_path,
         button,
-        |_, _| Ok(()),
+        &[],
     )
     .map_err(PointerClickPreDownError::into_message)
+}
+
+fn click_designer_client_bounds_with_button_and_owned_keys(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+    button: PointerButton,
+    owned_keys: &[VIRTUAL_KEY],
+) -> Result<PointerClickEvidence, PointerClickPreDownError> {
+    click_designer_client_bounds_with_pre_down_check_and_owned_keys(
+        child,
+        target,
+        bounds,
+        trace_path,
+        button,
+        owned_keys,
+        |_, _| Ok(()),
+    )
 }
 
 pub(super) fn click_designer_client_bounds_with_pre_down_check(
@@ -5550,6 +5762,26 @@ fn click_designer_client_bounds_with_pre_down_check_and_button(
     button: PointerButton,
     pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
 ) -> Result<PointerClickEvidence, PointerClickPreDownError> {
+    click_designer_client_bounds_with_pre_down_check_and_owned_keys(
+        child,
+        target,
+        bounds,
+        trace_path,
+        button,
+        &[],
+        pre_down_check,
+    )
+}
+
+fn click_designer_client_bounds_with_pre_down_check_and_owned_keys(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+    button: PointerButton,
+    owned_keys: &[VIRTUAL_KEY],
+    pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
+) -> Result<PointerClickEvidence, PointerClickPreDownError> {
     child.validate_window(target.hwnd)?;
     let mut client = RECT::default();
     unsafe { GetClientRect(target.hwnd, &mut client) }
@@ -5568,7 +5800,7 @@ fn click_designer_client_bounds_with_pre_down_check_and_button(
     if !unsafe { ClientToScreen(target.hwnd, &mut screen_point) }.as_bool() {
         return Err("could not convert Designer semantic point to screen coordinates".into());
     }
-    click_screen_point_with_pre_down_check(
+    click_screen_point_with_pre_down_check_and_owned_keys(
         child,
         target,
         screen_point,
@@ -5581,6 +5813,7 @@ fn click_designer_client_bounds_with_pre_down_check_and_button(
             nudge_trace_point: (nudge_client.x, nudge_client.y),
             target_trace_point: client_point,
         },
+        owned_keys,
         pre_down_check,
     )
 }
@@ -5856,6 +6089,28 @@ fn click_screen_point_with_pre_down_check(
     pointer_move_ack: PointerMoveAcknowledgement<'_>,
     pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
 ) -> Result<PointerClickEvidence, PointerClickPreDownError> {
+    click_screen_point_with_pre_down_check_and_owned_keys(
+        child,
+        target,
+        point,
+        button,
+        operation,
+        pointer_move_ack,
+        &[],
+        pre_down_check,
+    )
+}
+
+fn click_screen_point_with_pre_down_check_and_owned_keys(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    point: POINT,
+    button: PointerButton,
+    operation: &str,
+    pointer_move_ack: PointerMoveAcknowledgement<'_>,
+    owned_keys: &[VIRTUAL_KEY],
+    pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
+) -> Result<PointerClickEvidence, PointerClickPreDownError> {
     child.validate_window(target.hwnd)?;
     let root_screen_click = matches!(pointer_move_ack.kind, PointerTraceKind::RootScreen);
     if root_screen_click {
@@ -5922,12 +6177,14 @@ fn click_screen_point_with_pre_down_check(
     if root_screen_click {
         validate_root_pointer_geometry(target)?;
     }
-    let nudge_movement = send_validated_input(
+    let nudge_movement = send_validated_input_allowing_owned_keys(
         target.hwnd,
         child.process_id(),
         &nudge_movement,
         &format!("{operation} pointer nudge"),
-    )?;
+        owned_keys,
+    )
+    .map_err(|(_, error)| error)?;
     let nudge_correction_events = wait_for_pointer_move_ack(
         child,
         target,
@@ -5952,12 +6209,14 @@ fn click_screen_point_with_pre_down_check(
     if root_screen_click {
         validate_root_pointer_geometry(target)?;
     }
-    let movement = send_validated_input(
+    let movement = send_validated_input_allowing_owned_keys(
         target.hwnd,
         child.process_id(),
         &movement,
         &format!("{operation} pointer move"),
-    )?;
+        owned_keys,
+    )
+    .map_err(|(_, error)| error)?;
     let target_correction_events = wait_for_pointer_move_ack(
         child,
         target,
@@ -6019,12 +6278,20 @@ fn click_screen_point_with_pre_down_check(
             }
             validate_pointer_coverage(target.hwnd, child.process_id(), point, operation)?;
             let trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
-            let evidence = send_validated_input(target.hwnd, child.process_id(), &down, operation)?;
+            let evidence = send_validated_input_allowing_owned_keys(
+                target.hwnd,
+                child.process_id(),
+                &down,
+                operation,
+                owned_keys,
+            )
+            .map_err(|(_, error)| error)?;
             Ok((trace_cursor, evidence))
         },
     )?;
     let button_state_after_down = unsafe { GetAsyncKeyState(button.virtual_key() as i32) };
-    let mut button_guard = MouseButtonGuard::new(target.hwnd, child.process_id(), button);
+    let mut button_guard =
+        MouseButtonGuard::new_with_owned_keys(target.hwnd, child.process_id(), button, owned_keys);
     button_guard.armed = true;
     wait_for_pointer_button_ack(
         &pointer_move_ack,
@@ -7126,6 +7393,15 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
         "DiscardCells" => AuthoringControlTarget::DiscardCells,
         "Canvas" => AuthoringControlTarget::Canvas,
         "CanvasCell" => AuthoringControlTarget::CanvasCell,
+        "ProjectedCell" => AuthoringControlTarget::ProjectedCell,
+        "TreeSearch" => AuthoringControlTarget::TreeSearch,
+        "TreeSearchClear" => AuthoringControlTarget::TreeSearchClear,
+        "TreeSearchResult" => AuthoringControlTarget::TreeSearchResult,
+        "BulkLabel" => AuthoringControlTarget::BulkLabel,
+        "BulkSetLabel" => AuthoringControlTarget::BulkSetLabel,
+        "DesignerBack" => AuthoringControlTarget::DesignerBack,
+        "DesignerBreadcrumb" => AuthoringControlTarget::DesignerBreadcrumb,
+        "EditDynamicSource" => AuthoringControlTarget::EditDynamicSource,
         "DiscardDraft" => AuthoringControlTarget::DiscardDraft,
         "CellType" => AuthoringControlTarget::CellType,
         "ActionTypeOption" => AuthoringControlTarget::ActionTypeOption,
@@ -7137,6 +7413,7 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
         "PopupApplyAndOpen" => AuthoringControlTarget::PopupApplyAndOpen,
         "PopupDiscardAndOpen" => AuthoringControlTarget::PopupDiscardAndOpen,
         "PopupKeepEditing" => AuthoringControlTarget::PopupKeepEditing,
+        "InspectorDiscardAndContinue" => AuthoringControlTarget::InspectorDiscardAndContinue,
         "InspectorCell" => AuthoringControlTarget::InspectorCell,
         "SkinRow" => AuthoringControlTarget::SkinRow,
         "SkinGlowEnabled" => AuthoringControlTarget::SkinGlowEnabled,
@@ -7159,20 +7436,83 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
         _ => return None,
     };
     let control_index = trace_i32_field(line, "control_index=")?;
+    let optional_digest = |field: &str| {
+        trace_field(line, field)
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|digest| *digest != 0)
+    };
+    let optional_index = |field: &str| {
+        trace_i32_field(line, &format!("{field}=")).and_then(|index| usize::try_from(index).ok())
+    };
+    let coordinate =
+        |field: &str| trace_field(line, field).and_then(|value| value.parse::<i32>().ok());
+    let clip_bounds = if [
+        "clip_left_px",
+        "clip_top_px",
+        "clip_right_px",
+        "clip_bottom_px",
+    ]
+    .into_iter()
+    .any(|field| trace_field(line, field).is_some())
+    {
+        Some([
+            coordinate("clip_left_px")?,
+            coordinate("clip_top_px")?,
+            coordinate("clip_right_px")?,
+            coordinate("clip_bottom_px")?,
+        ])
+    } else {
+        // Gate C's retained trace packets precede pane clip measurements.
+        None
+    };
+    let undo_fields = [
+        "text_edit_field_digest",
+        "text_edit_value_digest",
+        "text_edit_undo_in_flux",
+    ];
+    let text_undo = if undo_fields
+        .into_iter()
+        .any(|field| trace_field(line, field).is_some())
+    {
+        let field_id_digest = trace_field(line, undo_fields[0])?.parse::<u64>().ok()?;
+        let value_digest = trace_field(line, undo_fields[1])?.parse::<u64>().ok()?;
+        match coordinate(undo_fields[2])? {
+            -1 if field_id_digest == 0 && value_digest == 0 => None,
+            in_flux @ (0 | 1)
+                if target == AuthoringControlTarget::TreeSearch
+                    && role == AuthoringControlRole::TextEdit
+                    && control_index == -1
+                    && field_id_digest != 0
+                    && value_digest != 0 =>
+            {
+                Some(TextEditUndoSnapshot {
+                    field_id_digest,
+                    value_digest,
+                    in_flux: in_flux == 1,
+                })
+            }
+            _ => return None,
+        }
+    } else {
+        // Older Gate C controls do not observe the framework's local undo state.
+        None
+    };
     Some(AuthoringControlSnapshot {
         target,
         role,
         index: usize::try_from(control_index).ok(),
         trace_sequence: trace_field(line, "trace_sequence")?.parse().ok()?,
         bounds: [
-            trace_i32_field(line, "left_px=")?,
-            trace_i32_field(line, "top_px=")?,
-            trace_i32_field(line, "right_px=")?,
-            trace_i32_field(line, "bottom_px=")?,
+            coordinate("left_px")?,
+            coordinate("top_px")?,
+            coordinate("right_px")?,
+            coordinate("bottom_px")?,
         ],
+        clip_bounds,
+        text_undo,
         client_size: [
-            trace_i32_field(line, "client_width_px=")?,
-            trace_i32_field(line, "client_height_px=")?,
+            coordinate("client_width_px")?,
+            coordinate("client_height_px")?,
         ],
         enabled: trace_bool_field(line, "enabled")?,
         selected: trace_bool_field(line, "selected")?,
@@ -7184,6 +7524,18 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
             .parse::<u64>()
             .ok()
             .filter(|digest| *digest != 0),
+        menu_id_digest: optional_digest("menu_id_digest"),
+        ring_id_digest: optional_digest("ring_id_digest"),
+        cell_id_digest: optional_digest("cell_id_digest"),
+        authored_target_digest: trace_field(line, "authored_target_digest")
+            .and_then(|digest| digest.parse::<u64>().ok())
+            .filter(|digest| *digest != 0),
+        cell_label_digest: optional_digest("cell_label_digest"),
+        projected_source_target_digest: optional_digest("projected_source_target_digest"),
+        projected_result_index: optional_index("projected_result_index"),
+        edit_source_target_digest: optional_digest("edit_source_target_digest"),
+        edit_source_result_index: optional_index("edit_source_result_index"),
+        breadcrumb_menu_id_digest: optional_digest("breadcrumb_menu_id_digest"),
         ring_index: trace_i32_field(line, "cell_ring_index=")
             .and_then(|index| usize::try_from(index).ok()),
         slot_index: trace_i32_field(line, "cell_slot_index=")
@@ -7506,12 +7858,24 @@ pub(super) fn authoring_control_events_after(
 ) -> Result<Vec<AuthoringControlSnapshot>, String> {
     let trace = std::fs::read_to_string(trace_path)
         .map_err(|error| format!("read Designer control event trace: {error}"))?;
-    Ok(trace_event_lines(&trace)
-        .into_iter()
+    Ok(authoring_control_events_in_lines_after(
+        &trace_event_lines(&trace),
+        first_line,
+        session_id,
+    ))
+}
+
+fn authoring_control_events_in_lines_after(
+    lines: &[String],
+    first_line: usize,
+    session_id: u64,
+) -> Vec<AuthoringControlSnapshot> {
+    lines
+        .iter()
         .skip(first_line)
-        .filter_map(|line| parse_authoring_control(&line))
+        .filter_map(|line| parse_authoring_control(line))
         .filter(|control| control.session_id == session_id)
-        .collect())
+        .collect()
 }
 
 pub(super) fn fresh_canvas_cell_for_generation(
@@ -7715,6 +8079,62 @@ pub(super) fn send_select_all_to_focused_window(
         .map(|evidence| evidence.inserted)
 }
 
+pub(super) fn send_control_z_to_focused_window(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+) -> Result<usize, String> {
+    child.validate_window(target.hwnd)?;
+    focus_is_validated(target.hwnd, child.process_id)?;
+    input_modifiers_clear()?;
+
+    let chord = [
+        OwnedKeyboardKey {
+            vk: VK_LCONTROL,
+            extended: false,
+        },
+        OwnedKeyboardKey {
+            vk: VIRTUAL_KEY(b'Z' as u16),
+            extended: false,
+        },
+    ];
+    if chord
+        .iter()
+        .any(|key| unsafe { GetAsyncKeyState(i32::from(key.vk.0)) } < 0)
+    {
+        return Err("refusing focused Ctrl+Z while one of its keys is already held".into());
+    }
+
+    let mut release_guard = OwnedKeyboardReleaseGuard::new();
+    let down_events = chord.map(OwnedKeyboardKey::down);
+    let down = match send_validated_input_allowing_owned_keys(
+        target.hwnd,
+        child.process_id,
+        &down_events,
+        "focused Ctrl+Z chord down",
+        &[],
+    ) {
+        Ok(evidence) => {
+            release_guard.owned.extend(chord);
+            evidence
+        }
+        Err((inserted, error)) => {
+            release_guard.owned.extend(chord.into_iter().take(inserted));
+            let cleanup = if release_guard.owned.is_empty() {
+                "no_owned_keys".to_string()
+            } else {
+                release_guard
+                    .release()
+                    .map(|evidence| format!("released={}", evidence.inserted))
+                    .unwrap_or_else(|cleanup_error| cleanup_error)
+            };
+            return Err(format!("{error}; cleanup={cleanup}"));
+        }
+    };
+    let up = release_guard.release()?;
+    input_modifiers_clear()?;
+    Ok(down.inserted.saturating_add(up.inserted))
+}
+
 fn unicode_text_events(text: &str) -> Vec<INPUT> {
     let mut events = Vec::with_capacity(text.encode_utf16().count().saturating_mul(2));
     for code_unit in text.encode_utf16() {
@@ -7734,6 +8154,19 @@ pub(super) fn send_enter_current(
     let enter = windows::Win32::UI::Input::KeyboardAndMouse::VK_RETURN;
     let events = [key_input(enter, false), key_input(enter, true)];
     send_input_checked(&events, "Enter")
+}
+
+pub(super) fn send_escape_to_focused_window(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+) -> Result<usize, String> {
+    child.validate_window(target.hwnd)?;
+    focus_is_validated(target.hwnd, child.process_id())?;
+    input_modifiers_clear()?;
+    send_input_checked(
+        &[key_input(VK_ESCAPE, false), key_input(VK_ESCAPE, true)],
+        "focused Escape",
+    )
 }
 
 pub(super) fn send_tab(child: &NativeChild, target: &WindowSnapshot) -> Result<usize, String> {
@@ -7832,6 +8265,7 @@ struct MouseButtonGuard {
     target_hwnd: HWND,
     target_process_id: u32,
     button: PointerButton,
+    owned_keys: Vec<VIRTUAL_KEY>,
     armed: bool,
 }
 
@@ -7841,6 +8275,22 @@ impl MouseButtonGuard {
             target_hwnd,
             target_process_id,
             button,
+            owned_keys: Vec::new(),
+            armed: false,
+        }
+    }
+
+    fn new_with_owned_keys(
+        target_hwnd: HWND,
+        target_process_id: u32,
+        button: PointerButton,
+        owned_keys: &[VIRTUAL_KEY],
+    ) -> Self {
+        Self {
+            target_hwnd,
+            target_process_id,
+            button,
+            owned_keys: owned_keys.to_vec(),
             armed: false,
         }
     }
@@ -7853,12 +8303,14 @@ impl MouseButtonGuard {
             focus_owned_window(self.target_hwnd, self.target_process_id)?;
         }
         let up = [mouse_button_input(self.button, false)];
-        let evidence = send_validated_input(
+        let evidence = send_validated_input_allowing_owned_keys(
             self.target_hwnd,
             self.target_process_id,
             &up,
             "semantic click up",
-        )?;
+            &self.owned_keys,
+        )
+        .map_err(|(_, error)| error)?;
         self.armed = false;
         Ok(evidence)
     }
@@ -8830,10 +9282,16 @@ mod tests {
             acceptance_environment_block(profile.path(), AcceptanceTraceBudgetProfile::Standard);
         let gate_c =
             acceptance_environment_block(profile.path(), AcceptanceTraceBudgetProfile::GateC);
+        let gate_d =
+            acceptance_environment_block(profile.path(), AcceptanceTraceBudgetProfile::GateD);
         assert!(values(&standard, super::TRACE_BUDGET_PROFILE_ENV).is_empty());
         assert_eq!(
             values(&gate_c, super::TRACE_BUDGET_PROFILE_ENV),
             vec!["gate_c_v1".to_owned()]
+        );
+        assert_eq!(
+            values(&gate_d, super::TRACE_BUDGET_PROFILE_ENV),
+            vec!["gate_d_v1".to_owned()]
         );
         assert_eq!(
             super::AcceptanceTraceBudgetProfile::Standard.environment_value(),
@@ -9442,6 +9900,257 @@ mod tests {
     }
 
     #[test]
+    fn selection_modifier_normalizes_only_semantic_control_and_shift() {
+        for (semantic, side) in [
+            (super::VK_CONTROL, super::VK_LCONTROL),
+            (super::VK_SHIFT, super::VK_LSHIFT),
+        ] {
+            assert_eq!(
+                super::owned_selection_modifier(semantic).unwrap(),
+                OwnedKeyboardKey {
+                    vk: side,
+                    extended: false,
+                }
+            );
+        }
+        for unsupported in [
+            super::VK_LCONTROL,
+            super::VK_RCONTROL,
+            super::VK_LSHIFT,
+            super::VK_RSHIFT,
+            super::VK_MENU,
+            super::VK_F11,
+        ] {
+            assert!(super::owned_selection_modifier(unsupported).is_err());
+        }
+    }
+
+    #[test]
+    fn owned_modifier_allowlist_accepts_aggregate_and_left_but_rejects_right() {
+        for (aggregate, left, right) in [
+            (super::VK_CONTROL, super::VK_LCONTROL, super::VK_RCONTROL),
+            (super::VK_SHIFT, super::VK_LSHIFT, super::VK_RSHIFT),
+        ] {
+            let allowed = [super::owned_selection_modifier(aggregate).unwrap().vk];
+            assert!(super::modifier_is_allowed_by_owned_keys(
+                aggregate, &allowed
+            ));
+            assert!(super::modifier_is_allowed_by_owned_keys(left, &allowed));
+            assert!(!super::modifier_is_allowed_by_owned_keys(right, &allowed));
+            assert!(!super::modifier_is_allowed_by_owned_keys(
+                super::VK_MENU,
+                &allowed
+            ));
+            assert!(!super::modifier_is_allowed_by_owned_keys(
+                super::VK_LWIN,
+                &allowed
+            ));
+            assert!(!super::modifier_is_allowed_by_owned_keys(
+                left,
+                &[aggregate]
+            ));
+            assert!(!super::modifier_is_allowed_by_owned_keys(
+                right,
+                &[aggregate]
+            ));
+            assert!(!super::modifier_is_allowed_by_owned_keys(aggregate, &[]));
+            assert!(!super::modifier_is_allowed_by_owned_keys(left, &[]));
+            assert!(!super::modifier_is_allowed_by_owned_keys(right, &[]));
+        }
+    }
+
+    fn synthetic_keyboard_release_evidence(inserted: usize) -> super::NativeInputEdgeEvidence {
+        super::NativeInputEdgeEvidence {
+            inserted,
+            at_unix_ms: 1,
+            foreground_hwnd: 99,
+            foreground_pid: 100,
+            input_desktop: "thread=Default;active=Default".into(),
+            cleanup_status: "release_inserted;async_state_to_be_verified_by_owner".into(),
+            keyboard_input: None,
+        }
+    }
+
+    #[test]
+    fn selection_modifier_down_allowed_and_up_use_same_cookie_owned_left_key() {
+        for semantic in [super::VK_CONTROL, super::VK_SHIFT] {
+            let key = super::owned_selection_modifier(semantic).unwrap();
+            let down = key.down();
+            assert_eq!(down.r#type, super::INPUT_KEYBOARD);
+            let keyboard = unsafe { down.Anonymous.ki };
+            assert_eq!(keyboard.wVk, key.vk);
+            assert_eq!(keyboard.dwFlags.0, 0);
+            assert_eq!(keyboard.dwExtraInfo, ACCEPTANCE_RUNNER_INPUT_COOKIE);
+            assert!(super::modifier_is_allowed_by_owned_keys(key.vk, &[key.vk]));
+
+            // These are synthetic owners: a panic must never invoke a real Win32 Drop cleanup.
+            let mut guard = std::mem::ManuallyDrop::new(super::OwnedKeyboardReleaseGuard::new());
+            guard.owned.push(key);
+            let phases = std::cell::RefCell::new(Vec::new());
+            let evidence = guard
+                .release_with(
+                    |events, _| {
+                        phases.borrow_mut().push("insert_up");
+                        assert_eq!(events.len(), 1);
+                        assert_eq!(events[0].r#type, super::INPUT_KEYBOARD);
+                        let up = unsafe { events[0].Anonymous.ki };
+                        assert_eq!(up.wVk, keyboard.wVk);
+                        assert_eq!(up.dwFlags, KEYEVENTF_KEYUP);
+                        assert_eq!(up.dwExtraInfo, keyboard.dwExtraInfo);
+                        Ok(synthetic_keyboard_release_evidence(1))
+                    },
+                    |released| {
+                        phases.borrow_mut().push("verify_physical_clear");
+                        assert_eq!(released, &[key]);
+                        Ok("async_state_clear_after_owned_release".into())
+                    },
+                    |_| panic!("a fully inserted release needs no cleanup"),
+                    |_| panic!("a successful release uses its physical verification seam"),
+                )
+                .unwrap();
+            assert_eq!(phases.into_inner(), ["insert_up", "verify_physical_clear"]);
+            assert_eq!(evidence.inserted, 1);
+            assert_eq!(
+                evidence.cleanup_status,
+                "async_state_clear_after_owned_release"
+            );
+            assert!(guard.owned.is_empty());
+        }
+    }
+
+    #[test]
+    fn selection_modifier_inserted_up_retires_owner_even_if_physical_key_remains_down() {
+        let key = super::owned_selection_modifier(super::VK_CONTROL).unwrap();
+        let mut guard = std::mem::ManuallyDrop::new(super::OwnedKeyboardReleaseGuard::new());
+        guard.owned.push(key);
+        let sends = std::cell::Cell::new(0);
+        let error = guard
+            .release_with(
+                |_, _| {
+                    sends.set(sends.get() + 1);
+                    Ok(synthetic_keyboard_release_evidence(1))
+                },
+                |released| {
+                    assert_eq!(released, &[key]);
+                    Err("external physical key remains down after inserted up".into())
+                },
+                |_| panic!("retired ownership cannot authorize another synthetic up"),
+                |_| panic!("the physical verification reported the failure"),
+            )
+            .unwrap_err();
+        assert!(error.contains("external physical key remains down"));
+        assert_eq!(sends.get(), 1);
+        assert!(guard.owned.is_empty());
+        assert!(
+            guard
+                .release_with(
+                    |_, _| panic!("an inserted up already retired ownership"),
+                    |_| panic!("no owned key remains"),
+                    |_| panic!("no owned key remains"),
+                    |_| panic!("no owned key remains"),
+                )
+                .unwrap_err()
+                .contains("no inserted key-downs")
+        );
+    }
+
+    #[test]
+    fn keyboard_partial_release_cleans_only_keydowns_without_inserted_ups() {
+        let control = super::owned_selection_modifier(super::VK_CONTROL).unwrap();
+        let shift = super::owned_selection_modifier(super::VK_SHIFT).unwrap();
+        let mut guard = std::mem::ManuallyDrop::new(super::OwnedKeyboardReleaseGuard::new());
+        guard.owned.extend([control, shift]);
+        let phases = std::cell::RefCell::new(Vec::new());
+        let error = guard
+            .release_with(
+                |events, _| {
+                    phases.borrow_mut().push("insert_shift_up");
+                    let released_vks = events
+                        .iter()
+                        .map(|event| unsafe { event.Anonymous.ki.wVk })
+                        .collect::<Vec<_>>();
+                    assert_eq!(released_vks, [shift.vk, control.vk]);
+                    Err((1, "partial key-up insertion".into()))
+                },
+                |_| panic!("a partial insertion uses the cleanup path"),
+                |owned| {
+                    phases.borrow_mut().push("cleanup_control_only");
+                    assert_eq!(owned, &[control]);
+                    assert_eq!(retire_inserted_keyboard_ups(owned, &[control], 1), 1);
+                    "synthetic_control_cleanup_inserted".into()
+                },
+                |released| {
+                    phases.borrow_mut().push("sample_after_cleanup");
+                    assert_eq!(released, &[shift, control]);
+                    vec![shift]
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            phases.into_inner(),
+            [
+                "insert_shift_up",
+                "cleanup_control_only",
+                "sample_after_cleanup"
+            ]
+        );
+        assert!(error.contains("partial key-up insertion"));
+        assert!(error.contains("release_inserted=1/2; retired=1"));
+        assert!(error.contains("synthetic_control_cleanup_inserted"));
+        assert!(guard.owned.is_empty());
+    }
+
+    #[test]
+    fn designer_modifier_click_always_releases_once_and_preserves_both_errors() {
+        for pointer_failed in [false, true] {
+            for release_failed in [false, true] {
+                let phases = std::cell::RefCell::new(Vec::new());
+                let result = super::finish_designer_click_with_modifier_release(
+                    || {
+                        phases.borrow_mut().push("pointer");
+                        if pointer_failed {
+                            Err("pointer refused: foreground changed or RightControl held".into())
+                        } else {
+                            Ok(42)
+                        }
+                    },
+                    || {
+                        phases.borrow_mut().push("release");
+                        if release_failed {
+                            Err("owned key-up insertion failed".into())
+                        } else {
+                            Ok(synthetic_keyboard_release_evidence(1))
+                        }
+                    },
+                );
+                assert_eq!(phases.into_inner(), ["pointer", "release"]);
+                match (pointer_failed, release_failed) {
+                    (false, false) => {
+                        let (click, up) = result.unwrap();
+                        assert_eq!(click, 42);
+                        assert_eq!(up.inserted, 1);
+                    }
+                    (true, false) => {
+                        let error = result.unwrap_err();
+                        assert!(error.contains("foreground changed or RightControl held"));
+                        assert!(error.contains("owned selection modifier released"));
+                    }
+                    (false, true) => {
+                        let error = result.unwrap_err();
+                        assert!(error.contains("Designer pointer click completed"));
+                        assert!(error.contains("owned key-up insertion failed"));
+                    }
+                    (true, true) => {
+                        let error = result.unwrap_err();
+                        assert!(error.contains("foreground changed or RightControl held"));
+                        assert!(error.contains("owned key-up insertion failed"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn keyboard_ownership_follows_inserted_keyups_not_async_state() {
         let chord = vec![
             OwnedKeyboardKey {
@@ -9653,6 +10362,8 @@ mod tests {
             index: Some(0),
             trace_sequence: 1,
             bounds: [20, 30, 60, 50],
+            clip_bounds: None,
+            text_undo: None,
             client_size: [640, 480],
             enabled: true,
             selected: false,
@@ -9661,6 +10372,16 @@ mod tests {
             session_id: 9,
             generation: 4,
             menu_cell_ids_digest: None,
+            authored_target_digest: None,
+            menu_id_digest: None,
+            ring_id_digest: None,
+            cell_id_digest: None,
+            cell_label_digest: None,
+            projected_source_target_digest: None,
+            projected_result_index: None,
+            edit_source_target_digest: None,
+            edit_source_result_index: None,
+            breadcrumb_menu_id_digest: None,
             ring_index: None,
             slot_index: None,
         }
@@ -9783,6 +10504,10 @@ mod tests {
         assert_eq!(control.session_id, 2);
         assert_eq!(control.bounds, [14, 116, 83, 134]);
         assert_eq!(control.client_size, [640, 480]);
+        assert_eq!(
+            control.clip_bounds, None,
+            "legacy Gate C evidence stays readable"
+        );
         for malformed_role in [
             "role=Button\"",
             "role=\"Button",
@@ -9793,6 +10518,105 @@ mod tests {
             assert!(
                 parse_authoring_control(&malformed).is_none(),
                 "{malformed_role}"
+            );
+        }
+    }
+
+    #[test]
+    fn authoring_parser_retains_owned_inspector_discard_guard_receipt() {
+        let line = "trace_event=\"designer_authoring_control\" target=InspectorDiscardAndContinue role=\"Button\" viewport=Deferred control_index=-1 left_px=170 top_px=160 right_px=310 bottom_px=182 clip_left_px=150 clip_top_px=140 clip_right_px=480 clip_bottom_px=260 client_width_px=640 client_height_px=480 trace_sequence=43 enabled=true selected=false focused=false clicked=true session_id=7 generation=9 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1";
+        let receipt = parse_authoring_control(line).unwrap();
+        assert_eq!(
+            receipt.target,
+            AuthoringControlTarget::InspectorDiscardAndContinue
+        );
+        assert_eq!(receipt.role, AuthoringControlRole::Button);
+        assert_eq!(receipt.index, None);
+        assert_eq!(
+            (
+                receipt.session_id,
+                receipt.generation,
+                receipt.trace_sequence
+            ),
+            (7, 9, 43)
+        );
+        assert_eq!(receipt.bounds, [170, 160, 310, 182]);
+        assert_eq!(receipt.clip_bounds, Some([150, 140, 480, 260]));
+        assert_eq!(receipt.client_size, [640, 480]);
+        assert!(receipt.enabled && receipt.clicked);
+        assert_ne!(receipt.target, AuthoringControlTarget::PopupDiscardAndOpen);
+    }
+
+    #[test]
+    fn authoring_parser_retains_actual_pane_clip_and_rejects_partial_measurements() {
+        let legacy = "trace_event=\"designer_authoring_control\" target=BulkLabel role=\"TextEdit\" viewport=Deferred control_index=-1 left_px=320 top_px=50 right_px=500 bottom_px=75 client_width_px=520 client_height_px=380 trace_sequence=11 enabled=true selected=false focused=false clicked=false session_id=4 generation=7 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1";
+        let clip = "clip_left_px=310 clip_top_px=80 clip_right_px=510 clip_bottom_px=340";
+        for line in [format!("{legacy} {clip}"), format!("{clip} {legacy}")] {
+            let control = parse_authoring_control(&line).expect("complete pane geometry parses");
+            assert_eq!(control.bounds, [320, 50, 500, 75]);
+            assert_eq!(control.clip_bounds, Some([310, 80, 510, 340]));
+            for missing in [
+                "clip_left_px=310",
+                "clip_top_px=80",
+                "clip_right_px=510",
+                "clip_bottom_px=340",
+            ] {
+                assert!(parse_authoring_control(&line.replace(missing, "")).is_none());
+                assert!(
+                    parse_authoring_control(&line.replace(missing, "clip_left_px=bad")).is_none()
+                );
+            }
+        }
+        assert_eq!(parse_authoring_control(legacy).unwrap().clip_bounds, None);
+    }
+
+    #[test]
+    fn authoring_parser_distinguishes_missing_and_actual_text_undo_checkpoint_state() {
+        let legacy = "trace_event=\"designer_authoring_control\" target=TreeSearch role=\"TextEdit\" viewport=Deferred control_index=-1 left_px=20 top_px=50 right_px=200 bottom_px=75 client_width_px=520 client_height_px=380 trace_sequence=11 enabled=true selected=false focused=true clicked=false session_id=4 generation=7 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1";
+        assert_eq!(parse_authoring_control(legacy).unwrap().text_undo, None);
+        let unknown = "text_edit_field_digest=0 text_edit_value_digest=0 text_edit_undo_in_flux=-1";
+        assert_eq!(
+            parse_authoring_control(&format!("{legacy} {unknown}"))
+                .unwrap()
+                .text_undo,
+            None
+        );
+        for in_flux in [false, true] {
+            let state = format!(
+                "text_edit_field_digest=41 text_edit_value_digest=42 text_edit_undo_in_flux={}",
+                i32::from(in_flux)
+            );
+            for line in [format!("{legacy} {state}"), format!("{state} {legacy}")] {
+                let control = parse_authoring_control(&line).unwrap();
+                assert_eq!(
+                    control.text_undo,
+                    Some(super::TextEditUndoSnapshot {
+                        field_id_digest: 41,
+                        value_digest: 42,
+                        in_flux,
+                    })
+                );
+                for field in state.split_whitespace() {
+                    assert!(parse_authoring_control(&line.replace(field, "")).is_none());
+                }
+            }
+        }
+        let valid = format!(
+            "{legacy} text_edit_field_digest=41 text_edit_value_digest=42 text_edit_undo_in_flux=0"
+        );
+        for (from, to) in [
+            ("text_edit_field_digest=41", "text_edit_field_digest=0"),
+            ("text_edit_value_digest=42", "text_edit_value_digest=0"),
+            ("text_edit_value_digest=42", "text_edit_value_digest=bad"),
+            ("text_edit_undo_in_flux=0", "text_edit_undo_in_flux=2"),
+            ("text_edit_undo_in_flux=0", "text_edit_undo_in_flux=-1"),
+            ("target=TreeSearch", "target=BulkLabel"),
+            ("role=\"TextEdit\"", "role=\"Button\""),
+            ("control_index=-1", "control_index=0"),
+        ] {
+            assert!(
+                parse_authoring_control(&valid.replace(from, to)).is_none(),
+                "{from} -> {to}"
             );
         }
     }
@@ -9820,16 +10644,43 @@ mod tests {
                 "logger startup line\n",
                 "trace_event=\"designer_authoring_control\" target=KeepEditing role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=8 enabled=true selected=false focused=true clicked=false session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1\n",
                 "logger unrelated line\n",
-                "trace_event=\"designer_authoring_control\" target=KeepEditing role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=9 enabled=true selected=false focused=true clicked=true session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1\n"
+                "trace_event=\"designer_authoring_control\" target=KeepEditing role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=9 enabled=true selected=false focused=true clicked=true session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1\n",
+                "trace_event=\"designer_authoring_control\" target=KeepEditing role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=10 enabled=false selected=false focused=false clicked=false session_id=2 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1\n",
+                "trace_event=\"designer_authoring_control\" target=KeepEditing role=\"Button\" viewport=Deferred control_index=-1 left_px=14 top_px=116 right_px=83 bottom_px=134 client_width_px=640 client_height_px=480 trace_sequence=11 enabled=true selected=false focused=true clicked=true session_id=3 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1\n"
             ),
         )
         .unwrap();
 
         let controls = authoring_control_events_after(&trace_path, 1, 2).unwrap();
-        assert_eq!(controls.len(), 1);
+        assert_eq!(controls.len(), 2);
         assert_eq!(controls[0].target, AuthoringControlTarget::KeepEditing);
         assert_eq!(controls[0].trace_sequence, 9);
         assert!(controls[0].clicked);
+        assert_eq!(controls[1].trace_sequence, 10);
+        assert!(!controls[1].clicked && !controls[1].enabled);
+
+        let records = trace_event_lines(&std::fs::read_to_string(&trace_path).unwrap());
+        assert_eq!(
+            super::authoring_control_events_in_lines_after(&records, 1, 2),
+            controls
+        );
+        let captured_cursor = records.len();
+        let mut appended = records.clone();
+        appended.push(records[1].replace("trace_sequence=9", "trace_sequence=12"));
+        assert!(
+            super::authoring_control_events_in_lines_after(&records, captured_cursor, 2).is_empty()
+        );
+        let following =
+            super::authoring_control_events_in_lines_after(&appended, captured_cursor, 2);
+        assert_eq!(following.len(), 1);
+        assert_eq!(following[0].trace_sequence, 12);
+        assert!(following[0].clicked);
+        let latest = latest_authoring_controls_after(&records, 1, 2);
+        assert_eq!(
+            latest,
+            vec![controls[1]],
+            "state lookup remains latest-state, while receipts retain every event"
+        );
     }
 
     #[test]

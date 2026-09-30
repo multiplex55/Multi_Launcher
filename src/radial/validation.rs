@@ -547,10 +547,17 @@ pub fn validate(document: &RadialDocument) -> Result<(), ValidationErrors> {
                         &format!("{cp}.alternate_clicks[{bi}]"),
                         &mut errors,
                     );
+                    let policy = if binding.gesture == ClickGesture::Secondary
+                        && binding.after_action == AfterActionPolicy::Inherit
+                    {
+                        cell.secondary_after_action
+                    } else {
+                        binding.after_action
+                    };
                     validate_keep_open(
                         document,
                         menu,
-                        binding.after_action,
+                        policy,
                         &binding.action,
                         &format!("{cp}.alternate_clicks[{bi}]"),
                         &mut errors,
@@ -716,6 +723,24 @@ fn validate_cell_style(
     validate_item_geometry(&style.geometry, &format!("{path}.geometry"), errors);
     validate_text(&style.text, &format!("{path}.text"), errors);
     validate_item_sounds(&style.sounds, &format!("{path}.sounds"), assets, errors);
+}
+
+pub(crate) fn validate_cell_style_layer(
+    document: &RadialDocument,
+    style: &CellStyleLayer,
+) -> Result<(), Vec<ValidationIssue>> {
+    let assets = document
+        .assets
+        .iter()
+        .map(|asset| (asset.id.clone(), asset.kind))
+        .collect::<BTreeMap<_, _>>();
+    let mut errors = Vec::new();
+    validate_cell_style(style, "style", &assets, &mut errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 fn validate_effects(style: &EffectStyleOverrides, path: &str, errors: &mut Vec<ValidationIssue>) {
@@ -1286,16 +1311,61 @@ fn validate_keep_open(
     path: &str,
     errors: &mut Vec<ValidationIssue>,
 ) {
-    if effective_after_action(document, menu, policy) != AfterActionPolicy::KeepOpen {
-        return;
-    }
-    let Some(requirement) = keep_open_incompatibility_requirement(binding) else {
+    let Some(requirement) = keep_open_policy_incompatibility(document, menu, policy, binding)
+    else {
         return;
     };
     errors.push(issue(
         format!("{path}.after_action"),
         format!("KeepOpen is incompatible with {requirement:?}"),
     ));
+}
+
+pub(crate) fn keep_open_policy_incompatibility(
+    document: &RadialDocument,
+    menu: &MenuDefinition,
+    policy: AfterActionPolicy,
+    binding: &ActionBinding,
+) -> Option<crate::radial::handoff::InteractionRequirement> {
+    (effective_after_action(document, menu, policy) == AfterActionPolicy::KeepOpen)
+        .then(|| keep_open_incompatibility_requirement(binding))
+        .flatten()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CellAfterActionSlot {
+    Primary,
+    Secondary,
+}
+
+/// Validate the immediate cell Inspector policy edit using the same binding
+/// classification as Save and bulk edits. Secondary policy supplies the
+/// fallback only for an authored secondary click whose own policy inherits.
+pub(crate) fn cell_policy_incompatibility(
+    document: &RadialDocument,
+    menu: &MenuDefinition,
+    cell: &CellDefinition,
+    slot: CellAfterActionSlot,
+    policy: AfterActionPolicy,
+) -> Option<crate::radial::handoff::InteractionRequirement> {
+    match slot {
+        CellAfterActionSlot::Primary => match &cell.content {
+            CellContent::Action { binding } => {
+                keep_open_policy_incompatibility(document, menu, policy, binding)
+            }
+            _ => None,
+        },
+        CellAfterActionSlot::Secondary => cell
+            .alternate_clicks
+            .iter()
+            .filter(|alternate| {
+                alternate.gesture == crate::radial::model::ClickGesture::Secondary
+                    && alternate.after_action == AfterActionPolicy::Inherit
+            })
+            .find_map(|alternate| {
+                keep_open_policy_incompatibility(document, menu, policy, &alternate.action)
+            }),
+    }
 }
 
 /// Returns the action handoff that makes an effective KeepOpen policy unsafe.
@@ -1685,6 +1755,37 @@ mod tests {
     }
 
     #[test]
+    fn full_save_uses_cell_secondary_policy_for_inherited_secondary_actions() {
+        let mut document = valid();
+        let menu_index = document
+            .menus
+            .iter()
+            .position(|menu| menu.id.as_str() == "starter-screen-tools")
+            .unwrap();
+        let cell = &mut document.menus[menu_index].rings[0].cells[0];
+        cell.secondary_after_action = AfterActionPolicy::KeepOpen;
+        cell.alternate_clicks.push(ClickBinding {
+            gesture: ClickGesture::Secondary,
+            action: ActionBinding::LauncherQuery {
+                query: "saved secondary query".into(),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            },
+            after_action: AfterActionPolicy::Inherit,
+        });
+
+        let errors = validate(&document).unwrap_err();
+        assert!(errors.0.iter().any(|issue| {
+            issue.path.contains("alternate_clicks[0]")
+                && issue.path.ends_with("after_action")
+                && issue.message.contains("Deferred")
+        }));
+
+        document.menus[menu_index].rings[0].cells[0].secondary_after_action =
+            AfterActionPolicy::CloseTree;
+        validate(&document).unwrap();
+    }
+
+    #[test]
     fn rejects_dynamic_ring_geometry_that_cannot_fit_paging_controls() {
         let mut document = valid();
         document.menus[0].rings[0].radius = 70.0;
@@ -2059,6 +2160,45 @@ mod tests {
             issue.path.contains("center_secondary_action")
                 && issue.message.contains("ExclusiveCapture")
         }));
+    }
+
+    #[test]
+    fn single_cell_policy_guard_rejects_keep_open_for_deferred_queries() {
+        let mut document = valid();
+        let menu_index = document
+            .menus
+            .iter()
+            .position(|menu| menu.id.as_str() == "starter-screen-tools")
+            .expect("starter screen tools menu");
+        document.menus[menu_index].rings[0].cells[0].content = CellContent::Action {
+            binding: ActionBinding::LauncherQuery {
+                query: "notes".into(),
+                mode: crate::radial::model::QueryRunMode::ExecuteFirst,
+            },
+        };
+        let menu = &document.menus[menu_index];
+        let cell = &menu.rings[0].cells[0];
+
+        assert_eq!(
+            cell_policy_incompatibility(
+                &document,
+                menu,
+                cell,
+                CellAfterActionSlot::Primary,
+                AfterActionPolicy::KeepOpen,
+            ),
+            Some(crate::radial::handoff::InteractionRequirement::Deferred)
+        );
+        assert_eq!(
+            cell_policy_incompatibility(
+                &document,
+                menu,
+                cell,
+                CellAfterActionSlot::Primary,
+                AfterActionPolicy::CloseTree,
+            ),
+            None
+        );
     }
 
     #[test]

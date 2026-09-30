@@ -24,6 +24,9 @@ pub(crate) const EVENT_BUDGET: usize = 8_192;
 pub(crate) const GATE_C_EVENT_BUDGET: usize = EVENT_BUDGET * 8;
 pub(crate) const GATE_C_TERMINAL_RESERVE: usize = 256;
 const GATE_C_TRACE_PROFILE: &str = "gate_c_v1";
+pub(crate) const GATE_D_EVENT_BUDGET: usize = EVENT_BUDGET * 6;
+pub(crate) const GATE_D_TERMINAL_RESERVE: usize = 256;
+const GATE_D_TRACE_PROFILE: &str = "gate_d_v1";
 const TRACE_TARGET: &str = "multi_launcher.radial_acceptance";
 const AUTHORING_CONTROL_REFRESH_MS: u128 = 500;
 
@@ -451,6 +454,15 @@ pub(crate) enum DesignerAuthoringTarget {
     DiscardCells,
     Canvas,
     CanvasCell,
+    ProjectedCell,
+    TreeSearch,
+    TreeSearchClear,
+    TreeSearchResult,
+    BulkLabel,
+    BulkSetLabel,
+    DesignerBack,
+    DesignerBreadcrumb,
+    EditDynamicSource,
     DiscardDraft,
     CellType,
     ActionTypeOption,
@@ -462,6 +474,7 @@ pub(crate) enum DesignerAuthoringTarget {
     PopupApplyAndOpen,
     PopupDiscardAndOpen,
     PopupKeepEditing,
+    InspectorDiscardAndContinue,
     InspectorCell,
     SkinRow,
     SkinGlowEnabled,
@@ -545,13 +558,14 @@ struct DesignerAuthoringControlSnapshot {
     session_id: u64,
     index: Option<usize>,
     bounds: [i32; 4],
+    clip_bounds: [i32; 4],
     client_size: [i32; 2],
     enabled: bool,
     selected: bool,
     focused: bool,
     clicked: bool,
     generation: u64,
-    canvas_scope: Option<DesignerCanvasCellScope>,
+    scope: Option<DesignerAuthoringControlScope>,
     last_emitted_ms: u128,
 }
 
@@ -670,8 +684,56 @@ struct InspectorCellTextEditSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DesignerCanvasCellScope {
     pub menu_cell_ids_digest: u64,
+    pub menu_id_digest: u64,
+    pub ring_id_digest: u64,
+    pub cell_id_digest: u64,
+    pub authored_target_digest: u64,
+    pub label_digest: u64,
     pub ring_index: usize,
     pub slot_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesignerProjectedCellScope {
+    pub menu_id_digest: u64,
+    pub source_target_digest: u64,
+    pub result_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesignerDynamicSourceEditScope {
+    pub source_target_digest: u64,
+    pub result_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesignerRenderedText {
+    pub digest: u64,
+    pub bounds: [i32; 4],
+    pub fully_visible: bool,
+    pub elided: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DesignerAuthoringControlScope {
+    CanvasCell(DesignerCanvasCellScope),
+    TreeSearchUndo {
+        field_id_digest: u64,
+        value_digest: u64,
+        in_flux: bool,
+    },
+    AuthoredSearchResult {
+        menu_id_digest: u64,
+        ring_id_digest: u64,
+        cell_id_digest: u64,
+        authored_target_digest: u64,
+        rendered_text: DesignerRenderedText,
+    },
+    ProjectedCell(DesignerProjectedCellScope),
+    DynamicSourceEdit(DesignerDynamicSourceEditScope),
+    Breadcrumb {
+        menu_id_digest: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -876,6 +938,10 @@ pub(crate) enum Event {
         top_px: i32,
         right_px: i32,
         bottom_px: i32,
+        clip_left_px: i32,
+        clip_top_px: i32,
+        clip_right_px: i32,
+        clip_bottom_px: i32,
         client_width_px: i32,
         client_height_px: i32,
         enabled: bool,
@@ -884,7 +950,7 @@ pub(crate) enum Event {
         clicked: bool,
         session_id: u64,
         generation: u64,
-        canvas_scope: Option<DesignerCanvasCellScope>,
+        scope: Option<DesignerAuthoringControlScope>,
     },
     DesignerActionEditorControl {
         surface: &'static str,
@@ -1341,11 +1407,17 @@ impl TraceBudgetProfile {
         terminal_reserve: GATE_C_TERMINAL_RESERVE,
     };
 
+    const GATE_D: Self = Self {
+        name: GATE_D_TRACE_PROFILE,
+        event_limit: GATE_D_EVENT_BUDGET,
+        terminal_reserve: GATE_D_TERMINAL_RESERVE,
+    };
+
     fn from_environment(value: Option<&str>) -> Self {
-        if value == Some(GATE_C_TRACE_PROFILE) {
-            Self::GATE_C
-        } else {
-            Self::DEFAULT
+        match value {
+            Some(GATE_C_TRACE_PROFILE) => Self::GATE_C,
+            Some(GATE_D_TRACE_PROFILE) => Self::GATE_D,
+            _ => Self::DEFAULT,
         }
     }
 }
@@ -2598,6 +2670,10 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                     top_px,
                     right_px,
                     bottom_px,
+                    clip_left_px,
+                    clip_top_px,
+                    clip_right_px,
+                    clip_bottom_px,
                     client_width_px,
                     client_height_px,
                     enabled,
@@ -2606,7 +2682,7 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                     clicked,
                     session_id,
                     generation,
-                    canvas_scope,
+                    scope,
                 } => {
                     tracing::warn!(
                         target: TRACE_TARGET,
@@ -2620,6 +2696,10 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                         top_px,
                         right_px,
                         bottom_px,
+                        clip_left_px,
+                        clip_top_px,
+                        clip_right_px,
+                        clip_bottom_px,
                         client_width_px,
                         client_height_px,
                         trace_sequence,
@@ -2629,9 +2709,29 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                         clicked,
                         session_id,
                         generation,
-                        menu_cell_ids_digest = canvas_scope.map_or(0, |scope| scope.menu_cell_ids_digest),
-                        cell_ring_index = canvas_scope.map_or(-1, |scope| scope.ring_index as i64),
-                        cell_slot_index = canvas_scope.map_or(-1, |scope| scope.slot_index as i64),
+                        menu_cell_ids_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.menu_cell_ids_digest, _ => 0 }),
+                        menu_id_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.menu_id_digest, DesignerAuthoringControlScope::ProjectedCell(cell) => cell.menu_id_digest, DesignerAuthoringControlScope::Breadcrumb { menu_id_digest } | DesignerAuthoringControlScope::AuthoredSearchResult { menu_id_digest, .. } => menu_id_digest, DesignerAuthoringControlScope::DynamicSourceEdit(_) | DesignerAuthoringControlScope::TreeSearchUndo { .. } => 0 }),
+                        ring_id_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.ring_id_digest, DesignerAuthoringControlScope::AuthoredSearchResult { ring_id_digest, .. } => ring_id_digest, _ => 0 }),
+                        cell_id_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.cell_id_digest, DesignerAuthoringControlScope::AuthoredSearchResult { cell_id_digest, .. } => cell_id_digest, _ => 0 }),
+                        authored_target_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.authored_target_digest, DesignerAuthoringControlScope::AuthoredSearchResult { authored_target_digest, .. } => authored_target_digest, _ => 0 }),
+                        cell_label_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.label_digest, _ => 0 }),
+                        cell_ring_index = scope.map_or(-1, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.ring_index as i64, _ => -1 }),
+                        cell_slot_index = scope.map_or(-1, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.slot_index as i64, _ => -1 }),
+                        projected_source_target_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::ProjectedCell(cell) => cell.source_target_digest, _ => 0 }),
+                        projected_result_index = scope.map_or(-1, |scope| match scope { DesignerAuthoringControlScope::ProjectedCell(cell) => cell.result_index as i64, _ => -1 }),
+                        edit_source_target_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::DynamicSourceEdit(edit) => edit.source_target_digest, _ => 0 }),
+                        edit_source_result_index = scope.map_or(-1, |scope| match scope { DesignerAuthoringControlScope::DynamicSourceEdit(edit) => edit.result_index as i64, _ => -1 }),
+                        breadcrumb_menu_id_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::Breadcrumb { menu_id_digest } => menu_id_digest, _ => 0 }),
+                        rendered_text_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::AuthoredSearchResult { rendered_text, .. } => rendered_text.digest, _ => 0 }),
+                        rendered_text_left_px = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::AuthoredSearchResult { rendered_text, .. } => rendered_text.bounds[0], _ => 0 }),
+                        rendered_text_top_px = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::AuthoredSearchResult { rendered_text, .. } => rendered_text.bounds[1], _ => 0 }),
+                        rendered_text_right_px = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::AuthoredSearchResult { rendered_text, .. } => rendered_text.bounds[2], _ => 0 }),
+                        rendered_text_bottom_px = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::AuthoredSearchResult { rendered_text, .. } => rendered_text.bounds[3], _ => 0 }),
+                        rendered_text_fully_visible = scope.is_some_and(|scope| matches!(scope, DesignerAuthoringControlScope::AuthoredSearchResult { rendered_text, .. } if rendered_text.fully_visible)),
+                        rendered_text_elided = scope.is_some_and(|scope| matches!(scope, DesignerAuthoringControlScope::AuthoredSearchResult { rendered_text, .. } if rendered_text.elided)),
+                        text_edit_field_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::TreeSearchUndo { field_id_digest, .. } => field_id_digest, _ => 0 }),
+                        text_edit_value_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::TreeSearchUndo { value_digest, .. } => value_digest, _ => 0 }),
+                        text_edit_undo_in_flux = scope.map_or(-1i32, |scope| match scope { DesignerAuthoringControlScope::TreeSearchUndo { in_flux, .. } => i32::from(in_flux), _ => -1 }),
                         "radial acceptance trace"
                     );
                 }
@@ -3816,6 +3916,7 @@ pub(crate) fn emit_designer_authoring_control(
     viewport: ViewportClass,
     index: Option<usize>,
     bounds: [i32; 4],
+    clip_bounds: [i32; 4],
     client_size: [i32; 2],
     is_enabled: bool,
     selected: bool,
@@ -3823,13 +3924,19 @@ pub(crate) fn emit_designer_authoring_control(
     clicked: bool,
     session_id: u64,
     generation: u64,
-    canvas_scope: Option<DesignerCanvasCellScope>,
+    scope: Option<DesignerAuthoringControlScope>,
 ) {
     if !enabled()
         || bounds[2] <= bounds[0]
         || bounds[3] <= bounds[1]
         || client_size[0] <= 0
         || client_size[1] <= 0
+        || clip_bounds[0] < 0
+        || clip_bounds[1] < 0
+        || clip_bounds[2] > client_size[0]
+        || clip_bounds[3] > client_size[1]
+        || clip_bounds[2] <= clip_bounds[0]
+        || clip_bounds[3] <= clip_bounds[1]
     {
         return;
     }
@@ -3841,13 +3948,14 @@ pub(crate) fn emit_designer_authoring_control(
         session_id,
         index,
         bounds,
+        clip_bounds,
         client_size,
         enabled: is_enabled,
         selected,
         focused,
         clicked,
         generation,
-        canvas_scope,
+        scope,
         last_emitted_ms: now_ms,
     };
     let changed = DESIGNER_AUTHORING_CONTROLS
@@ -3867,6 +3975,10 @@ pub(crate) fn emit_designer_authoring_control(
             top_px: bounds[1],
             right_px: bounds[2],
             bottom_px: bounds[3],
+            clip_left_px: clip_bounds[0],
+            clip_top_px: clip_bounds[1],
+            clip_right_px: clip_bounds[2],
+            clip_bottom_px: clip_bounds[3],
             client_width_px: client_size[0],
             client_height_px: client_size[1],
             enabled: is_enabled,
@@ -3875,7 +3987,7 @@ pub(crate) fn emit_designer_authoring_control(
             clicked,
             session_id,
             generation,
-            canvas_scope,
+            scope,
         });
     }
 }
@@ -4677,13 +4789,14 @@ fn authoring_control_snapshot_should_emit(
         && left.session_id == right.session_id
         && left.index == right.index
         && left.bounds == right.bounds
+        && left.clip_bounds == right.clip_bounds
         && left.client_size == right.client_size
         && left.enabled == right.enabled
         && left.selected == right.selected
         && left.focused == right.focused
         && left.clicked == right.clicked
         && left.generation == right.generation
-        && left.canvas_scope == right.canvas_scope;
+        && left.scope == right.scope;
     !unchanged || now_ms.saturating_sub(left.last_emitted_ms) >= AUTHORING_CONTROL_REFRESH_MS
 }
 
@@ -5291,13 +5404,14 @@ mod tests {
             session_id: 9,
             index: None,
             bounds: [10, 20, 520, 390],
+            clip_bounds: [0, 0, 624, 441],
             client_size: [624, 441],
             enabled: true,
             selected: false,
             focused: false,
             clicked: false,
             generation: 4,
-            canvas_scope: None,
+            scope: None,
             last_emitted_ms,
         }
     }
@@ -5630,6 +5744,22 @@ mod tests {
             &prior, &resized, 1_001
         ));
 
+        let mut pane_clipped = unchanged;
+        pane_clipped.clip_bounds[1] = 28;
+        assert!(authoring_control_snapshot_should_emit(
+            &prior,
+            &pane_clipped,
+            1_001
+        ));
+        let mut cache = vec![prior];
+        assert!(insert_designer_authoring_control_snapshot(
+            &mut cache,
+            pane_clipped,
+            1_001
+        ));
+        assert_eq!(cache[0].bounds, prior.bounds);
+        assert_eq!(cache[0].clip_bounds, pane_clipped.clip_bounds);
+
         let mut focused = unchanged;
         focused.focused = true;
         assert!(authoring_control_snapshot_should_emit(
@@ -5637,16 +5767,76 @@ mod tests {
         ));
 
         let mut different_canvas_epoch = unchanged;
-        different_canvas_epoch.canvas_scope = Some(DesignerCanvasCellScope {
-            menu_cell_ids_digest: 41,
-            ring_index: 1,
-            slot_index: 0,
-        });
+        different_canvas_epoch.scope = Some(DesignerAuthoringControlScope::CanvasCell(
+            DesignerCanvasCellScope {
+                menu_cell_ids_digest: 41,
+                menu_id_digest: 42,
+                ring_id_digest: 43,
+                cell_id_digest: 44,
+                authored_target_digest: 45,
+                label_digest: 46,
+                ring_index: 1,
+                slot_index: 0,
+            },
+        ));
         assert!(authoring_control_snapshot_should_emit(
             &prior,
             &different_canvas_epoch,
             1_001
         ));
+    }
+
+    #[test]
+    fn tree_search_undo_observation_deduplicates_and_emits_settled_checkpoint_changes() {
+        let mut changing = authoring_control_snapshot(1_000);
+        changing.target = DesignerAuthoringTarget::TreeSearch;
+        changing.role = DesignerAuthoringRole::TextEdit;
+        changing.focused = true;
+        changing.scope = Some(DesignerAuthoringControlScope::TreeSearchUndo {
+            field_id_digest: 41,
+            value_digest: 42,
+            in_flux: true,
+        });
+        let mut cache = vec![changing];
+        assert!(!insert_designer_authoring_control_snapshot(
+            &mut cache, changing, 1_001
+        ));
+        let mut settled = changing;
+        settled.scope = Some(DesignerAuthoringControlScope::TreeSearchUndo {
+            field_id_digest: 41,
+            value_digest: 42,
+            in_flux: false,
+        });
+        assert!(insert_designer_authoring_control_snapshot(
+            &mut cache, settled, 1_002
+        ));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache[0].scope, settled.scope);
+        assert!(!insert_designer_authoring_control_snapshot(
+            &mut cache, settled, 1_003
+        ));
+        assert!(insert_designer_authoring_control_snapshot(
+            &mut cache, settled, 1_502
+        ));
+        for scope in [
+            None,
+            Some(DesignerAuthoringControlScope::TreeSearchUndo {
+                field_id_digest: 43,
+                value_digest: 42,
+                in_flux: false,
+            }),
+            Some(DesignerAuthoringControlScope::TreeSearchUndo {
+                field_id_digest: 41,
+                value_digest: 44,
+                in_flux: false,
+            }),
+        ] {
+            let mut changed = settled;
+            changed.scope = scope;
+            assert!(authoring_control_snapshot_should_emit(
+                &settled, &changed, 1_003
+            ));
+        }
     }
 
     #[test]
@@ -5659,11 +5849,18 @@ mod tests {
                 snapshot.target = DesignerAuthoringTarget::CanvasCell;
                 snapshot.session_id = session_id;
                 snapshot.index = Some(cell_index);
-                snapshot.canvas_scope = Some(DesignerCanvasCellScope {
-                    menu_cell_ids_digest: session_id * 100,
-                    ring_index: 0,
-                    slot_index: cell_index,
-                });
+                snapshot.scope = Some(DesignerAuthoringControlScope::CanvasCell(
+                    DesignerCanvasCellScope {
+                        menu_cell_ids_digest: session_id * 100,
+                        menu_id_digest: session_id * 101,
+                        ring_id_digest: session_id * 102,
+                        cell_id_digest: session_id * 103,
+                        authored_target_digest: session_id * 104,
+                        label_digest: session_id * 105,
+                        ring_index: 0,
+                        slot_index: cell_index,
+                    },
+                ));
                 assert!(insert_designer_authoring_control_snapshot(
                     &mut cache, snapshot, now_ms,
                 ));
@@ -5826,6 +6023,10 @@ mod tests {
                 "top_px",
                 "right_px",
                 "bottom_px",
+                "clip_left_px",
+                "clip_top_px",
+                "clip_right_px",
+                "clip_bottom_px",
                 "client_width_px",
                 "client_height_px",
                 "trace_sequence",
@@ -5836,8 +6037,28 @@ mod tests {
                 "session_id",
                 "generation",
                 "menu_cell_ids_digest",
+                "menu_id_digest",
+                "ring_id_digest",
+                "cell_id_digest",
+                "authored_target_digest",
+                "cell_label_digest",
                 "cell_ring_index",
                 "cell_slot_index",
+                "projected_source_target_digest",
+                "projected_result_index",
+                "edit_source_target_digest",
+                "edit_source_result_index",
+                "breadcrumb_menu_id_digest",
+                "rendered_text_digest",
+                "rendered_text_left_px",
+                "rendered_text_top_px",
+                "rendered_text_right_px",
+                "rendered_text_bottom_px",
+                "rendered_text_fully_visible",
+                "rendered_text_elided",
+                "text_edit_field_digest",
+                "text_edit_value_digest",
+                "text_edit_undo_in_flux",
             ],
             Event::DesignerActionEditorControl { .. } => &[
                 "editor_surface",
@@ -6256,11 +6477,22 @@ mod tests {
             TraceBudgetProfile::from_environment(Some("gate-c-v1")),
             TraceBudgetProfile::DEFAULT
         );
+        assert_eq!(
+            TraceBudgetProfile::from_environment(Some("gate_d_v1")),
+            TraceBudgetProfile::GATE_D
+        );
+        assert_eq!(
+            TraceBudgetProfile::from_environment(Some("gate-d-v1")),
+            TraceBudgetProfile::DEFAULT
+        );
         assert_eq!(TraceBudgetProfile::DEFAULT.event_limit, 8_192);
         assert_eq!(TraceBudgetProfile::DEFAULT.terminal_reserve, 0);
         assert_eq!(TraceBudgetProfile::GATE_C.event_limit, 65_536);
         assert_eq!(TraceBudgetProfile::GATE_C.event_limit, EVENT_BUDGET * 8);
         assert_eq!(TraceBudgetProfile::GATE_C.terminal_reserve, 256);
+        assert_eq!(TraceBudgetProfile::GATE_D.event_limit, 49_152);
+        assert_eq!(TraceBudgetProfile::GATE_D.event_limit, EVENT_BUDGET * 6);
+        assert_eq!(TraceBudgetProfile::GATE_D.terminal_reserve, 256);
     }
 
     #[test]
@@ -6340,6 +6572,10 @@ mod tests {
             top_px: 1,
             right_px: 20,
             bottom_px: 20,
+            clip_left_px: 0,
+            clip_top_px: 0,
+            clip_right_px: 800,
+            clip_bottom_px: 600,
             client_width_px: 800,
             client_height_px: 600,
             enabled: true,
@@ -6348,7 +6584,7 @@ mod tests {
             clicked,
             session_id: 1,
             generation: 2,
-            canvas_scope: None,
+            scope: None,
         };
         let clicked_discard = discard(true);
         let unclicked_discard = discard(false);
@@ -6557,6 +6793,10 @@ mod tests {
             top_px: 5,
             right_px: 48,
             bottom_px: 27,
+            clip_left_px: 0,
+            clip_top_px: 0,
+            clip_right_px: 800,
+            clip_bottom_px: 600,
             client_width_px: 800,
             client_height_px: 600,
             enabled: true,
@@ -6565,7 +6805,7 @@ mod tests {
             clicked: false,
             session_id: 7,
             generation: 9,
-            canvas_scope: None,
+            scope: None,
         };
         let mut clicked_discard = discard;
         if let Event::DesignerAuthoringControl { clicked, .. } = &mut clicked_discard {
@@ -7014,6 +7254,10 @@ mod tests {
                 top_px: 20,
                 right_px: 40,
                 bottom_px: 44,
+                clip_left_px: 0,
+                clip_top_px: 0,
+                clip_right_px: 624,
+                clip_bottom_px: 441,
                 client_width_px: 624,
                 client_height_px: 441,
                 enabled: true,
@@ -7022,11 +7266,18 @@ mod tests {
                 clicked: true,
                 session_id: 77,
                 generation: 19,
-                canvas_scope: Some(DesignerCanvasCellScope {
-                    menu_cell_ids_digest: 123,
-                    ring_index: 1,
-                    slot_index: 0,
-                }),
+                scope: Some(DesignerAuthoringControlScope::CanvasCell(
+                    DesignerCanvasCellScope {
+                        menu_cell_ids_digest: 123,
+                        menu_id_digest: 124,
+                        ring_id_digest: 125,
+                        cell_id_digest: 126,
+                        authored_target_digest: 127,
+                        label_digest: 128,
+                        ring_index: 1,
+                        slot_index: 0,
+                    },
+                )),
             },
             Event::DesignerCanvasAllocation {
                 allocated_rect_px: [191, 157, 331, 442],

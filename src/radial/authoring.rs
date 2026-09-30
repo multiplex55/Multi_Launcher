@@ -166,6 +166,34 @@ impl AuthoringSnapshot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AuthoredCellTarget {
+    pub menu_id: MenuId,
+    pub ring_id: RingId,
+    pub cell_id: CellId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AuthoredCellSelection {
+    pub primary: AuthoredCellTarget,
+    pub members: Vec<AuthoredCellTarget>,
+    pub range_anchor: AuthoredCellTarget,
+}
+
+impl AuthoredCellSelection {
+    pub fn contains(&self, target: &AuthoredCellTarget) -> bool {
+        self.members.iter().any(|member| member == target)
+    }
+
+    pub fn primary_stable_selection(&self) -> StableSelection {
+        StableSelection::Cell {
+            menu_id: self.primary.menu_id.clone(),
+            ring_id: self.primary.ring_id.clone(),
+            cell_id: self.primary.cell_id.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum StableSelection {
     Menu(MenuId),
@@ -178,6 +206,9 @@ pub enum StableSelection {
         ring_id: RingId,
         cell_id: CellId,
     },
+    /// One menu's authored cells in authored ring/cell order. The primary
+    /// remains an ordinary StableSelection::Cell at integration boundaries.
+    CellSet(AuthoredCellSelection),
     Skin(SkinId),
     Asset(AssetId),
 }
@@ -201,9 +232,252 @@ impl StableSelection {
                 .find(|menu| &menu.id == menu_id)
                 .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
                 .is_some_and(|ring| ring.cells.iter().any(|cell| &cell.id == cell_id)),
+            Self::CellSet(selection) => {
+                let same_menu = selection
+                    .members
+                    .iter()
+                    .all(|target| target.menu_id == selection.primary.menu_id);
+                same_menu
+                    && selection
+                        .members
+                        .iter()
+                        .any(|target| target == &selection.primary)
+                    && selection
+                        .members
+                        .iter()
+                        .any(|target| target == &selection.range_anchor)
+                    && selection.members.iter().all(|target| {
+                        Self::Cell {
+                            menu_id: target.menu_id.clone(),
+                            ring_id: target.ring_id.clone(),
+                            cell_id: target.cell_id.clone(),
+                        }
+                        .exists_in(document)
+                    })
+            }
             Self::Skin(id) => document.skins.iter().any(|skin| &skin.id == id),
             Self::Asset(id) => document.assets.iter().any(|asset| &asset.id == id),
         }
+    }
+
+    pub fn primary_cell(&self) -> Option<StableSelection> {
+        match self {
+            Self::Cell { .. } => Some(self.clone()),
+            Self::CellSet(selection) => Some(selection.primary_stable_selection()),
+            _ => None,
+        }
+    }
+
+    pub fn selected_cells(&self) -> Vec<AuthoredCellTarget> {
+        match self {
+            Self::Cell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => vec![AuthoredCellTarget {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: cell_id.clone(),
+            }],
+            Self::CellSet(selection) => selection.members.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn is_authored_cell_selected(&self, target: &AuthoredCellTarget) -> bool {
+        match self {
+            Self::Cell {
+                menu_id,
+                ring_id,
+                cell_id,
+            } => {
+                menu_id == &target.menu_id
+                    && ring_id == &target.ring_id
+                    && cell_id == &target.cell_id
+            }
+            Self::CellSet(selection) => selection.contains(target),
+            _ => false,
+        }
+    }
+}
+
+fn cell_target_selection(target: &AuthoredCellTarget) -> StableSelection {
+    StableSelection::Cell {
+        menu_id: target.menu_id.clone(),
+        ring_id: target.ring_id.clone(),
+        cell_id: target.cell_id.clone(),
+    }
+}
+
+fn selection_primary_target(selection: &StableSelection) -> Option<AuthoredCellTarget> {
+    match selection {
+        StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } => Some(AuthoredCellTarget {
+            menu_id: menu_id.clone(),
+            ring_id: ring_id.clone(),
+            cell_id: cell_id.clone(),
+        }),
+        StableSelection::CellSet(selection) => Some(selection.primary.clone()),
+        _ => None,
+    }
+}
+
+fn cell_target_exists(target: &AuthoredCellTarget, document: &RadialDocument) -> bool {
+    document
+        .menus
+        .iter()
+        .find(|menu| menu.id == target.menu_id)
+        .and_then(|menu| menu.rings.iter().find(|ring| ring.id == target.ring_id))
+        .is_some_and(|ring| ring.cells.iter().any(|cell| cell.id == target.cell_id))
+}
+
+fn authored_cell_order(document: &RadialDocument, menu_id: &MenuId) -> Vec<AuthoredCellTarget> {
+    document
+        .menus
+        .iter()
+        .find(|menu| &menu.id == menu_id)
+        .into_iter()
+        .flat_map(|menu| {
+            menu.rings.iter().flat_map(move |ring| {
+                ring.cells.iter().map(move |cell| AuthoredCellTarget {
+                    menu_id: menu.id.clone(),
+                    ring_id: ring.id.clone(),
+                    cell_id: cell.id.clone(),
+                })
+            })
+        })
+        .collect()
+}
+
+fn relocate_cell_target(
+    target: &AuthoredCellTarget,
+    document: &RadialDocument,
+) -> Option<AuthoredCellTarget> {
+    if cell_target_exists(target, document) {
+        return Some(target.clone());
+    }
+    let menu = document
+        .menus
+        .iter()
+        .find(|menu| menu.id == target.menu_id)?;
+    let mut matches = menu.rings.iter().flat_map(|ring| {
+        ring.cells
+            .iter()
+            .filter(move |cell| cell.id == target.cell_id)
+            .map(move |cell| AuthoredCellTarget {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            })
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn reconcile_selection(
+    selection: StableSelection,
+    document: &RadialDocument,
+) -> Option<StableSelection> {
+    match selection {
+        StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } => relocate_cell_target(
+            &AuthoredCellTarget {
+                menu_id,
+                ring_id,
+                cell_id,
+            },
+            document,
+        )
+        .map(|target| cell_target_selection(&target)),
+        StableSelection::CellSet(selection) => {
+            let mut members = selection
+                .members
+                .iter()
+                .filter_map(|target| relocate_cell_target(target, document))
+                .collect::<Vec<_>>();
+            members.sort_by_key(|target| {
+                let menu_index = document
+                    .menus
+                    .iter()
+                    .position(|menu| menu.id == target.menu_id);
+                let cell_index = menu_index.and_then(|menu_index| {
+                    document.menus[menu_index]
+                        .rings
+                        .iter()
+                        .position(|ring| ring.id == target.ring_id)
+                        .map(|ring_index| {
+                            let cell_index = document.menus[menu_index].rings[ring_index]
+                                .cells
+                                .iter()
+                                .position(|cell| cell.id == target.cell_id)
+                                .unwrap_or(usize::MAX);
+                            (menu_index, ring_index, cell_index)
+                        })
+                });
+                cell_index.unwrap_or((usize::MAX, usize::MAX, usize::MAX))
+            });
+            members.dedup();
+            let primary = relocate_cell_target(&selection.primary, document)
+                .filter(|primary| members.contains(primary))
+                .or_else(|| members.first().cloned())?;
+            members.retain(|member| member.menu_id == primary.menu_id);
+            let primary = if members.contains(&primary) {
+                primary
+            } else {
+                members.first()?.clone()
+            };
+            let range_anchor = relocate_cell_target(&selection.range_anchor, document)
+                .filter(|anchor| anchor.menu_id == primary.menu_id && members.contains(anchor))
+                .unwrap_or_else(|| primary.clone());
+            Some(StableSelection::CellSet(AuthoredCellSelection {
+                primary,
+                members,
+                range_anchor,
+            }))
+        }
+        selection => selection.exists_in(document).then_some(selection),
+    }
+}
+
+pub fn reconcile_stable_selection(
+    selection: &StableSelection,
+    document: &RadialDocument,
+) -> Option<StableSelection> {
+    reconcile_selection(selection.clone(), document)
+}
+
+fn estimate_selection_bytes(selection: &Option<StableSelection>) -> usize {
+    let Some(selection) = selection else {
+        return 0;
+    };
+    let target_size = |target: &AuthoredCellTarget| {
+        target.menu_id.as_str().len()
+            + target.ring_id.as_str().len()
+            + target.cell_id.as_str().len()
+    };
+    match selection {
+        StableSelection::Cell {
+            menu_id,
+            ring_id,
+            cell_id,
+        } => menu_id.as_str().len() + ring_id.as_str().len() + cell_id.as_str().len(),
+        StableSelection::CellSet(selection) => {
+            selection.members.iter().map(target_size).sum::<usize>()
+                + target_size(&selection.primary)
+                + target_size(&selection.range_anchor)
+        }
+        StableSelection::Menu(id) => id.as_str().len(),
+        StableSelection::Ring { menu_id, ring_id } => {
+            menu_id.as_str().len() + ring_id.as_str().len()
+        }
+        StableSelection::Skin(id) => id.as_str().len(),
+        StableSelection::Asset(id) => id.as_str().len(),
     }
 }
 
@@ -337,6 +611,8 @@ struct HistoryEntry {
     after: Arc<RadialDocument>,
     before_assets: AssetMutations,
     after_assets: AssetMutations,
+    before_selection: Option<StableSelection>,
+    after_selection: Option<StableSelection>,
     key: Option<EditKey>,
     open: bool,
     bytes: usize,
@@ -360,6 +636,7 @@ impl BoundedHistory {
             self.bytes = self.bytes.saturating_sub(last.bytes);
             last.after = entry.after;
             last.after_assets = entry.after_assets;
+            last.after_selection = entry.after_selection;
             last.open = entry.open;
             last.bytes =
                 estimate_document_bytes(&last.before) + estimate_document_bytes(&last.after);
@@ -1347,7 +1624,8 @@ impl RadialAuthoringSession {
         self.authoritative_snapshot_required
     }
 
-    pub(crate) fn acceptance_history_depths(&self) -> (usize, usize) {
+    /// Read-only history counts for GUI-owner snapshots and native acceptance evidence.
+    pub fn acceptance_history_depths(&self) -> (usize, usize) {
         (self.history.undo.len(), self.history.redo.len())
     }
 
@@ -1438,7 +1716,154 @@ impl RadialAuthoringSession {
         if self.is_initial_snapshot_pending() {
             return;
         }
-        self.selection = selection.filter(|selection| selection.exists_in(&self.draft));
+        self.selection = selection
+            .filter(|selection| selection.exists_in(&self.draft))
+            .and_then(|selection| reconcile_selection(selection, &self.draft));
+    }
+
+    /// Attach a helper's post-commit selection to the same history entry as
+    /// the document operation. Ordinary browsing should continue to use
+    /// `select`, which deliberately does not create or rewrite history.
+    pub fn select_after_mutation(
+        &mut self,
+        selection: Option<StableSelection>,
+        generation_before: DraftGeneration,
+    ) {
+        self.select(selection);
+        if self.generation != generation_before
+            && let Some(entry) = self.history.undo.back_mut()
+            && Arc::ptr_eq(&entry.after, &self.draft)
+        {
+            entry.after_selection = self.selection.clone();
+        }
+    }
+
+    pub fn replace_document_atomic_and_select(
+        &mut self,
+        document: RadialDocument,
+        selection: Option<StableSelection>,
+    ) -> Result<(), AuthoringError> {
+        let generation_before = self.generation;
+        self.replace_document_atomic(document)?;
+        self.select_after_mutation(selection, generation_before);
+        Ok(())
+    }
+
+    pub fn select_authored_cell(&mut self, target: AuthoredCellTarget, control: bool, shift: bool) {
+        if self.is_initial_snapshot_pending() || !cell_target_exists(&target, &self.draft) {
+            return;
+        }
+        if !control && !shift {
+            self.selection = Some(cell_target_selection(&target));
+            return;
+        }
+
+        let authored = authored_cell_order(&self.draft, &target.menu_id);
+        let current_cells = self
+            .selection
+            .as_ref()
+            .filter(|selection| {
+                selection
+                    .selected_cells()
+                    .iter()
+                    .all(|cell| cell.menu_id == target.menu_id)
+            })
+            .map(StableSelection::selected_cells)
+            .unwrap_or_default();
+        if shift {
+            let anchor = self
+                .selection
+                .as_ref()
+                .and_then(|selection| match selection {
+                    StableSelection::CellSet(selection)
+                        if selection.primary.menu_id == target.menu_id =>
+                    {
+                        Some(selection.range_anchor.clone())
+                    }
+                    StableSelection::Cell {
+                        menu_id,
+                        ring_id,
+                        cell_id,
+                    } if menu_id == &target.menu_id => Some(AuthoredCellTarget {
+                        menu_id: menu_id.clone(),
+                        ring_id: ring_id.clone(),
+                        cell_id: cell_id.clone(),
+                    }),
+                    _ => None,
+                })
+                .filter(|anchor| authored.contains(anchor))
+                .unwrap_or_else(|| target.clone());
+            let anchor_index = authored
+                .iter()
+                .position(|cell| cell == &anchor)
+                .unwrap_or(0);
+            let target_index = authored
+                .iter()
+                .position(|cell| cell == &target)
+                .unwrap_or(0);
+            let (start, end) = if anchor_index <= target_index {
+                (anchor_index, target_index)
+            } else {
+                (target_index, anchor_index)
+            };
+            let members = authored[start..=end].to_vec();
+            self.selection = Some(StableSelection::CellSet(AuthoredCellSelection {
+                primary: target,
+                members,
+                range_anchor: anchor,
+            }));
+            return;
+        }
+
+        let mut members = current_cells;
+        if let Some(index) = members.iter().position(|member| member == &target) {
+            members.remove(index);
+        } else {
+            members.push(target.clone());
+        }
+        members.sort_by_key(|member| {
+            authored
+                .iter()
+                .position(|cell| cell == member)
+                .unwrap_or(usize::MAX)
+        });
+        members.dedup();
+        if members.is_empty() {
+            self.selection = None;
+            return;
+        }
+        let old_primary = self.selection.as_ref().and_then(selection_primary_target);
+        let primary = old_primary
+            .filter(|primary| members.contains(primary))
+            .unwrap_or_else(|| members[0].clone());
+        let old_anchor = self
+            .selection
+            .as_ref()
+            .and_then(|selection| match selection {
+                StableSelection::CellSet(selection)
+                    if selection.primary.menu_id == target.menu_id =>
+                {
+                    Some(selection.range_anchor.clone())
+                }
+                StableSelection::Cell {
+                    menu_id,
+                    ring_id,
+                    cell_id,
+                } if menu_id == &target.menu_id => Some(AuthoredCellTarget {
+                    menu_id: menu_id.clone(),
+                    ring_id: ring_id.clone(),
+                    cell_id: cell_id.clone(),
+                }),
+                _ => None,
+            });
+        let range_anchor = old_anchor
+            .filter(|anchor| members.contains(anchor))
+            .unwrap_or_else(|| primary.clone());
+        self.selection = Some(StableSelection::CellSet(AuthoredCellSelection {
+            primary,
+            members,
+            range_anchor,
+        }));
     }
 
     pub fn mutate(
@@ -1462,15 +1887,23 @@ impl RadialAuthoringSession {
                 return Ok(());
             }
             self.advance_draft_generation()?;
+            let selection_before = self.selection.clone();
+            let selection_after = selection_before
+                .clone()
+                .and_then(|selection| reconcile_selection(selection, &after));
             let open = matches!(phase, EditPhase::Begin | EditPhase::Update);
             let entry = HistoryEntry {
                 bytes: estimate_document_bytes(&before)
                     + estimate_document_bytes(&after)
-                    + self.pending_assets.byte_len() * 2,
+                    + self.pending_assets.byte_len() * 2
+                    + estimate_selection_bytes(&selection_before)
+                    + estimate_selection_bytes(&selection_after),
                 before,
                 after: Arc::clone(&after),
                 before_assets: self.pending_assets.clone(),
                 after_assets: self.pending_assets.clone(),
+                before_selection: selection_before,
+                after_selection: selection_after.clone(),
                 key: key.clone(),
                 open,
             };
@@ -1481,13 +1914,7 @@ impl RadialAuthoringSession {
                 self.history.close_group(key);
             }
             self.draft = after;
-            if self
-                .selection
-                .as_ref()
-                .is_some_and(|selected| !selected.exists_in(&self.draft))
-            {
-                self.selection = None;
-            }
+            self.selection = selection_after;
             Ok(())
         })();
         acceptance_trace::emit(Event::DesignerMutation {
@@ -1556,25 +1983,30 @@ impl RadialAuthoringSession {
             return Ok(());
         }
         self.advance_draft_generation()?;
+        let selection_before = self.selection.clone();
+        let selection_after = selection_before
+            .clone()
+            .and_then(|selection| reconcile_selection(selection, &after));
         let entry = HistoryEntry {
             bytes: estimate_document_bytes(&before)
                 + estimate_document_bytes(&after)
                 + before_assets.byte_len()
-                + assets.byte_len(),
+                + assets.byte_len()
+                + estimate_selection_bytes(&selection_before)
+                + estimate_selection_bytes(&selection_after),
             before,
             after: Arc::clone(&after),
             before_assets,
             after_assets: assets.clone(),
+            before_selection: selection_before,
+            after_selection: selection_after.clone(),
             key: None,
             open: false,
         };
         self.history.push(entry);
         self.draft = after;
         self.pending_assets = assets;
-        self.selection = self
-            .selection
-            .take()
-            .filter(|selection| selection.exists_in(&self.draft));
+        self.selection = selection_after;
         Ok(())
     }
 
@@ -1607,9 +2039,13 @@ impl RadialAuthoringSession {
             after: Arc::clone(&self.draft),
             before_assets: before_assets.clone(),
             after_assets: self.pending_assets.clone(),
+            before_selection: self.selection.clone(),
+            after_selection: self.selection.clone(),
             key: None,
             open: false,
-            bytes: before_assets.byte_len() + self.pending_assets.byte_len(),
+            bytes: before_assets.byte_len()
+                + self.pending_assets.byte_len()
+                + estimate_selection_bytes(&self.selection) * 2,
         });
         Ok(())
     }
@@ -1630,9 +2066,13 @@ impl RadialAuthoringSession {
             after: Arc::clone(&self.draft),
             before_assets: before_assets.clone(),
             after_assets: self.pending_assets.clone(),
+            before_selection: self.selection.clone(),
+            after_selection: self.selection.clone(),
             key: None,
             open: false,
-            bytes: before_assets.byte_len() + self.pending_assets.byte_len(),
+            bytes: before_assets.byte_len()
+                + self.pending_assets.byte_len()
+                + estimate_selection_bytes(&self.selection) * 2,
         });
     }
 
@@ -1646,6 +2086,10 @@ impl RadialAuthoringSession {
         self.history.bytes = self.history.bytes.saturating_sub(entry.bytes);
         self.draft = Arc::clone(&entry.before);
         self.pending_assets = entry.before_assets.clone();
+        self.selection = entry
+            .before_selection
+            .clone()
+            .and_then(|selection| reconcile_selection(selection, &self.draft));
         self.history.redo.push_back(entry);
         true
     }
@@ -1659,6 +2103,10 @@ impl RadialAuthoringSession {
         };
         self.draft = Arc::clone(&entry.after);
         self.pending_assets = entry.after_assets.clone();
+        self.selection = entry
+            .after_selection
+            .clone()
+            .and_then(|selection| reconcile_selection(selection, &self.draft));
         self.history.bytes = self.history.bytes.saturating_add(entry.bytes);
         self.history.undo.push_back(entry);
         self.history.trim();
@@ -2446,6 +2894,10 @@ impl RadialAuthoringSession {
                 self.baseline = snapshot.clone();
                 self.draft = Arc::clone(&snapshot.document);
                 self.clean_checkpoint = Arc::clone(&snapshot.document);
+                self.selection = self
+                    .selection
+                    .take()
+                    .and_then(|selection| reconcile_selection(selection, &self.draft));
                 self.pending_assets = AssetMutations::default();
                 self.rollback_assets = rollback_assets;
                 self.history.clear();
@@ -2481,6 +2933,10 @@ impl RadialAuthoringSession {
                 self.baseline = snapshot.clone();
                 self.draft = Arc::clone(&snapshot.document);
                 self.clean_checkpoint = Arc::clone(&snapshot.document);
+                self.selection = self
+                    .selection
+                    .take()
+                    .and_then(|selection| reconcile_selection(selection, &self.draft));
                 self.pending_assets = AssetMutations::default();
                 self.rollback_assets = AssetMutations::default();
                 self.cancel_checkpoint = None;
@@ -2528,7 +2984,7 @@ impl RadialAuthoringSession {
             self.selection = self
                 .selection
                 .take()
-                .filter(|selection| selection.exists_in(&self.draft));
+                .and_then(|selection| reconcile_selection(selection, &self.draft));
         } else {
             self.conflict = Some(AuthoringConflict {
                 external: snapshot,
@@ -2558,6 +3014,10 @@ impl RadialAuthoringSession {
                 self.baseline = conflict.external.clone();
                 self.draft = Arc::clone(&conflict.external.document);
                 self.clean_checkpoint = Arc::clone(&conflict.external.document);
+                self.selection = self
+                    .selection
+                    .take()
+                    .and_then(|selection| reconcile_selection(selection, &self.draft));
                 self.pending_assets = AssetMutations::default();
                 self.cancel_checkpoint = None;
                 self.rollback_assets = AssetMutations::default();
@@ -2569,6 +3029,10 @@ impl RadialAuthoringSession {
                 self.baseline = conflict.external.clone();
                 self.draft = Arc::clone(&conflict.external.document);
                 self.clean_checkpoint = Arc::clone(&conflict.external.document);
+                self.selection = self
+                    .selection
+                    .take()
+                    .and_then(|selection| reconcile_selection(selection, &self.draft));
                 self.pending_assets = AssetMutations::default();
                 self.cancel_checkpoint = None;
                 self.rollback_assets = AssetMutations::default();
@@ -2586,6 +3050,10 @@ impl RadialAuthoringSession {
                 self.baseline = conflict.external.clone();
                 self.clean_checkpoint = Arc::clone(&conflict.external.document);
                 self.draft = Arc::new(merged);
+                self.selection = self
+                    .selection
+                    .take()
+                    .and_then(|selection| reconcile_selection(selection, &self.draft));
                 self.cancel_checkpoint = None;
                 self.rollback_assets = AssetMutations::default();
                 self.history.clear();
@@ -2787,6 +3255,209 @@ mod tests {
         assert_eq!(session.draft.menus[0].name, "Starter");
         assert!(session.redo());
         assert_eq!(session.draft.menus[0].name, "Work");
+    }
+
+    #[test]
+    fn authored_cell_selection_ranges_cross_rings_and_toggle_primary_deterministically() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let menu_id = session.draft.default_menu_id.clone();
+        let first_ring = session.draft.menus[0].rings[0].id.clone();
+        let second_ring = menu::add_ring(&mut session, &menu_id).unwrap();
+        let history_len = session.history.undo.len();
+        let generation = session.generation;
+        let first_cells = session.draft.menus[0].rings[0]
+            .cells
+            .iter()
+            .map(|cell| cell.id.clone())
+            .collect::<Vec<_>>();
+        let second_cells = session.draft.menus[0].rings[1]
+            .cells
+            .iter()
+            .map(|cell| cell.id.clone())
+            .collect::<Vec<_>>();
+        let anchor = AuthoredCellTarget {
+            menu_id: menu_id.clone(),
+            ring_id: first_ring.clone(),
+            cell_id: first_cells[6].clone(),
+        };
+        let toggled = AuthoredCellTarget {
+            menu_id: menu_id.clone(),
+            ring_id: first_ring.clone(),
+            cell_id: first_cells[7].clone(),
+        };
+        let range_end = AuthoredCellTarget {
+            menu_id: menu_id.clone(),
+            ring_id: second_ring.clone(),
+            cell_id: second_cells[1].clone(),
+        };
+        session.select_authored_cell(anchor.clone(), false, false);
+        session.select_authored_cell(range_end.clone(), false, true);
+        let selection = session.selection.as_ref().unwrap();
+        assert_eq!(
+            selection.primary_cell(),
+            Some(StableSelection::Cell {
+                menu_id: menu_id.clone(),
+                ring_id: second_ring.clone(),
+                cell_id: second_cells[1].clone(),
+            })
+        );
+        let expected_range = first_cells[6..]
+            .iter()
+            .map(|cell_id| AuthoredCellTarget {
+                menu_id: menu_id.clone(),
+                ring_id: first_ring.clone(),
+                cell_id: cell_id.clone(),
+            })
+            .chain(second_cells[..=1].iter().map(|cell_id| AuthoredCellTarget {
+                menu_id: menu_id.clone(),
+                ring_id: second_ring.clone(),
+                cell_id: cell_id.clone(),
+            }))
+            .collect::<Vec<_>>();
+        assert_eq!(selection.selected_cells(), expected_range);
+        let StableSelection::CellSet(selection) = session.selection.as_ref().unwrap() else {
+            panic!("Shift selection must retain its range anchor and members");
+        };
+        assert_eq!(selection.range_anchor, anchor);
+        assert!(selection.contains(&toggled));
+
+        session.select_authored_cell(toggled.clone(), true, false);
+        assert!(
+            !session
+                .selection
+                .as_ref()
+                .unwrap()
+                .selected_cells()
+                .contains(&toggled)
+        );
+        session.select_authored_cell(range_end, true, false);
+        let StableSelection::CellSet(selection) = session.selection.as_ref().unwrap() else {
+            panic!("A multi-cell selection must remain typed after a toggle");
+        };
+        assert_eq!(selection.primary, anchor);
+        assert_eq!(selection.range_anchor, anchor);
+        assert_eq!(session.generation, generation);
+        assert_eq!(session.history.undo.len(), history_len);
+    }
+
+    #[test]
+    fn selection_follows_stable_cell_id_through_reorder_move_and_undo_redo() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let menu_id = session.draft.default_menu_id.clone();
+        let first_ring = session.draft.menus[0].rings[0].id.clone();
+        let second_ring = menu::add_ring(&mut session, &menu_id).unwrap();
+        let cell_id = session.draft.menus[0].rings[0].cells[0].id.clone();
+        let old_target = StableSelection::Cell {
+            menu_id: menu_id.clone(),
+            ring_id: first_ring.clone(),
+            cell_id: cell_id.clone(),
+        };
+        session.select(Some(old_target.clone()));
+        let mut reordered = (*session.draft).clone();
+        reordered.menus[0].rings[0].cells.swap(0, 1);
+        session.replace_document_atomic(reordered).unwrap();
+        assert_eq!(session.selection, Some(old_target.clone()));
+
+        let generation = session.generation;
+        menu::move_cell_to_slot(
+            &mut session,
+            (&menu_id, &first_ring, &cell_id),
+            (&menu_id, &second_ring, 3),
+            menu::CellDropResolution::MoveIntoSpacer,
+            generation,
+        )
+        .unwrap();
+        let new_target = StableSelection::Cell {
+            menu_id,
+            ring_id: second_ring,
+            cell_id,
+        };
+        assert_eq!(session.selection, Some(new_target.clone()));
+        assert!(session.undo());
+        assert_eq!(session.selection, Some(old_target));
+        assert!(session.redo());
+        assert_eq!(session.selection, Some(new_target));
+    }
+
+    #[test]
+    fn duplicate_cell_ids_in_other_menus_do_not_redirect_selection_or_history() {
+        let mut session = RadialAuthoringSession::new(snapshot("Starter", 1));
+        let mut document = (*session.draft).clone();
+        let first_menu = document.menus[0].clone();
+        let first_menu_id = first_menu.id.clone();
+        let first_ring_id = first_menu.rings[0].id.clone();
+        let shared_cell_id = first_menu.rings[0].cells[0].id.clone();
+        let second_menu_id = MenuId::new("duplicate-cell-id-menu");
+        let mut second_menu = first_menu;
+        second_menu.id = second_menu_id.clone();
+        document.menus.push(second_menu);
+        session.replace_document_atomic(document).unwrap();
+
+        let target = AuthoredCellTarget {
+            menu_id: second_menu_id.clone(),
+            ring_id: first_ring_id.clone(),
+            cell_id: shared_cell_id.clone(),
+        };
+        let selection = cell_target_selection(&target);
+        session.select(Some(selection.clone()));
+        assert_eq!(session.selection, Some(selection.clone()));
+
+        let first_label = session
+            .draft
+            .menus
+            .iter()
+            .find(|menu| menu.id == first_menu_id)
+            .unwrap()
+            .rings[0]
+            .cells[0]
+            .label
+            .clone();
+        let second_menu_index = session
+            .draft
+            .menus
+            .iter()
+            .position(|menu| menu.id == second_menu_id)
+            .unwrap();
+        menu::set_cell_label(
+            &mut session,
+            &second_menu_id,
+            &first_ring_id,
+            &shared_cell_id,
+            "Edited in second menu".into(),
+            EditPhase::Atomic,
+        )
+        .unwrap();
+        assert_eq!(session.selection, Some(selection.clone()));
+        assert_eq!(
+            session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| menu.id == first_menu_id)
+                .unwrap()
+                .rings[0]
+                .cells[0]
+                .label,
+            first_label
+        );
+        assert_eq!(
+            session.draft.menus[second_menu_index].rings[0].cells[0].label,
+            "Edited in second menu"
+        );
+
+        assert!(session.undo());
+        assert_eq!(session.selection, Some(selection.clone()));
+        assert_eq!(
+            session.draft.menus[second_menu_index].rings[0].cells[0].label,
+            first_label
+        );
+        assert!(session.redo());
+        assert_eq!(session.selection, Some(selection));
+        assert_eq!(
+            session.draft.menus[second_menu_index].rings[0].cells[0].label,
+            "Edited in second menu"
+        );
+        assert_eq!(first_menu_id, session.draft.menus[0].id);
     }
 
     #[test]

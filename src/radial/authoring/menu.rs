@@ -2,11 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{DraftGeneration, RadialAuthoringSession, StableSelection};
-use crate::radial::model::{
-    AfterActionPolicy, CellContent, CellDefinition, CellId, InteractionMode, MenuDefinition,
-    MenuId, RadialDocument, RingDefinition, RingId, SubmenuPresentation,
+use super::{
+    AssetMutations, AuthoredCellTarget, AuthoringSessionId, DraftGeneration,
+    RadialAuthoringSession, StableSelection,
 };
+use crate::radial::model::{
+    AfterActionPolicy, CellContent, CellDefinition, CellId, CellStyleLayer, InteractionMode,
+    MenuDefinition, MenuId, Override, RadialDocument, RingDefinition, RingId, SubmenuPresentation,
+};
+use crate::radial::skin::StyleField;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubmenuDuplication {
@@ -100,6 +104,306 @@ pub enum MenuEditError {
     LimitExceeded(&'static str),
     KeepOpenIncompatible(crate::radial::handoff::InteractionRequirement),
     InvalidGeometry(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BulkCellEditRequest {
+    pub editor_session: AuthoringSessionId,
+    pub generation: DraftGeneration,
+    pub targets: Vec<AuthoredCellTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BulkCellEdit {
+    SetLabel(String),
+    SetStyleOverride {
+        field: StyleField,
+        value: serde_json::Value,
+    },
+    SetAfterAction {
+        slot: BulkAfterActionSlot,
+        policy: AfterActionPolicy,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BulkAfterActionSlot {
+    Primary,
+    Secondary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BulkCellEditError {
+    EmptySelection,
+    MultipleMenus,
+    StaleSession,
+    StaleGeneration,
+    DuplicateTarget(AuthoredCellTarget),
+    MissingTarget(AuthoredCellTarget),
+    InvalidStyleField(StyleField),
+    InvalidStyleValue(String),
+    InvalidStyle {
+        target: AuthoredCellTarget,
+        issues: Vec<crate::radial::validation::ValidationIssue>,
+    },
+    MissingManagedAsset {
+        target: AuthoredCellTarget,
+        asset: crate::radial::model::AssetId,
+    },
+    PolicyIncompatible {
+        target: AuthoredCellTarget,
+        requirement: crate::radial::handoff::InteractionRequirement,
+    },
+    Authoring(String),
+}
+
+impl BulkCellEditRequest {
+    pub fn capture(session: &RadialAuthoringSession) -> Result<Self, BulkCellEditError> {
+        let targets = session
+            .selection
+            .as_ref()
+            .map(StableSelection::selected_cells)
+            .unwrap_or_default();
+        if targets.is_empty() {
+            return Err(BulkCellEditError::EmptySelection);
+        }
+        if targets
+            .iter()
+            .any(|target| target.menu_id != targets[0].menu_id)
+        {
+            return Err(BulkCellEditError::MultipleMenus);
+        }
+        Ok(Self {
+            editor_session: session.editor_session,
+            generation: session.generation,
+            targets,
+        })
+    }
+}
+
+/// Validate and apply one explicit cell-field edit to a captured stable target
+/// set. All targets are resolved before the candidate is committed; every
+/// error therefore leaves document, assets, generation, and history untouched.
+pub fn apply_bulk_cell_edit(
+    session: &mut RadialAuthoringSession,
+    request: &BulkCellEditRequest,
+    edit: BulkCellEdit,
+) -> Result<(), BulkCellEditError> {
+    let assets = session.pending_assets.clone();
+    apply_bulk_cell_edit_with_assets(session, request, edit, assets, Vec::new())
+}
+
+pub fn apply_bulk_cell_edit_with_assets(
+    session: &mut RadialAuthoringSession,
+    request: &BulkCellEditRequest,
+    edit: BulkCellEdit,
+    assets: AssetMutations,
+    asset_records: Vec<crate::radial::model::AssetRecord>,
+) -> Result<(), BulkCellEditError> {
+    if request.editor_session != session.editor_session {
+        return Err(BulkCellEditError::StaleSession);
+    }
+    if request.generation != session.generation {
+        return Err(BulkCellEditError::StaleGeneration);
+    }
+    if request.targets.is_empty() {
+        return Err(BulkCellEditError::EmptySelection);
+    }
+    if request
+        .targets
+        .iter()
+        .any(|target| target.menu_id != request.targets[0].menu_id)
+    {
+        return Err(BulkCellEditError::MultipleMenus);
+    }
+    let mut seen = BTreeSet::new();
+    for target in &request.targets {
+        if !seen.insert(target.clone()) {
+            return Err(BulkCellEditError::DuplicateTarget(target.clone()));
+        }
+        if find_cell(&session.draft, target).is_none() {
+            return Err(BulkCellEditError::MissingTarget(target.clone()));
+        }
+    }
+
+    let mut document = (*session.draft).clone();
+    for record in asset_records {
+        if let Some(existing) = document.assets.iter().find(|asset| asset.id == record.id) {
+            if existing != &record {
+                return Err(BulkCellEditError::Authoring(format!(
+                    "managed asset {} conflicts with the document record",
+                    record.id
+                )));
+            }
+        } else {
+            document.assets.push(record);
+        }
+    }
+    match edit {
+        BulkCellEdit::SetLabel(label) => {
+            for target in &request.targets {
+                find_cell_mut(&mut document, target)
+                    .ok_or_else(|| BulkCellEditError::MissingTarget(target.clone()))?
+                    .label = label.clone();
+            }
+        }
+        BulkCellEdit::SetStyleOverride { field, value } => {
+            let (section, key) =
+                cell_style_path(field).ok_or(BulkCellEditError::InvalidStyleField(field))?;
+            for target in &request.targets {
+                let cell = find_cell_mut(&mut document, target)
+                    .ok_or_else(|| BulkCellEditError::MissingTarget(target.clone()))?;
+                let mut layer = serde_json::to_value(&cell.style)
+                    .map_err(|error| BulkCellEditError::InvalidStyleValue(error.to_string()))?;
+                let slot = layer
+                    .get_mut(section)
+                    .and_then(|section| section.get_mut(key))
+                    .ok_or(BulkCellEditError::InvalidStyleField(field))?;
+                *slot = value.clone();
+                cell.style = serde_json::from_value::<CellStyleLayer>(layer)
+                    .map_err(|error| BulkCellEditError::InvalidStyleValue(error.to_string()))?;
+                if let Some(crate::radial::model::Override::Value(
+                    crate::radial::model::MediaReference::Managed { asset_id },
+                )) = cell_style_media_override(cell, field)
+                    && !document.assets.iter().any(|asset| asset.id == asset_id)
+                {
+                    return Err(BulkCellEditError::MissingManagedAsset {
+                        target: target.clone(),
+                        asset: asset_id,
+                    });
+                }
+            }
+            for target in &request.targets {
+                let cell = find_cell(&document, target)
+                    .ok_or_else(|| BulkCellEditError::MissingTarget(target.clone()))?;
+                if let Err(issues) =
+                    crate::radial::validation::validate_cell_style_layer(&document, &cell.style)
+                {
+                    return Err(BulkCellEditError::InvalidStyle {
+                        target: target.clone(),
+                        issues,
+                    });
+                }
+            }
+        }
+        BulkCellEdit::SetAfterAction { slot, policy } => {
+            for target in &request.targets {
+                let cell = find_cell_mut(&mut document, target)
+                    .ok_or_else(|| BulkCellEditError::MissingTarget(target.clone()))?;
+                match slot {
+                    BulkAfterActionSlot::Primary => cell.after_action = policy,
+                    BulkAfterActionSlot::Secondary => cell.secondary_after_action = policy,
+                }
+            }
+            for target in &request.targets {
+                let menu = document
+                    .menus
+                    .iter()
+                    .find(|menu| menu.id == target.menu_id)
+                    .ok_or_else(|| BulkCellEditError::MissingTarget(target.clone()))?;
+                let cell = find_cell(&document, target)
+                    .ok_or_else(|| BulkCellEditError::MissingTarget(target.clone()))?;
+                let slot = match slot {
+                    BulkAfterActionSlot::Primary => {
+                        crate::radial::validation::CellAfterActionSlot::Primary
+                    }
+                    BulkAfterActionSlot::Secondary => {
+                        crate::radial::validation::CellAfterActionSlot::Secondary
+                    }
+                };
+                if let Some(requirement) = crate::radial::validation::cell_policy_incompatibility(
+                    &document, menu, cell, slot, policy,
+                ) {
+                    return Err(BulkCellEditError::PolicyIncompatible {
+                        target: target.clone(),
+                        requirement,
+                    });
+                }
+            }
+        }
+    }
+    session
+        .replace_document_and_assets_atomic(document, assets)
+        .map_err(|error| BulkCellEditError::Authoring(format!("{error:?}")))
+}
+
+pub fn supports_bulk_cell_style_field(field: StyleField) -> bool {
+    cell_style_path(field).is_some()
+}
+
+fn find_cell<'a>(
+    document: &'a RadialDocument,
+    target: &AuthoredCellTarget,
+) -> Option<&'a CellDefinition> {
+    document
+        .menus
+        .iter()
+        .find(|menu| menu.id == target.menu_id)?
+        .rings
+        .iter()
+        .find(|ring| ring.id == target.ring_id)?
+        .cells
+        .iter()
+        .find(|cell| cell.id == target.cell_id)
+}
+
+fn find_cell_mut<'a>(
+    document: &'a mut RadialDocument,
+    target: &AuthoredCellTarget,
+) -> Option<&'a mut CellDefinition> {
+    document
+        .menus
+        .iter_mut()
+        .find(|menu| menu.id == target.menu_id)?
+        .rings
+        .iter_mut()
+        .find(|ring| ring.id == target.ring_id)?
+        .cells
+        .iter_mut()
+        .find(|cell| cell.id == target.cell_id)
+}
+
+fn cell_style_media_override(
+    cell: &CellDefinition,
+    field: StyleField,
+) -> Option<Override<crate::radial::model::MediaReference>> {
+    let value = serde_json::to_value(&cell.style).ok()?;
+    let (section, key) = cell_style_path(field)?;
+    serde_json::from_value(value.get(section)?.get(key)?.clone()).ok()
+}
+
+fn cell_style_path(field: StyleField) -> Option<(&'static str, &'static str)> {
+    use StyleField::*;
+    Some(match field {
+        ItemBackground => ("images", "item_background"),
+        SubmenuIndicator => ("images", "submenu_indicator"),
+        ItemBackgroundOpacity => ("images", "item_background_opacity"),
+        SubmenuIndicatorOpacity => ("images", "submenu_indicator_opacity"),
+        IconOpacity => ("images", "icon_opacity"),
+        ItemImageScale => ("geometry", "item_image_scale"),
+        ItemImageYRatio => ("geometry", "item_image_y_ratio"),
+        SubmenuIndicatorSize => ("geometry", "submenu_indicator_size"),
+        SubmenuIndicatorYRatio => ("geometry", "submenu_indicator_y_ratio"),
+        TextVisible => ("text", "visible"),
+        SubmenuIndicatorText => ("text", "submenu_indicator_text"),
+        FontFamily => ("text", "font_family"),
+        FontSize => ("text", "font_size"),
+        TextColor => ("text", "color"),
+        Bold => ("text", "bold"),
+        Italic => ("text", "italic"),
+        Underline => ("text", "underline"),
+        Strikeout => ("text", "strikeout"),
+        TextShadowEnabled => ("text", "shadow_enabled"),
+        TextShadowColor => ("text", "shadow_color"),
+        TextShadowOffset => ("text", "shadow_offset"),
+        TextBoxScale => ("text", "text_box_scale"),
+        TextVerticalRatio => ("text", "vertical_ratio"),
+        TextQuality => ("quality", "text"),
+        ShapeQuality => ("quality", "shape"),
+        InterpolationQuality => ("quality", "interpolation"),
+        SoundOnSelect => ("sounds", "on_select"),
+        _ => return None,
+    })
 }
 
 /// Resolution chosen by the user after a drag reaches an authored slot.
@@ -237,9 +541,8 @@ pub fn create_menu_with_defaults(
     };
     document.menus.push(menu);
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(document, Some(StableSelection::Menu(id.clone())))
         .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
-    session.select(Some(StableSelection::Menu(id.clone())));
     Ok(id)
 }
 
@@ -396,13 +699,15 @@ pub fn add_action_binding(
     };
     validate_candidate(&document)?;
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(StableSelection::Cell {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: cell_id.clone(),
+            }),
+        )
         .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
-    session.select(Some(StableSelection::Cell {
-        menu_id: menu_id.clone(),
-        ring_id: ring_id.clone(),
-        cell_id: cell_id.clone(),
-    }));
     Ok(cell_id)
 }
 
@@ -425,11 +730,10 @@ pub fn delete_menu(session: &mut RadialAuthoringSession, id: &MenuId) -> Result<
     if document.menus.len() == before {
         return Err(MenuEditError::MissingEntity);
     }
+    let fallback = document.default_menu_id.clone();
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(document, Some(StableSelection::Menu(fallback)))
         .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
-    let fallback = session.draft.default_menu_id.clone();
-    session.select(Some(StableSelection::Menu(fallback)));
     Ok(())
 }
 
@@ -448,9 +752,8 @@ pub fn move_menu(
     let destination = destination_index.min(document.menus.len());
     document.menus.insert(destination, menu);
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(document, Some(StableSelection::Menu(id.clone())))
         .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
-    session.select(Some(StableSelection::Menu(id.clone())));
     Ok(())
 }
 
@@ -671,9 +974,8 @@ pub fn apply_ring_proposal(
         ring_id: proposal.ring_id.clone(),
     };
     session
-        .replace_document_atomic(proposal.document)
+        .replace_document_atomic_and_select(proposal.document, Some(selection))
         .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
-    session.select(Some(selection));
     Ok(())
 }
 
@@ -846,9 +1148,8 @@ pub fn delete_ring(
         return Err(MenuEditError::MissingEntity);
     }
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(document, Some(StableSelection::Menu(menu_id.clone())))
         .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Menu(menu_id.clone())));
     Ok(())
 }
 
@@ -873,12 +1174,14 @@ pub fn move_ring(
     let destination = destination_index.min(menu.rings.len());
     menu.rings.insert(destination, ring);
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(StableSelection::Ring {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+            }),
+        )
         .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Ring {
-        menu_id: menu_id.clone(),
-        ring_id: ring_id.clone(),
-    }));
     Ok(())
 }
 
@@ -923,12 +1226,14 @@ pub fn delete_cell(
         return Err(MenuEditError::MissingEntity);
     }
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(StableSelection::Ring {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+            }),
+        )
         .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Ring {
-        menu_id: menu_id.clone(),
-        ring_id: ring_id.clone(),
-    }));
     Ok(())
 }
 
@@ -955,13 +1260,15 @@ pub fn add_spacer(
         hotstrings: Vec::new(),
     });
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(StableSelection::Cell {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: id.clone(),
+            }),
+        )
         .map_err(|error| MenuEditError::InvalidGeometry(format!("{error:?}")))?;
-    session.select(Some(StableSelection::Cell {
-        menu_id: menu_id.clone(),
-        ring_id: ring_id.clone(),
-        cell_id: id.clone(),
-    }));
     Ok(id)
 }
 
@@ -1037,13 +1344,15 @@ pub fn move_cell_to_slot(
             source_cell.clone();
     }
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(StableSelection::Cell {
+                menu_id: destination.0.clone(),
+                ring_id: destination.1.clone(),
+                cell_id: source.2.clone(),
+            }),
+        )
         .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Cell {
-        menu_id: destination.0.clone(),
-        ring_id: destination.1.clone(),
-        cell_id: source.2.clone(),
-    }));
     Ok(())
 }
 
@@ -1149,13 +1458,15 @@ pub fn create_submenu_and_link(
         menu_id: child_id.clone(),
     };
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(StableSelection::Cell {
+                menu_id: parent_menu_id.clone(),
+                ring_id: parent_ring_id.clone(),
+                cell_id: parent_cell_id.clone(),
+            }),
+        )
         .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Cell {
-        menu_id: parent_menu_id.clone(),
-        ring_id: parent_ring_id.clone(),
-        cell_id: parent_cell_id.clone(),
-    }));
     Ok(child_id)
 }
 
@@ -1331,9 +1642,8 @@ pub fn duplicate_menu(
     }
     let new_root = mapping[root].clone();
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(document, Some(StableSelection::Menu(new_root.clone())))
         .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Menu(new_root.clone())));
     Ok(new_root)
 }
 
@@ -1364,13 +1674,15 @@ pub fn copy_cell(
         .cells
         .push(copy);
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(StableSelection::Cell {
+                menu_id: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: copied_id.clone(),
+            }),
+        )
         .map_err(|_| MenuEditError::MissingEntity)?;
-    session.select(Some(StableSelection::Cell {
-        menu_id: menu_id.clone(),
-        ring_id: ring_id.clone(),
-        cell_id: copied_id.clone(),
-    }));
     Ok(copied_id)
 }
 
@@ -1669,6 +1981,322 @@ mod tests {
             document: std::sync::Arc::new(document),
             disk_sha256: DiskSha256("test".into()),
         })
+    }
+
+    fn select_first_cells(
+        session: &mut RadialAuthoringSession,
+        count: usize,
+    ) -> Vec<AuthoredCellTarget> {
+        let menu = &session.draft.menus[0];
+        let ring = &menu.rings[0];
+        let targets = ring
+            .cells
+            .iter()
+            .take(count)
+            .map(|cell| AuthoredCellTarget {
+                menu_id: menu.id.clone(),
+                ring_id: ring.id.clone(),
+                cell_id: cell.id.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Some(first) = targets.first() {
+            session.select_authored_cell(first.clone(), false, false);
+            for target in targets.iter().skip(1) {
+                session.select_authored_cell(target.clone(), true, false);
+            }
+        }
+        targets
+    }
+
+    #[test]
+    fn bulk_label_is_one_atomic_edit_and_undo_redo_restores_selection() {
+        let mut session = session();
+        let targets = select_first_cells(&mut session, 3);
+        let request = BulkCellEditRequest::capture(&session).unwrap();
+        let selection = session.selection.clone();
+        let before = (*session.draft).clone();
+        let mut expected = before.clone();
+        for target in &targets {
+            find_cell_mut(&mut expected, target).unwrap().label = "Batch".into();
+        }
+        let generation = session.generation;
+        let history_len = session.history.undo.len();
+
+        apply_bulk_cell_edit(
+            &mut session,
+            &request,
+            BulkCellEdit::SetLabel("Batch".into()),
+        )
+        .unwrap();
+
+        assert_eq!(*session.draft, expected);
+        assert_eq!(session.generation.0, generation.0 + 1);
+        assert_eq!(session.history.undo.len(), history_len + 1);
+        assert_eq!(session.selection, selection);
+        assert!(session.undo());
+        assert_eq!(*session.draft, before);
+        assert_eq!(session.selection, selection);
+        assert!(session.redo());
+        assert_eq!(*session.draft, expected);
+        assert_eq!(session.selection, selection);
+    }
+
+    #[test]
+    fn bulk_style_changes_only_one_field_and_preserves_override_states_in_history() {
+        let mut session = session();
+        let mut document = (*session.draft).clone();
+        let cells = &mut document.menus[0].rings[0].cells;
+        let mut clear_style = serde_json::to_value(&cells[1].style).unwrap();
+        clear_style["text"]["bold"] = serde_json::to_value(Override::<bool>::Clear).unwrap();
+        cells[1].style = serde_json::from_value(clear_style).unwrap();
+        let mut value_style = serde_json::to_value(&cells[2].style).unwrap();
+        value_style["text"]["bold"] = serde_json::to_value(Override::<bool>::Value(false)).unwrap();
+        cells[2].style = serde_json::from_value(value_style).unwrap();
+        session.replace_document_atomic(document).unwrap();
+        let targets = select_first_cells(&mut session, 3);
+        let request = BulkCellEditRequest::capture(&session).unwrap();
+        let before = (*session.draft).clone();
+        let selection = session.selection.clone();
+        let mut expected = before.clone();
+        let set_true = serde_json::to_value(Override::<bool>::Value(true)).unwrap();
+        for target in &targets {
+            let cell = find_cell_mut(&mut expected, target).unwrap();
+            let mut style = serde_json::to_value(&cell.style).unwrap();
+            style["text"]["bold"] = set_true.clone();
+            cell.style = serde_json::from_value(style).unwrap();
+        }
+
+        apply_bulk_cell_edit(
+            &mut session,
+            &request,
+            BulkCellEdit::SetStyleOverride {
+                field: StyleField::Bold,
+                value: set_true.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(*session.draft, expected);
+        assert_eq!(
+            serde_json::to_value(&session.draft.menus[0].rings[0].cells[0].style).unwrap()["text"]
+                ["bold"],
+            set_true
+        );
+        assert!(session.undo());
+        assert_eq!(*session.draft, before);
+        assert_eq!(session.selection, selection);
+        assert!(session.redo());
+        assert_eq!(*session.draft, expected);
+        assert_eq!(session.selection, selection);
+
+        let inherit = serde_json::to_value(Override::<bool>::Inherit).unwrap();
+        let clear = serde_json::to_value(Override::<bool>::Clear).unwrap();
+        assert_ne!(inherit, clear);
+        assert_ne!(clear, set_true);
+    }
+
+    #[test]
+    fn bulk_style_rejects_invalid_search_paths_and_wrong_media_kinds_atomically() {
+        let mut session = session();
+        let targets = select_first_cells(&mut session, 2);
+        let request = BulkCellEditRequest::capture(&session).unwrap();
+        let before = session.draft.clone();
+        let generation = session.generation;
+        let history_len = session.history.undo.len();
+        let assets = session.pending_assets.clone();
+        let invalid_search_path = serde_json::to_value(Override::Value(
+            crate::radial::model::MediaReference::SearchPath {
+                file_name: "../unsafe.png".into(),
+            },
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            apply_bulk_cell_edit(
+                &mut session,
+                &request,
+                BulkCellEdit::SetStyleOverride {
+                    field: StyleField::ItemBackground,
+                    value: invalid_search_path,
+                },
+            ),
+            Err(BulkCellEditError::InvalidStyle { target, issues })
+                if target == targets[0]
+                    && issues.iter().any(|issue| issue.message.contains("safe file name"))
+        ));
+        assert_eq!(session.draft, before);
+        assert_eq!(session.generation, generation);
+        assert_eq!(session.history.undo.len(), history_len);
+        assert_eq!(session.pending_assets, assets);
+
+        let mut sound_document = (*session.draft).clone();
+        let sound_asset = crate::radial::model::AssetRecord {
+            id: crate::radial::model::AssetId::new("bulk-style-sound"),
+            kind: crate::radial::model::MediaKind::Sound,
+            relative_path: "sound.wav".into(),
+            content_sha256: "a".repeat(64),
+            byte_len: 1,
+        };
+        sound_document.assets.push(sound_asset.clone());
+        session.replace_document_atomic(sound_document).unwrap();
+        let targets = select_first_cells(&mut session, 2);
+        let request = BulkCellEditRequest::capture(&session).unwrap();
+        let before = session.draft.clone();
+        let generation = session.generation;
+        let history_len = session.history.undo.len();
+        let asset_value = serde_json::to_value(Override::Value(
+            crate::radial::model::MediaReference::Managed {
+                asset_id: sound_asset.id,
+            },
+        ))
+        .unwrap();
+
+        assert!(matches!(
+            apply_bulk_cell_edit(
+                &mut session,
+                &request,
+                BulkCellEdit::SetStyleOverride {
+                    field: StyleField::ItemBackground,
+                    value: asset_value,
+                },
+            ),
+            Err(BulkCellEditError::InvalidStyle { target, issues })
+                if target == targets[0]
+                    && issues.iter().any(|issue| issue.message.contains("wrong media kind"))
+        ));
+        assert_eq!(session.draft, before);
+        assert_eq!(session.generation, generation);
+        assert_eq!(session.history.undo.len(), history_len);
+    }
+
+    #[test]
+    fn bulk_secondary_close_tree_policy_remains_valid_for_save_fallback() {
+        let mut session = session();
+        let targets = select_first_cells(&mut session, 1);
+        let mut document = (*session.draft).clone();
+        let cell = find_cell_mut(&mut document, &targets[0]).unwrap();
+        cell.alternate_clicks
+            .push(crate::radial::model::ClickBinding {
+                gesture: crate::radial::model::ClickGesture::Secondary,
+                action: crate::radial::model::ActionBinding::LauncherQuery {
+                    query: "secondary query".into(),
+                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                },
+                after_action: AfterActionPolicy::Inherit,
+            });
+        session.replace_document_atomic(document).unwrap();
+        let targets = select_first_cells(&mut session, 1);
+        let request = BulkCellEditRequest::capture(&session).unwrap();
+
+        apply_bulk_cell_edit(
+            &mut session,
+            &request,
+            BulkCellEdit::SetAfterAction {
+                slot: BulkAfterActionSlot::Secondary,
+                policy: AfterActionPolicy::CloseTree,
+            },
+        )
+        .unwrap();
+        crate::radial::validation::validate(&session.draft).unwrap();
+        assert_eq!(
+            find_cell(&session.draft, &targets[0])
+                .unwrap()
+                .secondary_after_action,
+            AfterActionPolicy::CloseTree
+        );
+    }
+
+    #[test]
+    fn bulk_after_action_rejects_mixed_keep_open_incompatibility_atomically() {
+        let mut session = session();
+        let targets = select_first_cells(&mut session, 2);
+        let mut document = (*session.draft).clone();
+        find_cell_mut(&mut document, &targets[1]).unwrap().content = CellContent::Action {
+            binding: crate::radial::model::ActionBinding::LauncherQuery {
+                query: "draft query".into(),
+                mode: crate::radial::model::QueryRunMode::OpenLauncher,
+            },
+        };
+        session.replace_document_atomic(document).unwrap();
+        let request = BulkCellEditRequest::capture(&session).unwrap();
+        let before = session.draft.clone();
+        let generation = session.generation;
+        let history_len = session.history.undo.len();
+        let assets = session.pending_assets.clone();
+
+        let result = apply_bulk_cell_edit(
+            &mut session,
+            &request,
+            BulkCellEdit::SetAfterAction {
+                slot: BulkAfterActionSlot::Primary,
+                policy: AfterActionPolicy::KeepOpen,
+            },
+        );
+
+        assert_eq!(
+            result,
+            Err(BulkCellEditError::PolicyIncompatible {
+                target: targets[1].clone(),
+                requirement: crate::radial::handoff::InteractionRequirement::Deferred,
+            })
+        );
+        assert_eq!(session.draft, before);
+        assert_eq!(session.generation, generation);
+        assert_eq!(session.history.undo.len(), history_len);
+        assert_eq!(session.pending_assets, assets);
+    }
+
+    #[test]
+    fn bulk_edit_rejects_stale_generation_and_any_missing_captured_target() {
+        let mut stale_session = session();
+        let stale_targets = select_first_cells(&mut stale_session, 2);
+        let stale_request = BulkCellEditRequest::capture(&stale_session).unwrap();
+        let mut advanced = (*stale_session.draft).clone();
+        find_cell_mut(&mut advanced, &stale_targets[0])
+            .unwrap()
+            .label = "Concurrent".into();
+        stale_session.replace_document_atomic(advanced).unwrap();
+        let after_concurrent_edit = stale_session.draft.clone();
+        let generation = stale_session.generation;
+        let history_len = stale_session.history.undo.len();
+        assert_eq!(
+            apply_bulk_cell_edit(
+                &mut stale_session,
+                &stale_request,
+                BulkCellEdit::SetLabel("Must not apply".into()),
+            ),
+            Err(BulkCellEditError::StaleGeneration)
+        );
+        assert_eq!(stale_session.draft, after_concurrent_edit);
+        assert_eq!(stale_session.generation, generation);
+        assert_eq!(stale_session.history.undo.len(), history_len);
+
+        let mut missing_session = session();
+        let missing_targets = select_first_cells(&mut missing_session, 2);
+        let request = BulkCellEditRequest::capture(&missing_session).unwrap();
+        let mut missing_document = (*missing_session.draft).clone();
+        find_ring_mut(
+            &mut missing_document,
+            &missing_targets[1].menu_id,
+            &missing_targets[1].ring_id,
+        )
+        .unwrap()
+        .cells
+        .retain(|cell| cell.id != missing_targets[1].cell_id);
+        missing_session.draft = std::sync::Arc::new(missing_document);
+        let after_missing_target = missing_session.draft.clone();
+        let generation = missing_session.generation;
+        let history_len = missing_session.history.undo.len();
+        assert_eq!(
+            apply_bulk_cell_edit(
+                &mut missing_session,
+                &request,
+                BulkCellEdit::SetLabel("Must not partially apply".into()),
+            ),
+            Err(BulkCellEditError::MissingTarget(missing_targets[1].clone()))
+        );
+        assert_eq!(missing_session.draft, after_missing_target);
+        assert_eq!(missing_session.generation, generation);
+        assert_eq!(missing_session.history.undo.len(), history_len);
     }
 
     fn make_root_slot_spacer(session: &mut RadialAuthoringSession, cell_index: usize) {

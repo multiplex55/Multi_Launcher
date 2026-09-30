@@ -481,6 +481,12 @@ pub(crate) enum BindingEditorSlot {
     CellPrimary,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BindingAssignmentKind {
+    Explicit,
+    Pinned,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct BindingEditorScope {
     pub(crate) surface: BindingEditorSurface,
@@ -541,6 +547,8 @@ pub(crate) struct ActionBindingEditorState {
         Vec<crate::gui::universal_action_catalog::UniversalActionPickerRow>,
     )>,
     selected_binding: Option<ActionBinding>,
+    selected_binding_input_digest: Option<u64>,
+    pinned_search_input: Option<(String, QueryRunMode)>,
     editor_epoch: u64,
     edit_generation: u64,
     query_generation: u64,
@@ -597,6 +605,128 @@ pub(crate) enum ActionSearchCompletionState {
 }
 
 impl ActionBindingEditorState {
+    pub(crate) fn has_unassigned_text(&self) -> bool {
+        if self
+            .selected_binding
+            .as_ref()
+            .is_some_and(|binding| self.active_binding.as_ref() != Some(binding))
+        {
+            return true;
+        }
+        let (assigned_query, assigned_mode, assigned_command, assigned_args) = match self
+            .active_binding
+            .as_ref()
+        {
+            Some(ActionBinding::LauncherQuery { query, mode }) => (query.as_str(), *mode, "", ""),
+            Some(ActionBinding::ExactCommand { command, args }) => (
+                "",
+                QueryRunMode::OpenLauncher,
+                command.as_str(),
+                args.as_deref().unwrap_or_default(),
+            ),
+            _ => ("", QueryRunMode::OpenLauncher, "", ""),
+        };
+        let query_is_pinned_search = self
+            .pinned_search_input
+            .as_ref()
+            .is_some_and(|(query, mode)| query == &self.query && *mode == self.query_mode);
+        (!query_is_pinned_search
+            && (self.query != assigned_query || self.query_mode != assigned_mode))
+            || self.command != assigned_command
+            || self.args != assigned_args
+    }
+
+    pub(crate) fn binding_for_explicit_apply(&self) -> Option<ActionBinding> {
+        if !self.has_unassigned_text() {
+            return None;
+        }
+        if self
+            .selected_binding
+            .as_ref()
+            .is_some_and(|binding| self.active_binding.as_ref() != Some(binding))
+            && self.selected_binding_input_digest == Some(self.authored_input_digest())
+        {
+            return self.selected_binding.clone();
+        }
+        match self.tab {
+            EditorTab::Query if !self.query.trim().is_empty() => {
+                Some(ActionBinding::LauncherQuery {
+                    query: self.query.clone(),
+                    mode: self.query_mode,
+                })
+            }
+            EditorTab::Advanced if !self.command.trim().is_empty() => {
+                Some(ActionBinding::ExactCommand {
+                    command: self.command.clone(),
+                    args: (!self.args.is_empty()).then(|| self.args.clone()),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn discard_unassigned_changes(
+        &mut self,
+        scope: BindingEditorScope,
+        binding: Option<&ActionBinding>,
+    ) {
+        self.reset_for(scope, binding);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_pinned_search_for_test(
+        &mut self,
+        scope: BindingEditorScope,
+        binding: ActionBinding,
+        query: &str,
+    ) {
+        self.reset_for(scope, Some(&binding));
+        self.query = query.into();
+        self.accept_pinned_binding(binding);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_search_result_for_test(
+        &mut self,
+        scope: BindingEditorScope,
+        assigned: Option<&ActionBinding>,
+        query: &str,
+        candidate: ActionBinding,
+    ) {
+        self.reset_for(scope, assigned);
+        self.query = query.into();
+        self.search_rows = vec![
+            crate::gui::universal_action_catalog::UniversalActionPickerRow::fixture(candidate),
+        ];
+        self.search_status = SearchStatus::Results;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_for_test(&self) -> &str {
+        &self.query
+    }
+
+    #[cfg(test)]
+    pub(crate) fn command_for_test(&self) -> &str {
+        &self.command
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advanced_for_test(&self) -> bool {
+        self.tab == EditorTab::Advanced
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_unassigned_query_for_test(
+        &mut self,
+        scope: BindingEditorScope,
+        binding: Option<&ActionBinding>,
+        query: &str,
+    ) {
+        self.reset_for(scope, binding);
+        self.query = query.into();
+    }
+
     fn reset_for(&mut self, scope: BindingEditorScope, binding: Option<&ActionBinding>) {
         self.trace_retiring_requests();
         *self = Self::from_binding(scope, binding);
@@ -676,6 +806,14 @@ impl ActionBindingEditorState {
         self.pending_test_query = None;
         self.pending_search_identity = None;
         self.pending_search_query = None;
+    }
+
+    /// End the buffer owner's lifetime after a completed close or force-close.
+    /// A close prompt uses request invalidation instead, preserving its buffers
+    /// until the user chooses whether to discard them.
+    pub(crate) fn dispose(&mut self) {
+        self.trace_retiring_requests();
+        *self = Self::default();
     }
 
     /// Retire outstanding Search, Test, and confirmation identities without
@@ -971,6 +1109,8 @@ impl ActionBindingEditorState {
         self.search_preview = None;
         self.search_preview_unavailable = None;
         self.selected_binding = None;
+        self.selected_binding_input_digest = None;
+        self.pinned_search_input = None;
         self.search_status = SearchStatus::Idle;
         self.pending_search_due = None;
         self.search_retry_attempts = 0;
@@ -1019,7 +1159,7 @@ impl ActionBindingEditorState {
             self.search_rows.clear();
             self.search_preview = None;
             self.search_preview_unavailable = None;
-            self.selected_binding = None;
+            self.clear_selected_binding();
             self.search_status = SearchStatus::Pending;
             self.search_retry_attempts = 0;
             self.pending_search_due = Some(now + SEARCH_DEBOUNCE);
@@ -1086,6 +1226,7 @@ impl ActionBindingEditorState {
                 } else {
                     QueryRunMode::OpenLauncher
                 };
+                self.clear_selected_binding();
                 self.bump_edit_generation();
             }
             let mode_binding = ActionBinding::LauncherQuery {
@@ -1154,7 +1295,6 @@ impl ActionBindingEditorState {
             };
             let response = ui.add_enabled(save_enabled, egui::Button::new("Save query"));
             if response.clicked() {
-                self.accept_binding(binding.clone());
                 intents.push(ActionBindingEditorIntent::SaveQuery {
                     binding: binding.clone(),
                 });
@@ -1252,8 +1392,7 @@ impl ActionBindingEditorState {
                                             .unwrap_or("Target and action identity"),
                                     );
                                 if response.clicked() {
-                                    self.selected_binding = row.binding.clone();
-                                    self.bump_edit_generation();
+                                    self.select_binding_candidate(row.binding.clone());
                                 }
                                 trace_action_editor_control_with_full_text(
                                     ui,
@@ -1293,8 +1432,7 @@ impl ActionBindingEditorState {
                                     if response.clicked()
                                         && let Ok(binding) = row.assignment()
                                     {
-                                        self.selected_binding = Some(binding.clone());
-                                        self.accept_binding(binding.clone());
+                                        self.stage_pinned_binding(binding.clone());
                                         intents.push(ActionBindingEditorIntent::Pin { binding });
                                     }
                                     trace_action_editor_control_with_presentation(
@@ -1374,8 +1512,7 @@ impl ActionBindingEditorState {
                                 .selected(self.selected_binding.as_ref() == row.binding.as_ref()),
                         );
                         if response.clicked() {
-                            self.selected_binding = row.binding.clone();
-                            self.bump_edit_generation();
+                            self.select_binding_candidate(row.binding.clone());
                         }
                         trace_action_editor_control_with_full_text(
                             ui,
@@ -1414,8 +1551,7 @@ impl ActionBindingEditorState {
                                 egui::Button::new("Pin contextual action"),
                             );
                             if response.clicked() && let Ok(binding) = row.assignment() {
-                                self.selected_binding = Some(binding.clone());
-                                self.accept_binding(binding.clone());
+                                self.stage_pinned_binding(binding.clone());
                                 intents.push(ActionBindingEditorIntent::Pin { binding });
                             }
                             trace_action_editor_control_with_presentation(
@@ -1457,6 +1593,7 @@ impl ActionBindingEditorState {
                 .desired_width(f32::INFINITY),
         );
         if command_response.changed() || args_response.changed() {
+            self.clear_selected_binding();
             self.bump_edit_generation();
         }
         let current_exact_binding =
@@ -1505,7 +1642,6 @@ impl ActionBindingEditorState {
             ui.horizontal(|ui| {
                 let response = ui.button("Use exact command");
                 if response.clicked() {
-                    self.accept_binding(binding.clone());
                     intents.push(ActionBindingEditorIntent::SetCommand {
                         binding: binding.clone(),
                     });
@@ -1596,11 +1732,101 @@ impl ActionBindingEditorState {
         });
     }
 
+    /// Finalize the editor state only after its owning draft accepted the
+    /// assignment. A rejected model mutation leaves the authored buffers and
+    /// staged Pin candidate available for correction or retry.
+    pub(crate) fn finish_assignment<E>(
+        &mut self,
+        binding: ActionBinding,
+        kind: BindingAssignmentKind,
+        result: Result<(), E>,
+    ) -> Result<(), E> {
+        result?;
+        self.accept_committed_assignment(binding, kind);
+        Ok(())
+    }
+
+    pub(crate) fn accept_committed_assignment(
+        &mut self,
+        binding: ActionBinding,
+        kind: BindingAssignmentKind,
+    ) {
+        match kind {
+            BindingAssignmentKind::Explicit => self.accept_binding(binding),
+            BindingAssignmentKind::Pinned => self.accept_pinned_binding(binding),
+        }
+    }
+
     fn accept_binding(&mut self, binding: ActionBinding) {
-        self.active_binding = Some(binding);
+        self.accept_binding_without_generation(binding);
         self.bump_edit_generation();
-        self.pending_test_binding = None;
-        self.test_status = None;
+    }
+
+    fn accept_pinned_binding(&mut self, binding: ActionBinding) {
+        let pinned_search = matches!(
+            &binding,
+            ActionBinding::Persisted { .. } | ActionBinding::Contextual { .. }
+        )
+        .then(|| (self.query.clone(), self.query_mode));
+        self.accept_binding_without_generation(binding.clone());
+        self.bump_edit_generation();
+        // Pin is the one assignment path that intentionally keeps the result
+        // highlighted while preserving its search text as browsing state.
+        if let Some((query, mode)) = pinned_search {
+            self.query = query.clone();
+            self.query_mode = mode;
+            self.pinned_search_input = Some((query, mode));
+        }
+        self.selected_binding = Some(binding.clone());
+        self.selected_binding_input_digest = Some(self.authored_input_digest());
+    }
+
+    fn accept_binding_without_generation(&mut self, binding: ActionBinding) {
+        // A Save query / Set command decision supersedes any highlighted live
+        // result. Leaving that candidate selected makes the next explicit
+        // Apply prefer the stale row over the binding the user just saved.
+        self.clear_selected_binding();
+        match &binding {
+            ActionBinding::LauncherQuery { query, mode } => {
+                self.query.clone_from(query);
+                self.query_mode = *mode;
+                self.command.clear();
+                self.args.clear();
+            }
+            ActionBinding::ExactCommand { command, args } => {
+                self.query.clear();
+                self.query_mode = QueryRunMode::OpenLauncher;
+                self.command.clone_from(command);
+                self.args = args.clone().unwrap_or_default();
+            }
+            ActionBinding::Persisted { .. } | ActionBinding::Contextual { .. } => {
+                self.query.clear();
+                self.query_mode = QueryRunMode::OpenLauncher;
+                self.command.clear();
+                self.args.clear();
+            }
+        }
+        self.active_binding = Some(binding);
+        self.pinned_search_input = None;
+    }
+
+    fn stage_pinned_binding(&mut self, binding: ActionBinding) {
+        self.selected_binding_input_digest = Some(self.authored_input_digest());
+        self.selected_binding = Some(binding);
+    }
+
+    fn select_binding_candidate(&mut self, binding: Option<ActionBinding>) {
+        self.selected_binding = binding;
+        self.selected_binding_input_digest = self
+            .selected_binding
+            .as_ref()
+            .map(|_| self.authored_input_digest());
+        self.bump_edit_generation();
+    }
+
+    fn clear_selected_binding(&mut self) {
+        self.selected_binding = None;
+        self.selected_binding_input_digest = None;
     }
 
     pub(crate) fn set_assigned_binding(&mut self, binding: Option<ActionBinding>) {
@@ -1824,6 +2050,449 @@ mod tests {
             identity.query_request_generation
         );
         assert_eq!(state.authored_input_digest(), digest_before_counter_change);
+    }
+
+    #[test]
+    fn explicit_apply_captures_query_and_exact_buffers_and_discard_restores_assignment() {
+        let original = ActionBinding::LauncherQuery {
+            query: "assigned query".into(),
+            mode: QueryRunMode::OpenLauncher,
+        };
+        let mut state = ActionBindingEditorState::default();
+        let mut inspector_scope = scope();
+        inspector_scope.surface = BindingEditorSurface::Inspector;
+        state.reset_for(inspector_scope.clone(), Some(&original));
+
+        state.query = "new query".into();
+        state.query_mode = QueryRunMode::ExecuteFirst;
+        assert_eq!(
+            state.binding_for_explicit_apply(),
+            Some(ActionBinding::LauncherQuery {
+                query: "new query".into(),
+                mode: QueryRunMode::ExecuteFirst,
+            })
+        );
+
+        state.tab = EditorTab::Advanced;
+        state.command = "window:close".into();
+        state.args = "--all".into();
+        assert_eq!(
+            state.binding_for_explicit_apply(),
+            Some(ActionBinding::ExactCommand {
+                command: "window:close".into(),
+                args: Some("--all".into()),
+            })
+        );
+
+        state.discard_unassigned_changes(inspector_scope.clone(), Some(&original));
+        assert!(!state.has_unassigned_text());
+        assert_eq!(state.query, "assigned query");
+        assert_eq!(state.active_binding, Some(original));
+    }
+
+    #[test]
+    fn explicit_apply_uses_authored_text_changed_after_selecting_a_result() {
+        let mut inspector_scope = scope();
+        inspector_scope.surface = BindingEditorSurface::Inspector;
+        let original = ActionBinding::LauncherQuery {
+            query: "assigned query".into(),
+            mode: QueryRunMode::OpenLauncher,
+        };
+        let result = ActionBinding::Persisted {
+            action: crate::universal_actions::PersistedUniversalActionRef {
+                target: None,
+                action_id: crate::universal_actions::ActionId::new("help.show"),
+            },
+        };
+        let mut state = ActionBindingEditorState::default();
+        state.reset_for(inspector_scope.clone(), Some(&original));
+        state.select_binding_candidate(Some(result.clone()));
+        assert_eq!(state.binding_for_explicit_apply(), Some(result));
+
+        let saved_query = ActionBinding::LauncherQuery {
+            query: "query saved after selecting a result".into(),
+            mode: QueryRunMode::OpenLauncher,
+        };
+        state.query = "query saved after selecting a result".into();
+        state.accept_binding(saved_query.clone());
+        assert_eq!(state.selected_binding(), None);
+        assert!(!state.has_unassigned_text());
+        assert_eq!(state.binding_for_explicit_apply(), None);
+        assert_eq!(state.active_binding, Some(saved_query));
+
+        state.tab = EditorTab::Advanced;
+        state.command = "window:close".into();
+        state.args = "--all".into();
+        assert_eq!(
+            state.binding_for_explicit_apply(),
+            Some(ActionBinding::ExactCommand {
+                command: "window:close".into(),
+                args: Some("--all".into()),
+            })
+        );
+
+        state.reset_for(inspector_scope, Some(&original));
+        state.select_binding_candidate(Some(ActionBinding::ExactCommand {
+            command: "window:show".into(),
+            args: None,
+        }));
+        state.query = "new query text".into();
+        state.query_mode = QueryRunMode::ExecuteFirst;
+        assert_eq!(
+            state.binding_for_explicit_apply(),
+            Some(ActionBinding::LauncherQuery {
+                query: "new query text".into(),
+                mode: QueryRunMode::ExecuteFirst,
+            })
+        );
+    }
+
+    #[test]
+    fn pinned_search_text_is_browsing_until_the_user_edits_it() {
+        let mut inspector_scope = scope();
+        inspector_scope.surface = BindingEditorSurface::Inspector;
+        let binding = persisted_binding(
+            crate::universal_actions::PersistableActionTargetRef::Note {
+                slug: "pinned-search-fixture".into(),
+            },
+            crate::universal_actions::action_ids::NOTE_OPEN,
+        );
+        let mut state = ActionBindingEditorState::default();
+        state.reset_for(inspector_scope, None);
+        state.query = "find the action to pin".into();
+        state.accept_pinned_binding(binding.clone());
+
+        assert_eq!(state.query, "find the action to pin");
+        assert_eq!(state.active_binding, Some(binding));
+        assert!(!state.has_unassigned_text());
+
+        state.query = "a newly authored query".into();
+        assert!(state.has_unassigned_text());
+        assert_eq!(
+            state.binding_for_explicit_apply(),
+            Some(ActionBinding::LauncherQuery {
+                query: "a newly authored query".into(),
+                mode: QueryRunMode::OpenLauncher,
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_assignments_clear_inactive_tab_text_and_later_edits_remain_dirty() {
+        let original_query = ActionBinding::LauncherQuery {
+            query: "previously assigned query".into(),
+            mode: QueryRunMode::OpenLauncher,
+        };
+        let mut inspector_scope = scope();
+        inspector_scope.surface = BindingEditorSurface::Inspector;
+
+        let mut query_state = ActionBindingEditorState::default();
+        query_state.reset_for(inspector_scope.clone(), Some(&original_query));
+        query_state.tab = EditorTab::Advanced;
+        query_state.command = "stale exact command".into();
+        query_state.args = "stale arguments".into();
+        let saved_query = ActionBinding::LauncherQuery {
+            query: "newly saved query".into(),
+            mode: QueryRunMode::ExecuteFirst,
+        };
+        query_state
+            .accept_committed_assignment(saved_query.clone(), BindingAssignmentKind::Explicit);
+
+        assert_eq!(query_state.active_binding, Some(saved_query.clone()));
+        assert_eq!(query_state.query, "newly saved query");
+        assert_eq!(query_state.query_mode, QueryRunMode::ExecuteFirst);
+        assert!(query_state.command.is_empty());
+        assert!(query_state.args.is_empty());
+        assert!(!query_state.has_unassigned_text());
+
+        query_state.command = "a later exact command edit".into();
+        assert!(query_state.has_unassigned_text());
+
+        let mut exact_state = ActionBindingEditorState::default();
+        exact_state.reset_for(inspector_scope, Some(&original_query));
+        exact_state.query = "stale query tab text".into();
+        exact_state.query_mode = QueryRunMode::ExecuteFirst;
+        exact_state.command = "window:show".into();
+        exact_state.args = "--all".into();
+        let exact = ActionBinding::ExactCommand {
+            command: "window:close".into(),
+            args: Some("--all".into()),
+        };
+        exact_state.accept_committed_assignment(exact.clone(), BindingAssignmentKind::Explicit);
+
+        assert_eq!(exact_state.active_binding, Some(exact.clone()));
+        assert!(exact_state.query.is_empty());
+        assert_eq!(exact_state.query_mode, QueryRunMode::OpenLauncher);
+        assert_eq!(exact_state.command, "window:close");
+        assert_eq!(exact_state.args, "--all");
+        assert!(!exact_state.has_unassigned_text());
+
+        exact_state.query = "a later query edit".into();
+        assert!(exact_state.has_unassigned_text());
+    }
+
+    #[test]
+    fn pin_after_advanced_edit_consumes_command_but_keeps_search_as_browsing_text() {
+        let original = ActionBinding::ExactCommand {
+            command: "window:show".into(),
+            args: None,
+        };
+        let pinned = persisted_binding(
+            crate::universal_actions::PersistableActionTargetRef::Note {
+                slug: "pin-after-advanced-fixture".into(),
+            },
+            crate::universal_actions::action_ids::NOTE_OPEN,
+        );
+        let mut inspector_scope = scope();
+        inspector_scope.surface = BindingEditorSurface::Inspector;
+        let mut state = ActionBindingEditorState::default();
+        state.reset_for(inspector_scope, Some(&original));
+        state.tab = EditorTab::Advanced;
+        state.query = "search used for Pin".into();
+        state.query_mode = QueryRunMode::ExecuteFirst;
+        state.command = "unassigned exact command".into();
+        state.args = "unassigned arguments".into();
+        state.stage_pinned_binding(pinned.clone());
+
+        assert_eq!(state.active_binding, Some(original));
+        assert!(state.has_unassigned_text());
+        state.accept_committed_assignment(pinned.clone(), BindingAssignmentKind::Pinned);
+
+        assert_eq!(state.active_binding, Some(pinned.clone()));
+        assert_eq!(state.selected_binding(), Some(pinned));
+        assert_eq!(state.query, "search used for Pin");
+        assert_eq!(state.query_mode, QueryRunMode::ExecuteFirst);
+        assert!(state.command.is_empty());
+        assert!(state.args.is_empty());
+        assert!(!state.has_unassigned_text());
+
+        state.args = "a later exact command edit".into();
+        assert!(state.has_unassigned_text());
+    }
+
+    #[test]
+    fn request_pending_assignment_rejection_preserves_editor_buffers_and_pin_selection() {
+        use crate::radial::authoring::menu;
+        use crate::radial::authoring::{AuthoringError, AuthoringSnapshot, RadialAuthoringSession};
+        use crate::radial::model::{CellContent, RadialDocument};
+
+        let document = RadialDocument::starter();
+        let (menu_id, ring_id, cell_id, original) = document
+            .menus
+            .iter()
+            .find_map(|menu| {
+                menu.rings.iter().find_map(|ring| {
+                    ring.cells.iter().find_map(|cell| match &cell.content {
+                        CellContent::Action { binding } => Some((
+                            menu.id.clone(),
+                            ring.id.clone(),
+                            cell.id.clone(),
+                            binding.clone(),
+                        )),
+                        _ => None,
+                    })
+                })
+            })
+            .expect("starter document has an authored action");
+        let target = StableSelection::Cell {
+            menu_id: menu_id.clone(),
+            ring_id: ring_id.clone(),
+            cell_id: cell_id.clone(),
+        };
+        let mut session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::new(document),
+            "request-pending-assignment-fixture",
+        ));
+        session.select(Some(target.clone()));
+        session.require_authoritative_snapshot();
+        let scope = BindingEditorScope {
+            surface: BindingEditorSurface::Inspector,
+            editor_session: session.editor_session,
+            draft_generation: session.generation,
+            target,
+            slot: BindingEditorSlot::CellPrimary,
+        };
+        let pinned = persisted_binding(
+            crate::universal_actions::PersistableActionTargetRef::Note {
+                slug: "rejected-pin-fixture".into(),
+            },
+            crate::universal_actions::action_ids::NOTE_OPEN,
+        );
+        let mut state = ActionBindingEditorState::default();
+        state.reset_for(scope.clone(), Some(&original));
+        state.query = "typed query to preserve".into();
+        state.command = "window:close".into();
+        state.args = "--all".into();
+        state.tab = EditorTab::Query;
+        state.search_rows = vec![
+            crate::gui::universal_action_catalog::UniversalActionPickerRow::fixture(pinned.clone()),
+        ];
+        state.search_status = SearchStatus::Results;
+        state.stage_pinned_binding(pinned.clone());
+
+        let before_document = std::sync::Arc::clone(&session.draft);
+        let before_generation = session.generation;
+        let before_history = session.acceptance_history_depths();
+        let mut direct_candidate = (*session.draft).clone();
+        direct_candidate.menus[0].name.push_str(" pending edit");
+        assert_eq!(
+            session.replace_document_atomic(direct_candidate),
+            Err(AuthoringError::RequestPending),
+            "the authoritative snapshot guard rejects a real document edit"
+        );
+        assert!(session.is_initial_snapshot_pending());
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let catalog = action_snapshot(Vec::new());
+        let (initial, _) = render_editor_with_catalog(
+            &context,
+            &mut state,
+            scope.clone(),
+            &original,
+            &catalog,
+            Vec::new(),
+        );
+
+        let (after_pin, pin_intents) = click_action_editor_button(
+            &context,
+            &mut state,
+            scope.clone(),
+            &original,
+            &catalog,
+            &initial,
+            "Pin this action",
+        );
+        let pin = pin_intents.into_iter().find_map(|intent| match intent {
+            ActionBindingEditorIntent::Pin { binding } => Some(binding),
+            _ => None,
+        });
+        assert_eq!(pin, Some(pinned.clone()));
+        let rejected_pin = menu::set_cell_content(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            &cell_id,
+            CellContent::Action {
+                binding: pinned.clone(),
+            },
+        );
+        assert!(rejected_pin.is_err());
+        assert!(
+            state
+                .finish_assignment(pinned.clone(), BindingAssignmentKind::Pinned, rejected_pin,)
+                .is_err()
+        );
+        assert_eq!(state.active_binding, Some(original.clone()));
+        assert_eq!(state.selected_binding(), Some(pinned.clone()));
+        assert_eq!(state.query, "typed query to preserve");
+        assert_eq!(state.command, "window:close");
+        assert_eq!(state.args, "--all");
+
+        let (_after_save, save_intents) = click_action_editor_button(
+            &context,
+            &mut state,
+            scope.clone(),
+            &original,
+            &catalog,
+            &after_pin,
+            "Save query",
+        );
+        let saved_query = save_intents.into_iter().find_map(|intent| match intent {
+            ActionBindingEditorIntent::SaveQuery { binding } => Some(binding),
+            _ => None,
+        });
+        let saved_query = saved_query.expect("Save query click returns a staged assignment");
+        let rejected_save = menu::set_cell_content(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            &cell_id,
+            CellContent::Action {
+                binding: saved_query.clone(),
+            },
+        );
+        assert!(rejected_save.is_err());
+        assert!(
+            state
+                .finish_assignment(saved_query, BindingAssignmentKind::Explicit, rejected_save,)
+                .is_err()
+        );
+        assert_eq!(state.active_binding, Some(original.clone()));
+
+        state.tab = EditorTab::Advanced;
+        let (advanced, _) = render_editor_with_catalog(
+            &context,
+            &mut state,
+            scope.clone(),
+            &original,
+            &catalog,
+            Vec::new(),
+        );
+        let (_after_command, command_intents) = click_action_editor_button(
+            &context,
+            &mut state,
+            scope.clone(),
+            &original,
+            &catalog,
+            &advanced,
+            "Use exact command",
+        );
+        let exact_command = command_intents.into_iter().find_map(|intent| match intent {
+            ActionBindingEditorIntent::SetCommand { binding } => Some(binding),
+            _ => None,
+        });
+        let exact_command = exact_command.expect("Use exact command click stages a binding");
+        let rejected_command = menu::set_cell_content(
+            &mut session,
+            &menu_id,
+            &ring_id,
+            &cell_id,
+            CellContent::Action {
+                binding: exact_command.clone(),
+            },
+        );
+        assert!(rejected_command.is_err());
+        assert!(
+            state
+                .finish_assignment(
+                    exact_command,
+                    BindingAssignmentKind::Explicit,
+                    rejected_command,
+                )
+                .is_err()
+        );
+        assert_eq!(state.active_binding, Some(original.clone()));
+
+        state.tab = EditorTab::Query;
+        let (rendered, _) = render_editor_with_catalog(
+            &context,
+            &mut state,
+            scope,
+            &original,
+            &catalog,
+            Vec::new(),
+        );
+        assert!(rendered.platform_output.accesskit_update.is_some());
+        assert_eq!(state.query, "typed query to preserve");
+        assert_eq!(state.command, "window:close");
+        assert_eq!(state.args, "--all");
+        assert_eq!(state.active_binding, Some(original));
+        assert_eq!(state.selected_binding(), Some(pinned));
+        assert!(state.has_unassigned_text());
+        let controls = crate::radial::acceptance_trace::take_action_editor_control_test_events();
+        assert!(controls.iter().any(|event| matches!(
+            event,
+            crate::radial::acceptance_trace::Event::DesignerActionEditorControl {
+                control: "result_target",
+                selected: true,
+                ..
+            }
+        )));
+        assert_eq!(&*session.draft, &*before_document);
+        assert_eq!(session.generation, before_generation);
+        assert_eq!(session.acceptance_history_depths(), before_history);
+        assert!(!session.is_dirty());
     }
     use std::sync::{Arc, Mutex, mpsc};
 
@@ -2258,6 +2927,40 @@ mod tests {
             });
         });
         (output, intents)
+    }
+
+    fn click_action_editor_button(
+        context: &egui::Context,
+        state: &mut ActionBindingEditorState,
+        editor_scope: BindingEditorScope,
+        binding: &ActionBinding,
+        action_catalog: &crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
+        output: &egui::FullOutput,
+        name: &str,
+    ) -> (egui::FullOutput, Vec<ActionBindingEditorIntent>) {
+        let point = named_button_bounds(output, name).center();
+        let mut latest = None;
+        let mut intents = Vec::new();
+        for event in [
+            egui::Event::PointerMoved(point),
+            pointer_button(point, true),
+            pointer_button(point, false),
+        ] {
+            let (output, emitted) = render_editor_with_catalog(
+                context,
+                state,
+                editor_scope.clone(),
+                binding,
+                action_catalog,
+                vec![event],
+            );
+            latest = Some(output);
+            intents.extend(emitted);
+        }
+        (
+            latest.expect("button click renders at least one frame"),
+            intents,
+        )
     }
 
     fn render_assigned_presentation(
@@ -3163,6 +3866,41 @@ mod tests {
     }
 
     #[test]
+    fn disposal_retires_exact_pending_identities_and_clears_all_buffer_state() {
+        let mut state = ActionBindingEditorState::default();
+        state.reset_for(scope(), Some(&exact_binding()));
+        state.query = "unassigned disposal query".into();
+        state.command = "window:show".into();
+        state.args = "unassigned disposal arguments".into();
+        let mut intents = Vec::new();
+        state.emit_search(&mut intents);
+        state.emit_test(exact_binding(), &mut intents);
+        let search_identity = state.pending_search_identity.clone().unwrap();
+        let test_identity = state.pending_test_identity.clone().unwrap();
+        let _ = crate::radial::acceptance_trace::take_authoring_provider_trace_test_events();
+
+        state.dispose();
+
+        assert_eq!(state, ActionBindingEditorState::default());
+        assert!(!state.has_unassigned_text());
+        assert!(state.acceptance_observation().is_none());
+        assert!(!state.matches_identity(&search_identity));
+        assert!(!state.matches_identity(&test_identity));
+        let retired = crate::radial::acceptance_trace::take_authoring_provider_trace_test_events();
+        assert_eq!(retired.len(), 2);
+        assert_eq!(retired[0].edge, "retired");
+        assert_eq!(retired[0].kind, "search");
+        assert_eq!(retired[0].identity, search_identity);
+        assert_eq!(retired[1].edge, "retired");
+        assert_eq!(retired[1].kind, "test");
+        assert_eq!(retired[1].identity, test_identity);
+        state.dispose();
+        assert!(
+            crate::radial::acceptance_trace::take_authoring_provider_trace_test_events().is_empty()
+        );
+    }
+
+    #[test]
     fn revisiting_the_same_scope_gets_a_new_editor_epoch() {
         let scope = scope();
         let mut state = ActionBindingEditorState::default();
@@ -3680,6 +4418,7 @@ mod tests {
     fn live_ranked_editor_search_scrolls_and_assigns_rows_beyond_fifty() {
         crate::radial::acceptance_trace::reset_action_editor_scroll_test_state();
         let context = egui::Context::default();
+        context.enable_accesskit();
         let mut app = crate::gui::actions::tests::new_app(&context);
         app.test_skip_history_persistence = true;
         let history_before = serde_json::to_vec(
@@ -3875,7 +4614,51 @@ mod tests {
             _ => None,
         });
         assert_eq!(assigned_binding, Some(expected_binding.clone()));
-        assert_eq!(state.selected_binding(), Some(expected_binding));
+        assert_eq!(state.selected_binding(), Some(expected_binding.clone()));
+        assert_eq!(state.active_binding, Some(binding.clone()));
+        assert!(
+            state.has_unassigned_text(),
+            "a selected Pin candidate is pending until its document commit succeeds"
+        );
+        state
+            .finish_assignment(
+                expected_binding.clone(),
+                BindingAssignmentKind::Pinned,
+                Ok::<(), ()>(()),
+            )
+            .expect("fixture assignment commit succeeds");
+        assert_eq!(state.query, query, "Pin keeps the result search visible");
+        assert!(
+            !state.has_unassigned_text(),
+            "the retained result search is not a pending action edit"
+        );
+        let pinned_output = render_editor_with_catalog(
+            &context,
+            &mut state,
+            editor_scope.clone(),
+            &expected_binding,
+            &empty_action_catalog,
+            Vec::new(),
+        )
+        .0;
+        let replacement_query = "a new authored query after pin";
+        let _ = replace_text(
+            &context,
+            &mut state,
+            &editor_scope,
+            &expected_binding,
+            &pinned_output,
+            query,
+            replacement_query,
+        );
+        assert!(state.has_unassigned_text());
+        assert_eq!(
+            state.binding_for_explicit_apply(),
+            Some(ActionBinding::LauncherQuery {
+                query: replacement_query.into(),
+                mode: QueryRunMode::OpenLauncher,
+            })
+        );
         assert!(app.test_activation_trace.is_empty());
         assert!(app.test_recorded_history_queries.is_empty());
         assert_eq!(app.usage, usage_before);

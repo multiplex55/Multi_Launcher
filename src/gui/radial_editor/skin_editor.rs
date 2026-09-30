@@ -144,11 +144,11 @@ pub(super) fn create_skin(
         style: Default::default(),
     });
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(crate::radial::authoring::StableSelection::Skin(id.clone())),
+        )
         .map_err(|error| format!("{error:?}"))?;
-    session.select(Some(crate::radial::authoring::StableSelection::Skin(
-        id.clone(),
-    )));
     Ok(id)
 }
 
@@ -175,11 +175,11 @@ pub(super) fn duplicate_skin(
     let id = copy.id.clone();
     document.skins.push(copy);
     session
-        .replace_document_atomic(document)
+        .replace_document_atomic_and_select(
+            document,
+            Some(crate::radial::authoring::StableSelection::Skin(id.clone())),
+        )
         .map_err(|error| format!("{error:?}"))?;
-    session.select(Some(crate::radial::authoring::StableSelection::Skin(
-        id.clone(),
-    )));
     Ok(id)
 }
 
@@ -515,7 +515,7 @@ fn provenance<'a>(
 
 macro_rules! paths {
     ($( $section:ident . $field:ident => $variant:ident ),+ $(,)?) => {
-        fn style_field(section: &str, field: &str) -> Option<StyleField> {
+        pub(super) fn style_field(section: &str, field: &str) -> Option<StyleField> {
             match (section, field) {
                 $((stringify!($section), stringify!($field)) => Some(StyleField::$variant),)+
                 _ => None,
@@ -565,6 +565,72 @@ paths!(
 mod tests {
     use super::*;
     use crate::radial::authoring::{AuthoringSnapshot, DiskSha256};
+
+    #[test]
+    fn creating_skin_undo_redo_restores_prior_and_created_selection() {
+        use crate::radial::authoring::StableSelection;
+
+        let document = RadialDocument::starter();
+        let prior = StableSelection::Menu(document.default_menu_id.clone());
+        let mut session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::new(document.clone()),
+            "test",
+        ));
+        session.select(Some(prior.clone()));
+        let generation = session.generation;
+        let created = create_skin(&mut session, "Created skin").unwrap();
+        let created_selection = StableSelection::Skin(created.clone());
+        let after = session.draft.clone();
+        assert_eq!(session.generation.0, generation.0 + 1);
+        assert_eq!(session.acceptance_history_depths(), (1, 0));
+        assert_eq!(session.selection, Some(created_selection.clone()));
+        assert!(session.undo());
+        assert_eq!(*session.draft, document);
+        assert_eq!(session.selection, Some(prior));
+        assert!(session.redo());
+        assert_eq!(*session.draft, *after);
+        assert_eq!(session.selection, Some(created_selection));
+        assert_eq!(session.acceptance_history_depths(), (1, 0));
+    }
+
+    #[test]
+    fn duplicating_skin_undo_redo_restores_prior_and_duplicated_selection() {
+        use crate::radial::authoring::StableSelection;
+
+        let document = RadialDocument::starter();
+        let source = document.skins[0].id.clone();
+        let prior = StableSelection::Skin(source.clone());
+        let source_style = document.skins[0].style.clone();
+        let mut session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            std::sync::Arc::new(document.clone()),
+            "test",
+        ));
+        session.select(Some(prior.clone()));
+        let generation = session.generation;
+        let duplicated = duplicate_skin(&mut session, &source).unwrap();
+        let duplicated_selection = StableSelection::Skin(duplicated.clone());
+        let after = session.draft.clone();
+        assert_eq!(session.generation.0, generation.0 + 1);
+        assert_eq!(session.acceptance_history_depths(), (1, 0));
+        assert_eq!(session.selection, Some(duplicated_selection.clone()));
+        assert_eq!(
+            session
+                .draft
+                .skins
+                .iter()
+                .find(|skin| skin.id == duplicated)
+                .unwrap()
+                .style,
+            source_style,
+        );
+        assert!(session.undo());
+        assert_eq!(*session.draft, document);
+        assert_eq!(session.selection, Some(prior));
+        assert!(session.redo());
+        assert_eq!(*session.draft, *after);
+        assert_eq!(session.selection, Some(duplicated_selection));
+        assert_eq!(session.acceptance_history_depths(), (1, 0));
+    }
 
     #[test]
     fn every_full_scope_field_roundtrips_inherit_set_clear_and_reports_provenance() {

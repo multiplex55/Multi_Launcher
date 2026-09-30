@@ -1,7 +1,7 @@
 use super::PendingCellDrop;
 use super::canvas::{
-    CanvasPoint, CanvasTransform, DesignerMode, DragPayload, PlacementDraft,
-    ProjectedCellProvenance, ProjectedSelection, VisitedMenuPath,
+    CanvasPoint, CanvasTransform, DesignerMode, DesignerNavigationIntent, DragPayload,
+    PlacementDraft, ProjectedCellProvenance, ProjectedSelection, SubmenuPathEdge, VisitedMenuPath,
 };
 use crate::radial::acceptance_trace::{
     self, DesignerAuthoringRole, DesignerAuthoringTarget, ViewportClass,
@@ -417,6 +417,7 @@ impl EmbeddedPreview {
                 | StableSelection::Ring { menu_id: id, .. }
                 | StableSelection::Cell { menu_id: id, .. },
             ) => Some(id.clone()),
+            Some(StableSelection::CellSet(selection)) => Some(selection.primary.menu_id.clone()),
             _ => None,
         };
         let selected_skin = match selection {
@@ -1127,7 +1128,7 @@ impl EmbeddedPreview {
         drag_payload: &mut Option<DragPayload>,
         placement_draft: &mut Option<PlacementDraft>,
         pending_drop: &mut Option<PendingCellDrop>,
-        properties_popup: &mut Option<StableSelection>,
+        navigation_intent: &mut Option<DesignerNavigationIntent>,
         visited_path: &mut VisitedMenuPath,
         canvas_pan: &mut CanvasPoint,
         pan_drag_start: &mut Option<CanvasPoint>,
@@ -1138,6 +1139,7 @@ impl EmbeddedPreview {
                 | StableSelection::Ring { menu_id: id, .. }
                 | StableSelection::Cell { menu_id: id, .. },
             ) => Some(id.clone()),
+            Some(StableSelection::CellSet(selection)) => Some(selection.primary.menu_id.clone()),
             _ => None,
         };
         let selected_skin = match selection {
@@ -1216,7 +1218,7 @@ impl EmbeddedPreview {
                 drag_payload,
                 placement_draft,
                 pending_drop,
-                properties_popup,
+                navigation_intent,
                 visited_path,
                 zoom,
                 canvas_pan,
@@ -1439,41 +1441,57 @@ impl EmbeddedPreview {
         drag_payload: &mut Option<DragPayload>,
         placement_draft: &mut Option<PlacementDraft>,
         pending_drop: &mut Option<PendingCellDrop>,
-        properties_popup: &mut Option<StableSelection>,
+        navigation_intent: &mut Option<DesignerNavigationIntent>,
         visited_path: &mut VisitedMenuPath,
         zoom: f32,
         canvas_pan: &mut CanvasPoint,
         pan_drag_start: &mut Option<CanvasPoint>,
     ) {
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(visited_path.as_slice().len() > 1, egui::Button::new("Back"))
-                .clicked()
-            {
-                visited_path.back();
-                if let Some(parent) = visited_path.current().cloned()
-                    && let Some(session) = authoring_session.as_deref_mut()
-                {
-                    session.select(Some(StableSelection::Menu(parent)));
-                }
-                self.cancel_tooltip();
-                ui.ctx().request_repaint();
+            let back = ui.add_enabled(visited_path.can_back(), egui::Button::new("Back"));
+            super::trace_designer_authoring_control(
+                ui,
+                &back,
+                DesignerAuthoringTarget::DesignerBack,
+                DesignerAuthoringRole::Button,
+                None,
+                visited_path.can_back(),
+                false,
+                ViewportClass::Deferred,
+                super::trace_correlation(authoring_session.as_deref()),
+            );
+            if back.clicked() {
+                *navigation_intent = Some(DesignerNavigationIntent::Back);
             }
-            ui.label(format!("Design · {}", menu.name))
-                .on_hover_text(menu.name.clone());
-            let breadcrumb = visited_path
-                .as_slice()
-                .iter()
-                .filter_map(|id| {
-                    document
-                        .menus
-                        .iter()
-                        .find(|candidate| &candidate.id == id)
-                        .map(|candidate| candidate.name.clone())
-                })
-                .collect::<Vec<_>>()
-                .join(" › ");
-            ui.small(breadcrumb);
+            ui.label("Design");
+            for (index, id) in visited_path.as_slice().iter().enumerate() {
+                if index > 0 {
+                    ui.small("›");
+                }
+                if let Some(candidate) = document.menus.iter().find(|candidate| &candidate.id == id)
+                {
+                    let breadcrumb = ui.small_button(&candidate.name);
+                    super::trace_designer_authoring_control_with_scope(
+                        ui,
+                        &breadcrumb,
+                        DesignerAuthoringTarget::DesignerBreadcrumb,
+                        DesignerAuthoringRole::Button,
+                        Some(index),
+                        true,
+                        visited_path.current() == Some(id),
+                        ViewportClass::Deferred,
+                        super::trace_correlation(authoring_session.as_deref()),
+                        acceptance_trace::DesignerAuthoringControlScope::Breadcrumb {
+                            menu_id_digest: super::acceptance_identity_digest(&[candidate
+                                .id
+                                .as_str()]),
+                        },
+                    );
+                    if breadcrumb.clicked() {
+                        *navigation_intent = Some(DesignerNavigationIntent::Breadcrumb(index));
+                    }
+                }
+            }
         });
         let available = ui.available_size();
         if available.x <= 1.0 || available.y <= 1.0 {
@@ -1536,18 +1554,17 @@ impl EmbeddedPreview {
                             egui::vec2(8.0, 8.0),
                         );
                         let selected = authoring_session.as_deref().is_some_and(|session| {
-                            matches!(
-                                session.selection.as_ref(),
-                                Some(StableSelection::Cell {
-                                    menu_id: selected_menu,
-                                    ring_id: selected_ring,
-                                    cell_id: selected_cell,
-                                }) if selected_menu == &menu.id
-                                    && selected_ring == &ring.id
-                                    && selected_cell == &authored.id
-                            )
+                            session.selection.as_ref().is_some_and(|selection| {
+                                selection.is_authored_cell_selected(
+                                    &crate::radial::authoring::AuthoredCellTarget {
+                                        menu_id: menu.id.clone(),
+                                        ring_id: ring.id.clone(),
+                                        cell_id: authored.id.clone(),
+                                    },
+                                )
+                            })
                         });
-                        let clicked = response.clicked()
+                        let clicked = (response.clicked() || response.secondary_clicked())
                             && response
                                 .interact_pointer_pos()
                                 .is_some_and(|pointer| rect.contains(pointer));
@@ -1565,6 +1582,23 @@ impl EmbeddedPreview {
                             super::trace_correlation(authoring_session.as_deref()),
                             Some(acceptance_trace::DesignerCanvasCellScope {
                                 menu_cell_ids_digest,
+                                menu_id_digest: super::acceptance_identity_digest(&[menu
+                                    .id
+                                    .as_str()]),
+                                ring_id_digest: super::acceptance_identity_digest(&[ring
+                                    .id
+                                    .as_str()]),
+                                cell_id_digest: super::acceptance_identity_digest(&[authored
+                                    .id
+                                    .as_str()]),
+                                authored_target_digest: super::acceptance_identity_digest(&[
+                                    menu.id.as_str(),
+                                    ring.id.as_str(),
+                                    authored.id.as_str(),
+                                ]),
+                                label_digest: super::acceptance_identity_digest(&[authored
+                                    .label
+                                    .as_str()]),
                                 ring_index,
                                 slot_index,
                             }),
@@ -1572,6 +1606,72 @@ impl EmbeddedPreview {
                     }
                     flat_index = flat_index.saturating_add(1);
                 }
+            }
+            for cell in &input.layout.cells {
+                let ProjectedCellProvenance::Dynamic {
+                    menu_id,
+                    ring_id,
+                    source_cell_id,
+                    result_index,
+                    ..
+                } = projected_provenance(document, &menu.id, cell, &input.provenance)
+                else {
+                    continue;
+                };
+                let world = match &cell.shape {
+                    HitShape::Circle { center, .. } => *center,
+                    HitShape::Wedge {
+                        center,
+                        inner_radius,
+                        outer_radius,
+                        start_angle,
+                        end_angle,
+                    } => {
+                        let angle = (*start_angle + *end_angle) * 0.5;
+                        let radius = (*inner_radius + *outer_radius) * 0.5;
+                        LogicalPoint {
+                            x: center.x + angle.cos() * radius,
+                            y: center.y + angle.sin() * radius,
+                        }
+                    }
+                };
+                let screen = transform.world_to_screen(CanvasPoint::new(world.x, world.y));
+                let rect = egui::Rect::from_center_size(
+                    egui::pos2(screen.x, screen.y),
+                    egui::vec2(8.0, 8.0),
+                );
+                let clicked = (response.clicked() || response.secondary_clicked())
+                    && response
+                        .interact_pointer_pos()
+                        .is_some_and(|pointer| rect.contains(pointer));
+                super::trace_designer_authoring_control_scoped_rect(
+                    ui,
+                    rect,
+                    clicked,
+                    DesignerAuthoringTarget::ProjectedCell,
+                    DesignerAuthoringRole::Region,
+                    Some(result_index),
+                    true,
+                    false,
+                    false,
+                    ViewportClass::Deferred,
+                    super::trace_correlation(authoring_session.as_deref()),
+                    Some(
+                        acceptance_trace::DesignerAuthoringControlScope::ProjectedCell(
+                            acceptance_trace::DesignerProjectedCellScope {
+                                menu_id_digest: super::acceptance_identity_digest(&[
+                                    menu_id.as_str()
+                                ]),
+                                source_target_digest: super::acceptance_identity_digest(&[
+                                    menu_id.as_str(),
+                                    ring_id.as_str(),
+                                    source_cell_id.as_str(),
+                                ]),
+                                result_index,
+                            },
+                        ),
+                    ),
+                );
             }
         }
         let pointer_world = response
@@ -1652,24 +1752,17 @@ impl EmbeddedPreview {
                         });
                     if payload.generation == crate::radial::authoring::DraftGeneration(generation) {
                         if let Some((menu_id, ring_id, cell_id)) = target {
-                            if let Some(session) = authoring_session.as_deref_mut() {
-                                session.select(Some(StableSelection::Cell {
+                            *navigation_intent = Some(DesignerNavigationIntent::Select {
+                                target: StableSelection::Cell {
                                     menu_id: menu_id.clone(),
                                     ring_id: ring_id.clone(),
                                     cell_id: cell_id.clone(),
-                                }));
-                            }
-                            *properties_popup = Some(StableSelection::Cell {
-                                menu_id: menu_id.clone(),
-                                ring_id: ring_id.clone(),
-                                cell_id: cell_id.clone(),
+                                },
+                                control: false,
+                                shift: false,
+                                force_history: false,
+                                open_properties: true,
                             });
-                            *placement_draft = Some(PlacementDraft::new(
-                                menu_id,
-                                ring_id,
-                                cell_id,
-                                payload.generation,
-                            ));
                             *projected_selection = Some(ProjectedSelection {
                                 label: "Placement draft · choose content in the inspector".into(),
                                 provenance: destination.unwrap_or(ProjectedCellProvenance::Center),
@@ -1781,23 +1874,15 @@ impl EmbeddedPreview {
             *pan_drag_start = None;
         }
         if response.clicked() || response.secondary_clicked() {
+            let primary_clicked = response.clicked_by(egui::PointerButton::Primary);
+            let modifiers = ui.input(|input| input.modifiers);
+            let modified_selection = modifiers.ctrl || modifiers.shift;
             if let Some(provenance) = hovered_provenance.clone() {
                 *projected_selection = Some(ProjectedSelection {
                     label: hovered.map_or_else(String::new, |cell| cell.label.clone()),
                     provenance: provenance.clone(),
                 });
-                if response.secondary_clicked()
-                    && let Some((menu_id, ring_id, cell_id)) = provenance.authored_ids()
-                {
-                    *properties_popup = Some(StableSelection::Cell {
-                        menu_id: menu_id.clone(),
-                        ring_id: ring_id.clone(),
-                        cell_id: cell_id.clone(),
-                    });
-                }
-                if let Some((menu_id, ring_id, cell_id)) = provenance.authored_ids()
-                    && let Some(session) = authoring_session.as_deref_mut()
-                {
+                if let Some((menu_id, ring_id, cell_id)) = provenance.authored_ids() {
                     let hovered_is_spacer = document
                         .menus
                         .iter()
@@ -1809,24 +1894,20 @@ impl EmbeddedPreview {
                             ring.cells.iter().find(|candidate| &candidate.id == cell_id)
                         })
                         .is_some_and(|candidate| matches!(&candidate.content, CellContent::Spacer));
-                    if hovered_is_spacer {
-                        *placement_draft = Some(PlacementDraft::new(
-                            menu_id.clone(),
-                            ring_id.clone(),
-                            cell_id.clone(),
-                            crate::radial::authoring::DraftGeneration(generation),
-                        ));
-                        *properties_popup = Some(StableSelection::Cell {
-                            menu_id: menu_id.clone(),
-                            ring_id: ring_id.clone(),
-                            cell_id: cell_id.clone(),
+                    if primary_clicked || response.secondary_clicked() {
+                        *navigation_intent = Some(DesignerNavigationIntent::Select {
+                            target: StableSelection::Cell {
+                                menu_id: menu_id.clone(),
+                                ring_id: ring_id.clone(),
+                                cell_id: cell_id.clone(),
+                            },
+                            control: modifiers.ctrl,
+                            shift: modifiers.shift,
+                            force_history: false,
+                            open_properties: response.secondary_clicked()
+                                || hovered_is_spacer && !modified_selection && primary_clicked,
                         });
                     }
-                    session.select(Some(StableSelection::Cell {
-                        menu_id: menu_id.clone(),
-                        ring_id: ring_id.clone(),
-                        cell_id: cell_id.clone(),
-                    }));
                 }
             } else if let Some(point) = pointer_world
                 && menu.center_action.is_none()
@@ -1845,22 +1926,19 @@ impl EmbeddedPreview {
                     label,
                     provenance: ProjectedCellProvenance::Center,
                 });
-                if let [(ring_id, cell_id)] = empty_slots.as_slice()
-                    && let Some(session) = authoring_session.as_deref_mut()
-                {
+                if let [(ring_id, cell_id)] = empty_slots.as_slice() {
                     let selection = StableSelection::Cell {
                         menu_id: menu.id.clone(),
                         ring_id: ring_id.clone(),
                         cell_id: cell_id.clone(),
                     };
-                    *placement_draft = Some(PlacementDraft::new(
-                        menu.id.clone(),
-                        ring_id.clone(),
-                        cell_id.clone(),
-                        crate::radial::authoring::DraftGeneration(generation),
-                    ));
-                    *properties_popup = Some(selection.clone());
-                    session.select(Some(selection));
+                    *navigation_intent = Some(DesignerNavigationIntent::Select {
+                        target: selection,
+                        control: false,
+                        shift: false,
+                        force_history: false,
+                        open_properties: true,
+                    });
                 }
             }
             if response.secondary_clicked() {
@@ -1881,12 +1959,22 @@ impl EmbeddedPreview {
                 .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == cell_id))
             && let CellContent::Submenu { menu_id: child } = &cell.content
         {
-            if visited_path.enter(child.clone()) {
-                if let Some(session) = authoring_session.as_deref_mut() {
-                    session.select(Some(StableSelection::Menu(child.clone())));
-                }
+            let edge = SubmenuPathEdge {
+                parent_menu: menu_id.clone(),
+                ring_id: ring_id.clone(),
+                cell_id: cell_id.clone(),
+                child_menu: child.clone(),
+            };
+            if visited_path.current() == Some(menu_id) {
+                *navigation_intent = Some(DesignerNavigationIntent::EnterSubmenu {
+                    edge,
+                    return_selection: StableSelection::Cell {
+                        menu_id: menu_id.clone(),
+                        ring_id: ring_id.clone(),
+                        cell_id: cell_id.clone(),
+                    },
+                });
                 self.cancel_tooltip();
-                ui.ctx().request_repaint();
             }
         }
 

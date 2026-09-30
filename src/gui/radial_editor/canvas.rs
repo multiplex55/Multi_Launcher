@@ -6,9 +6,9 @@
 //! zoom, pan, and DPI values and prevents dynamic preview rows from becoming
 //! persisted document entities.
 
-use crate::radial::authoring::DraftGeneration;
+use crate::radial::authoring::{DraftGeneration, StableSelection};
 use crate::radial::dynamic::SourceFingerprint;
-use crate::radial::model::{CellId, DynamicSource, MenuId, RingId};
+use crate::radial::model::{CellContent, CellId, DynamicSource, MenuId, RadialDocument, RingId};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -420,82 +420,410 @@ impl PlacementDraft {
     }
 }
 
+const MAX_EDITOR_BACK_LOCATIONS: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubmenuPathEdge {
+    pub(crate) parent_menu: MenuId,
+    pub(crate) ring_id: RingId,
+    pub(crate) cell_id: CellId,
+    pub(crate) child_menu: MenuId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DesignerNavigationIntent {
+    Select {
+        target: StableSelection,
+        control: bool,
+        shift: bool,
+        force_history: bool,
+        open_properties: bool,
+    },
+    ClearSelection,
+    CreateSkin,
+    DuplicateSkin(crate::radial::model::SkinId),
+    EnterSubmenu {
+        edge: SubmenuPathEdge,
+        return_selection: StableSelection,
+    },
+    Back,
+    Breadcrumb(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditLocation {
+    menus: Vec<MenuId>,
+    edges: Vec<SubmenuPathEdge>,
+    return_selections: Vec<Option<StableSelection>>,
+    selection: Option<StableSelection>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct VisitedMenuPath {
     menus: Vec<MenuId>,
+    edges: Vec<SubmenuPathEdge>,
+    return_selections: Vec<Option<StableSelection>>,
+    previous_locations: Vec<EditLocation>,
 }
 
 impl VisitedMenuPath {
     pub(crate) fn new(root: MenuId) -> Self {
-        Self { menus: vec![root] }
+        Self {
+            menus: vec![root],
+            ..Self::default()
+        }
     }
 
     pub(crate) fn current(&self) -> Option<&MenuId> {
         self.menus.last()
     }
 
+    pub(crate) fn can_back(&self) -> bool {
+        self.menus.len() > 1 || !self.previous_locations.is_empty()
+    }
+
     pub(crate) fn as_slice(&self) -> &[MenuId] {
         &self.menus
     }
 
-    pub(crate) fn enter(&mut self, menu_id: MenuId) -> bool {
-        if self.menus.contains(&menu_id) {
+    pub(crate) fn acceptance_menu_id_digests(&self) -> Vec<u64> {
+        self.menus
+            .iter()
+            .map(|menu| acceptance_identity_digest(menu.as_str().as_bytes()))
+            .collect()
+    }
+
+    pub(crate) fn acceptance_edge_digests(&self) -> Vec<u64> {
+        self.edges
+            .iter()
+            .map(|edge| {
+                let identity = format!(
+                    "{}\0{}\0{}\0{}",
+                    edge.parent_menu, edge.ring_id, edge.cell_id, edge.child_menu
+                );
+                acceptance_identity_digest(identity.as_bytes())
+            })
+            .collect()
+    }
+
+    pub(crate) fn acceptance_digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.menus.hash(&mut hasher);
+        for edge in &self.edges {
+            edge.parent_menu.hash(&mut hasher);
+            edge.ring_id.hash(&mut hasher);
+            edge.cell_id.hash(&mut hasher);
+            edge.child_menu.hash(&mut hasher);
+        }
+        self.return_selections.hash(&mut hasher);
+        for location in &self.previous_locations {
+            location.menus.hash(&mut hasher);
+            for edge in &location.edges {
+                edge.parent_menu.hash(&mut hasher);
+                edge.ring_id.hash(&mut hasher);
+                edge.cell_id.hash(&mut hasher);
+                edge.child_menu.hash(&mut hasher);
+            }
+            location.return_selections.hash(&mut hasher);
+            location.selection.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    pub(crate) fn enter_submenu(
+        &mut self,
+        edge: SubmenuPathEdge,
+        return_selection: Option<StableSelection>,
+    ) -> bool {
+        if self.current() != Some(&edge.parent_menu)
+            || self.menus.contains(&edge.child_menu)
+            || self.menus.len().saturating_sub(1) >= crate::radial::model::limits::MAX_SUBMENU_DEPTH
+        {
             return false;
         }
-        self.menus.push(menu_id);
+        self.menus.push(edge.child_menu.clone());
+        self.edges.push(edge);
+        self.return_selections.push(return_selection);
         true
     }
 
-    pub(crate) fn select_direct(&mut self, menu_id: MenuId) {
-        self.menus.clear();
-        self.menus.push(menu_id);
-    }
-
-    pub(crate) fn ensure_root(&mut self, root: MenuId, existing: impl Fn(&MenuId) -> bool) {
-        // A direct tree selection is a valid path root even when it differs
-        // from the document's configured default.  Only an empty path or a
-        // deleted/invalid root should be repaired to the default.
-        if self.menus.is_empty() {
-            self.menus.clear();
-            self.menus.push(root);
-        } else if self.menus.first().is_none_or(|id| !existing(id)) {
-            self.menus.clear();
-            self.menus.push(root);
+    pub(crate) fn direct_reveal(
+        &mut self,
+        menu_id: MenuId,
+        selection_before: Option<StableSelection>,
+        force_history: bool,
+    ) {
+        let target_is_current = self.current() == Some(&menu_id);
+        if !target_is_current || force_history {
+            self.previous_locations.push(EditLocation {
+                menus: self.menus.clone(),
+                edges: self.edges.clone(),
+                return_selections: self.return_selections.clone(),
+                selection: selection_before,
+            });
+            if self.previous_locations.len() > MAX_EDITOR_BACK_LOCATIONS {
+                self.previous_locations.remove(0);
+            }
+            self.menus = vec![menu_id];
+            self.edges.clear();
+            self.return_selections.clear();
         }
-        self.replace_invalid_tail(existing);
     }
 
-    /// Select a menu from the tree/inspector as a fresh path root.  A tree
-    /// selection does not prove that the menu was reached through a submenu
-    /// edge, so retaining the configured default root would invent a
-    /// breadcrumb for unreferenced (or multiply referenced) menus.  Real
-    /// canvas traversal uses [`Self::enter`] and is preserved by the early
-    /// current-menu return.
-    pub(crate) fn select_menu(&mut self, _root: MenuId, menu_id: MenuId) {
-        if self.current() == Some(&menu_id) {
-            return;
+    pub(crate) fn back_location(
+        &mut self,
+        current_selection: Option<StableSelection>,
+    ) -> Option<(MenuId, Option<StableSelection>)> {
+        if self.menus.len() > 1 {
+            self.menus.pop();
+            self.edges.pop();
+            let returned = self.return_selections.pop().flatten();
+            let menu_id = self.current()?.clone();
+            return Some((
+                menu_id.clone(),
+                returned.or_else(|| Some(StableSelection::Menu(menu_id))),
+            ));
         }
-        self.menus.clear();
-        self.menus.push(menu_id);
+        let location = self.previous_locations.pop()?;
+        self.menus = location.menus;
+        self.edges = location.edges;
+        self.return_selections = location.return_selections;
+        let menu_id = self.current()?.clone();
+        let selection = location
+            .selection
+            .filter(|selection| selection_menu_id(selection) == Some(&menu_id))
+            .or_else(|| {
+                current_selection.filter(|selection| selection_menu_id(selection) == Some(&menu_id))
+            });
+        Some((menu_id, selection))
     }
 
-    pub(crate) fn back(&mut self) -> Option<MenuId> {
-        (self.menus.len() > 1).then(|| self.menus.pop().expect("path has parent"))
+    pub(crate) fn go_to_breadcrumb(
+        &mut self,
+        index: usize,
+    ) -> Option<(MenuId, Option<StableSelection>)> {
+        if index >= self.menus.len() {
+            return None;
+        }
+        self.menus.truncate(index + 1);
+        self.edges.truncate(index);
+        let return_selection = self.return_selections.get(index).cloned().flatten();
+        self.return_selections.truncate(index);
+        Some((self.current()?.clone(), return_selection))
     }
 
-    pub(crate) fn replace_invalid_tail(&mut self, existing: impl Fn(&MenuId) -> bool) {
-        while self.menus.len() > 1 {
-            if self.current().is_some_and(&existing) {
+    pub(crate) fn validate_document_path(&mut self, document: &RadialDocument) {
+        let exists = |id: &MenuId| document.menus.iter().any(|menu| &menu.id == id);
+        let root = document.default_menu_id.clone();
+        if self.menus.is_empty() || self.menus.first().is_none_or(|id| !exists(id)) {
+            self.menus = vec![root.clone()];
+            self.edges.clear();
+            self.return_selections.clear();
+        }
+        let mut valid_len = 1usize;
+        let mut visited = vec![self.menus[0].clone()];
+        let max_len = crate::radial::model::limits::MAX_SUBMENU_DEPTH + 1;
+        for index in 0..self.menus.len().saturating_sub(1).min(max_len - 1) {
+            let Some(edge) = self.edges.get(index) else {
+                break;
+            };
+            if edge.parent_menu != self.menus[index]
+                || edge.child_menu != self.menus[index + 1]
+                || visited.contains(&edge.child_menu)
+            {
                 break;
             }
-            self.menus.pop();
+            let linked = document
+                .menus
+                .iter()
+                .find(|menu| menu.id == edge.parent_menu)
+                .and_then(|menu| menu.rings.iter().find(|ring| ring.id == edge.ring_id))
+                .and_then(|ring| ring.cells.iter().find(|cell| cell.id == edge.cell_id))
+                .is_some_and(|cell| matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &edge.child_menu));
+            if !linked || !exists(&edge.child_menu) {
+                break;
+            }
+            visited.push(edge.child_menu.clone());
+            valid_len += 1;
         }
+        self.menus.truncate(valid_len);
+        self.edges.truncate(valid_len.saturating_sub(1));
+        self.return_selections.truncate(valid_len.saturating_sub(1));
+        self.previous_locations.retain_mut(|location| {
+            let mut path = Self {
+                menus: location.menus.clone(),
+                edges: location.edges.clone(),
+                return_selections: location.return_selections.clone(),
+                previous_locations: Vec::new(),
+            };
+            path.validate_document_path_without_history(document);
+            let Some(menu_id) = path.current() else {
+                return false;
+            };
+            let selection = match location.selection.as_ref() {
+                Some(selection) => {
+                    crate::radial::authoring::reconcile_stable_selection(selection, document)
+                        .filter(|selection| selection_menu_id(selection) == Some(menu_id))
+                }
+                None => None,
+            };
+            if location.selection.is_some() && selection.is_none() {
+                return false;
+            }
+            location.menus = path.menus;
+            location.edges = path.edges;
+            location.return_selections = path.return_selections;
+            location.selection = selection;
+            true
+        });
+    }
+
+    fn validate_document_path_without_history(&mut self, document: &RadialDocument) {
+        let exists = |id: &MenuId| document.menus.iter().any(|menu| &menu.id == id);
+        if self.menus.is_empty() || self.menus.first().is_none_or(|id| !exists(id)) {
+            self.menus = vec![document.default_menu_id.clone()];
+            self.edges.clear();
+            self.return_selections.clear();
+        }
+        let mut valid_len = 1usize;
+        let mut visited = vec![self.menus[0].clone()];
+        for index in 0..self
+            .menus
+            .len()
+            .saturating_sub(1)
+            .min(crate::radial::model::limits::MAX_SUBMENU_DEPTH)
+        {
+            let Some(edge) = self.edges.get(index) else {
+                break;
+            };
+            let linked = document
+                .menus
+                .iter()
+                .find(|menu| menu.id == edge.parent_menu)
+                .and_then(|menu| menu.rings.iter().find(|ring| ring.id == edge.ring_id))
+                .and_then(|ring| ring.cells.iter().find(|cell| cell.id == edge.cell_id))
+                .is_some_and(|cell| matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == &edge.child_menu));
+            if edge.parent_menu != self.menus[index]
+                || edge.child_menu != self.menus[index + 1]
+                || visited.contains(&edge.child_menu)
+                || !linked
+                || !exists(&edge.child_menu)
+            {
+                break;
+            }
+            valid_len += 1;
+            visited.push(edge.child_menu.clone());
+        }
+        self.menus.truncate(valid_len);
+        self.edges.truncate(valid_len.saturating_sub(1));
+        self.return_selections.truncate(valid_len.saturating_sub(1));
+    }
+}
+
+fn acceptance_identity_digest(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn selection_menu_id(selection: &StableSelection) -> Option<&MenuId> {
+    match selection {
+        StableSelection::Menu(menu_id)
+        | StableSelection::Ring { menu_id, .. }
+        | StableSelection::Cell { menu_id, .. } => Some(menu_id),
+        StableSelection::CellSet(cells) => Some(&cells.primary.menu_id),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn navigation_fixture() -> RadialDocument {
+        let mut document = RadialDocument::starter();
+        let root_id = document.default_menu_id.clone();
+        let child_id = MenuId::new("shared-child");
+        let second_parent_id = MenuId::new("second-parent");
+        let grandchild_id = MenuId::new("grandchild");
+        let template = document.menus[0].clone();
+        let root_ring = document.menus[0].rings[0].id.clone();
+        let root_cell = document.menus[0].rings[0].cells[0].id.clone();
+        document.menus[0].rings[0].cells[0].content = CellContent::Submenu {
+            menu_id: child_id.clone(),
+        };
+
+        let make_menu = |id: MenuId, name: &str, prefix: &str| {
+            let mut menu = template.clone();
+            menu.id = id;
+            menu.name = name.into();
+            for (ring_index, ring) in menu.rings.iter_mut().enumerate() {
+                ring.id = RingId::new(format!("{prefix}-ring-{ring_index}"));
+                for (cell_index, cell) in ring.cells.iter_mut().enumerate() {
+                    cell.id = CellId::new(format!("{prefix}-cell-{ring_index}-{cell_index}"));
+                    cell.label = "Spacer".into();
+                    cell.content = CellContent::Spacer;
+                }
+            }
+            menu
+        };
+        let mut child = make_menu(child_id.clone(), "Child", "child");
+        child.rings[0].cells[0].content = CellContent::Submenu {
+            menu_id: grandchild_id.clone(),
+        };
+        let mut second_parent = make_menu(second_parent_id.clone(), "Second parent", "parent2");
+        second_parent.rings[0].cells[0].content = CellContent::Submenu { menu_id: child_id };
+        let grandchild = make_menu(grandchild_id, "Grandchild", "grandchild");
+        document.menus.extend([child, second_parent, grandchild]);
+        // Keep these stable fixtures available to tests without deriving a
+        // parent from graph structure.
+        let _ = (root_id, root_ring, root_cell);
+        document
+    }
+
+    fn submenu_edge(
+        document: &RadialDocument,
+        parent_menu: &MenuId,
+        child_menu: &MenuId,
+    ) -> SubmenuPathEdge {
+        let cell = document
+            .menus
+            .iter()
+            .find(|menu| &menu.id == parent_menu)
+            .unwrap()
+            .rings
+            .iter()
+            .flat_map(|ring| ring.cells.iter().map(move |cell| (ring, cell)))
+            .find(|(_, cell)| {
+                matches!(&cell.content, CellContent::Submenu { menu_id } if menu_id == child_menu)
+            })
+            .unwrap();
+        SubmenuPathEdge {
+            parent_menu: parent_menu.clone(),
+            ring_id: cell.0.id.clone(),
+            cell_id: cell.1.id.clone(),
+            child_menu: child_menu.clone(),
+        }
+    }
+
+    fn cell_selection(
+        document: &RadialDocument,
+        menu_id: &MenuId,
+        index: usize,
+    ) -> StableSelection {
+        let menu = document
+            .menus
+            .iter()
+            .find(|menu| &menu.id == menu_id)
+            .unwrap();
+        StableSelection::Cell {
+            menu_id: menu_id.clone(),
+            ring_id: menu.rings[0].id.clone(),
+            cell_id: menu.rings[0].cells[index].id.clone(),
+        }
+    }
 
     #[test]
     fn transform_round_trips_zoom_pan_and_dpi() {
@@ -525,71 +853,181 @@ mod tests {
     }
 
     #[test]
-    fn visited_path_is_the_navigation_source_of_truth_and_rejects_cycles() {
-        let root = MenuId::new("root");
-        let child = MenuId::new("child");
+    fn visited_path_uses_real_edges_and_enforces_cycle_and_depth_bounds() {
+        let document = navigation_fixture();
+        let root = document.default_menu_id.clone();
+        let child = MenuId::new("shared-child");
+        let edge = submenu_edge(&document, &root, &child);
+        let return_selection = cell_selection(&document, &root, 0);
         let mut path = VisitedMenuPath::new(root.clone());
-        assert!(path.enter(child.clone()));
-        assert!(!path.enter(root));
+        assert!(path.enter_submenu(edge, Some(return_selection.clone())));
+        path.validate_document_path(&document);
         assert_eq!(path.current(), Some(&child));
-        assert!(path.back().is_some());
-        assert_eq!(path.as_slice(), &[MenuId::new("root")]);
+        assert!(!path.enter_submenu(
+            SubmenuPathEdge {
+                parent_menu: child.clone(),
+                ring_id: RingId::new("cycle"),
+                cell_id: CellId::new("cycle"),
+                child_menu: root.clone(),
+            },
+            None,
+        ));
+        let (menu, selection) = path
+            .back_location(Some(StableSelection::Menu(child.clone())))
+            .unwrap();
+        assert_eq!(menu, root);
+        assert_eq!(selection, Some(return_selection));
+
+        let mut deep = VisitedMenuPath::new(MenuId::new("depth-root"));
+        for index in 0..crate::radial::model::limits::MAX_SUBMENU_DEPTH {
+            let parent = deep.current().unwrap().clone();
+            assert!(deep.enter_submenu(
+                SubmenuPathEdge {
+                    parent_menu: parent,
+                    ring_id: RingId::new(format!("ring-{index}")),
+                    cell_id: CellId::new(format!("cell-{index}")),
+                    child_menu: MenuId::new(format!("depth-{index}")),
+                },
+                None,
+            ));
+        }
+        let parent = deep.current().unwrap().clone();
+        assert!(!deep.enter_submenu(
+            SubmenuPathEdge {
+                parent_menu: parent,
+                ring_id: RingId::new("too-deep-ring"),
+                cell_id: CellId::new("too-deep-cell"),
+                child_menu: MenuId::new("too-deep"),
+            },
+            None,
+        ));
     }
 
     #[test]
-    fn selecting_from_the_tree_establishes_a_fresh_path_root() {
-        let root = MenuId::new("root");
-        let first = MenuId::new("first");
-        let second = MenuId::new("second");
+    fn direct_reveal_and_shared_submenu_back_restore_actual_edit_locations() {
+        let document = navigation_fixture();
+        let root = document.default_menu_id.clone();
+        let child = MenuId::new("shared-child");
+        let second_parent = MenuId::new("second-parent");
+        let child_selection = cell_selection(&document, &child, 1);
+        let root_cell = cell_selection(&document, &root, 0);
+        let second_parent_cell = cell_selection(&document, &second_parent, 0);
         let mut path = VisitedMenuPath::new(root.clone());
-        assert!(path.enter(first));
-        path.select_menu(root.clone(), second.clone());
-        assert_eq!(path.as_slice(), &[second]);
+        assert!(path.enter_submenu(
+            submenu_edge(&document, &root, &child),
+            Some(root_cell.clone()),
+        ));
+        path.direct_reveal(second_parent.clone(), Some(child_selection.clone()), false);
+        assert_eq!(path.as_slice(), &[second_parent.clone()]);
+        assert!(path.enter_submenu(
+            submenu_edge(&document, &second_parent, &child),
+            Some(second_parent_cell.clone()),
+        ));
+        path.validate_document_path(&document);
+        assert_eq!(path.edges[0].parent_menu, second_parent);
+        let (menu, selection) = path
+            .back_location(Some(StableSelection::Menu(child.clone())))
+            .unwrap();
+        assert_eq!(menu, MenuId::new("second-parent"));
+        assert_eq!(selection, Some(second_parent_cell));
+        let (menu, selection) = path
+            .back_location(Some(StableSelection::Menu(menu.clone())))
+            .unwrap();
+        assert_eq!(menu, child);
+        assert_eq!(selection, Some(child_selection));
     }
 
     #[test]
-    fn selection_mirroring_does_not_collapse_canvas_navigation() {
-        let root = MenuId::new("root");
-        let child = MenuId::new("child");
+    fn direct_reveal_preserves_back_location_without_a_prior_selection() {
+        let document = navigation_fixture();
+        let root = document.default_menu_id.clone();
+        let second_parent = MenuId::new("second-parent");
+        let mut path = VisitedMenuPath::new(root.clone());
+
+        path.direct_reveal(second_parent.clone(), None, false);
+        path.validate_document_path(&document);
+        assert_eq!(path.as_slice(), &[second_parent.clone()]);
+        assert!(path.can_back());
+
+        let (menu, selection) = path
+            .back_location(Some(StableSelection::Menu(second_parent)))
+            .unwrap();
+        assert_eq!(menu, root);
+        assert_eq!(selection, None);
+    }
+
+    #[test]
+    fn invalid_intermediate_edges_are_repaired_and_deleted_history_is_skipped() {
+        let mut document = navigation_fixture();
+        let root = document.default_menu_id.clone();
+        let child = MenuId::new("shared-child");
+        let second_parent = MenuId::new("second-parent");
         let grandchild = MenuId::new("grandchild");
         let mut path = VisitedMenuPath::new(root.clone());
-        assert!(path.enter(child));
-        assert!(path.enter(grandchild.clone()));
-        path.select_menu(root, grandchild);
-        assert_eq!(path.as_slice().len(), 3);
-    }
+        assert!(path.enter_submenu(
+            submenu_edge(&document, &root, &child),
+            Some(cell_selection(&document, &root, 0)),
+        ));
+        assert!(path.enter_submenu(
+            submenu_edge(&document, &child, &grandchild),
+            Some(cell_selection(&document, &child, 0)),
+        ));
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == child)
+            .unwrap()
+            .name = "Renamed".into();
+        path.validate_document_path(&document);
+        assert_eq!(path.as_slice(), &[root.clone(), child.clone(), grandchild]);
+        assert_eq!(
+            document
+                .menus
+                .iter()
+                .find(|menu| menu.id == child)
+                .unwrap()
+                .name,
+            "Renamed"
+        );
+        let second_edge = submenu_edge(&document, &child, &MenuId::new("grandchild"));
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == second_edge.parent_menu)
+            .unwrap()
+            .rings
+            .iter_mut()
+            .find(|ring| ring.id == second_edge.ring_id)
+            .unwrap()
+            .cells
+            .iter_mut()
+            .find(|cell| cell.id == second_edge.cell_id)
+            .unwrap()
+            .content = CellContent::Spacer;
+        path.validate_document_path(&document);
+        assert_eq!(path.as_slice(), &[root.clone(), child.clone()]);
 
-    #[test]
-    fn direct_selection_does_not_invent_parent_for_unreferenced_menu() {
-        let root = MenuId::new("root");
-        let reused = MenuId::new("reused");
-        let child = MenuId::new("child");
-        let mut path = VisitedMenuPath::new(root);
-        path.select_menu(MenuId::new("root"), reused.clone());
-        assert_eq!(path.as_slice(), &[reused.clone()]);
-        assert!(path.enter(child.clone()));
-        assert_eq!(path.back(), Some(child));
-        assert_eq!(path.as_slice(), &[reused]);
-    }
-
-    #[test]
-    fn next_frame_normalization_preserves_direct_root_and_repairs_deleted_root() {
-        let default_root = MenuId::new("default");
-        let selected = MenuId::new("selected");
-        let child = MenuId::new("child");
-        let mut path = VisitedMenuPath::new(default_root.clone());
-        path.select_direct(selected.clone());
-        assert!(path.enter(child.clone()));
-
-        let existing = |id: &MenuId| id == &default_root || id == &selected || id == &child;
-        path.ensure_root(default_root.clone(), existing);
-        assert_eq!(path.as_slice(), &[selected.clone(), child]);
-        assert_eq!(path.back(), Some(MenuId::new("child")));
-        assert_eq!(path.as_slice(), &[selected.clone()]);
-
-        path.select_direct(selected);
-        path.ensure_root(default_root.clone(), |id| id == &default_root);
-        assert_eq!(path.as_slice(), &[default_root]);
+        let mut history_path = VisitedMenuPath::new(root.clone());
+        assert!(history_path.enter_submenu(
+            submenu_edge(&document, &root, &child),
+            Some(cell_selection(&document, &root, 0)),
+        ));
+        let prior_selection = cell_selection(&document, &child, 1);
+        let prior_cell_id = match &prior_selection {
+            StableSelection::Cell { cell_id, .. } => cell_id.clone(),
+            _ => unreachable!(),
+        };
+        history_path.direct_reveal(second_parent, Some(prior_selection.clone()), false);
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == child)
+            .unwrap()
+            .rings[0]
+            .cells
+            .retain(|cell| cell.id != prior_cell_id);
+        history_path.validate_document_path(&document);
+        assert!(!history_path.can_back());
     }
 
     #[test]

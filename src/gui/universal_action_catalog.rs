@@ -156,6 +156,36 @@ impl UniversalActionPickerRow {
             &self.presentation.label,
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(binding: ActionBinding) -> Self {
+        let requirement = InteractionRequirement::None;
+        Self {
+            target_command: "fixture:pin".into(),
+            target_title: "Fixture target".into(),
+            target_type: "Fixture".into(),
+            target_disambiguator: "pin-flow".into(),
+            custom_action_index: None,
+            search_text: "fixture pin flow".into(),
+            action_id: crate::universal_actions::action_ids::RESULT_EXECUTE,
+            binding: Some(binding),
+            persistence: PickerPersistence::Persisted,
+            presentation: EffectiveActionPresentation {
+                label: "Fixture action".into(),
+                short_label: None,
+                description: Some("Retained Properties Pin fixture".into()),
+                icon: None,
+                group: Default::default(),
+                priority: Default::default(),
+                visible: true,
+            },
+            availability: ActionAvailability::Available,
+            unavailable_reason: None,
+            destructive: false,
+            interaction: requirement,
+            after_action: AfterActionCompatibility::for_requirement(requirement),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
