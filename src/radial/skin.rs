@@ -75,6 +75,7 @@ pub enum StyleField {
     TextBoxScale,
     TextVerticalRatio,
     GlowEnabled,
+    EmphasizeSelection,
     TooltipMode,
     MenuShadowWidth,
     MenuShadowInnerColor,
@@ -163,6 +164,7 @@ pub const ALL_STYLE_FIELDS: &[StyleField] = &[
     StyleField::TextBoxScale,
     StyleField::TextVerticalRatio,
     StyleField::GlowEnabled,
+    StyleField::EmphasizeSelection,
     StyleField::TooltipMode,
     StyleField::MenuShadowWidth,
     StyleField::MenuShadowInnerColor,
@@ -248,6 +250,7 @@ pub fn style_consumer(field: StyleField) -> StyleConsumer {
         | StyleField::TextBoxScale
         | StyleField::TextVerticalRatio
         | StyleField::GlowEnabled
+        | StyleField::EmphasizeSelection
         | StyleField::TooltipMode
         | StyleField::MenuShadowWidth
         | StyleField::MenuShadowInnerColor
@@ -406,6 +409,7 @@ impl ApplicationStyleLayer {
                 },
                 effects: EffectStyleOverrides {
                     glow_enabled: Override::Value(false),
+                    emphasize_selection: Override::Value(false),
                     tooltip_mode: Override::Value(TooltipMode::Explicit),
                     menu_shadow_width: Override::Value(0.0),
                     menu_shadow_inner_color: Override::Value(ColorRgba::default()),
@@ -681,6 +685,7 @@ fn apply_full(
         text.text_box_scale => TextBoxScale,
         text.vertical_ratio => TextVerticalRatio,
         effects.glow_enabled => GlowEnabled,
+        effects.emphasize_selection => EmphasizeSelection,
         effects.menu_shadow_width => MenuShadowWidth,
         effects.menu_shadow_inner_color => MenuShadowInnerColor,
         effects.menu_shadow_outer_color => MenuShadowOuterColor,
@@ -1032,7 +1037,7 @@ mod tests {
             .iter()
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(ALL_STYLE_FIELDS.len(), 71);
+        assert_eq!(ALL_STYLE_FIELDS.len(), 72);
         assert_eq!(unique.len(), ALL_STYLE_FIELDS.len());
 
         let consumers = ALL_STYLE_FIELDS

@@ -97,6 +97,7 @@ pub(super) struct EmbeddedPreview {
     document_generation: u64,
     selection_token: String,
     frame_token: String,
+    resource_revision: u64,
     failed_frame_token: Option<String>,
     preparation_notice: Option<super::ResourceNotice>,
     compositor: CompositorCache,
@@ -127,6 +128,7 @@ impl Default for EmbeddedPreview {
             document_generation: 0,
             selection_token: String::new(),
             frame_token: String::new(),
+            resource_revision: 0,
             failed_frame_token: None,
             preparation_notice: None,
             compositor: CompositorCache::default(),
@@ -460,9 +462,10 @@ impl EmbeddedPreview {
             .and_then(|reducer| reducer.state.stack.last())
             .cloned();
         let frame_token = format!(
-            "{}:{menu_id}:{selected:?}:{selected_skin:?}:{page}:{preset:?}:{candidate_token}:assets={}:tooltips={:?}",
+            "{}:{menu_id}:{selected:?}:{selected_skin:?}:{page}:{preset:?}:{candidate_token}:assets={}:resources={}:tooltips={:?}",
             session.generation.0,
             session.pending_assets.preview_identity(),
+            self.resource_revision,
             tooltip_preferences,
         );
         let pending_frame = self
@@ -793,6 +796,16 @@ impl EmbeddedPreview {
     pub(super) fn retry_preparation(&mut self) {
         self.failed_frame_token = None;
         self.preparation_notice = None;
+    }
+
+    pub(super) fn invalidate_resources(&mut self) {
+        self.resource_revision = self.resource_revision.wrapping_add(1);
+        self.navigation_frames.clear();
+        self.frame_token.clear();
+        self.texture = None;
+        self.retry_preparation();
+        // Leave the authoring slot and its local correlation owned until its
+        // real terminal reply. The changed token rejects that old resource frame.
     }
 
     pub(super) fn reset(&mut self, document: &RadialDocument, menu_id: &MenuId, generation: u64) {
@@ -1172,9 +1185,14 @@ impl EmbeddedPreview {
                 .unwrap_or_else(|| root.clone())
         };
         let token = format!("{root:?}:{selected_skin:?}:{preset:?}");
+        // Preparation owns the complete candidate token. Paint may initialize
+        // a standalone preview, but must not discard that synchronized owner
+        // or its retained navigation merely because it includes a suffix.
+        let synchronized_selection =
+            self.selection_token == token || self.selection_token.starts_with(&format!("{token}:"));
         if self.reducer.is_none()
             || self.document_generation != generation
-            || self.selection_token != token
+            || !synchronized_selection
         {
             self.reset(document, &root, generation);
             self.selection_token = token;

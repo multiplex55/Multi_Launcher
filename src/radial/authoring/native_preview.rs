@@ -174,6 +174,75 @@ pub fn sanitize_preview_context(
     context
 }
 
+fn trace_appearance_targets(active: &ActivePreview, clicked: Option<&CellId>) {
+    if !acceptance_trace::enabled() {
+        return;
+    }
+    use std::hash::{Hash, Hasher};
+    let digest = |value: &str| {
+        let mut h = std::hash::DefaultHasher::new();
+        value.hash(&mut h);
+        h.finish()
+    };
+    let layout = &active.frame.layout;
+    let geometry_digest = digest(&format!("{layout:?}"));
+    for cell in layout.cells.iter().filter(|cell| cell.actionable).take(128) {
+        if clicked.is_some_and(|target| target != &cell.cell_id) {
+            continue;
+        }
+        let point = match cell.shape {
+            super::super::geometry::HitShape::Circle { center, .. } => {
+                layout.scale_factor.logical_to_physical(center)
+            }
+            super::super::geometry::HitShape::Wedge {
+                center,
+                inner_radius,
+                outer_radius,
+                start_angle,
+                end_angle,
+            } => {
+                let radius = (inner_radius + outer_radius) * 0.5;
+                let angle = (start_angle + end_angle) * 0.5;
+                layout
+                    .scale_factor
+                    .logical_to_physical(super::super::geometry::LogicalPoint {
+                        x: center.x + angle.cos() * radius,
+                        y: center.y + angle.sin() * radius,
+                    })
+            }
+        };
+        let kind = match active_cell_role(active, &cell.cell_id, None) {
+            CellRole::Action => 0,
+            CellRole::Submenu => 1,
+            CellRole::Back => 2,
+            CellRole::NextPage => 3,
+            CellRole::PreviousPage => 4,
+            _ => 5,
+        };
+        let work = active.spatial.work_area;
+        acceptance_trace::emit(Event::NativeAppearanceTarget {
+            state: super::super::gallery::NativeAppearanceTarget {
+                session_id: active.lease.editor_session.0,
+                generation: active.layout_generation,
+                menu_digest: digest(&format!("{:?}", active.menu_id)),
+                cell_digest: digest(&format!("{:?}", cell.cell_id)),
+                geometry_digest,
+                point_x: point.x.round() as i32,
+                point_y: point.y.round() as i32,
+                dpi_milli: (layout.scale_factor.get() * 1000.0).round() as u32,
+                work_area: [
+                    work.min.x as i32,
+                    work.min.y as i32,
+                    work.max.x as i32,
+                    work.max.y as i32,
+                ],
+                kind,
+                clicked: clicked.is_some(),
+            },
+        });
+    }
+}
+
 pub struct NativePreviewCoordinator {
     host: Option<Box<dyn PreviewHostPort>>,
     factory: HostFactory,
@@ -417,6 +486,9 @@ impl NativePreviewCoordinator {
             projection,
             tooltip_hover: TooltipHoverState::default(),
         });
+        if let Some(active) = self.active.as_ref() {
+            trace_appearance_targets(active, None);
+        }
         self.trace_dispatch_count(editor_session.0);
         self.send_checked(open)?;
         Ok(PreviewLeaseResult {
@@ -537,6 +609,11 @@ impl NativePreviewCoordinator {
         if let Some(mut host) = self.host.take() {
             host.shutdown();
         }
+        self.preparer.release();
+    }
+    pub fn invalidate_resources(&mut self) {
+        // Release negative media/font entries without dismissing an active
+        // authoring lease. Its next preparation reads current resource bytes.
         self.preparer.release();
     }
 
@@ -933,6 +1010,7 @@ impl NativePreviewCoordinator {
                         let role = cell.as_ref().map_or(CellRole::Unavailable, |cell| {
                             active_cell_role(active, cell, Some(button))
                         });
+                        trace_appearance_targets(active, cell.as_ref());
                         let intents = active.reducer.reduce(SessionEvent::PointerUp {
                             point,
                             cell,
@@ -1099,6 +1177,7 @@ impl NativePreviewCoordinator {
                 preview_present_scene(active, selected.as_ref(), visible_tooltip.clone());
             active.frame.layout = layout.clone();
             active.frame.scene = scene.clone();
+            trace_appearance_targets(active, None);
             if let Some(frame_state) = active.navigation_frames.get_mut(&active.current_frame_id) {
                 frame_state.projection = active.projection.clone();
                 frame_state.selected = selected;
@@ -1917,6 +1996,94 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn resource_invalidation_releases_missing_managed_image_cache_without_retiring_active_lease() {
+        use crate::radial::model::{AssetId, AssetRecord, MediaKind, MediaReference, Override};
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([30, 60, 90, 255]),
+        ))
+        .write_to(&mut bytes, image::ImageOutputFormat::Png)
+        .unwrap();
+        let bytes = bytes.into_inner();
+        let mut document = RadialDocument::starter();
+        let asset = AssetId::new("appearing-image");
+        document.assets.push(AssetRecord {
+            id: asset.clone(),
+            kind: MediaKind::Image,
+            relative_path: "appearing.png".into(),
+            content_sha256: hex::encode(Sha256::digest(&bytes)),
+            byte_len: bytes.len() as u64,
+        });
+        let reference = MediaReference::Managed { asset_id: asset };
+        document.menus[0].rings[0].cells[0].icon = Override::Value(reference.clone());
+        let (mut coordinator, _commands, _events) = coordinator();
+        coordinator.preparer = PreviewFramePreparer::new(root.path().into());
+        let lease = coordinator
+            .start_with_projection_context(
+                AuthoringSessionId(9),
+                DraftGeneration(7),
+                AuthoringRequestId(1),
+                Arc::new(document.clone()),
+                document.default_menu_id.clone(),
+                false,
+                PreviewProjection::default(),
+                Some(frozen_test_context()),
+            )
+            .unwrap()
+            .lease;
+        let identity = crate::radial::assets::reference_identity(&reference);
+        assert!(
+            !coordinator
+                .active
+                .as_ref()
+                .unwrap()
+                .frame
+                .resources
+                .media
+                .contains_key(&identity)
+        );
+        let directory = root
+            .path()
+            .join(crate::radial::model::RADIAL_ASSETS_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("appearing.png"), bytes).unwrap();
+        let context = frozen_test_context();
+        let prepare = |coordinator: &mut NativePreviewCoordinator| {
+            coordinator
+                .preparer
+                .prepare(
+                    &document,
+                    &document.default_menu_id,
+                    context.visible_center,
+                    context.work_area,
+                    context.scale_factor,
+                    7,
+                    None,
+                    &PreviewProjection::default(),
+                )
+                .unwrap()
+        };
+        assert!(
+            !prepare(&mut coordinator)
+                .resources
+                .media
+                .contains_key(&identity)
+        );
+        coordinator.invalidate_resources();
+        assert_eq!(coordinator.active_lease(), Some(lease));
+        assert!(
+            prepare(&mut coordinator)
+                .resources
+                .media
+                .contains_key(&identity)
+        );
+    }
 
     #[test]
     fn saved_query_and_exact_command_are_not_executable_in_native_preview() {

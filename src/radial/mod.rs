@@ -35,3 +35,6 @@ pub mod validation;
 pub mod watch;
 
 pub use model::{RadialDocument, RadialFeatureSettings};
+pub mod appearance;
+pub mod density;
+pub mod gallery;

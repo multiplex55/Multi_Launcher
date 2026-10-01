@@ -45,6 +45,9 @@ use super::super::{
     gate_c_record_ordered_result_row,
 };
 use super::*;
+#[path = "gate_s_native.rs"]
+mod gate_s_native;
+pub use gate_s_native::run_gate_s_suite;
 use multi_launcher::radial::authoring::AuthoredCellTarget;
 use multi_launcher::radial::model::{CURRENT_SCHEMA_VERSION, CellDefinition};
 use multi_launcher::universal_actions::{PersistableActionTargetRef, PersistedUniversalActionRef};
@@ -63,6 +66,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const TAP_TIME: Duration = Duration::from_millis(135);
 const ROOT_TIMEOUT: Duration = Duration::from_secs(3);
 const UIA_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PRE_DOWN_GEOMETRY_REACQUISITIONS: usize = 3;
 const TRACE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_GATE_C_RESULT_ROW_SCROLL_ATTEMPTS: usize = MAX_GATE_C_RESULTS * 2;
 const MAX_GATE_C_RESULT_ROW_STALLS: usize = 4;
@@ -10259,7 +10263,6 @@ fn pin_gate_c_result(
             "the result row client size changed before its Pin control was reacquired".into(),
         ));
     }
-    const MAX_PRE_DOWN_GEOMETRY_REACQUISITIONS: usize = 3;
     let pin_deadline = Instant::now() + UIA_TIMEOUT.saturating_mul(3);
     let mut stale_geometry_attempts = 0usize;
     let (
@@ -16782,7 +16785,62 @@ fn gate_d_establish_panes_with(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GateDReadyControlStep {
     Visible,
-    Scroll { bounds: [i32; 4], delta: i16 },
+    Scroll {
+        owner: GateDControlScrollOwner,
+        bounds: [i32; 4],
+        delta: i16,
+    },
+}
+
+const MAX_PRESENTATION_SCROLLS: usize = 8;
+
+#[derive(Default)]
+struct GateDPresentationScrollProgress {
+    previous: Option<AuthoringControlSnapshot>,
+    scrolls: usize,
+}
+
+impl GateDPresentationScrollProgress {
+    fn check(
+        &self,
+        control: &AuthoringControlSnapshot,
+        step: GateDReadyControlStep,
+    ) -> Result<(), String> {
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|previous| !gate_d_control_scroll_made_progress(previous, control))
+        {
+            return Err(format!(
+                "owned scrolling did not move {:?} into its measured pane clip",
+                control.target
+            ));
+        }
+        if matches!(step, GateDReadyControlStep::Scroll { .. })
+            && self.scrolls >= MAX_PRESENTATION_SCROLLS
+        {
+            return Err(format!(
+                "owned scrolling did not expose {:?} with bounded progress",
+                control.target
+            ));
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, control: AuthoringControlSnapshot) {
+        self.previous = Some(control);
+        self.scrolls += 1;
+    }
+}
+
+fn gate_d_presentation_scroll_state_is_unchanged(
+    control: &AuthoringControlSnapshot,
+    before: &GateDObservationEvidence,
+    after: &GateDObservationEvidence,
+) -> bool {
+    before.session_id == control.session_id
+        && before.generation == control.generation
+        && gate_d_presentation_state_is_unchanged(before, after)
 }
 
 fn gate_d_ready_control_step(
@@ -16828,32 +16886,54 @@ fn gate_d_ready_control_step(
     if right <= left || bottom <= top || left < clip_left || right > clip_right {
         return Err("required presentation control cannot fit its owned pane horizontally".into());
     }
+    if control
+        .scroll_viewport
+        .as_ref()
+        .is_some_and(|viewport| !authoring_scroll_viewport_matches(control, viewport))
+    {
+        return Err("presentation scroll viewport has stale or mismatched ownership".into());
+    }
     if top >= clip_top && bottom <= clip_bottom {
         return Ok(GateDReadyControlStep::Visible);
     }
-    if !matches!(
-        target,
-        AuthoringControlTarget::BulkLabel
-            | AuthoringControlTarget::BulkSetLabel
-            | AuthoringControlTarget::TreeSearch
-            | AuthoringControlTarget::TreeSearchResult
-            | AuthoringControlTarget::EditDynamicSource
-    ) {
-        return Err("clipped control is not in a required scrollable side pane".into());
+    let owner = gate_d_control_scroll_owner(control)
+        .ok_or("clipped control has no admitted presentation scroll owner")?;
+    let measured = control
+        .scroll_viewport
+        .ok_or("clipped control has no fresh measured scroll input viewport")?
+        .measured;
+    let [input_left, input_top, input_right, input_bottom] = measured.input_bounds;
+    if i64::from(input_right) - i64::from(input_left) <= 2
+        || i64::from(input_bottom) - i64::from(input_top) <= 2
+    {
+        return Err("required presentation control cannot fit its scroll input viewport".into());
     }
-    if i64::from(bottom) - i64::from(top) > i64::from(clip_bottom) - i64::from(clip_top) {
+    // Stay strictly inside the measured input viewport, including fractional
+    // pixel boundaries. The expanded paint margin never receives wheel input.
+    let safe_top = input_top + 1;
+    let safe_bottom = input_bottom - 1;
+    // The painted widget can extend past the scroll-input rectangle. Wheel
+    // input needs a usable interior intersection, not the entire widget width.
+    let wheel_left = left.max(input_left + 1);
+    let wheel_right = right.min(input_right - 1);
+    if wheel_right <= wheel_left {
+        return Err(
+            "required presentation control has no interior scroll input intersection".into(),
+        );
+    }
+    if i64::from(bottom) - i64::from(top) > i64::from(safe_bottom) - i64::from(safe_top) {
         return Err("required presentation control cannot fit its owned pane vertically".into());
     }
-    let visible_top = top.max(clip_top);
-    let visible_bottom = bottom.min(clip_bottom);
+    let visible_top = top.max(safe_top);
+    let visible_bottom = bottom.min(safe_bottom);
     let bounds = if visible_bottom > visible_top {
-        [left, visible_top, right, visible_bottom]
+        [wheel_left, visible_top, wheel_right, visible_bottom]
     } else {
-        // A fully clipped control still anchors input inside its measured owning pane.
-        let middle = clip_top + (clip_bottom - clip_top) / 2;
-        [left, middle, right, (middle + 1).min(clip_bottom)]
+        let middle = safe_top + (safe_bottom - safe_top) / 2;
+        [wheel_left, middle, wheel_right, middle + 1]
     };
     Ok(GateDReadyControlStep::Scroll {
+        owner,
         bounds,
         delta: if top < clip_top { 120 } else { -120 },
     })
@@ -16878,6 +16958,153 @@ fn gate_d_control_scroll_made_progress(
     clipped_distance(current.bounds) < clipped_distance(previous.bounds)
 }
 
+fn gate_d_control_presentation_is_unchanged(
+    previous: &AuthoringControlSnapshot,
+    current: &AuthoringControlSnapshot,
+) -> bool {
+    let mut current = *current;
+    current.trace_sequence = previous.trace_sequence;
+    current.frame_nr = previous.frame_nr;
+    if let (Some(previous), Some(current)) =
+        (previous.scroll_viewport, current.scroll_viewport.as_mut())
+    {
+        current.trace_sequence = previous.trace_sequence;
+        current.measured.frame_nr = previous.measured.frame_nr;
+    }
+    current == *previous
+}
+
+#[derive(Default)]
+struct GateDControlPresentationStability {
+    previous: Option<AuthoringControlSnapshot>,
+}
+
+impl GateDControlPresentationStability {
+    fn observe(&mut self, control: AuthoringControlSnapshot) -> Result<bool, String> {
+        let frame = control
+            .frame_nr
+            .ok_or("presentation control omitted its rendered frame")?;
+        if let Some(previous) = self.previous {
+            if control.trace_sequence <= previous.trace_sequence
+                || frame <= previous.frame_nr.unwrap_or(frame)
+            {
+                return Ok(false);
+            }
+            if gate_d_control_presentation_is_unchanged(&previous, &control) {
+                return Ok(true);
+            }
+        }
+        self.previous = Some(control);
+        Ok(false)
+    }
+}
+
+fn gate_d_wait_settled_control_with(
+    before: &GateDObservationEvidence,
+    boundary: GateDPresentationBoundary,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+    authored_target_digest: Option<u64>,
+    require_scroll_viewport: bool,
+    timeout: Duration,
+    mut refresh: impl FnMut() -> Result<
+        (
+            [i32; 2],
+            Vec<AuthoringControlSnapshot>,
+            GateDObservationEvidence,
+        ),
+        CaseFailure,
+    >,
+    mut pause: impl FnMut(Duration),
+) -> Result<(AuthoringControlSnapshot, GateDReadyControlStep), CaseFailure> {
+    let deadline = Instant::now() + timeout;
+    let mut stability = GateDControlPresentationStability::default();
+    loop {
+        if Instant::now() >= deadline {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                format!(
+                    "Designer did not settle fresh {target:?} geometry within readiness timeout"
+                ),
+            ));
+        }
+        let (client_size, controls, after) = refresh()?;
+        if client_size != boundary.client_size {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "Designer client changed during presentation readiness".into(),
+            ));
+        }
+        if before.session_id != boundary.session_id
+            || before.generation != boundary.generation
+            || after.trace_sequence <= before.trace_sequence
+            || !gate_d_presentation_state_is_unchanged(before, &after)
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "settling presentation geometry changed authoring state or effects".into(),
+            ));
+        }
+        let matches = controls
+            .into_iter()
+            .filter(|control| {
+                control.target == target
+                    && control.trace_sequence > boundary.trace_sequence
+                    && if let Some(digest) = authored_target_digest {
+                        control.authored_target_digest == Some(digest)
+                    } else {
+                        control.index == index
+                    }
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [control] => {
+                if control.frame_nr.is_none() {
+                    return Err(CaseFailure::new(
+                        FailureStage::DesignerNativeTarget,
+                        "presentation control omitted its rendered frame".into(),
+                    ));
+                }
+                let needs_viewport = gate_d_control_scroll_owner(control).is_some()
+                    && (require_scroll_viewport
+                        || control.clip_bounds.is_some_and(|clip| {
+                            control.bounds[1] < clip[1] || control.bounds[3] > clip[3]
+                        }));
+                // A partial trace read cannot combine a control with a different frame's
+                // viewport. Wait for the existing completed-frame measurement owner.
+                if !needs_viewport || control.scroll_viewport.is_some() {
+                    let step = gate_d_ready_control_step(
+                        control,
+                        boundary,
+                        target,
+                        index,
+                        role,
+                        authored_target_digest,
+                    )
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+                    if after.trace_sequence > control.trace_sequence
+                        && stability.observe(*control).map_err(|error| {
+                            CaseFailure::new(FailureStage::DesignerNativeTarget, error)
+                        })?
+                        && Instant::now() < deadline
+                    {
+                        return Ok((*control, step));
+                    }
+                }
+            }
+            [] => {}
+            _ => {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerNativeTarget,
+                    format!("Designer published ambiguous fresh {target:?} controls"),
+                ));
+            }
+        }
+        pause(WINDOW_POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
 fn gate_d_ready_control(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -16888,7 +17115,30 @@ fn gate_d_ready_control(
     role: AuthoringControlRole,
     authored_target_digest: Option<u64>,
 ) -> Result<AuthoringControlSnapshot, CaseFailure> {
-    const MAX_PRESENTATION_SCROLLS: usize = 8;
+    gate_d_ready_control_before_deadline(
+        child,
+        designer,
+        trace_path,
+        boundary,
+        target,
+        index,
+        role,
+        authored_target_digest,
+        Instant::now() + UIA_TIMEOUT.saturating_mul((MAX_PRESENTATION_SCROLLS + 1) as u32),
+    )
+}
+
+fn gate_d_ready_control_before_deadline(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    boundary: GateDPresentationBoundary,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+    authored_target_digest: Option<u64>,
+    deadline: Instant,
+) -> Result<AuthoringControlSnapshot, CaseFailure> {
     let observed = gate_d_live_observation(child, boundary.session_id)?;
     if observed.generation != boundary.generation {
         return Err(CaseFailure::new(
@@ -16899,104 +17149,62 @@ fn gate_d_ready_control(
     let mut boundary = boundary;
     boundary.trace_sequence = observed.trace_sequence;
     let mut cursor = trace_lines(trace_path).len().max(boundary.first_line);
-    let mut prior_control = None;
-    for scrolls in 0..=MAX_PRESENTATION_SCROLLS {
-        let deadline = Instant::now() + UIA_TIMEOUT;
-        let control = loop {
-            // Reuse the owned repaint handshake so normal trace deduplication can refresh
-            // unchanged controls; an old rectangle never becomes a native click target.
-            let client_size = child
-                .request_designer_repaint(designer)
-                .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
-            if client_size != boundary.client_size {
-                return Err(CaseFailure::new(
-                    FailureStage::DesignerReadiness,
-                    "Designer client changed during presentation readiness".into(),
-                ));
-            }
-            let controls = latest_authoring_controls_after(
-                &trace_lines(trace_path),
-                cursor,
-                boundary.session_id,
-            );
-            let matches = controls
-                .into_iter()
-                .filter(|control| {
-                    control.target == target
-                        && control.role == role
-                        && control.trace_sequence > boundary.trace_sequence
-                        && if let Some(digest) = authored_target_digest {
-                            control.authored_target_digest == Some(digest)
-                        } else {
-                            control.index == index
-                        }
-                })
-                .collect::<Vec<_>>();
-            match matches.as_slice() {
-                [control] => break *control,
-                [] => {}
-                _ => {
-                    return Err(CaseFailure::new(
-                        FailureStage::DesignerNativeTarget,
-                        format!("Designer published ambiguous fresh {target:?} controls"),
-                    ));
-                }
-            }
-            if Instant::now() >= deadline {
-                return Err(CaseFailure::new(
-                    FailureStage::DesignerNativeTarget,
-                    format!("Designer did not republish fresh {target:?} after pane readiness"),
-                ));
-            }
-            std::thread::sleep(WINDOW_POLL);
-        };
-        let step = gate_d_ready_control_step(
-            &control,
+    let mut progress = GateDPresentationScrollProgress::default();
+    loop {
+        let (control, step) = gate_d_wait_settled_control_with(
+            &observed,
             boundary,
             target,
             index,
             role,
             authored_target_digest,
-        )
-        .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
-        if prior_control
-            .as_ref()
-            .is_some_and(|previous| !gate_d_control_scroll_made_progress(previous, &control))
-        {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerReadiness,
-                format!("owned scrolling did not move {target:?} into its measured pane clip"),
-            ));
-        }
+            progress.previous.is_some(),
+            UIA_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+            || {
+                let client_size = child
+                    .request_designer_repaint(designer)
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
+                let controls = latest_authoring_controls_after(
+                    &trace_lines(trace_path),
+                    cursor,
+                    boundary.session_id,
+                );
+                let after = gate_d_live_observation(child, boundary.session_id)?;
+                Ok((client_size, controls, after))
+            },
+            std::thread::sleep,
+        )?;
+        progress
+            .check(&control, step)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
         match step {
             GateDReadyControlStep::Visible => return Ok(control),
-            GateDReadyControlStep::Scroll { bounds, delta } => {
-                if scrolls == MAX_PRESENTATION_SCROLLS {
+            GateDReadyControlStep::Scroll { bounds, delta, .. } => {
+                let before = gate_d_live_observation(child, boundary.session_id)?;
+                if !gate_d_presentation_scroll_state_is_unchanged(&control, &before, &before)
+                    || !gate_d_presentation_state_is_unchanged(&observed, &before)
+                    || Instant::now() >= deadline
+                {
                     return Err(CaseFailure::new(
                         FailureStage::DesignerReadiness,
-                        format!("owned scrolling did not expose {target:?} with bounded progress"),
+                        "Designer owner changed before presentation scrolling".into(),
                     ));
                 }
-                let before = gate_d_live_observation(child, boundary.session_id)?;
                 scroll_designer_client_bounds(child, designer, bounds, delta)
                     .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
                 let after = gate_d_live_observation(child, boundary.session_id)?;
-                if !gate_d_presentation_state_is_unchanged(&before, &after) {
+                if !gate_d_presentation_scroll_state_is_unchanged(&control, &before, &after) {
                     return Err(CaseFailure::new(
                         FailureStage::DesignerReadiness,
                         "owned presentation scrolling changed authoring state or effects".into(),
                     ));
                 }
-                prior_control = Some(control);
+                progress.record(control);
                 boundary.trace_sequence = after.trace_sequence;
                 cursor = trace_lines(trace_path).len();
             }
         }
     }
-    Err(CaseFailure::new(
-        FailureStage::DesignerReadiness,
-        "presentation scrolling exhausted its bounded attempts".into(),
-    ))
 }
 
 fn gate_d_ready_authored_canvas_control(
@@ -17015,6 +17223,159 @@ fn gate_d_ready_authored_canvas_control(
         None,
         AuthoringControlRole::Region,
         Some(target_digest),
+    )
+}
+
+fn gate_d_control_pre_down_status(
+    controls: &[AuthoringControlSnapshot],
+    expected: &AuthoringControlSnapshot,
+    before: &GateDObservationEvidence,
+    after: &GateDObservationEvidence,
+    client_size: [i32; 2],
+    client_point: [i32; 2],
+) -> Result<Option<AuthoringControlSnapshot>, PointerClickPreDownError> {
+    if before.session_id != expected.session_id
+        || before.generation != expected.generation
+        || !gate_d_presentation_state_is_unchanged(before, after)
+    {
+        return Err(PointerClickPreDownError::Input(
+            "Designer owner, document, history, assets, selection, navigation, or effects changed before button-down".into(),
+        ));
+    }
+    if client_size != expected.client_size {
+        return Err(PointerClickPreDownError::StaleGeometry(
+            "Designer client changed during pointer preparation".into(),
+        ));
+    }
+    // Inspect the latest widget slot before its role or semantic digests. An older
+    // matching role cannot authorize a slot replaced by a newer rendered owner.
+    let Some(current) = controls
+        .iter()
+        .filter(|control| control.target == expected.target && control.index == expected.index)
+        .max_by_key(|control| control.trace_sequence)
+    else {
+        return Ok(None);
+    };
+    if current.trace_sequence <= expected.trace_sequence {
+        return Ok(None);
+    }
+    let fresh_frame = current
+        .frame_nr
+        .zip(expected.frame_nr)
+        .is_some_and(|(current, expected)| current > expected);
+    let missing_viewport = expected.scroll_viewport.is_some() && current.scroll_viewport.is_none();
+    let mut comparable = *current;
+    if missing_viewport {
+        // The parser only attaches a viewport after this control's complete frame
+        // arrives. Its absence cannot consume a geometry-reacquisition attempt.
+        comparable.scroll_viewport = expected.scroll_viewport;
+    }
+    let boundary = GateDPresentationBoundary {
+        first_line: 0,
+        trace_sequence: expected.trace_sequence,
+        session_id: expected.session_id,
+        generation: expected.generation,
+        client_size: expected.client_size,
+    };
+    if !fresh_frame
+        || !gate_d_control_presentation_is_unchanged(expected, &comparable)
+        || !matches!(
+            gate_d_ready_control_step(
+                current,
+                boundary,
+                expected.target,
+                expected.index,
+                expected.role,
+                expected.authored_target_digest,
+            ),
+            Ok(GateDReadyControlStep::Visible)
+        )
+        || !gate_c_point_is_inside_rect(client_point, current.bounds)
+    {
+        return Err(PointerClickPreDownError::StaleGeometry(
+            "Designer control moved, became clipped, or changed rendered identity during pointer preparation; no button-down was sent".into(),
+        ));
+    }
+    if missing_viewport || after.trace_sequence <= current.trace_sequence {
+        return Ok(None);
+    }
+    Ok(Some(*current))
+}
+
+fn gate_d_wait_control_before_pointer_down_with(
+    expected: &AuthoringControlSnapshot,
+    before: &GateDObservationEvidence,
+    client_point: [i32; 2],
+    timeout: Duration,
+    mut refresh: impl FnMut() -> Result<
+        (
+            [i32; 2],
+            Vec<AuthoringControlSnapshot>,
+            GateDObservationEvidence,
+        ),
+        PointerClickPreDownError,
+    >,
+    mut pause: impl FnMut(Duration),
+) -> Result<AuthoringControlSnapshot, PointerClickPreDownError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(PointerClickPreDownError::StaleGeometry(
+                "no fresh matching Designer frame arrived before button-down within timeout".into(),
+            ));
+        }
+        let (client_size, controls, after) = refresh()?;
+        if let Some(current) = gate_d_control_pre_down_status(
+            &controls,
+            expected,
+            before,
+            &after,
+            client_size,
+            client_point,
+        )? {
+            if Instant::now() < deadline {
+                return Ok(current);
+            }
+        }
+        pause(WINDOW_POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn gate_d_wait_control_before_pointer_down(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    pointer_prepare_cursor: usize,
+    expected: &AuthoringControlSnapshot,
+    before: &GateDObservationEvidence,
+    client_point: [i32; 2],
+    timeout: Duration,
+) -> Result<AuthoringControlSnapshot, PointerClickPreDownError> {
+    gate_d_wait_control_before_pointer_down_with(
+        expected,
+        before,
+        client_point,
+        UIA_TIMEOUT.min(timeout),
+        || {
+            child.validate_window(designer.hwnd)?;
+            if !child.foreground_is_child() {
+                return Err(PointerClickPreDownError::Input(
+                    "Designer lost foreground ownership during pointer preparation".into(),
+                ));
+            }
+            let client_size = child
+                .request_designer_repaint(designer)
+                .map_err(PointerClickPreDownError::Input)?;
+            let controls = latest_authoring_controls_after(
+                &trace_lines(trace_path),
+                pointer_prepare_cursor,
+                expected.session_id,
+            );
+            let after = gate_d_live_observation(child, expected.session_id)
+                .map_err(|error| PointerClickPreDownError::Input(error.message))?;
+            Ok((client_size, controls, after))
+        },
+        std::thread::sleep,
     )
 }
 
@@ -26407,6 +26768,7 @@ pub fn record_environment_failure(
         AcceptanceSuite::Query => &QUERY_CASE_IDS,
         AcceptanceSuite::GateC => &super::super::GATE_C_CASE_IDS,
         AcceptanceSuite::GateD => &super::super::GATE_D_CASE_IDS,
+        AcceptanceSuite::GateS => &super::super::GATE_S_CASE_IDS,
     };
     for (index, id) in ids
         .iter()
@@ -34877,6 +35239,7 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "frontend_key",
         "designer_semantic_target",
         "designer_authoring_control",
+        "designer_authoring_scroll_viewport",
         "designer_action_editor_control",
         "designer_inspector_cell_text_edit",
         "radial_insertion_control",
@@ -34885,6 +35248,8 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "designer_canvas_allocation",
         "designer_action_catalog_rank",
         "native_preview_dispatch_count",
+        "appearance_state",
+        "native_appearance_target",
         "designer_geometry_state",
         "designer_edit_state",
         "designer_close",
@@ -34904,6 +35269,57 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "trace_ready",
     ];
     const SAFE_FIELDS: &[&str] = &[
+        "menu_digest",
+        "catalog_count",
+        "current_builtin",
+        "preview_builtin",
+        "preview_active",
+        "preview_key",
+        "preview_candidate_digest",
+        "preview_token_digest",
+        "prepared_menu_digest",
+        "prepared_candidate_digest",
+        "prepared_content_key",
+        "prepared_token_digest",
+        "prepared_owner_session",
+        "effective_digest",
+        "bindings_digest",
+        "other_menus_digest",
+        "raw_overrides_digest",
+        "opacity_milli",
+        "scale_milli",
+        "spacing_milli",
+        "label_size_milli",
+        "labels_visible",
+        "masked_fields",
+        "gallery_active",
+        "requested",
+        "completed",
+        "rejected",
+        "in_flight",
+        "visible_pending",
+        "cached_tiles",
+        "cpu_bytes",
+        "gpu_bytes",
+        "failure_count",
+        "tile_key",
+        "tile_scene_digest",
+        "tile_geometry_digest",
+        "tile_selected_emphasis",
+        "prepared_generation",
+        "geometry_digest",
+        "scene_digest",
+        "authored_cell_count",
+        "density_warnings",
+        "diagnostic_digest",
+        "point_x",
+        "point_y",
+        "dpi_milli",
+        "work_left",
+        "work_top",
+        "work_right",
+        "work_bottom",
+        "cell_kind",
         "elapsed_ms",
         "trace_sequence",
         "event_budget",
@@ -35030,6 +35446,13 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "clip_top_px",
         "clip_right_px",
         "clip_bottom_px",
+        "scroll_owner",
+        "scroll_id",
+        "frame_nr",
+        "input_left_px",
+        "input_top_px",
+        "input_right_px",
+        "input_bottom_px",
         "enabled",
         "selected",
         "index",
@@ -35131,6 +35554,7 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
                     | "insertion_control"
                     | "widget_part"
                     | "trace_budget_profile"
+                    | "scroll_owner"
             ) {
                 trace_static_enum_value(value)?
             } else {
@@ -35153,8 +35577,53 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
 
 fn safe_trace_field_value(key: &str, value: &str) -> bool {
     match key {
+        "scroll_owner" => GateDControlScrollOwner::from_trace_label(value).is_some(),
+        "scroll_id" | "frame_nr" => value.parse::<u64>().is_ok(),
+        "menu_digest"
+        | "catalog_count"
+        | "preview_key"
+        | "preview_candidate_digest"
+        | "preview_token_digest"
+        | "prepared_menu_digest"
+        | "prepared_candidate_digest"
+        | "prepared_content_key"
+        | "prepared_token_digest"
+        | "prepared_owner_session"
+        | "effective_digest"
+        | "bindings_digest"
+        | "other_menus_digest"
+        | "raw_overrides_digest"
+        | "masked_fields"
+        | "requested"
+        | "completed"
+        | "rejected"
+        | "in_flight"
+        | "visible_pending"
+        | "cached_tiles"
+        | "cpu_bytes"
+        | "gpu_bytes"
+        | "failure_count"
+        | "tile_key"
+        | "tile_scene_digest"
+        | "tile_geometry_digest"
+        | "prepared_generation"
+        | "geometry_digest"
+        | "scene_digest"
+        | "authored_cell_count"
+        | "density_warnings"
+        | "diagnostic_digest"
+        | "dpi_milli"
+        | "cell_kind" => value.parse::<u64>().is_ok(),
+        "current_builtin" | "preview_builtin" | "opacity_milli" | "scale_milli"
+        | "spacing_milli" | "label_size_milli" | "point_x" | "point_y" | "work_left"
+        | "work_top" | "work_right" | "work_bottom" => value.parse::<i32>().is_ok(),
+        "preview_active" | "labels_visible" | "gallery_active" | "tile_selected_emphasis" => {
+            matches!(value, "true" | "false")
+        }
         "event_budget" | "reserved_event_budget" => value.parse::<u64>().is_ok(),
-        "trace_budget_profile" => matches!(value, "default" | "gate_c_v1"),
+        "trace_budget_profile" => {
+            matches!(value, "default" | "gate_c_v1" | "gate_d_v1" | "gate_s_v1")
+        }
         "request_id" | "baseline_request_id" | "captured_trace_sequence" | "trace_sequence" => {
             value.parse::<u64>().is_ok()
         }
@@ -35263,6 +35732,9 @@ fn safe_trace_field_value(key: &str, value: &str) -> bool {
         "left_px" | "top_px" | "right_px" | "bottom_px" | "full_left_px" | "full_top_px"
         | "full_right_px" | "full_bottom_px" | "clip_left_px" | "clip_top_px" | "clip_right_px"
         | "clip_bottom_px" | "client_width_px" | "client_height_px" => value.parse::<i32>().is_ok(),
+        "input_left_px" | "input_top_px" | "input_right_px" | "input_bottom_px" => {
+            value.parse::<i32>().is_ok()
+        }
         "control_index" => value.parse::<i32>().is_ok(),
         "target_digest"
         | "title_digest"
@@ -35542,6 +36014,31 @@ impl std::fmt::Display for CaseFailure {
 
 fn expected(id: &str) -> &'static str {
     match id {
+        "S01" => {
+            "fresh isolated profile selects Modern Clean; legacy data remains covered by compatibility tests"
+        }
+        "S02" => {
+            "real tile preview and Cancel retain the unrelated dirty name, draft, assets and history"
+        }
+        "S03" => {
+            "real Simple opacity, menu scale and radial spacing change only their mapped current-menu channels and prepared geometry"
+        }
+        "S04" => {
+            "real preset Apply is one undo unit; Undo and Redo preserve bindings and advanced overrides"
+        }
+        "S05" => {
+            "Compact, Comfortable, High Contrast and Classic produce distinct shared-renderer tiles; High Contrast has bold/underline selection"
+        }
+        "S06" => {
+            "actual prepared valid 50-cell fixture remains intact and reports bounded measured density warnings"
+        }
+        "S07" => {
+            "post-edit shared native preview acknowledges the prepared actionable cell hit and intercepts exactly one activation"
+        }
+        "S08" => "Save persists the authoritative appearance draft without action execution",
+        "S09" => {
+            "settled unchanged gallery frames and a closed gallery tab schedule no new tile work"
+        }
         "H0" => "ROOT focused F11 tap parks ROOT offscreen; exactly one short tap; no radial open",
         "H1" => "hidden ROOT is shown from known runner-owned focus",
         "H2" => "runner-owned other focus toggles visible ROOT in both directions",
@@ -37392,6 +37889,20 @@ mod tests {
             client_size: [520, 380],
         };
         let control = AuthoringControlSnapshot {
+            frame_nr: Some(90),
+            scroll_viewport: Some(AuthoringScrollViewportSnapshot {
+                measured: DesignerAuthoringScrollViewport {
+                    owner: GateDControlScrollOwner::Inspector,
+                    scroll_id: 31,
+                    frame_nr: 90,
+                    session_id: boundary.session_id,
+                    generation: boundary.generation,
+                    input_bounds: [313, 83, 507, 337],
+                    paint_clip_bounds: [310, 80, 510, 340],
+                    client_size: boundary.client_size,
+                },
+                trace_sequence: 12,
+            }),
             target: AuthoringControlTarget::BulkLabel,
             role: AuthoringControlRole::TextEdit,
             index: None,
@@ -37423,6 +37934,514 @@ mod tests {
         (boundary, control)
     }
 
+    fn presentation_tree_search_control() -> (GateDPresentationBoundary, AuthoringControlSnapshot) {
+        let (boundary, mut control) = presentation_control();
+        control.target = AuthoringControlTarget::TreeSearch;
+        // The actual TreeSearch header is rendered outside the menu ScrollArea.
+        control.scroll_viewport = None;
+        (boundary, control)
+    }
+
+    fn moving_menu_row_fixture() -> (
+        GateDPresentationBoundary,
+        AuthoringControlSnapshot,
+        GateDObservationEvidence,
+    ) {
+        let (_, mut control) = presentation_control();
+        let mut owner = crate::tests::gate_d_test_observation(9, 901, &[11], 11, 11, 5, 0, true);
+        owner.session_id = 1;
+        owner.trace_sequence = 7050;
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: owner.trace_sequence,
+            session_id: owner.session_id,
+            generation: owner.generation,
+            client_size: [900, 650],
+        };
+        control.target = AuthoringControlTarget::MenuRow;
+        control.role = AuthoringControlRole::Selectable;
+        control.index = Some(10);
+        control.trace_sequence = 7057;
+        control.frame_nr = Some(717);
+        control.bounds = [8, 607, 128, 625];
+        control.clip_bounds = Some([0, 185, 900, 638]);
+        control.client_size = boundary.client_size;
+        control.session_id = owner.session_id;
+        control.generation = owner.generation;
+        control.scroll_viewport = Some(AuthoringScrollViewportSnapshot {
+            measured: DesignerAuthoringScrollViewport {
+                owner: GateDControlScrollOwner::MenuTree,
+                scroll_id: 61,
+                frame_nr: 717,
+                session_id: owner.session_id,
+                generation: owner.generation,
+                input_bounds: [3, 188, 896, 635],
+                paint_clip_bounds: control.clip_bounds.unwrap(),
+                client_size: boundary.client_size,
+            },
+            trace_sequence: 7058,
+        });
+        (boundary, control, owner)
+    }
+
+    fn menu_row_next_frame(
+        mut control: AuthoringControlSnapshot,
+        sequence: u64,
+        frame: u64,
+        top: i32,
+    ) -> AuthoringControlSnapshot {
+        control.trace_sequence = sequence;
+        control.frame_nr = Some(frame);
+        control.bounds[1] = top;
+        control.bounds[3] = top + 18;
+        if let Some(viewport) = control.scroll_viewport.as_mut() {
+            viewport.trace_sequence = sequence + 1;
+            viewport.measured.frame_nr = frame;
+        }
+        control
+    }
+
+    fn presentation_following_owner(
+        before: &GateDObservationEvidence,
+        control: AuthoringControlSnapshot,
+    ) -> GateDObservationEvidence {
+        let mut owner = before.clone();
+        owner.frame_ordinal += 1;
+        owner.trace_sequence = control.trace_sequence + 2;
+        owner
+    }
+
+    #[test]
+    fn gate_d_settled_presentation_reacquires_moving_row_across_distinct_frames() {
+        let (boundary, initial, before) = moving_menu_row_fixture();
+        let moved = menu_row_next_frame(initial, 7072, 718, 596);
+        let settled = menu_row_next_frame(moved, 7080, 719, 596);
+        let mut samples = [initial, moved, moved, settled].into_iter();
+        let polls = Cell::new(0);
+        let (control, step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            initial.target,
+            initial.index,
+            initial.role,
+            None,
+            true,
+            UIA_TIMEOUT,
+            || {
+                polls.set(polls.get() + 1);
+                let control = samples.next().unwrap();
+                Ok((
+                    boundary.client_size,
+                    vec![control],
+                    presentation_following_owner(&before, control),
+                ))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(polls.get(), 4);
+        assert_eq!(control, settled);
+        assert_eq!(control.bounds, [8, 596, 128, 614]);
+        assert_eq!(step, GateDReadyControlStep::Visible);
+        assert!(!gate_c_point_is_inside_rect([68, 616], control.bounds));
+        assert_eq!(before.document_digest, 901);
+        assert_eq!((before.undo_depth, before.redo_depth), (5, 0));
+    }
+
+    #[test]
+    fn gate_d_settled_presentation_uses_real_refreshes_across_viewport_only_frames() {
+        use crate::native::tests::cadence_menu_row_lines;
+
+        let (mut boundary, _, mut before) = moving_menu_row_fixture();
+        boundary.trace_sequence = 13890;
+        before.trace_sequence = 13890;
+        let first = cadence_menu_row_lines(13894, 1274, 773, 126930);
+        // The next real control refresh occurred 534ms later, not on each
+        // intervening viewport publication. Retain both actual sequence/frames.
+        let second = cadence_menu_row_lines(13945, 1279, 773, 127464);
+        let records = [
+            first[0].clone(),
+            first[1].clone(),
+            first[1]
+                .replace("frame_nr=1274", "frame_nr=1275")
+                .replace("13896", "13901"),
+            first[1]
+                .replace("frame_nr=1274", "frame_nr=1276")
+                .replace("13896", "13918"),
+            second[0].clone(),
+            second[1].clone(),
+            second[1]
+                .replace("frame_nr=1279", "frame_nr=1280")
+                .replace("13947", "13952"),
+        ];
+        let mut ends = [2, 3, 4, 5, 7].into_iter();
+        let polls = Cell::new(0);
+        let (control, step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            AuthoringControlTarget::MenuRow,
+            Some(10),
+            AuthoringControlRole::Selectable,
+            None,
+            true,
+            UIA_TIMEOUT,
+            || {
+                polls.set(polls.get() + 1);
+                let end = ends
+                    .next()
+                    .expect("viewport-only frames must not settle a real control");
+                let controls = latest_authoring_controls_after(&records[..end], 0, 1);
+                let mut after = before.clone();
+                after.trace_sequence = 13953;
+                after.frame_ordinal += polls.get();
+                assert!(gate_d_presentation_state_is_unchanged(&before, &after));
+                Ok((boundary.client_size, controls, after))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(polls.get(), 5);
+        assert_eq!(
+            (control.trace_sequence, control.frame_nr),
+            (13945, Some(1279))
+        );
+        assert_eq!(control.bounds, [8, 773, 128, 791]);
+        let receipt = control.scroll_viewport.unwrap();
+        assert_eq!(
+            (receipt.trace_sequence, receipt.measured.frame_nr),
+            (13947, 1279)
+        );
+        assert_eq!(
+            step,
+            GateDReadyControlStep::Scroll {
+                owner: GateDControlScrollOwner::MenuTree,
+                bounds: [9, 412, 128, 413],
+                delta: -120,
+            }
+        );
+        assert_eq!(
+            (before.document_digest, before.undo_depth, before.redo_depth),
+            (901, 5, 0)
+        );
+    }
+
+    #[test]
+    fn gate_d_settled_presentation_keeps_d_controls_and_rejects_invalid_owner_geometry() {
+        let (boundary, row, before) = moving_menu_row_fixture();
+        for (target, role, index, digest) in [
+            (
+                AuthoringControlTarget::BulkLabel,
+                AuthoringControlRole::TextEdit,
+                None,
+                None,
+            ),
+            (
+                AuthoringControlTarget::CanvasCell,
+                AuthoringControlRole::Region,
+                Some(19),
+                Some(99),
+            ),
+        ] {
+            let control = AuthoringControlSnapshot {
+                target,
+                role,
+                index,
+                authored_target_digest: digest,
+                scroll_viewport: None,
+                ..row
+            };
+            let fresh = menu_row_next_frame(control, 7072, 718, 607);
+            let mut samples = [control, fresh].into_iter();
+            let (actual, step) = gate_d_wait_settled_control_with(
+                &before,
+                boundary,
+                target,
+                if digest.is_some() { None } else { index },
+                role,
+                digest,
+                false,
+                UIA_TIMEOUT,
+                || {
+                    let control = samples.next().unwrap();
+                    Ok((
+                        boundary.client_size,
+                        vec![control],
+                        presentation_following_owner(&before, control),
+                    ))
+                },
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(actual, fresh);
+            assert_eq!(step, GateDReadyControlStep::Visible);
+        }
+        let corruptions: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.session_id += 1,
+            |control| control.generation += 1,
+            |control| control.role = AuthoringControlRole::Button,
+            |control| control.index = Some(11),
+            |control| control.trace_sequence = 7050,
+            |control| control.frame_nr = None,
+            |control| control.frame_nr = Some(716),
+            |control| control.enabled = false,
+            |control| control.clicked = true,
+            |control| control.clip_bounds = None,
+            |control| control.clip_bounds = Some([0, 610, 900, 638]),
+            |control| control.bounds[2] = 901,
+            |control| control.client_size[0] += 1,
+        ];
+        for corrupt in corruptions {
+            let mut bad = row;
+            corrupt(&mut bad);
+            let result = gate_d_wait_settled_control_with(
+                &before,
+                boundary,
+                row.target,
+                row.index,
+                row.role,
+                None,
+                true,
+                Duration::from_millis(1),
+                || {
+                    Ok((
+                        boundary.client_size,
+                        vec![bad],
+                        presentation_following_owner(&before, row),
+                    ))
+                },
+                |_| {},
+            );
+            assert!(result.is_err(), "{bad:?}");
+        }
+        let mutations: &[fn(&mut GateDObservationEvidence)] = &[
+            |owner| owner.session_id += 1,
+            |owner| owner.generation += 1,
+            |owner| owner.document_digest ^= 1,
+            |owner| owner.selected_member_target_digests.push(99),
+            |owner| owner.selection_digest ^= 1,
+            |owner| owner.primary_target_digest ^= 1,
+            |owner| owner.range_anchor_target_digest ^= 1,
+            |owner| owner.pending_assets_digest ^= 1,
+            |owner| owner.undo_depth += 1,
+            |owner| owner.redo_depth += 1,
+            |owner| owner.navigation_menu_id_digests.push(99),
+            |owner| owner.navigation_edge_digests.push(99),
+            |owner| owner.designer_filter_digest ^= 1,
+            |owner| owner.designer_search_hit_count += 1,
+            |owner| owner.properties_dirty = true,
+            |owner| owner.root_history_digest ^= 1,
+            |owner| owner.root_usage_digest ^= 1,
+        ];
+        for mutate in mutations {
+            let mut changed = presentation_following_owner(&before, row);
+            mutate(&mut changed);
+            assert!(
+                gate_d_wait_settled_control_with(
+                    &before,
+                    boundary,
+                    row.target,
+                    row.index,
+                    row.role,
+                    None,
+                    true,
+                    UIA_TIMEOUT,
+                    || Ok((boundary.client_size, vec![row], changed.clone())),
+                    |_| {},
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn gate_d_control_pre_down_rejects_motion_replaced_slots_and_full_state_changes() {
+        let (_, expected, before) = moving_menu_row_fixture();
+        let fresh = menu_row_next_frame(expected, 7072, 718, 607);
+        let after = presentation_following_owner(&before, fresh);
+        let point = [68, 616];
+        let check = |controls: &[AuthoringControlSnapshot], owner: &GateDObservationEvidence| {
+            gate_d_control_pre_down_status(
+                controls,
+                &expected,
+                &before,
+                owner,
+                expected.client_size,
+                point,
+            )
+        };
+        assert_eq!(check(&[fresh], &after).unwrap(), Some(fresh));
+        let moved = menu_row_next_frame(fresh, 7072, 718, 596);
+        let downs = Cell::new(0);
+        assert!(matches!(
+            dispatch_pointer_down_after_preflight(
+                || check(&[moved], &after).map(|_| ()),
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            ),
+            Err(PointerClickPreDownError::StaleGeometry(_))
+        ));
+        assert_eq!(downs.get(), 0);
+        let corruptions: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.role = AuthoringControlRole::Button,
+            |control| control.index = Some(11),
+            |control| control.target = AuthoringControlTarget::TreeSearchResult,
+            |control| control.session_id += 1,
+            |control| control.generation += 1,
+            |control| control.trace_sequence = 7057,
+            |control| control.frame_nr = None,
+            |control| control.frame_nr = Some(717),
+            |control| control.enabled = false,
+            |control| control.clicked = true,
+            |control| control.client_size[0] += 1,
+            |control| control.clip_bounds = None,
+            |control| control.clip_bounds = Some([0, 610, 900, 638]),
+            |control| control.authored_target_digest = Some(44),
+            |control| control.menu_id_digest = Some(45),
+            |control| control.scroll_viewport.as_mut().unwrap().measured.scroll_id += 1,
+        ];
+        for corrupt in corruptions {
+            let mut bad = fresh;
+            corrupt(&mut bad);
+            assert!(!matches!(check(&[bad], &after), Ok(Some(_))), "{bad:?}");
+        }
+        let replaced = AuthoringControlSnapshot {
+            trace_sequence: 7075,
+            role: AuthoringControlRole::Button,
+            ..fresh
+        };
+        let mut later = after.clone();
+        later.trace_sequence = 7078;
+        assert!(matches!(
+            check(&[fresh, replaced], &later),
+            Err(PointerClickPreDownError::StaleGeometry(_))
+        ));
+        for mutate in [
+            |owner: &mut GateDObservationEvidence| owner.pending_assets_digest ^= 1,
+            |owner: &mut GateDObservationEvidence| owner.selection_digest ^= 1,
+            |owner: &mut GateDObservationEvidence| owner.redo_depth += 1,
+            |owner: &mut GateDObservationEvidence| owner.document_digest ^= 1,
+            |owner: &mut GateDObservationEvidence| owner.navigation_path_digest ^= 1,
+            |owner: &mut GateDObservationEvidence| owner.root_usage_digest ^= 1,
+        ] {
+            let mut changed = after.clone();
+            mutate(&mut changed);
+            assert!(matches!(
+                check(&[fresh], &changed),
+                Err(PointerClickPreDownError::Input(_))
+            ));
+        }
+        let mut early = after;
+        early.trace_sequence = fresh.trace_sequence;
+        assert_eq!(check(&[fresh], &early).unwrap(), None);
+    }
+
+    #[test]
+    fn gate_d_pre_down_waits_for_fresh_frame_and_timeouts_never_dispatch() {
+        let (boundary, expected, before) = moving_menu_row_fixture();
+        let fresh = menu_row_next_frame(expected, 7072, 718, 607);
+        let mut early = presentation_following_owner(&before, fresh);
+        early.trace_sequence = fresh.trace_sequence;
+        let mut samples = [
+            (vec![expected], early.clone()),
+            (vec![fresh], early),
+            (vec![fresh], presentation_following_owner(&before, fresh)),
+        ]
+        .into_iter();
+        let polls = Cell::new(0);
+        let downs = Cell::new(0);
+        let prepared = RefCell::new(None);
+        dispatch_pointer_down_after_preflight(
+            || {
+                let control = gate_d_wait_control_before_pointer_down_with(
+                    &expected,
+                    &before,
+                    [68, 616],
+                    UIA_TIMEOUT,
+                    || {
+                        polls.set(polls.get() + 1);
+                        let (controls, owner) = samples.next().unwrap();
+                        Ok((expected.client_size, controls, owner))
+                    },
+                    |_| {},
+                )?;
+                *prepared.borrow_mut() = Some(control);
+                Ok(())
+            },
+            || {
+                downs.set(downs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(polls.get(), 3);
+        assert_eq!(downs.get(), 1);
+        assert_eq!(*prepared.borrow(), Some(fresh));
+        for timeout in [Duration::ZERO, Duration::from_millis(1)] {
+            let downs = Cell::new(0);
+            let polls = Cell::new(0);
+            let result = dispatch_pointer_down_after_preflight(
+                || {
+                    gate_d_wait_control_before_pointer_down_with(
+                        &expected,
+                        &before,
+                        [68, 616],
+                        timeout,
+                        || {
+                            polls.set(polls.get() + 1);
+                            Ok((
+                                expected.client_size,
+                                vec![expected],
+                                presentation_following_owner(&before, expected),
+                            ))
+                        },
+                        |_| {},
+                    )
+                    .map(|_| ())
+                },
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(PointerClickPreDownError::StaleGeometry(_))
+            ));
+            assert_eq!(downs.get(), 0);
+            if timeout.is_zero() {
+                assert_eq!(polls.get(), 0);
+            }
+        }
+        let polls = Cell::new(0);
+        assert!(
+            gate_d_wait_settled_control_with(
+                &before,
+                boundary,
+                expected.target,
+                expected.index,
+                expected.role,
+                None,
+                true,
+                Duration::from_millis(1),
+                || {
+                    polls.set(polls.get() + 1);
+                    let n = polls.get();
+                    let control =
+                        menu_row_next_frame(expected, 7060 + n * 3, 718 + n, 596 + (n % 2) as i32);
+                    Ok((
+                        expected.client_size,
+                        vec![control],
+                        presentation_following_owner(&before, control),
+                    ))
+                },
+                |_| {},
+            )
+            .is_err()
+        );
+    }
+
     fn keyboard_transition_fixture() -> (
         GateDObservationEvidence,
         GateDPresentationBoundary,
@@ -37445,7 +38464,7 @@ mod tests {
         .unwrap();
         session.select(Some(StableSelection::Menu(menu_id)));
         let mut before = gate_d_deterministic_observation(&session).unwrap();
-        let (mut boundary, mut expected) = presentation_control();
+        let (mut boundary, mut expected) = presentation_tree_search_control();
         before.session_id = boundary.session_id;
         before.generation = boundary.generation;
         before.frame_ordinal = 40;
@@ -37454,7 +38473,6 @@ mod tests {
         before.designer_search_hit_count = 3;
         assert!(before.draft_dirty && before.undo_depth == 1);
         boundary.trace_sequence = before.trace_sequence;
-        expected.target = AuthoringControlTarget::TreeSearch;
         expected.trace_sequence = 99;
         expected.focused = true;
         expected.text_undo = Some(TextEditUndoSnapshot {
@@ -37822,8 +38840,7 @@ mod tests {
 
     #[test]
     fn gate_d_local_text_checkpoint_requires_settled_focused_actual_field_state() {
-        let (boundary, mut expected) = presentation_control();
-        expected.target = AuthoringControlTarget::TreeSearch;
+        let (boundary, mut expected) = presentation_tree_search_control();
         expected.text_undo = Some(TextEditUndoSnapshot {
             field_id_digest: 41,
             value_digest: 42,
@@ -37965,6 +38982,7 @@ mod tests {
             assert!(step(&stale).is_err());
         }
         let canvas = AuthoringControlSnapshot {
+            scroll_viewport: None,
             target: AuthoringControlTarget::CanvasCell,
             role: AuthoringControlRole::Region,
             index: Some(19),
@@ -38016,14 +39034,16 @@ mod tests {
         assert_eq!(
             step([320, 330, 500, 355]).unwrap(),
             GateDReadyControlStep::Scroll {
-                bounds: [320, 330, 500, 340],
+                owner: GateDControlScrollOwner::Inspector,
+                bounds: [320, 330, 500, 336],
                 delta: -120,
             }
         );
         assert_eq!(
             step([320, 70, 500, 95]).unwrap(),
             GateDReadyControlStep::Scroll {
-                bounds: [320, 80, 500, 95],
+                owner: GateDControlScrollOwner::Inspector,
+                bounds: [320, 84, 500, 95],
                 delta: 120,
             }
         );
@@ -38031,6 +39051,7 @@ mod tests {
         assert_eq!(
             step([320, 50, 500, 75]).unwrap(),
             GateDReadyControlStep::Scroll {
+                owner: GateDControlScrollOwner::Inspector,
                 bounds: [320, 210, 500, 211],
                 delta: 120,
             }
@@ -38038,6 +39059,7 @@ mod tests {
         assert_eq!(
             step([320, 350, 500, 375]).unwrap(),
             GateDReadyControlStep::Scroll {
+                owner: GateDControlScrollOwner::Inspector,
                 bounds: [320, 210, 500, 211],
                 delta: -120,
             }
@@ -38118,6 +39140,1002 @@ mod tests {
                 "a wider clip cannot replace actual control scroll progress"
             );
         }
+    }
+
+    fn gate_s_retained_scroll_control(
+        target: AuthoringControlTarget,
+    ) -> (GateDPresentationBoundary, AuthoringControlSnapshot) {
+        let (_, mut control) = presentation_control();
+        control.target = target;
+        control.client_size = [900, 650];
+        control.session_id = 1;
+        match target {
+            // Candidate 2 S03, producer sequence 1144: six pixels of the minus
+            // button are below the actual Resources ScrollArea clip.
+            AuthoringControlTarget::SimpleOpacity => {
+                control.role = AuthoringControlRole::Button;
+                control.index = Some(0);
+                control.generation = 3;
+                control.trace_sequence = 1144;
+                control.bounds = [8, 633, 23, 651];
+                control.clip_bounds = Some([0, 107, 900, 645]);
+            }
+            // Candidate 1 S02, producer sequence 602: an authored menu row
+            // wholly below the actual menu-tree clip, still in the retained UI.
+            AuthoringControlTarget::MenuRow => {
+                control.role = AuthoringControlRole::Selectable;
+                control.index = Some(11);
+                control.generation = 2;
+                control.trace_sequence = 602;
+                control.bounds = [8, 794, 137, 812];
+                control.clip_bounds = Some([0, 185, 900, 638]);
+            }
+            _ => panic!("fixture is limited to the two retained scroll owners"),
+        }
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: control.trace_sequence - 1,
+            session_id: control.session_id,
+            generation: control.generation,
+            client_size: control.client_size,
+        };
+        control.frame_nr = Some(90);
+        control.scroll_viewport = Some(AuthoringScrollViewportSnapshot {
+            measured: DesignerAuthoringScrollViewport {
+                owner: gate_d_control_scroll_owner(&control).unwrap(),
+                scroll_id: 31,
+                frame_nr: 90,
+                session_id: control.session_id,
+                generation: control.generation,
+                // Modeled input receipts augment retained pre-repair paint
+                // records. Real current-owner wheel geometry is tested in GUI.
+                input_bounds: match target {
+                    AuthoringControlTarget::SimpleOpacity => [8, 110, 892, 642],
+                    AuthoringControlTarget::MenuRow => [8, 188, 892, 635],
+                    _ => unreachable!(),
+                },
+                paint_clip_bounds: control.clip_bounds.unwrap(),
+                client_size: control.client_size,
+            },
+            trace_sequence: control.trace_sequence + 1,
+        });
+        (boundary, control)
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_admits_retained_resources_and_menu_tree_geometry() {
+        for (target, owner, wheel_bounds) in [
+            (
+                AuthoringControlTarget::SimpleOpacity,
+                GateDControlScrollOwner::Resources,
+                [9, 633, 23, 641],
+            ),
+            (
+                AuthoringControlTarget::MenuRow,
+                GateDControlScrollOwner::MenuTree,
+                [9, 411, 137, 412],
+            ),
+        ] {
+            let (boundary, control) = gate_s_retained_scroll_control(target);
+            let step = |control: &AuthoringControlSnapshot| {
+                gate_d_ready_control_step(
+                    control,
+                    boundary,
+                    target,
+                    control.index,
+                    control.role,
+                    None,
+                )
+            };
+            assert_eq!(
+                step(&control).unwrap(),
+                GateDReadyControlStep::Scroll {
+                    owner,
+                    bounds: wheel_bounds,
+                    delta: -120,
+                }
+            );
+            let clip = control.clip_bounds.unwrap();
+            let [left, _, right, _] = control.bounds;
+            let above = AuthoringControlSnapshot {
+                bounds: [left, clip[1] - 6, right, clip[1] + 12],
+                ..control
+            };
+            assert_eq!(
+                step(&above).unwrap(),
+                GateDReadyControlStep::Scroll {
+                    owner,
+                    bounds: [left + 1, clip[1] + 4, right, clip[1] + 12],
+                    delta: 120,
+                }
+            );
+            let visible = AuthoringControlSnapshot {
+                bounds: [left, clip[1] + 1, right, clip[1] + 19],
+                ..control
+            };
+            assert_eq!(step(&visible).unwrap(), GateDReadyControlStep::Visible);
+            assert!(gate_d_control_scroll_made_progress(&above, &visible));
+            assert!(gate_d_control_scroll_made_progress(&control, &visible));
+        }
+    }
+
+    fn horizontal_root_scroll_fixture() -> (GateDPresentationBoundary, AuthoringControlSnapshot) {
+        let mut lines = crate::native::tests::cadence_menu_row_lines(13177, 1257, 11, 116935);
+        // Candidate7 S07's exact root-row and following MenuTree measurement.
+        lines[0] = lines[0]
+            .replace("control_index=10", "control_index=0")
+            .replace("right_px=128", "right_px=185");
+        lines[1] = lines[1].replace("trace_sequence=13179", "trace_sequence=13189");
+        let control = latest_authoring_controls_after(&lines, 0, 1).pop().unwrap();
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: 13176,
+            session_id: 1,
+            generation: 9,
+            client_size: [900, 650],
+        };
+        (boundary, control)
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_root_intersection_preserves_progress_and_fresh_terminal_owner() {
+        let (boundary, control) = horizontal_root_scroll_fixture();
+        let step = |control: &AuthoringControlSnapshot| {
+            gate_d_ready_control_step(
+                control,
+                boundary,
+                control.target,
+                control.index,
+                control.role,
+                None,
+            )
+        };
+        assert_eq!(control.bounds, [8, 11, 185, 29]);
+        let measured = control.scroll_viewport.unwrap();
+        assert_eq!(
+            (control.trace_sequence, control.frame_nr),
+            (13177, Some(1257))
+        );
+        assert_eq!(
+            (measured.trace_sequence, measured.measured.frame_nr),
+            (13189, 1257)
+        );
+        assert_eq!(measured.measured.input_bounds, [8, 189, 184, 635]);
+        assert_eq!(measured.measured.paint_clip_bounds, [0, 185, 900, 638]);
+        let initial_step = step(&control).unwrap();
+        assert_eq!(
+            initial_step,
+            GateDReadyControlStep::Scroll {
+                owner: GateDControlScrollOwner::MenuTree,
+                bounds: [9, 412, 183, 413],
+                delta: 120,
+            }
+        );
+        let mut progress = GateDPresentationScrollProgress::default();
+        progress.check(&control, initial_step).unwrap();
+        progress.record(control);
+        // Model owned upward movement; the failed native run stopped before a
+        // wheel and therefore does not establish these subsequent positions.
+        let closer = menu_row_next_frame(control, 13255, 1258, 176);
+        let closer_step = step(&closer).unwrap();
+        assert_eq!(
+            closer_step,
+            GateDReadyControlStep::Scroll {
+                owner: GateDControlScrollOwner::MenuTree,
+                bounds: [9, 190, 183, 194],
+                delta: 120,
+            }
+        );
+        progress.check(&closer, closer_step).unwrap();
+        progress.record(closer);
+        let visible = menu_row_next_frame(closer, 13280, 1259, 190);
+        assert_eq!(step(&visible).unwrap(), GateDReadyControlStep::Visible);
+        progress
+            .check(&visible, GateDReadyControlStep::Visible)
+            .unwrap();
+        let (_, _, mut before) = moving_menu_row_fixture();
+        before.trace_sequence = boundary.trace_sequence;
+        for sample in [closer, visible] {
+            let after = presentation_following_owner(&before, sample);
+            assert!(gate_d_presentation_scroll_state_is_unchanged(
+                &sample, &before, &after
+            ));
+        }
+        let terminal = menu_row_next_frame(visible, 13285, 1260, 190);
+        let mut samples = [visible, terminal].into_iter();
+        let polls = Cell::new(0);
+        let (settled, settled_step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            control.target,
+            control.index,
+            control.role,
+            None,
+            true,
+            UIA_TIMEOUT,
+            || {
+                polls.set(polls.get() + 1);
+                let sample = samples.next().unwrap();
+                Ok((
+                    boundary.client_size,
+                    vec![sample],
+                    presentation_following_owner(&before, sample),
+                ))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(polls.get(), 2);
+        assert_eq!(settled, terminal);
+        assert_eq!(settled_step, GateDReadyControlStep::Visible);
+        assert_eq!(settled.bounds, [8, 190, 185, 208]);
+        assert_eq!(
+            (settled.trace_sequence, settled.frame_nr),
+            (13285, Some(1260))
+        );
+        assert_eq!(
+            (before.document_digest, before.undo_depth, before.redo_depth),
+            (901, 5, 0)
+        );
+        let post_pointer = menu_row_next_frame(settled, 13290, 1261, 190);
+        assert_eq!(
+            gate_d_control_pre_down_status(
+                &[post_pointer],
+                &settled,
+                &before,
+                &presentation_following_owner(&before, post_pointer),
+                boundary.client_size,
+                [96, 199],
+            )
+            .unwrap(),
+            Some(post_pointer)
+        );
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_intersections_admit_top_and_bottom_for_each_owner() {
+        let (tree_boundary, tree) = horizontal_root_scroll_fixture();
+        let (resources_boundary, mut resources) =
+            gate_s_retained_scroll_control(AuthoringControlTarget::SimpleOpacity);
+        resources.bounds = [7, 633, 895, 651];
+        let (inspector_boundary, mut inspector) = presentation_control();
+        inspector.bounds = [310, 330, 510, 355];
+        for (boundary, control, top_bounds, top_anchor, bottom_anchor) in [
+            (
+                tree_boundary,
+                AuthoringControlSnapshot {
+                    bounds: [8, 794, 185, 812],
+                    ..tree
+                },
+                [8, 11, 185, 29],
+                [9, 412, 183, 413],
+                [9, 412, 183, 413],
+            ),
+            (
+                resources_boundary,
+                resources,
+                [7, 101, 895, 119],
+                [9, 111, 891, 119],
+                [9, 633, 891, 641],
+            ),
+            (
+                inspector_boundary,
+                inspector,
+                [310, 70, 510, 95],
+                [314, 84, 506, 95],
+                [314, 330, 506, 336],
+            ),
+        ] {
+            let owner = control.scroll_viewport.unwrap().measured.owner;
+            let input = control.scroll_viewport.unwrap().measured.input_bounds;
+            for (sample, expected, delta) in [
+                (control, bottom_anchor, -120),
+                (
+                    AuthoringControlSnapshot {
+                        bounds: top_bounds,
+                        ..control
+                    },
+                    top_anchor,
+                    120,
+                ),
+            ] {
+                assert_eq!(
+                    gate_d_ready_control_step(
+                        &sample,
+                        boundary,
+                        control.target,
+                        control.index,
+                        control.role,
+                        None,
+                    )
+                    .unwrap(),
+                    GateDReadyControlStep::Scroll {
+                        owner,
+                        bounds: expected,
+                        delta
+                    }
+                );
+                assert!(expected[0] > input[0] && expected[2] < input[2]);
+                assert!(expected[1] > input[1] && expected[3] < input[3]);
+                assert!(expected[2] > expected[0] && expected[3] > expected[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_intersections_reject_unusable_or_unowned_measurements() {
+        let (boundary, control) = horizontal_root_scroll_fixture();
+        let step = |control: &AuthoringControlSnapshot| {
+            gate_d_ready_control_step(
+                control,
+                boundary,
+                AuthoringControlTarget::MenuRow,
+                Some(0),
+                AuthoringControlRole::Selectable,
+                None,
+            )
+        };
+        for bounds in [
+            [0, 11, 8, 29],
+            [0, 11, 9, 29],
+            [183, 11, 185, 29],
+            [184, 11, 187, 29],
+            [185, 11, 8, 29],
+            [8, 11, 8, 29],
+            [-1, 11, 185, 29],
+            [8, 11, 901, 29],
+            [8, 11, 185, 456],
+            [8, 190, 901, 208],
+        ] {
+            assert!(
+                step(&AuthoringControlSnapshot { bounds, ..control }).is_err(),
+                "{bounds:?}"
+            );
+        }
+        let corruptions: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.scroll_viewport = None,
+            |control| control.frame_nr = None,
+            |control| control.frame_nr = Some(1256),
+            |control| control.session_id += 1,
+            |control| control.generation += 1,
+            |control| control.trace_sequence = 13176,
+            |control| control.client_size[0] += 1,
+            |control| control.scroll_viewport.as_mut().unwrap().trace_sequence = 13177,
+            |control| {
+                control.scroll_viewport.as_mut().unwrap().measured.owner =
+                    GateDControlScrollOwner::Resources
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .session_id += 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .generation += 1
+            },
+            |control| control.scroll_viewport.as_mut().unwrap().measured.scroll_id = 0,
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .client_size[0] += 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .paint_clip_bounds[0] = 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds = [8, 189, 10, 635]
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds = [8, 189, 184, 191]
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds = [185, 189, 184, 635]
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds = [8, 635, 184, 635]
+            },
+        ];
+        for corrupt in corruptions {
+            let mut changed = control;
+            corrupt(&mut changed);
+            assert!(step(&changed).is_err(), "{changed:?}");
+        }
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_admission_is_typed_and_limited_to_actual_owners() {
+        use AuthoringControlRole::{Button, Checkbox, DragValue, Selectable, TextEdit};
+        use AuthoringControlTarget::*;
+        let (boundary, base) = presentation_control();
+        let admitted = [
+            (BulkLabel, TextEdit, GateDControlScrollOwner::Inspector),
+            (BulkSetLabel, Button, GateDControlScrollOwner::Inspector),
+            (
+                EditDynamicSource,
+                Button,
+                GateDControlScrollOwner::Inspector,
+            ),
+            (TreeSearch, TextEdit, GateDControlScrollOwner::MenuTree),
+            (
+                TreeSearchResult,
+                Selectable,
+                GateDControlScrollOwner::MenuTree,
+            ),
+            (MenuRow, Selectable, GateDControlScrollOwner::MenuTree),
+            (
+                AppearanceTile,
+                Selectable,
+                GateDControlScrollOwner::Resources,
+            ),
+            (AppearanceApply, Button, GateDControlScrollOwner::Resources),
+            (AppearanceCancel, Button, GateDControlScrollOwner::Resources),
+            (SimpleAccent, Button, GateDControlScrollOwner::Resources),
+            (SimpleOpacity, Button, GateDControlScrollOwner::Resources),
+            (SimpleOpacity, DragValue, GateDControlScrollOwner::Resources),
+            (SimpleScale, Button, GateDControlScrollOwner::Resources),
+            (SimpleScale, DragValue, GateDControlScrollOwner::Resources),
+            (SimpleSpacing, Button, GateDControlScrollOwner::Resources),
+            (SimpleSpacing, DragValue, GateDControlScrollOwner::Resources),
+            (SimpleLabelSize, Button, GateDControlScrollOwner::Resources),
+            (
+                SimpleLabelSize,
+                DragValue,
+                GateDControlScrollOwner::Resources,
+            ),
+            (SimpleLabels, Checkbox, GateDControlScrollOwner::Resources),
+            (SimpleBold, Checkbox, GateDControlScrollOwner::Resources),
+            (SimpleShadow, Checkbox, GateDControlScrollOwner::Resources),
+        ];
+        for (target, role, owner) in admitted {
+            let mut control = AuthoringControlSnapshot {
+                target,
+                role,
+                bounds: [320, 330, 500, 355],
+                ..base
+            };
+            control.scroll_viewport.as_mut().unwrap().measured.owner = owner;
+            assert_eq!(gate_d_control_scroll_owner(&control), Some(owner));
+            assert_eq!(
+                gate_d_ready_control_step(&control, boundary, target, None, role, None).unwrap(),
+                GateDReadyControlStep::Scroll {
+                    owner,
+                    bounds: [320, 330, 500, 336],
+                    delta: -120,
+                }
+            );
+        }
+        for (target, role) in [
+            (Save, Button),
+            (Undo, Button),
+            (DesignerBack, Button),
+            (PopupApply, Button),
+            (SkinRow, Button),
+            (SkinGlowEnabled, Checkbox),
+            (CanvasCell, AuthoringControlRole::Region),
+            (MenuRow, Button),
+            (SimpleLabels, Button),
+            (SimpleScale, TextEdit),
+        ] {
+            let control = AuthoringControlSnapshot {
+                target,
+                role,
+                bounds: [320, 330, 500, 355],
+                ..base
+            };
+            assert_eq!(gate_d_control_scroll_owner(&control), None);
+            assert!(
+                gate_d_ready_control_step(&control, boundary, target, None, role, None).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn gate_d_presentation_resources_and_tree_scroll_reject_stale_or_unfit_records() {
+        let corruptions: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.session_id += 1,
+            |control| control.generation += 1,
+            |control| control.trace_sequence -= 1,
+            |control| control.client_size[1] += 1,
+            |control| control.target = AuthoringControlTarget::Canvas,
+            |control| control.role = AuthoringControlRole::Region,
+            |control| control.index = Some(99),
+            |control| control.enabled = false,
+            |control| control.clicked = true,
+            |control| control.clip_bounds = None,
+            |control| control.bounds[0] = -1,
+            |control| control.bounds[2] = 901,
+            |control| control.bounds[3] = control.bounds[1],
+            |control| control.bounds[3] = control.bounds[1] + 651,
+            |control| control.clip_bounds.as_mut().unwrap()[3] = 651,
+            |control| control.clip_bounds.as_mut().unwrap()[1] = -1,
+        ];
+        for target in [
+            AuthoringControlTarget::SimpleOpacity,
+            AuthoringControlTarget::MenuRow,
+        ] {
+            let (boundary, control) = gate_s_retained_scroll_control(target);
+            for corrupt in corruptions {
+                let mut changed = control;
+                corrupt(&mut changed);
+                assert!(
+                    gate_d_ready_control_step(
+                        &changed,
+                        boundary,
+                        target,
+                        control.index,
+                        control.role,
+                        None,
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gate_d_presentation_resources_and_tree_scroll_require_progress_within_budget() {
+        for target in [
+            AuthoringControlTarget::SimpleOpacity,
+            AuthoringControlTarget::MenuRow,
+        ] {
+            let (boundary, mut control) = gate_s_retained_scroll_control(target);
+            let clip = control.clip_bounds.unwrap();
+            control.bounds[1] = clip[3] + 200;
+            control.bounds[3] = control.bounds[1] + 18;
+            let mut progress = GateDPresentationScrollProgress::default();
+            for attempt in 0..=MAX_PRESENTATION_SCROLLS {
+                control.scroll_viewport.as_mut().unwrap().trace_sequence =
+                    control.trace_sequence + 1;
+                let step = gate_d_ready_control_step(
+                    &control,
+                    boundary,
+                    target,
+                    control.index,
+                    control.role,
+                    None,
+                )
+                .unwrap();
+                assert!(matches!(step, GateDReadyControlStep::Scroll { .. }));
+                if attempt == MAX_PRESENTATION_SCROLLS {
+                    assert!(
+                        progress
+                            .check(&control, step)
+                            .unwrap_err()
+                            .contains("bounded")
+                    );
+                    break;
+                }
+                progress.check(&control, step).unwrap();
+                progress.record(control);
+                // Even fresh records fail if a wheel has no actual movement,
+                // moves the wrong way, or only enlarges the clip.
+                for changed in [
+                    AuthoringControlSnapshot {
+                        trace_sequence: control.trace_sequence + 1,
+                        ..control
+                    },
+                    AuthoringControlSnapshot {
+                        bounds: [
+                            control.bounds[0],
+                            control.bounds[1] + 1,
+                            control.bounds[2],
+                            control.bounds[3] + 1,
+                        ],
+                        trace_sequence: control.trace_sequence + 1,
+                        ..control
+                    },
+                    AuthoringControlSnapshot {
+                        clip_bounds: Some([clip[0], clip[1], clip[2], control.bounds[3] + 1]),
+                        trace_sequence: control.trace_sequence + 1,
+                        ..control
+                    },
+                ] {
+                    assert!(
+                        progress
+                            .check(&changed, step)
+                            .unwrap_err()
+                            .contains("did not move")
+                    );
+                }
+                control.bounds[1] -= 1;
+                control.bounds[3] -= 1;
+                control.trace_sequence += 1;
+            }
+            assert_eq!(progress.scrolls, MAX_PRESENTATION_SCROLLS);
+            // The last permitted wheel can expose the target: the cap limits
+            // input, not the fresh visible observation following that input.
+            control.bounds[1] = clip[3] - 20;
+            control.bounds[3] = clip[3] - 2;
+            control.trace_sequence += 1;
+            control.scroll_viewport.as_mut().unwrap().trace_sequence = control.trace_sequence + 1;
+            let step = gate_d_ready_control_step(
+                &control,
+                boundary,
+                target,
+                control.index,
+                control.role,
+                None,
+            )
+            .unwrap();
+            assert_eq!(step, GateDReadyControlStep::Visible);
+            progress.check(&control, step).unwrap();
+        }
+    }
+
+    #[test]
+    fn gate_d_presentation_resources_and_tree_scroll_preserve_captured_owner_and_state() {
+        use multi_launcher::radial::authoring::{AuthoringSnapshot, RadialAuthoringSession};
+        let session = RadialAuthoringSession::new(AuthoringSnapshot::new(
+            Arc::new(RadialDocument::starter()),
+            "scroll-preservation",
+        ));
+        let corruptions: &[fn(&mut GateDObservationEvidence)] = &[
+            |state| state.session_id += 1,
+            |state| state.generation += 1,
+            |state| state.document_digest ^= 1,
+            |state| state.pending_assets_digest ^= 1,
+            |state| state.undo_depth += 1,
+            |state| state.redo_depth += 1,
+            |state| state.selection_digest ^= 1,
+            |state| state.selected_member_target_digests.push(99),
+            |state| state.primary_target_digest ^= 1,
+            |state| state.range_anchor_target_digest ^= 1,
+            |state| state.navigation_path_digest ^= 1,
+            |state| state.navigation_menu_id_digests.push(99),
+            |state| state.navigation_edge_digests.push(99),
+            |state| state.designer_filter_digest ^= 1,
+            |state| state.designer_search_hit_count += 1,
+            |state| state.root_history_digest ^= 1,
+            |state| state.root_usage_digest ^= 1,
+            |state| state.root_visible = !state.root_visible,
+            |state| state.draft_dirty = !state.draft_dirty,
+            |state| state.properties_popup_open = !state.properties_popup_open,
+            |state| state.properties_dirty = !state.properties_dirty,
+        ];
+        for target in [
+            AuthoringControlTarget::SimpleOpacity,
+            AuthoringControlTarget::MenuRow,
+        ] {
+            let (_, control) = gate_s_retained_scroll_control(target);
+            let mut before = gate_d_deterministic_observation(&session).unwrap();
+            before.session_id = control.session_id;
+            before.generation = control.generation;
+            let mut painted = before.clone();
+            painted.trace_sequence += 1;
+            painted.frame_ordinal += 1;
+            assert!(gate_d_presentation_scroll_state_is_unchanged(
+                &control, &before, &painted
+            ));
+            for corrupt in corruptions {
+                let mut changed = painted.clone();
+                corrupt(&mut changed);
+                assert!(!gate_d_presentation_scroll_state_is_unchanged(
+                    &control, &before, &changed
+                ));
+            }
+            // A replacement owner cannot authorize input even if its state
+            // would otherwise compare equal before and after the wheel.
+            for corrupt in &corruptions[..2] {
+                let mut changed = before.clone();
+                corrupt(&mut changed);
+                assert!(!gate_d_presentation_scroll_state_is_unchanged(
+                    &control, &changed, &changed
+                ));
+            }
+        }
+    }
+
+    fn scroll_input_producer_fixture() -> (String, String) {
+        // Retain candidate 3's Scale button/paint/client geometry. Frame and
+        // input-viewport fields use the current producer schema; actual live
+        // measurements and wheel admission are exercised by retained GUI tests.
+        (
+            "trace_event=\"designer_authoring_control\" target=SimpleScale role=\"Button\" viewport=Deferred control_index=1 left_px=31 top_px=642 right_px=46 bottom_px=660 clip_left_px=0 clip_top_px=107 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence=1716 frame_nr=121 enabled=true selected=false focused=false clicked=false session_id=1 generation=4 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1".into(),
+            "trace_event=\"designer_authoring_scroll_viewport\" viewport=Deferred scroll_owner=\"Resources\" scroll_id=31 frame_nr=121 session_id=1 generation=4 input_left_px=8 input_top_px=110 input_right_px=892 input_bottom_px=642 clip_left_px=0 clip_top_px=107 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence=1717".into(),
+        )
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_input_parser_preserves_producer_schema_and_allowlist() {
+        let (control_line, viewport_line) = scroll_input_producer_fixture();
+        let control = parse_authoring_control(&control_line).unwrap();
+        let viewport = parse_authoring_scroll_viewport(&viewport_line).unwrap();
+        assert_eq!(control.frame_nr, Some(121));
+        assert_eq!(viewport.measured.input_bounds, [8, 110, 892, 642]);
+        assert_eq!(viewport.measured.paint_clip_bounds, [0, 107, 900, 645]);
+        assert!(authoring_scroll_viewport_matches(&control, &viewport));
+        assert_eq!(
+            parse_authoring_scroll_viewport(
+                &viewport_line.replace("scroll_owner=\"Resources\"", "scroll_owner=Resources")
+            ),
+            Some(viewport)
+        );
+        for (field, replacement) in [
+            ("scroll_owner=\"Resources\"", "scroll_owner=\"Unknown\""),
+            ("scroll_owner=\"Resources\"", "scroll_owner=\"Resources"),
+            ("scroll_id=31", "scroll_id=0"),
+            ("frame_nr=121", "frame_nr=-1"),
+            ("frame_nr=121", "frame_nr=private"),
+            ("session_id=1", "session_id=0"),
+            ("generation=4", "generation=private"),
+            ("input_left_px=8", "input_left_px=-1"),
+            ("input_top_px=110", "input_top_px=642"),
+            ("input_bottom_px=642", "input_bottom_px=646"),
+            ("input_right_px=892", "input_right_px=private"),
+            (" input_right_px=892", ""),
+            ("clip_bottom_px=645", "clip_bottom_px=641"),
+            ("client_width_px=900", "client_width_px=891"),
+            ("trace_sequence=1717", "trace_sequence=private"),
+            ("viewport=Deferred", "viewport=Root"),
+        ] {
+            assert!(
+                parse_authoring_scroll_viewport(&viewport_line.replace(field, replacement))
+                    .is_none(),
+                "{field} -> {replacement}"
+            );
+        }
+        assert!(
+            parse_authoring_control(&control_line.replace("frame_nr=121", "frame_nr=-1")).is_none()
+        );
+        let legacy = parse_authoring_control(&control_line.replace(" frame_nr=121", "")).unwrap();
+        assert_eq!(legacy.frame_nr, None);
+        assert!(!authoring_scroll_viewport_matches(&legacy, &viewport));
+        let sanitized =
+            sanitize_trace_line(&(viewport_line.clone() + " private_label=secret")).unwrap();
+        assert!(sanitized.starts_with("trace_event=designer_authoring_scroll_viewport"));
+        for field in [
+            "scroll_owner=Resources",
+            "scroll_id=31",
+            "frame_nr=121",
+            "input_bottom_px=642",
+            "clip_bottom_px=645",
+        ] {
+            assert!(sanitized.contains(field));
+        }
+        assert!(!sanitized.contains("secret"));
+        assert!(
+            !sanitize_trace_line(
+                &viewport_line.replace("scroll_owner=\"Resources\"", "scroll_owner=\"Unknown\"")
+            )
+            .unwrap()
+            .contains("scroll_owner=")
+        );
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_input_correlates_only_current_ordered_owner_receipts() {
+        let (control_line, viewport_line) = scroll_input_producer_fixture();
+        let matched =
+            latest_authoring_controls_after(&[control_line.clone(), viewport_line.clone()], 0, 1);
+        assert_eq!(matched.len(), 1);
+        assert!(matched[0].scroll_viewport.is_some());
+        for (field, replacement) in [
+            ("scroll_owner=\"Resources\"", "scroll_owner=\"Inspector\""),
+            ("frame_nr=121", "frame_nr=120"),
+            ("session_id=1", "session_id=2"),
+            ("generation=4", "generation=5"),
+            ("client_width_px=900", "client_width_px=901"),
+            ("clip_top_px=107", "clip_top_px=106"),
+            ("trace_sequence=1717", "trace_sequence=1716"),
+        ] {
+            let controls = latest_authoring_controls_after(
+                &[
+                    control_line.clone(),
+                    viewport_line.replace(field, replacement),
+                ],
+                0,
+                1,
+            );
+            assert_eq!(controls.len(), 1);
+            assert_eq!(
+                controls[0].scroll_viewport, None,
+                "{field} -> {replacement}"
+            );
+        }
+        let reversed =
+            latest_authoring_controls_after(&[viewport_line.clone(), control_line.clone()], 0, 1);
+        assert_eq!(reversed[0].scroll_viewport, None);
+        let duplicated = latest_authoring_controls_after(
+            &[
+                control_line.clone(),
+                viewport_line.clone(),
+                viewport_line.replace("1717", "1718"),
+            ],
+            0,
+            1,
+        );
+        assert_eq!(duplicated[0].scroll_viewport, None);
+        let later_frame = latest_authoring_controls_after(
+            &[
+                control_line.clone(),
+                viewport_line.clone(),
+                viewport_line
+                    .replace("frame_nr=121", "frame_nr=122")
+                    .replace("1717", "1718"),
+            ],
+            0,
+            1,
+        );
+        assert_eq!(
+            later_frame, matched,
+            "an unchanged viewport-only frame retains the original exact-frame pair without rewriting its evidence"
+        );
+        assert!(latest_authoring_controls_after(&[control_line, viewport_line], 1, 1).is_empty());
+    }
+
+    #[test]
+    fn gate_d_presentation_scroll_input_anchor_excludes_paint_margin_and_rejects_invalid_viewports()
+    {
+        let (control_line, viewport_line) = scroll_input_producer_fixture();
+        let control = latest_authoring_controls_after(&[control_line, viewport_line], 0, 1)[0];
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: 1715,
+            session_id: 1,
+            generation: 4,
+            client_size: [900, 650],
+        };
+        let step = |control: &AuthoringControlSnapshot| {
+            gate_d_ready_control_step(
+                control,
+                boundary,
+                AuthoringControlTarget::SimpleScale,
+                Some(1),
+                AuthoringControlRole::Button,
+                None,
+            )
+        };
+        assert_eq!(
+            step(&control).unwrap(),
+            GateDReadyControlStep::Scroll {
+                owner: GateDControlScrollOwner::Resources,
+                bounds: [31, 376, 46, 377],
+                delta: -120,
+            }
+        );
+        assert!(control.bounds[1] == control.scroll_viewport.unwrap().measured.input_bounds[3]);
+        let corruptions: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.scroll_viewport = None,
+            |control| control.frame_nr = None,
+            |control| control.frame_nr = Some(120),
+            |control| {
+                control.scroll_viewport.as_mut().unwrap().trace_sequence = control.trace_sequence
+            },
+            |control| {
+                control.scroll_viewport.as_mut().unwrap().measured.owner =
+                    GateDControlScrollOwner::MenuTree
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .session_id += 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .generation += 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .paint_clip_bounds[3] += 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds[0] = 46
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds[2] = 31
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds[3] = 112
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds[3] = 651
+            },
+        ];
+        for corrupt in corruptions {
+            let mut changed = control;
+            corrupt(&mut changed);
+            assert!(step(&changed).is_err());
+        }
+        for (input_left, input_right, anchor) in
+            [(32, 892, [33, 376, 46, 377]), (8, 45, [31, 376, 44, 377])]
+        {
+            let mut partial = control;
+            let input = &mut partial
+                .scroll_viewport
+                .as_mut()
+                .unwrap()
+                .measured
+                .input_bounds;
+            input[0] = input_left;
+            input[2] = input_right;
+            assert_eq!(
+                step(&partial).unwrap(),
+                GateDReadyControlStep::Scroll {
+                    owner: GateDControlScrollOwner::Resources,
+                    bounds: anchor,
+                    delta: -120,
+                }
+            );
+        }
+        // Candidate 3's real failed wheel left the Scale response unchanged
+        // despite fresh sequence 1766. A fresh receipt must not erase the
+        // existing actual-progress rejection.
+        let mut progress = GateDPresentationScrollProgress::default();
+        progress.record(control);
+        let mut unmoved = control;
+        unmoved.trace_sequence = 1766;
+        unmoved.frame_nr = Some(122);
+        let receipt = unmoved.scroll_viewport.as_mut().unwrap();
+        receipt.measured.frame_nr = 122;
+        receipt.trace_sequence = 1767;
+        assert!(progress.check(&unmoved, step(&unmoved).unwrap()).is_err());
     }
 
     #[test]
@@ -38398,6 +40416,7 @@ mod tests {
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
+            gate_s_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: super::super::super::CleanupResult::default(),
             capacity_saturated: false,
@@ -38624,6 +40643,8 @@ mod tests {
                     Ok((
                         cursor,
                         Some(AuthoringControlSnapshot {
+                            frame_nr: None,
+                            scroll_viewport: None,
                             target: AuthoringControlTarget::DiscardDraft,
                             role: AuthoringControlRole::Button,
                             index: None,
@@ -40269,6 +42290,7 @@ mod tests {
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
+            gate_s_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: super::super::super::CleanupResult::default(),
             capacity_saturated: false,
@@ -40975,6 +42997,7 @@ mod tests {
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
+            gate_s_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: super::super::super::CleanupResult::default(),
             capacity_saturated: false,
@@ -42509,6 +44532,8 @@ mod tests {
     #[test]
     fn popup_apply_accepts_only_clicked_response_with_closed_owner_transition() {
         let clicked = AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::PopupApply,
             role: AuthoringControlRole::Button,
             index: None,
@@ -42821,6 +44846,8 @@ mod tests {
             trace_sequence: sequence,
             bounds: [12, 24, 108, 52],
             clip_bounds: None,
+            frame_nr: None,
+            scroll_viewport: None,
             text_undo: None,
             client_size: [640, 650],
             enabled: true,
@@ -43713,6 +45740,8 @@ mod tests {
             &before, &after, 7
         ));
         let popup = AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::PopupApply,
             role: AuthoringControlRole::Button,
             index: None,
@@ -43817,6 +45846,8 @@ mod tests {
     #[test]
     fn gate_c_q14_reopen_requires_selected_saved_cell_before_fresh_inspector_control() {
         let cell = AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::CanvasCell,
             role: AuthoringControlRole::Region,
             index: Some(0),
@@ -43957,6 +45988,8 @@ mod tests {
     #[test]
     fn gate_c_q14_reopened_inspector_repaints_until_post_selection_control_is_fresh() {
         let cell = AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::CanvasCell,
             role: AuthoringControlRole::Region,
             index: Some(0),
@@ -44124,6 +46157,8 @@ mod tests {
         before.editor.range_anchor_digest = before.editor.selected_members_digest;
         before.editor.action_editor.as_mut().unwrap().surface = "inspector".into();
         let cell = AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::CanvasCell,
             role: AuthoringControlRole::Region,
             index: Some(0),
@@ -44338,6 +46373,8 @@ mod tests {
     #[test]
     fn gate_c_properties_modal_uses_selected_pre_click_cell_and_fresh_popup_receipts() {
         let cell = AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::CanvasCell,
             role: AuthoringControlRole::Region,
             index: Some(0),
@@ -44367,6 +46404,8 @@ mod tests {
             slot_index: Some(0),
         };
         let popup = AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::PopupApply,
             role: AuthoringControlRole::Button,
             index: None,

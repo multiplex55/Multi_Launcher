@@ -1095,6 +1095,16 @@ fn main() -> anyhow::Result<()> {
             event_tx.clone(),
             app_data_root.path().to_path_buf(),
         );
+    let gallery_service = match multi_launcher::radial::gallery::GalleryPreparationService::new(
+        app_data_root.path().to_path_buf(),
+        authoring_endpoint.gallery_reply_sink(),
+    ) {
+        Ok(service) => Some(service),
+        Err(error) => {
+            tracing::warn!(%error,"radial gallery worker unavailable");
+            None
+        }
+    };
     let tooltip_preferences =
         multi_launcher::radial::tooltip::TooltipPreferences::from(&settings.radial);
     let _ = native_preview.set_tooltip_preferences(tooltip_preferences);
@@ -1112,6 +1122,7 @@ fn main() -> anyhow::Result<()> {
     let mut radial_command_invocation_id = 1u64 << 63;
     let mut authoring_preview_document: Option<Arc<RadialDocument>> = None;
     let mut authoring_editor_session = None;
+    let mut gallery_editor_session = None;
     let mut radial_controller = RadialController::new(
         Arc::clone(&radial_document),
         settings.debug_logging,
@@ -1241,6 +1252,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(ExternalReloadOutcome::Published(document)) => {
                     native_preview.cancel_all();
+                    if let Some(service) = &gallery_service {
+                        service.invalidate_resources();
+                    }
                     radial_generation_replaced = true;
                     radial_document = document;
                     multi_launcher::gui::install_radial_published_document(Arc::clone(
@@ -1374,6 +1388,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if radial_changes.assets {
+            native_preview.invalidate_resources();
+            if let Some(service) = &gallery_service {
+                service.invalidate_resources();
+            }
             if !radial_generation_replaced {
                 let _ = multi_launcher::gui::send_event(
                     multi_launcher::gui::WatchEvent::RadialInvalidate,
@@ -1389,9 +1407,16 @@ fn main() -> anyhow::Result<()> {
             let released = match demand {
                 AuthoringResourceDemand::Acquire(editor_session) => {
                     authoring_editor_session = Some(editor_session);
+                    gallery_editor_session = Some(editor_session);
                     false
                 }
                 AuthoringResourceDemand::Release(editor_session) => {
+                    if gallery_editor_session == Some(editor_session) {
+                        gallery_editor_session = None;
+                        if let Some(service) = &gallery_service {
+                            service.invalidate_resources();
+                        }
+                    }
                     if authoring_editor_session == Some(editor_session) {
                         authoring_editor_session = None;
                     }
@@ -1935,6 +1960,29 @@ fn main() -> anyhow::Result<()> {
                 },
             };
             let _ = authoring_endpoint.reply_tx.send(reply);
+        }
+
+        // Controls, resource release and native lifecycle replies take priority
+        // over the separate capacity-one thumbnail queue. No native tile window.
+        if let Ok(request) = authoring_endpoint.gallery_rx.try_recv() {
+            let correlation = request.correlation;
+            let result = if gallery_editor_session != Some(correlation.editor_session)
+                || !request.interest.load(std::sync::atomic::Ordering::Acquire)
+            {
+                Err("gallery editor interest was released".into())
+            } else if let Some(service) = &gallery_service {
+                service.try_prepare(request)
+            } else {
+                Err("gallery preparation service unavailable".into())
+            };
+            if let Err(message) = result {
+                authoring_endpoint.send_gallery_reply(
+                    multi_launcher::radial::gallery::GalleryReply {
+                        correlation,
+                        result: Err(message),
+                    },
+                );
+            }
         }
 
         let handoff_result = pending_launcher_route

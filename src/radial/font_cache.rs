@@ -394,7 +394,7 @@ fn physical_extent_to_logical_milli(extent: f32, dpi_milli: u64) -> u32 {
     if !extent.is_finite() || extent <= 0.0 {
         return 0;
     }
-    ((f64::from(extent) * 1_000.0 / dpi_milli.max(1) as f64)
+    ((f64::from(extent) * 1_000_000.0 / dpi_milli.max(1) as f64)
         .ceil()
         .min(u32::MAX as f64)) as u32
 }
@@ -694,6 +694,15 @@ fn windows_fonts_directory() -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn physical_glyph_metrics_keep_their_logical_milli_pixel_unit_at_fractional_dpi() {
+        assert_eq!(physical_extent_to_logical_milli(13.5, 1000), 13_500);
+        assert_eq!(physical_extent_to_logical_milli(13.5, 1250), 10_800);
+        assert_eq!(physical_extent_to_logical_milli(27.0, 2000), 13_500);
+        assert_eq!(physical_extent_to_logical_milli(5157.0, 1000), 5_157_000);
+        assert_eq!(physical_extent_to_logical_milli(f32::NAN, 1000), 0);
+    }
 
     struct Catalog {
         families: BTreeSet<String>,

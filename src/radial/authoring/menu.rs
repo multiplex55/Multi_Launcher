@@ -2391,8 +2391,18 @@ mod tests {
 
         let mut append_fixture = (*session.draft).clone();
         append_fixture.menus[0].rings[0].cell_radius = 24.0;
+        // A curated selected skin owns item_size. Set this fixture's intended
+        // 48-pixel target explicitly instead of depending on legacy fallback.
+        append_fixture.menus[0].style.values.geometry.item_size =
+            crate::radial::model::Override::Value(48.0);
         crate::radial::validation::validate(&append_fixture)
             .expect("fixture geometry must support one appended cell");
+        let mut appended_probe = append_fixture.clone();
+        appended_probe.menus[0].rings[0]
+            .cells
+            .push(spacer_cell(CellId::new("append-fixture-geometry-probe")));
+        crate::radial::validation::validate(&appended_probe)
+            .expect("fixture must also validate after the append");
         session.draft = std::sync::Arc::new(append_fixture);
         let before_append = session.draft.clone();
         let original_len = session.draft.menus[0].rings[0].cells.len();

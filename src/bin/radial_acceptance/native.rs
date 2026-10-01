@@ -6,9 +6,12 @@ mod suite;
 use super::{AcceptanceHotkey, foreign_edge_indices_interfering_owned_spans, owned_gesture_spans};
 pub(super) use suite::{
     CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_gate_c_suite,
-    run_gate_d_suite, run_hotkey_suite, run_query_suite, run_suite,
+    run_gate_d_suite, run_gate_s_suite, run_hotkey_suite, run_query_suite, run_suite,
 };
 
+use multi_launcher::radial::acceptance_trace::{
+    DesignerAuthoringScrollOwner as GateDControlScrollOwner, DesignerAuthoringScrollViewport,
+};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::os::windows::ffi::OsStrExt;
@@ -112,6 +115,7 @@ enum AcceptanceTraceBudgetProfile {
     Standard,
     GateC,
     GateD,
+    GateS,
 }
 
 impl AcceptanceTraceBudgetProfile {
@@ -120,6 +124,7 @@ impl AcceptanceTraceBudgetProfile {
             Self::Standard => None,
             Self::GateC => Some("gate_c_v1"),
             Self::GateD => Some("gate_d_v1"),
+            Self::GateS => Some("gate_s_v1"),
         }
     }
 }
@@ -2076,6 +2081,23 @@ impl NativeChild {
             stdout_path,
             stderr_path,
             AcceptanceTraceBudgetProfile::GateD,
+        )
+    }
+
+    pub fn launch_gate_s(
+        executable: &Path,
+        profile: &Path,
+        log_path: &Path,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) -> Result<Self, NativeLaunchFailure> {
+        Self::launch_with_trace_profile(
+            executable,
+            profile,
+            log_path,
+            stdout_path,
+            stderr_path,
+            AcceptanceTraceBudgetProfile::GateS,
         )
     }
 
@@ -4086,6 +4108,17 @@ pub(super) enum AuthoringControlTarget {
     InspectorDiscardAndContinue,
     InspectorCell,
     SkinRow,
+    AppearanceTile,
+    AppearanceApply,
+    AppearanceCancel,
+    SimpleAccent,
+    SimpleOpacity,
+    SimpleScale,
+    SimpleSpacing,
+    SimpleLabelSize,
+    SimpleLabels,
+    SimpleBold,
+    SimpleShadow,
     SkinGlowEnabled,
     OpenDesktopPreview,
     StopDesktopPreview,
@@ -4114,6 +4147,8 @@ pub(super) struct AuthoringControlSnapshot {
     pub trace_sequence: u64,
     pub bounds: [i32; 4],
     pub clip_bounds: Option<[i32; 4]>,
+    pub frame_nr: Option<u64>,
+    pub scroll_viewport: Option<AuthoringScrollViewportSnapshot>,
     pub text_undo: Option<TextEditUndoSnapshot>,
     pub client_size: [i32; 2],
     pub enabled: bool,
@@ -4135,6 +4170,50 @@ pub(super) struct AuthoringControlSnapshot {
     pub breadcrumb_menu_id_digest: Option<u64>,
     pub ring_index: Option<usize>,
     pub slot_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AuthoringScrollViewportSnapshot {
+    pub measured: DesignerAuthoringScrollViewport,
+    pub trace_sequence: u64,
+}
+
+fn gate_d_control_scroll_owner(
+    control: &AuthoringControlSnapshot,
+) -> Option<GateDControlScrollOwner> {
+    use AuthoringControlRole::{Button, Checkbox, DragValue, Selectable, TextEdit};
+    use AuthoringControlTarget::*;
+    match (control.target, control.role) {
+        (BulkLabel, TextEdit) | (BulkSetLabel | EditDynamicSource, Button) => {
+            Some(GateDControlScrollOwner::Inspector)
+        }
+        (TreeSearch, TextEdit) | (MenuRow | TreeSearchResult, Selectable) => {
+            Some(GateDControlScrollOwner::MenuTree)
+        }
+        (AppearanceTile, Selectable)
+        | (AppearanceApply | AppearanceCancel | SimpleAccent, Button)
+        | (SimpleOpacity | SimpleScale | SimpleSpacing | SimpleLabelSize, Button | DragValue)
+        | (SimpleLabels | SimpleBold | SimpleShadow, Checkbox) => {
+            Some(GateDControlScrollOwner::Resources)
+        }
+        // Toolbar, canvas, popup, and nested Advanced editors are distinct owners.
+        _ => None,
+    }
+}
+
+fn authoring_scroll_viewport_matches(
+    control: &AuthoringControlSnapshot,
+    viewport: &AuthoringScrollViewportSnapshot,
+) -> bool {
+    let measured = viewport.measured;
+    measured.is_valid()
+        && gate_d_control_scroll_owner(control) == Some(measured.owner)
+        && control.frame_nr == Some(measured.frame_nr)
+        && control.session_id == measured.session_id
+        && control.generation == measured.generation
+        && control.client_size == measured.client_size
+        && control.clip_bounds == Some(measured.paint_clip_bounds)
+        && viewport.trace_sequence > control.trace_sequence
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6868,6 +6947,121 @@ fn trace_bool_field(line: &str, name: &str) -> Option<bool> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DesignerPointerReleaseBoundary {
+    pub first_line: usize,
+    pub after_trace_sequence: u64,
+    pub through_trace_sequence: u64,
+    pub session_id: u64,
+    pub generation: u64,
+    pub target_hwnd: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DesignerPointerReleaseReceipt {
+    pub trace_sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DesignerPointerEdgeSnapshot {
+    trace_sequence: u64,
+    session_id: u64,
+    generation: u64,
+    window_under_cursor_hwnd: u64,
+    screen_point: (i32, i32),
+    down: bool,
+    up: bool,
+}
+
+impl DesignerPointerEdgeSnapshot {
+    fn parse(line: &str) -> Option<Self> {
+        if trace_static_enum_field(line, "trace_event")? != "designer_pointer" {
+            return None;
+        }
+        Some(Self {
+            trace_sequence: trace_field(line, "trace_sequence")?.parse().ok()?,
+            session_id: trace_field(line, "session_id")?.parse().ok()?,
+            generation: trace_field(line, "generation")?.parse().ok()?,
+            window_under_cursor_hwnd: trace_field(line, "window_under_cursor_hwnd")?
+                .parse()
+                .ok()?,
+            screen_point: (
+                trace_field(line, "cursor_screen_x")?.parse().ok()?,
+                trace_field(line, "cursor_screen_y")?.parse().ok()?,
+            ),
+            down: trace_bool_field(line, "pointer_down")?,
+            up: trace_bool_field(line, "pointer_up")?,
+        })
+    }
+}
+
+/// Correlate the producer's aggregate pointer edges with one checked primary
+/// click. The producer has no button field, so the checked injection owns that
+/// fact; it acknowledges down before sending up, requiring distinct ordered
+/// edges even when clicking mutates the draft later in the release frame.
+pub(super) fn owned_designer_pointer_release_after(
+    lines: &[String],
+    boundary: DesignerPointerReleaseBoundary,
+    click: &PointerClickEvidence,
+) -> Result<DesignerPointerReleaseReceipt, String> {
+    if boundary.session_id == 0
+        || boundary.target_hwnd == 0
+        || boundary.after_trace_sequence == 0
+        || boundary.through_trace_sequence <= boundary.after_trace_sequence
+        || boundary.first_line > lines.len()
+        || hwnd_id(click.target_hwnd) != boundary.target_hwnd
+        || hwnd_id(click.under_cursor_hwnd) == 0
+        || click.foreground_hwnd != click.target_hwnd
+        || click.down.foreground_hwnd != boundary.target_hwnd
+        || click.up.foreground_hwnd != boundary.target_hwnd
+        || click.button != PointerButton::Left
+        || click.down.inserted != 1
+        || click.up.inserted != 1
+        || !click.pointer_move_acknowledged
+        || !click.down_acknowledged
+        || !click.up_acknowledged
+    {
+        return Err("invalid captured Designer owner or checked primary click".into());
+    }
+    let mut down_sequence = None;
+    for edge in lines
+        .iter()
+        .skip(boundary.first_line)
+        .filter_map(|line| DesignerPointerEdgeSnapshot::parse(line))
+    {
+        if edge.trace_sequence <= boundary.after_trace_sequence
+            || edge.trace_sequence > boundary.through_trace_sequence
+            || edge.session_id != boundary.session_id
+            || edge.generation != boundary.generation
+            || edge.window_under_cursor_hwnd != hwnd_id(click.under_cursor_hwnd)
+            || !cursor_points_match(
+                POINT {
+                    x: edge.screen_point.0,
+                    y: edge.screen_point.1,
+                },
+                POINT {
+                    x: click.screen_point.0,
+                    y: click.screen_point.1,
+                },
+            )
+        {
+            continue;
+        }
+        match (edge.down, edge.up) {
+            (true, false) if down_sequence.is_none() => {
+                down_sequence = Some(edge.trace_sequence);
+            }
+            (false, true) if down_sequence.is_some_and(|down| down < edge.trace_sequence) => {
+                return Ok(DesignerPointerReleaseReceipt {
+                    trace_sequence: edge.trace_sequence,
+                });
+            }
+            _ => return Err("Designer pointer edges did not form one fresh ordered click".into()),
+        }
+    }
+    Err("checked click lacked a fresh owned Designer pointer release".into())
+}
+
 fn parse_action_editor_surface(value: &str) -> Option<ActionEditorSurface> {
     match value {
         "properties" => Some(ActionEditorSurface::Properties),
@@ -7416,6 +7610,17 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
         "InspectorDiscardAndContinue" => AuthoringControlTarget::InspectorDiscardAndContinue,
         "InspectorCell" => AuthoringControlTarget::InspectorCell,
         "SkinRow" => AuthoringControlTarget::SkinRow,
+        "AppearanceTile" => AuthoringControlTarget::AppearanceTile,
+        "AppearanceApply" => AuthoringControlTarget::AppearanceApply,
+        "AppearanceCancel" => AuthoringControlTarget::AppearanceCancel,
+        "SimpleAccent" => AuthoringControlTarget::SimpleAccent,
+        "SimpleOpacity" => AuthoringControlTarget::SimpleOpacity,
+        "SimpleScale" => AuthoringControlTarget::SimpleScale,
+        "SimpleSpacing" => AuthoringControlTarget::SimpleSpacing,
+        "SimpleLabelSize" => AuthoringControlTarget::SimpleLabelSize,
+        "SimpleLabels" => AuthoringControlTarget::SimpleLabels,
+        "SimpleBold" => AuthoringControlTarget::SimpleBold,
+        "SimpleShadow" => AuthoringControlTarget::SimpleShadow,
         "SkinGlowEnabled" => AuthoringControlTarget::SkinGlowEnabled,
         "OpenDesktopPreview" => AuthoringControlTarget::OpenDesktopPreview,
         "StopDesktopPreview" => AuthoringControlTarget::StopDesktopPreview,
@@ -7509,6 +7714,12 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
             coordinate("bottom_px")?,
         ],
         clip_bounds,
+        frame_nr: if trace_field(line, "frame_nr").is_some() {
+            Some(trace_field(line, "frame_nr")?.parse().ok()?)
+        } else {
+            None
+        },
+        scroll_viewport: None,
         text_undo,
         client_size: [
             coordinate("client_width_px")?,
@@ -7541,6 +7752,46 @@ fn parse_authoring_control(line: &str) -> Option<AuthoringControlSnapshot> {
         slot_index: trace_i32_field(line, "cell_slot_index=")
             .and_then(|index| usize::try_from(index).ok()),
     })
+}
+
+fn parse_authoring_scroll_viewport(line: &str) -> Option<AuthoringScrollViewportSnapshot> {
+    if !line.contains("trace_event=\"designer_authoring_scroll_viewport\"")
+        || trace_field(line, "viewport")? != "Deferred"
+    {
+        return None;
+    }
+    let measured = DesignerAuthoringScrollViewport {
+        owner: GateDControlScrollOwner::from_trace_label(trace_static_enum_field(
+            line,
+            "scroll_owner",
+        )?)?,
+        scroll_id: trace_field(line, "scroll_id")?.parse().ok()?,
+        frame_nr: trace_field(line, "frame_nr")?.parse().ok()?,
+        session_id: trace_field(line, "session_id")?.parse().ok()?,
+        generation: trace_field(line, "generation")?.parse().ok()?,
+        input_bounds: [
+            trace_i32_field(line, "input_left_px=")?,
+            trace_i32_field(line, "input_top_px=")?,
+            trace_i32_field(line, "input_right_px=")?,
+            trace_i32_field(line, "input_bottom_px=")?,
+        ],
+        paint_clip_bounds: [
+            trace_i32_field(line, "clip_left_px=")?,
+            trace_i32_field(line, "clip_top_px=")?,
+            trace_i32_field(line, "clip_right_px=")?,
+            trace_i32_field(line, "clip_bottom_px=")?,
+        ],
+        client_size: [
+            trace_i32_field(line, "client_width_px=")?,
+            trace_i32_field(line, "client_height_px=")?,
+        ],
+    };
+    measured
+        .is_valid()
+        .then_some(AuthoringScrollViewportSnapshot {
+            measured,
+            trace_sequence: trace_field(line, "trace_sequence")?.parse().ok()?,
+        })
 }
 
 fn parse_designer_canvas_allocation(line: &str) -> Option<DesignerCanvasAllocationSnapshot> {
@@ -7695,26 +7946,110 @@ fn latest_authoring_controls_after(
     first_line: usize,
     session_id: u64,
 ) -> Vec<AuthoringControlSnapshot> {
-    let mut controls = Vec::<AuthoringControlSnapshot>::new();
-    for control in lines
-        .iter()
-        .skip(first_line)
-        .filter_map(|line| parse_authoring_control(line))
-    {
-        if control.session_id != session_id {
+    // Keep only current control slots and one head per finite scroll owner.
+    // Controls refresh less often than viewports, so correlate in publication
+    // order and retain the original completed-frame pair while geometry agrees.
+    let mut controls = Vec::<AuthoringControlSlot>::new();
+    let mut viewports = [None::<AuthoringScrollViewportHead>; 3];
+    for line in lines.iter().skip(first_line) {
+        if let Some(control) = parse_authoring_control(line) {
+            if control.session_id != session_id {
+                continue;
+            }
+            if let Some(existing) = controls.iter_mut().find(|item| {
+                item.control.target == control.target
+                    && item.control.role == control.role
+                    && item.control.index == control.index
+            }) {
+                // A new real control publication needs its own following
+                // exact-frame receipt, including when its geometry is unchanged.
+                *existing = AuthoringControlSlot {
+                    control,
+                    invalidated: false,
+                };
+            } else {
+                controls.push(AuthoringControlSlot {
+                    control,
+                    invalidated: false,
+                });
+            }
             continue;
         }
-        if let Some(existing) = controls.iter_mut().find(|item| {
-            item.target == control.target
-                && item.role == control.role
-                && item.index == control.index
-        }) {
-            *existing = control;
+        let Some(viewport) = parse_authoring_scroll_viewport(line) else {
+            continue;
+        };
+        let slot = match viewport.measured.owner {
+            GateDControlScrollOwner::Inspector => 0,
+            GateDControlScrollOwner::MenuTree => 1,
+            GateDControlScrollOwner::Resources => 2,
+        };
+        let ordered = if let Some(head) = viewports[slot].as_mut() {
+            head.advance(viewport)
         } else {
-            controls.push(control);
+            viewports[slot] = Some(AuthoringScrollViewportHead {
+                latest: viewport,
+                sequence_high_water: viewport.trace_sequence,
+            });
+            true
+        };
+        for control_slot in controls.iter_mut().filter(|slot| {
+            gate_d_control_scroll_owner(&slot.control) == Some(viewport.measured.owner)
+        }) {
+            let control = &mut control_slot.control;
+            if !ordered {
+                // Duplicate-frame or stale publications invalidate every pair
+                // from this owner; later viewport-only frames cannot restore it.
+                control.scroll_viewport = None;
+                control_slot.invalidated = true;
+                continue;
+            }
+            if control_slot.invalidated {
+                continue;
+            }
+            if let Some(attached) = control.scroll_viewport {
+                let mut current = viewport.measured;
+                current.frame_nr = attached.measured.frame_nr;
+                if current != attached.measured {
+                    control.scroll_viewport = None;
+                    control_slot.invalidated = true;
+                }
+            } else if authoring_scroll_viewport_matches(control, &viewport) {
+                control.scroll_viewport = Some(viewport);
+            } else {
+                // This slot missed its own following exact-frame receipt.
+                // An owner/lifetime round trip must not revive the old control.
+                control_slot.invalidated = true;
+            }
         }
     }
-    controls
+    controls.into_iter().map(|slot| slot.control).collect()
+}
+
+struct AuthoringControlSlot {
+    control: AuthoringControlSnapshot,
+    invalidated: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AuthoringScrollViewportHead {
+    latest: AuthoringScrollViewportSnapshot,
+    sequence_high_water: u64,
+}
+
+impl AuthoringScrollViewportHead {
+    fn advance(&mut self, viewport: AuthoringScrollViewportSnapshot) -> bool {
+        // Frame counters can restart with a viewport lifetime. Physical trace
+        // sequence ordering spans lifetimes; frame ordering applies within one.
+        let same_lifetime = viewport.measured.session_id == self.latest.measured.session_id
+            && viewport.measured.generation == self.latest.measured.generation;
+        let ordered = viewport.trace_sequence > self.sequence_high_water
+            && (!same_lifetime || viewport.measured.frame_nr > self.latest.measured.frame_nr);
+        self.sequence_high_water = self.sequence_high_water.max(viewport.trace_sequence);
+        if ordered {
+            self.latest = viewport;
+        }
+        ordered
+    }
 }
 
 fn trace_event_lines(trace: &str) -> Vec<String> {
@@ -9006,6 +9341,241 @@ mod tests {
         wait_for_pointer_release_settle, wait_visible_text_with, window_process_id,
     };
     use std::time::Duration;
+
+    fn owned_pointer_release_fixture() -> (
+        super::DesignerPointerReleaseBoundary,
+        super::PointerClickEvidence,
+        Vec<String>,
+    ) {
+        let hwnd = super::HWND(201197638usize as *mut _);
+        let edge = super::NativeInputEdgeEvidence {
+            inserted: 1,
+            at_unix_ms: 1,
+            foreground_hwnd: super::hwnd_id(hwnd),
+            foreground_pid: 7,
+            input_desktop: "Default".into(),
+            cleanup_status: "verified".into(),
+            keyboard_input: None,
+        };
+        let click = super::PointerClickEvidence {
+            nudge_movement: edge.clone(),
+            movement: edge.clone(),
+            pointer_correction_events: 0,
+            pointer_position_preexisting_ack: false,
+            pointer_move_acknowledged: true,
+            down: edge.clone(),
+            down_acknowledged: true,
+            button: super::PointerButton::Left,
+            button_state_after_down: i16::MIN,
+            button_state_before_up: i16::MIN,
+            up: edge,
+            up_acknowledged: true,
+            button_state_after_up: 0,
+            target_hwnd: hwnd,
+            nudge_under_cursor_hwnd: hwnd,
+            under_cursor_hwnd: hwnd,
+            foreground_hwnd: hwnd,
+            screen_point: (874, 366),
+        };
+        let boundary = super::DesignerPointerReleaseBoundary {
+            first_line: 0,
+            after_trace_sequence: 580,
+            through_trace_sequence: 608,
+            session_id: 1,
+            generation: 2,
+            target_hwnd: super::hwnd_id(hwnd),
+        };
+        // Retained candidate-1 S02 producer records, with no authored text,
+        // paths, process nonce or other private document content.
+        let lines = [
+            "trace_event=designer_pointer elapsed_ms=7547 pointer_down=true pointer_up=false trace_sequence=588 window_under_cursor_hwnd=201197638 window_under_cursor_owner=Other cursor_screen_x=874 cursor_screen_y=366 request_id=0 request_kind=None session_id=1 generation=2 terminal=false",
+            "trace_event=designer_pointer elapsed_ms=7599 pointer_down=false pointer_up=true trace_sequence=607 window_under_cursor_hwnd=201197638 window_under_cursor_owner=Other cursor_screen_x=874 cursor_screen_y=366 request_id=0 request_kind=None session_id=1 generation=2 terminal=false",
+        ].map(str::to_owned).to_vec();
+        (boundary, click, lines)
+    }
+
+    #[test]
+    fn owned_designer_pointer_release_accepts_retained_producer_and_live_quoted_format() {
+        let (boundary, click, lines) = owned_pointer_release_fixture();
+        for lines in [
+            lines.clone(),
+            lines
+                .iter()
+                .map(|line| {
+                    line.replacen(
+                        "trace_event=designer_pointer",
+                        "trace_event=\"designer_pointer\"",
+                        1,
+                    )
+                })
+                .collect(),
+        ] {
+            let receipt = super::owned_designer_pointer_release_after(&lines, boundary, &click)
+                .expect("actual producer fields form the checked owned click");
+            assert_eq!(receipt.trace_sequence, 607);
+            let after_rename = super::DesignerPointerReleaseBoundary {
+                through_trace_sequence: 682,
+                ..boundary
+            };
+            assert_eq!(
+                super::owned_designer_pointer_release_after(&lines, after_rename, &click).unwrap(),
+                receipt,
+                "post-input generation changes do not replace the captured generation"
+            );
+        }
+        let mut quantized = lines;
+        quantized[1] = quantized[1].replace("cursor_screen_x=874", "cursor_screen_x=875");
+        assert!(super::owned_designer_pointer_release_after(&quantized, boundary, &click).is_ok());
+    }
+
+    #[test]
+    fn owned_designer_pointer_release_rejects_wrong_owner_and_stale_boundaries() {
+        let (boundary, click, lines) = owned_pointer_release_fixture();
+        for (field, wrong) in [
+            ("session_id=1", "session_id=2"),
+            ("generation=2", "generation=3"),
+            (
+                "window_under_cursor_hwnd=201197638",
+                "window_under_cursor_hwnd=201197639",
+            ),
+            ("cursor_screen_x=874", "cursor_screen_x=876"),
+            ("cursor_screen_y=366", "cursor_screen_y=368"),
+            ("trace_sequence=607", "trace_sequence=580"),
+            ("trace_sequence=607", "trace_sequence=609"),
+        ] {
+            let mut wrong_lines = lines.clone();
+            wrong_lines[1] = wrong_lines[1].replace(field, wrong);
+            assert!(
+                super::owned_designer_pointer_release_after(&wrong_lines, boundary, &click)
+                    .is_err(),
+                "wrong release must be rejected: {wrong}"
+            );
+        }
+        for stale in [
+            super::DesignerPointerReleaseBoundary {
+                first_line: 1,
+                ..boundary
+            },
+            super::DesignerPointerReleaseBoundary {
+                after_trace_sequence: 607,
+                ..boundary
+            },
+            super::DesignerPointerReleaseBoundary {
+                through_trace_sequence: 606,
+                ..boundary
+            },
+            super::DesignerPointerReleaseBoundary {
+                generation: 3,
+                ..boundary
+            },
+            super::DesignerPointerReleaseBoundary {
+                session_id: 0,
+                ..boundary
+            },
+            super::DesignerPointerReleaseBoundary {
+                target_hwnd: 0,
+                ..boundary
+            },
+        ] {
+            assert!(super::owned_designer_pointer_release_after(&lines, stale, &click).is_err());
+        }
+    }
+
+    #[test]
+    fn owned_designer_pointer_release_rejects_missing_malformed_and_unordered_edges() {
+        let (boundary, click, lines) = owned_pointer_release_fixture();
+        for field in [
+            "trace_event",
+            "trace_sequence",
+            "session_id",
+            "generation",
+            "window_under_cursor_hwnd",
+            "cursor_screen_x",
+            "cursor_screen_y",
+            "pointer_down",
+            "pointer_up",
+        ] {
+            let mut missing = lines.clone();
+            missing[1] = missing[1]
+                .split_ascii_whitespace()
+                .filter(|part| !part.starts_with(&format!("{field}=")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                super::owned_designer_pointer_release_after(&missing, boundary, &click).is_err(),
+                "missing {field} cannot prove a release"
+            );
+        }
+        for (field, wrong) in [
+            (
+                "trace_event=designer_pointer",
+                "trace_event=root_pointer_button",
+            ),
+            (
+                "trace_event=designer_pointer",
+                "trace_event=\"designer_pointer_moved\"",
+            ),
+            ("pointer_up=true", "up=true"),
+            ("pointer_up=true", "pointer_up=1"),
+            ("pointer_down=false", "pointer_down=\"false\""),
+            ("pointer_down=false", "pointer_down=true"),
+            ("pointer_up=true", "pointer_up=false"),
+            ("session_id=1", "session_id=1.0"),
+            ("generation=2", "generation=unknown"),
+            (
+                "window_under_cursor_hwnd=201197638",
+                "window_under_cursor_hwnd=Other",
+            ),
+            ("cursor_screen_x=874", "cursor_screen_x=874.0"),
+            ("trace_sequence=607", "trace_sequence=607.0"),
+            ("trace_sequence=607", "trace_sequence=588"),
+        ] {
+            let mut malformed = lines.clone();
+            malformed[1] = malformed[1].replace(field, wrong);
+            assert!(
+                super::owned_designer_pointer_release_after(&malformed, boundary, &click).is_err(),
+                "malformed edge cannot prove a release: {wrong}"
+            );
+        }
+        for unordered in [
+            vec![lines[1].clone(), lines[0].clone()],
+            vec![lines[0].clone(), lines[0].clone(), lines[1].clone()],
+            vec![lines[0].clone()],
+            vec![lines[1].clone()],
+        ] {
+            assert!(
+                super::owned_designer_pointer_release_after(&unordered, boundary, &click).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn owned_designer_pointer_release_requires_the_checked_primary_input_owner() {
+        let (boundary, click, lines) = owned_pointer_release_fixture();
+        let mutations: &[fn(&mut super::PointerClickEvidence)] = &[
+            |click| click.button = super::PointerButton::Right,
+            |click| click.pointer_move_acknowledged = false,
+            |click| click.down_acknowledged = false,
+            |click| click.up_acknowledged = false,
+            |click| click.down.inserted = 0,
+            |click| click.down.inserted = 2,
+            |click| click.up.inserted = 0,
+            |click| click.up.inserted = 2,
+            |click| click.target_hwnd = super::HWND(9usize as *mut _),
+            |click| click.under_cursor_hwnd = super::HWND::default(),
+            |click| click.foreground_hwnd = super::HWND(9usize as *mut _),
+            |click| click.down.foreground_hwnd = 9,
+            |click| click.up.foreground_hwnd = 9,
+        ];
+        for mutate in mutations {
+            let mut wrong_click = click.clone();
+            mutate(&mut wrong_click);
+            assert!(
+                super::owned_designer_pointer_release_after(&lines, boundary, &wrong_click)
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn scrollbar_down_waits_for_fresh_ack_then_accepts_delayed_physical_down() {
@@ -10357,6 +10927,8 @@ mod tests {
 
     fn authoring_control() -> AuthoringControlSnapshot {
         AuthoringControlSnapshot {
+            frame_nr: None,
+            scroll_viewport: None,
             target: AuthoringControlTarget::MenuRow,
             role: AuthoringControlRole::Selectable,
             index: Some(0),
@@ -10704,6 +11276,350 @@ mod tests {
         .expect("fresh canvas should not be ambiguous")
         .expect("post-resize render should publish a current canvas");
         assert_eq!(current.bounds, [20, 30, 520, 390]);
+    }
+
+    pub(super) fn cadence_menu_row_lines(
+        sequence: u64,
+        frame: u64,
+        top: i32,
+        elapsed_ms: u64,
+    ) -> [String; 2] {
+        // Candidate 6's row10/input/paint/client measurements, restored to the
+        // actual producer schema (the public excerpt omits target and quotes).
+        [
+            format!(
+                "trace_event=\"designer_authoring_control\" elapsed_ms={elapsed_ms} target=MenuRow role=\"Selectable\" viewport=Deferred control_index=10 left_px=8 top_px={top} right_px=128 bottom_px={} clip_left_px=0 clip_top_px=185 clip_right_px=900 clip_bottom_px=638 client_width_px=900 client_height_px=650 trace_sequence={sequence} enabled=true selected=false focused=false clicked=false session_id=1 generation=9 frame_nr={frame} menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1",
+                top + 18
+            ),
+            format!(
+                "trace_event=\"designer_authoring_scroll_viewport\" elapsed_ms={elapsed_ms} viewport=Deferred scroll_owner=\"MenuTree\" scroll_id=10543418435404023934 frame_nr={frame} session_id=1 generation=9 input_left_px=8 input_top_px=189 input_right_px=184 input_bottom_px=635 clip_left_px=0 clip_top_px=185 clip_right_px=900 clip_bottom_px=638 client_width_px=900 client_height_px=650 trace_sequence={}",
+                sequence + 2
+            ),
+        ]
+    }
+
+    #[test]
+    fn authoring_controls_retain_completed_pair_across_actual_viewport_only_cadence() {
+        let [control, viewport] = cadence_menu_row_lines(13894, 1274, 773, 126930);
+        let first = latest_authoring_controls_after(&[control.clone(), viewport.clone()], 0, 1);
+        assert_eq!(first.len(), 1);
+        let attached = first[0].scroll_viewport.unwrap();
+        assert_eq!(
+            (first[0].trace_sequence, first[0].frame_nr),
+            (13894, Some(1274))
+        );
+        assert_eq!(
+            (attached.trace_sequence, attached.measured.frame_nr),
+            (13896, 1274)
+        );
+        assert_eq!(attached.measured.input_bounds, [8, 189, 184, 635]);
+        let records = [
+            control,
+            viewport.clone(),
+            viewport
+                .replace("frame_nr=1274", "frame_nr=1275")
+                .replace("13896", "13901"),
+            viewport
+                .replace("frame_nr=1274", "frame_nr=1276")
+                .replace("13896", "13918"),
+        ];
+        for end in 2..=records.len() {
+            assert_eq!(
+                latest_authoring_controls_after(&records[..end], 0, 1),
+                first
+            );
+        }
+        assert!(latest_authoring_controls_after(&records, 1, 1).is_empty());
+        assert!(latest_authoring_controls_after(&records, 0, 2).is_empty());
+    }
+
+    #[test]
+    fn authoring_controls_invalidate_conflicting_viewports_until_fresh_control_proof() {
+        let first = cadence_menu_row_lines(13894, 1274, 773, 126930);
+        let second = cadence_menu_row_lines(13945, 1279, 773, 127464);
+        let later = first[1]
+            .replace("frame_nr=1274", "frame_nr=1275")
+            .replace("13896", "13901");
+        for (field, replacement) in [
+            ("session_id=1", "session_id=2"),
+            ("generation=9", "generation=10"),
+            (
+                "scroll_id=10543418435404023934",
+                "scroll_id=10543418435404023935",
+            ),
+            ("input_left_px=8", "input_left_px=9"),
+            ("input_top_px=189", "input_top_px=190"),
+            ("input_right_px=184", "input_right_px=183"),
+            ("input_bottom_px=635", "input_bottom_px=634"),
+            ("clip_top_px=185", "clip_top_px=184"),
+            ("clip_bottom_px=638", "clip_bottom_px=639"),
+            ("client_width_px=900", "client_width_px=901"),
+            ("client_height_px=650", "client_height_px=651"),
+            ("frame_nr=1275", "frame_nr=1273"),
+            ("trace_sequence=13901", "trace_sequence=13896"),
+        ] {
+            let changed = later.replace(field, replacement);
+            assert!(
+                super::parse_authoring_scroll_viewport(&changed).is_some(),
+                "{field}"
+            );
+            let mut records = vec![first[0].clone(), first[1].clone(), changed];
+            assert_eq!(
+                latest_authoring_controls_after(&records, 0, 1)[0].scroll_viewport,
+                None,
+                "{field}"
+            );
+            records.push(
+                later
+                    .replace("frame_nr=1275", "frame_nr=1276")
+                    .replace("13901", "13918"),
+            );
+            assert_eq!(
+                latest_authoring_controls_after(&records, 0, 1)[0].scroll_viewport,
+                None,
+                "viewport-only recovery: {field}"
+            );
+            records.extend(second.clone());
+            let recovered = latest_authoring_controls_after(&records, 0, 1);
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].trace_sequence, 13945);
+            assert_eq!(recovered[0].scroll_viewport.unwrap().trace_sequence, 13947);
+        }
+        let wrong_owner =
+            first[1].replace("scroll_owner=\"MenuTree\"", "scroll_owner=\"Inspector\"");
+        assert_eq!(
+            latest_authoring_controls_after(&[first[0].clone(), wrong_owner.clone()], 0, 1)[0]
+                .scroll_viewport,
+            None
+        );
+        // A different legitimate pane must not invalidate the MenuTree owner.
+        let matched = latest_authoring_controls_after(&first, 0, 1);
+        assert_eq!(
+            latest_authoring_controls_after(
+                &[first[0].clone(), first[1].clone(), wrong_owner],
+                0,
+                1
+            ),
+            matched
+        );
+    }
+
+    #[test]
+    fn authoring_controls_require_new_slot_receipt_and_reject_ambiguous_frames() {
+        let first = cadence_menu_row_lines(13894, 1274, 773, 126930);
+        let second = cadence_menu_row_lines(13945, 1279, 773, 127464);
+        let mut records = first.to_vec();
+        records.push(second[0].clone());
+        let partial = latest_authoring_controls_after(&records, 0, 1);
+        assert_eq!(partial.len(), 1);
+        assert_eq!(
+            (partial[0].trace_sequence, partial[0].frame_nr),
+            (13945, Some(1279))
+        );
+        assert_eq!(partial[0].scroll_viewport, None);
+        records.push(second[1].clone());
+        let complete = latest_authoring_controls_after(&records, 0, 1);
+        assert_eq!(complete[0].scroll_viewport.unwrap().trace_sequence, 13947);
+        // Even identical measurements from the same owner/frame are ambiguous.
+        records.push(second[1].replace("13947", "13948"));
+        records.push(
+            second[1]
+                .replace("frame_nr=1279", "frame_nr=1280")
+                .replace("13947", "13952"),
+        );
+        assert_eq!(
+            latest_authoring_controls_after(&records, 0, 1)[0].scroll_viewport,
+            None
+        );
+        let fresh = cadence_menu_row_lines(13994, 1283, 773, 127971);
+        records.extend(fresh.clone());
+        assert_eq!(
+            latest_authoring_controls_after(&records, 0, 1)[0]
+                .scroll_viewport
+                .unwrap()
+                .trace_sequence,
+            13996
+        );
+        for altered in [
+            second[1].replace("frame_nr=1279", "frame_nr=1280"),
+            second[1].replace("generation=9", "generation=10"),
+            second[1].replace("trace_sequence=13947", "trace_sequence=13945"),
+        ] {
+            let mut records = vec![
+                first[0].clone(),
+                first[1].clone(),
+                second[0].clone(),
+                altered,
+            ];
+            assert_eq!(
+                latest_authoring_controls_after(&records, 0, 1)[0].scroll_viewport,
+                None
+            );
+            records.push(second[1].replace("13947", "13950"));
+            assert_eq!(
+                latest_authoring_controls_after(&records, 0, 1)[0].scroll_viewport,
+                None,
+                "a mismatched receipt cannot recover from viewport-only evidence"
+            );
+            records.extend(fresh.clone());
+            assert_eq!(
+                latest_authoring_controls_after(&records, 0, 1)[0]
+                    .scroll_viewport
+                    .unwrap()
+                    .trace_sequence,
+                13996
+            );
+        }
+        let reversed = [first[1].clone(), first[0].clone()];
+        assert_eq!(
+            latest_authoring_controls_after(&reversed, 0, 1)[0].scroll_viewport,
+            None
+        );
+        let missing_frame = [first[0].replace(" frame_nr=1274", ""), first[1].clone()];
+        assert_eq!(
+            latest_authoring_controls_after(&missing_frame, 0, 1)[0].scroll_viewport,
+            None
+        );
+    }
+
+    #[test]
+    fn authoring_controls_recover_after_foreign_lifetime_high_frame_conflict() {
+        let first = cadence_menu_row_lines(13894, 1274, 773, 126930);
+        let restarted = cadence_menu_row_lines(13945, 3, 773, 127464);
+        for (field, replacement) in [
+            ("session_id=1", "session_id=2"),
+            ("generation=9", "generation=10"),
+        ] {
+            let foreign = first[1]
+                .replace("frame_nr=1274", "frame_nr=9999")
+                .replace("13896", "13901")
+                .replace(field, replacement);
+            let mut records = vec![first[0].clone(), first[1].clone(), foreign];
+            assert_eq!(
+                latest_authoring_controls_after(&records, 0, 1)[0].scroll_viewport,
+                None,
+                "foreign {field} must invalidate the requested owner"
+            );
+            let mut old_frame_return = records.clone();
+            old_frame_return.push(first[1].replace("13896", "13910"));
+            assert_eq!(
+                latest_authoring_controls_after(&old_frame_return, 0, 1)[0].scroll_viewport,
+                None,
+                "returning to the original owner's original frame cannot revive the invalidated control"
+            );
+            old_frame_return.extend(cadence_menu_row_lines(13945, 1279, 773, 127464));
+            let fresh_publication = latest_authoring_controls_after(&old_frame_return, 0, 1);
+            assert_eq!(fresh_publication.len(), 1);
+            assert_eq!(fresh_publication[0].trace_sequence, 13945);
+            assert_eq!(
+                fresh_publication[0].scroll_viewport.unwrap().trace_sequence,
+                13947
+            );
+            records.push(restarted[0].clone());
+            assert_eq!(
+                latest_authoring_controls_after(&records, 0, 1)[0].scroll_viewport,
+                None
+            );
+            let mut stale_sequence = records.clone();
+            stale_sequence.push(restarted[1].replace("13947", "13900"));
+            assert_eq!(
+                latest_authoring_controls_after(&stale_sequence, 0, 1)[0].scroll_viewport,
+                None,
+                "physical sequence must remain fresh across lifetimes"
+            );
+            stale_sequence.push(restarted[1].clone());
+            assert_eq!(
+                latest_authoring_controls_after(&stale_sequence, 0, 1)[0].scroll_viewport,
+                None,
+                "stale sequence invalidation requires a new control publication"
+            );
+            stale_sequence.extend(cadence_menu_row_lines(13950, 4, 773, 127971));
+            assert_eq!(
+                latest_authoring_controls_after(&stale_sequence, 0, 1)[0]
+                    .scroll_viewport
+                    .unwrap()
+                    .trace_sequence,
+                13952
+            );
+            records.push(restarted[1].clone());
+            let recovered = latest_authoring_controls_after(&records, 0, 1);
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(
+                (recovered[0].trace_sequence, recovered[0].frame_nr),
+                (13945, Some(3))
+            );
+            assert_eq!(
+                (
+                    recovered[0].scroll_viewport.unwrap().trace_sequence,
+                    recovered[0].scroll_viewport.unwrap().measured.frame_nr
+                ),
+                (13947, 3)
+            );
+            for frame in [2, 3] {
+                let mut conflicting = records.clone();
+                conflicting.push(
+                    restarted[1]
+                        .replace("frame_nr=3", &format!("frame_nr={frame}"))
+                        .replace("13947", "13948"),
+                );
+                conflicting.push(
+                    restarted[1]
+                        .replace("frame_nr=3", "frame_nr=4")
+                        .replace("13947", "13952"),
+                );
+                assert_eq!(
+                    latest_authoring_controls_after(&conflicting, 0, 1)[0].scroll_viewport,
+                    None,
+                    "same-lifetime duplicate/backward frames cannot recover without a fresh control"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authoring_controls_keep_only_latest_slots_for_three_viewport_owners() {
+        let mut records = Vec::new();
+        let mut expected = Vec::new();
+        for frame in 1..=256 {
+            let sequence = 14000 + frame * 10;
+            let [control, viewport] = cadence_menu_row_lines(sequence, frame, 773, 127971);
+            for (offset, target, role, index, owner) in [
+                (0, "MenuRow", "Selectable", 10, "MenuTree"),
+                (1, "BulkLabel", "TextEdit", -1, "Inspector"),
+                (2, "SimpleScale", "Button", 1, "Resources"),
+            ] {
+                let control = control
+                    .replace("target=MenuRow", &format!("target={target}"))
+                    .replace("role=\"Selectable\"", &format!("role=\"{role}\""))
+                    .replace("control_index=10", &format!("control_index={index}"))
+                    .replace(
+                        &format!("trace_sequence={sequence}"),
+                        &format!("trace_sequence={}", sequence + offset * 3),
+                    );
+                let viewport = viewport
+                    .replace(
+                        "scroll_owner=\"MenuTree\"",
+                        &format!("scroll_owner=\"{owner}\""),
+                    )
+                    .replace(
+                        &format!("trace_sequence={}", sequence + 2),
+                        &format!("trace_sequence={}", sequence + 2 + offset * 3),
+                    );
+                if frame % 5 == 1 {
+                    records.push(control.clone());
+                    let pair = latest_authoring_controls_after(&[control, viewport.clone()], 0, 1);
+                    assert_eq!(pair.len(), 1);
+                    if frame == 256 {
+                        expected.extend(pair);
+                    }
+                }
+                records.push(viewport);
+            }
+            assert_eq!(latest_authoring_controls_after(&records, 0, 1).len(), 3);
+        }
+        assert_eq!(latest_authoring_controls_after(&records, 0, 1), expected);
+        assert_eq!(expected.len(), 3);
+        assert!(expected.iter().all(|control| control.frame_nr == Some(256)));
     }
 
     #[test]

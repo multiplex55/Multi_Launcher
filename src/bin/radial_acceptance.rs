@@ -24,6 +24,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod copied_profile;
 #[path = "radial_acceptance/gate_c_wire.rs"]
 mod gate_c_wire;
+#[path = "radial_acceptance/gate_s.rs"]
+mod gate_s;
+use gate_s::*;
 #[cfg(windows)]
 #[path = "radial_acceptance/native.rs"]
 mod native;
@@ -149,6 +152,7 @@ enum AcceptanceSuite {
     Query,
     GateC,
     GateD,
+    GateS,
 }
 
 impl AcceptanceSuite {
@@ -159,6 +163,7 @@ impl AcceptanceSuite {
             Self::Query => "query",
             Self::GateC => "gate_c",
             Self::GateD => "gate_d",
+            Self::GateS => "gate_s",
         }
     }
 }
@@ -10843,6 +10848,7 @@ struct AcceptanceReport {
     query_evidence: Vec<QueryCaseEvidence>,
     gate_c_evidence: Vec<GateCCaseEvidence>,
     gate_d_evidence: Vec<GateDCaseEvidence>,
+    gate_s_evidence: Vec<GateSCaseEvidence>,
     artifacts: Vec<String>,
     cleanup: CleanupResult,
     capacity_saturated: bool,
@@ -12195,6 +12201,8 @@ impl AcceptanceReport {
             &GATE_C_CASE_IDS[..]
         } else if self.suite == AcceptanceSuite::GateD {
             &GATE_D_CASE_IDS[..]
+        } else if self.suite == AcceptanceSuite::GateS {
+            &GATE_S_CASE_IDS[..]
         } else {
             &CASE_IDS[..]
         };
@@ -12409,7 +12417,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
             }
             Some("--suite") => {
                 let value = args.next().ok_or_else(|| {
-                    "--suite requires all, hotkey, query, gate-c, or gate-d".to_string()
+                    "--suite requires all, hotkey, query, gate-c, gate-d, or gate-s".to_string()
                 })?;
                 suite = match value.to_str() {
                     Some("all") => AcceptanceSuite::All,
@@ -12417,7 +12425,12 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
                     Some("query") => AcceptanceSuite::Query,
                     Some("gate-c") => AcceptanceSuite::GateC,
                     Some("gate-d") => AcceptanceSuite::GateD,
-                    _ => return Err("--suite must be all, hotkey, query, gate-c, or gate-d".into()),
+                    Some("gate-s") => AcceptanceSuite::GateS,
+                    _ => {
+                        return Err(
+                            "--suite must be all, hotkey, query, gate-c, gate-d, or gate-s".into(),
+                        );
+                    }
                 };
             }
             Some("--hotkey") => {
@@ -12476,10 +12489,12 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
     if output.is_some() == report_file.is_some() {
         return Err("specify exactly one of --output <directory> or --report <file>".into());
     }
-    if !matches!(suite, AcceptanceSuite::Hotkey | AcceptanceSuite::GateD)
-        && hotkey != AcceptanceHotkey::F11
+    if !matches!(
+        suite,
+        AcceptanceSuite::Hotkey | AcceptanceSuite::GateD | AcceptanceSuite::GateS
+    ) && hotkey != AcceptanceHotkey::F11
     {
-        return Err("--hotkey shift-alt-win-end requires --suite hotkey or gate-d".into());
+        return Err("--hotkey shift-alt-win-end requires --suite hotkey, gate-d, or gate-s".into());
     }
     if suite == AcceptanceSuite::Hotkey && profile_copy.is_some() {
         return Err("--suite hotkey cannot be combined with --profile-copy".into());
@@ -12492,6 +12507,9 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
     }
     if suite == AcceptanceSuite::GateD && profile_copy.is_some() {
         return Err("--suite gate-d cannot be combined with --profile-copy".into());
+    }
+    if suite == AcceptanceSuite::GateS && profile_copy.is_some() {
+        return Err("--suite gate-s cannot be combined with --profile-copy".into());
     }
     let source_revision = match source_revision {
         Some(revision) => Some(validate_source_revision(revision)?),
@@ -13259,6 +13277,7 @@ fn copied_report_seed(deterministic: &AcceptanceReport, started_unix_ms: u128) -
         query_evidence: Vec::new(),
         gate_c_evidence: Vec::new(),
         gate_d_evidence: Vec::new(),
+        gate_s_evidence: Vec::new(),
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
@@ -13858,17 +13877,25 @@ fn run_windows_deterministic(
             &std::env::current_exe()
                 .map_err(|error| format!("resolve runner for Gate C fixture: {error}"))?,
         )?
-    } else if arguments.suite == AcceptanceSuite::GateD {
+    } else if matches!(
+        arguments.suite,
+        AcceptanceSuite::GateD | AcceptanceSuite::GateS
+    ) {
         let marker_path = profile_path.join("query-marker-ledger.txt");
         write_new(&marker_path, b"radial-acceptance-marker-ledger:v1\n")?;
-        deterministic_gate_d_fixture(
+        let fixture = deterministic_gate_d_fixture(
             &log_path,
             arguments.mouse_gesture_mode,
             arguments.hotkey,
             &marker_path,
             &std::env::current_exe()
                 .map_err(|error| format!("resolve runner for Gate D fixture: {error}"))?,
-        )?
+        )?;
+        if arguments.suite == AcceptanceSuite::GateS {
+            gate_s_fixture(fixture)?
+        } else {
+            fixture
+        }
     } else {
         deterministic_fixture_for_hotkey(&log_path, arguments.mouse_gesture_mode, arguments.hotkey)?
     };
@@ -13880,7 +13907,7 @@ fn run_windows_deterministic(
     let actions_sha256 = sha256_bytes(&fixture.actions_json);
 
     let mut report = AcceptanceReport {
-        schema_version: 8,
+        schema_version: 9,
         run_id,
         mode: "native_windows",
         started_unix_ms,
@@ -13923,6 +13950,7 @@ fn run_windows_deterministic(
         query_evidence: Vec::new(),
         gate_c_evidence: Vec::new(),
         gate_d_evidence: Vec::new(),
+        gate_s_evidence: Vec::new(),
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
@@ -14019,6 +14047,10 @@ fn run_windows_deterministic(
                             &desktop_attachment,
                             &mut report,
                             &mut log,
+                        ),
+                        AcceptanceSuite::GateS => native::run_gate_s_suite(
+                            &candidate_executable,&driver_profile,&driver_output,&driver_trace,arguments.hotkey,
+                            before_cursor.as_ref().ok().copied(),&desktop_attachment,&mut report,&mut log,
                         ),
                     };
 
@@ -14364,6 +14396,8 @@ fn validate_r0_report(
         &GATE_C_CASE_IDS
     } else if report.suite == AcceptanceSuite::GateD {
         &GATE_D_CASE_IDS
+    } else if report.suite == AcceptanceSuite::GateS {
+        &GATE_S_CASE_IDS
     } else {
         &CASE_IDS
     };
@@ -14400,6 +14434,7 @@ fn validate_r0_report(
     validate_query_evidence_report(report)?;
     validate_gate_c_evidence_report(report)?;
     validate_gate_d_evidence_report(report)?;
+    validate_gate_s_evidence_report(report)?;
     if is_copied_profile {
         validate_private_artifact_report(report)?;
         validate_copied_style_evidence_relations(report)?;
@@ -16969,7 +17004,7 @@ fn is_reparse_point(metadata: &Metadata) -> bool {
 
 fn print_usage() {
     println!(
-        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey|query|gate-c|gate-d] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]"
+        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey|query|gate-c|gate-d|gate-s] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]"
     );
 }
 
@@ -19474,9 +19509,9 @@ mod tests {
         }
     }
 
-    fn acceptance_report(mode: &'static str) -> AcceptanceReport {
+    pub(super) fn acceptance_report(mode: &'static str) -> AcceptanceReport {
         AcceptanceReport {
-            schema_version: 8,
+            schema_version: 9,
             run_id: "test-run".into(),
             mode,
             started_unix_ms: 1,
@@ -19517,6 +19552,7 @@ mod tests {
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
+            gate_s_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
@@ -22506,7 +22542,7 @@ mod tests {
         );
     }
 
-    fn gate_d_test_observation(
+    pub(super) fn gate_d_test_observation(
         generation: u64,
         document_digest: u64,
         selected_targets: &[u64],
@@ -22613,7 +22649,7 @@ mod tests {
         }
     }
 
-    fn gate_d_test_no_action_proof() -> GateDNoActionProof {
+    pub(super) fn gate_d_test_no_action_proof() -> GateDNoActionProof {
         let empty_dispatch = GateDDispatchEvidence {
             event_count: 0,
             event_digest: 0,
@@ -33670,7 +33706,7 @@ mod tests {
             .expect("exact chord remains restricted to its supported suites");
             assert_eq!(
                 error,
-                "--hotkey shift-alt-win-end requires --suite hotkey or gate-d"
+                "--hotkey shift-alt-win-end requires --suite hotkey, gate-d, or gate-s"
             );
         }
         let error = parse(&[
@@ -35184,7 +35220,7 @@ mod tests {
     #[test]
     fn report_capacity_saturation_is_explicit_and_fails_r0() {
         let mut report = AcceptanceReport {
-            schema_version: 8,
+            schema_version: 9,
             run_id: "test".into(),
             mode: "test",
             started_unix_ms: 1,
@@ -35233,6 +35269,7 @@ mod tests {
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
+            gate_s_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
@@ -35455,7 +35492,7 @@ mod tests {
     #[test]
     fn text_report_marks_copied_profile_as_not_run_and_has_timing_and_hashes() {
         let report = AcceptanceReport {
-            schema_version: 8,
+            schema_version: 9,
             run_id: "test".into(),
             mode: "test",
             started_unix_ms: 100,
@@ -35496,6 +35533,7 @@ mod tests {
             query_evidence: Vec::new(),
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
+            gate_s_evidence: Vec::new(),
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,

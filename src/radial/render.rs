@@ -438,9 +438,11 @@ fn build_scene_internal(
                     .unwrap_or_else(|| fallback_text(&cell.label, &cell.visual.font_family)),
                 size: cell.visual.font_size,
                 font_family: cell.visual.font_family.clone(),
-                bold: cell.visual.bold,
+                bold: cell.visual.bold
+                    || (cell.visual.emphasize_selection && selected == Some(&cell.cell_id)),
                 italic: cell.visual.italic,
-                underline: cell.visual.underline,
+                underline: cell.visual.underline
+                    || (cell.visual.emphasize_selection && selected == Some(&cell.cell_id)),
                 strikeout: cell.visual.strikeout,
                 quality: cell.visual.text_quality,
                 shadow: cell.visual.shadow_enabled.then_some((
@@ -571,7 +573,7 @@ fn push_shape(output: &mut Vec<VectorPrimitive>, shape: &HitShape, color: Rgba, 
     }
 }
 
-fn shape_bounds(shape: &HitShape) -> LogicalRect {
+pub(crate) fn shape_bounds(shape: &HitShape) -> LogicalRect {
     match *shape {
         HitShape::Circle { center, radius } => circle_bounds(center, radius),
         HitShape::Wedge {

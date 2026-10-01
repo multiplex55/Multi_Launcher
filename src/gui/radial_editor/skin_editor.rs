@@ -80,6 +80,7 @@ pub(super) fn control_kind(section: &str, field: &str) -> Option<StyleControlKin
         ("geometry", "item_background_on_center" | "item_background_on_items")
         | ("text", "visible" | "bold" | "italic" | "underline" | "strikeout" | "shadow_enabled")
         | ("effects", "glow_enabled")
+        | ("effects", "emphasize_selection")
         | (
             "window",
             "always_on_top" | "activate_on_show" | "fill_center_hit_zone" | "fill_item_hit_zones",
@@ -552,6 +553,7 @@ paths!(
     text.shadow_offset => TextShadowOffset, text.text_box_scale => TextBoxScale,
     text.vertical_ratio => TextVerticalRatio,
     effects.glow_enabled => GlowEnabled, effects.tooltip_mode => TooltipMode,
+    effects.emphasize_selection => EmphasizeSelection,
     effects.menu_shadow_width => MenuShadowWidth, effects.menu_shadow_inner_color => MenuShadowInnerColor,
     effects.menu_shadow_outer_color => MenuShadowOuterColor,
     quality.text => TextQuality, quality.shape => ShapeQuality, quality.interpolation => InterpolationQuality,
@@ -644,7 +646,7 @@ mod tests {
         });
         let scope = StyleScope::Skin(skin);
         let initial = rows(&session.draft, &scope).unwrap();
-        assert_eq!(initial.len(), 71);
+        assert_eq!(initial.len(), 72);
         for row in initial {
             set_override(
                 &mut session,
@@ -696,7 +698,11 @@ mod tests {
                 ((row.section, row.field), kind)
             })
             .collect();
-        assert_eq!(fields.len(), 71);
+        assert_eq!(fields.len(), 72);
+        assert_eq!(
+            fields.get(&("effects".into(), "emphasize_selection".into())),
+            Some(&StyleControlKind::Toggle)
+        );
         assert_eq!(
             fields.get(&("text".into(), "bold".into())),
             Some(&StyleControlKind::Toggle)

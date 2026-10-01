@@ -146,6 +146,7 @@ pub struct CellVisualStyle {
     pub submenu_indicator_size: f32,
     pub submenu_indicator_y_ratio: f32,
     pub glow_enabled: bool,
+    pub emphasize_selection: bool,
     pub text_visible: bool,
     pub font_size: f32,
     pub font_family: String,
@@ -1049,6 +1050,9 @@ fn cell_visual(
             .map(|values| resolved_f32(&values.geometry.submenu_indicator_y_ratio))
             .unwrap_or(0.75),
         glow_enabled,
+        emphasize_selection: values
+            .map(|values| resolved_bool(&values.effects.emphasize_selection))
+            .unwrap_or(false),
         text_visible: values
             .map(|values| resolved_bool(&values.text.visible))
             .unwrap_or(text_visible),

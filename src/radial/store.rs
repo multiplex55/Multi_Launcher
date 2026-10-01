@@ -1300,6 +1300,30 @@ mod tests {
         (dir, RadialStore::new(&root).unwrap())
     }
     #[test]
+    fn fresh_missing_profile_is_modern_but_loading_legacy_custom_data_preserves_selection_and_disk_bytes()
+     {
+        let (dir, store) = fixture();
+        let initial = store.snapshot().unwrap();
+        assert_eq!(
+            initial.skins[0],
+            super::super::appearance::BuiltinSkin::ModernClean.definition()
+        );
+        assert!(!dir.path().join(RADIAL_FILE).exists());
+        let mut legacy = (*initial).clone();
+        legacy.skins[0].id = SkinId::new("carbon");
+        legacy.skins[0].name = "Carbon custom".into();
+        legacy.skins[0].style.values = super::super::model::StyleOverrides::default();
+        for menu in &mut legacy.menus {
+            menu.skin_id = SkinId::new("carbon");
+        }
+        legacy.menus[0].style.values.text.underline = super::super::model::Override::Clear;
+        let bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        fs::write(dir.path().join(RADIAL_FILE), &bytes).unwrap();
+        assert_eq!(*store.reload().unwrap(), legacy);
+        assert_eq!(*store.authoring_snapshot().unwrap().document, legacy);
+        assert_eq!(fs::read(dir.path().join(RADIAL_FILE)).unwrap(), bytes);
+    }
+    #[test]
     fn missing_empty_malformed_and_newer_are_distinct_and_retain_snapshot() {
         let (dir, store) = fixture();
         let before = store.snapshot().unwrap();

@@ -1,6 +1,7 @@
 //! Stable-ID radial menu authoring window.
 
 pub(crate) mod action_editor;
+mod appearance;
 mod asset_picker;
 mod audio_controls;
 mod canvas;
@@ -11,10 +12,11 @@ mod work_area;
 
 use crate::gui::LauncherApp;
 use crate::radial::acceptance_trace::{
-    self, BodyBlock, Correlation, DesignerAuthoringRole, DesignerAuthoringTarget,
-    DesignerCloseState, DesignerGeometryState, DesignerProposalKind, DesignerSemanticRole,
-    DesignerSemanticTarget, Event, FocusEdge, RadialInsertionControl, RadialInsertionTraceIdentity,
-    RequestKind, ViewportClass, WidgetCategory, WidgetResponse,
+    self, BodyBlock, Correlation, DesignerAuthoringRole, DesignerAuthoringScrollOwner,
+    DesignerAuthoringScrollViewport, DesignerAuthoringTarget, DesignerCloseState,
+    DesignerGeometryState, DesignerProposalKind, DesignerSemanticRole, DesignerSemanticTarget,
+    Event, FocusEdge, RadialInsertionControl, RadialInsertionTraceIdentity, RequestKind,
+    ViewportClass, WidgetCategory, WidgetResponse,
 };
 use crate::radial::authoring::menu::{
     self, BulkAfterActionSlot, BulkCellEdit, BulkCellEditRequest, ResizeResolution,
@@ -365,6 +367,7 @@ fn trace_designer_authoring_control_scoped_rect(
         clicked,
         correlation.session_id,
         correlation.generation,
+        ui.ctx().frame_nr(),
         scope,
     );
 }
@@ -389,6 +392,92 @@ fn designer_authoring_clip_bounds(ui: &egui::Ui, client_size: egui::Vec2) -> Opt
         scale(clip.right())?,
         scale(clip.bottom())?,
     ])
+}
+
+fn designer_scroll_viewport_measurement<R>(
+    ui: &egui::Ui,
+    scroll: &egui::scroll_area::ScrollAreaOutput<R>,
+    paint_clip: egui::Rect,
+    owner: DesignerAuthoringScrollOwner,
+    correlation: Correlation,
+) -> Option<DesignerAuthoringScrollViewport> {
+    let client_size = ui.ctx().input(|input| input.viewport().inner_rect)?.size();
+    let client = egui::Rect::from_min_size(egui::Pos2::ZERO, client_size);
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return None;
+    }
+    let paint_clip = paint_clip.intersect(client);
+    // inner_rect is a public, measured subset of egui's wheel-admitting outer
+    // region. Content paint clips include clip_rect_margin and are not input
+    // viewports. Intersect the real ancestor clip, never infer an inset from it.
+    // Egui returns the pre-end inner_rect. Auto-shrink can reduce its final
+    // wheel region to content_size; both public measurements are required for
+    // a conservative subset, including a short or narrow pane.
+    let content_extent = egui::Rect::from_min_size(scroll.inner_rect.min, scroll.content_size);
+    let input = scroll
+        .inner_rect
+        .intersect(content_extent)
+        .intersect(ui.clip_rect())
+        .intersect(paint_clip);
+    let px = |value: f32, inward: bool, minimum: bool| {
+        let value = value * pixels_per_point;
+        let value = if inward {
+            if minimum { value.ceil() } else { value.floor() }
+        } else {
+            value.round()
+        };
+        (value.is_finite() && value >= i32::MIN as f32 && value <= i32::MAX as f32)
+            .then(|| value as i32)
+    };
+    let measured = DesignerAuthoringScrollViewport {
+        owner,
+        scroll_id: scroll.id.value(),
+        frame_nr: ui.ctx().frame_nr(),
+        session_id: correlation.session_id,
+        generation: correlation.generation,
+        input_bounds: [
+            px(input.left(), true, true)?,
+            px(input.top(), true, true)?,
+            px(input.right(), true, false)?,
+            px(input.bottom(), true, false)?,
+        ],
+        paint_clip_bounds: [
+            px(paint_clip.left(), false, true)?,
+            px(paint_clip.top(), false, true)?,
+            px(paint_clip.right(), false, false)?,
+            px(paint_clip.bottom(), false, false)?,
+        ],
+        client_size: [
+            px(client_size.x, false, false)?,
+            px(client_size.y, false, false)?,
+        ],
+    };
+    measured.is_valid().then_some(measured)
+}
+
+fn show_designer_scroll_area<R>(
+    ui: &mut egui::Ui,
+    scroll: egui::ScrollArea,
+    owner: DesignerAuthoringScrollOwner,
+    viewport: ViewportClass,
+    correlation: Correlation,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    if !acceptance_trace::enabled() && !cfg!(test) {
+        return scroll.show(ui, add_contents);
+    }
+    let mut paint_clip = egui::Rect::NOTHING;
+    let output = scroll.show(ui, |ui| {
+        paint_clip = ui.clip_rect();
+        add_contents(ui)
+    });
+    if let Some(measured) =
+        designer_scroll_viewport_measurement(ui, &output, paint_clip, owner, correlation)
+    {
+        acceptance_trace::emit_designer_authoring_scroll_viewport(viewport, measured);
+    }
+    output
 }
 
 fn designer_tree_search_undo_scope(
@@ -1502,6 +1591,7 @@ pub(crate) struct RadialEditorState {
     session: Option<RadialAuthoringSession>,
     client: Option<AuthoringClient>,
     preview: EmbeddedPreview,
+    appearance: appearance::AppearanceGallery,
     close_intent: CloseIntent,
     close_stop_attempted: bool,
     close_prompt: bool,
@@ -1588,6 +1678,7 @@ impl Default for RadialEditorState {
             session: None,
             client: None,
             preview: EmbeddedPreview::default(),
+            appearance: appearance::AppearanceGallery::default(),
             close_intent: CloseIntent::None,
             close_stop_attempted: false,
             close_prompt: false,
@@ -2756,6 +2847,11 @@ impl RadialEditorState {
 
     /// Keep a pinned Designer open without treating each maintenance pass as
     /// an explicit user focus request.
+    pub(crate) fn invalidate_appearance_resources(&mut self) {
+        self.appearance.invalidate_resources();
+        self.preview.invalidate_resources();
+    }
+
     pub(crate) fn ensure_open(&mut self) {
         if !self.open {
             self.open();
@@ -2841,6 +2937,7 @@ impl RadialEditorState {
     }
 
     pub(crate) fn request_close(&mut self) {
+        self.appearance.dispose();
         if self.close_intent == CloseIntent::Requested {
             return;
         }
@@ -2933,6 +3030,7 @@ impl RadialEditorState {
     }
 
     fn finish_close(&mut self) {
+        self.appearance.dispose();
         self.preview.dispose();
         self.release_authoring_resources();
         self.inspector_action_editor.dispose();
@@ -2993,6 +3091,7 @@ impl RadialEditorState {
     }
 
     pub(crate) fn force_close(&mut self) {
+        self.appearance.dispose();
         self.preview.cancel_tooltip();
         self.preferences_flush_requested = true;
         self.preference_debounce.flush();
@@ -3836,6 +3935,9 @@ impl RadialEditorState {
                 return;
             };
             if let Some(client) = &self.client {
+                while let Some(reply) = client.try_recv_gallery() {
+                    self.appearance.accept(reply, session);
+                }
                 while let Some(reply) = client.try_recv() {
                     session.accept_reply(reply);
                 }
@@ -4034,6 +4136,9 @@ impl RadialEditorState {
             });
         }
         self.poll_replies();
+        if !self.show_resources {
+            self.appearance.retire_interest();
+        }
         if self.close_intent == CloseIntent::None {
             self.sync_native_preview_generation();
         }
@@ -4053,6 +4158,8 @@ impl RadialEditorState {
             conflict_reason,
             preview_selection,
             prepared_preview,
+            prepared_menu,
+            prepared_appearance,
             draft,
             generation,
             editor_session,
@@ -4085,19 +4192,25 @@ impl RadialEditorState {
                         self.visited_path.direct_reveal(selected_menu, None, false);
                     }
                 }
+                let appearance_candidate = self.appearance.candidate(session);
                 let proposal = self
                     .ring_proposal
                     .as_ref()
                     .filter(|proposal| proposal.base_generation == session.generation);
-                let preview_selection = proposal.map_or_else(
-                    || session.selection.clone(),
-                    |proposal| {
-                        Some(StableSelection::Ring {
-                            menu_id: proposal.menu_id.clone(),
-                            ring_id: proposal.ring_id.clone(),
-                        })
-                    },
-                );
+                let preview_selection = appearance_candidate
+                    .as_ref()
+                    .map(|(_, _, selection)| Some(selection.clone()))
+                    .unwrap_or_else(|| {
+                        proposal.map_or_else(
+                            || session.selection.clone(),
+                            |proposal| {
+                                Some(StableSelection::Ring {
+                                    menu_id: proposal.menu_id.clone(),
+                                    ring_id: proposal.ring_id.clone(),
+                                })
+                            },
+                        )
+                    });
                 let preparation_preset = if self.designer_mode == DesignerMode::Design {
                     PreviewPreset::Current
                 } else {
@@ -4112,15 +4225,27 @@ impl RadialEditorState {
                     preparation_preset,
                     preview_selection.as_ref(),
                     tooltip_preferences,
-                    proposal
-                        .zip(proposal_token.as_deref())
-                        .map(|(proposal, token)| (&proposal.document, token)),
+                    appearance_candidate
+                        .as_ref()
+                        .map(|(candidate, token, _)| (&**candidate, token.as_str()))
+                        .or_else(|| {
+                            proposal
+                                .zip(proposal_token.as_deref())
+                                .map(|(proposal, token)| (&proposal.document, token))
+                        }),
                 );
                 let prepared_preview = self.preview.prepared_frame(session);
-                let draft = proposal.map_or_else(
-                    || session.draft.clone(),
-                    |proposal| std::sync::Arc::new(proposal.document.clone()),
-                );
+                let prepared_menu = self.preview.current_menu().cloned();
+                let prepared_appearance = self.appearance.prepared_identity(session, &self.preview);
+                let draft = appearance_candidate
+                    .as_ref()
+                    .map(|(candidate, _, _)| Arc::clone(candidate))
+                    .unwrap_or_else(|| {
+                        proposal.map_or_else(
+                            || session.draft.clone(),
+                            |proposal| std::sync::Arc::new(proposal.document.clone()),
+                        )
+                    });
                 let generation = session.generation.0;
                 let editor_session = session.editor_session;
                 let initial_snapshot_pending = session.is_initial_snapshot_pending();
@@ -4130,6 +4255,8 @@ impl RadialEditorState {
                     conflict_reason,
                     preview_selection,
                     prepared_preview,
+                    prepared_menu,
+                    prepared_appearance,
                     draft,
                     generation,
                     editor_session,
@@ -4255,11 +4382,48 @@ impl RadialEditorState {
                         // than being appended below it, so every control is
                         // reachable through this internal scroll region at
                         // compact viewport sizes.
-                        egui::ScrollArea::vertical()
-                            .id_source("radial-designer-resources")
-                            .show(ui, |ui| {
-                                self.resources_ui(ui, trace_viewport_class(viewport_class))
-                            });
+                        show_designer_scroll_area(
+                            ui,
+                            egui::ScrollArea::vertical().id_source("radial-designer-resources"),
+                            DesignerAuthoringScrollOwner::Resources,
+                            trace_viewport_class(viewport_class),
+                            trace_correlation(self.session.as_ref()),
+                            |ui| {
+                                self.resources_ui(ui, trace_viewport_class(viewport_class));
+                                egui::CollapsingHeader::new("Current menu appearance preview")
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(ui.available_width(), 240.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                let mut navigation = None;
+                                                self.preview.ui(
+                                                    ui,
+                                                    &draft,
+                                                    generation,
+                                                    0.65,
+                                                    PreviewPreset::Current,
+                                                    preview_selection.as_ref(),
+                                                    prepared_preview.as_deref(),
+                                                    editor_session,
+                                                    show_expected_layout_diagnostics,
+                                                    DesignerMode::Design,
+                                                    None,
+                                                    &mut self.projected_selection,
+                                                    &mut self.drag_payload,
+                                                    &mut self.placement_draft,
+                                                    &mut self.pending_drop,
+                                                    &mut navigation,
+                                                    &mut self.visited_path,
+                                                    &mut self.canvas_pan,
+                                                    &mut self.pan_drag_start,
+                                                );
+                                            },
+                                        );
+                                    });
+                            },
+                        );
                     } else {
                         let correlation = trace_correlation(self.session.as_ref());
                         ui.horizontal(|ui| {
@@ -4337,15 +4501,21 @@ impl RadialEditorState {
                                     egui::vec2(pane.inspector_width, pane.height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        egui::ScrollArea::vertical()
-                                            .id_source("radial-designer-inspector")
-                                            .show(ui, |ui| {
+                                        show_designer_scroll_area(
+                                            ui,
+                                            egui::ScrollArea::vertical()
+                                                .id_source("radial-designer-inspector"),
+                                            DesignerAuthoringScrollOwner::Inspector,
+                                            trace_viewport_class(viewport_class),
+                                            trace_correlation(self.session.as_ref()),
+                                            |ui| {
                                                 self.inspector(
                                                     ui,
                                                     frame,
                                                     trace_viewport_class(viewport_class),
                                                 )
-                                            });
+                                            },
+                                        );
                                     },
                                 );
                             }
@@ -4424,6 +4594,17 @@ impl RadialEditorState {
         }
         self.enqueue_preferences_ready_if_due();
         self.trace_authoring_geometry(Some(&frame.action_catalog));
+        if acceptance_trace::enabled()
+            && let Some(session) = self.session.as_ref()
+        {
+            let state = self.appearance.observation(
+                session,
+                prepared_preview.as_ref(),
+                prepared_menu.as_ref(),
+                prepared_appearance,
+            );
+            acceptance_trace::emit_appearance_state(state);
+        }
         if self.preferences_dirty && !self.preferences_flush_requested {
             ctx.request_repaint_after(Duration::from_millis(300));
         }
@@ -5593,6 +5774,16 @@ impl RadialEditorState {
     }
 
     fn resources_ui(&mut self, ui: &mut egui::Ui, viewport: ViewportClass) {
+        if let Some(session) = self.session.as_mut() {
+            if self.appearance.destination.is_none() {
+                self.appearance.destination = self.visited_path.current().cloned();
+            }
+            let prepared = self.appearance.prepared_identity(session, &self.preview);
+            self.appearance
+                .ui(ui, session, self.client.as_ref(), viewport, prepared);
+            ui.separator();
+            ui.heading("Advanced style, assets and packages");
+        }
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -5605,7 +5796,9 @@ impl RadialEditorState {
                 navigation = Some(DesignerNavigationIntent::ClearSelection);
             }
             for (skin_index, skin) in session.draft.skins.clone().into_iter().enumerate() {
-                let response = ui.button(&skin.name);
+                // Name the authored editing action separately from the
+                // temporary skin-preview tiles above it.
+                let response = ui.button(format!("Edit {}", skin.name));
                 trace_designer_authoring_control(
                     ui,
                     &response,
@@ -6744,14 +6937,24 @@ impl RadialEditorState {
         if !filter.trim().is_empty() {
             let hits = authored_search_hits(&session.draft, filter);
             ui.small(format!("{} authored results", hits.len()));
-            egui::ScrollArea::vertical()
-                .id_source("radial-designer-search-results")
-                .show(ui, |ui| {
+            show_designer_scroll_area(
+                ui,
+                egui::ScrollArea::vertical().id_source("radial-designer-search-results"),
+                DesignerAuthoringScrollOwner::MenuTree,
+                viewport,
+                trace_correlation(Some(session)),
+                |ui| {
                     for (hit_index, hit) in hits.into_iter().enumerate() {
                         // Reuse the widget's actual Galley so diagnostic text geometry
                         // describes what is painted, including wrapping and elision.
-                        let galley = egui::WidgetText::from(format!("{}  ·  {}", hit.label, hit.context))
-                            .into_galley(ui, None, ui.available_width() - 2.0 * ui.spacing().button_padding.x, egui::TextStyle::Button);
+                        let galley =
+                            egui::WidgetText::from(format!("{}  ·  {}", hit.label, hit.context))
+                                .into_galley(
+                                    ui,
+                                    None,
+                                    ui.available_width() - 2.0 * ui.spacing().button_padding.x,
+                                    egui::TextStyle::Button,
+                                );
                         let selected = session.selection.as_ref() == Some(&hit.target)
                             || session.selection.as_ref().is_some_and(|selection| {
                                 matches!(
@@ -6816,32 +7019,39 @@ impl RadialEditorState {
                             filter.clear();
                         }
                     }
-                });
+                },
+            );
             return;
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (menu_index, menu) in menus.iter().enumerate() {
-                let menu_selected = session.selection.as_ref().is_some_and(|selection| {
-                    match selection {
-                        StableSelection::Menu(id) => id == &menu.id,
-                        StableSelection::Ring { menu_id, .. }
-                        | StableSelection::Cell { menu_id, .. } => menu_id == &menu.id,
-                        StableSelection::CellSet(cells) => {
-                            cells.primary.menu_id == menu.id
-                        }
-                        _ => false,
-                    }
-                });
-                let expansion_key = format!("menu:{}", menu.id);
-                let default_open = expanded_sections
-                    .get(&expansion_key)
-                    .copied()
-                    // A collapsed tree is the compact default.  Once a
-                    // section is explicitly opened or closed, its persisted
-                    // value is authoritative and selection/diagnostics never
-                    // force it open.
-                    .unwrap_or(false);
-                let header = egui::CollapsingHeader::new(&menu.name)
+        show_designer_scroll_area(
+            ui,
+            egui::ScrollArea::vertical(),
+            DesignerAuthoringScrollOwner::MenuTree,
+            viewport,
+            trace_correlation(Some(session)),
+            |ui| {
+                for (menu_index, menu) in menus.iter().enumerate() {
+                    let menu_selected =
+                        session
+                            .selection
+                            .as_ref()
+                            .is_some_and(|selection| match selection {
+                                StableSelection::Menu(id) => id == &menu.id,
+                                StableSelection::Ring { menu_id, .. }
+                                | StableSelection::Cell { menu_id, .. } => menu_id == &menu.id,
+                                StableSelection::CellSet(cells) => cells.primary.menu_id == menu.id,
+                                _ => false,
+                            });
+                    let expansion_key = format!("menu:{}", menu.id);
+                    let default_open = expanded_sections
+                        .get(&expansion_key)
+                        .copied()
+                        // A collapsed tree is the compact default.  Once a
+                        // section is explicitly opened or closed, its persisted
+                        // value is authoritative and selection/diagnostics never
+                        // force it open.
+                        .unwrap_or(false);
+                    let header = egui::CollapsingHeader::new(&menu.name)
                     .id_source((
                         self.tree_widget_epoch,
                         menu::widget_key("menu", menu.id.as_str(), "tree"),
@@ -7001,61 +7211,64 @@ impl RadialEditorState {
                             );
                         }
                     });
-                trace_designer_authoring_control(
-                    ui,
-                    &header.header_response,
-                    DesignerAuthoringTarget::MenuRow,
-                    DesignerAuthoringRole::Selectable,
-                    Some(menu_index),
-                    true,
-                    menu_selected,
-                    viewport,
-                    trace_correlation(Some(session)),
-                );
-                if menu.id == session.draft.default_menu_id {
-                    trace_designer_semantic_target(
+                    trace_designer_authoring_control(
                         ui,
                         &header.header_response,
-                        DesignerSemanticTarget::DefaultMenu,
-                        DesignerSemanticRole::Button,
-                        viewport,
+                        DesignerAuthoringTarget::MenuRow,
+                        DesignerAuthoringRole::Selectable,
+                        Some(menu_index),
+                        true,
                         menu_selected,
+                        viewport,
                         trace_correlation(Some(session)),
                     );
+                    if menu.id == session.draft.default_menu_id {
+                        trace_designer_semantic_target(
+                            ui,
+                            &header.header_response,
+                            DesignerSemanticTarget::DefaultMenu,
+                            DesignerSemanticRole::Button,
+                            viewport,
+                            menu_selected,
+                            trace_correlation(Some(session)),
+                        );
+                    }
+                    let is_open = header.body_returned.is_some();
+                    header
+                        .header_response
+                        .clone()
+                        .on_hover_text(menu.name.clone());
+                    let expansion_was_interacted_with = expanded_sections
+                        .contains_key(&expansion_key)
+                        || header.header_response.clicked();
+                    if expansion_was_interacted_with
+                        && expanded_sections.get(&expansion_key).copied() != Some(is_open)
+                    {
+                        expanded_sections.insert(expansion_key, is_open);
+                        *preferences_dirty = true;
+                    }
+                    if focus_restore.as_ref() == Some(&StableSelection::Menu(menu.id.clone())) {
+                        header.header_response.request_focus();
+                        *focus_restore = None;
+                    }
+                    if header.header_response.clicked()
+                        || menu_selected && session.selection.is_none()
+                    {
+                        queue_scope_change(
+                            pending_scope_change,
+                            session,
+                            ScopeChangeIntent::Navigation(DesignerNavigationIntent::Select {
+                                target: StableSelection::Menu(menu.id.clone()),
+                                control: false,
+                                shift: false,
+                                force_history: false,
+                                open_properties: false,
+                            }),
+                        );
+                    }
                 }
-                let is_open = header.body_returned.is_some();
-                header
-                    .header_response
-                    .clone()
-                    .on_hover_text(menu.name.clone());
-                let expansion_was_interacted_with = expanded_sections.contains_key(&expansion_key)
-                    || header.header_response.clicked();
-                if expansion_was_interacted_with
-                    && expanded_sections.get(&expansion_key).copied() != Some(is_open)
-                {
-                    expanded_sections.insert(expansion_key, is_open);
-                    *preferences_dirty = true;
-                }
-                if focus_restore.as_ref() == Some(&StableSelection::Menu(menu.id.clone())) {
-                    header.header_response.request_focus();
-                    *focus_restore = None;
-                }
-                if header.header_response.clicked() || menu_selected && session.selection.is_none()
-                {
-                    queue_scope_change(
-                        pending_scope_change,
-                        session,
-                        ScopeChangeIntent::Navigation(DesignerNavigationIntent::Select {
-                            target: StableSelection::Menu(menu.id.clone()),
-                            control: false,
-                            shift: false,
-                            force_history: false,
-                            open_properties: false,
-                        }),
-                    );
-                }
-            }
-        });
+            },
+        );
         ui.small("Use the Design toolbar for New Menu, Add Ring, and slot-count proposals.");
     }
 
@@ -12443,13 +12656,19 @@ mod tests {
                 "unsaved action text",
             );
         let mut driver = RetainedDesignerDriver::new(editor);
+        driver.context.style_mut(|style| style.animation_time = 0.0);
+        let mut time = 0.0;
+        let mut frame = |driver: &mut RetainedDesignerDriver, events| {
+            time += 1.0 / 60.0;
+            driver.frame_in_client(egui::vec2(1000.0, 1800.0), time, events)
+        };
 
-        let initial = driver.frame(Vec::new());
+        let initial = frame(&mut driver, Vec::new());
         let skins = accesskit_named_bounds(&initial, "Skins", egui::accesskit::Role::ToggleButton);
         let point = skins.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
-        let _ = driver.frame(vec![pointer_button_event(point, true)]);
-        let in_skins = driver.frame(vec![pointer_button_event(point, false)]);
+        let _ = frame(&mut driver, vec![egui::Event::PointerMoved(point)]);
+        let _ = frame(&mut driver, vec![pointer_button_event(point, true)]);
+        let _ = frame(&mut driver, vec![pointer_button_event(point, false)]);
         assert!(driver.editor.show_resources);
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
         assert_eq!(
@@ -12461,17 +12680,51 @@ mod tests {
             Some(&target)
         );
 
-        let skin = accesskit_named_bounds(&in_skins, "Carbon", egui::accesskit::Role::Button);
+        // The gallery Grid learns its column widths during its first frame.
+        // Capture the edit row from the next retained layout, then verify it
+        // remains at the actual pointer target through press and release.
+        let settled = frame(&mut driver, Vec::new());
+        let skin =
+            accesskit_named_bounds(&settled, "Edit Modern Clean", egui::accesskit::Role::Button);
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1800.0))
+                .contains_rect(skin),
+            "Advanced edit owner bounds={skin:?}"
+        );
         let point = skin.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
-        let _ = driver.frame(vec![pointer_button_event(point, true)]);
-        let guarded = driver.frame(vec![pointer_button_event(point, false)]);
+        let hovered = frame(&mut driver, vec![egui::Event::PointerMoved(point)]);
+        assert_eq!(
+            accesskit_named_bounds(&hovered, "Edit Modern Clean", egui::accesskit::Role::Button),
+            skin,
+            "retained edit row must stay under the pointer"
+        );
+        let pressed = frame(&mut driver, vec![pointer_button_event(point, true)]);
+        assert_eq!(
+            accesskit_named_bounds(&pressed, "Edit Modern Clean", egui::accesskit::Role::Button),
+            skin,
+            "retained edit row must stay under the press"
+        );
+        let _ = frame(&mut driver, vec![pointer_button_event(point, false)]);
+        assert!(
+            driver
+                .context
+                .input(|input| input.pointer.primary_clicked())
+        );
+        assert!(
+            driver.editor.pending_scope_change.is_some(),
+            "Advanced row must queue its guarded scope change; bounds={skin:?}, selection={:?}, dirty={}",
+            driver.editor.session.as_ref().unwrap().selection,
+            driver.editor.inspector_action_editor.has_unassigned_text()
+        );
+        // The new guard Window uses its first frame to establish area size.
+        // Read its actual controls after the next retained layout frame.
+        let guarded = frame(&mut driver, Vec::new());
         let cancel =
             accesskit_named_bounds(&guarded, "Cancel change", egui::accesskit::Role::Button)
                 .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(cancel)]);
-        let _ = driver.frame(vec![pointer_button_event(cancel, true)]);
-        let cancelled = driver.frame(vec![pointer_button_event(cancel, false)]);
+        let _ = frame(&mut driver, vec![egui::Event::PointerMoved(cancel)]);
+        let _ = frame(&mut driver, vec![pointer_button_event(cancel, true)]);
+        let cancelled = frame(&mut driver, vec![pointer_button_event(cancel, false)]);
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(driver.editor.show_resources);
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
@@ -12491,9 +12744,9 @@ mod tests {
         let menus =
             accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::ToggleButton)
                 .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(menus)]);
-        let _ = driver.frame(vec![pointer_button_event(menus, true)]);
-        let back_in_menus = driver.frame(vec![pointer_button_event(menus, false)]);
+        let _ = frame(&mut driver, vec![egui::Event::PointerMoved(menus)]);
+        let _ = frame(&mut driver, vec![pointer_button_event(menus, true)]);
+        let back_in_menus = frame(&mut driver, vec![pointer_button_event(menus, false)]);
         assert!(!driver.editor.show_resources);
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
         assert_eq!(driver.editor.inspector_action_editor_scope, Some(scope));
@@ -13267,6 +13520,470 @@ mod tests {
             snapshots[1].0.top() < snapshots[0].0.top(),
             "the real control moves into its clip"
         );
+    }
+
+    #[test]
+    fn retained_resources_scroll_geometry_preserves_authoring_state() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_mut().unwrap();
+        let menu_id = session.draft.default_menu_id.clone();
+        session.select(Some(StableSelection::Menu(menu_id)));
+        let before = (
+            session.draft.clone(),
+            session.generation,
+            session.selection.clone(),
+            session.acceptance_history_depths(),
+            session.pending_assets.clone(),
+        );
+        let path = editor.visited_path.current().cloned();
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut(|style| style.animation_time = 0.0);
+        let client_size = egui::vec2(900.0, 650.0);
+        let mut frame = |offset| {
+            let mut clip = None;
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, client_size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::top("retained-resources-toolbar")
+                        .exact_height(107.0)
+                        .show(ctx, |ui| {
+                            ui.label("Designer toolbar");
+                        });
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        // Mount the actual Resources UI under its production
+                        // vertical scroll owner; no substitute controls.
+                        egui::ScrollArea::vertical()
+                            .id_source("radial-designer-resources")
+                            .max_height(400.0)
+                            .vertical_scroll_offset(offset)
+                            .show(ui, |ui| {
+                                clip = designer_authoring_clip_bounds(ui, client_size);
+                                editor.resources_ui(ui, ViewportClass::Deferred);
+                            });
+                    });
+                },
+            );
+            (
+                accesskit_named_bounds(&output, "−", egui::accesskit::Role::Button),
+                clip.unwrap(),
+            )
+        };
+        // The real gallery Grid and ScrollArea retain their measured widths
+        // and overflow after the first frame.
+        let _ = frame(0.0);
+        let (below, clip) = frame(0.0);
+        assert!(below.bottom() > clip[3] as f32, "{below:?}, clip={clip:?}");
+        let visible_offset = below.top() - clip[1] as f32 - 12.0;
+        assert!(visible_offset > 0.0);
+        let (visible, visible_clip) = frame(visible_offset);
+        assert_eq!(visible_clip, clip);
+        assert!(visible.top() >= clip[1] as f32 && visible.bottom() <= clip[3] as f32);
+        assert!(visible.top() < below.top());
+        let (above, above_clip) = frame(visible_offset + 18.0);
+        assert_eq!(above_clip, clip);
+        assert!(above.top() < clip[1] as f32 && above.bottom() > clip[1] as f32);
+        let (restored, restored_clip) = frame(visible_offset);
+        assert_eq!(restored_clip, clip);
+        assert_eq!(restored, visible);
+        let session = editor.session.as_ref().unwrap();
+        assert_eq!(
+            before,
+            (
+                session.draft.clone(),
+                session.generation,
+                session.selection.clone(),
+                session.acceptance_history_depths(),
+                session.pending_assets.clone(),
+            )
+        );
+        assert_eq!(editor.visited_path.current().cloned(), path);
+        assert!(editor.pending_scope_change.is_none());
+        assert!(editor.post_render.is_empty());
+    }
+
+    #[test]
+    fn retained_menu_tree_scroll_geometry_preserves_authoring_state() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_mut().unwrap();
+        let original_selection = session.selection.clone();
+        for index in 0..40 {
+            let id = format!("scroll-owner-menu-{index:02}");
+            menu::create_menu(session, &id, &id).unwrap();
+        }
+        session.select(original_selection);
+        let before = (
+            session.draft.clone(),
+            session.generation,
+            session.selection.clone(),
+            session.acceptance_history_depths(),
+            session.pending_assets.clone(),
+        );
+        let path = editor.visited_path.current().cloned();
+        let first_name = session.draft.menus[0].name.clone();
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut(|style| style.animation_time = 0.0);
+        let mut scroll_id = None;
+        let mut frame = |offset: Option<f32>| {
+            if let Some(offset) = offset {
+                let id = scroll_id.expect("actual tree ScrollArea retained its state");
+                let mut state = egui::scroll_area::State::load(&context, id).unwrap();
+                state.offset.y = offset;
+                state.store(&context, id);
+            }
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 650.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        scroll_id = Some(ui.make_persistent_id(egui::Id::new("scroll_area")));
+                        editor.tree(
+                            ui,
+                            &crate::radial::model::RadialFeatureSettings::default(),
+                            ViewportClass::Deferred,
+                        );
+                    });
+                },
+            );
+            let clip = output
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::epaint::Shape::Text(text) = &shape.shape {
+                        let name = text.galley.text();
+                        if name == first_name || name.starts_with("scroll-owner-menu-") {
+                            return Some(shape.clip_rect);
+                        }
+                    }
+                    None
+                })
+                .expect("actual painted menu row supplies its ScrollArea clip");
+            let bounds =
+                |name: &str| accesskit_named_bounds(&output, name, egui::accesskit::Role::Button);
+            (bounds("scroll-owner-menu-39"), bounds(&first_name), clip)
+        };
+        let _ = frame(None);
+        let (below, first, clip) = frame(None);
+        assert!(clip.contains_rect(first));
+        assert!(below.top() > clip.bottom());
+        let visible_offset = below.bottom() - clip.bottom() + 8.0;
+        let (visible, above, visible_clip) = frame(Some(visible_offset));
+        assert_eq!(visible_clip, clip);
+        assert!(clip.contains_rect(visible));
+        assert!(visible.top() < below.top());
+        assert!(above.bottom() < clip.top());
+        let (below_again, first_again, restored_clip) = frame(Some(0.0));
+        assert_eq!(restored_clip, clip);
+        assert_eq!((below_again, first_again), (below, first));
+        let session = editor.session.as_ref().unwrap();
+        assert_eq!(
+            before,
+            (
+                session.draft.clone(),
+                session.generation,
+                session.selection.clone(),
+                session.acceptance_history_depths(),
+                session.pending_assets.clone(),
+            )
+        );
+        assert_eq!(editor.visited_path.current().cloned(), path);
+        assert!(editor.tree_filter.is_empty());
+        assert!(editor.pending_scope_change.is_none());
+        assert!(editor.post_render.is_empty());
+    }
+
+    fn assert_retained_scroll_input_admission(
+        mut driver: RetainedDesignerDriver,
+        owner: DesignerAuthoringScrollOwner,
+        client_size: egui::Vec2,
+        control_bounds: impl Fn(&egui::FullOutput) -> egui::Rect,
+    ) {
+        driver.context.style_mut(|style| style.animation_time = 0.0);
+        let session = driver.editor.session.as_ref().unwrap();
+        let before = (
+            session.draft.clone(),
+            session.generation,
+            session.selection.clone(),
+            session.acceptance_history_depths(),
+            session.pending_assets.clone(),
+        );
+        let expected_menu = selected_menu_id(session).expect("fixture selects an authored menu");
+        let mut time = 0.0;
+        let mut frame = |driver: &mut RetainedDesignerDriver, events| {
+            let _ = acceptance_trace::take_designer_scroll_viewport_test_events();
+            // Real egui wheel smoothing completes within four retained frames
+            // at this deterministic frame interval; no offset is set by the test.
+            time += 0.1;
+            let output = driver.frame_in_client(client_size, time, events);
+            let measured = acceptance_trace::take_designer_scroll_viewport_test_events()
+                .into_iter()
+                .find(|event| event.owner == owner)
+                .expect("actual ScrollArea published its measured input viewport");
+            assert!(measured.is_valid());
+            assert_eq!(
+                measured.session_id,
+                driver.editor.session.as_ref().unwrap().editor_session.0
+            );
+            assert_eq!(
+                measured.generation,
+                driver.editor.session.as_ref().unwrap().generation.0
+            );
+            (output, measured)
+        };
+        let _ = frame(&mut driver, Vec::new());
+        let (initial, measured) = frame(&mut driver, Vec::new());
+        // viewport_ui establishes the selected menu's navigation before input.
+        assert_eq!(driver.editor.visited_path.current(), Some(&expected_menu));
+        let path = driver.editor.visited_path.clone();
+        let initial_bounds = control_bounds(&initial);
+        let margin = egui::pos2(
+            initial_bounds.center().x,
+            measured.input_bounds[3] as f32 + 1.0,
+        );
+        assert!(
+            margin.x > measured.input_bounds[0] as f32
+                && margin.x < measured.input_bounds[2] as f32
+        );
+        assert!(
+            margin.y < measured.paint_clip_bounds[3] as f32,
+            "actual content paint margin must extend beyond the input viewport: {measured:?}"
+        );
+        let mut last_frame = measured.frame_nr;
+        for index in 0..4 {
+            let events = if index == 0 {
+                vec![
+                    egui::Event::PointerMoved(margin),
+                    egui::Event::Scroll(egui::vec2(0.0, -50.0)),
+                ]
+            } else {
+                Vec::new()
+            };
+            let (output, current) = frame(&mut driver, events);
+            assert!(current.frame_nr > last_frame);
+            assert_eq!(current.scroll_id, measured.scroll_id);
+            assert_eq!(current.input_bounds, measured.input_bounds);
+            assert_eq!(
+                control_bounds(&output),
+                initial_bounds,
+                "wheel input in the real paint-only margin cannot scroll {owner:?}"
+            );
+            last_frame = current.frame_nr;
+        }
+        let interior = egui::pos2(
+            margin.x,
+            (measured.input_bounds[1] + measured.input_bounds[3]) as f32 / 2.0,
+        );
+        let mut final_bounds = initial_bounds;
+        for index in 0..4 {
+            let events = if index == 0 {
+                vec![
+                    egui::Event::PointerMoved(interior),
+                    egui::Event::Scroll(egui::vec2(0.0, -50.0)),
+                ]
+            } else {
+                Vec::new()
+            };
+            let (output, current) = frame(&mut driver, events);
+            assert!(current.frame_nr > last_frame);
+            assert_eq!(current.scroll_id, measured.scroll_id);
+            assert_eq!(current.paint_clip_bounds, measured.paint_clip_bounds);
+            final_bounds = control_bounds(&output);
+            last_frame = current.frame_nr;
+        }
+        assert!(
+            (initial_bounds.top() - final_bounds.top() - 50.0).abs() < 0.5,
+            "real wheel input must move the control, owner={owner:?} before={initial_bounds:?} after={final_bounds:?}"
+        );
+        let session = driver.editor.session.as_ref().unwrap();
+        assert_eq!(
+            before,
+            (
+                session.draft.clone(),
+                session.generation,
+                session.selection.clone(),
+                session.acceptance_history_depths(),
+                session.pending_assets.clone(),
+            )
+        );
+        assert_eq!(driver.editor.visited_path, path);
+        assert!(driver.editor.pending_scope_change.is_none());
+        assert!(driver.editor.post_render.is_empty());
+    }
+
+    #[test]
+    fn retained_resources_scroll_input_rejects_paint_margin_and_accepts_measured_interior() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_mut().unwrap();
+        let menu_id = session.draft.default_menu_id.clone();
+        menu::rename_menu(
+            session,
+            menu_id.clone(),
+            "Unrelated dirty menu".into(),
+            EditPhase::Atomic,
+        )
+        .unwrap();
+        session.select(Some(StableSelection::Menu(menu_id)));
+        editor.show_resources = true;
+        editor.tree_visible = false;
+        editor.inspector_visible = false;
+        assert_retained_scroll_input_admission(
+            RetainedDesignerDriver::new(editor),
+            DesignerAuthoringScrollOwner::Resources,
+            egui::vec2(900.0, 650.0),
+            |output| {
+                let update = output.platform_output.accesskit_update.as_ref().unwrap();
+                let bounds = update
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button && node.name() == Some("+")
+                    })
+                    .nth(1)
+                    .expect("actual SimpleScale plus button follows the Opacity step buttons")
+                    .1
+                    .bounds()
+                    .unwrap();
+                egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn retained_tree_and_inspector_scroll_input_reject_paint_margin_and_preserve_state() {
+        let mut editor = RadialEditorState::default();
+        editor.open_test_snapshot();
+        let session = editor.session.as_mut().unwrap();
+        let selection = Some(StableSelection::Menu(session.draft.default_menu_id.clone()));
+        for index in 0..40 {
+            let id = format!("scroll-input-menu-{index:02}");
+            menu::create_menu(session, &id, &id).unwrap();
+        }
+        session.select(selection);
+        editor.tree_visible = true;
+        editor.inspector_visible = false;
+        assert_retained_scroll_input_admission(
+            RetainedDesignerDriver::new(editor),
+            DesignerAuthoringScrollOwner::MenuTree,
+            egui::vec2(900.0, 380.0),
+            |output| {
+                accesskit_named_bounds(
+                    output,
+                    "scroll-input-menu-39",
+                    egui::accesskit::Role::Button,
+                )
+            },
+        );
+        let inspector = retained_bulk_style_driver("text.bold");
+        assert_eq!(
+            inspector
+                .editor
+                .session
+                .as_ref()
+                .unwrap()
+                .selection
+                .as_ref()
+                .expect("Inspector fixture selects the two authored cells")
+                .selected_cells()
+                .len(),
+            2
+        );
+        assert_retained_scroll_input_admission(
+            inspector,
+            DesignerAuthoringScrollOwner::Inspector,
+            egui::vec2(900.0, 380.0),
+            |output| {
+                accesskit_named_bounds(
+                    output,
+                    "Set label on 2 cells",
+                    egui::accesskit::Role::Button,
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn measured_scroll_input_viewport_respects_auto_shrink_and_fractional_client_pixels() {
+        for (content_size, fractional) in [
+            (egui::vec2(90.0, 40.0), false),
+            (egui::vec2(700.0, 900.0), true),
+        ] {
+            let context = egui::Context::default();
+            context.set_pixels_per_point(if fractional { 1.5 } else { 1.0 });
+            let client_size = egui::vec2(520.0, 380.0);
+            let mut measured = None;
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, client_size)),
+                    viewports: [(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportInfo {
+                            inner_rect: Some(egui::Rect::from_min_size(
+                                egui::pos2(-640.0, 120.0),
+                                client_size,
+                            )),
+                            native_pixels_per_point: Some(if fractional { 1.5 } else { 1.0 }),
+                            ..Default::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let mut paint_clip = egui::Rect::NOTHING;
+                        let output = egui::ScrollArea::vertical().show(ui, |ui| {
+                            paint_clip = ui.clip_rect();
+                            ui.allocate_exact_size(content_size, egui::Sense::hover());
+                        });
+                        let receipt = designer_scroll_viewport_measurement(
+                            ui,
+                            &output,
+                            paint_clip,
+                            DesignerAuthoringScrollOwner::Resources,
+                            Correlation {
+                                session_id: 7,
+                                generation: 9,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        let scale = ui.ctx().pixels_per_point();
+                        assert!(receipt.input_bounds[0] as f32 >= output.inner_rect.left() * scale);
+                        assert!(receipt.input_bounds[1] as f32 >= output.inner_rect.top() * scale);
+                        assert!(
+                            receipt.input_bounds[2] as f32
+                                <= (output.inner_rect.left() + output.content_size.x)
+                                    .min(output.inner_rect.right())
+                                    * scale
+                        );
+                        assert!(
+                            receipt.input_bounds[3] as f32
+                                <= (output.inner_rect.top() + output.content_size.y)
+                                    .min(output.inner_rect.bottom())
+                                    * scale
+                        );
+                        measured = Some(receipt);
+                    });
+                },
+            );
+            assert!(measured.unwrap().is_valid());
+        }
     }
 
     #[test]

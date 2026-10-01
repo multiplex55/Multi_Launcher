@@ -1159,12 +1159,153 @@ pub struct AuthoringClient {
     /// the actual owner without changing the service's lifetime boundary.
     reply_wake: Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
     resource_tx: mpsc::Sender<AuthoringResourceDemand>,
+    gallery_tx: mpsc::SyncSender<super::gallery::GalleryRequest>,
+    gallery_reply: Arc<std::sync::Mutex<GalleryReplyMailbox>>,
+}
+
+#[derive(Default)]
+struct GalleryReplyMailbox {
+    current: Option<(
+        super::gallery::GalleryCorrelation,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
+    reply: Option<super::gallery::GalleryReply>,
+}
+
+#[derive(Clone)]
+struct GalleryReplySender {
+    mailbox: Arc<std::sync::Mutex<GalleryReplyMailbox>>,
+    root_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    reply_wake: Arc<std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+}
+
+impl GalleryReplySender {
+    fn send(&self, reply: super::gallery::GalleryReply) {
+        let Ok(mut mailbox) = self.mailbox.lock() else {
+            return;
+        };
+        if !mailbox
+            .current
+            .as_ref()
+            .is_some_and(|(correlation, interest)| {
+                *correlation == reply.correlation
+                    && interest.load(std::sync::atomic::Ordering::Acquire)
+            })
+        {
+            return;
+        }
+        // One registered interest and one terminal result. Both main-owner
+        // rejection and worker completion use this boundary, so late retired
+        // work cannot replace a newer terminal result before the GUI polls.
+        mailbox.current = None;
+        mailbox.reply = Some(reply);
+        drop(mailbox);
+        if let Some(wake) = &self.root_wake {
+            wake();
+        }
+        let wake = self
+            .reply_wake
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(Arc::clone));
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
 }
 
 pub struct AuthoringMainEndpoint {
     pub request_rx: mpsc::Receiver<AuthoringRequest>,
     pub reply_tx: AuthoringReplySender,
     pub resource_rx: mpsc::Receiver<AuthoringResourceDemand>,
+    pub gallery_rx: mpsc::Receiver<super::gallery::GalleryRequest>,
+    gallery_reply: GalleryReplySender,
+}
+
+impl AuthoringMainEndpoint {
+    pub fn gallery_reply_sink(&self) -> Arc<dyn Fn(super::gallery::GalleryReply) + Send + Sync> {
+        let sender = self.gallery_reply.clone();
+        Arc::new(move |reply| sender.send(reply))
+    }
+    pub fn send_gallery_reply(&self, reply: super::gallery::GalleryReply) {
+        self.gallery_reply.send(reply);
+    }
+}
+
+#[cfg(test)]
+mod gallery_transport_tests {
+    use super::super::gallery::*;
+    use super::*;
+    #[test]
+    fn gallery_queue_and_current_terminal_reply_are_capacity_one_without_stealing_authoring_requests()
+     {
+        let (client, endpoint) = authoring_control_service();
+        let correlation = GalleryCorrelation {
+            request_id: 1,
+            editor_session: AuthoringSessionId(3),
+            draft_generation: DraftGeneration(2),
+            interest_generation: 1,
+            key: content_key(
+                &super::super::appearance::BuiltinSkin::ModernClean.definition(),
+                &RadialDocument::starter(),
+                &AssetMutations::default(),
+                1000,
+                1,
+            ),
+        };
+        let request = GalleryRequest {
+            correlation,
+            document: Arc::new(demonstration(
+                super::super::appearance::BuiltinSkin::ModernClean.definition(),
+                &RadialDocument::starter(),
+            )),
+            projection: Default::default(),
+            interest: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        };
+        client.try_send_gallery(request.clone()).unwrap();
+        assert!(client.try_send_gallery(request.clone()).is_err());
+        assert!(endpoint.request_rx.try_recv().is_err());
+        assert_eq!(
+            endpoint.gallery_rx.try_recv().unwrap().correlation,
+            correlation
+        );
+        endpoint.send_gallery_reply(GalleryReply {
+            correlation,
+            result: Err("retired".into()),
+        });
+        let current = GalleryCorrelation {
+            request_id: 2,
+            ..correlation
+        };
+        client
+            .try_send_gallery(GalleryRequest {
+                correlation: current,
+                ..request
+            })
+            .unwrap();
+        assert_eq!(endpoint.gallery_rx.try_recv().unwrap().correlation, current);
+        endpoint.send_gallery_reply(GalleryReply {
+            correlation: current,
+            result: Err("current".into()),
+        });
+        endpoint.gallery_reply_sink()(GalleryReply {
+            correlation,
+            result: Err("late retired worker".into()),
+        });
+        endpoint.send_gallery_reply(GalleryReply {
+            correlation,
+            result: Err("late retired dispatch".into()),
+        });
+        endpoint.send_gallery_reply(GalleryReply {
+            correlation: current,
+            result: Err("duplicate terminal".into()),
+        });
+        let reply = client.try_recv_gallery().unwrap();
+        assert_eq!(reply.correlation, current);
+        assert_eq!(reply.result.unwrap_err(), "current");
+        assert!(client.try_recv_gallery().is_none());
+        assert!(client.try_recv().is_none());
+    }
 }
 
 /// Main-owner side of the authoring reply channel.  Sending a reply wakes the
@@ -1222,6 +1363,8 @@ pub fn authoring_control_service_with_wake(
     let (request_tx, request_rx) = mpsc::channel();
     let (reply_tx, reply_rx) = mpsc::channel();
     let (resource_tx, resource_rx) = mpsc::channel();
+    let (gallery_tx, gallery_rx) = mpsc::sync_channel(1);
+    let gallery_reply = Arc::new(std::sync::Mutex::new(GalleryReplyMailbox::default()));
     let reply_wake = Arc::new(std::sync::Mutex::new(None));
     (
         AuthoringClient {
@@ -1230,20 +1373,52 @@ pub fn authoring_control_service_with_wake(
             wake: wake.clone(),
             reply_wake: Arc::clone(&reply_wake),
             resource_tx,
+            gallery_tx,
+            gallery_reply: Arc::clone(&gallery_reply),
         },
         AuthoringMainEndpoint {
             request_rx,
             reply_tx: AuthoringReplySender {
                 tx: reply_tx,
+                root_wake: wake.clone(),
+                reply_wake: Arc::clone(&reply_wake),
+            },
+            resource_rx,
+            gallery_rx,
+            gallery_reply: GalleryReplySender {
+                mailbox: gallery_reply,
                 root_wake: wake,
                 reply_wake,
             },
-            resource_rx,
         },
     )
 }
 
 impl AuthoringClient {
+    pub fn try_send_gallery(&self, request: super::gallery::GalleryRequest) -> Result<(), String> {
+        let mut mailbox = self
+            .gallery_reply
+            .lock()
+            .map_err(|_| "gallery reply mailbox unavailable".to_owned())?;
+        let correlation = request.correlation;
+        let interest = Arc::clone(&request.interest);
+        self.gallery_tx
+            .try_send(request)
+            .map_err(|error| error.to_string())?;
+        // Hold the mailbox through enqueue/registration. A fast worker cannot
+        // publish before the correlation becomes its registered current owner.
+        mailbox.current = Some((correlation, interest));
+        mailbox.reply = None;
+        drop(mailbox);
+        if let Some(wake) = &self.wake {
+            wake();
+        }
+        Ok(())
+    }
+
+    pub fn try_recv_gallery(&self) -> Option<super::gallery::GalleryReply> {
+        self.gallery_reply.lock().ok()?.reply.take()
+    }
     /// Install or clear the callback for the currently open deferred editor
     /// viewport.  Cloned clients share this slot, while the root service wake
     /// remains unchanged.  Replacing a closed viewport callback is therefore

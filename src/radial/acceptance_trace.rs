@@ -27,6 +27,9 @@ const GATE_C_TRACE_PROFILE: &str = "gate_c_v1";
 pub(crate) const GATE_D_EVENT_BUDGET: usize = EVENT_BUDGET * 6;
 pub(crate) const GATE_D_TERMINAL_RESERVE: usize = 256;
 const GATE_D_TRACE_PROFILE: &str = "gate_d_v1";
+pub(crate) const GATE_S_EVENT_BUDGET: usize = EVENT_BUDGET * 10;
+pub(crate) const GATE_S_TERMINAL_RESERVE: usize = 256;
+const GATE_S_TRACE_PROFILE: &str = "gate_s_v1";
 const TRACE_TARGET: &str = "multi_launcher.radial_acceptance";
 const AUTHORING_CONTROL_REFRESH_MS: u128 = 500;
 
@@ -477,6 +480,17 @@ pub(crate) enum DesignerAuthoringTarget {
     InspectorDiscardAndContinue,
     InspectorCell,
     SkinRow,
+    AppearanceTile,
+    AppearanceApply,
+    AppearanceCancel,
+    SimpleAccent,
+    SimpleOpacity,
+    SimpleScale,
+    SimpleSpacing,
+    SimpleLabelSize,
+    SimpleLabels,
+    SimpleBold,
+    SimpleShadow,
     SkinGlowEnabled,
     OpenDesktopPreview,
     StopDesktopPreview,
@@ -484,6 +498,66 @@ pub(crate) enum DesignerAuthoringTarget {
     Redo,
     Save,
     KeepEditing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesignerAuthoringScrollOwner {
+    Inspector,
+    MenuTree,
+    Resources,
+}
+
+impl DesignerAuthoringScrollOwner {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inspector => "Inspector",
+            Self::MenuTree => "MenuTree",
+            Self::Resources => "Resources",
+        }
+    }
+
+    pub fn from_trace_label(value: &str) -> Option<Self> {
+        match value {
+            "Inspector" => Some(Self::Inspector),
+            "MenuTree" => Some(Self::MenuTree),
+            "Resources" => Some(Self::Resources),
+            _ => None,
+        }
+    }
+}
+
+/// Actual scroll-input viewport, separate from the expanded content paint clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DesignerAuthoringScrollViewport {
+    pub owner: DesignerAuthoringScrollOwner,
+    pub scroll_id: u64,
+    pub frame_nr: u64,
+    pub session_id: u64,
+    pub generation: u64,
+    pub input_bounds: [i32; 4],
+    pub paint_clip_bounds: [i32; 4],
+    pub client_size: [i32; 2],
+}
+
+impl DesignerAuthoringScrollViewport {
+    pub fn is_valid(self) -> bool {
+        let [width, height] = self.client_size;
+        let positive = |rect: [i32; 4]| rect[2] > rect[0] && rect[3] > rect[1];
+        let contains = |outer: [i32; 4], inner: [i32; 4]| {
+            outer[0] <= inner[0]
+                && outer[1] <= inner[1]
+                && outer[2] >= inner[2]
+                && outer[3] >= inner[3]
+        };
+        self.scroll_id != 0
+            && self.session_id != 0
+            && width > 0
+            && height > 0
+            && positive(self.input_bounds)
+            && positive(self.paint_clip_bounds)
+            && contains([0, 0, width, height], self.paint_clip_bounds)
+            && contains(self.paint_clip_bounds, self.input_bounds)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -929,6 +1003,12 @@ pub(crate) enum Event {
         focused: bool,
         correlation: Correlation,
     },
+    AppearanceState {
+        state: super::gallery::AppearanceObservation,
+    },
+    NativeAppearanceTarget {
+        state: super::gallery::NativeAppearanceTarget,
+    },
     DesignerAuthoringControl {
         target: DesignerAuthoringTarget,
         role: DesignerAuthoringRole,
@@ -950,7 +1030,12 @@ pub(crate) enum Event {
         clicked: bool,
         session_id: u64,
         generation: u64,
+        frame_nr: u64,
         scope: Option<DesignerAuthoringControlScope>,
+    },
+    DesignerAuthoringScrollViewport {
+        viewport: ViewportClass,
+        measured: DesignerAuthoringScrollViewport,
     },
     DesignerActionEditorControl {
         surface: &'static str,
@@ -1412,11 +1497,17 @@ impl TraceBudgetProfile {
         event_limit: GATE_D_EVENT_BUDGET,
         terminal_reserve: GATE_D_TERMINAL_RESERVE,
     };
+    const GATE_S: Self = Self {
+        name: GATE_S_TRACE_PROFILE,
+        event_limit: GATE_S_EVENT_BUDGET,
+        terminal_reserve: GATE_S_TERMINAL_RESERVE,
+    };
 
     fn from_environment(value: Option<&str>) -> Self {
         match value {
             Some(GATE_C_TRACE_PROFILE) => Self::GATE_C,
             Some(GATE_D_TRACE_PROFILE) => Self::GATE_D,
+            Some(GATE_S_TRACE_PROFILE) => Self::GATE_S,
             _ => Self::DEFAULT,
         }
     }
@@ -1670,6 +1761,7 @@ thread_local! {
     static TEST_AUTHORING_PROVIDER_TRACE: RefCell<Vec<AuthoringProviderTraceSnapshot>> = const { RefCell::new(Vec::new()) };
     static TEST_ACTION_EDITOR_CONTROL_EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
     static TEST_ACTION_EDITOR_SCROLL_EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+    static TEST_DESIGNER_SCROLL_VIEWPORTS: RefCell<Vec<DesignerAuthoringScrollViewport>> = const { RefCell::new(Vec::new()) };
     static TEST_INSPECTOR_TEXT_EDIT_EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
     static TEST_RADIAL_INSERTION_CONTROL_EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
 }
@@ -1687,6 +1779,11 @@ pub(crate) fn take_action_editor_control_test_events() -> Vec<Event> {
 #[cfg(test)]
 pub(crate) fn take_action_editor_scroll_test_events() -> Vec<Event> {
     TEST_ACTION_EDITOR_SCROLL_EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(crate) fn take_designer_scroll_viewport_test_events() -> Vec<DesignerAuthoringScrollViewport> {
+    TEST_DESIGNER_SCROLL_VIEWPORTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -2682,6 +2779,7 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                     clicked,
                     session_id,
                     generation,
+                    frame_nr,
                     scope,
                 } => {
                     tracing::warn!(
@@ -2709,6 +2807,7 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                         clicked,
                         session_id,
                         generation,
+                        frame_nr,
                         menu_cell_ids_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.menu_cell_ids_digest, _ => 0 }),
                         menu_id_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.menu_id_digest, DesignerAuthoringControlScope::ProjectedCell(cell) => cell.menu_id_digest, DesignerAuthoringControlScope::Breadcrumb { menu_id_digest } | DesignerAuthoringControlScope::AuthoredSearchResult { menu_id_digest, .. } => menu_id_digest, DesignerAuthoringControlScope::DynamicSourceEdit(_) | DesignerAuthoringControlScope::TreeSearchUndo { .. } => 0 }),
                         ring_id_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::CanvasCell(cell) => cell.ring_id_digest, DesignerAuthoringControlScope::AuthoredSearchResult { ring_id_digest, .. } => ring_id_digest, _ => 0 }),
@@ -2732,6 +2831,31 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                         text_edit_field_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::TreeSearchUndo { field_id_digest, .. } => field_id_digest, _ => 0 }),
                         text_edit_value_digest = scope.map_or(0, |scope| match scope { DesignerAuthoringControlScope::TreeSearchUndo { value_digest, .. } => value_digest, _ => 0 }),
                         text_edit_undo_in_flux = scope.map_or(-1i32, |scope| match scope { DesignerAuthoringControlScope::TreeSearchUndo { in_flux, .. } => i32::from(in_flux), _ => -1 }),
+                        "radial acceptance trace"
+                    );
+                }
+                Event::DesignerAuthoringScrollViewport { viewport, measured } => {
+                    tracing::warn!(
+                        target: TRACE_TARGET,
+                        trace_event = "designer_authoring_scroll_viewport",
+                        elapsed_ms,
+                        ?viewport,
+                        scroll_owner = measured.owner.as_str(),
+                        scroll_id = measured.scroll_id,
+                        frame_nr = measured.frame_nr,
+                        session_id = measured.session_id,
+                        generation = measured.generation,
+                        input_left_px = measured.input_bounds[0],
+                        input_top_px = measured.input_bounds[1],
+                        input_right_px = measured.input_bounds[2],
+                        input_bottom_px = measured.input_bounds[3],
+                        clip_left_px = measured.paint_clip_bounds[0],
+                        clip_top_px = measured.paint_clip_bounds[1],
+                        clip_right_px = measured.paint_clip_bounds[2],
+                        clip_bottom_px = measured.paint_clip_bounds[3],
+                        client_width_px = measured.client_size[0],
+                        client_height_px = measured.client_size[1],
+                        trace_sequence,
                         "radial acceptance trace"
                     );
                 }
@@ -3183,6 +3307,30 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                         count,
                         "radial acceptance trace"
                     );
+                }
+                Event::NativeAppearanceTarget { state } => {
+                    tracing::warn!(target:TRACE_TARGET,trace_event="native_appearance_target",elapsed_ms,trace_sequence,
+                        session_id=state.session_id,generation=state.generation,menu_digest=state.menu_digest,cell_digest=state.cell_digest,
+                        geometry_digest=state.geometry_digest,point_x=state.point_x,point_y=state.point_y,dpi_milli=state.dpi_milli,
+                        work_left=state.work_area[0],work_top=state.work_area[1],work_right=state.work_area[2],work_bottom=state.work_area[3],
+                        cell_kind=state.kind,clicked=state.clicked,"radial acceptance trace");
+                }
+                Event::AppearanceState { state } => {
+                    tracing::warn!(target:TRACE_TARGET,trace_event="appearance_state",elapsed_ms,trace_sequence,
+                        session_id=state.session_id,generation=state.generation,menu_digest=state.menu_digest,
+                        catalog_count=state.catalog_count,current_builtin=state.current_builtin,preview_builtin=state.preview_builtin,
+                        preview_active=state.preview_active,preview_key=state.preview_key,preview_candidate_digest=state.preview_candidate_digest,
+                        preview_token_digest=state.preview_token_digest,prepared_menu_digest=state.prepared_menu_digest,prepared_candidate_digest=state.prepared_candidate_digest,prepared_content_key=state.prepared_content_key,prepared_token_digest=state.prepared_token_digest,prepared_owner_session=state.prepared_owner_session,
+                        effective_digest=state.effective_digest,bindings_digest=state.bindings_digest,other_menus_digest=state.other_menus_digest,
+                        raw_overrides_digest=state.raw_overrides_digest,opacity_milli=state.opacity_milli,scale_milli=state.scale_milli,
+                        spacing_milli=state.spacing_milli,label_size_milli=state.label_size_milli,labels_visible=state.labels_visible,
+                        masked_fields=state.masked_fields,gallery_active=state.gallery_active,requested=state.requested,completed=state.completed,
+                        rejected=state.rejected,in_flight=state.in_flight,visible_pending=state.visible_pending,cached_tiles=state.cached_tiles,cpu_bytes=state.cpu_bytes,gpu_bytes=state.gpu_bytes,
+                        failure_count=state.failure_count,tile_key=state.tile_key,tile_scene_digest=state.tile_scene_digest,
+                        tile_geometry_digest=state.tile_geometry_digest,tile_selected_emphasis=state.tile_selected_emphasis,
+                        prepared_generation=state.prepared_generation,geometry_digest=state.geometry_digest,scene_digest=state.scene_digest,
+                        authored_cell_count=state.authored_cell_count,density_warnings=state.density_warnings,diagnostic_digest=state.diagnostic_digest,
+                        "radial acceptance trace");
                 }
                 Event::DesignerGeometryState { state } => {
                     tracing::warn!(
@@ -3910,6 +4058,30 @@ pub(crate) fn emit_designer_semantic_target(
     }
 }
 
+pub(crate) fn emit_designer_authoring_scroll_viewport(
+    viewport: ViewportClass,
+    measured: DesignerAuthoringScrollViewport,
+) {
+    if !measured.is_valid() {
+        return;
+    }
+    #[cfg(test)]
+    TEST_DESIGNER_SCROLL_VIEWPORTS.with(|events| {
+        let mut events = events.borrow_mut();
+        if let Some(previous) = events
+            .iter_mut()
+            .find(|event| event.owner == measured.owner)
+        {
+            *previous = measured;
+        } else if events.len() < 3 {
+            events.push(measured);
+        }
+    });
+    if enabled() {
+        emit(Event::DesignerAuthoringScrollViewport { viewport, measured });
+    }
+}
+
 pub(crate) fn emit_designer_authoring_control(
     target: DesignerAuthoringTarget,
     role: DesignerAuthoringRole,
@@ -3924,6 +4096,7 @@ pub(crate) fn emit_designer_authoring_control(
     clicked: bool,
     session_id: u64,
     generation: u64,
+    frame_nr: u64,
     scope: Option<DesignerAuthoringControlScope>,
 ) {
     if !enabled()
@@ -3987,6 +4160,7 @@ pub(crate) fn emit_designer_authoring_control(
             clicked,
             session_id,
             generation,
+            frame_nr,
             scope,
         });
     }
@@ -4834,6 +5008,31 @@ fn insert_designer_authoring_control_snapshot(
     snapshot.last_emitted_ms = now_ms;
     previous.push(snapshot);
     true
+}
+
+pub(crate) fn emit_appearance_state(state: super::gallery::AppearanceObservation) {
+    static PREVIOUS: OnceLock<Mutex<Option<(super::gallery::AppearanceObservation, u128)>>> =
+        OnceLock::new();
+    if !enabled() {
+        return;
+    }
+    let now = elapsed_ms();
+    let publish = PREVIOUS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map(|mut previous| {
+            let publish = previous.is_none_or(|(old, time)| {
+                old != state || now.saturating_sub(time) >= AUTHORING_CONTROL_REFRESH_MS
+            });
+            if publish {
+                *previous = Some((state, now));
+            }
+            publish
+        })
+        .unwrap_or(false);
+    if publish {
+        emit(Event::AppearanceState { state });
+    }
 }
 
 pub(crate) fn emit_designer_geometry_state(state: DesignerGeometryState) {
@@ -5905,6 +6104,8 @@ mod tests {
 
     fn schema_labels(event: Event) -> &'static [&'static str] {
         match event {
+            Event::AppearanceState { .. } => &["state"],
+            Event::NativeAppearanceTarget { .. } => &["state"],
             Event::DesignerCallback { .. } => &["phase", "viewport"],
             Event::DesignerFocus { .. } => &["edge", "viewport", "correlation"],
             Event::DesignerPointer { .. } => &[
@@ -6029,6 +6230,7 @@ mod tests {
                 "clip_bottom_px",
                 "client_width_px",
                 "client_height_px",
+                "frame_nr",
                 "trace_sequence",
                 "enabled",
                 "selected",
@@ -6059,6 +6261,25 @@ mod tests {
                 "text_edit_field_digest",
                 "text_edit_value_digest",
                 "text_edit_undo_in_flux",
+            ],
+            Event::DesignerAuthoringScrollViewport { .. } => &[
+                "viewport",
+                "scroll_owner",
+                "scroll_id",
+                "frame_nr",
+                "session_id",
+                "generation",
+                "input_left_px",
+                "input_top_px",
+                "input_right_px",
+                "input_bottom_px",
+                "clip_left_px",
+                "clip_top_px",
+                "clip_right_px",
+                "clip_bottom_px",
+                "client_width_px",
+                "client_height_px",
+                "trace_sequence",
             ],
             Event::DesignerActionEditorControl { .. } => &[
                 "editor_surface",
@@ -6493,6 +6714,74 @@ mod tests {
         assert_eq!(TraceBudgetProfile::GATE_D.event_limit, 49_152);
         assert_eq!(TraceBudgetProfile::GATE_D.event_limit, EVENT_BUDGET * 6);
         assert_eq!(TraceBudgetProfile::GATE_D.terminal_reserve, 256);
+        assert_eq!(
+            TraceBudgetProfile::from_environment(Some("gate_s_v1")),
+            TraceBudgetProfile::GATE_S
+        );
+        assert_eq!(
+            TraceBudgetProfile::from_environment(Some("gate-s-v1")),
+            TraceBudgetProfile::DEFAULT
+        );
+        assert_eq!(TraceBudgetProfile::GATE_S.event_limit, 81920);
+        assert_eq!(TraceBudgetProfile::GATE_S.terminal_reserve, 256);
+    }
+    #[test]
+    fn appearance_receipts_serialize_only_typed_owner_facts_with_a_hard_budget() {
+        let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let writer_bytes = std::sync::Arc::clone(&bytes);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || CapturedTraceWriter(std::sync::Arc::clone(&writer_bytes)))
+            .finish();
+        let budget = EventBudget::new(2);
+        tracing::subscriber::with_default(subscriber, || {
+            emit_with_budget(
+                Event::AppearanceState {
+                    state: super::super::gallery::AppearanceObservation {
+                        session_id: 4,
+                        generation: 2,
+                        catalog_count: 5,
+                        preview_active: true,
+                        geometry_digest: 88,
+                        ..Default::default()
+                    },
+                },
+                &budget,
+            );
+            emit_with_budget(
+                Event::NativeAppearanceTarget {
+                    state: super::super::gallery::NativeAppearanceTarget {
+                        session_id: 4,
+                        generation: 3,
+                        point_x: -300,
+                        dpi_milli: 1250,
+                        clicked: true,
+                        ..Default::default()
+                    },
+                },
+                &budget,
+            );
+            emit_with_budget(
+                Event::AppearanceState {
+                    state: Default::default(),
+                },
+                &budget,
+            );
+        });
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("appearance_state") && output.contains("native_appearance_target"));
+        assert!(
+            output.contains("geometry_digest=88")
+                && output.contains("point_x=-300")
+                && output.contains("dpi_milli=1250")
+        );
+        assert!(
+            !output.contains("command=") && !output.contains("path=") && !output.contains("label=")
+        );
+        assert_eq!(budget.emitted(), 2);
     }
 
     #[test]
@@ -6578,6 +6867,7 @@ mod tests {
             clip_bottom_px: 600,
             client_width_px: 800,
             client_height_px: 600,
+            frame_nr: 1,
             enabled: true,
             selected: false,
             focused: true,
@@ -6799,6 +7089,7 @@ mod tests {
             clip_bottom_px: 600,
             client_width_px: 800,
             client_height_px: 600,
+            frame_nr: 2,
             enabled: true,
             selected: false,
             focused: true,
@@ -7260,6 +7551,7 @@ mod tests {
                 clip_bottom_px: 441,
                 client_width_px: 624,
                 client_height_px: 441,
+                frame_nr: 3,
                 enabled: true,
                 selected: false,
                 focused: true,
@@ -7278,6 +7570,19 @@ mod tests {
                         slot_index: 0,
                     },
                 )),
+            },
+            Event::DesignerAuthoringScrollViewport {
+                viewport: ViewportClass::Deferred,
+                measured: DesignerAuthoringScrollViewport {
+                    owner: DesignerAuthoringScrollOwner::Resources,
+                    scroll_id: 31,
+                    frame_nr: 3,
+                    session_id: 77,
+                    generation: 19,
+                    input_bounds: [8, 110, 616, 433],
+                    paint_clip_bounds: [0, 107, 624, 436],
+                    client_size: [624, 441],
+                },
             },
             Event::DesignerCanvasAllocation {
                 allocated_rect_px: [191, 157, 331, 442],

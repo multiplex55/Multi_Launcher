@@ -22,6 +22,7 @@ pub enum RadialDiagnosticSeverity {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RadialDiagnosticKind {
     LabelTruncated,
+    DensityPressure(DensityPressure),
     TooltipViewLimited,
     RequestedFamilyMissing(String),
     FallbackFamilyMissing,
@@ -30,6 +31,14 @@ pub enum RadialDiagnosticKind {
     AssetUnavailable(AssetDiagnostic),
     SoundUnavailable(AssetDiagnostic),
     DiagnosticsOmitted(RadialDiagnosticOmission),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DensityPressure {
+    NarrowTargets,
+    LabelOverlap,
+    Readability,
+    WorkAreaFit,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

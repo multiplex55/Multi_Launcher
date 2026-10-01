@@ -70,6 +70,9 @@ impl LauncherApp {
                     self.start_next_authoring_provider_search()
                 }
                 WatchEvent::RadialInvalidate => {
+                    if let Ok(mut editor) = self.radial_editor.lock() {
+                        editor.invalidate_appearance_resources();
+                    }
                     self.radial_expected_diagnostics.clear();
                     self.invalidate_radial_leases();
                 }

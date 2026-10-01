@@ -307,6 +307,7 @@ pub(crate) fn prepare_visual_resources(
             }
         }
     }
+    diagnostics.extend(super::density::analyze(menu, layout, &resources, work_area));
     (
         resources,
         bound_diagnostics(

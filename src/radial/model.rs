@@ -366,6 +366,8 @@ pub struct TextStyleOverrides {
 #[serde(default, deny_unknown_fields)]
 pub struct EffectStyleOverrides {
     pub glow_enabled: Override<bool>,
+    /// Optional non-color selection cue. Absent fields preserve legacy rendering.
+    pub emphasize_selection: Override<bool>,
     pub tooltip_mode: Override<TooltipMode>,
     pub menu_shadow_width: Override<f32>,
     pub menu_shadow_inner_color: Override<ColorRgba>,
@@ -793,7 +795,7 @@ impl Default for RadialDocument {
 impl RadialDocument {
     pub fn starter() -> Self {
         let menu_id = MenuId::new("starter");
-        let skin_id = SkinId::new("carbon");
+        let skin_id = super::appearance::BuiltinSkin::ModernClean.definition().id;
         let submenu_specs = [
             ("favorites", "Favorites", DynamicSource::Favorites),
             ("applications", "Apps", DynamicSource::Applications),
@@ -901,27 +903,7 @@ impl RadialDocument {
             default_menu_id: menu_id,
             after_action: AfterActionPolicy::Inherit,
             menus,
-            skins: vec![SkinDefinition {
-                id: skin_id,
-                name: "Carbon".into(),
-                style: SelectedSkinStyleLayer {
-                    values: StyleOverrides {
-                        images: ImageStyleOverrides {
-                            center_image: Override::Clear,
-                            ..Default::default()
-                        },
-                        geometry: GeometryStyleOverrides {
-                            menu_scale: Override::Value(1.0),
-                            ..Default::default()
-                        },
-                        effects: EffectStyleOverrides {
-                            glow_enabled: Override::Value(true),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    },
-                },
-            }],
+            skins: vec![super::appearance::BuiltinSkin::ModernClean.definition()],
             user_style_defaults: UserDefaultStyleLayer::default(),
             media_search_roots: MediaSearchRoots::default(),
             assets: Vec::new(),
