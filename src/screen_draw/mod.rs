@@ -46,6 +46,10 @@ pub use native_runtime::{
     NativeSessionEvent, NativeSessionHandle,
 };
 pub use raster::{RasterBackground, RasterError, render_document_into, selected_background};
-pub use recovery::ScreenDrawRecoveryBridge;
+pub use recovery::{
+    ScreenDrawRecoveryAdmission, ScreenDrawRecoveryBridge, ScreenDrawRecoveryIntent,
+    ScreenDrawRecoveryKind, ScreenDrawRecoveryLifetime,
+};
+pub(crate) use recovery::{ScreenDrawRestoreCause, ScreenDrawRestoreOutcome};
 pub use settings::{HotkeyChord, PALETTE_SLOT_COUNT, ScreenDrawSettings, SettingsValidationError};
 pub use window_layers::{NativeWindowHandle, ToolbarWindowInfo};

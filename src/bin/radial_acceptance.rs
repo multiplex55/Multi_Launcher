@@ -27,6 +27,8 @@ mod gate_c_wire;
 #[path = "radial_acceptance/gate_s.rs"]
 mod gate_s;
 use gate_s::*;
+#[path = "radial_acceptance/controlled_failures.rs"]
+mod controlled_failures;
 #[cfg(windows)]
 #[path = "radial_acceptance/native.rs"]
 mod native;
@@ -61,13 +63,18 @@ const H04_BURST_FIXTURE_TIMING: HotkeyBurstFixtureTiming = HotkeyBurstFixtureTim
     released: Duration::from_millis(50),
 };
 
-const HOTKEY_CASE_IDS: [&str; 15] = [
-    "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17", "H18",
-    "CLEANUP", "R0",
+const HOTKEY_CASE_IDS: [&str; 16] = [
+    "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H15", "H16", "H17",
+    "H18", "CLEANUP", "R0",
 ];
-const QUERY_CASE_IDS: [&str; 11] = [
-    "Q02", "Q03", "Q05", "Q07", "Q10", "Q11", "Q12", "Q13", "Q15", "CLEANUP", "R0",
+const QUERY_CASE_IDS: [&str; 12] = [
+    "Q02", "Q03", "Q05", "Q07", "Q10", "Q11", "Q12", "Q13", "Q15", "L08", "CLEANUP", "R0",
 ];
+const PRIORITY_SMOKE_ACTION_LABEL: &str = "Radial Acceptance Screen Draw Priority Smoke";
+const PRIORITY_SMOKE_QUERY: &str = "app Radial Acceptance Screen Draw Priority Smoke";
+const PRIORITY_SMOKE_TOOL_TITLE: &str = "Screen Draw — Multi Launcher";
+const QUERY_CONFIGURED_ROOT_POSITION: [i32; 2] = [240, 180];
+const QUERY_CONFIGURED_ROOT_CLIENT_SIZE: [i32; 2] = [900, 650];
 const GATE_C_CASE_IDS: [&str; 9] = [
     "D01", "D02", "D04", "D06", "D07", "D09", "Q14", "CLEANUP", "R0",
 ];
@@ -95,9 +102,10 @@ const MAX_GATE_D_CASE_EVIDENCE_BYTES: usize = 32 * 1024;
 const MAX_GATE_D_EVIDENCE_BYTES: usize = 128 * 1024;
 const ACCEPTANCE_ACTION_COUNT: usize = 64;
 const ACCEPTANCE_TARGET_ACTION_INDEX: usize = ACCEPTANCE_ACTION_COUNT - 1;
-pub(crate) const CASE_IDS: [&str; 32] = [
+pub(crate) const CASE_IDS: [&str; 33] = [
     "H0", "H1", "H2", "H3", "H4", "H5", "H6", "D0", "D1", "D2", "D4", "D5", "A0", "A1", "G0", "A2",
     "G1", "G2", "A3", "A4", "A5", "A6", "A7", "A8", "D3", "D6", "D7", "H7", "H8", "R0", "R1", "R2",
+    "CLEANUP",
 ];
 const COPIED_CASE_IDS: [&str; 28] = [
     "CP_PREFLIGHT",
@@ -142,6 +150,8 @@ struct Arguments {
     mouse_gesture_mode: MouseGestureMode,
     suite: AcceptanceSuite,
     hotkey: AcceptanceHotkey,
+    operation: controlled_failures::Operation,
+    probe_nonce: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -234,7 +244,7 @@ impl H6RepeatMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CaseStatus {
     Passed,
@@ -243,7 +253,7 @@ enum CaseStatus {
     Unsupported,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum FailureStage {
     Environment,
@@ -264,13 +274,13 @@ enum FailureStage {
     Cleanup,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 struct CandidateIdentity {
     executable: String,
     sha256: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 struct MonitorIdentity {
     id: u32,
     x: i32,
@@ -280,7 +290,7 @@ struct MonitorIdentity {
     scale_factor: f32,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 struct EnvironmentIdentity {
     os_version: String,
     architecture: String,
@@ -303,7 +313,7 @@ struct ProfileIdentity {
     hold_threshold_ms: u64,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, serde::Deserialize)]
 struct AcceptanceCaseResult {
     id: String,
     status: CaseStatus,
@@ -327,6 +337,7 @@ enum HotkeyExpectedState {
     HoldDismissesHoveredActionWithoutDispatch,
     DesignerDraftAndForegroundPreserved,
     DesignerPreviewAndDraftPreserved,
+    RealScreenDrawPriorityAndNextGesture,
     DirectAndLegacyTriggersPreserved,
     AlternateHotkeyProfilesIsolated,
     ParkedRootWakesAndRadialDismisses,
@@ -1057,6 +1068,8 @@ struct HotkeyCaseEvidence {
     root_identities: Vec<HotkeyRootIdentityEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     physical_displays: Vec<[i32; 4]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    screen_draw_priority: Option<ScreenDrawPriorityEvidence>,
     candidate_event_count: usize,
     candidate_trace_overflow: bool,
     capture_segment_overflow: bool,
@@ -1133,6 +1146,8 @@ struct HotkeyCaseEvidenceWire {
     root_identities: Vec<HotkeyRootIdentityEvidence>,
     #[serde(default)]
     physical_displays: Vec<[i32; 4]>,
+    #[serde(default)]
+    screen_draw_priority: Option<ScreenDrawPriorityEvidence>,
     candidate_event_count: usize,
     candidate_trace_overflow: bool,
     capture_segment_overflow: bool,
@@ -1158,6 +1173,7 @@ impl<'de> serde::Deserialize<'de> for HotkeyCaseEvidence {
             follow_on_restorations: wire.follow_on_restorations,
             root_identities: wire.root_identities,
             physical_displays: wire.physical_displays,
+            screen_draw_priority: wire.screen_draw_priority,
             candidate_event_count: wire.candidate_event_count,
             candidate_trace_overflow: wire.candidate_trace_overflow,
             capture_segment_overflow: wire.capture_segment_overflow,
@@ -1185,6 +1201,13 @@ fn hydrate_hotkey_command_spans(packet: &mut HotkeyCaseEvidence) {
     for restore in &mut packet.follow_on_restorations {
         for span in &mut restore.root_commands {
             hydrate_hotkey_command_span(&packet.candidate_events, restore.stream, span);
+        }
+    }
+    if let Some(priority) = &mut packet.screen_draw_priority {
+        for restore in &mut priority.restorations {
+            for span in &mut restore.root_commands {
+                hydrate_hotkey_command_span(&priority.candidate_events, restore.stream, span);
+            }
         }
     }
 }
@@ -1249,6 +1272,7 @@ fn hotkey_expected_state(case_id: &str) -> Option<HotkeyExpectedState> {
         "H10" => HotkeyExpectedState::HoldDismissesHoveredActionWithoutDispatch,
         "H11" => HotkeyExpectedState::DesignerDraftAndForegroundPreserved,
         "H12" => HotkeyExpectedState::DesignerPreviewAndDraftPreserved,
+        "H15" => HotkeyExpectedState::RealScreenDrawPriorityAndNextGesture,
         "H16" => HotkeyExpectedState::DirectAndLegacyTriggersPreserved,
         "H17" => HotkeyExpectedState::AlternateHotkeyProfilesIsolated,
         "H18" => HotkeyExpectedState::ParkedRootWakesAndRadialDismisses,
@@ -1258,6 +1282,559 @@ fn hotkey_expected_state(case_id: &str) -> Option<HotkeyExpectedState> {
 
 fn validate_hotkey_evidence_packet(packet: &HotkeyCaseEvidence) -> Result<(), String> {
     validate_hotkey_evidence_packet_with_context(packet, AcceptanceHotkey::F11, 350)
+}
+
+// ROOT samples are taken two frames after a request. They identify requested
+// work, not an application acknowledgment. Keep the causal rule shared by the
+// live wait, proof builder, and persisted oracle.
+fn hotkey_paired_toggle_intent<'a>(
+    events: &'a [HotkeyCandidateEventEvidence],
+    intent: &HotkeyCandidateEventEvidence,
+) -> Option<(
+    &'a HotkeyCandidateEventEvidence,
+    &'a HotkeyCandidateEventEvidence,
+    &'a HotkeyCandidateEventEvidence,
+)> {
+    if intent.kind != HotkeyTraceEventKind::VisibilityIntent
+        || intent.visibility_source != Some(HotkeyVisibilitySource::ToggleBatch)
+        || intent.input_group_id == 0
+        || intent.invocation_id.is_none_or(|id| id == 0)
+        || intent
+            .visibility_revision
+            .is_none_or(|revision| revision == 0)
+        || intent.visible.is_none()
+    {
+        return None;
+    }
+    let unique = |kind| {
+        let mut matching = events.iter().filter(|event| {
+            event.stream == intent.stream
+                && event.input_group_id == intent.input_group_id
+                && event.input_purpose == intent.input_purpose
+                && event.invocation_id == intent.invocation_id
+                && event.kind == kind
+        });
+        let event = matching.next()?;
+        matching.next().is_none().then_some(event)
+    };
+    let press = unique(HotkeyTraceEventKind::PrimaryPress)?;
+    let release = unique(HotkeyTraceEventKind::PrimaryRelease)?;
+    let tap = unique(HotkeyTraceEventKind::ShortTap)?;
+    (press.modifiers_match == Some(true)
+        && release.modifiers_match.is_some()
+        && tap.terminal == Some(true)
+        && press.event_ordinal < release.event_ordinal
+        && release.event_ordinal < tap.event_ordinal
+        && tap.event_ordinal < intent.event_ordinal
+        && press.elapsed_ms <= release.elapsed_ms
+        && release.elapsed_ms <= tap.elapsed_ms
+        && tap.elapsed_ms <= intent.elapsed_ms)
+        .then_some((press, release, tap))
+}
+
+fn hotkey_command_belongs_to_intent(
+    command: &HotkeyCandidateEventEvidence,
+    intent: &HotkeyCandidateEventEvidence,
+) -> bool {
+    command.kind == HotkeyTraceEventKind::RootCommand
+        && command.stream == intent.stream
+        && command.input_group_id == intent.input_group_id
+        && command.input_purpose == intent.input_purpose
+        && command.visibility_revision == intent.visibility_revision
+        && command.invocation_id == intent.invocation_id
+        && command.event_ordinal > intent.event_ordinal
+        && command.elapsed_ms >= intent.elapsed_ms
+        && command.request_id.is_some_and(|request| request != 0)
+        && command.command.is_some()
+}
+
+#[derive(Clone, Copy)]
+struct HotkeyRootProofContext<'a> {
+    candidate_events: &'a [HotkeyCandidateEventEvidence],
+    root_identities: &'a [HotkeyRootIdentityEvidence],
+    physical_displays: &'a [[i32; 4]],
+    follow_on_restorations: &'a [HotkeyFollowOnRestoreEvidence],
+}
+
+impl<'a> From<&'a HotkeyCaseEvidence> for HotkeyRootProofContext<'a> {
+    fn from(packet: &'a HotkeyCaseEvidence) -> Self {
+        Self {
+            candidate_events: &packet.candidate_events,
+            root_identities: &packet.root_identities,
+            physical_displays: &packet.physical_displays,
+            follow_on_restorations: &packet.follow_on_restorations,
+        }
+    }
+}
+
+fn hotkey_command_snapshots_are_owned(
+    events: &[HotkeyCandidateEventEvidence],
+    command: &HotkeyCandidateEventEvidence,
+) -> bool {
+    events
+        .iter()
+        .filter(|snapshot| {
+            snapshot.stream == command.stream
+                && snapshot.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                && snapshot.request_id == command.request_id
+        })
+        .all(|snapshot| {
+            snapshot.input_group_id == command.input_group_id
+                && snapshot.input_purpose == command.input_purpose
+                && snapshot.invocation_id == command.invocation_id
+                && snapshot.visibility_revision == command.visibility_revision
+                && snapshot.event_ordinal > command.event_ordinal
+                && snapshot.elapsed_ms >= command.elapsed_ms
+        })
+}
+
+fn hotkey_owned_follow_on_restore_intent<'a>(
+    context: HotkeyRootProofContext<'a>,
+    restore: &HotkeyFollowOnRestoreEvidence,
+) -> Option<&'a HotkeyCandidateEventEvidence> {
+    let events = context.candidate_events;
+    if restore.input_group_id == 0
+        || restore.visibility_revision == 0
+        || !restore.visible
+        || context
+            .follow_on_restorations
+            .iter()
+            .filter(|owner| {
+                owner.stream == restore.stream
+                    && owner.visibility_revision == restore.visibility_revision
+            })
+            .count()
+            != 1
+    {
+        return None;
+    }
+    let mut intents = events.iter().filter(|event| {
+        event.stream == restore.stream
+            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+            && event.visibility_revision == Some(restore.visibility_revision)
+            && event.visibility_source == Some(HotkeyVisibilitySource::ScreenDrawRestore)
+    });
+    let intent = intents.next()?;
+    if intents.next().is_some()
+        || intent.input_group_id != restore.input_group_id
+        || intent.invocation_id != restore.invocation_id
+        || intent.elapsed_ms != restore.intent_elapsed_ms
+        || intent.visible != Some(restore.visible)
+    {
+        return None;
+    }
+    let mut focuses = events.iter().filter(|event| {
+        event.stream == restore.stream
+            && event.kind == HotkeyTraceEventKind::ScreenDrawRestoreFocusIntent
+            && event.visibility_revision == Some(restore.visibility_revision)
+    });
+    let focus = focuses.next()?;
+    if focuses.next().is_some()
+        || focus.input_group_id != intent.input_group_id
+        || focus.input_purpose != intent.input_purpose
+        || focus.invocation_id != intent.invocation_id
+        || focus.focus_intent != Some(restore.focus_intent)
+        || focus.event_ordinal <= intent.event_ordinal
+        || focus.elapsed_ms < intent.elapsed_ms
+    {
+        return None;
+    }
+    match (restore.invocation_id, restore.parent_visibility_revision) {
+        (None, None) => {}
+        (Some(invocation), Some(parent_revision)) => {
+            let mut parents = events.iter().filter(|parent| {
+                parent.stream == intent.stream
+                    && parent.input_group_id == intent.input_group_id
+                    && parent.input_purpose == intent.input_purpose
+                    && parent.kind == HotkeyTraceEventKind::VisibilityIntent
+                    && parent.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
+                    && parent.invocation_id == Some(invocation)
+                    && parent.visibility_revision == Some(parent_revision)
+                    && parent_revision < restore.visibility_revision
+                    && parent.event_ordinal < intent.event_ordinal
+                    && parent.elapsed_ms <= intent.elapsed_ms
+            });
+            parents.next()?;
+            if parents.next().is_some() {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let commands = events
+        .iter()
+        .filter(|command| {
+            command.stream == intent.stream
+                && command.kind == HotkeyTraceEventKind::RootCommand
+                && command.visibility_revision == intent.visibility_revision
+        })
+        .collect::<Vec<_>>();
+    if commands.is_empty()
+        || commands.len() != restore.root_commands.len()
+        || commands.iter().any(|command| {
+            !hotkey_command_belongs_to_intent(command, intent)
+                || command.event_ordinal <= focus.event_ordinal
+                || command.elapsed_ms < focus.elapsed_ms
+                || !hotkey_command_snapshots_are_owned(events, command)
+                || restore
+                    .root_commands
+                    .iter()
+                    .filter(|span| root_command_event_matches_span(command, restore.stream, span))
+                    .count()
+                    != 1
+        })
+        || restore.root_commands.iter().any(|span| {
+            span.visibility_revision != restore.visibility_revision
+                || span.invocation_id != restore.invocation_id
+                || span.release_to_root_command_ms.is_some()
+                || !root_command_span_matches(context, restore.stream, span)
+        })
+    {
+        return None;
+    }
+    let root = context
+        .root_identities
+        .iter()
+        .find(|root| root.stream == restore.stream)?;
+    let snapshot = hotkey_current_intent_physical_snapshot(context, intent, root)?;
+    if !restore.root_commands.iter().any(|span| {
+        span.observed_snapshot_event_ordinal == Some(snapshot)
+            && span.observed_presentation.as_ref().is_some_and(|observed| {
+                presentation_matches(context, restore.stream, span, observed, restore.visible)
+            })
+    }) {
+        return None;
+    }
+    let activations = events
+        .iter()
+        .filter(|event| {
+            event.stream == restore.stream
+                && event.kind == HotkeyTraceEventKind::NativeActivation
+                && event.visibility_revision == Some(restore.visibility_revision)
+                && event.invocation_id == restore.invocation_id
+        })
+        .collect::<Vec<_>>();
+    match restore.focus_intent {
+        HotkeyRootFocusIntent::PreserveForeground => {
+            if restore.native_activation.is_some()
+                || !activations.is_empty()
+                || commands
+                    .iter()
+                    .any(|command| command.command == Some(HotkeyRootCommand::Focus))
+            {
+                return None;
+            }
+        }
+        HotkeyRootFocusIntent::ActivateRoot => {
+            let span = restore.native_activation.as_ref()?;
+            if !native_activation_span_matches(context, restore.stream, restore, span)
+                || activations.len() != 2
+                || activations.iter().any(|event| {
+                    event.input_group_id != intent.input_group_id
+                        || event.input_purpose != intent.input_purpose
+                        || event.event_ordinal <= focus.event_ordinal
+                        || event.elapsed_ms < focus.elapsed_ms
+                })
+            {
+                return None;
+            }
+            let requested = activations.iter().find(|event| {
+                event.activation_edge == Some(HotkeyActivationEdge::RestoreRequested)
+            })?;
+            let completed = activations.iter().find(|event| {
+                event.activation_edge == Some(HotkeyActivationEdge::RestoreCompleted)
+            })?;
+            if requested.event_ordinal >= completed.event_ordinal
+                || requested.elapsed_ms > completed.elapsed_ms
+            {
+                return None;
+            }
+        }
+    }
+    Some(intent)
+}
+
+fn hotkey_restore_follows_intent<'a>(
+    context: HotkeyRootProofContext<'a>,
+    restore: &HotkeyFollowOnRestoreEvidence,
+    intent: &HotkeyCandidateEventEvidence,
+) -> Option<&'a HotkeyCandidateEventEvidence> {
+    if restore.stream != intent.stream
+        || restore.input_group_id != intent.input_group_id
+        || restore.invocation_id != intent.invocation_id
+        || restore.parent_visibility_revision != intent.visibility_revision
+    {
+        return None;
+    }
+    let restore_intent = hotkey_owned_follow_on_restore_intent(context, restore)?;
+    let root = context
+        .root_identities
+        .iter()
+        .find(|root| root.stream == intent.stream)?;
+    hotkey_paired_toggle_intent(context.candidate_events, intent)?;
+    // Screen Draw retains its parent invocation, but owns fresh work only
+    // after the original request has a physical presentation.
+    let parent_snapshot = hotkey_current_intent_physical_snapshot(context, intent, root)?;
+    let observed = context
+        .candidate_events
+        .iter()
+        .find(|event| event.stream == intent.stream && event.event_ordinal == parent_snapshot)?;
+    (restore_intent.input_purpose == intent.input_purpose
+        && observed.event_ordinal < restore_intent.event_ordinal
+        && observed.elapsed_ms <= restore_intent.elapsed_ms)
+        .then_some(restore_intent)
+}
+
+fn hotkey_intent_work_is_owned(
+    context: HotkeyRootProofContext<'_>,
+    intent: &HotkeyCandidateEventEvidence,
+) -> bool {
+    let events = context.candidate_events;
+    if context.follow_on_restorations.iter().any(|restore| {
+        restore.stream == intent.stream
+            && ((restore.input_group_id == intent.input_group_id
+                && hotkey_owned_follow_on_restore_intent(context, restore).is_none())
+                || ((restore.invocation_id == intent.invocation_id
+                    || restore.parent_visibility_revision == intent.visibility_revision)
+                    && hotkey_restore_follows_intent(context, restore, intent).is_none()))
+    }) {
+        return false;
+    }
+    events
+        .iter()
+        .filter(|event| {
+            event.stream == intent.stream
+                && event.kind == HotkeyTraceEventKind::RootCommand
+                && (event.invocation_id == intent.invocation_id
+                    || event.visibility_revision == intent.visibility_revision)
+        })
+        .all(|command| {
+            let separately_owned_restore = || {
+                let mut owners = context.follow_on_restorations.iter().filter(|restore| {
+                    restore
+                        .root_commands
+                        .iter()
+                        .any(|span| root_command_event_matches_span(command, restore.stream, span))
+                });
+                let restore = owners.next()?;
+                if owners.next().is_some() {
+                    return None;
+                }
+                let restore_intent = hotkey_restore_follows_intent(context, restore, intent)?;
+                hotkey_command_belongs_to_intent(command, restore_intent).then_some(())
+            };
+            (hotkey_command_belongs_to_intent(command, intent)
+                || separately_owned_restore().is_some())
+                && hotkey_command_snapshots_are_owned(events, command)
+        })
+}
+
+fn hotkey_intent_physical_snapshot(
+    context: HotkeyRootProofContext<'_>,
+    intent: &HotkeyCandidateEventEvidence,
+    root: &HotkeyRootIdentityEvidence,
+) -> Option<u32> {
+    hotkey_paired_toggle_intent(context.candidate_events, intent)?;
+    if !hotkey_intent_work_is_owned(context, intent) {
+        return None;
+    }
+    hotkey_current_intent_physical_snapshot(context, intent, root)
+}
+
+fn hotkey_current_intent_physical_snapshot(
+    context: HotkeyRootProofContext<'_>,
+    intent: &HotkeyCandidateEventEvidence,
+    root: &HotkeyRootIdentityEvidence,
+) -> Option<u32> {
+    let events = context.candidate_events;
+    let displays = context.physical_displays;
+    if root.stream != intent.stream
+        || root.hwnd == 0
+        || root.process_id == 0
+        || displays.is_empty()
+        || displays
+            .iter()
+            .any(|display| display[0] >= display[2] || display[1] >= display[3])
+    {
+        return None;
+    }
+    // One captured ROOT lifetime owns every native observation in this stream.
+    if events.iter().any(|event| {
+        event.stream == root.stream
+            && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+            && (event.hwnd != Some(root.hwnd)
+                || event.process_id != Some(root.process_id)
+                || event.visible.is_none()
+                || event.minimized.is_none()
+                || event
+                    .bounds
+                    .is_none_or(|bounds| bounds[0] >= bounds[2] || bounds[1] >= bounds[3]))
+    }) {
+        return None;
+    }
+    let commands = events
+        .iter()
+        .filter(|command| hotkey_command_belongs_to_intent(command, intent))
+        .collect::<Vec<_>>();
+    if commands
+        .iter()
+        .any(|command| !hotkey_command_snapshots_are_owned(events, command))
+    {
+        return None;
+    }
+    let last_command = commands
+        .iter()
+        .max_by_key(|command| command.event_ordinal)?;
+    let snapshot = events
+        .iter()
+        .filter(|snapshot| {
+            snapshot.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                && snapshot.stream == intent.stream
+                && snapshot.input_group_id == intent.input_group_id
+                && snapshot.input_purpose == intent.input_purpose
+                && snapshot.visibility_revision == intent.visibility_revision
+                && snapshot.invocation_id == intent.invocation_id
+                && snapshot.event_ordinal > last_command.event_ordinal
+                && snapshot.elapsed_ms >= last_command.elapsed_ms
+                && commands.iter().any(|command| {
+                    command.request_id == snapshot.request_id
+                        && command.event_ordinal < snapshot.event_ordinal
+                        && command.elapsed_ms <= snapshot.elapsed_ms
+                })
+                && !events.iter().any(|later| {
+                    later.stream == intent.stream
+                        && later.event_ordinal > intent.event_ordinal
+                        && later.event_ordinal < snapshot.event_ordinal
+                        && ((later.kind == HotkeyTraceEventKind::VisibilityIntent
+                            && later.visibility_revision.is_some_and(|revision| {
+                                revision > intent.visibility_revision.unwrap_or(0)
+                            }))
+                            || (later.kind == HotkeyTraceEventKind::RootCommand
+                                && later.visibility_revision != intent.visibility_revision))
+                })
+        })
+        .max_by_key(|snapshot| snapshot.event_ordinal)?;
+    let bounds = snapshot.bounds?;
+    let physically_shown = snapshot.visible == Some(true)
+        && snapshot.minimized == Some(false)
+        && displays.iter().any(|display| {
+            bounds[0] < display[2]
+                && bounds[2] > display[0]
+                && bounds[1] < display[3]
+                && bounds[3] > display[1]
+        });
+    (Some(physically_shown) == intent.visible).then_some(snapshot.event_ordinal)
+}
+
+fn hotkey_terminal_successor<'a>(
+    context: HotkeyRootProofContext<'a>,
+    source: &HotkeyCandidateEventEvidence,
+    root: &HotkeyRootIdentityEvidence,
+) -> Option<&'a HotkeyCandidateEventEvidence> {
+    let events = context.candidate_events;
+    let (_, source_release, _) = hotkey_paired_toggle_intent(events, source)?;
+    let source_revision = source.visibility_revision?;
+    let source_invocation = source.invocation_id?;
+    if !hotkey_intent_work_is_owned(context, source) {
+        return None;
+    }
+    if let Some(first_newer) = events
+        .iter()
+        .filter(|event| {
+            event.stream == source.stream
+                && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                && event
+                    .visibility_revision
+                    .is_some_and(|revision| revision > source_revision)
+                && event.event_ordinal > source.event_ordinal
+        })
+        .min_by_key(|event| event.event_ordinal)
+    {
+        if events
+            .iter()
+            .filter(|command| hotkey_command_belongs_to_intent(command, source))
+            .any(|command| {
+                command.event_ordinal >= first_newer.event_ordinal
+                    || command.elapsed_ms > first_newer.elapsed_ms
+            })
+        {
+            return None;
+        }
+    }
+    let mut successors = events
+        .iter()
+        .filter(|successor| {
+            successor.stream == source.stream
+                && successor.input_group_id == source.input_group_id
+                && successor.input_purpose == source.input_purpose
+                && successor.kind == HotkeyTraceEventKind::VisibilityIntent
+                && successor.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
+                && successor.event_ordinal > source.event_ordinal
+                && successor.elapsed_ms >= source.elapsed_ms
+                && successor
+                    .visibility_revision
+                    .is_some_and(|revision| revision > source_revision)
+                && successor
+                    .invocation_id
+                    .is_some_and(|invocation| invocation > source_invocation)
+        })
+        .collect::<Vec<_>>();
+    successors.sort_by_key(|successor| successor.event_ordinal);
+    for successor in successors {
+        let mut chain = events
+            .iter()
+            .filter(|event| {
+                event.stream == source.stream
+                    && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    && event.event_ordinal > source.event_ordinal
+                    && event.event_ordinal <= successor.event_ordinal
+                    && event.visibility_source != Some(HotkeyVisibilitySource::Queued)
+            })
+            .collect::<Vec<_>>();
+        chain.sort_by_key(|event| event.event_ordinal);
+        let mut prior_revision = source_revision;
+        let mut prior_invocation = source_invocation;
+        let mut prior_release = source_release;
+        let mut ordered = true;
+        for intent in chain {
+            let Some((press, release, _)) = hotkey_paired_toggle_intent(events, intent) else {
+                ordered = false;
+                break;
+            };
+            if intent.input_group_id != source.input_group_id
+                || intent.input_purpose != source.input_purpose
+                || intent
+                    .visibility_revision
+                    .is_none_or(|revision| revision <= prior_revision)
+                || intent
+                    .invocation_id
+                    .is_none_or(|invocation| invocation <= prior_invocation)
+                || press.event_ordinal <= prior_release.event_ordinal
+                || press.elapsed_ms < prior_release.elapsed_ms
+            {
+                ordered = false;
+                break;
+            }
+            prior_revision = intent.visibility_revision?;
+            prior_invocation = intent.invocation_id?;
+            prior_release = release;
+        }
+        // Issued source work must precede the newer decision; a stale side
+        // effect issued after it cannot acquire a supersession proof.
+        if ordered
+            && events
+                .iter()
+                .filter(|command| hotkey_command_belongs_to_intent(command, source))
+                .all(|command| {
+                    command.event_ordinal < successor.event_ordinal
+                        && command.elapsed_ms <= successor.elapsed_ms
+                })
+            && hotkey_intent_physical_snapshot(context, successor, root).is_some()
+        {
+            return Some(successor);
+        }
+    }
+    None
 }
 
 fn validate_hotkey_evidence_packet_with_context(
@@ -1398,7 +1975,7 @@ fn validate_hotkey_evidence_packet_with_context(
                         packet.case_id
                     ));
                 }
-                if !event_root_identity_matches(packet, event) {
+                if !event_root_identity_matches(packet.into(), event) {
                     return Err(format!(
                         "{} native presentation snapshot is not from the captured ROOT HWND/PID",
                         packet.case_id
@@ -1510,7 +2087,7 @@ fn validate_hotkey_evidence_packet_with_context(
                             span.command_elapsed_ms
                                 .saturating_sub(gesture.release_elapsed_ms),
                         )
-                    || !root_command_span_matches(packet, gesture.stream, span)
+                    || !root_command_span_matches(packet.into(), gesture.stream, span)
                 {
                     return Err(format!(
                         "{} ROOT command span has invalid release correlation",
@@ -1531,11 +2108,41 @@ fn validate_hotkey_evidence_packet_with_context(
             }
             if !root_commands.iter().any(|span| {
                 span.observed_presentation.as_ref().is_some_and(|observed| {
-                    presentation_matches(packet, gesture.stream, span, observed, *visible)
+                    presentation_matches(packet.into(), gesture.stream, span, observed, *visible)
                 })
             }) {
                 return Err(format!(
                     "{} applied gesture lacks a ROOT-owned physical presentation matching its visibility decision",
+                    packet.case_id
+                ));
+            }
+            let actual_snapshot = packet
+                .candidate_events
+                .iter()
+                .find(|event| {
+                    event.stream == gesture.stream
+                        && event.input_group_id == gesture.input_group_id
+                        && event.input_purpose == gesture.input_purpose
+                        && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                        && event.invocation_id == Some(gesture.invocation_id)
+                        && event.visibility_revision == Some(*visibility_revision)
+                })
+                .and_then(|intent| {
+                    packet
+                        .root_identities
+                        .iter()
+                        .find(|root| root.stream == gesture.stream)
+                        .and_then(|root| {
+                            hotkey_intent_physical_snapshot(packet.into(), intent, root)
+                        })
+                });
+            if actual_snapshot.is_none_or(|ordinal| {
+                !root_commands
+                    .iter()
+                    .any(|span| span.observed_snapshot_event_ordinal == Some(ordinal))
+            }) {
+                return Err(format!(
+                    "{} applied decision lacks a current physical observation before supersession",
                     packet.case_id
                 ));
             }
@@ -1561,24 +2168,30 @@ fn validate_hotkey_evidence_packet_with_context(
                     packet.case_id
                 ));
             }
-            let has_source_intent = packet.candidate_events.iter().any(|event| {
+            let source_intent = packet.candidate_events.iter().find(|event| {
                 event.stream == gesture.stream
+                    && event.input_group_id == gesture.input_group_id
+                    && event.input_purpose == gesture.input_purpose
                     && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    && event.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
                     && event.invocation_id == Some(gesture.invocation_id)
                     && event.visibility_revision == Some(*visibility_revision)
                     && event.elapsed_ms == *intent_elapsed_ms
                     && event.visible == Some(*visible)
             });
-            let successor_intent = packet.candidate_events.iter().find(|event| {
-                event.stream == gesture.stream
-                    && event.kind == HotkeyTraceEventKind::VisibilityIntent
-                    && event.visibility_revision == Some(*by_revision)
-                    && event.elapsed_ms >= *intent_elapsed_ms
-                    && event.invocation_id.is_some()
+            let successor_intent = source_intent.and_then(|source| {
+                packet
+                    .root_identities
+                    .iter()
+                    .find(|root| root.stream == gesture.stream)
+                    .and_then(|root| hotkey_terminal_successor(packet.into(), source, root))
+                    .filter(|successor| successor.visibility_revision == Some(*by_revision))
             });
             let successor_gesture = successor_intent.and_then(|successor| {
                 packet.gestures.iter().find(|candidate| {
                     candidate.stream == successor.stream
+                        && candidate.input_group_id == successor.input_group_id
+                        && candidate.input_purpose == successor.input_purpose
                         && Some(candidate.invocation_id) == successor.invocation_id
                         && candidate.short_tap_elapsed_ms.is_some()
                         && matches!(
@@ -1591,7 +2204,7 @@ fn validate_hotkey_evidence_packet_with_context(
                                 && root_commands.iter().any(|span| {
                                     span.observed_presentation.as_ref().is_some_and(|observed| {
                                         presentation_matches(
-                                            packet,
+                                            packet.into(),
                                             candidate.stream,
                                             span,
                                             observed,
@@ -1602,7 +2215,7 @@ fn validate_hotkey_evidence_packet_with_context(
                         )
                 })
             });
-            if !has_source_intent || successor_gesture.is_none() {
+            if successor_gesture.is_none() {
                 return Err(format!(
                     "{} superseded decision lacks a later paired gesture with terminal physical presentation",
                     packet.case_id
@@ -1660,11 +2273,17 @@ fn validate_hotkey_evidence_packet_with_context(
                 span.visibility_revision != decision.visibility_revision
                     || span.invocation_id.is_some()
                     || span.release_to_root_command_ms.is_some()
-                    || !root_command_span_matches(packet, decision.stream, span)
+                    || !root_command_span_matches(packet.into(), decision.stream, span)
             })
             || !decision.root_commands.iter().any(|span| {
                 span.observed_presentation.as_ref().is_some_and(|observed| {
-                    presentation_matches(packet, decision.stream, span, observed, decision.visible)
+                    presentation_matches(
+                        packet.into(),
+                        decision.stream,
+                        span,
+                        observed,
+                        decision.visible,
+                    )
                 })
             })
         {
@@ -1697,76 +2316,7 @@ fn validate_hotkey_evidence_packet_with_context(
         ));
     }
     for restore in &packet.follow_on_restorations {
-        let Some(event) = screen_draw_events.iter().find(|event| {
-            event.stream == restore.stream
-                && event.input_group_id == restore.input_group_id
-                && event.visibility_revision == Some(restore.visibility_revision)
-                && event.invocation_id == restore.invocation_id
-                && event.elapsed_ms == restore.intent_elapsed_ms
-                && event.visible == Some(restore.visible)
-        }) else {
-            return Err(format!(
-                "{} Screen Draw follow-on does not match its trace event",
-                packet.case_id
-            ));
-        };
-        let focus_intent_event = screen_draw_focus_events.iter().find(|candidate| {
-            candidate.stream == restore.stream
-                && candidate.input_group_id == restore.input_group_id
-                && candidate.visibility_revision == Some(restore.visibility_revision)
-                && candidate.invocation_id == restore.invocation_id
-                && candidate.focus_intent == Some(restore.focus_intent)
-                && candidate.event_ordinal > event.event_ordinal
-                && candidate.elapsed_ms >= event.elapsed_ms
-        });
-        let parent_matches = match (restore.invocation_id, restore.parent_visibility_revision) {
-            (None, None) => true,
-            (Some(invocation_id), Some(parent_revision)) => {
-                packet.candidate_events.iter().any(|prior| {
-                    prior.stream == restore.stream
-                        && prior.kind == HotkeyTraceEventKind::VisibilityIntent
-                        && prior.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
-                        && prior.invocation_id == Some(invocation_id)
-                        && prior.visibility_revision == Some(parent_revision)
-                        && parent_revision < restore.visibility_revision
-                        && prior.elapsed_ms <= restore.intent_elapsed_ms
-                })
-            }
-            _ => false,
-        };
-        let activation_is_valid = match restore.focus_intent {
-            HotkeyRootFocusIntent::ActivateRoot => {
-                restore.native_activation.as_ref().is_some_and(|span| {
-                    native_activation_span_matches(packet, restore.stream, restore, span)
-                })
-            }
-            HotkeyRootFocusIntent::PreserveForeground => {
-                restore.native_activation.is_none()
-                    && !packet.candidate_events.iter().any(|candidate| {
-                        candidate.stream == restore.stream
-                            && candidate.kind == HotkeyTraceEventKind::NativeActivation
-                            && candidate.visibility_revision == Some(restore.visibility_revision)
-                            && candidate.invocation_id == restore.invocation_id
-                    })
-            }
-        };
-        if !parent_matches
-            || focus_intent_event.is_none()
-            || event.visibility_revision.is_none()
-            || restore.root_commands.is_empty()
-            || restore.root_commands.iter().any(|span| {
-                span.visibility_revision != restore.visibility_revision
-                    || span.invocation_id != restore.invocation_id
-                    || span.release_to_root_command_ms.is_some()
-                    || !root_command_span_matches(packet, restore.stream, span)
-            })
-            || !restore.root_commands.iter().any(|span| {
-                span.observed_presentation.as_ref().is_some_and(|observed| {
-                    presentation_matches(packet, restore.stream, span, observed, restore.visible)
-                })
-            })
-            || !activation_is_valid
-        {
+        if hotkey_owned_follow_on_restore_intent(packet.into(), restore).is_none() {
             return Err(format!(
                 "{} Screen Draw follow-on lacks a correlated ROOT/native presentation span",
                 packet.case_id
@@ -1813,7 +2363,7 @@ fn validate_hotkey_evidence_packet_with_context(
         return Err("H04 evidence does not contain the complete 86+3 tap matrix".into());
     }
     let required_taps = match packet.case_id.as_str() {
-        "H01" | "H02" | "H06" | "H08" | "H18" => 1,
+        "H01" | "H02" | "H06" | "H08" | "H15" | "H18" => 1,
         "H07" => 3,
         "H16" => 2,
         "H11" => 5,
@@ -1914,6 +2464,11 @@ fn validate_hotkey_evidence_packet_with_context(
             &[false, true, false, true, false],
         )?,
         "H12" => require_sequence(
+            HotkeyCandidateStream::MainCandidate,
+            HotkeyRunnerInputPurpose::LauncherChord,
+            &[false],
+        )?,
+        "H15" => require_sequence(
             HotkeyCandidateStream::MainCandidate,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false],
@@ -2033,6 +2588,580 @@ fn validate_hotkey_evidence_packet_with_context(
             ));
         }
         previous_runner_us = Some(edge.runner_relative_us);
+    }
+    validate_screen_draw_priority(packet, configured_hotkey)?;
+    Ok(())
+}
+
+use multi_launcher::radial::acceptance_trace::{
+    ScreenDrawLauncherObservation, ScreenDrawParkingObservation, ScreenDrawParkingState,
+    ScreenDrawRootIdentity, ScreenDrawToolbarMode, ScreenDrawToolbarObservation,
+    ScreenDrawToolbarRole, ScreenDrawToolbarTarget, ScreenDrawToolbarWidget,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenDrawToolbarReceipt {
+    event_ordinal: u32,
+    trace_sequence: u64,
+    elapsed_ms: u64,
+    observation: ScreenDrawToolbarObservation,
+}
+
+/// One contract for live admission and persisted H15 proof. Native client
+/// measurement and presentation are independent of the producer's UI frame.
+fn validate_screen_draw_toolbar_receipt(
+    receipt: &ScreenDrawToolbarReceipt,
+    mode: ScreenDrawToolbarMode,
+    presentation: &QueryRootPresentationEvidence,
+    native_client: [i32; 4],
+    displays: &[[i32; 4]],
+    after_ordinal: u32,
+    through_ordinal: u32,
+    prior: Option<&ScreenDrawToolbarReceipt>,
+) -> Result<(), String> {
+    let frame = &receipt.observation;
+    let width = native_client[2].checked_sub(native_client[0]);
+    let height = native_client[3].checked_sub(native_client[1]);
+    if receipt.event_ordinal <= after_ordinal
+        || receipt.event_ordinal > through_ordinal
+        || receipt.trace_sequence == 0
+        || frame.hwnd == 0
+        || frame.process_id == 0
+        || frame.generation == 0
+        || frame.lifetime == 0
+        || frame.frame_nr == 0
+        || frame.state != mode
+        || frame.runtime_mode != mode
+        || !matches!(
+            mode,
+            ScreenDrawToolbarMode::Drawing | ScreenDrawToolbarMode::Ghost
+        )
+        || !owned_root_presentation_is_valid(
+            presentation,
+            displays,
+            frame.hwnd,
+            frame.process_id,
+            true,
+        )
+        || native_client[0] != 0
+        || native_client[1] != 0
+        || width != Some(frame.client_size[0])
+        || height != Some(frame.client_size[1])
+        || frame.client_size.iter().any(|size| *size <= 0)
+    {
+        return Err("Screen Draw receipt has stale identity, mode, client, or presentation".into());
+    }
+    if !frame.has_visible_controls_for_mode(mode) {
+        return Err(
+            "Screen Draw receipt lacks its real visible enabled state-label/Resume responses"
+                .into(),
+        );
+    }
+    let owner = &frame.launcher;
+    let root = owner
+        .root
+        .ok_or("Screen Draw receipt omitted the current ROOT identity")?;
+    let parking = owner
+        .parking
+        .ok_or("Screen Draw receipt omitted the current parking transaction")?;
+    if owner.visibility_revision == 0
+        || owner.invocation_id == Some(0)
+        || root.hwnd == 0
+        || root.hwnd == frame.hwnd
+        || root.process_id != frame.process_id
+        || root.generation == 0
+        || parking.hwnd != root.hwnd
+        || parking.generation != frame.generation
+        || parking.cycle == 0
+        || (mode == ScreenDrawToolbarMode::Drawing
+            && (owner.visible || parking.state != ScreenDrawParkingState::Committed))
+        || (mode == ScreenDrawToolbarMode::Ghost
+            && (!owner.visible || parking.state != ScreenDrawParkingState::Restored))
+    {
+        return Err(
+            "Screen Draw receipt has incomplete or conflicting current launcher ownership".into(),
+        );
+    }
+    if let Some(prior) = prior {
+        let previous = &prior.observation;
+        if receipt.event_ordinal <= prior.event_ordinal
+            || receipt.trace_sequence <= prior.trace_sequence
+            || receipt.elapsed_ms < prior.elapsed_ms
+            || frame.frame_nr <= previous.frame_nr
+            || frame.hwnd != previous.hwnd
+            || frame.process_id != previous.process_id
+            || frame.generation != previous.generation
+            || frame.lifetime != previous.lifetime
+            || frame.label.widget_id != previous.label.widget_id
+        {
+            return Err(
+                "Screen Draw recovery receipt is not a fresh frame of the pinned toolbar lifetime"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The pre-input frame is an observation of the current owners, rather than a
+/// historical desired-visibility event or a value inferred from recovery.
+fn validate_screen_draw_baseline_receipt(
+    baseline: &ScreenDrawToolbarReceipt,
+    ready: &ScreenDrawToolbarReceipt,
+    tool: &QueryRootPresentationEvidence,
+    client: [i32; 4],
+    root_hwnd: u64,
+    process_id: u32,
+    displays: &[[i32; 4]],
+    entry_ordinal: u32,
+    entry_sequence: u64,
+    cursor: u32,
+) -> Result<(), String> {
+    validate_screen_draw_toolbar_receipt(
+        baseline,
+        ScreenDrawToolbarMode::Drawing,
+        tool,
+        client,
+        displays,
+        entry_ordinal,
+        cursor,
+        None,
+    )?;
+    let frame = &baseline.observation;
+    let initial = &ready.observation;
+    let owner = frame.launcher;
+    let root = owner.root.ok_or("H15 baseline ROOT is absent")?;
+    if baseline.trace_sequence <= entry_sequence
+        || baseline.event_ordinal < ready.event_ordinal
+        || baseline.trace_sequence < ready.trace_sequence
+        || baseline.elapsed_ms < ready.elapsed_ms
+        || (baseline.event_ordinal == ready.event_ordinal && baseline != ready)
+        || (baseline.event_ordinal > ready.event_ordinal
+            && (baseline.trace_sequence <= ready.trace_sequence
+                || frame.frame_nr <= initial.frame_nr))
+        || frame.hwnd != initial.hwnd
+        || frame.process_id != initial.process_id
+        || frame.generation != initial.generation
+        || frame.lifetime != initial.lifetime
+        || frame.label.widget_id != initial.label.widget_id
+        || root.hwnd != root_hwnd
+        || root.process_id != process_id
+        || owner.root != initial.launcher.root
+        || owner.visibility_revision < initial.launcher.visibility_revision
+        || (owner.visibility_revision == initial.launcher.visibility_revision
+            && (owner.invocation_id != initial.launcher.invocation_id
+                || owner.focus_intent != initial.launcher.focus_intent
+                || owner.visible != initial.launcher.visible))
+        || owner
+            .parking
+            .map(|parking| (parking.hwnd, parking.generation, parking.cycle))
+            != initial
+                .launcher
+                .parking
+                .map(|parking| (parking.hwnd, parking.generation, parking.cycle))
+    {
+        return Err(
+            "H15 baseline is not the current pre-chord frame of the owned entry lifetime".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_screen_draw_recovery_owner(
+    baseline: &ScreenDrawToolbarReceipt,
+    recovered: &ScreenDrawToolbarReceipt,
+    revision: u64,
+    invocation: Option<u64>,
+    focus: HotkeyRootFocusIntent,
+) -> Result<(), String> {
+    let before = baseline.observation.launcher;
+    let after = recovered.observation.launcher;
+    let expected_focus = match focus {
+        HotkeyRootFocusIntent::ActivateRoot => {
+            multi_launcher::visibility::RootFocusIntent::ActivateRoot
+        }
+        HotkeyRootFocusIntent::PreserveForeground => {
+            multi_launcher::visibility::RootFocusIntent::PreserveForeground
+        }
+    };
+    if revision <= before.visibility_revision
+        || after.visibility_revision != revision
+        || before.invocation_id != invocation
+        || after.invocation_id != invocation
+        || before.focus_intent != expected_focus
+        || after.focus_intent != expected_focus
+        || after.root != before.root
+        || after
+            .parking
+            .map(|parking| (parking.hwnd, parking.generation, parking.cycle))
+            != before
+                .parking
+                .map(|parking| (parking.hwnd, parking.generation, parking.cycle))
+    {
+        return Err(
+            "H15 recovered frame is not the exact current baseline owner's restoration".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_screen_draw_priority(
+    packet: &HotkeyCaseEvidence,
+    hotkey: AcceptanceHotkey,
+) -> Result<(), String> {
+    if packet.case_id != "H15" {
+        return if packet.screen_draw_priority.is_none() {
+            Ok(())
+        } else {
+            Err("Screen Draw priority proof is present outside H15".into())
+        };
+    }
+    let proof = packet
+        .screen_draw_priority
+        .as_ref()
+        .ok_or("H15 omitted real Screen Draw priority proof")?;
+    let root = packet
+        .root_identities
+        .iter()
+        .find(|root| root.stream == HotkeyCandidateStream::MainCandidate)
+        .ok_or("H15 omitted the owned ROOT identity")?;
+    let valid_root = |sample: &QueryRootPresentationEvidence| {
+        owned_root_presentation_is_valid(
+            sample,
+            &packet.physical_displays,
+            root.hwnd,
+            root.process_id,
+            true,
+        )
+    };
+    let valid_tool = |sample: &QueryRootPresentationEvidence| {
+        sample.hwnd != root.hwnd
+            && owned_root_presentation_is_valid(
+                sample,
+                &packet.physical_displays,
+                sample.hwnd,
+                root.process_id,
+                true,
+            )
+    };
+    let expected = configured_chord_edges(hotkey, 1);
+    let edges = proof
+        .runner_edges
+        .iter()
+        .map(|edge| (edge.virtual_key, edge.down))
+        .collect::<Vec<_>>();
+    let cursor = u32::try_from(proof.trace_cursor)
+        .map_err(|_| "H15 trace cursor exceeds its ordinal bound")?;
+    let end =
+        u32::try_from(proof.trace_end).map_err(|_| "H15 trace end exceeds its ordinal bound")?;
+    validate_screen_draw_toolbar_receipt(
+        &proof.ready_observation,
+        ScreenDrawToolbarMode::Drawing,
+        &proof.ready_tool,
+        proof.ready_client_bounds,
+        &packet.physical_displays,
+        proof.entry_clicked_ordinal,
+        cursor,
+        None,
+    )?;
+    validate_screen_draw_baseline_receipt(
+        &proof.baseline_observation,
+        &proof.ready_observation,
+        &proof.baseline_tool,
+        proof.baseline_client_bounds,
+        root.hwnd,
+        root.process_id,
+        &packet.physical_displays,
+        proof.entry_clicked_ordinal,
+        proof.entry_clicked_sequence,
+        cursor,
+    )?;
+    let baseline_owner = proof.baseline_observation.observation.launcher;
+    if proof.baseline_visibility_revision != baseline_owner.visibility_revision
+        || proof.baseline_invocation_id != baseline_owner.invocation_id
+    {
+        return Err("H15 baseline scalars do not match its mandatory producer receipt".into());
+    }
+    let recovery_boundary = proof
+        .admissions
+        .first()
+        .ok_or("H15 lacks its recovery admission")?;
+    validate_screen_draw_toolbar_receipt(
+        &proof.recovered_observation,
+        ScreenDrawToolbarMode::Ghost,
+        &proof.recovered_tool,
+        proof.recovered_client_bounds,
+        &packet.physical_displays,
+        recovery_boundary.event_ordinal,
+        end,
+        Some(&proof.baseline_observation),
+    )?;
+    if proof.entry_clicked_sequence == 0
+        || proof.ready_observation.trace_sequence <= proof.entry_clicked_sequence
+        || proof.recovered_observation.elapsed_ms < recovery_boundary.elapsed_ms
+        || proof
+            .primary_edges
+            .first()
+            .is_none_or(|edge| proof.baseline_observation.elapsed_ms > edge.elapsed_ms)
+        || proof.recovered_observation.elapsed_ms > proof.next_admission.elapsed_ms
+    {
+        return Err(
+            "H15 toolbar observations do not follow actual entry and recovery boundaries".into(),
+        );
+    }
+    if !valid_root(&proof.entry_root)
+        || !valid_root(&proof.recovered_root)
+        || !valid_tool(&proof.ready_tool)
+        || !valid_tool(&proof.baseline_tool)
+        || !valid_tool(&proof.recovered_tool)
+        || proof.ready_tool.hwnd != proof.recovered_tool.hwnd
+        || proof.entry_query_digest
+            != query_cell_digest(&format!("app {PRIORITY_SMOKE_ACTION_LABEL}"))
+        || proof.entry_label_digest != query_cell_digest(PRIORITY_SMOKE_ACTION_LABEL)
+        || proof.entry_action_digest != query_cell_digest("screen_draw:start")
+        || proof.tool_title_digest != query_cell_digest(PRIORITY_SMOKE_TOOL_TITLE)
+        || proof.entry_control_bounds[2] <= proof.entry_control_bounds[0]
+        || proof.entry_control_bounds[3] <= proof.entry_control_bounds[1]
+        || proof.entry_control_bounds[0] < proof.entry_root.bounds[0]
+        || proof.entry_control_bounds[1] < proof.entry_root.bounds[1]
+        || proof.entry_control_bounds[2] > proof.entry_root.bounds[2]
+        || proof.entry_control_bounds[3] > proof.entry_root.bounds[3]
+        || proof.entry_down_inserted != 1
+        || proof.entry_up_inserted != 1
+        || proof.entry_clicked_ordinal == 0
+        || proof.entry_clicked_ordinal > cursor
+        || !proof.drawing_ui_ack
+        || !proof.ghost_ui_ack
+        || cursor == 0
+        || end <= cursor
+        || proof.baseline_visibility_revision == 0
+        || !(75..=1_000).contains(&proof.quiet_preflight_ms)
+        || !proof.observer_default_desktop
+        || proof.input_down_inserted != expected.len() / 2
+        || proof.input_up_inserted != expected.len() / 2
+        || proof.input_down_foreground_hwnd != proof.ready_tool.hwnd
+        || proof.input_down_foreground_pid != root.process_id
+        || ![root.hwnd, proof.ready_tool.hwnd].contains(&proof.input_up_foreground_hwnd)
+        || proof.input_up_foreground_pid != root.process_id
+        || !proof.input_down_default_desktop
+        || !proof.input_up_default_desktop
+        || edges != expected
+        || !proof.foreign_edges.is_empty()
+        || proof.runner_edges.iter().any(|edge| {
+            !edge.injected || !edge.runner_cookie_matched || edge.runner_relative_us > 5_000_000
+        })
+        || proof
+            .runner_edges
+            .windows(2)
+            .any(|pair| pair[0].runner_relative_us > pair[1].runner_relative_us)
+        || proof.primary_edges.len() != 2
+        || proof.admissions.len() != 2
+        || proof.configured_primary.len() != 1
+        || proof.candidate_events.is_empty()
+        || proof.candidate_events.len() > 128
+        || proof.restorations.len() != 1
+        || proof.forbidden_event_count != 0
+        || proof.runtime_window_count != 0
+        || !proof.keys_released
+        || !proof.close_requested
+        || !proof.tool_closed
+        || proof.close_terminal_cursor < proof.trace_end
+        || packet.gestures.len() != 1
+        || !packet.standalone_decisions.is_empty()
+    {
+        return Err("H15 real entry, owned tool, exact input, suppression, or cleanup evidence is incomplete".into());
+    }
+    for (index, transition) in [HotkeyEdgeTransition::Press, HotkeyEdgeTransition::Release]
+        .into_iter()
+        .enumerate()
+    {
+        let primary = &proof.primary_edges[index];
+        let admission = &proof.admissions[index];
+        if primary.transition != transition
+            || admission.transition != transition
+            || primary.provenance != HotkeyInputProvenance::ExternalInjected
+            || admission.provenance != HotkeyInputProvenance::ExternalInjected
+            || primary.event_ordinal <= cursor
+            || primary.event_ordinal > end
+            || admission.event_ordinal <= primary.event_ordinal
+            || admission.event_ordinal > end
+            || admission.elapsed_ms < primary.elapsed_ms
+            || admission.deadline_scheduled
+            || admission.radial_intent
+            || (index == 0
+                && (primary.foreground_owner != PriorityForegroundOwner::Other
+                    || admission.owner != PriorityHookOwner::ScreenDrawRecovery
+                    || admission.global_exclusive_owners != 1
+                    || !admission.recovery))
+            || (index == 1
+                && (admission.recovery
+                    || admission.owner == PriorityHookOwner::ExclusiveTool
+                    || admission.global_exclusive_owners & !1 != 0))
+            || (index == 1
+                && (primary.event_ordinal <= proof.admissions[0].event_ordinal
+                    || primary.elapsed_ms < proof.admissions[0].elapsed_ms))
+        {
+            return Err("H15 lacks ordered external primary edges and authoritative Screen Draw recovery admission".into());
+        }
+    }
+    // InvocationAdapter records the configured key before deciding who owns
+    // it. Recovery drains release before that recording path, so precisely one
+    // preadmission Press must bridge the hook edge and recovery admission.
+    let configured = &proof.configured_primary[0];
+    if configured.transition != HotkeyEdgeTransition::Press
+        || configured.provenance != HotkeyInputProvenance::ExternalInjected
+        || !configured.modifiers_match
+        || configured.invocation_id == 0
+        || configured.generation == 0
+        || configured.event_ordinal <= proof.primary_edges[0].event_ordinal
+        || configured.event_ordinal >= proof.admissions[0].event_ordinal
+        || configured.elapsed_ms < proof.primary_edges[0].elapsed_ms
+        || configured.elapsed_ms > proof.admissions[0].elapsed_ms
+    {
+        return Err("H15 configured primary is not the owned preadmission recovery receipt".into());
+    }
+    let mut recovery_packet = packet.clone();
+    recovery_packet.screen_draw_priority = None;
+    recovery_packet.candidate_events = proof.candidate_events.clone();
+    recovery_packet.gestures.clear();
+    recovery_packet.standalone_decisions.clear();
+    recovery_packet.follow_on_restorations = proof.restorations.clone();
+    validate_hotkey_candidate_event_coverage(&recovery_packet)?;
+    let restore = &proof.restorations[0];
+    validate_screen_draw_recovery_owner(
+        &proof.baseline_observation,
+        &proof.recovered_observation,
+        restore.visibility_revision,
+        restore.invocation_id,
+        restore.focus_intent,
+    )?;
+    let mut last_event = None;
+    for event in &proof.candidate_events {
+        if event.stream != HotkeyCandidateStream::MainCandidate
+            || event.input_group_id != 1
+            || event.input_purpose != HotkeyRunnerInputPurpose::LauncherChord
+            || event.event_ordinal <= cursor
+            || event.event_ordinal > end
+            || last_event.is_some_and(|(ordinal, elapsed)| {
+                event.event_ordinal <= ordinal || event.elapsed_ms < elapsed
+            })
+            || matches!(
+                event.kind,
+                HotkeyTraceEventKind::PrimaryPress
+                    | HotkeyTraceEventKind::PrimaryRelease
+                    | HotkeyTraceEventKind::ShortTap
+                    | HotkeyTraceEventKind::RadialAction
+            )
+            || event.invocation_id != proof.baseline_invocation_id
+            || event.visibility_revision != Some(restore.visibility_revision)
+        {
+            return Err(
+                "H15 suppression interval has stale, admitted, or unrelated candidate events"
+                    .into(),
+            );
+        }
+        last_event = Some((event.event_ordinal, event.elapsed_ms));
+    }
+    let intents = proof
+        .candidate_events
+        .iter()
+        .filter(|event| event.kind == HotkeyTraceEventKind::VisibilityIntent)
+        .collect::<Vec<_>>();
+    if intents.len() != 1
+        || intents[0].visibility_source != Some(HotkeyVisibilitySource::ScreenDrawRestore)
+        || intents[0].visible != Some(true)
+        || intents[0].event_ordinal <= proof.admissions[0].event_ordinal
+        || intents[0].elapsed_ms < proof.admissions[0].elapsed_ms
+        || restore.visibility_revision <= proof.baseline_visibility_revision
+        || restore.invocation_id != proof.baseline_invocation_id
+        || !restore.visible
+        || restore.intent_elapsed_ms != intents[0].elapsed_ms
+        || restore.stream != HotkeyCandidateStream::MainCandidate
+        || restore.input_group_id != 1
+        || restore.root_commands.is_empty()
+        || !proof.candidate_events.iter().any(|event| {
+            event.kind == HotkeyTraceEventKind::ScreenDrawRestoreFocusIntent
+                && event.event_ordinal > intents[0].event_ordinal
+                && event.focus_intent == Some(restore.focus_intent)
+        })
+        || !proof.candidate_events.iter().any(|event| {
+            event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                && event.bounds == Some(proof.recovered_root.bounds)
+                && event.visible == Some(proof.recovered_root.visible)
+                && event.minimized == Some(proof.recovered_root.minimized)
+                && event.hwnd == Some(root.hwnd)
+                && event.process_id == Some(root.process_id)
+        })
+        || restore
+            .root_commands
+            .iter()
+            .any(|span| !root_command_span_matches((&recovery_packet).into(), restore.stream, span))
+        || !restore.root_commands.iter().any(|span| {
+            span.observed_presentation.as_ref().is_some_and(|observed| {
+                presentation_matches(
+                    (&recovery_packet).into(),
+                    restore.stream,
+                    span,
+                    observed,
+                    true,
+                )
+            })
+        })
+        || (restore.focus_intent == HotkeyRootFocusIntent::ActivateRoot
+            && !restore.native_activation.as_ref().is_some_and(|span| {
+                native_activation_span_matches(
+                    (&recovery_packet).into(),
+                    restore.stream,
+                    restore,
+                    span,
+                )
+            }))
+    {
+        return Err(
+            "H15 recovery is stale or lacks correlated Screen Draw ROOT/native presentation".into(),
+        );
+    }
+    let gesture = &packet.gestures[0];
+    let press = packet
+        .candidate_events
+        .iter()
+        .find(|event| {
+            event.kind == HotkeyTraceEventKind::PrimaryPress
+                && event.invocation_id == Some(gesture.invocation_id)
+        })
+        .ok_or("H15 next gesture omitted its admitted press")?;
+    let release = packet
+        .candidate_events
+        .iter()
+        .find(|event| {
+            event.kind == HotkeyTraceEventKind::PrimaryRelease
+                && event.invocation_id == Some(gesture.invocation_id)
+        })
+        .ok_or("H15 next gesture omitted its admitted release")?;
+    let admission = &proof.next_admission;
+    if usize::try_from(press.event_ordinal).unwrap_or(0) <= proof.close_terminal_cursor
+        || gesture.invocation_id != configured.invocation_id
+        || proof
+            .baseline_invocation_id
+            .is_some_and(|baseline| gesture.invocation_id <= baseline)
+        || admission.event_ordinal <= press.event_ordinal
+        || admission.event_ordinal >= release.event_ordinal
+        || admission.elapsed_ms < press.elapsed_ms
+        || admission.transition != HotkeyEdgeTransition::Press
+        || admission.provenance != HotkeyInputProvenance::ExternalInjected
+        || admission.owner != PriorityHookOwner::Launcher
+        || admission.global_exclusive_owners != 0
+        || admission.adapter_exclusive
+        || admission.recovery
+        || !admission.deadline_scheduled
+        || admission.radial_intent
+        || admission.elapsed_ms > gesture.release_elapsed_ms
+        || hotkey_decision_visible(&gesture.decision) != Some(false)
+    {
+        return Err(
+            "H15 owner cleanup did not precede one usable normal configured gesture".into(),
+        );
     }
     Ok(())
 }
@@ -2157,7 +3286,7 @@ fn validate_hotkey_candidate_event_coverage(packet: &HotkeyCaseEvidence) -> Resu
             .iter()
             .filter(|event| root_command_event_matches_span(event, stream, span))
             .count();
-        if event_count != 1 || !root_command_span_matches(packet, stream, span) {
+        if event_count != 1 || !root_command_span_matches(packet.into(), stream, span) {
             return Err(format!(
                 "{} ROOT command event reference is dangling, duplicated, or does not match its source record",
                 packet.case_id
@@ -2312,10 +3441,41 @@ fn root_command_event_reference_count(
     packet: &HotkeyCaseEvidence,
     event: &HotkeyCandidateEventEvidence,
 ) -> usize {
-    all_root_command_spans(packet)
+    let applied_references = all_root_command_spans(packet)
         .iter()
         .filter(|(stream, span)| root_command_event_matches_span(event, *stream, span))
-        .count()
+        .count();
+    // Superseded work stays in the bounded original event inventory. Its typed
+    // decision owns those command records directly, without fabricating an
+    // Applied span or dropping already-issued requests and late observations.
+    let superseded_references = packet
+        .gestures
+        .iter()
+        .filter(|gesture| {
+            let HotkeyDecisionProof::Superseded {
+                visibility_revision,
+                intent_elapsed_ms,
+                visible,
+                ..
+            } = &gesture.decision
+            else {
+                return false;
+            };
+            packet.candidate_events.iter().any(|intent| {
+                intent.stream == gesture.stream
+                    && intent.input_group_id == gesture.input_group_id
+                    && intent.input_purpose == gesture.input_purpose
+                    && intent.kind == HotkeyTraceEventKind::VisibilityIntent
+                    && intent.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
+                    && intent.invocation_id == Some(gesture.invocation_id)
+                    && intent.visibility_revision == Some(*visibility_revision)
+                    && intent.elapsed_ms == *intent_elapsed_ms
+                    && intent.visible == Some(*visible)
+                    && hotkey_command_belongs_to_intent(event, intent)
+            })
+        })
+        .count();
+    applied_references + superseded_references
 }
 
 fn root_command_event_matches_span(
@@ -2334,11 +3494,11 @@ fn root_command_event_matches_span(
 }
 
 fn root_command_span_matches(
-    packet: &HotkeyCaseEvidence,
+    context: HotkeyRootProofContext<'_>,
     stream: HotkeyCandidateStream,
     span: &HotkeyRootCommandSpan,
 ) -> bool {
-    let command_matches = packet
+    let command_matches = context
         .candidate_events
         .iter()
         .filter(|event| root_command_event_matches_span(event, stream, span))
@@ -2348,7 +3508,7 @@ fn root_command_span_matches(
     }
     match span.observed_snapshot_event_ordinal {
         Some(ordinal) => {
-            let snapshots = packet
+            let snapshots = context
                 .candidate_events
                 .iter()
                 .filter(|event| {
@@ -2361,7 +3521,7 @@ fn root_command_span_matches(
                         && event.elapsed_ms >= span.command_elapsed_ms
                         && span.command_to_observed_ms
                             == Some(event.elapsed_ms.saturating_sub(span.command_elapsed_ms))
-                        && event_root_identity_matches(packet, event)
+                        && event_root_identity_matches(context, event)
                 })
                 .count();
             snapshots == 1
@@ -2413,7 +3573,7 @@ fn validate_packet_root_identity(packet: &HotkeyCaseEvidence) -> Result<(), Stri
             || event.visible.is_none()
             || event.minimized.is_none()
             || event.bounds.is_none()
-            || !event_root_identity_matches(packet, event)
+            || !event_root_identity_matches(packet.into(), event)
         {
             return Err(format!(
                 "{} qualifying native ROOT snapshot has incomplete or stale HWND/PID evidence",
@@ -2425,7 +3585,7 @@ fn validate_packet_root_identity(packet: &HotkeyCaseEvidence) -> Result<(), Stri
 }
 
 fn event_root_identity_matches(
-    packet: &HotkeyCaseEvidence,
+    context: HotkeyRootProofContext<'_>,
     event: &HotkeyCandidateEventEvidence,
 ) -> bool {
     let Some(hwnd) = event.hwnd else {
@@ -2434,7 +3594,7 @@ fn event_root_identity_matches(
     let Some(process_id) = event.process_id else {
         return false;
     };
-    packet.root_identities.iter().any(|identity| {
+    context.root_identities.iter().any(|identity| {
         identity.stream == event.stream
             && identity.hwnd == hwnd
             && identity.process_id == process_id
@@ -2442,13 +3602,13 @@ fn event_root_identity_matches(
 }
 
 fn presentation_matches(
-    packet: &HotkeyCaseEvidence,
+    context: HotkeyRootProofContext<'_>,
     stream: HotkeyCandidateStream,
     span: &HotkeyRootCommandSpan,
     observed: &HotkeyObservedPresentation,
     expected_visible: bool,
 ) -> bool {
-    let Some(event) = packet.candidate_events.iter().find(|event| {
+    let Some(event) = context.candidate_events.iter().find(|event| {
         event.stream == stream
             && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
             && event.visibility_revision == Some(span.visibility_revision)
@@ -2458,15 +3618,15 @@ fn presentation_matches(
     }) else {
         return false;
     };
-    if !root_command_span_matches(packet, stream, span)
-        || !event_root_identity_matches(packet, event)
+    if !root_command_span_matches(context, stream, span)
+        || !event_root_identity_matches(context, event)
     {
         return false;
     }
     let Some(bounds) = event.bounds else {
         return false;
     };
-    let on_physical_display = packet.physical_displays.iter().any(|display| {
+    let on_physical_display = context.physical_displays.iter().any(|display| {
         bounds[0] < display[2]
             && bounds[2] > display[0]
             && bounds[1] < display[3]
@@ -2478,12 +3638,12 @@ fn presentation_matches(
 }
 
 fn native_activation_span_matches(
-    packet: &HotkeyCaseEvidence,
+    context: HotkeyRootProofContext<'_>,
     stream: HotkeyCandidateStream,
     restore: &HotkeyFollowOnRestoreEvidence,
     span: &HotkeyNativeActivationSpan,
 ) -> bool {
-    let Some(identity) = packet
+    let Some(identity) = context
         .root_identities
         .iter()
         .find(|identity| identity.stream == stream)
@@ -2496,7 +3656,7 @@ fn native_activation_span_matches(
         && span
             .terminal_elapsed_ms
             .is_some_and(|terminal| terminal >= span.requested_elapsed_ms)
-        && packet.candidate_events.iter().any(|event| {
+        && context.candidate_events.iter().any(|event| {
             event.stream == stream
                 && event.kind == HotkeyTraceEventKind::NativeActivation
                 && event.activation_edge == Some(HotkeyActivationEdge::RestoreRequested)
@@ -2507,7 +3667,7 @@ fn native_activation_span_matches(
                 && event.elapsed_ms == span.requested_elapsed_ms
                 && event.elapsed_ms >= restore.intent_elapsed_ms
         })
-        && packet.candidate_events.iter().any(|event| {
+        && context.candidate_events.iter().any(|event| {
             event.stream == stream
                 && event.kind == HotkeyTraceEventKind::NativeActivation
                 && event.activation_edge == Some(HotkeyActivationEdge::RestoreCompleted)
@@ -3204,6 +4364,25 @@ fn validate_query_evidence_report(report: &AcceptanceReport) -> Result<(), Strin
                     })
                 })
             || !report.cases.iter().any(|case| case.id == evidence.case_id)
+            || evidence.placement.as_ref().is_some_and(|proof| {
+                proof.hotkey != report.hotkey
+                    || proof.configured_root.process_id
+                        != report.environment.child_process_id.unwrap_or(0)
+                    || proof.physical_displays
+                        != report
+                            .environment
+                            .monitors
+                            .iter()
+                            .map(|monitor| {
+                                [
+                                    monitor.x,
+                                    monitor.y,
+                                    monitor.x.saturating_add(monitor.width as i32),
+                                    monitor.y.saturating_add(monitor.height as i32),
+                                ]
+                            })
+                            .collect::<Vec<_>>()
+            })
         {
             return Err(format!(
                 "{} Query evidence identity or bounds are invalid",
@@ -5338,6 +6517,9 @@ fn gate_c_control_identity_is_observed(
             && gate_c_d04_query_tab_is_observed(control, packet))
         || (matches!(case_status, Some(CaseStatus::Passed))
             && gate_c_passed_query_edit_is_observed(control, packet))
+        || (packet.case_id == "D09"
+            && matches!(case_status, Some(CaseStatus::Passed))
+            && gate_c_d09_held_query_edit_is_observed(control, packet))
 }
 
 fn gate_c_d04_failed_completed_query_edit_is_observed(
@@ -6035,6 +7217,53 @@ fn gate_c_passed_query_edit_is_observed(
                     && search.search_control_sequence > edit.trace_sequence
                     && gate_c_search_is_valid(search, packet)
             })
+    })
+}
+
+fn gate_c_d09_held_query_edit_is_observed(
+    edit: &GateCControlEvidence,
+    packet: &GateCCaseEvidence,
+) -> bool {
+    if packet.case_id != "D09"
+        || edit.control != "query_field"
+        || !edit.changed
+        || !edit.visible
+        || !edit.enabled
+        || edit.value_digest == 0
+        || edit.value_digest != edit.query_digest
+        || edit.query_digest != edit.identity.query_digest
+        || edit.binding_digest == 0
+        || gate_c_case_contract_is_valid(packet).is_err()
+    {
+        return false;
+    }
+
+    // D09 deliberately retires both held Search requests before their results
+    // can settle. The pre-Search edit is witnessed by that exact request's
+    // complete lifecycle, while the existing D09 contract proves Keep,
+    // Discard, reopen, and rejection against the actual authoring boundaries.
+    packet.controls.iter().any(|search| {
+        if !gate_c_inspector_edit_matches_later_search(edit, search) {
+            return false;
+        }
+        let edges = [
+            GateCProviderEdge::Queued,
+            GateCProviderEdge::WorkerStarted,
+            GateCProviderEdge::Retired,
+            GateCProviderEdge::WorkerCompleted,
+            GateCProviderEdge::Rejected,
+        ]
+        .map(|edge| {
+            gate_c_provider_request_edge(packet, &search.identity, edit.query_digest, edge)
+        });
+        let mut previous = search.trace_sequence;
+        edges.into_iter().all(|event| {
+            event.is_some_and(|event| {
+                let ordered = event.trace_sequence > previous;
+                previous = event.trace_sequence;
+                ordered
+            })
+        })
     })
 }
 
@@ -10289,7 +11518,205 @@ fn query_cell_digest(value: &str) -> u64 {
     })
 }
 
+fn owned_root_presentation_is_valid(
+    sample: &QueryRootPresentationEvidence,
+    displays: &[[i32; 4]],
+    hwnd: u64,
+    process_id: u32,
+    physically_visible: bool,
+) -> bool {
+    let on_display = displays.iter().any(|display| {
+        sample.bounds[0] < display[2]
+            && sample.bounds[2] > display[0]
+            && sample.bounds[1] < display[3]
+            && sample.bounds[3] > display[1]
+    });
+    hwnd > 0
+        && process_id > 0
+        && sample.hwnd == hwnd
+        && sample.process_id == process_id
+        && sample.bounds[2] > sample.bounds[0]
+        && sample.bounds[3] > sample.bounds[1]
+        && sample.physically_visible == (sample.visible && !sample.minimized && on_display)
+        && sample.physically_visible == physically_visible
+}
+
+fn query_placement_toggle_is_valid(
+    toggle: &QueryPlacementToggleEvidence,
+    hotkey: AcceptanceHotkey,
+    displays: &[[i32; 4]],
+    hwnd: u64,
+    process_id: u32,
+    visible: bool,
+) -> bool {
+    let Some(tap) = toggle.input.tap.as_ref() else {
+        return false;
+    };
+    let command = &toggle.command;
+    let snapshot = &toggle.snapshot;
+    query_setup_visibility_is_valid(&toggle.input, hotkey)
+        && tap
+            .observed_edges
+            .windows(2)
+            .all(|edges| edges[0].runner_relative_us <= edges[1].runner_relative_us)
+        && toggle.input.visible_before != visible
+        && toggle.input.desired_visible == visible
+        && toggle.visibility_revision > 0
+        && command.stream == HotkeyCandidateStream::MainCandidate
+        && command.input_purpose == HotkeyRunnerInputPurpose::LauncherChord
+        && command.input_group_id > 0
+        && command.kind == HotkeyTraceEventKind::RootCommand
+        && command.visibility_revision == Some(toggle.visibility_revision)
+        && command.invocation_id == Some(tap.invocation_id)
+        && command.request_id.is_some_and(|id| id > 0)
+        && usize::try_from(command.event_ordinal).unwrap_or(0) > tap.visibility_event_ordinal
+        && matches!(
+            command.command,
+            Some(
+                HotkeyRootCommand::Show
+                    | HotkeyRootCommand::Minimize
+                    | HotkeyRootCommand::Position
+                    | HotkeyRootCommand::ParkingBoundary
+            )
+        )
+        && snapshot.stream == command.stream
+        && snapshot.input_group_id == command.input_group_id
+        && snapshot.input_purpose == command.input_purpose
+        && snapshot.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+        && snapshot.request_id == command.request_id
+        && snapshot.visibility_revision == command.visibility_revision
+        && snapshot.invocation_id == command.invocation_id
+        && snapshot.event_ordinal > command.event_ordinal
+        && snapshot.elapsed_ms >= command.elapsed_ms
+        && snapshot.hwnd == Some(hwnd)
+        && snapshot.process_id == Some(process_id)
+        && snapshot.bounds == Some(toggle.presentation.bounds)
+        && snapshot.visible == Some(toggle.presentation.visible)
+        && snapshot.minimized == Some(toggle.presentation.minimized)
+        && owned_root_presentation_is_valid(
+            &toggle.presentation,
+            displays,
+            hwnd,
+            process_id,
+            visible,
+        )
+}
+
+fn query_placement_is_valid(
+    proof: &QueryPlacementEvidence,
+    invocation: &QueryInvocationEvidence,
+) -> bool {
+    let baseline = &proof.configured_root;
+    let displays = &proof.physical_displays;
+    let scale = f64::from(proof.dpi) / 96.0;
+    let scaled = |value: i32| (f64::from(value) * scale).round() as i32;
+    let Some(width) = baseline.bounds[2]
+        .checked_sub(baseline.bounds[0])
+        .filter(|width| *width > 0)
+    else {
+        return false;
+    };
+    let Some(height) = baseline.bounds[3]
+        .checked_sub(baseline.bounds[1])
+        .filter(|height| *height > 0)
+    else {
+        return false;
+    };
+    let client = proof.configured_client_bounds;
+    let Some(hide_tap) = proof.hide.input.tap.as_ref() else {
+        return false;
+    };
+    let Some(show_tap) = proof.show.input.tap.as_ref() else {
+        return false;
+    };
+    (48..=1536).contains(&proof.dpi)
+        && !displays.is_empty()
+        && displays.len() <= 32
+        && displays
+            .iter()
+            .all(|display| display[2] > display[0] && display[3] > display[1])
+        && proof.configured_logical_position == QUERY_CONFIGURED_ROOT_POSITION
+        && proof.configured_logical_client_size == QUERY_CONFIGURED_ROOT_CLIENT_SIZE
+        && baseline.bounds[0] == scaled(QUERY_CONFIGURED_ROOT_POSITION[0])
+        && baseline.bounds[1] == scaled(QUERY_CONFIGURED_ROOT_POSITION[1])
+        && client
+            == [
+                0,
+                0,
+                scaled(QUERY_CONFIGURED_ROOT_CLIENT_SIZE[0]),
+                scaled(QUERY_CONFIGURED_ROOT_CLIENT_SIZE[1]),
+            ]
+        && width >= client[2]
+        && height >= client[3]
+        && owned_root_presentation_is_valid(
+            baseline,
+            displays,
+            baseline.hwnd,
+            baseline.process_id,
+            true,
+        )
+        && owned_root_presentation_is_valid(
+            &proof.moved_root,
+            displays,
+            baseline.hwnd,
+            baseline.process_id,
+            true,
+        )
+        && proof.moved_root.bounds != baseline.bounds
+        && proof.moved_root.bounds[2].checked_sub(proof.moved_root.bounds[0]) == Some(width)
+        && proof.moved_root.bounds[3].checked_sub(proof.moved_root.bounds[1]) == Some(height)
+        && displays.iter().any(|display| {
+            proof.moved_root.bounds[0] >= display[0]
+                && proof.moved_root.bounds[1] >= display[1]
+                && proof.moved_root.bounds[2] <= display[2]
+                && proof.moved_root.bounds[3] <= display[3]
+        })
+        && proof.moved_client_bounds == client
+        && proof.restored_client_bounds == client
+        && proof.restored_root == proof.moved_root
+        && invocation.root_observations.len() >= 2
+        && invocation
+            .root_observations
+            .iter()
+            .all(|sample| sample == &proof.moved_root)
+        && invocation.root_geometry_change_count == 0
+        && invocation.root_hidden_samples == 0
+        && invocation.root_visible_samples == invocation.root_sample_count
+        && invocation.root_identity_violation_count == 0
+        && invocation.root_visibility_violation_count == 0
+        && proof.handoff_terminal_cursor > invocation.pointer_click.up_event_ordinal
+        && hide_tap.trace_cursor >= proof.handoff_terminal_cursor
+        && hide_tap.invocation_id > invocation.invocation_id
+        && show_tap.trace_cursor
+            >= usize::try_from(proof.hide.snapshot.event_ordinal).unwrap_or(usize::MAX)
+        && show_tap.invocation_id > hide_tap.invocation_id
+        && proof.show.visibility_revision > proof.hide.visibility_revision
+        && query_placement_toggle_is_valid(
+            &proof.hide,
+            proof.hotkey,
+            displays,
+            baseline.hwnd,
+            baseline.process_id,
+            false,
+        )
+        && query_placement_toggle_is_valid(
+            &proof.show,
+            proof.hotkey,
+            displays,
+            baseline.hwnd,
+            baseline.process_id,
+            true,
+        )
+        && proof.show.presentation == proof.configured_root
+        && proof.shown_client_bounds == client
+        && proof.note_absent_before
+        && proof.note_closed_after
+}
+
 fn query_case_contract_is_valid(evidence: &QueryCaseEvidence) -> Result<(), String> {
+    if evidence.case_id != "L08" && evidence.placement.is_some() {
+        return Err("ROOT placement evidence is present outside L08".into());
+    }
     let visible = |item: &QueryInvocationEvidence| {
         item.root_visible_samples > 0
             && item
@@ -10399,6 +11826,26 @@ fn query_case_contract_is_valid(evidence: &QueryCaseEvidence) -> Result<(), Stri
                 && has_cell(item, "qa-note-new")
                 && visible(item)
                 && evidence.invocations.len() == 1
+        }),
+        "L08" => one.is_some_and(|item| {
+            item.mode == QueryEvidenceMode::ExactCommand
+                && item.resolution_state == QueryEvidenceState::Ready
+                && item.setup_visibility.visible_before
+                && item.setup_visibility.desired_visible
+                && item.setup_visibility.tap.is_none()
+                && item.dispatch_outcome == QueryEvidenceOutcome::Executed
+                && item.requirement == QueryEvidenceRequirement::LauncherUi
+                && item.root_policy == QueryEvidenceRootPolicy::Legacy
+                && item.effect_count == 1
+                && item.cancelled_confirmation_count == 0
+                && item.ui_ack == QueryEvidenceUiAck::NoteEditor
+                && has_cell(item, "qa-note-new")
+                && stably_visible(item)
+                && evidence.invocations.len() == 1
+                && evidence
+                    .placement
+                    .as_ref()
+                    .is_some_and(|proof| query_placement_is_valid(proof, item))
         }),
         "Q12" => one.is_some_and(|item| {
             item.mode == QueryEvidenceMode::ExactCommand
@@ -10812,7 +12259,7 @@ where
     interfering.into_iter().collect()
 }
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, serde::Deserialize)]
 struct CleanupResult {
     child_closed_normally: bool,
     child_terminated_after_timeout: bool,
@@ -10823,6 +12270,579 @@ struct CleanupResult {
     foreground_restored: bool,
     cursor_restored: bool,
     input_desktop_released: bool,
+}
+
+#[cfg(any(windows, test))]
+mod foreground_cursor_cleanup {
+    use super::CleanupResult;
+    use std::io::Write;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct ForegroundOwner {
+        hwnd: usize,
+        process_id: u32,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AnchorFocus {
+        NotRetained,
+        Validated,
+    }
+
+    trait CleanupBackend {
+        fn focus_retained_anchor(&mut self) -> Result<AnchorFocus, String>;
+        fn cursor_position(&mut self) -> Result<[i32; 2], String>;
+        fn restore_cursor(&mut self, point: [i32; 2]) -> Result<(), String>;
+        fn restore_foreground(&mut self, owner: ForegroundOwner) -> Result<(), String>;
+        fn validate_foreground(&mut self, owner: ForegroundOwner) -> Result<(), String>;
+    }
+
+    fn cursor_matches(current: [i32; 2], expected: [i32; 2]) -> bool {
+        current[0].abs_diff(expected[0]) <= 1 && current[1].abs_diff(expected[1]) <= 1
+    }
+
+    fn restore(
+        backend: &mut impl CleanupBackend,
+        before_foreground: Option<ForegroundOwner>,
+        before_cursor: Result<[i32; 2], String>,
+        cleanup: &mut CleanupResult,
+        log: &mut impl Write,
+    ) {
+        cleanup.foreground_restore_captured = before_foreground.is_some();
+        cleanup.foreground_restore_attempted = false;
+        cleanup.foreground_restored = false;
+        cleanup.cursor_restored = false;
+
+        // Anchor acquisition may require its checked activation click. Complete
+        // that input before observing or restoring the final cursor position.
+        // Without a captured cursor, that activation cannot be undone.
+        let anchor_acquired = before_cursor.is_ok()
+            && match backend.focus_retained_anchor() {
+                Ok(AnchorFocus::NotRetained) => {
+                    let _ = writeln!(
+                        log,
+                        "cursor/foreground cleanup has no retained runner anchor"
+                    );
+                    true
+                }
+                Ok(AnchorFocus::Validated) => true,
+                Err(error) => {
+                    let _ = writeln!(
+                        log,
+                        "retained runner anchor acquisition failed; cursor restoration is unverified: {error}"
+                    );
+                    false
+                }
+            };
+        let cursor_acknowledged = match &before_cursor {
+            Ok(point) if anchor_acquired => {
+                if backend
+                    .cursor_position()
+                    .is_ok_and(|current| cursor_matches(current, *point))
+                {
+                    true
+                } else {
+                    match backend.restore_cursor(*point) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            let _ = writeln!(log, "cursor restoration failed: {error}");
+                            false
+                        }
+                    }
+                }
+            }
+            Ok(_) => false,
+            Err(error) => {
+                let _ = writeln!(
+                    log,
+                    "cursor position capture failed; restoration is unverified: {error}"
+                );
+                false
+            }
+        };
+
+        if let Some(owner) = before_foreground {
+            cleanup.foreground_restore_attempted = true;
+            let restored = match backend.restore_foreground(owner) {
+                Ok(()) => true,
+                Err(error) => {
+                    let _ = writeln!(
+                        log,
+                        "foreground restoration failed for captured HWND={} PID={}: {error}",
+                        owner.hwnd, owner.process_id
+                    );
+                    false
+                }
+            };
+            let validated = match backend.validate_foreground(owner) {
+                Ok(()) => true,
+                Err(error) => {
+                    let _ = writeln!(log, "final foreground verification failed: {error}");
+                    false
+                }
+            };
+            cleanup.foreground_restored = restored && validated;
+        } else {
+            let _ = writeln!(
+                log,
+                "foreground restoration skipped: no foreground HWND was captured"
+            );
+        }
+
+        // Restoring the original foreground must not reactivate the anchor or
+        // insert corrective pointer input. The last observation proves whether
+        // the acknowledged restoration survived the foreground transition.
+        if let Ok(point) = before_cursor {
+            match backend.cursor_position() {
+                Ok(current) => {
+                    cleanup.cursor_restored = cursor_acknowledged && cursor_matches(current, point);
+                    if !cleanup.cursor_restored {
+                        let _ = writeln!(
+                            log,
+                            "final cursor restoration is unverified: expected=({},{}), observed=({},{}), acknowledged={cursor_acknowledged}",
+                            point[0], point[1], current[0], current[1]
+                        );
+                    }
+                }
+                Err(error) => {
+                    let _ = writeln!(log, "final cursor verification failed: {error}");
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    struct NativeCleanupBackend<'a> {
+        anchor: Option<&'a super::native::FocusAnchor>,
+    }
+
+    #[cfg(windows)]
+    impl CleanupBackend for NativeCleanupBackend<'_> {
+        fn focus_retained_anchor(&mut self) -> Result<AnchorFocus, String> {
+            let Some(anchor) = self.anchor else {
+                return Ok(AnchorFocus::NotRetained);
+            };
+            anchor.focus()?;
+            super::native::focus_is_validated(anchor.hwnd(), anchor.process_id())?;
+            Ok(AnchorFocus::Validated)
+        }
+
+        fn cursor_position(&mut self) -> Result<[i32; 2], String> {
+            super::native::cursor_position().map(|point| [point.x, point.y])
+        }
+
+        fn restore_cursor(&mut self, point: [i32; 2]) -> Result<(), String> {
+            super::native::set_cursor_position(windows::Win32::Foundation::POINT {
+                x: point[0],
+                y: point[1],
+            })
+        }
+
+        fn restore_foreground(&mut self, owner: ForegroundOwner) -> Result<(), String> {
+            super::native::restore_foreground(
+                windows::Win32::Foundation::HWND(owner.hwnd as *mut std::ffi::c_void),
+                owner.process_id,
+            )
+        }
+
+        fn validate_foreground(&mut self, owner: ForegroundOwner) -> Result<(), String> {
+            super::native::focus_is_validated(
+                windows::Win32::Foundation::HWND(owner.hwnd as *mut std::ffi::c_void),
+                owner.process_id,
+            )
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn restore_native(
+        before_foreground: (windows::Win32::Foundation::HWND, u32),
+        before_cursor: Result<windows::Win32::Foundation::POINT, String>,
+        anchor: Option<&super::native::FocusAnchor>,
+        cleanup: &mut CleanupResult,
+        log: &mut impl Write,
+    ) {
+        let before_foreground = (!before_foreground.0.is_invalid()).then_some(ForegroundOwner {
+            hwnd: before_foreground.0.0 as usize,
+            process_id: before_foreground.1,
+        });
+        restore(
+            &mut NativeCleanupBackend { anchor },
+            before_foreground,
+            before_cursor.map(|point| [point.x, point.y]),
+            cleanup,
+            log,
+        );
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const ORIGINAL_CURSOR: [i32; 2] = [1194, 978];
+        const ACTIVATION_CURSOR: [i32; 2] = [1194, 887];
+        const ORIGINAL_FOREGROUND: ForegroundOwner = ForegroundOwner {
+            hwnd: 101,
+            process_id: 17,
+        };
+        const ANCHOR: ForegroundOwner = ForegroundOwner {
+            hwnd: 202,
+            process_id: 31,
+        };
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum Operation {
+            AcquireAnchor,
+            ObserveCursor,
+            RestoreCursor([i32; 2]),
+            RestoreForeground(ForegroundOwner),
+            ValidateForeground(ForegroundOwner),
+        }
+
+        struct Backend {
+            operations: Vec<Operation>,
+            anchor_focus: Result<AnchorFocus, String>,
+            activation_cursor: Option<[i32; 2]>,
+            cursor: [i32; 2],
+            foreground: Option<ForegroundOwner>,
+            cursor_restore: Result<(), String>,
+            apply_cursor_restore: bool,
+            foreground_restore: Result<(), String>,
+            apply_foreground_restore: bool,
+            cursor_after_foreground: Option<[i32; 2]>,
+            cursor_reads: usize,
+            cursor_error_on_read: Option<usize>,
+        }
+
+        impl Default for Backend {
+            fn default() -> Self {
+                Self {
+                    operations: Vec::new(),
+                    anchor_focus: Ok(AnchorFocus::Validated),
+                    activation_cursor: Some(ACTIVATION_CURSOR),
+                    cursor: ORIGINAL_CURSOR,
+                    foreground: Some(ORIGINAL_FOREGROUND),
+                    cursor_restore: Ok(()),
+                    apply_cursor_restore: true,
+                    foreground_restore: Ok(()),
+                    apply_foreground_restore: true,
+                    cursor_after_foreground: None,
+                    cursor_reads: 0,
+                    cursor_error_on_read: None,
+                }
+            }
+        }
+
+        impl CleanupBackend for Backend {
+            fn focus_retained_anchor(&mut self) -> Result<AnchorFocus, String> {
+                self.operations.push(Operation::AcquireAnchor);
+                if let Some(point) = self.activation_cursor {
+                    self.cursor = point;
+                    self.foreground = Some(ANCHOR);
+                }
+                self.anchor_focus.clone()
+            }
+
+            fn cursor_position(&mut self) -> Result<[i32; 2], String> {
+                self.operations.push(Operation::ObserveCursor);
+                self.cursor_reads += 1;
+                if self.cursor_error_on_read == Some(self.cursor_reads) {
+                    Err("actual cursor read failed".into())
+                } else {
+                    Ok(self.cursor)
+                }
+            }
+
+            fn restore_cursor(&mut self, point: [i32; 2]) -> Result<(), String> {
+                self.operations.push(Operation::RestoreCursor(point));
+                if self.apply_cursor_restore {
+                    self.cursor = point;
+                }
+                self.cursor_restore.clone()
+            }
+
+            fn restore_foreground(&mut self, owner: ForegroundOwner) -> Result<(), String> {
+                self.operations.push(Operation::RestoreForeground(owner));
+                if self.apply_foreground_restore {
+                    self.foreground = Some(owner);
+                }
+                if let Some(point) = self.cursor_after_foreground {
+                    self.cursor = point;
+                }
+                self.foreground_restore.clone()
+            }
+
+            fn validate_foreground(&mut self, owner: ForegroundOwner) -> Result<(), String> {
+                self.operations.push(Operation::ValidateForeground(owner));
+                if self.foreground == Some(owner) {
+                    Ok(())
+                } else {
+                    Err("actual foreground HWND/PID differs from captured owner".into())
+                }
+            }
+        }
+
+        fn run(backend: &mut Backend) -> (CleanupResult, String) {
+            let mut cleanup = CleanupResult::default();
+            let mut log = Vec::new();
+            restore(
+                backend,
+                Some(ORIGINAL_FOREGROUND),
+                Ok(ORIGINAL_CURSOR),
+                &mut cleanup,
+                &mut log,
+            );
+            (cleanup, String::from_utf8(log).unwrap())
+        }
+
+        fn pointer_restores(backend: &Backend) -> usize {
+            backend
+                .operations
+                .iter()
+                .filter(|operation| matches!(operation, Operation::RestoreCursor(_)))
+                .count()
+        }
+
+        #[test]
+        fn anchor_activation_finishes_before_cursor_restoration_and_foreground_return() {
+            let mut backend = Backend::default();
+            let (cleanup, _) = run(&mut backend);
+            assert_eq!(
+                backend.operations,
+                vec![
+                    Operation::AcquireAnchor,
+                    Operation::ObserveCursor,
+                    Operation::RestoreCursor(ORIGINAL_CURSOR),
+                    Operation::RestoreForeground(ORIGINAL_FOREGROUND),
+                    Operation::ValidateForeground(ORIGINAL_FOREGROUND),
+                    Operation::ObserveCursor,
+                ]
+            );
+            assert_eq!(backend.cursor, ORIGINAL_CURSOR);
+            assert_eq!(backend.foreground, Some(ORIGINAL_FOREGROUND));
+            assert!(cleanup.foreground_restore_captured);
+            assert!(cleanup.foreground_restore_attempted);
+            assert!(cleanup.foreground_restored);
+            assert!(cleanup.cursor_restored);
+        }
+
+        #[test]
+        fn no_anchor_already_matching_cursor_needs_no_pointer_input() {
+            let mut backend = Backend {
+                anchor_focus: Ok(AnchorFocus::NotRetained),
+                activation_cursor: None,
+                cursor: [ORIGINAL_CURSOR[0] + 1, ORIGINAL_CURSOR[1] - 1],
+                ..Backend::default()
+            };
+            let (cleanup, log) = run(&mut backend);
+            assert!(cleanup.cursor_restored);
+            assert!(cleanup.foreground_restored);
+            assert_eq!(pointer_restores(&backend), 0);
+            assert!(log.contains("no retained runner anchor"));
+            assert_eq!(backend.operations.len(), 5);
+        }
+
+        #[test]
+        fn no_anchor_cursor_restoration_still_requires_actual_final_position() {
+            for apply_cursor_restore in [true, false] {
+                let mut backend = Backend {
+                    anchor_focus: Ok(AnchorFocus::NotRetained),
+                    activation_cursor: None,
+                    cursor: ACTIVATION_CURSOR,
+                    apply_cursor_restore,
+                    ..Backend::default()
+                };
+                let (cleanup, _) = run(&mut backend);
+                assert_eq!(cleanup.cursor_restored, apply_cursor_restore);
+                assert!(cleanup.foreground_restored);
+                assert_eq!(pointer_restores(&backend), 1);
+            }
+        }
+
+        #[test]
+        fn failed_anchor_acquisition_refuses_pointer_restore_but_recovers_foreground() {
+            for activation_cursor in [Some(ACTIVATION_CURSOR), None] {
+                let mut backend = Backend {
+                    anchor_focus: Err("retained anchor owner could not be acquired".into()),
+                    activation_cursor,
+                    ..Backend::default()
+                };
+                let (cleanup, log) = run(&mut backend);
+                assert!(!cleanup.cursor_restored);
+                assert!(cleanup.foreground_restored);
+                assert_eq!(pointer_restores(&backend), 0);
+                assert_eq!(backend.cursor, activation_cursor.unwrap_or(ORIGINAL_CURSOR));
+                assert_eq!(backend.foreground, Some(ORIGINAL_FOREGROUND));
+                assert_eq!(
+                    backend.operations,
+                    vec![
+                        Operation::AcquireAnchor,
+                        Operation::RestoreForeground(ORIGINAL_FOREGROUND),
+                        Operation::ValidateForeground(ORIGINAL_FOREGROUND),
+                        Operation::ObserveCursor,
+                    ]
+                );
+                assert!(log.contains("anchor acquisition failed"));
+            }
+        }
+
+        #[test]
+        fn cursor_ack_failure_remains_failed_even_when_final_coordinates_match() {
+            let mut backend = Backend {
+                cursor_restore: Err("native cursor restoration did not acknowledge".into()),
+                ..Backend::default()
+            };
+            let (cleanup, log) = run(&mut backend);
+            assert_eq!(backend.cursor, ORIGINAL_CURSOR);
+            assert!(!cleanup.cursor_restored);
+            assert!(cleanup.foreground_restored);
+            assert_eq!(pointer_restores(&backend), 1);
+            assert!(log.contains("did not acknowledge"));
+        }
+
+        #[test]
+        fn final_cursor_mismatch_or_read_failure_never_inserts_post_foreground_input() {
+            for (point, read_error) in [
+                (Some(ACTIVATION_CURSOR), None),
+                (Some([ORIGINAL_CURSOR[0] + 2, ORIGINAL_CURSOR[1]]), None),
+                (None, Some(2)),
+            ] {
+                let mut backend = Backend {
+                    cursor_after_foreground: point,
+                    cursor_error_on_read: read_error,
+                    ..Backend::default()
+                };
+                let (cleanup, log) = run(&mut backend);
+                assert!(!cleanup.cursor_restored);
+                assert!(cleanup.foreground_restored);
+                assert_eq!(pointer_restores(&backend), 1);
+                let returned = backend
+                    .operations
+                    .iter()
+                    .position(|operation| {
+                        *operation == Operation::RestoreForeground(ORIGINAL_FOREGROUND)
+                    })
+                    .unwrap();
+                assert!(backend.operations[returned + 1..].iter().all(|operation| {
+                    matches!(
+                        operation,
+                        Operation::ValidateForeground(_) | Operation::ObserveCursor
+                    )
+                }));
+                assert!(log.contains("final cursor"));
+            }
+        }
+
+        #[test]
+        fn foreground_success_requires_both_restoration_ack_and_exact_final_owner() {
+            for (foreground_restore, apply_foreground_restore) in [
+                (
+                    Err("foreground restoration acknowledgment failed".into()),
+                    true,
+                ),
+                (Ok(()), false),
+            ] {
+                let mut backend = Backend {
+                    foreground_restore,
+                    apply_foreground_restore,
+                    ..Backend::default()
+                };
+                let (cleanup, log) = run(&mut backend);
+                assert!(!cleanup.foreground_restored);
+                assert!(cleanup.foreground_restore_captured);
+                assert!(cleanup.foreground_restore_attempted);
+                assert!(cleanup.cursor_restored);
+                assert!(log.contains("foreground"));
+            }
+            let mut backend = Backend {
+                anchor_focus: Ok(AnchorFocus::NotRetained),
+                activation_cursor: None,
+                foreground: Some(ForegroundOwner {
+                    process_id: ORIGINAL_FOREGROUND.process_id + 1,
+                    ..ORIGINAL_FOREGROUND
+                }),
+                apply_foreground_restore: false,
+                ..Backend::default()
+            };
+            let (cleanup, log) = run(&mut backend);
+            assert!(!cleanup.foreground_restored);
+            assert!(cleanup.cursor_restored);
+            assert!(log.contains("HWND/PID differs"));
+        }
+
+        #[test]
+        fn missing_captures_stay_unverified_and_other_cleanup_facts_are_preserved() {
+            let mut backend = Backend::default();
+            let original_cursor = backend.cursor;
+            let original_foreground = backend.foreground;
+            let mut cleanup = CleanupResult {
+                child_closed_normally: true,
+                child_terminated_after_timeout: true,
+                child_owned_windows_closed: true,
+                profile_removed: true,
+                foreground_restore_captured: true,
+                foreground_restore_attempted: true,
+                foreground_restored: true,
+                cursor_restored: true,
+                input_desktop_released: true,
+            };
+            let mut log = Vec::new();
+            restore(
+                &mut backend,
+                None,
+                Err("baseline cursor capture failed".into()),
+                &mut cleanup,
+                &mut log,
+            );
+            assert!(backend.operations.is_empty());
+            assert_eq!(backend.cursor, original_cursor);
+            assert_eq!(backend.foreground, original_foreground);
+            assert!(!cleanup.foreground_restore_captured);
+            assert!(!cleanup.foreground_restore_attempted);
+            assert!(!cleanup.foreground_restored);
+            assert!(!cleanup.cursor_restored);
+            assert!(cleanup.child_closed_normally);
+            assert!(cleanup.child_terminated_after_timeout);
+            assert!(cleanup.child_owned_windows_closed);
+            assert!(cleanup.profile_removed);
+            assert!(cleanup.input_desktop_released);
+            let log = String::from_utf8(log).unwrap();
+            assert!(log.contains("baseline cursor capture failed"));
+            assert!(log.contains("no foreground HWND was captured"));
+
+            backend.foreground = Some(ANCHOR);
+            let mut log = Vec::new();
+            restore(
+                &mut backend,
+                Some(ORIGINAL_FOREGROUND),
+                Err("baseline cursor capture failed".into()),
+                &mut cleanup,
+                &mut log,
+            );
+            assert_eq!(
+                backend.operations,
+                vec![
+                    Operation::RestoreForeground(ORIGINAL_FOREGROUND),
+                    Operation::ValidateForeground(ORIGINAL_FOREGROUND),
+                ]
+            );
+            assert_eq!(backend.cursor, original_cursor);
+            assert_eq!(backend.foreground, Some(ORIGINAL_FOREGROUND));
+            assert!(cleanup.foreground_restore_captured);
+            assert!(cleanup.foreground_restore_attempted);
+            assert!(cleanup.foreground_restored);
+            assert!(!cleanup.cursor_restored);
+            assert!(cleanup.child_closed_normally);
+            assert!(cleanup.child_terminated_after_timeout);
+            assert!(cleanup.child_owned_windows_closed);
+            assert!(cleanup.profile_removed);
+            assert!(cleanup.input_desktop_released);
+            assert!(
+                String::from_utf8(log)
+                    .unwrap()
+                    .contains("baseline cursor capture failed")
+            );
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -10849,6 +12869,8 @@ struct AcceptanceReport {
     gate_c_evidence: Vec<GateCCaseEvidence>,
     gate_d_evidence: Vec<GateDCaseEvidence>,
     gate_s_evidence: Vec<GateSCaseEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    controlled_failures: Option<controlled_failures::Evidence>,
     artifacts: Vec<String>,
     cleanup: CleanupResult,
     capacity_saturated: bool,
@@ -11055,6 +13077,149 @@ struct QueryCaseEvidence {
     schema_version: u16,
     case_id: String,
     invocations: Vec<QueryInvocationEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    placement: Option<QueryPlacementEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct QueryPlacementToggleEvidence {
+    input: QuerySetupVisibilityEvidence,
+    visibility_revision: u64,
+    command: HotkeyCandidateEventEvidence,
+    snapshot: HotkeyCandidateEventEvidence,
+    presentation: QueryRootPresentationEvidence,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct QueryPlacementEvidence {
+    hotkey: AcceptanceHotkey,
+    physical_displays: Vec<[i32; 4]>,
+    dpi: u32,
+    configured_logical_position: [i32; 2],
+    configured_logical_client_size: [i32; 2],
+    configured_client_bounds: [i32; 4],
+    configured_root: QueryRootPresentationEvidence,
+    moved_root: QueryRootPresentationEvidence,
+    moved_client_bounds: [i32; 4],
+    handoff_terminal_cursor: usize,
+    restored_root: QueryRootPresentationEvidence,
+    restored_client_bounds: [i32; 4],
+    hide: QueryPlacementToggleEvidence,
+    show: QueryPlacementToggleEvidence,
+    shown_client_bounds: [i32; 4],
+    note_absent_before: bool,
+    note_closed_after: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+enum PriorityHookOwner {
+    Launcher,
+    ScreenDrawRecovery,
+    ExclusiveTool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+enum PriorityForegroundOwner {
+    Root,
+    PreviewInput,
+    PreviewVisual,
+    Other,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct PriorityHookPrimaryEvidence {
+    event_ordinal: u32,
+    elapsed_ms: u64,
+    transition: HotkeyEdgeTransition,
+    provenance: HotkeyInputProvenance,
+    foreground_owner: PriorityForegroundOwner,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct PriorityHookAdmissionEvidence {
+    event_ordinal: u32,
+    elapsed_ms: u64,
+    transition: HotkeyEdgeTransition,
+    provenance: HotkeyInputProvenance,
+    owner: PriorityHookOwner,
+    global_exclusive_owners: u32,
+    adapter_exclusive: bool,
+    recovery: bool,
+    deadline_scheduled: bool,
+    radial_intent: bool,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct PriorityConfiguredPrimaryEvidence {
+    event_ordinal: u32,
+    elapsed_ms: u64,
+    transition: HotkeyEdgeTransition,
+    provenance: HotkeyInputProvenance,
+    modifiers_match: bool,
+    invocation_id: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenDrawPriorityEvidence {
+    entry_root: QueryRootPresentationEvidence,
+    entry_query_digest: u64,
+    entry_label_digest: u64,
+    entry_action_digest: u64,
+    entry_control_bounds: [i32; 4],
+    entry_down_inserted: usize,
+    entry_up_inserted: usize,
+    entry_clicked_ordinal: u32,
+    entry_clicked_sequence: u64,
+    tool_title_digest: u64,
+    ready_tool: QueryRootPresentationEvidence,
+    drawing_ui_ack: bool,
+    ready_observation: ScreenDrawToolbarReceipt,
+    ready_client_bounds: [i32; 4],
+    baseline_observation: ScreenDrawToolbarReceipt,
+    baseline_tool: QueryRootPresentationEvidence,
+    baseline_client_bounds: [i32; 4],
+    trace_cursor: usize,
+    trace_end: usize,
+    baseline_visibility_revision: u64,
+    #[serde(deserialize_with = "deserialize_h15_baseline_invocation")]
+    baseline_invocation_id: Option<u64>,
+    quiet_preflight_ms: u64,
+    observer_default_desktop: bool,
+    input_down_inserted: usize,
+    input_up_inserted: usize,
+    input_down_foreground_hwnd: u64,
+    input_down_foreground_pid: u32,
+    input_up_foreground_hwnd: u64,
+    input_up_foreground_pid: u32,
+    input_down_default_desktop: bool,
+    input_up_default_desktop: bool,
+    runner_edges: Vec<QuerySetupObservedEdge>,
+    foreign_edges: Vec<QuerySetupObservedEdge>,
+    primary_edges: Vec<PriorityHookPrimaryEvidence>,
+    admissions: Vec<PriorityHookAdmissionEvidence>,
+    configured_primary: Vec<PriorityConfiguredPrimaryEvidence>,
+    candidate_events: Vec<HotkeyCandidateEventEvidence>,
+    restorations: Vec<HotkeyFollowOnRestoreEvidence>,
+    forbidden_event_count: usize,
+    runtime_window_count: usize,
+    recovered_root: QueryRootPresentationEvidence,
+    recovered_tool: QueryRootPresentationEvidence,
+    ghost_ui_ack: bool,
+    recovered_observation: ScreenDrawToolbarReceipt,
+    recovered_client_bounds: [i32; 4],
+    keys_released: bool,
+    close_requested: bool,
+    tool_closed: bool,
+    close_terminal_cursor: usize,
+    next_admission: PriorityHookAdmissionEvidence,
+}
+
+fn deserialize_h15_baseline_invocation<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    serde::Deserialize::deserialize(deserializer)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -12111,7 +14276,7 @@ struct GateCInsertionObservationReceipt {
     boundary: GateCObservationBoundaryEvidence,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CopiedProfileStatus {
     NotRun,
@@ -12191,6 +14356,19 @@ impl AcceptanceReport {
     }
 
     fn passed_native_cases(&self) -> bool {
+        if self.mode == controlled_failures::PROBE_MODE {
+            return false;
+        }
+        if self.mode == controlled_failures::AGGREGATE_MODE {
+            return !self.capacity_saturated
+                && self.cases.len() == controlled_failures::CASE_IDS.len()
+                && self
+                    .cases
+                    .iter()
+                    .zip(controlled_failures::CASE_IDS)
+                    .all(|(case, id)| case.id == id && matches!(case.status, CaseStatus::Passed))
+                && controlled_failures::validate_report_evidence(self).is_ok();
+        }
         let case_ids = if self.mode == "native_windows_copied_profile" {
             &COPIED_CASE_IDS[..]
         } else if self.suite == AcceptanceSuite::Hotkey {
@@ -12401,11 +14579,44 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
     let mut mouse_gesture_mode = MouseGestureMode::Enabled;
     let mut suite = AcceptanceSuite::All;
     let mut hotkey = AcceptanceHotkey::F11;
+    let mut operation = controlled_failures::Operation::Ordinary;
+    let mut probe_nonce = None;
+    let mut ordinary_mode_option = false;
     let mut args = args.into_iter();
 
     while let Some(argument) = args.next() {
         match argument.to_str() {
             Some("--help" | "-h") => return Ok(ParseResult::Help),
+            Some("--controlled-native-failures") => {
+                if operation != controlled_failures::Operation::Ordinary {
+                    return Err("choose one controlled operation".into());
+                }
+                operation = controlled_failures::Operation::Aggregate;
+            }
+            Some("--controlled-native-failure-probe") => {
+                if operation != controlled_failures::Operation::Ordinary {
+                    return Err("choose one controlled operation".into());
+                }
+                let value = args.next().ok_or("controlled probe requires a kind")?;
+                operation =
+                    controlled_failures::Operation::Probe(controlled_failures::ProbeKind::parse(
+                        value
+                            .to_str()
+                            .ok_or("controlled probe kind must be UTF-8")?,
+                    )?);
+            }
+            Some("--controlled-probe-nonce") => {
+                if probe_nonce.is_some() {
+                    return Err("controlled nonce must be supplied once".into());
+                }
+                let value = args
+                    .next()
+                    .ok_or("controlled probe requires a nonce")?
+                    .into_string()
+                    .map_err(|_| "controlled nonce must be UTF-8")?;
+                controlled_failures::validate_nonce(&value)?;
+                probe_nonce = Some(value);
+            }
             Some("--keep-profile-on-failure") => keep_profile_on_failure = true,
             Some("--launcher" | "--candidate") => {
                 launcher = Some(next_path(&mut args, "--launcher")?);
@@ -12416,6 +14627,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
                 profile_copy = Some(next_path(&mut args, "--profile-copy")?);
             }
             Some("--suite") => {
+                ordinary_mode_option = true;
                 let value = args.next().ok_or_else(|| {
                     "--suite requires all, hotkey, query, gate-c, gate-d, or gate-s".to_string()
                 })?;
@@ -12434,6 +14646,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
                 };
             }
             Some("--hotkey") => {
+                ordinary_mode_option = true;
                 let value = args
                     .next()
                     .ok_or_else(|| "--hotkey requires f11 or shift-alt-win-end".to_string())?;
@@ -12454,6 +14667,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
                 );
             }
             Some("--h6-repeat") => {
+                ordinary_mode_option = true;
                 let value = args.next().ok_or_else(|| {
                     "--h6-repeat requires immediate, quiescent, or production-only-diagnostic"
                         .to_string()
@@ -12468,6 +14682,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
                 };
             }
             Some("--mouse-gestures") => {
+                ordinary_mode_option = true;
                 let value = args.next().ok_or_else(|| {
                     "--mouse-gestures requires enabled or disabled-diagnostic".to_string()
                 })?;
@@ -12488,6 +14703,24 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
 
     if output.is_some() == report_file.is_some() {
         return Err("specify exactly one of --output <directory> or --report <file>".into());
+    }
+    if operation != controlled_failures::Operation::Ordinary
+        && (profile_copy.is_some() || keep_profile_on_failure || ordinary_mode_option)
+    {
+        return Err("controlled native failures require an isolated default fixture; profile-copy, keep-profile and ordinary suite/input options are incompatible".into());
+    }
+    if matches!(operation, controlled_failures::Operation::Probe(_)) != probe_nonce.is_some() {
+        return Err(
+            "--controlled-probe-nonce is required only for an inner controlled probe".into(),
+        );
+    }
+    if operation != controlled_failures::Operation::Ordinary
+        && (launcher.is_none()
+            || source_revision.as_deref().is_none_or(|s| {
+                s.is_empty() || s.len() > 160 || !s.bytes().all(|b| b.is_ascii_graphic())
+            }))
+    {
+        return Err("controlled native failures require an explicit source-matched --launcher and bounded --source-revision".into());
     }
     if !matches!(
         suite,
@@ -12526,6 +14759,8 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<ParseResu
         mouse_gesture_mode,
         suite,
         hotkey,
+        operation,
+        probe_nonce,
     }))
 }
 
@@ -12587,7 +14822,13 @@ fn run(arguments: Arguments) -> Result<(PathBuf, bool), String> {
     }
 
     #[cfg(windows)]
-    run_windows(arguments)
+    {
+        if arguments.operation == controlled_failures::Operation::Aggregate {
+            controlled_failures::run_aggregate(arguments)
+        } else {
+            run_windows(arguments)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -13025,41 +15266,13 @@ fn run_copied_profile_windows(
                     copied_options,
                 );
 
-                if let Ok(point) = &before_cursor {
-                    let point = *point;
-                    let already_restored = native::cursor_position().is_ok_and(|current| {
-                        current.x.abs_diff(point.x) <= 1 && current.y.abs_diff(point.y) <= 1
-                    });
-                    if already_restored {
-                        report.cleanup.cursor_restored = true;
-                    } else if native::set_cursor_position(point).is_ok() {
-                        report.cleanup.cursor_restored =
-                            native::cursor_position().is_ok_and(|current| {
-                                current.x.abs_diff(point.x) <= 1 && current.y.abs_diff(point.y) <= 1
-                            });
-                    }
-                }
-                report.cleanup.foreground_restored = if before_foreground.0.is_invalid() {
-                    false
-                } else {
-                    report.cleanup.foreground_restore_attempted = true;
-                    if let Some(anchor) = anchor.as_ref() {
-                        let _ = anchor.focus();
-                    }
-                    native::restore_foreground(before_foreground.0, before_foreground.1).is_ok()
-                };
-                if let Ok(point) = &before_cursor {
-                    let point = *point;
-                    if !native::cursor_position().is_ok_and(|current| {
-                        current.x.abs_diff(point.x) <= 1 && current.y.abs_diff(point.y) <= 1
-                    }) {
-                        report.cleanup.cursor_restored = native::set_cursor_position(point)
-                            .and_then(|()| native::cursor_position())
-                            .is_ok_and(|current| {
-                                current.x.abs_diff(point.x) <= 1 && current.y.abs_diff(point.y) <= 1
-                            });
-                    }
-                }
+                foreground_cursor_cleanup::restore_native(
+                    before_foreground,
+                    before_cursor,
+                    anchor.as_ref(),
+                    &mut report.cleanup,
+                    &mut runner_log,
+                );
                 drop(anchor);
                 let handle = desktop_attachment.release_for_thread_exit();
                 (report, handle)
@@ -13278,6 +15491,7 @@ fn copied_report_seed(deterministic: &AcceptanceReport, started_unix_ms: u128) -
         gate_c_evidence: Vec::new(),
         gate_d_evidence: Vec::new(),
         gate_s_evidence: Vec::new(),
+        controlled_failures: None,
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
@@ -13849,23 +16063,30 @@ fn run_windows_deterministic(
         .map_err(|error| format!("create isolated profile directory: {error}"))?;
     let profile_path = profile.path().to_path_buf();
     let log_path = profile_path.join("acceptance.log");
-    let fixture = if arguments.suite == AcceptanceSuite::Hotkey {
+    let mut fixture = if arguments.suite == AcceptanceSuite::Hotkey {
         deterministic_fixture_for_hotkey_with_direct_trigger(
             &log_path,
             arguments.mouse_gesture_mode,
             arguments.hotkey,
         )?
-    } else if arguments.suite == AcceptanceSuite::Query {
+    } else if arguments.suite == AcceptanceSuite::Query
+        || matches!(
+            arguments.operation,
+            controlled_failures::Operation::Probe(_)
+        )
+    {
         let marker_path = profile_path.join("query-marker-ledger.txt");
         write_new(&marker_path, b"radial-acceptance-marker-ledger:v1\n")?;
-        deterministic_query_fixture(
+        let fixture = deterministic_query_fixture(
             &log_path,
             arguments.mouse_gesture_mode,
             arguments.hotkey,
             &marker_path,
             &std::env::current_exe()
                 .map_err(|error| format!("resolve runner for query fixture: {error}"))?,
-        )?
+        )?;
+        seed_query_note_editor_fixture(&profile_path)?;
+        fixture
     } else if arguments.suite == AcceptanceSuite::GateC {
         let marker_path = profile_path.join("query-marker-ledger.txt");
         write_new(&marker_path, b"radial-acceptance-marker-ledger:v1\n")?;
@@ -13897,11 +16118,21 @@ fn run_windows_deterministic(
             fixture
         }
     } else {
-        deterministic_fixture_for_hotkey(&log_path, arguments.mouse_gesture_mode, arguments.hotkey)?
+        deterministic_all_fixture_for_hotkey(
+            &log_path,
+            arguments.mouse_gesture_mode,
+            arguments.hotkey,
+        )?
     };
     write_new(&profile_path.join("settings.json"), &fixture.settings_json)?;
     write_new(&profile_path.join("radial.json"), &fixture.radial_json)?;
     write_new(&profile_path.join("actions.json"), &fixture.actions_json)?;
+    if matches!(
+        arguments.operation,
+        controlled_failures::Operation::Probe(_)
+    ) {
+        controlled_failures::prepare_fresh_controlled_fixture(&profile_path, &mut fixture)?;
+    }
     let settings_sha256 = sha256_bytes(&fixture.settings_json);
     let radial_sha256 = sha256_bytes(&fixture.radial_json);
     let actions_sha256 = sha256_bytes(&fixture.actions_json);
@@ -13951,11 +16182,35 @@ fn run_windows_deterministic(
         gate_c_evidence: Vec::new(),
         gate_d_evidence: Vec::new(),
         gate_s_evidence: Vec::new(),
+        controlled_failures: None,
         artifacts: Vec::new(),
         cleanup: CleanupResult::default(),
         capacity_saturated: false,
         report_overflow: None,
     };
+    if let controlled_failures::Operation::Probe(kind) = arguments.operation {
+        report.mode = controlled_failures::PROBE_MODE;
+        report.controlled_failures = Some(controlled_failures::Evidence::Probe {
+            receipt: Box::new(controlled_failures::ProbeReceipt {
+                kind,
+                nonce: arguments
+                    .probe_nonce
+                    .clone()
+                    .ok_or("controlled probe nonce missing")?,
+                owner: None,
+                proof: None,
+                profile_before: controlled_failures::read_profile_hashes(&profile_path)?,
+                profile_after: None,
+                child_exit_code: None,
+                owned_keys_after: None,
+                marker_count_before: None,
+                marker_count_after: None,
+                execution_count_before: None,
+                execution_count_after: None,
+                cleanup_errors: Vec::new(),
+            }),
+        });
+    }
     let profile_hashes_match_at_launch =
         validate_profile_hashes(&profile_path, &report.profile).is_ok();
 
@@ -13991,7 +16246,10 @@ fn run_windows_deterministic(
             let before_foreground = native::capture_foreground();
             let before_cursor = native::cursor_position();
             report.cleanup.foreground_restore_captured = !before_foreground.0.is_invalid();
-                    let focus_anchor = match arguments.suite {
+                    let focus_anchor = if let controlled_failures::Operation::Probe(kind) = arguments.operation {
+                        native::run_controlled_failure_probe(kind, &candidate_executable, &driver_profile,
+                            &driver_output, &driver_trace, &mut report, &mut log)
+                    } else { match arguments.suite {
                         AcceptanceSuite::All => native::run_suite(
                             &candidate_executable,
                             &driver_profile,
@@ -14052,99 +16310,15 @@ fn run_windows_deterministic(
                             &candidate_executable,&driver_profile,&driver_output,&driver_trace,arguments.hotkey,
                             before_cursor.as_ref().ok().copied(),&desktop_attachment,&mut report,&mut log,
                         ),
-                    };
+                    }};
 
-                    match &before_cursor {
-                        Ok(point) => {
-                            let point = *point;
-                            let already_restored = native::cursor_position().is_ok_and(|current| {
-                                current.x == point.x && current.y == point.y
-                            });
-                            if already_restored {
-                                report.cleanup.cursor_restored = true;
-                            } else {
-                                match native::set_cursor_position(point) {
-                                    Ok(()) => {
-                                        report.cleanup.cursor_restored = true;
-                                        let _ = writeln!(
-                                            log,
-                                            "cursor restoration before foreground reached ({},{})",
-                                            point.x,
-                                            point.y
-                                        );
-                                    }
-                                    Err(error) => {
-                                        let _ = writeln!(log, "cursor restoration failed: {error}");
-                                    }
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            let _ = writeln!(
-                                log,
-                                "cursor position capture failed; restoration is unverified: {error}"
-                            );
-                        }
-                    }
-                    report.cleanup.foreground_restored = if before_foreground.0.is_invalid() {
-                        let _ = writeln!(log, "foreground restoration skipped: no foreground HWND was captured");
-                        false
-                    } else {
-                        report.cleanup.foreground_restore_attempted = true;
-                        if let Some(anchor) = focus_anchor.as_ref() {
-                            if let Err(error) = anchor.focus() {
-                                let _ = writeln!(log, "could not focus retained runner anchor before foreground restore: {error}");
-                            }
-                        }
-                        match native::restore_foreground(before_foreground.0, before_foreground.1) {
-                            Ok(()) => {
-                                let _ = writeln!(
-                                    log,
-                                    "foreground restored to captured HWND={} PID={}",
-                                    before_foreground.0.0 as usize,
-                                    before_foreground.1
-                                );
-                                true
-                            }
-                            Err(error) => {
-                                let _ = writeln!(
-                                    log,
-                                    "foreground restoration failed for captured HWND={} PID={}: {error}",
-                                    before_foreground.0.0 as usize,
-                                    before_foreground.1
-                                );
-                                false
-                            }
-                        }
-                    };
-                    if let Ok(point) = &before_cursor {
-                        let point = *point;
-                        let restored_after_foreground = native::cursor_position().is_ok_and(|current| {
-                            current.x.abs_diff(point.x) <= 1 && current.y.abs_diff(point.y) <= 1
-                        });
-                        report.cleanup.cursor_restored = restored_after_foreground;
-                        if !restored_after_foreground {
-                            let observed = native::cursor_position()
-                                .map(|current| format!("({}, {})", current.x, current.y))
-                                .unwrap_or_else(|error| format!("unavailable: {error}"));
-                            let _ = writeln!(
-                                log,
-                                "cursor changed during foreground restoration: expected=({},{}), observed={observed}",
-                                point.x,
-                                point.y
-                            );
-                            report.cleanup.cursor_restored = match native::set_cursor_position(point) {
-                                Ok(()) => native::cursor_position().is_ok_and(|current| {
-                                    current.x.abs_diff(point.x) <= 1
-                                        && current.y.abs_diff(point.y) <= 1
-                                }),
-                                Err(error) => {
-                                    let _ = writeln!(log, "post-foreground cursor restoration failed: {error}");
-                                    false
-                                }
-                            };
-                        }
-                    }
+                    foreground_cursor_cleanup::restore_native(
+                        before_foreground,
+                        before_cursor,
+                        focus_anchor.as_ref(),
+                        &mut report.cleanup,
+                        &mut log,
+                    );
                     drop(focus_anchor);
                     let handle = desktop_attachment.release_for_thread_exit();
                     let _ = writeln!(
@@ -14155,13 +16329,11 @@ fn run_windows_deterministic(
                 }
                 Err(error) => {
                     let _ = writeln!(log, "input desktop attachment failed: {error}");
-                    native::record_environment_failure(
-                        error,
-                        &mut report,
-                        &driver_output,
-                        &driver_trace,
-                        &mut log,
-                    );
+                    if let controlled_failures::Operation::Probe(kind) = arguments.operation {
+                        controlled_failures::record_environment_failure(kind, &error, &mut report);
+                    } else {
+                        native::record_environment_failure(error, &mut report, &driver_output, &driver_trace, &mut log);
+                    }
                     (report, log, None)
                 }
             }
@@ -14242,7 +16414,18 @@ fn ensure_final_acceptance_cases(
     profile_hashes_match: bool,
     run_started: Instant,
 ) {
-    if report.suite == AcceptanceSuite::All {
+    if report.suite == AcceptanceSuite::All && report.controlled_failures.is_none() {
+        if !report.cases.iter().any(|case| case.id == "CLEANUP") {
+            push_final_case(
+                report,
+                "CLEANUP",
+                CaseStatus::Failed,
+                "native child cleanup was not run; no successful normal-close receipt can be claimed",
+                Some(FailureStage::Cleanup),
+                Vec::new(),
+                run_started,
+            );
+        }
         if !report.cases.iter().any(|case| case.id == "R1") {
             push_final_case(
                 report,
@@ -14386,7 +16569,9 @@ fn validate_r0_report(
     if report.environment.runner_sha256.as_deref() != Some(runner_actual.as_str()) {
         return Err("runner executable hash changed during acceptance".into());
     }
-    let case_ids: &[&str] = if is_copied_profile {
+    let case_ids: &[&str] = if let Some(ids) = controlled_failures::case_inventory(report) {
+        ids
+    } else if is_copied_profile {
         &COPIED_CASE_IDS
     } else if report.suite == AcceptanceSuite::Hotkey {
         &HOTKEY_CASE_IDS
@@ -14430,11 +16615,14 @@ fn validate_r0_report(
         validate_required_case_evidence(&case.id, case.status, &case.observed)?;
         validate_case_hotkey_profile_relation(report, case)?;
     }
-    validate_hotkey_evidence_report(report)?;
-    validate_query_evidence_report(report)?;
-    validate_gate_c_evidence_report(report)?;
-    validate_gate_d_evidence_report(report)?;
-    validate_gate_s_evidence_report(report)?;
+    controlled_failures::validate_report_evidence(report)?;
+    if report.controlled_failures.is_none() {
+        validate_hotkey_evidence_report(report)?;
+        validate_query_evidence_report(report)?;
+        validate_gate_c_evidence_report(report)?;
+        validate_gate_d_evidence_report(report)?;
+        validate_gate_s_evidence_report(report)?;
+    }
     if is_copied_profile {
         validate_private_artifact_report(report)?;
         validate_copied_style_evidence_relations(report)?;
@@ -14495,6 +16683,11 @@ fn copied_status_contract_is_valid(report: &AcceptanceReport) -> bool {
                 .is_some_and(|summary| summary.source_unchanged),
             CopiedProfileStatus::Failed => true,
         }
+    } else if report.mode == controlled_failures::PROBE_MODE
+        || report.mode == controlled_failures::AGGREGATE_MODE
+    {
+        matches!(report.copied_profile_status, CopiedProfileStatus::NotRun)
+            && report.copied_profile.is_none()
     } else {
         false
     }
@@ -15181,7 +17374,7 @@ fn validate_case_hotkey_profile_relation(
 ) -> Result<(), String> {
     if matches!(
         case.id.as_str(),
-        "H01" | "H02" | "H04" | "H06" | "H07" | "H09" | "H10" | "H11" | "H18" | "H7" | "H8"
+        "H01" | "H02" | "H04" | "H06" | "H07" | "H09" | "H10" | "H11" | "H15" | "H18" | "H7" | "H8"
     ) && report_evidence_value(&case.observed, "hotkey=") != Some(report.hotkey.as_str())
     {
         return Err(format!(
@@ -15449,6 +17642,18 @@ fn required_case_evidence(id: &str) -> Option<&'static [&'static str]> {
             "preview_cleanup=stopped",
             "designer_cleanup=closed_cleanly",
         ]),
+        "H15" => Some(&[
+            "entry=normal_screen_draw_result",
+            "owner=real_screen_draw_recovery",
+            "configured_input=exact_owned_edges",
+            "launcher_admission=none",
+            "runtime_radial=none",
+            "dispatch=none",
+            "restore=correlated_screen_draw",
+            "tool_cleanup=closed",
+            "release_keys=clear",
+            "next_gesture=usable",
+        ]),
         "H16" => Some(&[
             "direct_trigger=opened",
             "native_launcher_tap=dismissed+grid_toggled",
@@ -15696,6 +17901,27 @@ fn deterministic_fixture_for_hotkey(
     })
 }
 
+fn deterministic_all_fixture_for_hotkey(
+    log_path: &Path,
+    mouse_gesture_mode: MouseGestureMode,
+    hotkey: AcceptanceHotkey,
+) -> Result<DeterministicFixture, String> {
+    let mut fixture = deterministic_fixture_for_hotkey(log_path, mouse_gesture_mode, hotkey)?;
+    let mut document: RadialDocument = serde_json::from_slice(&fixture.radial_json)
+        .map_err(|error| format!("decode All acceptance radial document: {error}"))?;
+    // All's fixed A5/A6/A7/D6 sequence starts enabled, then saves the disabled value.
+    let skin = document
+        .skins
+        .first_mut()
+        .ok_or_else(|| "All acceptance fixture has no exercised skin".to_string())?;
+    skin.style.values.effects.glow_enabled = multi_launcher::radial::model::Override::Value(true);
+    validate_radial_document(&document)
+        .map_err(|error| format!("All acceptance radial document is invalid: {error:?}"))?;
+    fixture.radial_json = serde_json::to_vec_pretty(&document)
+        .map_err(|error| format!("serialize All acceptance radial document: {error}"))?;
+    Ok(fixture)
+}
+
 fn deterministic_query_fixture(
     log_path: &Path,
     mouse_gesture_mode: MouseGestureMode,
@@ -15719,6 +17945,7 @@ fn deterministic_query_fixture(
     settings.radial.safety_policy =
         multi_launcher::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
     settings.note.default_view_mode = multi_launcher::settings::NoteViewMode::Edit;
+    settings.note_save_on_close = false;
     let mut document: RadialDocument = serde_json::from_slice(&fixture.radial_json)
         .map_err(|error| format!("decode Query acceptance radial document: {error}"))?;
 
@@ -15890,6 +18117,13 @@ fn deterministic_query_fixture(
     fixture.actions_json = serde_json::to_vec_pretty(&actions)
         .map_err(|error| format!("serialize Query actions: {error}"))?;
     Ok(fixture)
+}
+
+fn seed_query_note_editor_fixture(profile_root: &Path) -> Result<(), String> {
+    write_new(
+        &profile_root.join("notes").join("radial-acceptance-q11.md"),
+        b"# radial acceptance q11\n\n",
+    )
 }
 
 fn deterministic_gate_c_fixture(
@@ -16236,6 +18470,17 @@ fn deterministic_fixture_for_hotkey_with_direct_trigger_chord(
         .map_err(|error| format!("serialize direct-trigger radial fixture: {error}"))?;
     fixture.settings_json = serde_json::to_vec_pretty(&settings)
         .map_err(|error| format!("serialize direct-trigger settings fixture: {error}"))?;
+    let mut actions: Vec<multi_launcher::actions::Action> =
+        serde_json::from_slice(&fixture.actions_json)
+            .map_err(|error| format!("decode Hotkey custom actions: {error}"))?;
+    actions.push(multi_launcher::actions::Action {
+        label: PRIORITY_SMOKE_ACTION_LABEL.into(),
+        desc: "Safe isolated Screen Draw priority smoke; no drawing or export".into(),
+        action: "screen_draw:start".into(),
+        args: None,
+    });
+    fixture.actions_json = serde_json::to_vec_pretty(&actions)
+        .map_err(|error| format!("serialize Hotkey priority action fixture: {error}"))?;
     Ok(fixture)
 }
 
@@ -16589,6 +18834,9 @@ fn report_serialized_sizes(report: &AcceptanceReport) -> Result<(usize, usize), 
 }
 
 fn bound_report_for_persistence(report: &mut AcceptanceReport) -> Result<(), String> {
+    if let Some(reason) = controlled_failures::persistence_cap_failure(report) {
+        controlled_failures::fail_evidence_for_persistence(report, &reason);
+    }
     let mut gate_c_evidence_omitted = false;
     if let Some(reason) = gate_c_persistence_cap_failure(report) {
         fail_gate_c_evidence_for_persistence(report, &reason);
@@ -16601,6 +18849,16 @@ fn bound_report_for_persistence(report: &mut AcceptanceReport) -> Result<(), Str
     };
     if fits(report) {
         return Ok(());
+    }
+
+    if report.controlled_failures.is_some() {
+        controlled_failures::fail_evidence_for_persistence(
+            report,
+            "serialized controlled native proof exceeded the existing JSON/text report limits",
+        );
+        if fits(report) {
+            return Ok(());
+        }
     }
 
     report.mark_capacity_saturated();
@@ -16843,6 +19101,23 @@ fn render_text_report(report: &AcceptanceReport) -> String {
         report.environment.child_process_id
     ));
     contents.push_str(&format!("Suite: {}\n", report.suite.as_str()));
+    if report.mode == controlled_failures::PROBE_MODE
+        || report.mode == controlled_failures::AGGREGATE_MODE
+    {
+        contents.push_str(&format!("Operation: {}\n", report.mode));
+        if let Some(controlled_failures::Evidence::Aggregate { probes, attempts }) =
+            &report.controlled_failures
+        {
+            contents.push_str(&format!(
+                "Verified controlled failed subprocesses: {}/6\n",
+                probes.len()
+            ));
+            contents.push_str(&format!(
+                "Actual controlled subprocess attempts: {}/6\n",
+                attempts.len()
+            ));
+        }
+    }
     if report.suite == AcceptanceSuite::GateC {
         let gate_c_bytes = report
             .gate_c_evidence
@@ -17004,7 +19279,7 @@ fn is_reparse_point(metadata: &Metadata) -> bool {
 
 fn print_usage() {
     println!(
-        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey|query|gate-c|gate-d|gate-s] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]"
+        "Usage: radial_acceptance [--launcher <source-matched multi_launcher.exe>] --output <new-run-directory> [--suite all|hotkey|query|gate-c|gate-d|gate-s] [--hotkey f11|shift-alt-win-end] [--profile-copy <profile-directory>] [--source-revision <id>] [--h6-repeat immediate|quiescent|production-only-diagnostic] [--mouse-gestures enabled|disabled-diagnostic] [--keep-profile-on-failure]\n       radial_acceptance [--candidate <multi_launcher.exe>] --report <new-report.json> [--profile-copy <profile-directory>]\n       radial_acceptance --controlled-native-failures --launcher <source-matched multi_launcher.exe> --output <new-private-directory> --source-revision <id>\n       radial_acceptance --controlled-native-failure-probe <startup|input-timeout|query|ui|child-exit|desktop-mismatch> --controlled-probe-nonce <token> --launcher <source-matched multi_launcher.exe> --output <new-private-directory> --source-revision <id>\nControlled operations use fresh isolated F11 fixtures; ordinary suite/input options and profile-copy/keep-profile are incompatible. Each inner probe persists a failed report and exits nonzero. The aggregate exits zero only after actual subprocess status, report readbacks, native ownership and cleanup verification."
     );
 }
 
@@ -17235,6 +19510,7 @@ mod tests {
                 process_id: 202,
             }],
             physical_displays: vec![[0, 0, 1920, 1080]],
+            screen_draw_priority: None,
             candidate_event_count: 6,
             candidate_trace_overflow: false,
             capture_segment_overflow: false,
@@ -17301,12 +19577,1035 @@ mod tests {
             follow_on_restorations: Vec::new(),
             root_identities: Vec::new(),
             physical_displays: Vec::new(),
+            screen_draw_priority: None,
             candidate_event_count: 0,
             candidate_trace_overflow: false,
             capture_segment_overflow: false,
             runner_edge_overflow: false,
             gesture_overflow: false,
         }
+    }
+
+    fn h15_toolbar_fixture(
+        mode: ScreenDrawToolbarMode,
+        ordinal: u32,
+        frame_nr: u64,
+    ) -> ScreenDrawToolbarReceipt {
+        let label = ScreenDrawToolbarWidget {
+            target: ScreenDrawToolbarTarget::StateLabel,
+            role: ScreenDrawToolbarRole::Label,
+            widget_id: 701,
+            enabled: true,
+            bounds: [8, 35, 60, 50],
+            clip: [0, 0, 500, 200],
+            visible_bounds: [8, 35, 60, 50],
+            fully_visible: true,
+        };
+        let resume = ScreenDrawToolbarWidget {
+            target: ScreenDrawToolbarTarget::ResumeDrawing,
+            role: ScreenDrawToolbarRole::Button,
+            widget_id: 702,
+            enabled: true,
+            bounds: [8, 60, 130, 80],
+            clip: [0, 0, 500, 200],
+            visible_bounds: [8, 60, 130, 80],
+            fully_visible: true,
+        };
+        ScreenDrawToolbarReceipt {
+            event_ordinal: ordinal,
+            trace_sequence: u64::from(ordinal),
+            elapsed_ms: if mode == ScreenDrawToolbarMode::Drawing {
+                49
+            } else {
+                60
+            },
+            observation: ScreenDrawToolbarObservation {
+                hwnd: 1002,
+                process_id: 202,
+                generation: 7,
+                lifetime: 11,
+                frame_nr,
+                state: mode,
+                runtime_mode: mode,
+                client_size: [500, 200],
+                launcher: ScreenDrawLauncherObservation {
+                    visibility_revision: if mode == ScreenDrawToolbarMode::Drawing {
+                        5
+                    } else {
+                        6
+                    },
+                    invocation_id: Some(5),
+                    focus_intent: multi_launcher::visibility::RootFocusIntent::ActivateRoot,
+                    visible: mode != ScreenDrawToolbarMode::Drawing,
+                    root: Some(ScreenDrawRootIdentity {
+                        hwnd: 1001,
+                        process_id: 202,
+                        generation: 3,
+                    }),
+                    parking: Some(ScreenDrawParkingObservation {
+                        hwnd: 1001,
+                        generation: 7,
+                        cycle: 1,
+                        state: if mode == ScreenDrawToolbarMode::Drawing {
+                            ScreenDrawParkingState::Committed
+                        } else {
+                            ScreenDrawParkingState::Restored
+                        },
+                    }),
+                },
+                label,
+                resume: (mode == ScreenDrawToolbarMode::Ghost).then_some(resume),
+            },
+        }
+    }
+
+    pub(crate) fn h15_priority_packet(hotkey: AcceptanceHotkey) -> HotkeyCaseEvidence {
+        let mut packet = h01_evidence_packet();
+        let template = packet.candidate_events[4].clone();
+        packet.case_id = "H15".into();
+        packet.expected_state = HotkeyExpectedState::RealScreenDrawPriorityAndNextGesture;
+        packet.runner_edges = configured_chord_edges(hotkey, 1)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (virtual_key, down))| HotkeyRunnerEdgeEvidence {
+                runner_relative_us: index as u64 * 100,
+                input_group_id: 1,
+                stream: HotkeyCandidateStream::MainCandidate,
+                purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                virtual_key,
+                transition: if down {
+                    HotkeyEdgeTransition::Press
+                } else {
+                    HotkeyEdgeTransition::Release
+                },
+                injected: true,
+                runner_cookie_matched: true,
+            })
+            .collect();
+        for (event, ordinal) in packet
+            .candidate_events
+            .iter_mut()
+            .zip([101, 103, 104, 105, 106, 107])
+        {
+            event.event_ordinal = ordinal;
+            event.elapsed_ms += 100;
+            event.invocation_id = Some(7);
+            if event.kind == HotkeyTraceEventKind::VisibilityIntent {
+                event.visible = Some(false);
+            }
+            if event.kind == HotkeyTraceEventKind::RootCommand {
+                event.command = Some(HotkeyRootCommand::Position);
+            }
+            if event.kind == HotkeyTraceEventKind::NativeWindowSnapshot {
+                event.bounds = Some([-10_000, -10_000, -9_200, -9_400]);
+            }
+        }
+        let gesture = &mut packet.gestures[0];
+        gesture.invocation_id = 7;
+        gesture.release_elapsed_ms += 100;
+        gesture.short_tap_elapsed_ms = Some(122);
+        let HotkeyDecisionProof::Applied {
+            intent_elapsed_ms,
+            visible,
+            root_commands,
+            ..
+        } = &mut gesture.decision
+        else {
+            unreachable!()
+        };
+        *intent_elapsed_ms = 124;
+        *visible = false;
+        let span = &mut root_commands[0];
+        span.invocation_id = Some(7);
+        span.command = HotkeyRootCommand::Position;
+        span.command_elapsed_ms = 126;
+        span.command_event_ordinal = 106;
+        span.observed_snapshot_event_ordinal = Some(107);
+        let observed = span.observed_presentation.as_mut().unwrap();
+        observed.elapsed_ms = 132;
+        observed.bounds = [-10_000, -10_000, -9_200, -9_400];
+
+        let event = |kind, ordinal, elapsed| HotkeyCandidateEventEvidence {
+            kind,
+            event_ordinal: ordinal,
+            elapsed_ms: elapsed,
+            visibility_revision: Some(6),
+            ..template.clone()
+        };
+        let mut intent = event(HotkeyTraceEventKind::VisibilityIntent, 23, 52);
+        intent.request_id = None;
+        intent.command = None;
+        intent.visible = Some(true);
+        intent.visibility_source = Some(HotkeyVisibilitySource::ScreenDrawRestore);
+        let mut focus = event(HotkeyTraceEventKind::ScreenDrawRestoreFocusIntent, 24, 53);
+        focus.request_id = None;
+        focus.command = None;
+        focus.focus_intent = Some(HotkeyRootFocusIntent::ActivateRoot);
+        let command = event(HotkeyTraceEventKind::RootCommand, 25, 54);
+        let mut snapshot = event(HotkeyTraceEventKind::NativeWindowSnapshot, 26, 55);
+        snapshot.command = None;
+        snapshot.visible = Some(true);
+        snapshot.minimized = Some(false);
+        snapshot.bounds = Some([100, 100, 900, 700]);
+        snapshot.hwnd = Some(1001);
+        snapshot.process_id = Some(202);
+        let mut requested = event(HotkeyTraceEventKind::NativeActivation, 27, 56);
+        requested.command = None;
+        requested.hwnd = Some(1001);
+        requested.activation_edge = Some(HotkeyActivationEdge::RestoreRequested);
+        requested.request_id = Some(10);
+        let mut completed = requested.clone();
+        completed.event_ordinal = 28;
+        completed.elapsed_ms = 57;
+        completed.activation_edge = Some(HotkeyActivationEdge::RestoreCompleted);
+        completed.terminal = Some(true);
+        let mut candidate_events = vec![intent, focus, command, snapshot, requested, completed];
+        for event in &mut candidate_events {
+            event.event_ordinal += 1;
+        }
+        let root = QueryRootPresentationEvidence {
+            hwnd: 1001,
+            process_id: 202,
+            bounds: [100, 100, 900, 700],
+            visible: true,
+            minimized: false,
+            physically_visible: true,
+        };
+        let tool = QueryRootPresentationEvidence {
+            hwnd: 1002,
+            bounds: [200, 200, 700, 400],
+            ..root.clone()
+        };
+        let admission = |transition, ordinal, elapsed| PriorityHookAdmissionEvidence {
+            event_ordinal: ordinal,
+            elapsed_ms: elapsed,
+            transition,
+            provenance: HotkeyInputProvenance::ExternalInjected,
+            owner: PriorityHookOwner::ScreenDrawRecovery,
+            global_exclusive_owners: 1,
+            adapter_exclusive: false,
+            recovery: transition == HotkeyEdgeTransition::Press,
+            deadline_scheduled: false,
+            radial_intent: false,
+        };
+        packet.screen_draw_priority = Some(ScreenDrawPriorityEvidence {
+            entry_root: root.clone(),
+            entry_query_digest: query_cell_digest(
+                "app Radial Acceptance Screen Draw Priority Smoke",
+            ),
+            entry_label_digest: query_cell_digest(PRIORITY_SMOKE_ACTION_LABEL),
+            entry_action_digest: query_cell_digest("screen_draw:start"),
+            entry_control_bounds: [120, 150, 400, 180],
+            entry_down_inserted: 1,
+            entry_up_inserted: 1,
+            entry_clicked_ordinal: 10,
+            entry_clicked_sequence: 10,
+            tool_title_digest: query_cell_digest(PRIORITY_SMOKE_TOOL_TITLE),
+            ready_tool: tool.clone(),
+            drawing_ui_ack: true,
+            ready_observation: h15_toolbar_fixture(ScreenDrawToolbarMode::Drawing, 11, 1),
+            ready_client_bounds: [0, 0, 500, 200],
+            baseline_observation: h15_toolbar_fixture(ScreenDrawToolbarMode::Drawing, 11, 1),
+            baseline_tool: tool.clone(),
+            baseline_client_bounds: [0, 0, 500, 200],
+            trace_cursor: 20,
+            trace_end: 40,
+            baseline_visibility_revision: 5,
+            baseline_invocation_id: Some(5),
+            quiet_preflight_ms: 80,
+            observer_default_desktop: true,
+            input_down_inserted: packet.runner_edges.len() / 2,
+            input_up_inserted: packet.runner_edges.len() / 2,
+            input_down_foreground_hwnd: tool.hwnd,
+            input_down_foreground_pid: tool.process_id,
+            input_up_foreground_hwnd: root.hwnd,
+            input_up_foreground_pid: root.process_id,
+            input_down_default_desktop: true,
+            input_up_default_desktop: true,
+            runner_edges: packet
+                .runner_edges
+                .iter()
+                .map(|edge| QuerySetupObservedEdge {
+                    runner_relative_us: edge.runner_relative_us,
+                    virtual_key: edge.virtual_key,
+                    down: edge.transition == HotkeyEdgeTransition::Press,
+                    injected: true,
+                    runner_cookie_matched: true,
+                })
+                .collect(),
+            foreign_edges: Vec::new(),
+            primary_edges: vec![
+                PriorityHookPrimaryEvidence {
+                    event_ordinal: 21,
+                    elapsed_ms: 50,
+                    transition: HotkeyEdgeTransition::Press,
+                    provenance: HotkeyInputProvenance::ExternalInjected,
+                    foreground_owner: PriorityForegroundOwner::Other,
+                },
+                PriorityHookPrimaryEvidence {
+                    event_ordinal: 30,
+                    elapsed_ms: 58,
+                    transition: HotkeyEdgeTransition::Release,
+                    provenance: HotkeyInputProvenance::ExternalInjected,
+                    foreground_owner: PriorityForegroundOwner::Root,
+                },
+            ],
+            admissions: vec![
+                admission(HotkeyEdgeTransition::Press, 23, 51),
+                admission(HotkeyEdgeTransition::Release, 31, 59),
+            ],
+            configured_primary: vec![PriorityConfiguredPrimaryEvidence {
+                event_ordinal: 22,
+                elapsed_ms: 50,
+                transition: HotkeyEdgeTransition::Press,
+                provenance: HotkeyInputProvenance::ExternalInjected,
+                modifiers_match: true,
+                invocation_id: 7,
+                generation: 1,
+            }],
+            candidate_events,
+            restorations: vec![HotkeyFollowOnRestoreEvidence {
+                stream: HotkeyCandidateStream::MainCandidate,
+                input_group_id: 1,
+                parent_visibility_revision: None,
+                visibility_revision: 6,
+                invocation_id: Some(5),
+                intent_elapsed_ms: 52,
+                visible: true,
+                focus_intent: HotkeyRootFocusIntent::ActivateRoot,
+                root_commands: vec![HotkeyRootCommandSpan {
+                    visibility_revision: 6,
+                    invocation_id: Some(5),
+                    request_id: 9,
+                    command_elapsed_ms: 54,
+                    command: HotkeyRootCommand::Focus,
+                    release_to_root_command_ms: None,
+                    command_event_ordinal: 26,
+                    observed_snapshot_event_ordinal: Some(27),
+                    command_to_observed_ms: Some(1),
+                    observed_presentation: Some(HotkeyObservedPresentation {
+                        elapsed_ms: 55,
+                        command_to_observed_ms: 1,
+                        visible: true,
+                        minimized: false,
+                        bounds: root.bounds,
+                    }),
+                }],
+                native_activation: Some(HotkeyNativeActivationSpan {
+                    request_id: 10,
+                    hwnd: 1001,
+                    requested_elapsed_ms: 56,
+                    terminal_elapsed_ms: Some(57),
+                    terminal_edge: Some(HotkeyActivationEdge::RestoreCompleted),
+                }),
+            }],
+            forbidden_event_count: 0,
+            runtime_window_count: 0,
+            recovered_root: root,
+            recovered_tool: tool,
+            ghost_ui_ack: true,
+            recovered_observation: h15_toolbar_fixture(ScreenDrawToolbarMode::Ghost, 32, 2),
+            recovered_client_bounds: [0, 0, 500, 200],
+            keys_released: true,
+            close_requested: true,
+            tool_closed: true,
+            close_terminal_cursor: 100,
+            next_admission: PriorityHookAdmissionEvidence {
+                event_ordinal: 102,
+                elapsed_ms: 111,
+                transition: HotkeyEdgeTransition::Press,
+                provenance: HotkeyInputProvenance::ExternalInjected,
+                owner: PriorityHookOwner::Launcher,
+                global_exclusive_owners: 0,
+                adapter_exclusive: false,
+                recovery: false,
+                deadline_scheduled: true,
+                radial_intent: false,
+            },
+        });
+        packet
+    }
+
+    pub(crate) fn h15_current_owner_packet(hotkey: AcceptanceHotkey) -> HotkeyCaseEvidence {
+        let mut packet = h15_priority_packet(hotkey);
+        let proof = packet.screen_draw_priority.as_mut().unwrap();
+        for receipt in [
+            &mut proof.ready_observation,
+            &mut proof.baseline_observation,
+        ] {
+            receipt.observation.launcher.visibility_revision = 115;
+            receipt.observation.launcher.invocation_id = None;
+        }
+        proof.baseline_visibility_revision = 115;
+        proof.baseline_invocation_id = None;
+        proof
+            .recovered_observation
+            .observation
+            .launcher
+            .visibility_revision = 116;
+        proof
+            .recovered_observation
+            .observation
+            .launcher
+            .invocation_id = None;
+        proof.configured_primary[0].invocation_id = 125;
+        for event in &mut proof.candidate_events {
+            event.invocation_id = None;
+            event.visibility_revision = Some(116);
+        }
+        for restore in &mut proof.restorations {
+            restore.invocation_id = None;
+            restore.visibility_revision = 116;
+            for command in &mut restore.root_commands {
+                command.invocation_id = None;
+                command.visibility_revision = 116;
+            }
+        }
+        for event in &mut packet.candidate_events {
+            if event.visibility_revision.is_some() {
+                event.visibility_revision = Some(117);
+            }
+            event.invocation_id = Some(125);
+        }
+        let gesture = &mut packet.gestures[0];
+        gesture.invocation_id = 125;
+        if let HotkeyDecisionProof::Applied {
+            visibility_revision,
+            root_commands,
+            ..
+        } = &mut gesture.decision
+        {
+            *visibility_revision = 117;
+            for command in root_commands {
+                command.visibility_revision = 117;
+                command.invocation_id = Some(125);
+            }
+        }
+        packet
+    }
+
+    #[test]
+    fn h15_current_owner_claimed_primary_matches_next_gesture_live_and_persisted() {
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            let packet = h15_current_owner_packet(hotkey);
+            validate_hotkey_evidence_packet_with_context(&packet, hotkey, 200).unwrap();
+            let proof = packet.screen_draw_priority.as_ref().unwrap();
+            let claimed = proof.configured_primary[0].invocation_id;
+            assert_eq!(claimed, 125);
+            assert_eq!(packet.gestures[0].invocation_id, claimed);
+            assert!(
+                packet
+                    .candidate_events
+                    .iter()
+                    .all(|event| event.invocation_id == Some(claimed))
+            );
+            let HotkeyDecisionProof::Applied { root_commands, .. } = &packet.gestures[0].decision
+            else {
+                panic!("the next normal gesture must have applied");
+            };
+            assert!(
+                root_commands
+                    .iter()
+                    .all(|command| command.invocation_id == Some(claimed))
+            );
+            let decoded: HotkeyCaseEvidence =
+                serde_json::from_slice(&serde_json::to_vec(&packet).unwrap()).unwrap();
+            validate_hotkey_evidence_packet_with_context(&decoded, hotkey, 200).unwrap();
+
+            // Keep the complete next-gesture owner internally correlated, while
+            // contradicting only its independently observed preadmission claim.
+            let mut different = packet.clone();
+            for event in &mut different.candidate_events {
+                event.invocation_id = Some(127);
+            }
+            different.gestures[0].invocation_id = 127;
+            let HotkeyDecisionProof::Applied { root_commands, .. } =
+                &mut different.gestures[0].decision
+            else {
+                unreachable!();
+            };
+            for command in root_commands {
+                command.invocation_id = Some(127);
+            }
+            assert_eq!(
+                different
+                    .screen_draw_priority
+                    .as_ref()
+                    .unwrap()
+                    .configured_primary[0]
+                    .invocation_id,
+                claimed
+            );
+            assert!(validate_hotkey_evidence_packet_with_context(&different, hotkey, 200).is_err());
+            let decoded: HotkeyCaseEvidence =
+                serde_json::from_slice(&serde_json::to_vec(&different).unwrap()).unwrap();
+            assert!(validate_hotkey_evidence_packet_with_context(&decoded, hotkey, 200).is_err());
+        }
+    }
+
+    #[test]
+    fn h15_current_prechord_same_revision_correlated_owner_retagging_rejects_live_and_persisted() {
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            let mut packet = h15_current_owner_packet(hotkey);
+            validate_hotkey_evidence_packet_with_context(&packet, hotkey, 200).unwrap();
+            let proof = packet.screen_draw_priority.as_mut().unwrap();
+            proof.baseline_observation.event_ordinal = 12;
+            proof.baseline_observation.trace_sequence = 12;
+            proof.baseline_observation.observation.frame_nr = 2;
+            proof.recovered_observation.observation.frame_nr = 3;
+            for receipt in [
+                &mut proof.ready_observation,
+                &mut proof.baseline_observation,
+                &mut proof.recovered_observation,
+            ] {
+                receipt.observation.launcher.invocation_id = Some(124);
+            }
+            proof.baseline_invocation_id = Some(124);
+            for event in &mut proof.candidate_events {
+                event.invocation_id = Some(124);
+            }
+            for restore in &mut proof.restorations {
+                restore.invocation_id = Some(124);
+                for command in &mut restore.root_commands {
+                    command.invocation_id = Some(124);
+                }
+            }
+            validate_hotkey_evidence_packet_with_context(&packet, hotkey, 200).unwrap();
+            let decoded: HotkeyCaseEvidence =
+                serde_json::from_slice(&serde_json::to_vec(&packet).unwrap()).unwrap();
+            validate_hotkey_evidence_packet_with_context(&decoded, hotkey, 200).unwrap();
+
+            let contradictions: [fn(&mut ScreenDrawLauncherObservation); 2] = [
+                |owner| owner.invocation_id = None,
+                |owner| {
+                    owner.focus_intent =
+                        multi_launcher::visibility::RootFocusIntent::PreserveForeground
+                },
+            ];
+            for contradict in contradictions {
+                let mut inconsistent = packet.clone();
+                let proof = inconsistent.screen_draw_priority.as_mut().unwrap();
+                contradict(&mut proof.ready_observation.observation.launcher);
+                assert_eq!(
+                    proof
+                        .ready_observation
+                        .observation
+                        .launcher
+                        .visibility_revision,
+                    proof
+                        .baseline_observation
+                        .observation
+                        .launcher
+                        .visibility_revision
+                );
+                assert_eq!(
+                    proof.baseline_invocation_id,
+                    proof
+                        .baseline_observation
+                        .observation
+                        .launcher
+                        .invocation_id
+                );
+                assert_eq!(
+                    proof.baseline_invocation_id,
+                    proof
+                        .recovered_observation
+                        .observation
+                        .launcher
+                        .invocation_id
+                );
+                assert!(
+                    proof
+                        .candidate_events
+                        .iter()
+                        .all(|event| event.invocation_id == proof.baseline_invocation_id)
+                );
+                assert!(proof.restorations.iter().all(|restore| {
+                    restore.invocation_id == proof.baseline_invocation_id
+                        && restore
+                            .root_commands
+                            .iter()
+                            .all(|command| command.invocation_id == proof.baseline_invocation_id)
+                }));
+                assert!(
+                    validate_hotkey_evidence_packet_with_context(&inconsistent, hotkey, 200)
+                        .unwrap_err()
+                        .contains("H15 baseline")
+                );
+                let decoded: HotkeyCaseEvidence =
+                    serde_json::from_slice(&serde_json::to_vec(&inconsistent).unwrap()).unwrap();
+                assert!(
+                    validate_hotkey_evidence_packet_with_context(&decoded, hotkey, 200)
+                        .unwrap_err()
+                        .contains("H15 baseline")
+                );
+
+                // The same owner change is legitimate once a fresh visibility
+                // request advances its revision; the later proof remains exact.
+                inconsistent
+                    .screen_draw_priority
+                    .as_mut()
+                    .unwrap()
+                    .ready_observation
+                    .observation
+                    .launcher
+                    .visibility_revision = 114;
+                validate_hotkey_evidence_packet_with_context(&inconsistent, hotkey, 200).unwrap();
+                let decoded: HotkeyCaseEvidence =
+                    serde_json::from_slice(&serde_json::to_vec(&inconsistent).unwrap()).unwrap();
+                validate_hotkey_evidence_packet_with_context(&decoded, hotkey, 200).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn h15_current_prechord_owner_receipt_accepts_none_and_real_some_without_historical_retagging()
+    {
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            for packet in [
+                h15_current_owner_packet(hotkey),
+                h15_priority_packet(hotkey),
+            ] {
+                validate_hotkey_evidence_packet_with_context(&packet, hotkey, 200).unwrap();
+                let proof = packet.screen_draw_priority.as_ref().unwrap();
+                assert_eq!(
+                    proof
+                        .baseline_observation
+                        .observation
+                        .launcher
+                        .visibility_revision,
+                    proof.baseline_visibility_revision
+                );
+                assert_eq!(
+                    proof
+                        .baseline_observation
+                        .observation
+                        .launcher
+                        .invocation_id,
+                    proof.baseline_invocation_id
+                );
+                assert_eq!(
+                    proof
+                        .recovered_observation
+                        .observation
+                        .launcher
+                        .visibility_revision,
+                    proof.restorations[0].visibility_revision
+                );
+                let decoded: HotkeyCaseEvidence =
+                    serde_json::from_slice(&serde_json::to_vec(&packet).unwrap()).unwrap();
+                validate_hotkey_evidence_packet_with_context(&decoded, hotkey, 200).unwrap();
+                assert_eq!(
+                    decoded.screen_draw_priority.unwrap().baseline_observation,
+                    proof.baseline_observation
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn h15_current_prechord_owner_rejects_stale_foreign_postinput_and_recovery_derived_baselines_live_and_persisted()
+     {
+        let changes: &[fn(&mut ScreenDrawPriorityEvidence)] = &[
+            |p| p.baseline_visibility_revision = 114,
+            |p| p.baseline_invocation_id = Some(124),
+            |p| {
+                p.baseline_observation
+                    .observation
+                    .launcher
+                    .visibility_revision = 114
+            },
+            |p| p.baseline_observation.observation.launcher.invocation_id = Some(124),
+            |p| p.baseline_observation.observation.launcher.invocation_id = Some(0),
+            |p| p.baseline_observation.observation.launcher.root = None,
+            |p| {
+                p.baseline_observation
+                    .observation
+                    .launcher
+                    .root
+                    .as_mut()
+                    .unwrap()
+                    .hwnd += 1
+            },
+            |p| {
+                p.baseline_observation
+                    .observation
+                    .launcher
+                    .root
+                    .as_mut()
+                    .unwrap()
+                    .process_id += 1
+            },
+            |p| {
+                p.baseline_observation
+                    .observation
+                    .launcher
+                    .root
+                    .as_mut()
+                    .unwrap()
+                    .generation += 1
+            },
+            |p| p.baseline_observation.observation.launcher.parking = None,
+            |p| {
+                p.baseline_observation
+                    .observation
+                    .launcher
+                    .parking
+                    .as_mut()
+                    .unwrap()
+                    .generation += 1
+            },
+            |p| {
+                p.baseline_observation
+                    .observation
+                    .launcher
+                    .parking
+                    .as_mut()
+                    .unwrap()
+                    .cycle += 1
+            },
+            |p| {
+                p.baseline_observation
+                    .observation
+                    .launcher
+                    .parking
+                    .as_mut()
+                    .unwrap()
+                    .state = ScreenDrawParkingState::Active
+            },
+            |p| p.baseline_observation.observation.launcher.visible = true,
+            |p| p.baseline_observation.event_ordinal = p.trace_cursor as u32 + 1,
+            |p| p.baseline_observation.elapsed_ms = p.primary_edges[0].elapsed_ms + 1,
+            |p| p.baseline_observation.trace_sequence = p.entry_clicked_sequence,
+            |p| p.baseline_observation = p.recovered_observation.clone(),
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .launcher
+                    .visibility_revision += 1
+            },
+            |p| p.recovered_observation.observation.launcher.invocation_id = Some(124),
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .launcher
+                    .root
+                    .as_mut()
+                    .unwrap()
+                    .generation += 1
+            },
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .launcher
+                    .parking
+                    .as_mut()
+                    .unwrap()
+                    .cycle += 1
+            },
+            |p| {
+                p.recovered_observation.observation.launcher.focus_intent =
+                    multi_launcher::visibility::RootFocusIntent::PreserveForeground
+            },
+        ];
+        for change in changes {
+            let mut packet = h15_current_owner_packet(AcceptanceHotkey::F11);
+            change(packet.screen_draw_priority.as_mut().unwrap());
+            assert!(validate_hotkey_evidence_packet(&packet).is_err());
+            let decoded: HotkeyCaseEvidence =
+                serde_json::from_slice(&serde_json::to_vec(&packet).unwrap()).unwrap();
+            assert!(validate_hotkey_evidence_packet(&decoded).is_err());
+        }
+    }
+
+    #[test]
+    fn h15_current_owner_receipt_is_mandatory_in_wire_without_absent_option_defaults() {
+        let packet = h15_current_owner_packet(AcceptanceHotkey::F11);
+        let original = serde_json::to_value(&packet).unwrap();
+        for path in [
+            "baseline_observation",
+            "baseline_invocation_id",
+            "launcher",
+            "invocation_id",
+            "root",
+            "parking",
+        ] {
+            let mut value = original.clone();
+            if matches!(path, "baseline_observation" | "baseline_invocation_id") {
+                value["screen_draw_priority"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(path);
+            } else if path == "launcher" {
+                value["screen_draw_priority"]["baseline_observation"]["observation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(path);
+            } else {
+                value["screen_draw_priority"]["baseline_observation"]["observation"]["launcher"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(path);
+            }
+            assert!(
+                serde_json::from_value::<HotkeyCaseEvidence>(value).is_err(),
+                "missing {path} defaulted"
+            );
+        }
+    }
+
+    #[test]
+    fn h15_query_identity_requires_the_normal_app_prefix_independently_of_label() {
+        let mut packet = h15_priority_packet(AcceptanceHotkey::F11);
+        let priority = packet.screen_draw_priority.as_ref().unwrap();
+        assert_eq!(
+            priority.entry_query_digest,
+            query_cell_digest("app Radial Acceptance Screen Draw Priority Smoke")
+        );
+        assert_eq!(
+            priority.entry_label_digest,
+            query_cell_digest("Radial Acceptance Screen Draw Priority Smoke")
+        );
+        assert_ne!(priority.entry_query_digest, priority.entry_label_digest);
+        validate_hotkey_evidence_packet_with_context(&packet, AcceptanceHotkey::F11, 200).unwrap();
+        packet
+            .screen_draw_priority
+            .as_mut()
+            .unwrap()
+            .entry_query_digest = query_cell_digest(PRIORITY_SMOKE_ACTION_LABEL);
+        assert!(
+            validate_hotkey_evidence_packet_with_context(&packet, AcceptanceHotkey::F11, 200)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn h15_toolbar_proof_rejects_missing_receipts_even_with_both_boolean_acknowledgements() {
+        let packet = h15_priority_packet(AcceptanceHotkey::F11);
+        let value = serde_json::to_value(&packet).unwrap();
+        for key in [
+            "ready_observation",
+            "recovered_observation",
+            "ready_client_bounds",
+            "recovered_client_bounds",
+            "entry_clicked_sequence",
+        ] {
+            let mut missing = value.clone();
+            let proof = missing["screen_draw_priority"].as_object_mut().unwrap();
+            assert_eq!(proof["drawing_ui_ack"], true);
+            assert_eq!(proof["ghost_ui_ack"], true);
+            proof.remove(key);
+            assert!(
+                serde_json::from_value::<HotkeyCaseEvidence>(missing).is_err(),
+                "missing {key} accepted old boolean-only proof"
+            );
+        }
+    }
+
+    #[test]
+    fn h15_toolbar_persisted_readback_rejects_owner_lifetime_frame_geometry_and_semantic_corruption()
+     {
+        let changes: &[fn(&mut ScreenDrawPriorityEvidence)] = &[
+            |p| p.ready_observation.observation.hwnd = 0,
+            |p| p.ready_observation.observation.hwnd = p.entry_root.hwnd,
+            |p| p.recovered_observation.observation.hwnd += 1,
+            |p| p.recovered_observation.observation.process_id += 1,
+            |p| p.ready_observation.observation.generation = 0,
+            |p| p.recovered_observation.observation.generation += 1,
+            |p| p.ready_observation.observation.lifetime = 0,
+            |p| p.recovered_observation.observation.lifetime += 1,
+            |p| {
+                p.recovered_observation.observation.frame_nr =
+                    p.ready_observation.observation.frame_nr
+            },
+            |p| p.ready_observation.event_ordinal = p.entry_clicked_ordinal,
+            |p| p.ready_observation.event_ordinal = p.trace_cursor as u32 + 1,
+            |p| p.recovered_observation.event_ordinal = p.admissions[0].event_ordinal,
+            |p| p.recovered_observation.event_ordinal = p.trace_end as u32 + 1,
+            |p| p.ready_observation.trace_sequence = p.entry_clicked_sequence,
+            |p| p.recovered_observation.trace_sequence = p.ready_observation.trace_sequence,
+            |p| p.recovered_observation.elapsed_ms = p.admissions[0].elapsed_ms - 1,
+            |p| p.ready_observation.observation.runtime_mode = ScreenDrawToolbarMode::Ghost,
+            |p| p.recovered_observation.observation.state = ScreenDrawToolbarMode::Finish,
+            |p| p.recovered_observation.observation.runtime_mode = ScreenDrawToolbarMode::Finish,
+            |p| {
+                p.recovered_observation.observation.label.target =
+                    ScreenDrawToolbarTarget::ResumeDrawing
+            },
+            |p| p.recovered_observation.observation.label.role = ScreenDrawToolbarRole::Button,
+            |p| p.recovered_observation.observation.label.widget_id += 1,
+            |p| p.recovered_observation.observation.resume = None,
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .resume
+                    .as_mut()
+                    .unwrap()
+                    .enabled = false
+            },
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .resume
+                    .as_mut()
+                    .unwrap()
+                    .fully_visible = false
+            },
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .resume
+                    .as_mut()
+                    .unwrap()
+                    .widget_id = 0
+            },
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .resume
+                    .as_mut()
+                    .unwrap()
+                    .role = ScreenDrawToolbarRole::Label
+            },
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .resume
+                    .as_mut()
+                    .unwrap()
+                    .visible_bounds = [0; 4]
+            },
+            |p| {
+                p.recovered_observation
+                    .observation
+                    .resume
+                    .as_mut()
+                    .unwrap()
+                    .clip[3] = 70
+            },
+            |p| p.ready_client_bounds[2] += 1,
+            |p| p.recovered_client_bounds[0] = 1,
+            |p| p.recovered_observation.observation.client_size[0] = -1,
+            |p| p.recovered_observation.observation.label.bounds = [i32::MIN, 0, i32::MAX, 10],
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut packet = h15_priority_packet(AcceptanceHotkey::F11);
+            change(packet.screen_draw_priority.as_mut().unwrap());
+            let bytes = serde_json::to_vec(&packet).unwrap();
+            let persisted: HotkeyCaseEvidence = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                validate_hotkey_evidence_packet(&persisted).is_err(),
+                "toolbar mutation {index} falsely passed persisted proof"
+            );
+        }
+    }
+
+    #[test]
+    fn h15_toolbar_receipt_wire_rejects_unknown_fields_invalid_modes_and_numeric_overflow() {
+        let receipt = h15_toolbar_fixture(ScreenDrawToolbarMode::Ghost, 32, 2);
+        let value = serde_json::to_value(&receipt).unwrap();
+        for (path, replacement) in [
+            ("state", serde_json::json!("DrawingGhost")),
+            ("hwnd", serde_json::json!(-1)),
+            ("process_id", serde_json::json!(4294967296_u64)),
+            ("frame_nr", serde_json::json!(1.5)),
+        ] {
+            let mut bad = value.clone();
+            bad["observation"][path] = replacement;
+            assert!(serde_json::from_value::<ScreenDrawToolbarReceipt>(bad).is_err());
+        }
+        let mut bad = value;
+        bad["observation"]["label"]["private_label"] = serde_json::json!("Ghost");
+        assert!(serde_json::from_value::<ScreenDrawToolbarReceipt>(bad).is_err());
+    }
+
+    #[test]
+    fn h15_real_priority_proof_accepts_owned_recovery_and_next_cycle_for_both_hotkeys() {
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            let packet = h15_priority_packet(hotkey);
+            validate_hotkey_evidence_packet_with_context(&packet, hotkey, 200).unwrap();
+            let bytes = serde_json::to_vec(&packet).unwrap();
+            assert!(bytes.len() < MAX_HOTKEY_CASE_EVIDENCE_BYTES);
+            let decoded: HotkeyCaseEvidence = serde_json::from_slice(&bytes).unwrap();
+            validate_hotkey_evidence_packet_with_context(&decoded, hotkey, 200).unwrap();
+            let wire = String::from_utf8(bytes).unwrap();
+            assert!(!wire.contains(PRIORITY_SMOKE_ACTION_LABEL));
+            assert!(!wire.contains(PRIORITY_SMOKE_TOOL_TITLE));
+        }
+    }
+
+    #[test]
+    fn h15_priority_proof_rejects_asserted_owner_admission_stale_recovery_and_missing_cleanup() {
+        let changes: &[fn(&mut ScreenDrawPriorityEvidence)] = &[
+            |proof| proof.entry_action_digest = 0,
+            |proof| proof.entry_down_inserted = 0,
+            |proof| proof.entry_clicked_ordinal = proof.trace_end as u32,
+            |proof| proof.ready_tool.hwnd = proof.entry_root.hwnd,
+            |proof| proof.ready_tool.process_id += 1,
+            |proof| proof.drawing_ui_ack = false,
+            |proof| proof.primary_edges.clear(),
+            |proof| proof.configured_primary.clear(),
+            |proof| {
+                let extra = proof.configured_primary[0].clone();
+                proof.configured_primary.push(extra);
+            },
+            |proof| proof.configured_primary[0].transition = HotkeyEdgeTransition::Release,
+            |proof| proof.configured_primary[0].event_ordinal = proof.admissions[0].event_ordinal,
+            |proof| proof.configured_primary[0].provenance = HotkeyInputProvenance::Owned,
+            |proof| proof.configured_primary[0].modifiers_match = false,
+            |proof| proof.configured_primary[0].generation = 0,
+            |proof| proof.configured_primary[0].invocation_id = 0,
+            |proof| proof.configured_primary[0].invocation_id = 99,
+            |proof| proof.admissions[0].owner = PriorityHookOwner::Launcher,
+            |proof| proof.admissions[0].global_exclusive_owners = 0,
+            |proof| proof.admissions[0].provenance = HotkeyInputProvenance::Owned,
+            |proof| proof.admissions[0].deadline_scheduled = true,
+            |proof| proof.primary_edges[0].event_ordinal = proof.trace_cursor as u32,
+            |proof| proof.runner_edges.pop().map(|_| ()).unwrap_or_default(),
+            |proof| proof.runner_edges[0].runner_cookie_matched = false,
+            |proof| proof.input_up_inserted = 0,
+            |proof| proof.input_down_foreground_hwnd = proof.entry_root.hwnd,
+            |proof| proof.input_up_foreground_pid += 1,
+            |proof| proof.input_down_default_desktop = false,
+            |proof| proof.foreign_edges = proof.runner_edges.clone(),
+            |proof| proof.forbidden_event_count = 1,
+            |proof| proof.runtime_window_count = 1,
+            |proof| {
+                proof.candidate_events[0].visibility_source =
+                    Some(HotkeyVisibilitySource::ToggleBatch)
+            },
+            |proof| proof.candidate_events[0].invocation_id = Some(99),
+            |proof| proof.candidate_events[0].kind = HotkeyTraceEventKind::ShortTap,
+            |proof| proof.candidate_events[0].kind = HotkeyTraceEventKind::RadialAction,
+            |proof| proof.restorations[0].visibility_revision = proof.baseline_visibility_revision,
+            |proof| proof.restorations[0].native_activation = None,
+            |proof| proof.recovered_root.minimized = true,
+            |proof| proof.recovered_root.bounds[0] += 1,
+            |proof| {
+                let command = proof.restorations[0].root_commands[0].clone();
+                proof.restorations[0].root_commands.push(command);
+            },
+            |proof| proof.ghost_ui_ack = false,
+            |proof| proof.keys_released = false,
+            |proof| proof.tool_closed = false,
+            |proof| proof.close_terminal_cursor = 101,
+            |proof| proof.next_admission.global_exclusive_owners = 1,
+            |proof| proof.next_admission.deadline_scheduled = false,
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut packet = h15_priority_packet(AcceptanceHotkey::F11);
+            change(packet.screen_draw_priority.as_mut().unwrap());
+            assert!(
+                validate_hotkey_evidence_packet(&packet).is_err(),
+                "mutation {index} falsely passed"
+            );
+        }
+        let mut packet = h15_priority_packet(AcceptanceHotkey::F11);
+        packet.screen_draw_priority = None;
+        assert!(validate_hotkey_evidence_packet(&packet).is_err());
+        let mut packet = h15_priority_packet(AcceptanceHotkey::F11);
+        packet.gestures.clear();
+        assert!(validate_hotkey_evidence_packet(&packet).is_err());
     }
 
     fn h16_legacy_modifier_packet(configured_hotkey: AcceptanceHotkey) -> HotkeyCaseEvidence {
@@ -17718,6 +21017,7 @@ mod tests {
                 process_id: 202,
             }],
             physical_displays: vec![[0, 0, 1920, 1080]],
+            screen_draw_priority: None,
             candidate_trace_overflow: false,
             capture_segment_overflow: false,
             runner_edge_overflow: false,
@@ -18178,6 +21478,7 @@ mod tests {
                 process_id: 202,
             }],
             physical_displays: vec![[0, 0, 1920, 1080]],
+            screen_draw_priority: None,
             candidate_event_count: 16,
             candidate_trace_overflow: false,
             capture_segment_overflow: false,
@@ -18401,8 +21702,8 @@ mod tests {
     #[test]
     fn h_case_expected_states_cover_each_mandatory_case() {
         for case_id in [
-            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17",
-            "H18",
+            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H15", "H16",
+            "H17", "H18",
         ] {
             assert!(hotkey_expected_state(case_id).is_some(), "{case_id}");
         }
@@ -19110,6 +22411,350 @@ mod tests {
     }
 
     #[test]
+    fn screen_draw_follow_on_owner_rejects_coherent_false_restore_with_parked_root() {
+        for focus in [
+            HotkeyRootFocusIntent::ActivateRoot,
+            HotkeyRootFocusIntent::PreserveForeground,
+        ] {
+            let mut packet = h01_evidence_packet();
+            append_screen_draw_restore(&mut packet, Some(5), focus);
+            validate_hotkey_evidence_packet(&packet).unwrap();
+            let parked = [2000, 2000, 2800, 2600];
+            let restore = &mut packet.follow_on_restorations[0];
+            restore.visible = false;
+            restore.root_commands[0].command = HotkeyRootCommand::Position;
+            restore.root_commands[0]
+                .observed_presentation
+                .as_mut()
+                .unwrap()
+                .bounds = parked;
+            for event in &mut packet.candidate_events {
+                if event.visibility_revision != Some(8) {
+                    continue;
+                }
+                match event.kind {
+                    HotkeyTraceEventKind::VisibilityIntent => event.visible = Some(false),
+                    HotkeyTraceEventKind::RootCommand => {
+                        event.command = Some(HotkeyRootCommand::Position)
+                    }
+                    HotkeyTraceEventKind::NativeWindowSnapshot => event.bounds = Some(parked),
+                    _ => {}
+                }
+            }
+            let context = HotkeyRootProofContext::from(&packet);
+            let parent = &packet.candidate_events[3];
+            let child = &packet.candidate_events[6];
+            let restore = &packet.follow_on_restorations[0];
+            let span = &restore.root_commands[0];
+            let root = &packet.root_identities[0];
+            assert_eq!(child.visible, Some(false));
+            assert!(!restore.visible);
+            assert_eq!(child.invocation_id, parent.invocation_id);
+            assert_eq!(
+                restore.parent_visibility_revision,
+                parent.visibility_revision
+            );
+            assert_eq!(
+                hotkey_current_intent_physical_snapshot(context, parent, root),
+                Some(6)
+            );
+            assert_eq!(
+                hotkey_current_intent_physical_snapshot(context, child, root),
+                Some(11)
+            );
+            assert!(root_command_span_matches(context, restore.stream, span));
+            assert!(presentation_matches(
+                context,
+                restore.stream,
+                span,
+                span.observed_presentation.as_ref().unwrap(),
+                false,
+            ));
+            assert!(hotkey_owned_follow_on_restore_intent(context, restore).is_none());
+            assert!(!hotkey_intent_work_is_owned(context, parent));
+            assert!(hotkey_intent_physical_snapshot(context, parent, root).is_none());
+            assert!(validate_hotkey_evidence_packet(&packet).is_err());
+            let bytes = serde_json::to_vec(&packet).unwrap();
+            let decoded: HotkeyCaseEvidence = serde_json::from_slice(&bytes).unwrap();
+            assert!(!decoded.follow_on_restorations[0].visible);
+            assert_eq!(decoded.candidate_events[6].visible, Some(false));
+            assert!(validate_hotkey_evidence_packet(&decoded).is_err());
+        }
+    }
+
+    #[test]
+    fn screen_draw_follow_on_owner_rejects_viewport_focus_without_native_activation_under_preserve_foreground()
+     {
+        for focus in [
+            HotkeyRootFocusIntent::ActivateRoot,
+            HotkeyRootFocusIntent::PreserveForeground,
+        ] {
+            let mut packet = h01_evidence_packet();
+            append_screen_draw_restore(&mut packet, Some(5), focus);
+            validate_hotkey_evidence_packet(&packet).unwrap();
+            packet.follow_on_restorations[0].root_commands[0].command = HotkeyRootCommand::Focus;
+            packet.candidate_events[8].command = Some(HotkeyRootCommand::Focus);
+            let context = HotkeyRootProofContext::from(&packet);
+            let parent = &packet.candidate_events[3];
+            let child = &packet.candidate_events[6];
+            let restore = &packet.follow_on_restorations[0];
+            let span = &restore.root_commands[0];
+            let root = &packet.root_identities[0];
+            assert_eq!(span.command, HotkeyRootCommand::Focus);
+            assert_eq!(
+                packet.candidate_events[8].command,
+                Some(HotkeyRootCommand::Focus)
+            );
+            assert_eq!(
+                hotkey_current_intent_physical_snapshot(context, parent, root),
+                Some(6)
+            );
+            assert_eq!(
+                hotkey_current_intent_physical_snapshot(context, child, root),
+                Some(11)
+            );
+            assert!(root_command_span_matches(context, restore.stream, span));
+            assert!(presentation_matches(
+                context,
+                restore.stream,
+                span,
+                span.observed_presentation.as_ref().unwrap(),
+                true,
+            ));
+            let bytes = serde_json::to_vec(&packet).unwrap();
+            let decoded: HotkeyCaseEvidence = serde_json::from_slice(&bytes).unwrap();
+            if focus == HotkeyRootFocusIntent::PreserveForeground {
+                assert!(restore.native_activation.is_none());
+                assert!(
+                    !packet
+                        .candidate_events
+                        .iter()
+                        .any(|event| event.kind == HotkeyTraceEventKind::NativeActivation)
+                );
+                assert!(hotkey_owned_follow_on_restore_intent(context, restore).is_none());
+                assert!(!hotkey_intent_work_is_owned(context, parent));
+                assert!(hotkey_intent_physical_snapshot(context, parent, root).is_none());
+                assert!(validate_hotkey_evidence_packet(&packet).is_err());
+                assert!(validate_hotkey_evidence_packet(&decoded).is_err());
+            } else {
+                assert!(hotkey_owned_follow_on_restore_intent(context, restore).is_some());
+                assert_eq!(
+                    hotkey_intent_physical_snapshot(context, parent, root),
+                    Some(6)
+                );
+                validate_hotkey_evidence_packet(&packet).unwrap();
+                validate_hotkey_evidence_packet(&decoded).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn screen_draw_follow_on_owner_preserves_parent_proof_for_both_focus_intents_and_wire() {
+        for focus in [
+            HotkeyRootFocusIntent::ActivateRoot,
+            HotkeyRootFocusIntent::PreserveForeground,
+        ] {
+            let mut packet = h01_evidence_packet();
+            append_screen_draw_restore(&mut packet, Some(5), focus);
+            let before = serde_json::to_vec(&packet).unwrap();
+            let intent = &packet.candidate_events[3];
+            let restore = &packet.follow_on_restorations[0];
+            let context = HotkeyRootProofContext::from(&packet);
+            assert_eq!(intent.visibility_revision, Some(7));
+            assert_eq!(intent.invocation_id, Some(5));
+            assert_eq!(restore.visibility_revision, 8);
+            assert_eq!(restore.parent_visibility_revision, Some(7));
+            assert_eq!(restore.invocation_id, Some(5));
+            assert_eq!(restore.intent_elapsed_ms, 34);
+            let child = hotkey_restore_follows_intent(context, restore, intent).unwrap();
+            assert_eq!(
+                child.visibility_source,
+                Some(HotkeyVisibilitySource::ScreenDrawRestore)
+            );
+            assert_eq!(child.event_ordinal, 7);
+            assert!(hotkey_intent_work_is_owned(context, intent));
+            assert_eq!(
+                hotkey_intent_physical_snapshot(context, intent, &packet.root_identities[0]),
+                Some(6)
+            );
+            assert_eq!(packet.candidate_events[5].elapsed_ms, 32);
+            assert_eq!(restore.root_commands[0].command_elapsed_ms, 36);
+            assert_eq!(
+                restore.root_commands[0].observed_snapshot_event_ordinal,
+                Some(11)
+            );
+            assert!(
+                hotkey_terminal_successor(context, intent, &packet.root_identities[0]).is_none()
+            );
+            validate_hotkey_evidence_packet(&packet).unwrap();
+            assert_eq!(serde_json::to_vec(&packet).unwrap(), before);
+            let decoded: HotkeyCaseEvidence = serde_json::from_slice(&before).unwrap();
+            validate_hotkey_evidence_packet(&decoded).unwrap();
+            assert_eq!(decoded.gestures.len(), 1);
+            assert_eq!(decoded.follow_on_restorations.len(), 1);
+            assert_eq!(
+                hotkey_intent_physical_snapshot(
+                    (&decoded).into(),
+                    &decoded.candidate_events[3],
+                    &decoded.root_identities[0],
+                ),
+                Some(6)
+            );
+        }
+    }
+
+    #[test]
+    fn screen_draw_follow_on_owner_rejects_forged_stale_or_orphaned_work() {
+        let mut packet = h01_evidence_packet();
+        append_screen_draw_restore(&mut packet, Some(5), HotkeyRootFocusIntent::ActivateRoot);
+        let original = packet.candidate_events[3].clone();
+        let mutations: &[(&str, fn(&mut HotkeyCaseEvidence))] = &[
+            ("missing typed owner", |p| p.follow_on_restorations.clear()),
+            ("duplicate typed owner", |p| {
+                p.follow_on_restorations
+                    .push(p.follow_on_restorations[0].clone())
+            }),
+            ("missing parent revision", |p| {
+                p.follow_on_restorations[0].parent_visibility_revision = None
+            }),
+            ("wrong parent revision", |p| {
+                p.follow_on_restorations[0].parent_visibility_revision = Some(6)
+            }),
+            ("wrong typed child revision", |p| {
+                p.follow_on_restorations[0].visibility_revision = 9
+            }),
+            ("wrong typed invocation", |p| {
+                p.follow_on_restorations[0].invocation_id = Some(6)
+            }),
+            ("wrong typed group", |p| {
+                p.follow_on_restorations[0].input_group_id = 2
+            }),
+            ("wrong typed stream", |p| {
+                p.follow_on_restorations[0].stream =
+                    HotkeyCandidateStream::AlternateProfileCandidate
+            }),
+            ("missing raw restore", |p| {
+                p.candidate_events.retain(|e| {
+                    e.visibility_source != Some(HotkeyVisibilitySource::ScreenDrawRestore)
+                })
+            }),
+            ("different raw source", |p| {
+                p.candidate_events[6].visibility_source = Some(HotkeyVisibilitySource::Queued)
+            }),
+            ("wrong raw stream", |p| {
+                p.candidate_events[6].stream = HotkeyCandidateStream::AlternateProfileCandidate
+            }),
+            ("wrong child group", |p| {
+                p.follow_on_restorations[0].input_group_id = 2;
+                for e in &mut p.candidate_events[6..] {
+                    e.input_group_id = 2;
+                }
+            }),
+            ("wrong child purpose", |p| {
+                for e in &mut p.candidate_events[6..] {
+                    e.input_purpose = HotkeyRunnerInputPurpose::AuxiliaryProbe;
+                }
+            }),
+            ("orphaned parent", |p| {
+                p.candidate_events
+                    .retain(|e| e.visibility_source != Some(HotkeyVisibilitySource::ToggleBatch))
+            }),
+            ("unpaired parent", |p| {
+                p.candidate_events[2].terminal = Some(false)
+            }),
+            ("stale child revision", |p| {
+                p.follow_on_restorations[0].visibility_revision = 7;
+                p.follow_on_restorations[0].root_commands[0].visibility_revision = 7;
+                for e in &mut p.candidate_events[6..] {
+                    e.visibility_revision = Some(7);
+                }
+            }),
+            ("before physical parent proof", |p| {
+                p.candidate_events[6].event_ordinal = 6;
+                p.candidate_events[6].elapsed_ms = 31;
+                p.follow_on_restorations[0].intent_elapsed_ms = 31;
+            }),
+            ("missing focus intent", |p| {
+                p.candidate_events
+                    .retain(|e| e.kind != HotkeyTraceEventKind::ScreenDrawRestoreFocusIntent)
+            }),
+            ("focus before restore", |p| {
+                p.candidate_events[7].event_ordinal = 6
+            }),
+            ("command before focus", |p| {
+                p.candidate_events[8].event_ordinal = 7
+            }),
+            ("missing child command", |p| {
+                p.candidate_events.remove(8);
+            }),
+            ("unowned fresh command revision", |p| {
+                let mut command = p.candidate_events[8].clone();
+                command.visibility_revision = Some(9);
+                command.event_ordinal = 13;
+                command.elapsed_ms = 42;
+                command.request_id = Some(21);
+                p.candidate_events.push(command);
+            }),
+            ("wrong child snapshot request", |p| {
+                p.candidate_events[10].request_id = Some(21)
+            }),
+            ("wrong child snapshot invocation", |p| {
+                p.candidate_events[10].invocation_id = Some(6)
+            }),
+            ("wrong child snapshot revision", |p| {
+                p.candidate_events[10].visibility_revision = Some(9)
+            }),
+            ("wrong child HWND", |p| {
+                p.candidate_events[10].hwnd = Some(1002)
+            }),
+            ("wrong child PID", |p| {
+                p.candidate_events[10].process_id = Some(203)
+            }),
+            ("missing child snapshot", |p| {
+                p.candidate_events.remove(10);
+            }),
+            ("snapshot before command", |p| {
+                p.candidate_events[10].event_ordinal = 8
+            }),
+            ("snapshot stale time", |p| {
+                p.candidate_events[10].elapsed_ms = 35
+            }),
+            ("final child minimized", |p| {
+                p.candidate_events[10].minimized = Some(true)
+            }),
+            ("final child offscreen", |p| {
+                p.candidate_events[10].bounds = Some([2000, 2000, 2800, 2600])
+            }),
+            ("missing activation completion", |p| {
+                p.follow_on_restorations[0].native_activation = None
+            }),
+            ("activation completion before request", |p| {
+                p.candidate_events[11].event_ordinal = 9
+            }),
+            ("activation wrong group", |p| {
+                p.candidate_events[9].input_group_id = 2
+            }),
+            ("typed child release latency", |p| {
+                p.follow_on_restorations[0].root_commands[0].release_to_root_command_ms = Some(16)
+            }),
+        ];
+        validate_hotkey_evidence_packet(&packet).unwrap();
+        for (name, mutate) in mutations {
+            let mut changed = packet.clone();
+            mutate(&mut changed);
+            changed.candidate_event_count = changed.candidate_events.len();
+            let context = HotkeyRootProofContext::from(&changed);
+            assert!(!hotkey_intent_work_is_owned(context, &original), "{name}");
+            assert!(
+                hotkey_intent_physical_snapshot(context, &original, &changed.root_identities[0])
+                    .is_none(),
+                "{name}"
+            );
+            assert!(validate_hotkey_evidence_packet(&changed).is_err(), "{name}");
+        }
+    }
+
+    #[test]
     fn screen_draw_restore_is_a_correlated_follow_on_not_a_second_gesture_intent() {
         let mut packet = h01_evidence_packet();
         append_screen_draw_restore(&mut packet, Some(5), HotkeyRootFocusIntent::ActivateRoot);
@@ -19310,6 +22955,469 @@ mod tests {
         let mut packet = h01_evidence_packet();
         packet.runner_edge_overflow = true;
         assert!(validate_hotkey_evidence_packet(&packet).is_err());
+    }
+
+    fn reindex_hotkey_fixture(packet: &mut HotkeyCaseEvidence) {
+        packet
+            .candidate_events
+            .sort_by_key(|event| (event.stream, event.elapsed_ms, event.event_ordinal));
+        for (index, event) in packet.candidate_events.iter_mut().enumerate() {
+            event.event_ordinal = u32::try_from(index + 1).unwrap();
+        }
+        for gesture in &mut packet.gestures {
+            if let HotkeyDecisionProof::Applied { root_commands, .. } = &mut gesture.decision {
+                for span in root_commands {
+                    span.command_event_ordinal = packet
+                        .candidate_events
+                        .iter()
+                        .find(|event| {
+                            event.stream == gesture.stream
+                                && event.kind == HotkeyTraceEventKind::RootCommand
+                                && event.request_id == Some(span.request_id)
+                        })
+                        .unwrap()
+                        .event_ordinal;
+                    span.observed_snapshot_event_ordinal = packet
+                        .candidate_events
+                        .iter()
+                        .find(|event| {
+                            event.stream == gesture.stream
+                                && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                                && event.request_id == Some(span.request_id)
+                        })
+                        .map(|event| event.event_ordinal);
+                }
+            }
+        }
+        packet.candidate_event_count = packet.candidate_events.len();
+    }
+
+    pub(crate) fn hotkey_issued_superseded_fixture() -> HotkeyCaseEvidence {
+        let mut packet = h07_superseded_evidence_packet();
+        let mut command = packet
+            .candidate_events
+            .iter()
+            .find(|event| {
+                event.kind == HotkeyTraceEventKind::RootCommand && event.request_id == Some(21)
+            })
+            .unwrap()
+            .clone();
+        command.invocation_id = Some(5);
+        command.visibility_revision = Some(7);
+        command.request_id = Some(20);
+        command.command = Some(HotkeyRootCommand::Position);
+        command.elapsed_ms = 26;
+        command.event_ordinal = 5;
+        let mut snapshot = packet
+            .candidate_events
+            .iter()
+            .find(|event| {
+                event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    && event.request_id == Some(21)
+            })
+            .unwrap()
+            .clone();
+        snapshot.invocation_id = command.invocation_id;
+        snapshot.visibility_revision = command.visibility_revision;
+        snapshot.request_id = command.request_id;
+        snapshot.elapsed_ms = 49;
+        snapshot.event_ordinal = 6;
+        // The old hide request is sampled after the paired newer show.
+        assert_eq!(snapshot.visible, Some(true));
+        packet.candidate_events.extend([command, snapshot]);
+        reindex_hotkey_fixture(&mut packet);
+        packet
+    }
+
+    #[test]
+    fn issued_root_work_can_be_superseded_without_dropping_commands_or_late_samples() {
+        let packet = hotkey_issued_superseded_fixture();
+        validate_hotkey_evidence_packet(&packet).unwrap();
+        let source_command = packet
+            .candidate_events
+            .iter()
+            .find(|event| {
+                event.kind == HotkeyTraceEventKind::RootCommand && event.request_id == Some(20)
+            })
+            .unwrap();
+        assert_eq!(
+            root_command_event_reference_count(&packet, source_command),
+            1
+        );
+        assert!(packet.candidate_events.iter().any(|event| event.kind
+            == HotkeyTraceEventKind::NativeWindowSnapshot
+            && event.request_id == Some(20)));
+        let wire = serde_json::to_vec(&packet).unwrap();
+        assert!(wire.len() < MAX_HOTKEY_CASE_EVIDENCE_BYTES);
+        let decoded: HotkeyCaseEvidence = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            decoded.candidate_events.len(),
+            packet.candidate_events.len()
+        );
+        validate_hotkey_evidence_packet(&decoded).unwrap();
+    }
+
+    #[test]
+    fn issued_supersession_requires_exact_group_stream_lifetime_pair_and_terminal_observation() {
+        let changes: &[fn(&mut HotkeyCaseEvidence)] = &[
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .input_group_id += 1
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .stream = HotkeyCandidateStream::AlternateProfileCandidate
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .visibility_revision = Some(7)
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .visibility_source = Some(HotkeyVisibilitySource::LegacyTrigger)
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .event_ordinal = 1
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::PrimaryRelease
+                    })
+                    .unwrap()
+                    .invocation_id = Some(99)
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.request_id == Some(21)
+                            && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    })
+                    .unwrap()
+                    .process_id = Some(203)
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.request_id == Some(21)
+                            && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    })
+                    .unwrap()
+                    .hwnd = Some(1002)
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.request_id == Some(21)
+                            && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    })
+                    .unwrap()
+                    .visibility_revision = Some(6)
+            },
+            |packet| {
+                packet
+                    .candidate_events
+                    .iter_mut()
+                    .find(|event| {
+                        event.request_id == Some(21)
+                            && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    })
+                    .unwrap()
+                    .bounds = Some([2000, 2000, 2800, 2600])
+            },
+            |packet| {
+                packet.candidate_events.retain(|event| {
+                    !(event.request_id == Some(21)
+                        && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot)
+                })
+            },
+            |packet| {
+                let mut extra = packet
+                    .candidate_events
+                    .iter()
+                    .find(|event| {
+                        event.kind == HotkeyTraceEventKind::PrimaryRelease
+                            && event.invocation_id == Some(6)
+                    })
+                    .unwrap()
+                    .clone();
+                extra.event_ordinal = 99;
+                packet.candidate_events.push(extra);
+            },
+            |packet| {
+                let mut extra = packet
+                    .candidate_events
+                    .iter()
+                    .find(|event| {
+                        event.kind == HotkeyTraceEventKind::RootCommand
+                            && event.request_id == Some(20)
+                    })
+                    .unwrap()
+                    .clone();
+                extra.request_id = Some(19);
+                extra.visibility_revision = Some(99);
+                extra.event_ordinal = 99;
+                packet.candidate_events.push(extra);
+            },
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut packet = hotkey_issued_superseded_fixture();
+            change(&mut packet);
+            packet.candidate_event_count = packet.candidate_events.len();
+            assert!(
+                validate_hotkey_evidence_packet(&packet).is_err(),
+                "negative {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn h04_complete_89_decisions_accept_issued_supersession_and_reject_missing_extra_or_final_mismatch()
+     {
+        let mut packet = h04_matrix_evidence_packet();
+        let group = packet
+            .gestures
+            .iter()
+            .find(|gesture| {
+                packet
+                    .gestures
+                    .iter()
+                    .filter(|other| other.input_group_id == gesture.input_group_id)
+                    .count()
+                    == 2
+            })
+            .unwrap()
+            .input_group_id;
+        let indices = packet
+            .gestures
+            .iter()
+            .enumerate()
+            .filter(|(_, gesture)| gesture.input_group_id == group)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let source = packet.gestures[indices[0]].clone();
+        let successor = packet.gestures[indices[1]].clone();
+        let HotkeyDecisionProof::Applied {
+            visibility_revision,
+            intent_elapsed_ms,
+            visible,
+            release_to_intent_ms,
+            ..
+        } = source.decision
+        else {
+            panic!("source applied fixture");
+        };
+        let HotkeyDecisionProof::Applied {
+            visibility_revision: by_revision,
+            ..
+        } = successor.decision
+        else {
+            panic!("successor applied fixture");
+        };
+        let terminal = packet
+            .candidate_events
+            .iter()
+            .find(|event| {
+                event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    && event.invocation_id == Some(successor.invocation_id)
+            })
+            .unwrap()
+            .clone();
+        let delayed = packet
+            .candidate_events
+            .iter_mut()
+            .find(|event| {
+                event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    && event.invocation_id == Some(source.invocation_id)
+            })
+            .unwrap();
+        delayed.elapsed_ms = terminal.elapsed_ms;
+        delayed.visible = terminal.visible;
+        delayed.minimized = terminal.minimized;
+        delayed.bounds = terminal.bounds;
+        packet.gestures[indices[0]].decision = HotkeyDecisionProof::Superseded {
+            visibility_revision,
+            by_revision,
+            intent_elapsed_ms,
+            visible,
+            release_to_intent_ms,
+        };
+        reindex_hotkey_fixture(&mut packet);
+        assert_eq!(packet.gestures.len(), 89);
+        validate_hotkey_evidence_packet_with_context(
+            &packet,
+            AcceptanceHotkey::ShiftAltWinEnd,
+            350,
+        )
+        .unwrap();
+        let decoded: HotkeyCaseEvidence =
+            serde_json::from_slice(&serde_json::to_vec(&packet).unwrap()).unwrap();
+        validate_hotkey_evidence_packet_with_context(
+            &decoded,
+            AcceptanceHotkey::ShiftAltWinEnd,
+            350,
+        )
+        .unwrap();
+        for missing in [true, false] {
+            let mut changed = packet.clone();
+            if missing {
+                changed.gestures.remove(indices[0]);
+            } else {
+                changed.gestures.push(source.clone());
+            }
+            assert!(
+                validate_hotkey_evidence_packet_with_context(
+                    &changed,
+                    AcceptanceHotkey::ShiftAltWinEnd,
+                    350
+                )
+                .is_err()
+            );
+        }
+        let mut wrong_final = packet.clone();
+        let HotkeyDecisionProof::Applied {
+            visible: expected_terminal_visible,
+            root_commands,
+            ..
+        } = &successor.decision
+        else {
+            panic!("successor applied fixture");
+        };
+        let successor_commands = wrong_final
+            .candidate_events
+            .iter()
+            .filter(|event| {
+                event.kind == HotkeyTraceEventKind::RootCommand
+                    && event.stream == successor.stream
+                    && event.input_group_id == successor.input_group_id
+                    && event.input_purpose == successor.input_purpose
+                    && event.invocation_id == Some(successor.invocation_id)
+                    && event.visibility_revision == Some(by_revision)
+                    && root_commands
+                        .iter()
+                        .any(|span| event.request_id == Some(span.request_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(successor_commands.len(), root_commands.len());
+        let last_command = successor_commands
+            .iter()
+            .max_by_key(|command| command.event_ordinal)
+            .unwrap();
+        let terminal_index = wrong_final
+            .candidate_events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                    && event.stream == successor.stream
+                    && event.input_group_id == successor.input_group_id
+                    && event.input_purpose == successor.input_purpose
+                    && event.invocation_id == Some(successor.invocation_id)
+                    && event.visibility_revision == Some(by_revision)
+                    && event.event_ordinal > last_command.event_ordinal
+                    && event.elapsed_ms >= last_command.elapsed_ms
+                    && successor_commands
+                        .iter()
+                        .any(|command| event.request_id == command.request_id)
+            })
+            .max_by_key(|(_, event)| event.event_ordinal)
+            .map(|(index, _)| index)
+            .unwrap();
+        let original = &wrong_final.candidate_events[terminal_index];
+        assert_eq!(original.request_id, last_command.request_id);
+        assert!(successor_commands.iter().all(|command| {
+            original.event_ordinal > command.event_ordinal
+                && original.elapsed_ms >= command.elapsed_ms
+        }));
+        let root = wrong_final
+            .root_identities
+            .iter()
+            .find(|root| root.stream == successor.stream)
+            .unwrap();
+        assert_eq!(original.hwnd, Some(root.hwnd));
+        assert_eq!(original.process_id, Some(root.process_id));
+        assert_eq!(original.visible, Some(true));
+        assert_eq!(original.minimized, Some(false));
+        let original_bounds = original.bounds.unwrap();
+        let intersects_display = |bounds: [i32; 4]| {
+            wrong_final.physical_displays.iter().any(|display| {
+                bounds[0] < display[2]
+                    && bounds[2] > display[0]
+                    && bounds[1] < display[3]
+                    && bounds[3] > display[1]
+            })
+        };
+        assert_eq!(
+            intersects_display(original_bounds),
+            *expected_terminal_visible
+        );
+        let opposite_bounds = if *expected_terminal_visible {
+            [3_000, 100, 3_800, 700]
+        } else {
+            [100, 100, 900, 700]
+        };
+        assert_eq!(
+            intersects_display(opposite_bounds),
+            !*expected_terminal_visible
+        );
+        let event = &mut wrong_final.candidate_events[terminal_index];
+        event.visible = Some(true);
+        event.minimized = Some(false);
+        event.bounds = Some(opposite_bounds);
+        assert!(
+            validate_hotkey_evidence_packet_with_context(
+                &wrong_final,
+                AcceptanceHotkey::ShiftAltWinEnd,
+                350
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -19553,6 +23661,7 @@ mod tests {
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
             gate_s_evidence: Vec::new(),
+            controlled_failures: None,
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
@@ -22385,6 +26494,118 @@ mod tests {
         }
         assert_eq!(changed_controls, 2);
         assert_ne!(reopen.identity.query_digest, query.query_digest.unwrap());
+    }
+
+    #[test]
+    fn query_note_editor_fixture_loads_canonical_q11_and_preserves_q13_bindings() {
+        struct RestoreNotesDir(Option<OsString>);
+
+        impl Drop for RestoreNotesDir {
+            fn drop(&mut self) {
+                // This isolated runner fixture test has no concurrent environment readers.
+                unsafe {
+                    if let Some(previous) = self.0.take() {
+                        std::env::set_var("ML_NOTES_DIR", previous);
+                    } else {
+                        std::env::remove_var("ML_NOTES_DIR");
+                    }
+                }
+            }
+        }
+
+        let profile = tempfile::tempdir().unwrap();
+        let marker = profile.path().join("query-marker-ledger.txt");
+        write_new(&marker, b"radial-acceptance-marker-ledger:v1\n").unwrap();
+        let fixture = deterministic_query_fixture(
+            &profile.path().join("acceptance.log"),
+            MouseGestureMode::Enabled,
+            AcceptanceHotkey::F11,
+            &marker,
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap();
+        let notes_directory = profile.path().join("notes");
+        let q11_path = notes_directory.join("radial-acceptance-q11.md");
+        let q13_path = notes_directory.join("radial-acceptance-q13.md");
+        let q13_bytes = fs::read(&q13_path).unwrap();
+        assert_eq!(
+            q13_bytes,
+            b"# Query acceptance fixture note\nThis note may be deleted only after the explicit confirmation case.\n"
+        );
+        // The common builder also supplies Gate C/D/S and must not seed Q11.
+        assert!(!q11_path.exists());
+        seed_query_note_editor_fixture(profile.path()).unwrap();
+        assert_eq!(fs::read(&q13_path).unwrap(), q13_bytes);
+        assert_eq!(fs::read(&q11_path).unwrap(), b"# radial acceptance q11\n\n");
+
+        let _restore = RestoreNotesDir(std::env::var_os("ML_NOTES_DIR"));
+        // Nextest isolates this test in its own process; no worker is running here.
+        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_directory) };
+        let notes = multi_launcher::plugins::note::load_notes().unwrap();
+        assert_eq!(notes.len(), 2);
+        let q11 = notes
+            .iter()
+            .find(|note| note.slug == "radial-acceptance-q11")
+            .unwrap();
+        assert_eq!(q11.path, q11_path);
+        assert_eq!(q11.title, "radial acceptance q11");
+        assert_eq!(q11.content, "# radial acceptance q11\n\n");
+        let q13 = notes
+            .iter()
+            .find(|note| note.slug == "radial-acceptance-q13")
+            .unwrap();
+        assert_eq!(q13.path, q13_path);
+        assert_eq!(q13.content.as_bytes(), q13_bytes);
+
+        let document: RadialDocument = serde_json::from_slice(&fixture.radial_json).unwrap();
+        for (cell_id, command) in [
+            ("qa-note-new", "note:new:radial-acceptance-q11"),
+            ("qa-note-remove", "note:remove:radial-acceptance-q13"),
+        ] {
+            let cell = document
+                .menus
+                .iter()
+                .flat_map(|menu| &menu.rings)
+                .flat_map(|ring| &ring.cells)
+                .find(|cell| cell.id.as_str() == cell_id)
+                .unwrap();
+            assert_eq!(
+                cell.content,
+                CellContent::Action {
+                    binding: ActionBinding::ExactCommand {
+                        command: command.into(),
+                        args: None,
+                    },
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn query_note_editor_fixture_refuses_overwrite_without_changing_q13() {
+        let profile = tempfile::tempdir().unwrap();
+        let marker = profile.path().join("query-marker-ledger.txt");
+        deterministic_query_fixture(
+            &profile.path().join("acceptance.log"),
+            MouseGestureMode::Enabled,
+            AcceptanceHotkey::F11,
+            &marker,
+            &std::env::current_exe().unwrap(),
+        )
+        .unwrap();
+        let notes_directory = profile.path().join("notes");
+        let q11_path = notes_directory.join("radial-acceptance-q11.md");
+        let q13_path = notes_directory.join("radial-acceptance-q13.md");
+        let q13_bytes = fs::read(&q13_path).unwrap();
+        write_new(&q11_path, b"# Existing owned fixture\nDo not overwrite.\n").unwrap();
+
+        assert!(seed_query_note_editor_fixture(profile.path()).is_err());
+        assert_eq!(
+            fs::read(&q11_path).unwrap(),
+            b"# Existing owned fixture\nDo not overwrite.\n"
+        );
+        assert_eq!(fs::read(&q13_path).unwrap(), q13_bytes);
+        assert_eq!(fs::read_dir(notes_directory).unwrap().count(), 2);
     }
 
     #[test]
@@ -31482,6 +35703,178 @@ mod tests {
         assert!(validate_gate_c_evidence_report(&report).is_err());
     }
 
+    fn gate_c_d09_pre_search_edit_report() -> AcceptanceReport {
+        let mut report = valid_gate_c_evidence_report();
+        let packet = report
+            .gate_c_evidence
+            .iter_mut()
+            .find(|packet| packet.case_id == "D09")
+            .unwrap();
+        // Retained D09 shape: Properties edit at Search generation 0,
+        // baseline at 1, held searches at 2 and 4, then a new Inspector owner.
+        for control in &mut packet.controls[..2] {
+            control.identity.surface = GateCSurface::Properties;
+            control.identity.search_request_generation -= 2;
+        }
+        for event in &mut packet.provider_lifecycle {
+            event.identity.surface = GateCSurface::Properties;
+            event.identity.search_request_generation -= 2;
+        }
+        for (index, generation) in [(0, 1), (1, 3)] {
+            let identity = packet.authoring_states[index]
+                .action_editor
+                .as_mut()
+                .unwrap();
+            identity.surface = GateCSurface::Properties;
+            identity.search_request_generation = generation;
+        }
+        let mut edit = packet.controls[0].clone();
+        edit.control = "query_field".into();
+        edit.trace_sequence = 4;
+        edit.identity.search_request_generation = 0;
+        edit.value_digest = edit.query_digest;
+        edit.clicked = false;
+        edit.selected = false;
+        edit.changed = true;
+        packet.controls.insert(0, edit);
+        report
+    }
+
+    #[test]
+    fn gate_c_d09_four_control_held_search_edit_roundtrips_v2_and_readback() {
+        let mut report = gate_c_d09_pre_search_edit_report();
+        let packet = report
+            .gate_c_evidence
+            .iter()
+            .find(|p| p.case_id == "D09")
+            .unwrap();
+        assert_eq!(packet.controls.len(), 4);
+        assert!(
+            packet.searches.is_empty(),
+            "both held requests are rejected, not settled"
+        );
+        assert_eq!(packet.controls[0].identity.search_request_generation, 0);
+        assert_eq!(
+            packet.authoring_states[0]
+                .action_editor
+                .as_ref()
+                .unwrap()
+                .search_request_generation,
+            1
+        );
+        assert_eq!(packet.controls[1].identity.search_request_generation, 2);
+        assert_eq!(packet.controls[2].identity.search_request_generation, 4);
+        assert!(gate_c_d09_held_query_edit_is_observed(
+            &packet.controls[0],
+            packet
+        ));
+        assert!(!gate_c_passed_query_edit_is_observed(
+            &packet.controls[0],
+            packet
+        ));
+        validate_gate_c_evidence_report(&report).unwrap();
+
+        let bytes = serde_json::to_vec(&report.gate_c_evidence).unwrap();
+        assert!(bytes.len() <= MAX_GATE_C_EVIDENCE_BYTES);
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            wire.as_array()
+                .unwrap()
+                .iter()
+                .all(|packet| packet["v"] == 2)
+        );
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("held-search-evidence.json");
+        std::fs::write(&path, &bytes).unwrap();
+        let decoded =
+            serde_json::from_slice::<Vec<GateCCaseEvidence>>(&std::fs::read(&path).unwrap())
+                .unwrap();
+        assert_eq!(decoded, report.gate_c_evidence);
+        report.gate_c_evidence = decoded;
+        validate_gate_c_evidence_report(&report).unwrap();
+    }
+
+    #[test]
+    fn gate_c_d09_pre_search_edit_rejects_orphan_owner_digest_and_order() {
+        for invalid in 0..12 {
+            let mut report = gate_c_d09_pre_search_edit_report();
+            let packet = report
+                .gate_c_evidence
+                .iter_mut()
+                .find(|p| p.case_id == "D09")
+                .unwrap();
+            match invalid {
+                0 => {
+                    packet.controls.remove(1);
+                }
+                1 => packet.controls[0].identity.editor_epoch += 1,
+                2 => packet.controls[0].identity.session_id += 1,
+                3 => packet.controls[0].identity.draft_generation += 1,
+                4 => packet.controls[0].identity.query_request_generation += 1,
+                5 => {
+                    // This generation has no exact Search/provider/state
+                    // witness; an equal generation would be that known owner.
+                    packet.controls[0].identity.search_request_generation =
+                        packet.controls[1].identity.search_request_generation + 1
+                }
+                6 => packet.controls[0].binding_digest += 1,
+                7 => packet.controls[0].query_digest += 1,
+                8 => packet.controls[0].trace_sequence = packet.controls[1].trace_sequence,
+                9 => packet.provider_lifecycle.retain(|event| {
+                    !(event.edge == GateCProviderEdge::Rejected
+                        && event.identity == packet.controls[1].identity)
+                }),
+                10 => {
+                    packet.provider_lifecycle[1].trace_sequence =
+                        packet.provider_lifecycle[0].trace_sequence
+                }
+                _ => packet.controls[0].identity.stable_target_digest += 1,
+            }
+            assert!(
+                !gate_c_d09_held_query_edit_is_observed(&packet.controls[0], packet),
+                "invalid held edit {invalid}"
+            );
+            assert!(
+                !gate_c_control_identity_is_observed(
+                    &packet.controls[0],
+                    packet,
+                    Some(CaseStatus::Passed)
+                ),
+                "unowned edit {invalid}"
+            );
+            assert!(
+                validate_gate_c_evidence_report(&report).is_err(),
+                "readback {invalid}"
+            );
+        }
+        let report = gate_c_d09_pre_search_edit_report();
+        let packet = report
+            .gate_c_evidence
+            .iter()
+            .find(|p| p.case_id == "D09")
+            .unwrap();
+        assert!(!gate_c_control_identity_is_observed(
+            &packet.controls[0],
+            packet,
+            Some(CaseStatus::Failed)
+        ));
+        let mut equal_generation = packet.controls[0].clone();
+        equal_generation.identity.search_request_generation =
+            packet.controls[1].identity.search_request_generation;
+        assert!(!gate_c_d09_held_query_edit_is_observed(
+            &equal_generation,
+            packet
+        ));
+        assert!(
+            gate_c_control_identity_is_observed(
+                &equal_generation,
+                packet,
+                Some(CaseStatus::Passed)
+            ),
+            "the existing exact provider-identity witness remains valid independently of the strict later-Search comparator"
+        );
+    }
+
     #[test]
     fn gate_c_d09_reopen_snapshot_precedes_a_retained_selected_cell_transition() {
         let report = valid_gate_c_evidence_report();
@@ -32922,7 +37315,7 @@ mod tests {
         ));
     }
 
-    fn query_invocation_for_test(
+    pub(super) fn query_invocation_for_test(
         cell_id: &str,
         mode: QueryEvidenceMode,
         resolution_state: QueryEvidenceState,
@@ -33076,6 +37469,7 @@ mod tests {
             schema_version: 1,
             case_id: case_id.into(),
             invocations,
+            placement: None,
         }
     }
 
@@ -33229,13 +37623,279 @@ mod tests {
                 "Q15",
                 vec![hidden_ready("qa-exact-marker", Mode::ExactCommand, 110)],
             ),
+            l08_placement_packet(AcceptanceHotkey::F11),
         ]
+    }
+
+    fn l08_placement_packet(hotkey: AcceptanceHotkey) -> QueryCaseEvidence {
+        let configured = QueryRootPresentationEvidence {
+            hwnd: 44,
+            process_id: 7,
+            bounds: [240, 180, 1156, 869],
+            visible: true,
+            minimized: false,
+            physically_visible: true,
+        };
+        let moved = QueryRootPresentationEvidence {
+            bounds: [320, 260, 1236, 949],
+            ..configured.clone()
+        };
+        let mut invocation = query_invocation_for_test(
+            "qa-note-new",
+            QueryEvidenceMode::ExactCommand,
+            QueryEvidenceState::Ready,
+            QueryEvidenceRequirement::LauncherUi,
+            QueryEvidenceOutcome::Executed,
+            QueryEvidenceRootPolicy::Legacy,
+            1,
+            0,
+            QueryEvidenceUiAck::NoteEditor,
+            true,
+            120,
+        );
+        invocation.root_observations = vec![moved.clone(), moved.clone()];
+        invocation.setup_visibility = QuerySetupVisibilityEvidence {
+            visible_before: true,
+            desired_visible: true,
+            tap: None,
+        };
+        let toggle = |visible, cursor: usize, invocation_id, visibility_revision| {
+            let mut command = h01_evidence_packet().candidate_events[4].clone();
+            command.event_ordinal = (cursor + 5) as u32;
+            command.elapsed_ms = (cursor + 5) as u64;
+            command.invocation_id = Some(invocation_id);
+            command.visibility_revision = Some(visibility_revision);
+            command.request_id = Some(visibility_revision);
+            command.command = Some(if visible {
+                HotkeyRootCommand::Show
+            } else {
+                HotkeyRootCommand::Position
+            });
+            let presentation = if visible {
+                configured.clone()
+            } else {
+                QueryRootPresentationEvidence {
+                    bounds: [-10_000, -10_000, -9084, -9311],
+                    physically_visible: false,
+                    ..moved.clone()
+                }
+            };
+            let mut snapshot = command.clone();
+            snapshot.kind = HotkeyTraceEventKind::NativeWindowSnapshot;
+            snapshot.command = None;
+            snapshot.event_ordinal += 1;
+            snapshot.elapsed_ms += 1;
+            snapshot.hwnd = Some(44);
+            snapshot.process_id = Some(7);
+            snapshot.bounds = Some(presentation.bounds);
+            snapshot.visible = Some(true);
+            snapshot.minimized = Some(false);
+            QueryPlacementToggleEvidence {
+                input: QuerySetupVisibilityEvidence {
+                    visible_before: !visible,
+                    desired_visible: visible,
+                    tap: Some(QuerySetupTapEvidence {
+                        input_down_inserted: configured_chord_edges(hotkey, 1).len() / 2,
+                        input_up_inserted: configured_chord_edges(hotkey, 1).len() / 2,
+                        quiet_preflight_ms: 80,
+                        quiet_matching_edges: 0,
+                        observer_default_desktop: true,
+                        observed_edges: configured_chord_edges(hotkey, 1)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (virtual_key, down))| QuerySetupObservedEdge {
+                                runner_relative_us: index as u64 * 100,
+                                virtual_key,
+                                down,
+                                injected: true,
+                                runner_cookie_matched: true,
+                            })
+                            .collect(),
+                        foreign_edges: Vec::new(),
+                        trace_cursor: cursor,
+                        invocation_id,
+                        generation: 10,
+                        press_event_ordinal: cursor + 1,
+                        release_event_ordinal: cursor + 2,
+                        short_tap_event_ordinal: cursor + 3,
+                        visibility_event_ordinal: cursor + 4,
+                        visibility_visible: visible,
+                    }),
+                },
+                visibility_revision,
+                command,
+                snapshot,
+                presentation,
+            }
+        };
+        QueryCaseEvidence {
+            schema_version: 1,
+            case_id: "L08".into(),
+            invocations: vec![invocation],
+            placement: Some(QueryPlacementEvidence {
+                hotkey,
+                physical_displays: vec![[0, 0, 1920, 1080]],
+                dpi: 96,
+                configured_logical_position: QUERY_CONFIGURED_ROOT_POSITION,
+                configured_logical_client_size: QUERY_CONFIGURED_ROOT_CLIENT_SIZE,
+                configured_client_bounds: [0, 0, 900, 650],
+                configured_root: configured.clone(),
+                moved_root: moved.clone(),
+                moved_client_bounds: [0, 0, 900, 650],
+                handoff_terminal_cursor: 20,
+                restored_root: moved.clone(),
+                restored_client_bounds: [0, 0, 900, 650],
+                hide: toggle(false, 30, 200, 20),
+                show: toggle(true, 40, 201, 21),
+                shown_client_bounds: [0, 0, 900, 650],
+                note_absent_before: true,
+                note_closed_after: true,
+            }),
+        }
+    }
+
+    #[test]
+    fn l08_placement_proof_requires_real_move_ui_handoff_and_exact_hide_show() {
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            let packet = l08_placement_packet(hotkey);
+            query_case_contract_is_valid(&packet).unwrap();
+            let bytes = serde_json::to_vec(&packet).unwrap();
+            assert!(bytes.len() < MAX_QUERY_CASE_EVIDENCE_BYTES);
+            let decoded: QueryCaseEvidence = serde_json::from_slice(&bytes).unwrap();
+            query_case_contract_is_valid(&decoded).unwrap();
+            let mut q11 = passing_query_packets_for_test()
+                .into_iter()
+                .find(|packet| packet.case_id == "Q11")
+                .unwrap();
+            assert_eq!(q11.invocations.len(), 1);
+            assert!(q11.placement.is_none());
+            query_case_contract_is_valid(&q11).unwrap();
+            q11.placement = packet.placement;
+            assert!(query_case_contract_is_valid(&q11).is_err());
+        }
+    }
+
+    #[test]
+    fn l08_placement_geometry_uses_measured_client_dimensions_at_fractional_dpi() {
+        for dpi in [120, 144] {
+            let mut packet = l08_placement_packet(AcceptanceHotkey::F11);
+            let scale = f64::from(dpi) / 96.0;
+            let bounds =
+                |rect: [i32; 4]| rect.map(|value| (f64::from(value) * scale).round() as i32);
+            let proof = packet.placement.as_mut().unwrap();
+            proof.dpi = dpi;
+            proof.physical_displays = vec![bounds([0, 0, 1920, 1080])];
+            proof.configured_root.bounds = bounds(proof.configured_root.bounds);
+            proof.moved_root.bounds = bounds(proof.moved_root.bounds);
+            proof.restored_root.bounds = proof.moved_root.bounds;
+            proof.configured_client_bounds = bounds(proof.configured_client_bounds);
+            proof.moved_client_bounds = proof.configured_client_bounds;
+            proof.restored_client_bounds = proof.configured_client_bounds;
+            proof.shown_client_bounds = proof.configured_client_bounds;
+            proof.show.presentation = proof.configured_root.clone();
+            proof.show.snapshot.bounds = Some(proof.configured_root.bounds);
+            for sample in &mut packet.invocations[0].root_observations {
+                *sample = proof.moved_root.clone();
+            }
+            query_case_contract_is_valid(&packet).unwrap();
+            packet.placement.as_mut().unwrap().shown_client_bounds[2] += 1;
+            assert!(query_case_contract_is_valid(&packet).is_err());
+        }
+    }
+
+    #[test]
+    fn l08_placement_proof_rejects_geometry_identity_ack_release_order_and_cleanup_mutations() {
+        let changes: &[fn(&mut QueryCaseEvidence)] = &[
+            |packet| {
+                packet.placement.as_mut().unwrap().moved_root =
+                    packet.placement.as_ref().unwrap().configured_root.clone()
+            },
+            |packet| packet.placement.as_mut().unwrap().moved_root.hwnd += 1,
+            |packet| packet.placement.as_mut().unwrap().moved_root.process_id += 1,
+            |packet| packet.placement.as_mut().unwrap().moved_root.minimized = true,
+            |packet| {
+                packet.placement.as_mut().unwrap().moved_root.bounds =
+                    [-20_000, -20_000, -19_084, -19_311]
+            },
+            |packet| {
+                packet.placement.as_mut().unwrap().configured_root.bounds =
+                    [i32::MIN, 0, i32::MAX, 600]
+            },
+            |packet| packet.placement.as_mut().unwrap().restored_root.bounds[0] += 1,
+            |packet| packet.invocations[0].root_observations[0].bounds[1] += 1,
+            |packet| packet.invocations[0].root_geometry_change_count = 1,
+            |packet| packet.invocations[0].ui_ack = QueryEvidenceUiAck::None,
+            |packet| packet.invocations[0].effect_count = 2,
+            |packet| packet.invocations[0].setup_visibility.visible_before = false,
+            |packet| packet.placement.as_mut().unwrap().hide.input.tap = None,
+            |packet| {
+                packet
+                    .placement
+                    .as_mut()
+                    .unwrap()
+                    .show
+                    .input
+                    .tap
+                    .as_mut()
+                    .unwrap()
+                    .input_up_inserted = 0
+            },
+            |packet| {
+                packet
+                    .placement
+                    .as_mut()
+                    .unwrap()
+                    .hide
+                    .input
+                    .tap
+                    .as_mut()
+                    .unwrap()
+                    .observed_edges[0]
+                    .runner_cookie_matched = false
+            },
+            |packet| {
+                packet
+                    .placement
+                    .as_mut()
+                    .unwrap()
+                    .show
+                    .input
+                    .tap
+                    .as_mut()
+                    .unwrap()
+                    .trace_cursor = 25
+            },
+            |packet| packet.placement.as_mut().unwrap().show.visibility_revision = 20,
+            |packet| packet.placement.as_mut().unwrap().show.command.request_id = Some(99),
+            |packet| packet.placement.as_mut().unwrap().show.snapshot.hwnd = Some(99),
+            |packet| {
+                packet.placement.as_mut().unwrap().show.snapshot.bounds =
+                    Some([320, 260, 1236, 949])
+            },
+            |packet| {
+                packet.placement.as_mut().unwrap().show.presentation.bounds = [320, 260, 1236, 949]
+            },
+            |packet| packet.placement.as_mut().unwrap().shown_client_bounds[2] += 1,
+            |packet| packet.placement.as_mut().unwrap().note_closed_after = false,
+            |packet| packet.placement.as_mut().unwrap().note_absent_before = false,
+        ];
+        for (index, change) in changes.iter().enumerate() {
+            let mut packet = l08_placement_packet(AcceptanceHotkey::F11);
+            change(&mut packet);
+            assert!(
+                query_case_contract_is_valid(&packet).is_err(),
+                "mutation {index} falsely passed"
+            );
+        }
+        let mut packet = l08_placement_packet(AcceptanceHotkey::F11);
+        packet.placement = None;
+        assert!(query_case_contract_is_valid(&packet).is_err());
     }
 
     #[test]
     fn query_case_contracts_require_the_exact_hovered_cell() {
         let mut packets = passing_query_packets_for_test();
-        assert_eq!(packets.len(), 9);
+        assert_eq!(packets.len(), 10);
         for packet in &packets {
             query_case_contract_is_valid(packet).unwrap_or_else(|error| panic!("{error}"));
         }
@@ -33389,8 +38049,8 @@ mod tests {
             id: 1,
             x: 0,
             y: 0,
-            width: 1000,
-            height: 1000,
+            width: 1920,
+            height: 1080,
             scale_factor: 1.0,
         }];
         for packet in packets {
@@ -33794,13 +38454,73 @@ mod tests {
         else {
             panic!("fixture root hover-probe cell must bind a persisted custom action");
         };
+        assert_eq!(cell.id.as_str(), "starter-root-favorites");
         assert_eq!(*action_id, action_ids::RESULT_EXECUTE);
         assert_eq!(bound_action, &actions[0]);
         assert!(bound_action.label.contains("Harmless Action"));
         validate_radial_document(&document).expect("hover-probe fixture validates");
     }
 
-    fn synthetic_hotkey_burst(taps: usize, initial_visible: bool) -> Vec<String> {
+    #[test]
+    fn all_fixture_sets_only_its_exercised_glow_baseline_without_changing_other_fixtures() {
+        use multi_launcher::radial::model::Override;
+
+        let profile = tempfile::tempdir().unwrap();
+        let log_path = profile.path().join("acceptance.log");
+        let baseline = deterministic_fixture_for_hotkey(
+            &log_path,
+            MouseGestureMode::Enabled,
+            AcceptanceHotkey::F11,
+        )
+        .unwrap();
+        let all = deterministic_all_fixture_for_hotkey(
+            &log_path,
+            MouseGestureMode::Enabled,
+            AcceptanceHotkey::F11,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&all.settings_json).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&baseline.settings_json).unwrap()
+        );
+        assert_eq!(all.actions_json, baseline.actions_json);
+        assert_eq!(all.hold_threshold_ms, baseline.hold_threshold_ms);
+        let mut expected: RadialDocument = serde_json::from_slice(&baseline.radial_json).unwrap();
+        assert_eq!(
+            expected.skins[0].style.values.effects.glow_enabled,
+            Override::Value(false)
+        );
+        expected.skins[0].style.values.effects.glow_enabled = Override::Value(true);
+        write_new(&profile.path().join("radial.json"), &all.radial_json).unwrap();
+        let written: RadialDocument =
+            serde_json::from_slice(&fs::read(profile.path().join("radial.json")).unwrap()).unwrap();
+        assert_eq!(written, expected);
+        validate_radial_document(&written).unwrap();
+        assert_eq!(
+            RadialDocument::starter().skins[0]
+                .style
+                .values
+                .effects
+                .glow_enabled,
+            Override::Value(false)
+        );
+        let ordinary = deterministic_fixture(&log_path, MouseGestureMode::Enabled).unwrap();
+        assert_eq!(ordinary.radial_json, baseline.radial_json);
+        let hotkey = deterministic_fixture_for_hotkey_with_direct_trigger(
+            &log_path,
+            MouseGestureMode::Enabled,
+            AcceptanceHotkey::F11,
+        )
+        .unwrap();
+        let hotkey_document: RadialDocument = serde_json::from_slice(&hotkey.radial_json).unwrap();
+        assert_eq!(
+            hotkey_document.skins[0].style.values.effects.glow_enabled,
+            Override::Value(false)
+        );
+        assert_ne!(all.radial_json, baseline.radial_json);
+    }
+
+    pub(super) fn synthetic_hotkey_burst(taps: usize, initial_visible: bool) -> Vec<String> {
         let mut events = Vec::with_capacity(taps * 6);
         let mut visible = initial_visible;
         for index in 0..taps {
@@ -33828,6 +38548,46 @@ mod tests {
             ));
         }
         events
+    }
+
+    #[test]
+    fn hotkey_priority_fixture_adds_one_normal_safe_entry_without_changing_hover_probe_or_other_suites()
+     {
+        let profile = tempfile::tempdir().unwrap();
+        let log = profile.path().join("acceptance.log");
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            let base =
+                deterministic_fixture_for_hotkey(&log, MouseGestureMode::Enabled, hotkey).unwrap();
+            let hotkey_fixture = deterministic_fixture_for_hotkey_with_direct_trigger(
+                &log,
+                MouseGestureMode::Enabled,
+                hotkey,
+            )
+            .unwrap();
+            let base_actions: Vec<multi_launcher::actions::Action> =
+                serde_json::from_slice(&base.actions_json).unwrap();
+            let actions: Vec<multi_launcher::actions::Action> =
+                serde_json::from_slice(&hotkey_fixture.actions_json).unwrap();
+            assert_eq!(actions.len(), base_actions.len() + 1);
+            assert_eq!(&actions[..base_actions.len()], base_actions.as_slice());
+            let smoke = actions.last().unwrap();
+            assert_eq!(smoke.label, PRIORITY_SMOKE_ACTION_LABEL);
+            assert_eq!(smoke.action, "screen_draw:start");
+            assert!(smoke.args.is_none());
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|action| action.label == PRIORITY_SMOKE_ACTION_LABEL)
+                    .count(),
+                1
+            );
+            let base_doc: RadialDocument = serde_json::from_slice(&base.radial_json).unwrap();
+            let hotkey_doc: RadialDocument =
+                serde_json::from_slice(&hotkey_fixture.radial_json).unwrap();
+            assert_eq!(hotkey_doc.menus, base_doc.menus);
+            assert_eq!(hotkey_doc.default_menu_id, base_doc.default_menu_id);
+            validate_radial_document(&hotkey_doc).unwrap();
+        }
     }
 
     #[test]
@@ -34266,7 +39026,7 @@ mod tests {
         report.cleanup.profile_removed = true;
         report.cleanup.cursor_restored = true;
         report.cleanup.input_desktop_released = true;
-        for id in CASE_IDS {
+        for id in CASE_IDS.into_iter().filter(|id| *id != "CLEANUP") {
             report.push_case(AcceptanceCaseResult {
                 id: id.into(),
                 status: CaseStatus::Passed,
@@ -34277,10 +39037,26 @@ mod tests {
                 artifacts: Vec::new(),
             });
         }
+        report.push_case(AcceptanceCaseResult {
+            id: "CLEANUP".into(),
+            status: CaseStatus::Passed,
+            elapsed_ms: 180,
+            expected: "candidate and all child-owned windows close cleanly".into(),
+            observed: "candidate exited normally with exit code: 0 after bounded WM_CLOSE; all child-owned HWNDs closed".into(),
+            failure_stage: None,
+            artifacts: Vec::new(),
+        });
+        assert_eq!(report.cases.len(), 33);
         assert!(report.passed_native_cases());
+        let mut missing_cleanup = report.clone();
+        missing_cleanup.cases.retain(|case| case.id != "CLEANUP");
+        assert!(!missing_cleanup.passed_native_cases());
+        let mut duplicate_cleanup = report.clone();
+        duplicate_cleanup.cases[0] = report.cases.last().unwrap().clone();
+        assert!(!duplicate_cleanup.passed_native_cases());
         for id in [
-            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17",
-            "H18",
+            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H15", "H16",
+            "H17", "H18",
         ] {
             assert!(!CASE_IDS.contains(&id));
             assert!(HOTKEY_CASE_IDS.contains(&id));
@@ -35270,6 +40046,7 @@ mod tests {
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
             gate_s_evidence: Vec::new(),
+            controlled_failures: None,
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,
@@ -35403,8 +40180,8 @@ mod tests {
         report.profile.configured_hotkey = "F11";
         report.outcome = "passed";
         let case_ids = [
-            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17",
-            "H18",
+            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H15", "H16",
+            "H17", "H18",
         ];
         for id in case_ids {
             let mut packet = h01_evidence_packet();
@@ -35482,11 +40259,10 @@ mod tests {
             persisted["report_overflow"]["omitted_case_evidence"],
             case_ids.len()
         );
-        assert!(
-            fs::read_to_string(&text_path)
-                .unwrap()
-                .contains("Report overflow: omitted_case_evidence=13")
-        );
+        assert!(fs::read_to_string(&text_path).unwrap().contains(&format!(
+            "Report overflow: omitted_case_evidence={},",
+            case_ids.len()
+        )));
     }
 
     #[test]
@@ -35534,6 +40310,7 @@ mod tests {
             gate_c_evidence: Vec::new(),
             gate_d_evidence: Vec::new(),
             gate_s_evidence: Vec::new(),
+            controlled_failures: None,
             artifacts: Vec::new(),
             cleanup: CleanupResult::default(),
             capacity_saturated: false,

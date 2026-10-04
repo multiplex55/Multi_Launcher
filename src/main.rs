@@ -30,7 +30,9 @@ use multi_launcher::radial::model::{InteractionMode, InvocationId, RadialDocumen
 use multi_launcher::radial::store::{ExternalReloadOutcome, RadialStore};
 use multi_launcher::radial::validation::validate as validate_radial_document;
 use multi_launcher::radial::watch::RadialConfigWatcher;
-use multi_launcher::screen_draw::{ScreenDrawRecoveryBridge, ScreenDrawSettings};
+use multi_launcher::screen_draw::{
+    ScreenDrawRecoveryBridge, ScreenDrawRecoveryIntent, ScreenDrawRecoveryKind, ScreenDrawSettings,
+};
 use multi_launcher::settings::Settings;
 use multi_launcher::startup::{SettingsStartupDiagnostic, load_startup_preload};
 use multi_launcher::visibility::{
@@ -44,7 +46,7 @@ use once_cell::sync::Lazy;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
-    mpsc::{Sender, channel},
+    mpsc::{Receiver, RecvError, Sender, channel},
 };
 use std::thread;
 use std::{
@@ -710,8 +712,8 @@ fn fail_closed_radial_route(
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ScreenDrawTriggerActions {
     launch: bool,
-    recover: bool,
-    emergency: bool,
+    recover: Vec<ScreenDrawRecoveryIntent>,
+    emergency: Option<ScreenDrawRecoveryIntent>,
 }
 
 fn take_screen_draw_trigger_actions(
@@ -719,37 +721,85 @@ fn take_screen_draw_trigger_actions(
     launch: Option<&HotkeyTrigger>,
     emergency: Option<&HotkeyTrigger>,
     recovery_bridge: &ScreenDrawRecoveryBridge,
+    notices: &mut [ServiceNotice],
 ) -> ScreenDrawTriggerActions {
+    // A hook notice is already a one-shot admission. Do not collapse several
+    // accepted cycles into the legacy trigger's single boolean slot.
+    let mut recover = notices
+        .iter_mut()
+        .filter_map(|notice| notice.take_screen_draw_recovery(recovery_bridge))
+        .collect::<Vec<_>>();
     let emergency_fired = emergency.is_some_and(HotkeyTrigger::take);
     if emergency_fired && recovery_bridge.is_active() {
-        // Emergency owns this event-loop turn. Consume any defensive co-fire
-        // so the same physical chord cannot also start or recover Screen Draw.
         if let Some(launch) = launch {
             let _ = launch.take();
         }
         let _ = launcher.take();
         return ScreenDrawTriggerActions {
-            emergency: true,
+            recover,
+            emergency: recovery_bridge.admit(ScreenDrawRecoveryKind::Emergency, None),
             ..Default::default()
         };
     }
 
-    let launch = launch.is_some_and(HotkeyTrigger::take);
-    if launch {
-        // Publish before enqueueing the GUI event. A launcher summon observed
-        // in this same turn is then routed to recovery, never visibility.
-        recovery_bridge.stage_start();
+    let launch = launch.is_some_and(|trigger| recovery_bridge.stage_start_if_triggered(trigger));
+    if take_screen_draw_recovery_trigger(launcher, recovery_bridge.is_active())
+        && recover.is_empty()
+        && let Some(intent) = recovery_bridge.admit(ScreenDrawRecoveryKind::LauncherToggle, None)
+    {
+        recover.push(intent);
     }
-    let recover = take_screen_draw_recovery_trigger(launcher, recovery_bridge.is_active());
     ScreenDrawTriggerActions {
         launch,
         recover,
-        emergency: false,
+        emergency: None,
     }
 }
 
 fn take_screen_draw_recovery_trigger(trigger: &HotkeyTrigger, screen_draw_active: bool) -> bool {
     screen_draw_active && trigger.take()
+}
+
+fn dispatch_screen_draw_trigger_actions(
+    actions: ScreenDrawTriggerActions,
+    bridge: &ScreenDrawRecoveryBridge,
+    mut emit: impl FnMut(multi_launcher::gui::WatchEvent),
+) -> bool {
+    let handled = actions.emergency.is_some() || actions.launch || !actions.recover.is_empty();
+    if let Some(intent) = actions.emergency {
+        if let Err(error) = bridge.emergency_pause(intent) {
+            tracing::error!(%error, "failed to deliver Screen Draw emergency pause");
+        }
+        emit(multi_launcher::gui::WatchEvent::ScreenDrawEmergency(intent));
+    }
+    if actions.launch {
+        emit(multi_launcher::gui::WatchEvent::ScreenDrawStart);
+    }
+    for intent in actions.recover {
+        if intent.kind == ScreenDrawRecoveryKind::Emergency {
+            if let Err(error) = bridge.emergency_pause(intent) {
+                tracing::error!(%error, "failed to deliver Screen Draw emergency pause");
+            }
+            emit(multi_launcher::gui::WatchEvent::ScreenDrawEmergency(intent));
+        } else {
+            emit(multi_launcher::gui::WatchEvent::ScreenDrawRecover(intent));
+        }
+    }
+    handled
+}
+
+fn reconcile_screen_draw_cycle_notices(
+    handled: bool,
+    exclusive: bool,
+    notices: &mut Vec<ServiceNotice>,
+) {
+    if handled {
+        // The owned Screen Draw cycle suppresses its co-fired launcher notices.
+        notices.clear();
+    }
+    if exclusive {
+        reject_radial_opens_while_exclusive(notices);
+    }
 }
 
 pub fn request_hotkey_restart(settings: Settings) {
@@ -767,6 +817,62 @@ pub fn request_hotkey_restart(settings: Settings) {
         && let Some(tx) = guard.as_ref()
     {
         let _ = tx.send(());
+    }
+}
+
+struct GuiWorker {
+    handle: thread::JoinHandle<()>,
+    completed: Arc<AtomicBool>,
+}
+
+struct GuiWorkerCompletion {
+    completed: Arc<AtomicBool>,
+    wake: Sender<()>,
+}
+
+impl GuiWorkerCompletion {
+    fn complete(self) {
+        drop(self);
+    }
+}
+
+impl Drop for GuiWorkerCompletion {
+    fn drop(&mut self) {
+        // The wake can be consumed before the thread finishes its tail. Publish
+        // the GUI completion fact first, including when GUI work unwinds.
+        self.completed.store(true, Ordering::Release);
+        let _ = self.wake.send(());
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GuiWorkerEvent {
+    Wake,
+    Completed,
+    ChannelClosed(RecvError),
+}
+
+impl GuiWorker {
+    fn spawn(wake: Sender<()>, run: impl FnOnce(GuiWorkerCompletion) + Send + 'static) -> Self {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completion = GuiWorkerCompletion {
+            completed: Arc::clone(&completed),
+            wake,
+        };
+        let handle = thread::spawn(move || run(completion));
+        Self { handle, completed }
+    }
+
+    fn wait_for_event(&self, events: &Receiver<()>) -> GuiWorkerEvent {
+        match events.recv() {
+            Err(error) => GuiWorkerEvent::ChannelClosed(error),
+            Ok(()) if self.completed.load(Ordering::Acquire) => GuiWorkerEvent::Completed,
+            Ok(()) => GuiWorkerEvent::Wake,
+        }
+    }
+
+    fn join(self) -> thread::Result<()> {
+        self.handle.join()
     }
 }
 
@@ -791,7 +897,7 @@ fn spawn_gui(
     event_tx: Sender<()>,
     radial_hotkey_reservations: Vec<(String, String)>,
 ) -> (
-    thread::JoinHandle<()>,
+    GuiWorker,
     Arc<AtomicBool>,
     Arc<AtomicBool>,
     Arc<AtomicBool>,
@@ -853,7 +959,7 @@ fn spawn_gui(
     let root_window_bridge_for_gui = root_window_bridge.clone();
     let actions_for_window = Arc::clone(&actions);
 
-    let handle = thread::spawn(move || {
+    let worker = GuiWorker::spawn(event_tx, move |completion| {
         let viewport = build_viewport_with_icon(
             &settings,
             include_bytes!("../Resources/Green_MultiLauncher.png"),
@@ -907,11 +1013,11 @@ fn spawn_gui(
                 Box::new(app)
             }),
         );
-        let _ = event_tx.send(());
+        completion.complete();
     });
 
     (
-        handle,
+        worker,
         visible_flag,
         restore_flag,
         help_flag,
@@ -1147,8 +1253,8 @@ fn main() -> anyhow::Result<()> {
             ),
             related_launcher_bindings(&settings, &radial_document, shared_invocation),
             Arc::new(move || {
-                if owner_bridge.is_active() {
-                    PriorityOwner::ScreenDrawRecovery
+                if let Some(lifetime) = owner_bridge.active_lifetime() {
+                    PriorityOwner::ScreenDrawRecovery(lifetime)
                 } else if exclusive_owners() != 0 {
                     PriorityOwner::ExclusiveTool
                 } else {
@@ -1182,7 +1288,7 @@ fn main() -> anyhow::Result<()> {
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
     let visibility_revision = VisibilityRevision::default();
-    let (handle, visibility, restore_flag, help_flag, ctx, root_window_bridge) = spawn_gui(
+    let (gui_worker, visibility, restore_flag, help_flag, ctx, root_window_bridge) = spawn_gui(
         Arc::clone(&actions),
         custom_len,
         settings.clone(),
@@ -1203,8 +1309,15 @@ fn main() -> anyhow::Result<()> {
         HashMap::new();
 
     loop {
-        if let Err(err) = event_rx.recv() {
-            tracing::error!(?err, "event channel closed; shutting down launcher loop");
+        let shutdown = match gui_worker.wait_for_event(&event_rx) {
+            GuiWorkerEvent::Wake => false,
+            GuiWorkerEvent::Completed => true,
+            GuiWorkerEvent::ChannelClosed(err) => {
+                tracing::error!(?err, "event channel closed; shutting down launcher loop");
+                true
+            }
+        };
+        if shutdown {
             if let Some(service) = invocation_service.as_ref() {
                 let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
             }
@@ -1215,22 +1328,7 @@ fn main() -> anyhow::Result<()> {
                 service.stop();
             }
             listener.stop();
-            let _ = handle.join();
-            break Ok(());
-        }
-
-        if handle.is_finished() {
-            if let Some(service) = invocation_service.as_ref() {
-                let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
-            }
-            radial_controller.shutdown();
-            native_preview.cancel_all();
-            radial_resources.shutdown(&mut radial_controller);
-            if let Some(service) = invocation_service.as_mut() {
-                service.stop();
-            }
-            listener.stop();
-            let _ = handle.join();
+            let _ = gui_worker.join();
             break Ok(());
         }
 
@@ -1330,8 +1428,8 @@ fn main() -> anyhow::Result<()> {
                             route_plan.config,
                             route_plan.related,
                             Arc::new(move || {
-                                if owner_bridge.is_active() {
-                                    PriorityOwner::ScreenDrawRecovery
+                                if let Some(lifetime) = owner_bridge.active_lifetime() {
+                                    PriorityOwner::ScreenDrawRecovery(lifetime)
                                 } else if exclusive_owners() != 0 {
                                     PriorityOwner::ExclusiveTool
                                 } else {
@@ -2046,7 +2144,7 @@ fn main() -> anyhow::Result<()> {
         while let Ok(request) = radial_control_endpoint.request_rx.try_recv() {
             match request {
                 RadialControlRequest::Close => radial_notices.push(ServiceNotice {
-                    recovery: false,
+                    recovery: None,
                     intents: vec![InvocationIntent::CloseRadial { session_id: None }],
                     error: None,
                     action: None,
@@ -2241,7 +2339,7 @@ fn main() -> anyhow::Result<()> {
                             radial_command_invocation_id =
                                 radial_command_invocation_id.checked_add(1).unwrap_or(1);
                             radial_notices.push(ServiceNotice {
-                                recovery: false,
+                                recovery: None,
                                 intents: vec![InvocationIntent::OpenExternalRadial {
                                     id: invocation_id,
                                     menu_id,
@@ -2267,12 +2365,6 @@ fn main() -> anyhow::Result<()> {
         }
         if let Some(service) = invocation_service.as_ref() {
             while let Some(mut notice) = service.try_recv() {
-                if notice.recovery {
-                    if let Ok(mut value) = trigger.open.lock() {
-                        *value = true
-                    }
-                    notice.recovery = false;
-                }
                 if let Some(action) = notice.action.take() {
                     match action {
                         RelatedAction::Quit => {
@@ -2314,6 +2406,7 @@ fn main() -> anyhow::Result<()> {
             screen_draw_trigger.as_deref(),
             emergency_trigger.as_deref(),
             &screen_draw_recovery_bridge,
+            &mut radial_notices,
         );
         let exclusive = exclusive_owners() != 0;
         if exclusive != previous_exclusive {
@@ -2328,34 +2421,18 @@ fn main() -> anyhow::Result<()> {
             }
             previous_exclusive = exclusive;
         }
-        if screen_draw_actions.emergency {
-            if let Err(error) = screen_draw_recovery_bridge.emergency_pause() {
-                tracing::error!(%error, "failed to deliver Screen Draw emergency pause");
-            }
-            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::ScreenDrawEmergency);
-            if let Ok(guard) = ctx.lock()
-                && let Some(c) = &*guard
-            {
-                c.request_repaint();
-            }
-        }
-
-        if screen_draw_actions.launch {
-            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::ScreenDrawStart);
-            if let Ok(guard) = ctx.lock()
-                && let Some(c) = &*guard
-            {
-                c.request_repaint();
-            }
-        }
-        if screen_draw_actions.recover {
-            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::ScreenDrawRecover);
-            if let Ok(guard) = ctx.lock()
-                && let Some(c) = &*guard
-            {
-                c.request_repaint();
-            }
-        }
+        let screen_draw_cycle_handled = dispatch_screen_draw_trigger_actions(
+            screen_draw_actions,
+            &screen_draw_recovery_bridge,
+            |event| {
+                multi_launcher::gui::send_event(event);
+                if let Ok(guard) = ctx.lock()
+                    && let Some(c) = &*guard
+                {
+                    c.request_repaint();
+                }
+            },
+        );
 
         if let Some(qt) = &quit_trigger
             && qt.take()
@@ -2376,21 +2453,15 @@ fn main() -> anyhow::Result<()> {
                 c.send_viewport_cmd(egui::ViewportCommand::Close);
                 c.request_repaint();
             }
-            let _ = handle.join();
+            let _ = gui_worker.join();
             break Ok(());
         }
 
-        if screen_draw_actions.emergency
-            || screen_draw_actions.launch
-            || screen_draw_actions.recover
-        {
-            // Emergency owns the entire event-loop cycle, including any native
-            // launcher notice already queued by the same physical chord.
-            radial_notices.clear();
-        }
-        if exclusive {
-            reject_radial_opens_while_exclusive(&mut radial_notices);
-        }
+        reconcile_screen_draw_cycle_notices(
+            screen_draw_cycle_handled,
+            exclusive,
+            &mut radial_notices,
+        );
         let mut grid_toggle_batch = VisibilityToggleBatch::default();
         let mut invocation_route_failed = false;
         for notice in radial_notices {
@@ -2889,8 +2960,8 @@ fn main() -> anyhow::Result<()> {
                     route_plan.config,
                     route_plan.related,
                     Arc::new(move || {
-                        if owner_bridge.is_active() {
-                            PriorityOwner::ScreenDrawRecovery
+                        if let Some(lifetime) = owner_bridge.active_lifetime() {
+                            PriorityOwner::ScreenDrawRecovery(lifetime)
                         } else if exclusive_owners() != 0 {
                             PriorityOwner::ExclusiveTool
                         } else {
@@ -3054,6 +3125,173 @@ fn hold_acceptance_prepare_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_worker_completion_wake_shuts_down_before_worker_tail_returns() {
+        let (wake, events) = channel();
+        let keep_channel_connected = wake.clone();
+        let (tail_entered, tail_entered_rx) = channel();
+        let (release_tail, release_tail_rx) = channel();
+        let worker = GuiWorker::spawn(wake, move |completion| {
+            completion.complete();
+            tail_entered.send(()).unwrap();
+            let _ = release_tail_rx.recv_timeout(Duration::from_secs(5));
+        });
+        tail_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        assert!(!worker.handle.is_finished());
+        assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Completed);
+        assert!(!worker.handle.is_finished(), "shutdown must precede join");
+        assert_eq!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+
+        release_tail.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        drop(keep_channel_connected);
+    }
+
+    #[test]
+    fn gui_worker_prequeued_wake_observes_already_published_completion() {
+        let (wake, events) = channel();
+        wake.send(()).unwrap();
+        let keep_channel_connected = wake.clone();
+        let (tail_entered, tail_entered_rx) = channel();
+        let (release_tail, release_tail_rx) = channel();
+        let worker = GuiWorker::spawn(wake, move |completion| {
+            completion.complete();
+            tail_entered.send(()).unwrap();
+            let _ = release_tail_rx.recv_timeout(Duration::from_secs(5));
+        });
+        tail_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        assert!(!worker.handle.is_finished());
+        assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Completed);
+        assert_eq!(
+            events.try_recv(),
+            Ok(()),
+            "only the completion wake remains"
+        );
+        assert_eq!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+
+        release_tail.send(()).unwrap();
+        worker.join().unwrap();
+        drop(keep_channel_connected);
+    }
+
+    #[test]
+    fn gui_worker_ordinary_wake_keeps_running_until_gui_returns() {
+        let (wake, events) = channel();
+        let ordinary_wake = wake.clone();
+        let (work_entered, work_entered_rx) = channel();
+        let (finish_gui, finish_gui_rx) = channel();
+        let worker = GuiWorker::spawn(wake, move |_completion| {
+            work_entered.send(()).unwrap();
+            finish_gui_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        work_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        ordinary_wake.send(()).unwrap();
+
+        assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Wake);
+        assert!(!worker.completed.load(Ordering::Acquire));
+        assert!(!worker.handle.is_finished());
+        assert_eq!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+
+        finish_gui.send(()).unwrap();
+        assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Completed);
+        worker.join().unwrap();
+        assert_eq!(events.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn gui_worker_gui_error_return_publishes_completion() {
+        let (wake, events) = channel();
+        let (gui_result, gui_result_rx) = channel();
+        let worker = GuiWorker::spawn(wake, move |completion| {
+            let result: Result<(), &str> = Err("GUI startup failed");
+            gui_result.send(result).unwrap();
+            completion.complete();
+        });
+
+        assert_eq!(
+            gui_result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Err("GUI startup failed")
+        );
+        assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Completed);
+        worker.join().unwrap();
+        assert_eq!(
+            events.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn gui_worker_gui_panic_publishes_completion_and_retains_join_error() {
+        let (wake, events) = channel();
+        let worker = GuiWorker::spawn(wake, move |_completion| {
+            panic!("GUI worker test panic");
+        });
+
+        assert_eq!(worker.wait_for_event(&events), GuiWorkerEvent::Completed);
+        assert!(worker.join().is_err());
+        assert_eq!(
+            events.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn gui_worker_channel_close_retains_shutdown_before_join() {
+        let (wake, events) = channel();
+        let (tail_entered, tail_entered_rx) = channel();
+        let (release_tail, release_tail_rx) = channel();
+        let worker = GuiWorker::spawn(wake, move |completion| {
+            completion.complete();
+            tail_entered.send(()).unwrap();
+            let _ = release_tail_rx.recv_timeout(Duration::from_secs(5));
+        });
+        tail_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+
+        assert_eq!(events.try_recv(), Ok(()));
+        assert!(!worker.handle.is_finished());
+        assert_eq!(
+            worker.wait_for_event(&events),
+            GuiWorkerEvent::ChannelClosed(RecvError)
+        );
+        assert!(!worker.handle.is_finished());
+
+        release_tail.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn gui_worker_quit_path_joins_after_requested_gui_close() {
+        let (wake, events) = channel();
+        let (close_gui, close_gui_rx) = channel();
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_by_gui = Arc::clone(&closed);
+        let worker = GuiWorker::spawn(wake, move |_completion| {
+            close_gui_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            closed_by_gui.store(true, Ordering::Release);
+        });
+
+        assert!(!closed.load(Ordering::Acquire));
+        close_gui.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(closed.load(Ordering::Acquire));
+        assert_eq!(events.try_recv(), Ok(()));
+        assert_eq!(
+            events.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        );
+    }
 
     fn disabled_radial_resources() -> RadialRuntimeResources {
         let (wake, _rx) = channel();
@@ -3371,6 +3609,235 @@ mod tests {
         }
     }
 
+    fn admitted_recovery_notices(bridge: &ScreenDrawRecoveryBridge) -> Vec<ServiceNotice> {
+        use multi_launcher::hotkey::launcher_invocation::{
+            InvocationConfig, KeyEvent, KeyTransition, LauncherInvocationAdapter,
+        };
+        use multi_launcher::radial::invocation::InputProvenance;
+        let mut adapter = LauncherInvocationAdapter::new(InvocationConfig {
+            launcher_enabled: true,
+            hotkey: parse_hotkey("Shift+Alt+Win+End").unwrap(),
+            threshold_ms: 350,
+            generation: 4,
+            context_token: 9,
+            menu_id: multi_launcher::radial::model::MenuId::new("starter"),
+            interaction: multi_launcher::radial::model::InteractionMode::StickyClick,
+            accept_external_injected: true,
+            item_inputs: Vec::new(),
+        })
+        .unwrap();
+        let key = |vk, transition, at| KeyEvent {
+            vk,
+            transition,
+            at,
+            provenance: InputProvenance::Physical,
+        };
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(key(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let mut notices = Vec::new();
+        for cycle in 0..2 {
+            let down = adapter.process(
+                key(0x23, KeyTransition::Down, cycle * 10 + 1),
+                PriorityOwner::ScreenDrawRecovery(bridge.active_lifetime().unwrap()),
+            );
+            assert!(down.consume && down.recovery.is_some());
+            notices.push(down.into());
+            let repeat = adapter.process(
+                key(0x23, KeyTransition::Repeat, cycle * 10 + 2),
+                PriorityOwner::ScreenDrawRecovery(bridge.active_lifetime().unwrap()),
+            );
+            assert!(repeat.consume && repeat.recovery.is_none());
+            let up = adapter.process(
+                key(0x23, KeyTransition::Up, cycle * 10 + 3),
+                PriorityOwner::ScreenDrawRecovery(bridge.active_lifetime().unwrap()),
+            );
+            assert!(up.consume && up.recovery.is_none());
+        }
+        notices
+    }
+
+    #[test]
+    fn actual_recovery_notices_preserve_each_admission_through_main_trigger_consumption() {
+        let bridge = ScreenDrawRecoveryBridge::default();
+        bridge.stage_start();
+        let launcher = HotkeyTrigger::new(parse_hotkey("Shift+Alt+Win+End").unwrap());
+        let mut notices = admitted_recovery_notices(&bridge);
+        let admitted = notices
+            .iter()
+            .map(|notice| notice.recovery.unwrap())
+            .collect::<Vec<_>>();
+        let actions =
+            take_screen_draw_trigger_actions(&launcher, None, None, &bridge, &mut notices);
+        assert!(!actions.launch && actions.emergency.is_none());
+        assert_eq!(actions.recover.len(), 2);
+        assert_eq!(
+            actions
+                .recover
+                .iter()
+                .map(|intent| intent.admission.unwrap())
+                .collect::<Vec<_>>(),
+            admitted
+        );
+        assert_ne!(actions.recover[0].id(), actions.recover[1].id());
+        assert!(
+            actions
+                .recover
+                .iter()
+                .all(|intent| intent.activity_epoch() == bridge.activity_epoch())
+        );
+        assert!(
+            notices
+                .iter()
+                .all(|notice| notice.recovery.is_none() && notice.intents.is_empty())
+        );
+        let repeated =
+            take_screen_draw_trigger_actions(&launcher, None, None, &bridge, &mut notices);
+        assert!(repeated.recover.is_empty());
+        assert!(!launcher.take());
+    }
+
+    #[test]
+    fn emergency_defensive_cofire_keeps_separately_admitted_recoveries_and_owns_one_emergency() {
+        let bridge = ScreenDrawRecoveryBridge::default();
+        bridge.stage_start();
+        let launcher = HotkeyTrigger::new(parse_hotkey("F12").unwrap());
+        let launch = HotkeyTrigger::new(parse_hotkey("Ctrl+F12").unwrap());
+        let emergency = HotkeyTrigger::new(parse_hotkey("Shift+F12").unwrap());
+        for trigger in [&launcher, &launch, &emergency] {
+            *trigger.open.lock().unwrap() = true;
+        }
+        let mut notices = admitted_recovery_notices(&bridge);
+        let actions = take_screen_draw_trigger_actions(
+            &launcher,
+            Some(&launch),
+            Some(&emergency),
+            &bridge,
+            &mut notices,
+        );
+        assert!(!actions.launch);
+        assert_eq!(actions.recover.len(), 2);
+        let emergency_intent = actions.emergency.unwrap();
+        assert_eq!(emergency_intent.kind, ScreenDrawRecoveryKind::Emergency);
+        assert!(
+            actions
+                .recover
+                .iter()
+                .all(|intent| intent.id() != emergency_intent.id())
+        );
+        assert!(!launcher.take() && !launch.take() && !emergency.take());
+    }
+
+    #[test]
+    fn dispatched_screen_draw_cycle_preserves_each_intent_and_only_clears_its_cycle_notices() {
+        use multi_launcher::gui::WatchEvent;
+        let bridge = Arc::new(ScreenDrawRecoveryBridge::default());
+        bridge.stage_start();
+        let launcher = HotkeyTrigger::new(parse_hotkey("F12").unwrap());
+        let emergency = HotkeyTrigger::new(parse_hotkey("Shift+F12").unwrap());
+        *emergency.open.lock().unwrap() = true;
+        let mut notices = admitted_recovery_notices(&bridge);
+        let actions = take_screen_draw_trigger_actions(
+            &launcher,
+            None,
+            Some(&emergency),
+            &bridge,
+            &mut notices,
+        );
+        let recovery_ids = actions
+            .recover
+            .iter()
+            .map(|intent| intent.id())
+            .collect::<Vec<_>>();
+        let emergency_id = actions.emergency.unwrap().id();
+        let mut emitted = Vec::new();
+        let handled =
+            dispatch_screen_draw_trigger_actions(actions, &bridge, |event| emitted.push(event));
+        assert!(
+            handled,
+            "handled must be captured before the recovery vector is consumed"
+        );
+        assert!(
+            matches!(emitted.first(), Some(WatchEvent::ScreenDrawEmergency(intent)) if intent.id() == emergency_id)
+        );
+        assert_eq!(
+            emitted
+                .iter()
+                .filter_map(|event| match event {
+                    WatchEvent::ScreenDrawRecover(intent) => Some(intent.id()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            recovery_ids
+        );
+        assert_eq!(emitted.len(), 3);
+        reconcile_screen_draw_cycle_notices(handled, false, &mut notices);
+        assert!(notices.is_empty());
+
+        let make_notice = || ServiceNotice {
+            recovery: None,
+            intents: vec![
+                multi_launcher::radial::invocation::InvocationIntent::ToggleLegacyLauncher {
+                    id: InvocationId(9),
+                },
+                multi_launcher::radial::invocation::InvocationIntent::CancelDeadline {
+                    id: InvocationId(10),
+                },
+            ],
+            error: None,
+            action: None,
+            cancellation: None,
+        };
+        let mut later_notices = vec![make_notice()];
+        let idle = dispatch_screen_draw_trigger_actions(
+            ScreenDrawTriggerActions::default(),
+            &bridge,
+            |_| panic!("idle cycle emitted an event"),
+        );
+        assert!(!idle);
+        reconcile_screen_draw_cycle_notices(idle, false, &mut later_notices);
+        assert_eq!(
+            later_notices[0].intents.len(),
+            2,
+            "unrelated cycle must remain owned by radial routing"
+        );
+        reconcile_screen_draw_cycle_notices(idle, true, &mut later_notices);
+        assert!(matches!(
+            later_notices[0].intents.as_slice(),
+            [
+                multi_launcher::radial::invocation::InvocationIntent::CancelDeadline {
+                    id: InvocationId(10)
+                }
+            ]
+        ));
+
+        let launch = HotkeyTrigger::new(parse_hotkey("Ctrl+Shift+D").unwrap());
+        *launch.open.lock().unwrap() = true;
+        *launcher.open.lock().unwrap() = true;
+        let actions =
+            take_screen_draw_trigger_actions(&launcher, Some(&launch), None, &bridge, &mut []);
+        emitted.clear();
+        let handled =
+            dispatch_screen_draw_trigger_actions(actions, &bridge, |event| emitted.push(event));
+        assert!(
+            handled
+                && matches!(
+                    emitted.as_slice(),
+                    [
+                        WatchEvent::ScreenDrawStart,
+                        WatchEvent::ScreenDrawRecover(_)
+                    ]
+                )
+        );
+        let mut cofire = vec![make_notice()];
+        reconcile_screen_draw_cycle_notices(handled, false, &mut cofire);
+        assert!(cofire.is_empty());
+        multi_launcher::hotkey::launcher_invocation::set_exclusive_owner(
+            multi_launcher::hotkey::launcher_invocation::ExclusiveOwner::ScreenDraw,
+            false,
+        );
+    }
+
     #[test]
     fn same_loop_launch_then_summon_routes_recovery_without_visibility() {
         let bridge = ScreenDrawRecoveryBridge::default();
@@ -3379,16 +3846,17 @@ mod tests {
         *launcher.open.lock().unwrap() = true;
         *launch.open.lock().unwrap() = true;
 
-        let actions = take_screen_draw_trigger_actions(&launcher, Some(&launch), None, &bridge);
+        let actions =
+            take_screen_draw_trigger_actions(&launcher, Some(&launch), None, &bridge, &mut []);
 
+        assert!(actions.launch);
+        assert_eq!(actions.recover.len(), 1);
         assert_eq!(
-            actions,
-            ScreenDrawTriggerActions {
-                launch: true,
-                recover: true,
-                emergency: false,
-            }
+            actions.recover[0].kind,
+            ScreenDrawRecoveryKind::LauncherToggle
         );
+        assert_eq!(actions.recover[0].admission, None);
+        assert_eq!(actions.emergency, None);
         assert!(bridge.is_active());
         assert!(!launcher.take(), "visibility must not see the summon edge");
     }
@@ -3404,12 +3872,18 @@ mod tests {
             *trigger.open.lock().unwrap() = true;
         }
 
+        let actions = take_screen_draw_trigger_actions(
+            &launcher,
+            Some(&launch),
+            Some(&emergency),
+            &bridge,
+            &mut [],
+        );
+        assert!(!actions.launch);
+        assert!(actions.recover.is_empty());
         assert_eq!(
-            take_screen_draw_trigger_actions(&launcher, Some(&launch), Some(&emergency), &bridge,),
-            ScreenDrawTriggerActions {
-                emergency: true,
-                ..Default::default()
-            }
+            actions.emergency.unwrap().kind,
+            ScreenDrawRecoveryKind::Emergency
         );
         assert!(!launcher.take());
         assert!(!launch.take());
@@ -3507,7 +3981,7 @@ mod tests {
     #[test]
     fn queued_radial_opens_are_rejected_for_an_exclusive_cycle() {
         let mut notices = vec![multi_launcher::hotkey::launcher_invocation::ServiceNotice {
-            recovery: false,
+            recovery: None,
             intents: vec![
                 multi_launcher::radial::invocation::InvocationIntent::OpenRadial {
                     id: multi_launcher::radial::model::InvocationId(1),

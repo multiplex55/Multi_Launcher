@@ -25,9 +25,9 @@ use super::super::{
     HotkeyEdgeTransition, HotkeyEvidenceNotApplicable, HotkeyFollowOnRestoreEvidence,
     HotkeyGestureEvidence, HotkeyInputProvenance, HotkeyNativeActivationSpan,
     HotkeyObservedPresentation, HotkeyRadialActionStage, HotkeyRootCommand, HotkeyRootCommandSpan,
-    HotkeyRootFocusIntent, HotkeyRootIdentityEvidence, HotkeyRunnerEdgeEvidence,
-    HotkeyRunnerInputPurpose, HotkeyStandaloneDecisionEvidence, HotkeyTraceEventKind,
-    HotkeyVisibilitySource, MAX_GATE_C_RESULTS, MAX_GATE_D_STEPS_PER_CASE,
+    HotkeyRootFocusIntent, HotkeyRootIdentityEvidence, HotkeyRootProofContext,
+    HotkeyRunnerEdgeEvidence, HotkeyRunnerInputPurpose, HotkeyStandaloneDecisionEvidence,
+    HotkeyTraceEventKind, HotkeyVisibilitySource, MAX_GATE_C_RESULTS, MAX_GATE_D_STEPS_PER_CASE,
     MAX_HOTKEY_CASE_EVIDENCE_BYTES, MAX_HOTKEY_EVIDENCE_EDGES, MAX_HOTKEY_EVIDENCE_EVENTS,
     MAX_HOTKEY_EVIDENCE_GESTURES, MAX_PATH_BYTES, MAX_RESULT_BYTES, QUERY_CASE_IDS,
     QueryCaseEvidence, QueryEvidenceMode, QueryEvidenceOutcome, QueryEvidenceRequirement,
@@ -35,7 +35,8 @@ use super::super::{
     QueryInvocationEvidence, QueryRootPresentationEvidence, QueryRootStateEvidence,
     QuerySetupObservedEdge, QuerySetupTapEvidence, QuerySetupVisibilityEvidence, RadialDocument,
     format_h04_matrix_evidence, gate_d_hotkey_edges_digest, gate_d_same_owner_effects,
-    hotkey_expected_state, query_case_contract_is_valid, sha256_bytes, valid_marker_ledger,
+    hotkey_command_belongs_to_intent, hotkey_expected_state, hotkey_intent_physical_snapshot,
+    hotkey_terminal_successor, query_case_contract_is_valid, sha256_bytes, valid_marker_ledger,
     validate_h04_contamination_artifact, validate_hotkey_burst_trace_with_baseline,
 };
 use super::super::{
@@ -47,6 +48,7 @@ use super::super::{
 use super::*;
 #[path = "gate_s_native.rs"]
 mod gate_s_native;
+mod proof_remediation;
 pub use gate_s_native::run_gate_s_suite;
 use multi_launcher::radial::authoring::AuthoredCellTarget;
 use multi_launcher::radial::model::{CURRENT_SCHEMA_VERSION, CellDefinition};
@@ -94,7 +96,7 @@ static NEXT_QUERY_OBSERVATION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_GATE_C_OBSERVATION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_GATE_C_RECEIPT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 const MAX_HOTKEY_CAPTURE_SEGMENTS: usize = 32;
-const DEFERRED_REPORT_CASE_IDS: [&str; 3] = ["R0", "R1", "R2"];
+const DEFERRED_REPORT_CASE_IDS: [&str; 4] = ["R0", "R1", "R2", "CLEANUP"];
 const BLOCKED_DESIGNER_CASE_IDS: [&str; 20] = [
     "H3", "D1", "D2", "D4", "D5", "A0", "A1", "G0", "A2", "G1", "G2", "A3", "A4", "A5", "A6", "A7",
     "A8", "D3", "D6", "D7",
@@ -135,6 +137,7 @@ struct ActiveHotkeyEvidenceCapture {
     physical_displays: Vec<[i32; 4]>,
     next_input_group_id: u32,
     current_purpose: Option<HotkeyRunnerInputPurpose>,
+    screen_draw_priority: Option<super::super::ScreenDrawPriorityEvidence>,
 }
 
 thread_local! {
@@ -154,6 +157,7 @@ fn begin_hotkey_evidence_capture(case_id: &str, _main_trace: &Path) {
         physical_displays: native_display_bounds().unwrap_or_default(),
         next_input_group_id: 1,
         current_purpose: None,
+        screen_draw_priority: None,
     };
     ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
         *slot.borrow_mut() = Some(capture);
@@ -510,197 +514,45 @@ fn hotkey_segment_has_physical_snapshot_proof(
     context: &HotkeySnapshotWaitContext,
     events: &[HotkeyCandidateEventEvidence],
 ) -> bool {
+    let in_group = |event: &&HotkeyCandidateEventEvidence| {
+        event.stream == context.stream
+            && event.input_group_id == context.input_group_id
+            && event.input_purpose == context.purpose
+    };
     let taps = events
         .iter()
+        .filter(in_group)
+        .filter(|event| event.kind == HotkeyTraceEventKind::ShortTap)
+        .collect::<Vec<_>>();
+    let intents = events
+        .iter()
+        .filter(in_group)
         .filter(|event| {
-            event.stream == context.stream
-                && event.input_group_id == context.input_group_id
-                && event.kind == HotkeyTraceEventKind::ShortTap
+            event.kind == HotkeyTraceEventKind::VisibilityIntent
+                && event.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
         })
         .collect::<Vec<_>>();
-    if !taps.is_empty()
-        && (context.root_hwnd == 0
-            || context.root_process_id == 0
-            || context.physical_displays.is_empty())
-    {
+    if taps.is_empty() {
+        return intents.is_empty();
+    }
+    if taps.len() != intents.len() {
         return false;
     }
-    let invocations_with_visibility_work = events
-        .iter()
-        .filter(|event| {
-            event.stream == context.stream
-                && event.input_group_id == context.input_group_id
-                && event.kind == HotkeyTraceEventKind::VisibilityIntent
-                && event.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
-                && event.invocation_id.is_some()
-        })
-        .filter_map(|event| event.invocation_id)
-        .collect::<BTreeSet<_>>();
-    if invocations_with_visibility_work
-        .iter()
-        .any(|invocation_id| {
-            !taps
-                .iter()
-                .any(|tap| tap.invocation_id == Some(*invocation_id))
-        })
-    {
-        return false;
-    }
-
-    taps.iter().all(|tap| {
-        if tap.terminal != Some(true) {
-            return false;
-        }
-        let Some(invocation_id) = tap.invocation_id else {
-            return false;
-        };
-        let intents = events
-            .iter()
-            .filter(|event| {
-                event.stream == context.stream
-                    && event.input_group_id == context.input_group_id
-                    && event.kind == HotkeyTraceEventKind::VisibilityIntent
-                    && event.visibility_source == Some(HotkeyVisibilitySource::ToggleBatch)
-                    && event.invocation_id == Some(invocation_id)
-                    && event.event_ordinal > tap.event_ordinal
-                    && event.elapsed_ms >= tap.elapsed_ms
-            })
-            .collect::<Vec<_>>();
-        if intents.len() != 1 {
-            return false;
-        }
-        let intent = intents[0];
-        let (Some(revision), Some(visible)) = (intent.visibility_revision, intent.visible) else {
-            return false;
-        };
-        let commands = events
-            .iter()
-            .filter(|event| {
-                event.stream == context.stream
-                    && event.input_group_id == context.input_group_id
-                    && event.kind == HotkeyTraceEventKind::RootCommand
-                    && event.visibility_revision == Some(revision)
-                    && event.invocation_id == Some(invocation_id)
-                    && event.elapsed_ms >= intent.elapsed_ms
-                    && event.event_ordinal > intent.event_ordinal
-                    && event.request_id.is_some()
-            })
-            .collect::<Vec<_>>();
-        if commands.is_empty() {
-            return hotkey_has_terminal_successor_snapshot(
-                context,
-                events,
-                intent,
-                revision,
-                invocation_id,
-            );
-        }
-        commands.iter().any(|command| {
-            hotkey_command_has_target_snapshot(
-                context,
-                events,
-                command,
-                revision,
-                invocation_id,
-                visible,
-            )
-        })
-    })
-}
-
-fn hotkey_has_terminal_successor_snapshot(
-    context: &HotkeySnapshotWaitContext,
-    events: &[HotkeyCandidateEventEvidence],
-    source_intent: &HotkeyCandidateEventEvidence,
-    source_revision: u64,
-    source_invocation_id: u64,
-) -> bool {
-    events.iter().any(|successor| {
-        if successor.stream != context.stream
-            || successor.input_group_id != context.input_group_id
-            || successor.kind != HotkeyTraceEventKind::VisibilityIntent
-            || successor.visibility_source != Some(HotkeyVisibilitySource::ToggleBatch)
-            || successor.elapsed_ms < source_intent.elapsed_ms
-            || !successor
-                .visibility_revision
-                .is_some_and(|revision| revision > source_revision)
-        {
-            return false;
-        }
-        let Some(successor_invocation_id) = successor.invocation_id else {
-            return false;
-        };
-        if successor_invocation_id == source_invocation_id
-            || !events.iter().any(|event| {
-                event.stream == context.stream
-                    && event.input_group_id == context.input_group_id
-                    && event.kind == HotkeyTraceEventKind::ShortTap
-                    && event.invocation_id == Some(successor_invocation_id)
-                    && event.terminal == Some(true)
-                    && event.elapsed_ms <= successor.elapsed_ms
-            })
-        {
-            return false;
-        }
-        let (Some(revision), Some(visible)) = (successor.visibility_revision, successor.visible)
-        else {
-            return false;
-        };
-        events.iter().any(|command| {
-            command.stream == context.stream
-                && command.input_group_id == context.input_group_id
-                && command.kind == HotkeyTraceEventKind::RootCommand
-                && command.visibility_revision == Some(revision)
-                && command.invocation_id == Some(successor_invocation_id)
-                && command.elapsed_ms >= successor.elapsed_ms
-                && command.event_ordinal > successor.event_ordinal
-                && command.request_id.is_some()
-                && hotkey_command_has_target_snapshot(
-                    context,
-                    events,
-                    command,
-                    revision,
-                    successor_invocation_id,
-                    visible,
-                )
-        })
-    })
-}
-
-fn hotkey_command_has_target_snapshot(
-    context: &HotkeySnapshotWaitContext,
-    events: &[HotkeyCandidateEventEvidence],
-    command: &HotkeyCandidateEventEvidence,
-    revision: u64,
-    invocation_id: u64,
-    visible: bool,
-) -> bool {
-    let Some(request_id) = command.request_id else {
-        return false;
+    let root = HotkeyRootIdentityEvidence {
+        stream: context.stream,
+        hwnd: context.root_hwnd,
+        process_id: context.root_process_id,
     };
-    events.iter().any(|snapshot| {
-        if snapshot.stream != context.stream
-            || snapshot.input_group_id != context.input_group_id
-            || snapshot.kind != HotkeyTraceEventKind::NativeWindowSnapshot
-            || snapshot.request_id != Some(request_id)
-            || snapshot.visibility_revision != Some(revision)
-            || snapshot.invocation_id != Some(invocation_id)
-            || snapshot.elapsed_ms < command.elapsed_ms
-            || snapshot.event_ordinal <= command.event_ordinal
-            || snapshot.hwnd != Some(context.root_hwnd)
-            || snapshot.process_id != Some(context.root_process_id)
-        {
-            return false;
-        }
-        let (Some(native_visible), Some(minimized), Some(bounds)) =
-            (snapshot.visible, snapshot.minimized, snapshot.bounds)
-        else {
-            return false;
-        };
-        let physically_visible = native_visible
-            && !minimized
-            && intersects_display_bounds(bounds, &context.physical_displays);
-        physically_visible == visible
+    let restorations = build_hotkey_follow_on_restorations(events);
+    let proof_context = HotkeyRootProofContext {
+        candidate_events: events,
+        root_identities: std::slice::from_ref(&root),
+        physical_displays: &context.physical_displays,
+        follow_on_restorations: &restorations,
+    };
+    intents.iter().all(|intent| {
+        hotkey_intent_physical_snapshot(proof_context, intent, &root).is_some()
+            || hotkey_terminal_successor(proof_context, intent, &root).is_some()
     })
 }
 
@@ -783,8 +635,13 @@ fn finish_hotkey_evidence_capture(case_id: &str) -> Option<HotkeyCaseEvidence> {
             root_identities.push(identity);
         }
     }
-    let (gestures, standalone_decisions, gesture_overflow) =
-        build_hotkey_decision_proofs(case_id, &events, &capture.runner_edges);
+    let (gestures, standalone_decisions, gesture_overflow) = build_hotkey_decision_proofs(
+        case_id,
+        &events,
+        &capture.runner_edges,
+        &root_identities,
+        &capture.physical_displays,
+    );
     let follow_on_restorations = build_hotkey_follow_on_restorations(&events);
     Some(HotkeyCaseEvidence {
         schema_version: 4,
@@ -799,6 +656,7 @@ fn finish_hotkey_evidence_capture(case_id: &str) -> Option<HotkeyCaseEvidence> {
         follow_on_restorations,
         root_identities,
         physical_displays: capture.physical_displays,
+        screen_draw_priority: capture.screen_draw_priority,
         candidate_trace_overflow,
         capture_segment_overflow: capture.capture_segment_overflow,
         runner_edge_overflow: capture.runner_edge_overflow,
@@ -937,12 +795,21 @@ fn build_hotkey_decision_proofs(
     case_id: &str,
     events: &[HotkeyCandidateEventEvidence],
     runner_edges: &[HotkeyRunnerEdgeEvidence],
+    root_identities: &[HotkeyRootIdentityEvidence],
+    physical_displays: &[[i32; 4]],
 ) -> (
     Vec<HotkeyGestureEvidence>,
     Vec<HotkeyStandaloneDecisionEvidence>,
     bool,
 ) {
     let mut proof_error = false;
+    let restorations = build_hotkey_follow_on_restorations(events);
+    let proof_context = HotkeyRootProofContext {
+        candidate_events: events,
+        root_identities,
+        physical_displays,
+        follow_on_restorations: &restorations,
+    };
     let mut intents = events
         .iter()
         .filter(|event| {
@@ -971,7 +838,10 @@ fn build_hotkey_decision_proofs(
             continue;
         };
         let matching = |event: &&HotkeyCandidateEventEvidence| {
-            event.stream == release.stream && event.invocation_id == Some(invocation_id)
+            event.stream == release.stream
+                && event.input_group_id == release.input_group_id
+                && event.input_purpose == release.input_purpose
+                && event.invocation_id == Some(invocation_id)
         };
         let presses = events
             .iter()
@@ -1003,7 +873,10 @@ fn build_hotkey_decision_proofs(
             .iter()
             .copied()
             .filter(|event| {
-                event.stream == release.stream && event.invocation_id == Some(invocation_id)
+                event.stream == release.stream
+                    && event.input_group_id == release.input_group_id
+                    && event.input_purpose == release.input_purpose
+                    && event.invocation_id == Some(invocation_id)
             })
             .collect::<Vec<_>>();
         if taps.is_empty() {
@@ -1063,7 +936,16 @@ fn build_hotkey_decision_proofs(
             HotkeyDecisionProof::NotApplicable {
                 reason: HotkeyEvidenceNotApplicable::SupersededIntermediateVisibility,
             }
-        } else if !commands.is_empty() {
+        } else if root_identities
+            .iter()
+            .find(|root| root.stream == intent.stream)
+            .and_then(|root| hotkey_intent_physical_snapshot(proof_context, intent, root))
+            .is_some_and(|ordinal| {
+                commands
+                    .iter()
+                    .any(|command| command.observed_snapshot_event_ordinal == Some(ordinal))
+            })
+        {
             HotkeyDecisionProof::Applied {
                 visibility_revision: revision,
                 intent_elapsed_ms: intent.elapsed_ms,
@@ -1071,22 +953,14 @@ fn build_hotkey_decision_proofs(
                 release_to_intent_ms: intent.elapsed_ms.saturating_sub(release.elapsed_ms),
                 root_commands: commands,
             }
-        } else if let Some(next_revision) = intents
+        } else if let Some(successor) = root_identities
             .iter()
-            .filter(|next| {
-                next.stream == intent.stream
-                    && next
-                        .visibility_revision
-                        .is_some_and(|next_revision| next_revision > revision)
-                    && next.elapsed_ms >= intent.elapsed_ms
-                    && !commands_for_intent(events, next, None).is_empty()
-            })
-            .filter_map(|next| next.visibility_revision)
-            .min()
+            .find(|root| root.stream == intent.stream)
+            .and_then(|root| hotkey_terminal_successor(proof_context, intent, root))
         {
             HotkeyDecisionProof::Superseded {
                 visibility_revision: revision,
-                by_revision: next_revision,
+                by_revision: successor.visibility_revision.unwrap_or_default(),
                 intent_elapsed_ms: intent.elapsed_ms,
                 visible: intent.visible.unwrap_or(false),
                 release_to_intent_ms: intent.elapsed_ms.saturating_sub(release.elapsed_ms),
@@ -1265,19 +1139,16 @@ fn commands_for_intent(
     };
     let mut commands = events
         .iter()
-        .filter(|event| {
-            event.stream == intent.stream
-                && event.kind == HotkeyTraceEventKind::RootCommand
-                && event.visibility_revision == Some(revision)
-                && event.invocation_id == intent.invocation_id
-                && event.elapsed_ms >= intent.elapsed_ms
-        })
+        .filter(|event| hotkey_command_belongs_to_intent(event, intent))
         .filter_map(|command| {
             let request_id = command.request_id?;
             let observed = events
                 .iter()
                 .filter(|event| {
                     event.stream == intent.stream
+                        && event.input_group_id == command.input_group_id
+                        && event.input_purpose == command.input_purpose
+                        && event.event_ordinal > command.event_ordinal
                         && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
                         && event.request_id == Some(request_id)
                         && event.visibility_revision == Some(revision)
@@ -1498,6 +1369,456 @@ impl Drop for F11HoldGuard<'_> {
     }
 }
 
+pub fn run_controlled_failure_probe(
+    kind: super::super::controlled_failures::ProbeKind,
+    executable: &str,
+    profile: &Path,
+    output: &Path,
+    trace_path: &Path,
+    report: &mut AcceptanceReport,
+    runner_log: &mut File,
+) -> Option<FocusAnchor> {
+    use super::super::controlled_failures::{self as controlled, ProbeKind, StageProof};
+    let started = Instant::now();
+    let failed_case = |stage, message: String| {
+        AcceptanceCaseResult { id: kind.id().into(), status: CaseStatus::Failed,
+        elapsed_ms: elapsed_ms(started), expected: "reach the owned native stage, fail deliberately, persist failure and independently clean up".into(),
+        observed: bounded_text(&message, MAX_RESULT_BYTES), failure_stage: Some(stage), artifacts: Vec::new() }
+    };
+    let mut child = match preflight_acceptance_hotkey(AcceptanceHotkey::F11)
+        .map_err(|message| (FailureStage::Environment, message))
+        .and_then(|_| {
+            controlled::launch_ownership(output, report).map_err(|e| (FailureStage::Environment, e))
+        })
+        .and_then(|ownership| {
+            NativeChild::launch_controlled(
+                Path::new(executable),
+                profile,
+                trace_path,
+                &profile.join("child.stdout.log"),
+                &profile.join("child.stderr.log"),
+                &ownership,
+            )
+            .map_err(|error| {
+                report.environment.child_process_id = error.process_id;
+                report.environment.child_started_unix_ms = error
+                    .started
+                    .and_then(|at| at.duration_since(UNIX_EPOCH).ok().map(|t| t.as_millis()));
+                (FailureStage::CandidateStartup, error.to_string())
+            })
+        }) {
+        Ok(child) => child,
+        Err((stage, error)) => {
+            report.push_case(failed_case(stage, error));
+            report.push_case(AcceptanceCaseResult {
+                id: "CLEANUP".into(),
+                status: CaseStatus::Failed,
+                elapsed_ms: elapsed_ms(started),
+                expected: "dispose the actual started owned candidate and its input".into(),
+                observed:
+                    "intended native precondition was not reached; no successful cleanup proof"
+                        .into(),
+                failure_stage: Some(FailureStage::Cleanup),
+                artifacts: Vec::new(),
+            });
+            return None;
+        }
+    };
+    report.environment.child_process_id = Some(child.process_id());
+    report.environment.child_started_unix_ms = child
+        .started()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|t| t.as_millis());
+    let mut anchor = None;
+    let mut diagnostic_paths = Vec::new();
+    let mut failure_capture_done = false;
+    let attempt = (|| -> Result<StageProof, CaseFailure> {
+        wait_hotkey_fixture_ready(&child, trace_path, HOTKEY_FIXTURE_STARTUP_TIMEOUT)
+            .map_err(|e| CaseFailure::new(FailureStage::HookAdmission, e))?;
+        let owner = child.controlled_owner().map_err(query_input_error)?;
+        let marker_count = read_marker_counts(&profile.join("query-marker-ledger.txt"))?
+            .values()
+            .sum();
+        let receipt = controlled::receipt_mut(report).ok_or_else(|| {
+            CaseFailure::new(FailureStage::Environment, "typed probe missing".into())
+        })?;
+        receipt.owner = Some(owner);
+        receipt.marker_count_before = Some(marker_count);
+        receipt.execution_count_before = Some(controlled_execution_count(trace_path));
+        controlled::publish_live_owner(output, report)
+            .map_err(|e| CaseFailure::new(FailureStage::Environment, e))?;
+        controlled::await_process_lease(output, report)
+            .map_err(|e| CaseFailure::new(FailureStage::Environment, e))?;
+        match kind {
+            ProbeKind::Startup => child
+                .controlled_startup_wait()
+                .map_err(|e| CaseFailure::new(FailureStage::CandidateStartup, e)),
+            ProbeKind::InputTimeout => {
+                let nonce = controlled::receipt_mut(report).unwrap().nonce.clone();
+                controlled_held_key_timeout(&child, output, &nonce)
+                    .map(|key| StageProof::InputTimeout { key })
+                    .map_err(query_input_error)
+            }
+            ProbeKind::Query => {
+                anchor = Some(FocusAnchor::create().map_err(query_input_error)?);
+                let ui = UiAutomation::new().map_err(query_uia_error)?;
+                let invocation = run_query_invocation(
+                    &child,
+                    anchor.as_ref().unwrap(),
+                    &ui,
+                    trace_path,
+                    output,
+                    &profile.join("query-marker-ledger.txt"),
+                    AcceptanceHotkey::F11,
+                    report.profile.hold_threshold_ms,
+                    "qa-open",
+                    false,
+                    None,
+                    |child, ui, _| {
+                        wait_launcher_query(child, ui, "app QMarker")?;
+                        Ok(QueryEffectResult {
+                            effect_count: 0,
+                            cancelled_confirmation_count: 0,
+                            ui_ack: QueryEvidenceUiAck::LauncherQuery,
+                        })
+                    },
+                )?;
+                controlled::receipt_mut(report)
+                    .unwrap()
+                    .execution_count_before = Some(controlled_execution_count(trace_path));
+                diagnostic_paths.push(controlled_stage_trace(profile, trace_path, kind)?);
+                let wait = Instant::now();
+                let at = unix_time_ms();
+                let error = wait_launcher_query(&child, &ui, "qa-controlled-missing-query-ack")
+                    .err()
+                    .ok_or_else(|| {
+                        CaseFailure::new(
+                            FailureStage::Environment,
+                            "controlled missing query acknowledgement unexpectedly arrived".into(),
+                        )
+                    })?;
+                if error.stage != FailureStage::NativeRootState {
+                    return Err(error);
+                }
+                Ok(StageProof::Query {
+                    invocation: Box::new(invocation),
+                    wait_started_unix_ms: at,
+                    wait_finished_unix_ms: unix_time_ms(),
+                    elapsed_ms: elapsed_ms(wait),
+                    expected_missing_query_digest: super::super::query_cell_digest(
+                        "qa-controlled-missing-query-ack",
+                    ),
+                    wait_error: bounded_text(&error.message, MAX_RESULT_BYTES),
+                })
+            }
+            ProbeKind::Ui => {
+                anchor = Some(FocusAnchor::create().map_err(query_input_error)?);
+                let ui = UiAutomation::new().map_err(query_uia_error)?;
+                let entry =
+                    run_designer_entry(&mut child, &ui, anchor.as_ref().unwrap(), trace_path)?;
+                let snapshot_trace_seq = trace_lines(trace_path)
+                    .iter()
+                    .rev()
+                    .find(|line| {
+                        line.contains("trace_event=\"authoring\"")
+                            && trace_field(line, "edge") == Some("ReplyAccepted")
+                            && trace_field(line, "request_kind") == Some("Snapshot")
+                            && trace_field(line, "session_id").and_then(|s| s.parse::<u64>().ok())
+                                == Some(entry.session_id)
+                    })
+                    .and_then(|line| {
+                        trace_field(line, "trace_sequence").and_then(|s| s.parse().ok())
+                    })
+                    .ok_or_else(|| {
+                        CaseFailure::new(
+                            FailureStage::DesignerReadiness,
+                            "owned InitialSnapshot omitted physical trace sequence".into(),
+                        )
+                    })?;
+                controlled::receipt_mut(report)
+                    .unwrap()
+                    .execution_count_before = Some(controlled_execution_count(trace_path));
+                diagnostic_paths.push(controlled_stage_trace(profile, trace_path, kind)?);
+                let wait = Instant::now();
+                let at = unix_time_ms();
+                let error = wait_named_control_in_client(
+                    &ui,
+                    &child,
+                    &entry.window,
+                    "qa-controlled-missing-ui-control",
+                    UIA_TIMEOUT,
+                )
+                .err()
+                .ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::Environment,
+                        "controlled missing UI control unexpectedly appeared".into(),
+                    )
+                })?;
+                Ok(StageProof::Ui {
+                    designer_hwnd: hwnd_id(entry.window.hwnd),
+                    child_pid: child.process_id(),
+                    session_id: entry.session_id,
+                    snapshot_trace_seq,
+                    wait_started_unix_ms: at,
+                    wait_finished_unix_ms: unix_time_ms(),
+                    elapsed_ms: elapsed_ms(wait),
+                    missing_control_digest: super::super::query_cell_digest(
+                        "qa-controlled-missing-ui-control",
+                    ),
+                    wait_error: bounded_text(&error, MAX_RESULT_BYTES),
+                })
+            }
+            ProbeKind::ChildExit => {
+                diagnostic_paths.extend(save_failure_artifacts(
+                    "R1",
+                    Some(&child),
+                    profile,
+                    trace_path,
+                ));
+                failure_capture_done = true;
+                child
+                    .controlled_child_exit_during_wait()
+                    .map_err(query_window_error)
+            }
+            ProbeKind::DesktopMismatch => {
+                let admission = controlled_desktop_refusal(&child).map_err(query_input_error)?;
+                controlled::receipt_mut(report).unwrap().owner = Some(admission.actual.clone());
+                Ok(StageProof::DesktopMismatch { admission })
+            }
+        }
+    })();
+    let primary = match attempt {
+        Ok(proof) => {
+            let message = controlled::primary_message(&proof);
+            controlled::receipt_mut(report).unwrap().proof = Some(proof);
+            failed_case(kind.failure_stage(), message)
+        }
+        Err(error) => failed_case(
+            error.stage,
+            format!("controlled precondition failed: {}", error.message),
+        ),
+    };
+    report.push_case(primary);
+    if !failure_capture_done {
+        diagnostic_paths.extend(save_failure_artifacts(
+            "R1",
+            Some(&child),
+            profile,
+            trace_path,
+        ));
+    }
+    let _ = runner_log.flush();
+    let log_snapshot = (|| -> Result<Vec<PathBuf>, String> {
+        let mut bytes = Vec::new();
+        File::open(output.join("runner.log"))
+            .map_err(|e| e.to_string())?
+            .take((MAX_PRIVATE_LOG_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.is_empty() || bytes.len() > MAX_PRIVATE_LOG_BYTES {
+            return Err("controlled runner log exceeds private snapshot bound".into());
+        }
+        super::super::write_new(&profile.join("acceptance-runner.log"), &bytes)?;
+        super::super::private_artifacts::write_bounded_run_log_snapshots(profile, &report.run_id)
+    })();
+    match log_snapshot {
+        Ok(paths) => diagnostic_paths.extend(paths),
+        Err(e) => controlled::receipt_mut(report)
+            .unwrap()
+            .cleanup_errors
+            .push(bounded_text(&e, MAX_RESULT_BYTES)),
+    }
+    match super::super::private_artifacts::stage_diagnostics(profile, diagnostic_paths) {
+        Ok(staged) => {
+            let retained = staged.retain();
+            report.private_artifacts = Some(retained.summary);
+            report.push_artifact(retained.directory.to_string_lossy());
+        }
+        Err(error) => {
+            controlled::receipt_mut(report)
+                .unwrap()
+                .cleanup_errors
+                .push(bounded_text(&error, MAX_RESULT_BYTES));
+        }
+    }
+    stop_child(&mut child, report, runner_log, output, trace_path);
+    report.cleanup.child_owned_windows_closed =
+        wait_until(Duration::from_secs(2), || child.windows().is_empty());
+    let code = child.try_wait().ok().flatten().map(|s| s.code());
+    let marker =
+        read_marker_counts(&profile.join("query-marker-ledger.txt")).map(|m| m.values().sum());
+    let profile_after = controlled::read_profile_hashes(profile);
+    let keys_clear = input_modifiers_clear().and_then(|_| {
+        child
+            .verify_acceptance_hotkey_released(AcceptanceHotkey::F11)
+            .map(|_| ())
+    });
+    let receipt = controlled::receipt_mut(report).unwrap();
+    receipt.child_exit_code = code;
+    receipt.execution_count_after = Some(controlled_execution_count(trace_path));
+    match marker {
+        Ok(count) => receipt.marker_count_after = Some(count),
+        Err(e) => receipt
+            .cleanup_errors
+            .push(bounded_text(&e.message, MAX_RESULT_BYTES)),
+    }
+    match profile_after {
+        Ok(hashes) => receipt.profile_after = Some(hashes),
+        Err(e) => receipt
+            .cleanup_errors
+            .push(bounded_text(&e, MAX_RESULT_BYTES)),
+    }
+    match keys_clear {
+        Ok(()) => receipt.owned_keys_after = Some(0),
+        Err(e) => receipt
+            .cleanup_errors
+            .push(bounded_text(&e, MAX_RESULT_BYTES)),
+    }
+    controlled::finalize_probe_cleanup(report);
+    anchor
+}
+
+fn controlled_execution_count(trace_path: &Path) -> usize {
+    trace_lines(trace_path)
+        .iter()
+        .filter(|line| {
+            line.contains("trace_event=\"universal_action_execution\"")
+                || line.contains("trace_event=\"radial_dispatch_requested\"")
+                || (line.contains("trace_event=\"radial_action\"")
+                    && trace_field(line, "stage") == Some("Dispatched"))
+        })
+        .count()
+}
+
+fn controlled_stage_trace(
+    profile: &Path,
+    trace_path: &Path,
+    kind: super::super::controlled_failures::ProbeKind,
+) -> Result<PathBuf, CaseFailure> {
+    let trace = fs::read_to_string(trace_path).map_err(|e| query_window_error(e.to_string()))?;
+    let path = profile.join(format!("case-{}-stage-trace.log", kind.id()));
+    super::super::write_new(&path, safe_trace_excerpt(&trace).as_bytes())
+        .map_err(query_window_error)?;
+    Ok(path)
+}
+
+pub(crate) fn verify_controlled_stage_trace(
+    trace: &str,
+    receipt: &super::super::controlled_failures::ProbeReceipt,
+    windows: &[serde_json::Value],
+) -> Result<(), String> {
+    use super::super::controlled_failures::StageProof;
+    let lines = trace.lines().collect::<Vec<_>>();
+    if lines.len() > MAX_TRACE_EXCERPT
+        || !has_trace_strings(&lines, "trace_ready")
+        || has_trace_strings(&lines, "budget_exhausted")
+    {
+        return Err("controlled stage trace is missing its bounded producer boundary".into());
+    }
+    let events = |name: &str| {
+        lines
+            .iter()
+            .copied()
+            .filter(|line| trace_field(line, "trace_event") == Some(name))
+            .collect::<Vec<_>>()
+    };
+    let number =
+        |line: &str, field: &str| trace_field(line, field).and_then(|v| v.parse::<u64>().ok());
+    let universal = events("universal_action_execution");
+    let requests = events("radial_dispatch_requested");
+    let dispatches = events("radial_query_dispatch");
+    let leaf = events("radial_action")
+        .iter()
+        .filter(|line| trace_field(line, "stage") == Some("Dispatched"))
+        .count();
+    let result_clicks = events("root_result_pointer")
+        .iter()
+        .filter(|line| trace_bool_field(line, "clicked") == Some(true))
+        .count();
+    if leaf != 0 || result_clicks != 0 {
+        return Err("controlled stage trace contains an unrelated action activation".into());
+    }
+    match receipt.proof.as_ref() {
+        Some(StageProof::Query { invocation, .. }) => {
+            let action_digest = super::super::query_cell_digest(
+                multi_launcher::universal_actions::action_ids::RESULT_EXECUTE.as_str(),
+            )
+            .wrapping_mul(0x100000001b3); // Existing strings digest feeds the trailing zero.
+            let identity_matches = |line: &str| {
+                number(line, "invocation_id") == Some(invocation.invocation_id)
+                    && number(line, "session_digest") == Some(invocation.session_digest)
+                    && number(line, "cell_digest") == Some(invocation.cell_digest)
+                    && number(line, "session_generation") == Some(invocation.session_generation)
+                    && number(line, "config_revision") == Some(invocation.config_revision)
+                    && number(line, "query_digest") == Some(invocation.query_digest)
+                    && trace_field(line, "mode") == Some("open_launcher")
+            };
+            let resolutions = events("radial_query_resolution");
+            if universal.len() != 1
+                || number(universal[0], "action_id_digest") != Some(action_digest)
+                || trace_field(universal[0], "action_surface") != Some("RadialMenu")
+                || trace_field(universal[0], "activation_source") != Some("click")
+                || requests.len() != 1
+                || number(requests[0], "invocation_id") != Some(invocation.invocation_id)
+                || number(requests[0], "session_generation") != Some(invocation.session_generation)
+                || dispatches.len() != 1
+                || !identity_matches(dispatches[0])
+                || trace_field(dispatches[0], "outcome") != Some("executed")
+                || trace_field(dispatches[0], "interaction_requirement") != Some("launcher_ui")
+                || trace_field(dispatches[0], "root_policy") != Some("legacy")
+                || resolutions.len() != 1
+                || !identity_matches(resolutions[0])
+                || trace_field(resolutions[0], "state") != Some("manual_ui")
+                || number(resolutions[0], "preparation_generation")
+                    != Some(invocation.preparation_generation)
+            {
+                return Err("controlled query trace does not prove exactly the allowed owned manual-query handoff".into());
+            }
+        }
+        Some(StageProof::Ui {
+            designer_hwnd,
+            child_pid,
+            session_id,
+            snapshot_trace_seq,
+            ..
+        }) => {
+            let snapshots = events("authoring");
+            if !universal.is_empty()
+                || !requests.is_empty()
+                || !dispatches.is_empty()
+                || !windows.iter().any(|w| {
+                    w["hwnd"].as_u64() == Some(*designer_hwnd)
+                        && w["process_id"].as_u64() == Some(u64::from(*child_pid))
+                        && w["role"].as_str() == Some("designer")
+                        && w["visible"].as_bool() == Some(true)
+                })
+                || !snapshots.iter().any(|line| {
+                    trace_field(line, "edge") == Some("ReplyAccepted")
+                        && trace_field(line, "request_kind") == Some("Snapshot")
+                        && number(line, "session_id") == Some(*session_id)
+                        && number(line, "trace_sequence") == Some(*snapshot_trace_seq)
+                })
+            {
+                return Err("controlled UI trace does not prove the actual owned InitialSnapshot without action execution".into());
+            }
+        }
+        _ => return Err("controlled stage trace has no query/UI precondition".into()),
+    }
+    Ok(())
+}
+
+fn has_trace_strings(lines: &[&str], event: &str) -> bool {
+    lines
+        .iter()
+        .any(|line| trace_field(line, "trace_event") == Some(event))
+}
+
+fn query_input_error(error: String) -> CaseFailure {
+    CaseFailure::new(FailureStage::InputInjection, error)
+}
+
 pub fn run_suite(
     executable: &str,
     profile: &Path,
@@ -1527,7 +1848,7 @@ pub fn run_suite(
 
     let stdout_path = profile.join("child.stdout.log");
     let stderr_path = profile.join("child.stderr.log");
-    let mut child = match NativeChild::launch(
+    let mut child = match NativeChild::launch_all(
         Path::new(executable),
         profile,
         trace_path,
@@ -1600,7 +1921,9 @@ pub fn run_suite(
         child.started()
     );
 
-    let anchor = match FocusAnchor::create() {
+    let anchor = match wait_all_trace_budget_profile(trace_path, HOTKEY_FIXTURE_STARTUP_TIMEOUT)
+        .and_then(|_| FocusAnchor::create())
+    {
         Ok(anchor) => anchor,
         Err(error) => {
             let failure = CaseFailure::new(FailureStage::Environment, error);
@@ -2436,6 +2759,7 @@ pub fn run_query_suite(
                             "confirmed note removal did not remove the isolated file".into(),
                         ));
                     }
+                    close_query_notes_dialog(child, ui, trace_path)?;
                     Ok(QueryEffectResult {
                         effect_count: 1,
                         cancelled_confirmation_count: 0,
@@ -2483,6 +2807,17 @@ pub fn run_query_suite(
         },
     );
 
+    proof_remediation::run_l08_placement_case(
+        report,
+        &child,
+        &anchor,
+        &ui,
+        trace_path,
+        output,
+        marker_path.as_path(),
+        hotkey,
+        hold_threshold_ms,
+    );
     restore_cursor_before_shutdown(cursor_restore, runner_log);
     stop_child(&mut child, report, runner_log, output, trace_path);
     for id in QUERY_CASE_IDS
@@ -2748,6 +3083,272 @@ const QUERY_OBSERVATION_MAX_REQUEST_BYTES: usize = 8 * 1024;
 const QUERY_OBSERVATION_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const AUTHORING_ACK_DIAGNOSTIC_MAX_BYTES: usize = 4 * 1024;
 const QUERY_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Private finite wire mirror of the GUI's read-only note-close mailbox. The
+// canonical identity is the FNV-1a UTF-8 slug digest (query_cell_digest), plus
+// independently observed canonical-slug and fixture-content-marker predicates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoteCloseFixture {
+    Q11,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteCloseGuiRequest {
+    schema_version: u16,
+    fixture: NoteCloseFixture,
+    request_id: u64,
+    run_nonce: [u64; 2],
+    expected_hwnd: u64,
+    expected_pid: u32,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    expected_generation: Option<u64>,
+    after_frame_ordinal: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteCloseGuiRoot {
+    hwnd: u64,
+    process_id: u32,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteCloseGuiDiscard {
+    owner_slug_digest: u64,
+    widget_id: u64,
+    role: NoteCloseGuiWidgetRole,
+    enabled: bool,
+    visible: bool,
+    fully_visible: bool,
+    bounds: [i32; 4],
+    clip: [i32; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoteCloseGuiWidgetRole {
+    DiscardChanges,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteCloseGuiNote {
+    slug_digest: u64,
+    fixture_slug: bool,
+    fixture_marker: bool,
+    pending_discard: bool,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    rendered_discard: Option<NoteCloseGuiDiscard>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteCloseGuiSnapshot {
+    client_size: [i32; 2],
+    open_note_count: usize,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    sole_note: Option<NoteCloseGuiNote>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoteCloseGuiStatus {
+    Captured,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NoteCloseGuiError {
+    MalformedRequest,
+    InvalidIdentity,
+    StaleRequest,
+    WrongRoot,
+    StaleFrame,
+    UnavailableClient,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoteCloseGuiResponse {
+    schema_version: u16,
+    fixture: NoteCloseFixture,
+    request_id: u64,
+    run_nonce: [u64; 2],
+    status: NoteCloseGuiStatus,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    error: Option<NoteCloseGuiError>,
+    observed_frame_ordinal: u64,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    root: Option<NoteCloseGuiRoot>,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    snapshot: Option<NoteCloseGuiSnapshot>,
+}
+
+fn note_close_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer)
+}
+
+fn validate_note_close_gui_response(
+    request: &NoteCloseGuiRequest,
+    response: &NoteCloseGuiResponse,
+) -> Result<(), CaseFailure> {
+    if request.schema_version != 1
+        || request.request_id == 0
+        || request.run_nonce == [0, 0]
+        || request.expected_hwnd == 0
+        || request.expected_pid == 0
+        || request.expected_generation == Some(0)
+        || response.schema_version != request.schema_version
+        || response.fixture != request.fixture
+        || response.request_id != request.request_id
+        || response.run_nonce != request.run_nonce
+        || response.status != NoteCloseGuiStatus::Captured
+        || response.error.is_some()
+        || response.observed_frame_ordinal == 0
+        || response.observed_frame_ordinal <= request.after_frame_ordinal
+        || !response.root.as_ref().is_some_and(|root| {
+            root.hwnd == request.expected_hwnd
+                && root.process_id == request.expected_pid
+                && root.generation > 0
+                && request
+                    .expected_generation
+                    .is_none_or(|generation| generation == root.generation)
+        })
+        || !response.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.client_size[0] > 0
+                && snapshot.client_size[1] > 0
+                && (snapshot.open_note_count == 1) == snapshot.sole_note.is_some()
+        })
+    {
+        return Err(query_window_error(
+            "note-close GUI receipt is failed, stale, or has another owner".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn request_note_close_gui_observation(
+    child: &NativeChild,
+    root: &WindowSnapshot,
+    request: &NoteCloseGuiRequest,
+    remaining: Duration,
+) -> Result<NoteCloseGuiResponse, CaseFailure> {
+    let deadline = Instant::now().checked_add(remaining).ok_or_else(|| {
+        query_window_error("note-close observation remaining deadline is invalid".into())
+    })?;
+    if remaining.is_zero() {
+        return Err(query_window_error(
+            "note-close observation has no remaining budget".into(),
+        ));
+    }
+    child
+        .validate_window(root.hwnd)
+        .map_err(query_window_error)?;
+    let profile = child.log_path().parent().ok_or_else(|| {
+        query_window_error("note-close observation mailbox directory is unavailable".into())
+    })?;
+    let base = profile.join("radial-query-observation");
+    let request_path = path_with_suffix(&base, ".note-close.request.json");
+    let response_path = path_with_suffix(&base, ".note-close.response.json");
+    let bytes = serde_json::to_vec(request)
+        .map_err(|_| query_window_error("could not serialize finite note-close request".into()))?;
+    if bytes.len() > QUERY_OBSERVATION_MAX_REQUEST_BYTES || request_path.exists() {
+        return Err(query_window_error(
+            "note-close request is oversized or an earlier request remains pending".into(),
+        ));
+    }
+    if response_path.exists() {
+        fs::remove_file(&response_path)
+            .map_err(|_| query_window_error("could not retire prior note-close response".into()))?;
+    }
+    let temp = path_with_suffix(&request_path, &format!(".{}.tmp", request.request_id));
+    fs::write(&temp, bytes)
+        .map_err(|_| query_window_error("could not write note-close request".into()))?;
+    fs::rename(&temp, &request_path).map_err(|_| {
+        let _ = fs::remove_file(&temp);
+        query_window_error("could not publish note-close request atomically".into())
+    })?;
+    let result = await_note_close_gui_response(
+        request,
+        &response_path,
+        deadline,
+        Instant::now,
+        || {
+            child
+                .try_wait()
+                .map(|status| status.is_some())
+                .map_err(query_window_error)
+        },
+        || std::thread::sleep(WINDOW_POLL),
+    );
+    let _ = fs::remove_file(&request_path);
+    let response = result?;
+    let current = child.refresh_root().map_err(query_window_error)?;
+    if current.hwnd != root.hwnd
+        || current.process_id != root.process_id
+        || !current.visible
+        || current.minimized
+        || !current.is_nonzero()
+    {
+        return Err(query_window_error(
+            "note-close ROOT changed while obtaining its GUI receipt".into(),
+        ));
+    }
+    Ok(response)
+}
+
+fn await_note_close_gui_response(
+    request: &NoteCloseGuiRequest,
+    path: &Path,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut candidate_exited: impl FnMut() -> Result<bool, CaseFailure>,
+    mut poll: impl FnMut(),
+) -> Result<NoteCloseGuiResponse, CaseFailure> {
+    loop {
+        if now() >= deadline {
+            return Err(query_window_error(
+                "note-close observation exceeded the remaining close deadline".into(),
+            ));
+        }
+        if candidate_exited()? {
+            return Err(query_window_error(
+                "candidate exited before note-close observation".into(),
+            ));
+        }
+        if let Ok(metadata) = fs::metadata(path) {
+            if metadata.len() > QUERY_OBSERVATION_MAX_RESPONSE_BYTES as u64 {
+                return Err(query_window_error(
+                    "note-close GUI response exceeded its byte bound".into(),
+                ));
+            }
+            let bytes = fs::read(path)
+                .map_err(|_| query_window_error("could not read note-close GUI response".into()))?;
+            fs::remove_file(path).map_err(|_| {
+                query_window_error("could not retire note-close GUI response".into())
+            })?;
+            if bytes.len() > QUERY_OBSERVATION_MAX_RESPONSE_BYTES {
+                return Err(query_window_error(
+                    "note-close GUI response exceeded its byte bound".into(),
+                ));
+            }
+            let response = serde_json::from_slice(&bytes)
+                .map_err(|_| query_window_error("note-close GUI response is malformed".into()))?;
+            validate_note_close_gui_response(request, &response)?;
+            return Ok(response);
+        }
+        poll();
+    }
+}
 
 fn request_query_observation(
     child: &NativeChild,
@@ -5826,16 +6427,6 @@ fn gate_c_readable_result_row(
                     .into(),
             ));
         }
-        let anchor_index = anchor.index.expect("validated scroll anchor has an index");
-        if !scroll_progress.observe(anchor_index) {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerReadiness,
-                format!(
-                    "the owned result-list scroll made no row progress after {} checked attempts",
-                    scroll_progress.stalled_attempts
-                ),
-            ));
-        }
         let scroll_delta =
             gate_c_result_row_navigation_delta(target.result_index, anchor, identity)
             .ok_or_else(|| {
@@ -5844,6 +6435,18 @@ fn gate_c_readable_result_row(
                     "the requested result order is invalid or the expected row index contains a different semantic action".into(),
                 )
             })?;
+        let scroll =
+            latest_action_editor_scroll_after(trace_path, observation_cursor, identity.surface)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
+        if !scroll_progress.observe(anchor, scroll.as_ref(), scroll_delta) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                format!(
+                    "the owned result-list scroll made no row progress after {} checked attempts",
+                    scroll_progress.stalled_attempts
+                ),
+            ));
+        }
         // A clipped row may only provide a wheel location. It never flows into
         // the readable-row or click predicates above.
         let bounds = anchor.bounds;
@@ -6083,27 +6686,70 @@ fn gate_c_result_row_scroll_delta(target_index: Option<usize>, anchor_index: usi
     if target_index >= MAX_GATE_C_RESULTS || anchor_index >= MAX_GATE_C_RESULTS {
         return None;
     }
+    // Keep nearby ranks on one notch; distant ranks use at most the existing
+    // three-notch input envelope. Every next anchor still needs fresh geometry.
+    let notches = target_index.abs_diff(anchor_index).div_ceil(8).clamp(1, 3) as i16;
     match target_index.cmp(&anchor_index) {
-        std::cmp::Ordering::Less => Some(120),
-        std::cmp::Ordering::Greater => Some(-120),
+        std::cmp::Ordering::Less => Some(120 * notches),
+        std::cmp::Ordering::Greater => Some(-120 * notches),
         std::cmp::Ordering::Equal => None,
     }
 }
 
 #[derive(Default)]
 struct GateCResultScrollProgress {
-    last_anchor_index: Option<usize>,
+    last_anchor: Option<ActionEditorControlSnapshot>,
+    last_scroll: Option<ActionEditorScrollSnapshot>,
     stalled_attempts: usize,
 }
 
 impl GateCResultScrollProgress {
-    fn observe(&mut self, anchor_index: usize) -> bool {
-        if self.last_anchor_index == Some(anchor_index) {
-            self.stalled_attempts += 1;
-        } else {
+    fn observe(
+        &mut self,
+        anchor: &ActionEditorControlSnapshot,
+        scroll: Option<&ActionEditorScrollSnapshot>,
+        delta: i16,
+    ) -> bool {
+        let progressed = self
+            .last_anchor
+            .as_ref()
+            .zip(self.last_scroll.as_ref())
+            .zip(scroll)
+            .is_some_and(|((previous, previous_scroll), scroll)| {
+                if anchor.identity != previous.identity
+                    || anchor.client_size != previous.client_size
+                    || scroll.identity != anchor.identity
+                    || scroll.client_size != anchor.client_size
+                    || anchor.trace_sequence <= previous.trace_sequence
+                    || !gate_c_scroll_offset_progressed(
+                        previous_scroll,
+                        scroll,
+                        -delta.signum() as i8,
+                    )
+                {
+                    return false;
+                }
+                match anchor.index.cmp(&previous.index) {
+                    std::cmp::Ordering::Greater => delta < 0,
+                    std::cmp::Ordering::Less => delta > 0,
+                    std::cmp::Ordering::Equal => {
+                        let movement =
+                            i64::from(anchor.full_bounds[1]) - i64::from(previous.full_bounds[1]);
+                        anchor.full_bounds[0] == previous.full_bounds[0]
+                            && anchor.full_bounds[2] == previous.full_bounds[2]
+                            && i64::from(anchor.full_bounds[3]) - i64::from(previous.full_bounds[3])
+                                == movement
+                            && ((delta < 0 && movement < 0) || (delta > 0 && movement > 0))
+                    }
+                }
+            });
+        if self.last_anchor.is_none() || progressed {
             self.stalled_attempts = 0;
+        } else {
+            self.stalled_attempts += 1;
         }
-        self.last_anchor_index = Some(anchor_index);
+        self.last_anchor = Some(anchor.clone());
+        self.last_scroll = scroll.cloned();
         self.stalled_attempts < MAX_GATE_C_RESULT_ROW_STALLS
     }
 }
@@ -7716,6 +8362,28 @@ fn gate_c_click_action_control(
     selected: Option<bool>,
 ) -> Result<ActionEditorControlSnapshot, CaseFailure> {
     let current = gate_c_action_control(trace_path, 0, session_id, surface, name)?;
+    let clicked = gate_c_click_current_action_control(
+        child,
+        designer,
+        trace_path,
+        current,
+        selected,
+        TRACE_TIMEOUT,
+    )?;
+    Ok(gate_c_capture_action_control(packet, clicked))
+}
+
+fn gate_c_click_current_action_control(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    current: ActionEditorControlSnapshot,
+    selected: Option<bool>,
+    timeout: Duration,
+) -> Result<ActionEditorControlSnapshot, CaseFailure> {
+    let deadline = Instant::now() + timeout;
+    let surface = gate_c_surface_from_native(current.identity.surface);
+    let name = current.control.as_str();
     if !current.enabled || current.clicked {
         return Err(CaseFailure::new(
             FailureStage::DesignerNativeTarget,
@@ -7731,7 +8399,7 @@ fn gate_c_click_action_control(
         |control| {
             control.control == name
                 && control.identity.surface == current.identity.surface
-                && control.identity.session_id == session_id
+                && control.identity.session_id == current.identity.session_id
                 && control.identity.stable_target_digest == current.identity.stable_target_digest
                 && control.identity.editor_epoch == current.identity.editor_epoch
                 && control.clicked
@@ -7739,10 +8407,10 @@ fn gate_c_click_action_control(
                 && selected.is_none_or(|expected| control.selected == expected)
                 && control.visible
         },
-        TRACE_TIMEOUT,
+        deadline.saturating_duration_since(Instant::now()),
     )
     .map_err(|error| CaseFailure::new(FailureStage::DesignerFrameworkInput, error))?;
-    Ok(gate_c_capture_action_control(packet, clicked))
+    Ok(clicked)
 }
 
 fn gate_c_owner_control_sequence(
@@ -8071,28 +8739,204 @@ fn gate_c_ensure_action_tab(
     session_id: u64,
     surface: GateCSurface,
     advanced: bool,
-) -> Result<(), CaseFailure> {
-    let name = if advanced {
+) -> Result<ActionEditorControlSnapshot, CaseFailure> {
+    let cursor = trace_lines(trace_path).len();
+    let before = gate_c_authoring_snapshot(child, session_id)?;
+    gate_c_ensure_action_tab_after(
+        child, designer, trace_path, packet, surface, advanced, cursor, &before,
+    )
+}
+
+fn gate_c_action_tab_controls(
+    controls: &[ActionEditorControlSnapshot],
+    before: &AuthoringObservationEvidence,
+    surface: GateCSurface,
+    advanced: bool,
+    field: bool,
+    editor_epoch: Option<u64>,
+    client_size: [i32; 2],
+) -> Result<Vec<ActionEditorControlSnapshot>, String> {
+    let tab_name = if advanced {
         "advanced_tab"
     } else {
         "query_tab"
     };
-    let control = gate_c_action_control(trace_path, 0, session_id, surface, name)?;
-    if control.selected {
-        gate_c_capture_action_control(packet, control);
-        return Ok(());
+    let field_name = if advanced {
+        "exact_command_field"
+    } else {
+        "query_field"
+    };
+    // The trace cursor is captured before the transition. Its following tab
+    // receipt owns the new visit's epoch, including a receipt emitted while
+    // the native click helper is still awaiting its pointer acknowledgement.
+    let latest = |name| {
+        controls.iter().rev().find(|control| {
+            control.control == name
+                && gate_c_surface_from_native(control.identity.surface) == surface
+                && control.trace_sequence > before.trace_boundary_sequence
+        })
+    };
+    let Some(tab) = latest(tab_name) else {
+        return Ok(Vec::new());
+    };
+    let identity_is_current = |control: &ActionEditorControlSnapshot| {
+        let editor_epoch = editor_epoch.or_else(|| {
+            before
+                .editor
+                .action_editor
+                .as_ref()
+                .map(|editor| editor.editor_epoch)
+        });
+        control.identity.session_id == before.editor.session_id
+            && control.identity.draft_generation == before.editor.generation
+            && control.identity.stable_target_digest == before.editor.selected_target_digest
+            && editor_epoch.is_none_or(|epoch| control.identity.editor_epoch == epoch)
+    };
+    if !identity_is_current(tab) {
+        return Err(
+            "action tab readiness changed the Designer session, draft, target, or editor visit"
+                .into(),
+        );
     }
-    let _ = gate_c_click_action_control(
-        child,
-        designer,
-        trace_path,
-        packet,
-        session_id,
-        surface,
-        name,
-        Some(true),
+    if !field {
+        return Ok(vec![tab.clone()]);
+    }
+    if !tab.selected
+        || !tab.enabled
+        || !tab.visible
+        || !tab.fully_visible
+        || tab.bounds != tab.full_bounds
+        || tab.client_size != client_size
+        || !super::super::gate_c_rect_is_visible(tab.full_bounds, client_size)
+    {
+        return Ok(Vec::new());
+    }
+    let Some(control) = latest(field_name) else {
+        return Ok(Vec::new());
+    };
+    if !identity_is_current(control) {
+        return Err(
+            "action field readiness changed the Designer session, draft, target, or editor visit"
+                .into(),
+        );
+    }
+    // Request counters may advance during the visit. The current field and
+    // selected tab must describe the same complete identity, not an older pair.
+    Ok(
+        (control.identity == tab.identity && control.trace_sequence > tab.trace_sequence)
+            .then(|| control.clone())
+            .into_iter()
+            .collect(),
+    )
+}
+
+fn gate_c_ensure_action_tab_with(
+    advanced: bool,
+    timeout: Duration,
+    mut wait_ready: impl FnMut(
+        bool,
+        Option<u64>,
+        Duration,
+    ) -> Result<ActionEditorControlSnapshot, CaseFailure>,
+    mut click_tab: impl FnMut(
+        ActionEditorControlSnapshot,
+        Duration,
+    ) -> Result<ActionEditorControlSnapshot, CaseFailure>,
+) -> Result<(ActionEditorControlSnapshot, ActionEditorControlSnapshot), CaseFailure> {
+    let deadline = Instant::now() + timeout;
+    let mut tab = wait_ready(
+        false,
+        None,
+        deadline.saturating_duration_since(Instant::now()),
     )?;
-    Ok(())
+    if !tab.selected {
+        if Instant::now() >= deadline {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "action tab readiness expired before input; no button-down was sent".into(),
+            ));
+        }
+        tab = click_tab(tab, deadline.saturating_duration_since(Instant::now()))?;
+        if !tab.selected {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerFrameworkInput,
+                "action tab click did not select its requested mode".into(),
+            ));
+        }
+    }
+    let field = wait_ready(
+        true,
+        Some(tab.identity.editor_epoch),
+        deadline.saturating_duration_since(Instant::now()),
+    )?;
+    let expected_field = if advanced {
+        "exact_command_field"
+    } else {
+        "query_field"
+    };
+    if field.control != expected_field {
+        return Err(CaseFailure::new(
+            FailureStage::DesignerReadiness,
+            "action tab readiness returned a different editor field".into(),
+        ));
+    }
+    Ok((tab, field))
+}
+
+fn gate_c_ensure_action_tab_after(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    packet: &mut GateCCaseEvidence,
+    surface: GateCSurface,
+    advanced: bool,
+    cursor: usize,
+    before: &AuthoringObservationEvidence,
+) -> Result<ActionEditorControlSnapshot, CaseFailure> {
+    let client_size = gate_c_live_designer_client_size(child, designer)
+        .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
+    let (tab, field) = gate_c_ensure_action_tab_with(
+        advanced,
+        TRACE_TIMEOUT,
+        |field, editor_epoch, timeout| {
+            gate_c_wait_repainted_action_control_with(
+                client_size,
+                timeout,
+                || {
+                    if child.request_designer_repaint(designer)? != client_size {
+                        return Err("Designer client changed during action tab readiness".into());
+                    }
+                    Ok(())
+                },
+                || {
+                    gate_c_action_tab_controls(
+                        &action_editor_controls_after(trace_path, cursor)?,
+                        before,
+                        surface,
+                        advanced,
+                        field,
+                        editor_epoch,
+                        client_size,
+                    )
+                },
+                std::thread::sleep,
+                &mut |control| control.enabled && (field || !control.clicked),
+            )
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
+        },
+        |tab, timeout| {
+            gate_c_click_current_action_control(
+                child,
+                designer,
+                trace_path,
+                tab,
+                Some(true),
+                timeout,
+            )
+        },
+    )?;
+    gate_c_capture_action_control(packet, tab);
+    Ok(field)
 }
 
 fn gate_c_binding_control_receipt(
@@ -16603,14 +17447,37 @@ fn run_gate_d_selection_case(
                 "Gate D selection evidence exceeded its step bound".into(),
             ));
         }
-        let control = gate_d_canvas_control(trace_path, session_id, before.generation, ring, slot)
-            .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+        let boundary = GateDPresentationBoundary {
+            first_line: trace_lines(trace_path).len(),
+            trace_sequence: before.trace_sequence,
+            session_id: before.session_id,
+            generation: before.generation,
+            client_size: child
+                .request_designer_repaint(designer)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?,
+        };
+        let control = gate_d_ready_authored_canvas_control(
+            child,
+            designer,
+            trace_path,
+            boundary,
+            clicked_target_digests[packet.steps.len()],
+        )?;
         if control.authored_target_digest != Some(clicked_target_digests[packet.steps.len()])
             || control.menu_id_digest != Some(gate_d_id_digest(fixture.root_menu_id.as_str()))
+            || control.ring_index != Some(ring)
+            || control.slot_index != Some(slot)
         {
             return Err(CaseFailure::new(
                 FailureStage::DesignerNativeTarget,
                 "Gate D canvas hit target did not match the controlled authored IDs".into(),
+            ));
+        }
+        let ready = gate_d_live_observation(child, session_id)?;
+        if !gate_d_presentation_state_is_unchanged(&before, &ready) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "D10 canvas readiness changed the authoring owner, state, or effects".into(),
             ));
         }
         let (control_evidence, pointer_evidence, inserted_key_events) =
@@ -16843,6 +17710,14 @@ fn gate_d_presentation_scroll_state_is_unchanged(
         && gate_d_presentation_state_is_unchanged(before, after)
 }
 
+fn resources_presentation_wheel_amount(distance: i64, input_height: i64) -> i16 {
+    // Distance selects a bounded input amount, not a predicted pixel result.
+    // Every operation still has to show progress in freshly measured geometry.
+    let quarter_viewport = (input_height / 4).max(1);
+    let notches = ((distance.max(0) + quarter_viewport - 1) / quarter_viewport).clamp(1, 3);
+    (120 * notches) as i16
+}
+
 fn gate_d_ready_control_step(
     control: &AuthoringControlSnapshot,
     boundary: GateDPresentationBoundary,
@@ -16932,10 +17807,24 @@ fn gate_d_ready_control_step(
         let middle = safe_top + (safe_bottom - safe_top) / 2;
         [wheel_left, middle, wheel_right, middle + 1]
     };
+    let upward = top < clip_top;
+    let amount = if owner == GateDControlScrollOwner::Resources {
+        let distance = if upward {
+            i64::from(clip_top) - i64::from(top)
+        } else {
+            i64::from(bottom) - i64::from(clip_bottom)
+        };
+        resources_presentation_wheel_amount(
+            distance,
+            i64::from(input_bottom) - i64::from(input_top),
+        )
+    } else {
+        120
+    };
     Ok(GateDReadyControlStep::Scroll {
         owner,
         bounds,
-        delta: if top < clip_top { 120 } else { -120 },
+        delta: if upward { amount } else { -amount },
     })
 }
 
@@ -17083,13 +17972,26 @@ fn gate_d_wait_settled_control_with(
                         authored_target_digest,
                     )
                     .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
-                    if after.trace_sequence > control.trace_sequence
-                        && stability.observe(*control).map_err(|error| {
-                            CaseFailure::new(FailureStage::DesignerNativeTarget, error)
-                        })?
-                        && Instant::now() < deadline
-                    {
-                        return Ok((*control, step));
+                    if after.trace_sequence > control.trace_sequence {
+                        let prepared = match step {
+                            GateDReadyControlStep::Visible => {
+                                stability.observe(*control).map_err(|error| {
+                                    CaseFailure::new(FailureStage::DesignerNativeTarget, error)
+                                })?
+                            }
+                            // A wheel uses the measured pane interior while its target
+                            // may still be moving. The following owner snapshot must
+                            // cover that exact viewport receipt; final clicks still
+                            // require two distinct frames with unchanged geometry.
+                            GateDReadyControlStep::Scroll { .. } => {
+                                control.scroll_viewport.is_some_and(|viewport| {
+                                    after.trace_sequence >= viewport.trace_sequence
+                                })
+                            }
+                        };
+                        if prepared && Instant::now() < deadline {
+                            return Ok((*control, step));
+                        }
                     }
                 }
             }
@@ -19238,37 +20140,6 @@ fn gate_d_deterministic_observation(
     })
 }
 
-fn gate_d_canvas_control(
-    trace_path: &Path,
-    session_id: u64,
-    generation: u64,
-    ring_index: usize,
-    slot_index: usize,
-) -> Result<AuthoringControlSnapshot, String> {
-    let matches = list_authoring_controls(trace_path, session_id)?
-        .into_iter()
-        .filter(|control| {
-            control.target == AuthoringControlTarget::CanvasCell
-                && control.role == AuthoringControlRole::Region
-                && control.enabled
-                && !control.clicked
-                && control.session_id == session_id
-                && control.generation == generation
-                && control.ring_index == Some(ring_index)
-                && control.slot_index == Some(slot_index)
-        })
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [control] => Ok(*control),
-        [] => Err(format!(
-            "Designer did not publish an enabled authored cell at ring {ring_index}, slot {slot_index}, generation {generation}"
-        )),
-        _ => Err(format!(
-            "Designer published ambiguous authored cell controls at ring {ring_index}, slot {slot_index}"
-        )),
-    }
-}
-
 fn gate_d_wait_compact_search_control(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -20209,19 +21080,67 @@ impl Drop for QueryRootSampler {
 }
 
 trait IntoQueryInvocations {
-    fn into_query_invocations(self) -> Vec<QueryInvocationEvidence>;
+    fn into_query_evidence(
+        self,
+    ) -> (
+        Vec<QueryInvocationEvidence>,
+        Option<super::super::QueryPlacementEvidence>,
+    );
 }
 
 impl IntoQueryInvocations for QueryInvocationEvidence {
-    fn into_query_invocations(self) -> Vec<QueryInvocationEvidence> {
-        vec![self]
+    fn into_query_evidence(
+        self,
+    ) -> (
+        Vec<QueryInvocationEvidence>,
+        Option<super::super::QueryPlacementEvidence>,
+    ) {
+        (vec![self], None)
     }
 }
 
 impl IntoQueryInvocations for Vec<QueryInvocationEvidence> {
-    fn into_query_invocations(self) -> Vec<QueryInvocationEvidence> {
-        self
+    fn into_query_evidence(
+        self,
+    ) -> (
+        Vec<QueryInvocationEvidence>,
+        Option<super::super::QueryPlacementEvidence>,
+    ) {
+        (self, None)
     }
+}
+
+impl IntoQueryInvocations
+    for (
+        QueryInvocationEvidence,
+        super::super::QueryPlacementEvidence,
+    )
+{
+    fn into_query_evidence(
+        self,
+    ) -> (
+        Vec<QueryInvocationEvidence>,
+        Option<super::super::QueryPlacementEvidence>,
+    ) {
+        (vec![self.0], Some(self.1))
+    }
+}
+
+struct QueryCaseRun<R> {
+    result: Result<R, CaseFailure>,
+    diagnostics: Option<QueryCaseDiagnostics>,
+}
+
+struct QueryCaseDiagnostics {
+    l08: proof_remediation::L08CaseDiagnosticContext,
+    precleanup_artifacts: Option<Vec<PathBuf>>,
+    capture_errors: Vec<String>,
+}
+
+#[derive(Default)]
+struct PrecleanupDiagnosticArtifacts {
+    paths: Vec<PathBuf>,
+    errors: Vec<String>,
 }
 
 fn run_query_case<F, R>(
@@ -20240,27 +21159,47 @@ fn run_query_case<F, R>(
     F: FnOnce() -> Result<R, CaseFailure>,
     R: IntoQueryInvocations,
 {
+    run_query_case_with_diagnostics(
+        report,
+        id,
+        child,
+        anchor,
+        ui,
+        trace_path,
+        output,
+        marker_path,
+        hotkey,
+        hold_threshold_ms,
+        || QueryCaseRun {
+            result: run(),
+            diagnostics: None,
+        },
+    );
+}
+
+fn run_query_case_with_diagnostics<F, R>(
+    report: &mut AcceptanceReport,
+    id: &str,
+    child: &NativeChild,
+    anchor: &FocusAnchor,
+    ui: &UiAutomation,
+    trace_path: &Path,
+    output: &Path,
+    marker_path: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+    run: F,
+) where
+    F: FnOnce() -> QueryCaseRun<R>,
+    R: IntoQueryInvocations,
+{
     let started = started_now();
-    let result = run();
-    let mut evidence = None;
-    let result = match result {
-        Ok(invocations) => {
-            let packet = QueryCaseEvidence {
-                schema_version: 1,
-                case_id: id.to_owned(),
-                invocations: invocations.into_query_invocations(),
-            };
-            match query_case_contract_is_valid(&packet) {
-                Ok(()) => {
-                    evidence = Some(packet);
-                    Ok(format!("typed query evidence proves {}", id))
-                }
-                Err(error) => Err(CaseFailure::new(FailureStage::GestureDecision, error)),
-            }
-        }
-        Err(error) => Err(error),
-    };
-    append_query_case_result(
+    let QueryCaseRun {
+        result,
+        diagnostics,
+    } = run();
+    let (result, evidence) = qualify_query_case_result(id, result);
+    append_query_case_result_with_diagnostics(
         report,
         id,
         started,
@@ -20272,11 +21211,68 @@ fn run_query_case<F, R>(
         marker_path,
         hotkey,
         hold_threshold_ms,
+        diagnostics,
     );
     let _ = (anchor, ui);
 }
 
+fn qualify_query_case_result<R: IntoQueryInvocations>(
+    id: &str,
+    result: Result<R, CaseFailure>,
+) -> (Result<String, CaseFailure>, Option<QueryCaseEvidence>) {
+    let mut evidence = None;
+    let result = match result {
+        Ok(invocations) => {
+            let (invocations, placement) = invocations.into_query_evidence();
+            let packet = QueryCaseEvidence {
+                schema_version: 1,
+                case_id: id.to_owned(),
+                invocations,
+                placement,
+            };
+            match query_case_contract_is_valid(&packet) {
+                Ok(()) => {
+                    evidence = Some(packet);
+                    Ok(format!("typed query evidence proves {}", id))
+                }
+                Err(error) => Err(CaseFailure::new(FailureStage::GestureDecision, error)),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    (result, evidence)
+}
+
 fn append_query_case_result(
+    report: &mut AcceptanceReport,
+    id: &str,
+    started: Instant,
+    result: Result<String, CaseFailure>,
+    evidence: Option<QueryCaseEvidence>,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+    marker_path: &Path,
+    hotkey: AcceptanceHotkey,
+    hold_threshold_ms: u64,
+) {
+    append_query_case_result_with_diagnostics(
+        report,
+        id,
+        started,
+        result,
+        evidence,
+        child,
+        output,
+        trace_path,
+        marker_path,
+        hotkey,
+        hold_threshold_ms,
+        None,
+    );
+}
+
+fn append_query_case_result_with_diagnostics(
     report: &mut AcceptanceReport,
     id: &str,
     started: Instant,
@@ -20288,6 +21284,7 @@ fn append_query_case_result(
     _marker_path: &Path,
     _hotkey: AcceptanceHotkey,
     _hold_threshold_ms: u64,
+    diagnostics: Option<QueryCaseDiagnostics>,
 ) {
     if matches!(result, Ok(_)) && evidence.is_none() {
         result = Err(CaseFailure::new(
@@ -20305,7 +21302,13 @@ fn append_query_case_result(
             ));
         }
     }
-    append_case(
+    let (precleanup_artifacts, context) = diagnostics.map_or((None, None), |diagnostics| {
+        (
+            diagnostics.precleanup_artifacts,
+            Some((diagnostics.l08, diagnostics.capture_errors)),
+        )
+    });
+    append_case_with_case_diagnostics(
         report,
         id,
         expected(id),
@@ -20314,7 +21317,21 @@ fn append_query_case_result(
         child,
         output,
         trace_path,
+        precleanup_artifacts,
+        None,
+        context,
     );
+}
+
+fn query_operation_requires_ordinary_observation(events: &[String]) -> bool {
+    events.iter().any(|line| {
+        trace_field_value(line, "trace_event") == Some("radial_query_dispatch")
+            && trace_field_value(line, "root_policy") == Some("preserve")
+            && trace_field_value(line, "outcome") == Some("executed")
+            && trace_field_value(line, "selected_digest")
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|digest| digest != 0)
+    })
 }
 
 fn run_query_invocation<F>(
@@ -20359,8 +21376,10 @@ where
             "runtime radial surfaces were not newly created for query selection".into(),
         ));
     }
-    let (surface, point, session_digest, cell_digest, layout_generation) =
+    let (_hover_surface, point, session_digest, cell_digest, layout_generation) =
         hover_query_cell(child, &surfaces, trace_path, cell_id)?;
+    let surface = radial_input_surface_at(child, &surfaces, point)
+        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
     let root_hwnd = hwnd_id(child.root().hwnd);
     let sampler = QueryRootSampler::start(child.process_id(), root_hwnd, preserved_root_visibility);
     if !sampler.wait_ready() {
@@ -20394,6 +21413,22 @@ where
         trace_path,
         trace_cursor,
         layout_generation,
+        Instant::now() + TRACE_TIMEOUT,
+        || {
+            if !hotkey_hover_surfaces_have_current_geometry(
+                &surfaces,
+                &child.windows(),
+                child.process_id(),
+            ) {
+                return Err("query radial surfaces changed before selection input".into());
+            }
+            query_radial_selection_is_current(
+                &trace_lines(trace_path),
+                session_digest,
+                cell_digest,
+                layout_generation,
+            )
+        },
     )
     .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
     let events = wait_trace(
@@ -20446,7 +21481,9 @@ where
         ));
     }
     let pre_observation_trace = query_trace_tail(trace_path, trace_cursor);
-    let terminal_observation = if let Some(baseline) = baseline_observation.as_ref() {
+    let terminal_observation = if let Some(baseline) = baseline_observation.as_ref()
+        && query_operation_requires_ordinary_observation(&pre_observation_trace)
+    {
         request_terminal_query_observation(
             child,
             baseline,
@@ -20508,6 +21545,68 @@ where
         evidence.requirement,
     );
     Ok(evidence)
+}
+
+fn query_radial_selection_is_current(
+    lines: &[String],
+    session_digest: u64,
+    cell_digest: u64,
+    layout_generation: u64,
+) -> Result<(), String> {
+    let (index, line) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, line)| trace_field_value(line, "trace_event") == Some("runtime_radial_hover"))
+        .ok_or("query radial selection lost its production hover owner")?;
+    let hover = hotkey_runtime_hover_ack(line, index + 1)
+        .ok_or("query radial selection has malformed production hover ownership")?;
+    if session_digest == 0
+        || cell_digest == 0
+        || layout_generation == 0
+        || hover.session_digest != session_digest
+        || hover.cell_digest != cell_digest
+        || hover.layout_generation != layout_generation
+        || !hover.executable
+        || lines
+            .iter()
+            .skip(index + 1)
+            .any(|line| trace_field_value(line, "trace_event") == Some("runtime_preparation"))
+    {
+        return Err("query radial session, target or layout generation changed before down".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn query_radial_click_readiness_requires_current_executable_hover_generation() {
+    let line = "trace_event=\"runtime_radial_hover\" elapsed_ms=21550 session_digest=4293133620135121168 cell_digest=8094860968890429075 layout_generation=5 role=\"Action\" executable=true".to_string();
+    let check = |lines: &[String]| {
+        query_radial_selection_is_current(lines, 4293133620135121168, 8094860968890429075, 5)
+    };
+    assert!(check(&[line.clone()]).is_ok());
+    for invalid in [
+        line.replace("4293133620135121168", "4293134719646749379"),
+        line.replace("8094860968890429075", "99"),
+        line.replace("layout_generation=5", "layout_generation=6"),
+        line.replace(
+            "role=\"Action\" executable=true",
+            "role=\"Drag\" executable=false",
+        ),
+        line.replace("layout_generation=5", "layout_generation=malformed"),
+    ] {
+        assert!(check(&[line.clone(), invalid]).is_err());
+    }
+    assert!(
+        check(&[
+            line,
+            "trace_event=\"runtime_preparation\" edge=ReplyQueued invocation_id=9 generation=6"
+                .into()
+        ])
+        .is_err()
+    );
+    assert!(check(&[]).is_err());
 }
 
 fn hover_query_cell(
@@ -21297,6 +22396,176 @@ fn click_confirmation_control(
     ))
 }
 
+const QUERY_NOTES_DIALOG_BUTTONS: [&str; 3] = ["Add Note", "Unused Assets", "Close"];
+
+struct QueryNotesDialogObservation<C> {
+    root: WindowSnapshot,
+    client_bounds: [i32; 4],
+    buttons: [Option<([i32; 4], bool)>; 3],
+    close: Option<C>,
+}
+
+fn query_notes_dialog_owner_matches(expected: &WindowSnapshot, current: &WindowSnapshot) -> bool {
+    hwnd_id(expected.hwnd) != 0
+        && expected.process_id != 0
+        && expected.role == WindowRole::Root
+        && expected.visible
+        && !expected.minimized
+        && expected.is_nonzero()
+        && current.hwnd == expected.hwnd
+        && current.process_id == expected.process_id
+        && current.role == expected.role
+        && current.class_name == expected.class_name
+        && current.visible
+        && !current.minimized
+        && current.bounds == expected.bounds
+}
+
+fn close_query_notes_dialog(
+    child: &NativeChild,
+    ui: &UiAutomation,
+    trace_path: &Path,
+) -> Result<(), CaseFailure> {
+    let started = Instant::now();
+    let expected_root = child.refresh_root().map_err(query_window_error)?;
+    if expected_root.process_id != child.process_id() {
+        return Err(query_window_error(
+            "Quick Notes ROOT is not candidate-owned".into(),
+        ));
+    }
+    close_query_notes_dialog_with(
+        &expected_root,
+        UIA_TIMEOUT,
+        || {
+            let root = child.refresh_root().map_err(query_window_error)?;
+            let client_bounds = child
+                .client_screen_bounds(&root)
+                .map_err(query_window_error)?;
+            let buttons = [
+                ui.find_visible_client_button(
+                    root.hwnd,
+                    child.process_id(),
+                    QUERY_NOTES_DIALOG_BUTTONS[0],
+                    client_bounds,
+                ),
+                ui.find_visible_client_button(
+                    root.hwnd,
+                    child.process_id(),
+                    QUERY_NOTES_DIALOG_BUTTONS[1],
+                    client_bounds,
+                ),
+                ui.find_visible_client_button(
+                    root.hwnd,
+                    child.process_id(),
+                    QUERY_NOTES_DIALOG_BUTTONS[2],
+                    client_bounds,
+                ),
+            ];
+            let [add_note, unused_assets, close] =
+                buttons.map(|button| button.map_err(query_uia_error));
+            let buttons = [add_note?, unused_assets?, close?];
+            let bounds = buttons.each_ref().map(|button| {
+                button
+                    .as_ref()
+                    .map(|control| (control.bounds, control.enabled))
+            });
+            let [_, _, close] = buttons;
+            Ok(QueryNotesDialogObservation {
+                root,
+                client_bounds,
+                buttons: bounds,
+                close,
+            })
+        },
+        |root, close| {
+            super::click_semantic_control(child, root, close, trace_path)
+                .map(|_| ())
+                .map_err(|error| {
+                    CaseFailure::new(
+                        FailureStage::InputInjection,
+                        format!("click Quick Notes client Close: {error}"),
+                    )
+                })
+        },
+        || started.elapsed(),
+        || std::thread::sleep(WINDOW_POLL),
+    )
+}
+
+fn close_query_notes_dialog_with<C>(
+    expected_root: &WindowSnapshot,
+    timeout: Duration,
+    mut observe: impl FnMut() -> Result<QueryNotesDialogObservation<C>, CaseFailure>,
+    click: impl FnOnce(&WindowSnapshot, &C) -> Result<(), CaseFailure>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut poll: impl FnMut(),
+) -> Result<(), CaseFailure> {
+    let mut client_bounds = None;
+    let mut observe_current = || {
+        let observed = observe()?;
+        if !query_notes_dialog_owner_matches(expected_root, &observed.root)
+            || super::semantic_client_center(observed.client_bounds, observed.root.bounds).is_err()
+            || client_bounds.is_some_and(|client| client != observed.client_bounds)
+        {
+            return Err(query_window_error(
+                "Quick Notes ROOT identity or client geometry changed".into(),
+            ));
+        }
+        if observed.buttons.iter().flatten().any(|(bounds, _)| {
+            super::semantic_client_center(*bounds, observed.client_bounds).is_err()
+        }) {
+            return Err(query_window_error(
+                "Quick Notes control is outside the current ROOT client".into(),
+            ));
+        }
+        client_bounds = Some(observed.client_bounds);
+        Ok(observed)
+    };
+    let ready = loop {
+        if elapsed() >= timeout {
+            return Err(query_window_error(
+                "Quick Notes Add Note/Unused Assets/client Close context was not ready before timeout"
+                    .into(),
+            ));
+        }
+        let observed = observe_current()?;
+        if observed
+            .buttons
+            .iter()
+            .all(|button| button.is_some_and(|(_, enabled)| enabled))
+            && observed.close.is_some()
+        {
+            break observed;
+        }
+        poll();
+    };
+
+    // Reacquire the full dialog context immediately before the sole semantic click.
+    let current = observe_current()?;
+    if current.buttons != ready.buttons || elapsed() >= timeout {
+        return Err(query_window_error(
+            "Quick Notes controls changed before the client Close click".into(),
+        ));
+    }
+    let close = current.close.as_ref().ok_or_else(|| {
+        query_window_error("Quick Notes client Close disappeared before input".into())
+    })?;
+    click(&current.root, close)?;
+
+    loop {
+        if elapsed() >= timeout {
+            return Err(query_window_error(
+                "Quick Notes controls remained after its one client Close click".into(),
+            ));
+        }
+        let observed = observe_current()?;
+        if observed.buttons.iter().all(Option::is_none) {
+            return Ok(());
+        }
+        poll();
+    }
+}
+
 fn marker_occurrences(path: &Path, nonce: &str) -> Result<usize, CaseFailure> {
     Ok(read_marker_counts(path)?.get(nonce).copied().unwrap_or(0))
 }
@@ -21467,18 +22736,9 @@ fn run_hotkey_burst_case(
         true,
         hold_threshold_ms,
     )
-    .map(|evidence| {
-        format!(
-            "evidence:v1; hotkey={}; burst={taps}; initial_visible=true; final_visible={}; unique_invocation_ids={}; hold_ms={}..{}; released_gap_ms={}..{}; trace_fence={}; uninterrupted=true; observer=exact_injected_chord_edges; per_gesture_correlation=release_short_tap_visibility; key_cleanup=verified",
-            hotkey.as_str(),
-            evidence.final_visible,
-            evidence.invocation_ids.len(),
-            evidence.hold_min_ms,
-            evidence.hold_max_ms,
-            evidence.gap_min_ms,
-            evidence.gap_max_ms,
-            evidence.trace_fence.report_token(),
-        )
+    .and_then(|evidence| {
+        format_hotkey_burst_case_evidence(hotkey, taps, &evidence)
+            .map_err(|error| CaseFailure::new(FailureStage::GestureDecision, error))
     });
     append_case(
         report,
@@ -22021,6 +23281,15 @@ fn run_hotkey_behavior_cases(
         hotkey,
         hold_threshold_ms,
     );
+    proof_remediation::run_h15_priority_case(
+        report,
+        child,
+        anchor,
+        trace_path,
+        output,
+        hotkey,
+        hold_threshold_ms,
+    );
     run_hotkey_hidden_root_wake_case(
         report,
         child,
@@ -22187,57 +23456,435 @@ fn current_hotkey_target(
     Ok(current)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HotkeyRuntimeHoverAck {
+    ordinal: usize,
+    elapsed_ms: u64,
+    session_digest: u64,
+    layout_generation: u64,
+    cell_digest: u64,
+    executable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HotkeyOpeningPreparation {
+    invocation_id: u64,
+    generation: u64,
+    ordinal: usize,
+    elapsed_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HotkeyOpenHoverState {
+    preparation: HotkeyOpeningPreparation,
+    hover: Option<HotkeyRuntimeHoverAck>,
+}
+
+fn hotkey_runtime_hover_ack(line: &str, ordinal: usize) -> Option<HotkeyRuntimeHoverAck> {
+    if trace_field_value(line, "trace_event") != Some("runtime_radial_hover") {
+        return None;
+    }
+    let number = |field| {
+        trace_field_value(line, field)?
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value != 0)
+    };
+    let executable = match (
+        trace_field_value(line, "role"),
+        trace_field_value(line, "executable"),
+    ) {
+        (Some("Action"), Some("true")) => true,
+        (
+            Some(
+                "Submenu" | "Back" | "Close" | "NextPage" | "PreviousPage" | "Drag" | "Spacer"
+                | "Unavailable",
+            ),
+            Some("false"),
+        ) => false,
+        _ => return None,
+    };
+    Some(HotkeyRuntimeHoverAck {
+        ordinal,
+        elapsed_ms: trace_field_value(line, "elapsed_ms")?.parse().ok()?,
+        session_digest: number("session_digest")?,
+        layout_generation: number("layout_generation")?,
+        cell_digest: number("cell_digest")?,
+        executable,
+    })
+}
+
+// The opening boundary, admitted hold, and actual preparation delimit the new
+// runtime lifetime. A hover can legitimately arrive while that hold is down.
+fn hotkey_current_open_hover(
+    lines: &[String],
+    pre_open_cursor: usize,
+) -> Option<HotkeyRuntimeHoverAck> {
+    hotkey_current_open_hover_state(lines, pre_open_cursor)?.hover
+}
+
+fn hotkey_current_open_hover_state(
+    lines: &[String],
+    pre_open_cursor: usize,
+) -> Option<HotkeyOpenHoverState> {
+    let unique = |event, transition| {
+        let mut matching = lines
+            .iter()
+            .enumerate()
+            .skip(pre_open_cursor)
+            .filter(|(_, line)| {
+                trace_field_value(line, "trace_event") == Some(event)
+                    && trace_field_value(line, "transition") == Some(transition)
+            });
+        let found = matching.next()?;
+        matching.next().is_none().then_some(found)
+    };
+    let (press_index, press) = unique("configured_primary", "Press")?;
+    let (release_index, release) = unique("configured_primary", "Release")?;
+    let invocation = trace_field_value(press, "invocation_id")?
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0)?;
+    let press_elapsed = trace_field_value(press, "elapsed_ms")?
+        .parse::<u64>()
+        .ok()?;
+    if release_index <= press_index
+        || trace_field_value(press, "modifiers_match") != Some("true")
+        || trace_field_value(press, "provenance") != Some("ExternalInjected")
+        || trace_field_value(release, "provenance") != Some("ExternalInjected")
+        || !matches!(
+            trace_field_value(release, "modifiers_match"),
+            Some("true" | "false")
+        )
+        || trace_field_value(release, "invocation_id")?
+            .parse::<u64>()
+            .ok()?
+            != invocation
+        || trace_field_value(release, "elapsed_ms")?
+            .parse::<u64>()
+            .ok()?
+            < press_elapsed
+        || lines
+            .iter()
+            .skip(pre_open_cursor)
+            .any(|line| trace_field_value(line, "trace_event") == Some("short_tap"))
+    {
+        return None;
+    }
+    let mut preparations = lines
+        .iter()
+        .enumerate()
+        .skip(pre_open_cursor)
+        .filter(|(_, line)| {
+            trace_field_value(line, "trace_event") == Some("runtime_preparation")
+                && trace_field_value(line, "edge") == Some("ReplyQueued")
+        });
+    let (prepare_index, preparation) = preparations.next()?;
+    let prepare_elapsed = trace_field_value(preparation, "elapsed_ms")?
+        .parse::<u64>()
+        .ok()?;
+    let generation = trace_field_value(preparation, "generation")?
+        .parse::<u64>()
+        .ok()?;
+    if preparations.next().is_some()
+        || prepare_index <= press_index
+        || prepare_elapsed < press_elapsed
+        || trace_field_value(preparation, "invocation_id")?
+            .parse::<u64>()
+            .ok()?
+            != invocation
+        || generation == 0
+        || lines
+            .iter()
+            .skip(prepare_index + 1)
+            .any(|line| trace_field_value(line, "trace_event") == Some("runtime_preparation"))
+    {
+        return None;
+    }
+    let prior = lines
+        .iter()
+        .enumerate()
+        .take(pre_open_cursor)
+        .filter_map(|(index, line)| hotkey_runtime_hover_ack(line, index + 1))
+        .collect::<Vec<_>>();
+    let mut current = None;
+    for (index, line) in lines.iter().enumerate().skip(prepare_index + 1) {
+        if trace_field_value(line, "trace_event") != Some("runtime_radial_hover") {
+            continue;
+        }
+        let hover = hotkey_runtime_hover_ack(line, index + 1)?;
+        if hover.elapsed_ms < prepare_elapsed
+            || prior.iter().any(|previous| {
+                previous.session_digest == hover.session_digest
+                    || previous.layout_generation >= hover.layout_generation
+            })
+            || current.is_some_and(|previous: HotkeyRuntimeHoverAck| {
+                previous.session_digest != hover.session_digest
+                    || previous.layout_generation != hover.layout_generation
+                    || hover.elapsed_ms < previous.elapsed_ms
+            })
+        {
+            return None;
+        }
+        current = Some(hover);
+    }
+    Some(HotkeyOpenHoverState {
+        preparation: HotkeyOpeningPreparation {
+            invocation_id: invocation,
+            generation,
+            ordinal: prepare_index + 1,
+            elapsed_ms: prepare_elapsed,
+        },
+        hover: current,
+    })
+}
+
+fn hotkey_hover_surfaces_have_current_geometry(
+    surfaces: &[WindowSnapshot],
+    current: &[WindowSnapshot],
+    process_id: u32,
+) -> bool {
+    radial_surface_set_matches_active_state(surfaces, current, process_id, true)
+        && surfaces.iter().all(|surface| {
+            current.iter().any(|window| {
+                window.hwnd == surface.hwnd
+                    && window.process_id == process_id
+                    && is_radial_surface(window, process_id)
+                    && window.visible
+                    && !window.minimized
+                    && window.intersects_virtual_screen()
+                    && window.bounds == surface.bounds
+                    && window.is_nonzero()
+            })
+        })
+}
+
+fn hotkey_hover_ack_matches(
+    hover: HotkeyRuntimeHoverAck,
+    lifetime: HotkeyRuntimeHoverAck,
+    after_ordinal: usize,
+    cell_digest: u64,
+    executable: bool,
+) -> bool {
+    hover.ordinal > after_ordinal
+        && hover.session_digest == lifetime.session_digest
+        && hover.layout_generation == lifetime.layout_generation
+        && hover.cell_digest == cell_digest
+        && hover.executable == executable
+}
+
+fn hotkey_hover_delivery_is_current(
+    surfaces: &[WindowSnapshot],
+    current: &[WindowSnapshot],
+    process_id: u32,
+    actual: POINT,
+    expected: POINT,
+) -> bool {
+    hotkey_hover_surfaces_have_current_geometry(surfaces, current, process_id)
+        && actual.x == expected.x
+        && actual.y == expected.y
+        && surfaces.iter().any(|surface| {
+            expected.x >= surface.bounds[0]
+                && expected.x < surface.bounds[2]
+                && expected.y >= surface.bounds[1]
+                && expected.y < surface.bounds[3]
+        })
+}
+
+struct HotkeyHoverSetupObservation {
+    lines: Vec<String>,
+    windows: Vec<WindowSnapshot>,
+    cursor: POINT,
+}
+
 fn hover_executable_radial_cell(
     child: &NativeChild,
     surfaces: &[WindowSnapshot],
     trace_path: &Path,
+    pre_open_cursor: usize,
 ) -> Result<u64, CaseFailure> {
-    if !radial_surfaces_are_active(child, surfaces) {
-        return Err(CaseFailure::new(
-            FailureStage::NativeRootState,
-            "radial surfaces were inactive before hover setup".into(),
-        ));
-    }
+    let started = Instant::now();
+    hover_executable_radial_cell_with(
+        surfaces,
+        child.process_id(),
+        pre_open_cursor,
+        || {
+            Ok(HotkeyHoverSetupObservation {
+                lines: trace_lines(trace_path),
+                windows: child.windows(),
+                cursor: cursor_position()
+                    .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?,
+            })
+        },
+        |point| {
+            set_cursor_position(point)
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))
+        },
+        || started.elapsed(),
+        || std::thread::sleep(WINDOW_POLL),
+    )
+}
+
+fn hover_executable_radial_cell_with(
+    surfaces: &[WindowSnapshot],
+    process_id: u32,
+    pre_open_cursor: usize,
+    mut observe: impl FnMut() -> Result<HotkeyHoverSetupObservation, CaseFailure>,
+    mut move_cursor: impl FnMut(POINT) -> Result<(), CaseFailure>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut poll: impl FnMut(),
+) -> Result<u64, CaseFailure> {
     let surface = surfaces.first().ok_or_else(|| {
         CaseFailure::new(
             FailureStage::NativeRootState,
             "radial hold did not return a visible surface for hover setup".into(),
         )
     })?;
+    let mut read_current = |opening: Option<HotkeyOpeningPreparation>| {
+        if elapsed() >= TRACE_TIMEOUT {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "hover setup exhausted its total trace budget".into(),
+            ));
+        }
+        let observed = observe()?;
+        if !hotkey_hover_surfaces_have_current_geometry(surfaces, &observed.windows, process_id) {
+            return Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "radial surfaces were inactive or changed during hover setup".into(),
+            ));
+        }
+        let state = hotkey_current_open_hover_state(&observed.lines, pre_open_cursor)
+            .filter(|state| opening.is_none_or(|owner| state.preparation == owner))
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::GestureDecision,
+                    "opening hold omitted valid current preparation-correlated ownership".into(),
+                )
+            })?;
+        if elapsed() >= TRACE_TIMEOUT {
+            return Err(CaseFailure::new(
+                FailureStage::GestureDecision,
+                "hover setup exhausted its total trace budget".into(),
+            ));
+        }
+        Ok((observed, state))
+    };
+    let (initial, opening) = read_current(None)?;
     let point = POINT {
         x: surface.bounds[0] + (surface.bounds[2] - surface.bounds[0]) / 2,
         y: surface.bounds[1] + (surface.bounds[3] - surface.bounds[1]) * 3 / 20,
     };
-    let hover_cursor = trace_lines(trace_path).len();
-    set_cursor_position(point)
-        .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
-    let hover_events = wait_trace(trace_path, hover_cursor, TRACE_TIMEOUT, |events| {
-        events
-            .iter()
-            .any(|line| trace_line_is_executable_hover(line))
+    let neutral = POINT {
+        x: surface.bounds[0] + (surface.bounds[2] - surface.bounds[0]) / 2,
+        y: surface.bounds[1] + (surface.bounds[3] - surface.bounds[1]) / 2,
+    };
+    let expected_digest = acceptance_id_digest("starter-root-favorites");
+    let mut ack = opening.hover;
+    let already_acknowledged = ack.is_some_and(|hover| {
+        hotkey_hover_ack_matches(hover, hover, pre_open_cursor, expected_digest, true)
+            && hotkey_hover_delivery_is_current(
+                surfaces,
+                &initial.windows,
+                process_id,
+                initial.cursor,
+                point,
+            )
     });
-    let digest = hover_events
-        .iter()
-        .find(|line| trace_line_is_executable_hover(line))
-        .and_then(|line| trace_field_value(line, "cell_digest"))
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|digest| *digest != 0)
+    if !already_acknowledged {
+        let mut move_and_wait =
+            |point: POINT,
+             cell_digest: u64,
+             executable: bool,
+             lifetime: Option<HotkeyRuntimeHoverAck>| {
+                let (before, _) = read_current(Some(opening.preparation))?;
+                if before.cursor.x == point.x && before.cursor.y == point.y {
+                    return Err(CaseFailure::new(
+                        FailureStage::GestureDecision,
+                        "hover setup refused a no-op motion without a fresh acknowledgment".into(),
+                    ));
+                }
+                let after_ordinal = before.lines.len();
+                move_cursor(point)?;
+                loop {
+                    let (observed, state) = read_current(Some(opening.preparation))?;
+                    if let Some(hover) = state.hover
+                        && hotkey_hover_ack_matches(
+                            hover,
+                            lifetime.unwrap_or(hover),
+                            after_ordinal,
+                            cell_digest,
+                            executable,
+                        )
+                    {
+                        if !hotkey_hover_delivery_is_current(
+                            surfaces,
+                            &observed.windows,
+                            process_id,
+                            observed.cursor,
+                            point,
+                        ) {
+                            return Err(CaseFailure::new(
+                                FailureStage::NativeRootState,
+                                "hover motion lacked actual current pointer delivery".into(),
+                            ));
+                        }
+                        return Ok(hover);
+                    }
+                    poll();
+                }
+            };
+        let mut lifetime = opening.hover;
+        if initial.cursor.x != neutral.x || initial.cursor.y != neutral.y {
+            lifetime = Some(move_and_wait(
+                neutral,
+                acceptance_id_digest("__center"),
+                false,
+                lifetime,
+            )?);
+        }
+        // A stationary pointer can have no producer receipt. At the neutral
+        // point, use the distinct target motion rather than awaiting a no-op.
+        ack = Some(move_and_wait(point, expected_digest, true, lifetime)?);
+    }
+    let admitted = ack.ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::GestureDecision,
+            "hover setup omitted its actual executable-cell acknowledgment".into(),
+        )
+    })?;
+    let (final_observed, _) = read_current(Some(opening.preparation))?;
+    let final_ack = hotkey_current_open_hover(&final_observed.lines, pre_open_cursor)
+        .filter(|latest| {
+            latest.ordinal >= admitted.ordinal
+                && hotkey_hover_ack_matches(
+                    *latest,
+                    admitted,
+                    pre_open_cursor,
+                    expected_digest,
+                    true,
+                )
+        })
         .ok_or_else(|| {
             CaseFailure::new(
                 FailureStage::GestureDecision,
-                format!(
-                    "hover did not receive production acknowledgment for an executable radial cell at ({},{}); events={hover_events:?}",
-                    point.x, point.y
-                ),
+                "runtime hover ownership or selected cell changed before the final delivery check"
+                    .into(),
             )
         })?;
-    if !radial_surfaces_are_active(child, surfaces) {
+    if !hotkey_hover_delivery_is_current(
+        surfaces,
+        &final_observed.windows,
+        process_id,
+        final_observed.cursor,
+        point,
+    ) {
         return Err(CaseFailure::new(
             FailureStage::NativeRootState,
             "radial surface closed before executable-cell hover acknowledgment".into(),
         ));
     }
-    Ok(digest)
+    Ok(final_ack.cell_digest)
 }
 
 fn run_hotkey_tap_dismiss_case(
@@ -22256,6 +23903,7 @@ fn run_hotkey_tap_dismiss_case(
     begin_hotkey_evidence_capture(id, trace_path);
     let result = (|| {
         ensure_hotkey_root_visibility(child, anchor, hotkey, initial_visible)?;
+        let pre_open_cursor = trace_lines(trace_path).len();
         let surfaces = run_hotkey_hold_attempt(
             child,
             anchor,
@@ -22267,7 +23915,12 @@ fn run_hotkey_tap_dismiss_case(
             None,
         )?;
         let hover_digest = if hover_radial {
-            Some(hover_executable_radial_cell(child, &surfaces, trace_path)?)
+            Some(hover_executable_radial_cell(
+                child,
+                &surfaces,
+                trace_path,
+                pre_open_cursor,
+            )?)
         } else {
             None
         };
@@ -22824,7 +24477,8 @@ fn run_hotkey_hold_close_case(
             true,
             None,
         )?;
-        let hover_digest = hover_executable_radial_cell(child, &surfaces, trace_path)?;
+        let hover_digest =
+            hover_executable_radial_cell(child, &surfaces, trace_path, trace_cursor)?;
         let closed = run_hotkey_hold_attempt(
             child,
             anchor,
@@ -25517,6 +27171,116 @@ struct HotkeyBurstEvidence {
     preflight_matching_edges: usize,
     foreign_matching_edges: usize,
     trace_fence: HotkeyTraceFence,
+    report_facts: HotkeyBurstReportFacts,
+}
+
+struct HotkeyBurstReportFacts {
+    initial_visible: bool,
+    hook_pairs: usize,
+    configured_pairs: usize,
+    short_taps: usize,
+    visibility_edges: usize,
+    setup_insertions: Option<(usize, usize)>,
+    injection: AcceptanceHotkeyBurstEvidence,
+}
+
+fn retain_hotkey_burst_report_facts(
+    events: &[String],
+    taps: usize,
+    initial_visible: bool,
+    fence: HotkeyTraceFence,
+    setup_insertions: Option<(usize, usize)>,
+    injection: AcceptanceHotkeyBurstEvidence,
+) -> Result<HotkeyBurstReportFacts, String> {
+    validate_hotkey_production_admission(events, taps)?;
+    validate_hotkey_burst_trace_with_baseline(
+        events,
+        taps,
+        initial_visible,
+        fence.baseline_visibility_revision,
+        fence.baseline_invocation_id,
+    )?;
+    if !native_input_desktop_is_default(&injection.input_desktop) {
+        return Err("verified burst report requires the actual Default input desktop".into());
+    }
+    Ok(HotkeyBurstReportFacts {
+        initial_visible,
+        hook_pairs: hotkey_trace_edge_count(events, "hook_primary") / 2,
+        configured_pairs: hotkey_trace_edge_count(events, "configured_primary") / 2,
+        short_taps: hotkey_trace_edge_count(events, "short_tap"),
+        visibility_edges: events
+            .iter()
+            .filter(|line| {
+                line.contains("trace_event=\"desired_visibility\"")
+                    && trace_field_value(line, "source") == Some("ToggleBatch")
+            })
+            .count(),
+        setup_insertions,
+        injection,
+    })
+}
+
+fn format_hotkey_burst_case_evidence(
+    hotkey: AcceptanceHotkey,
+    taps: usize,
+    evidence: &HotkeyBurstEvidence,
+) -> Result<String, String> {
+    let facts = &evidence.report_facts;
+    let keys_per_tap = expected_hotkey_edges(hotkey, 1).len() / 2;
+    if evidence.exact_key_edges != expected_hotkey_edges(hotkey, taps)
+        || facts.injection.down_inserted != taps * keys_per_tap
+        || facts.injection.up_inserted != taps * keys_per_tap
+        || facts
+            .setup_insertions
+            .is_some_and(|counts| counts != (keys_per_tap, keys_per_tap))
+        || [
+            facts.hook_pairs,
+            facts.configured_pairs,
+            facts.short_taps,
+            facts.visibility_edges,
+            evidence.invocation_ids.len(),
+        ]
+        .iter()
+        .any(|count| *count != taps)
+        || !native_input_desktop_is_default(&facts.injection.input_desktop)
+        || facts.injection.cleanup != "no_owned_keydowns_remain;async_state_clear"
+    {
+        return Err("burst formatter lacks its actual verified counts, ordered edges, setup, or native desktop".into());
+    }
+    let (observer_order, observer_keys) = match hotkey {
+        AcceptanceHotkey::F11 => ("alternating_down_up", "F11"),
+        AcceptanceHotkey::ShiftAltWinEnd => {
+            ("down_then_reverse_up", "LeftShift+LeftAlt+LeftWin+End")
+        }
+    };
+    // ALL reaches this owner only after its real registered/unregistered
+    // preflight. The retained counts and setup edges come from this attempt.
+    Ok(format!(
+        "evidence:v1; hotkey={}; burst={taps}; parity={}; initial_visible={}; final_visible={}; hook_pairs={}; configured_pairs={}; short_taps={}; visibility_edges={}; uninterrupted=true; inter_tap_ui_poll=0; inter_tap_refocus=0; preflight=registered_unregistered; runner_observer=exact_injected_pairs; observer_order={observer_order}; observer_keys={observer_keys}; sendinput_down={}; sendinput_up={}; invocation_count={}; setup_tap={}; input_desktop=Default; unique_invocation_ids={}; hold_ms={}..{}; released_gap_ms={}..{}; trace_fence={}; observer=exact_injected_chord_edges; per_gesture_correlation=release_short_tap_visibility; key_cleanup=verified; native_input_desktop={}",
+        hotkey.as_str(),
+        if taps % 2 == 0 { "even" } else { "odd" },
+        facts.initial_visible,
+        evidence.final_visible,
+        facts.hook_pairs,
+        facts.configured_pairs,
+        facts.short_taps,
+        facts.visibility_edges,
+        facts.injection.down_inserted,
+        facts.injection.up_inserted,
+        evidence.invocation_ids.len(),
+        if facts.setup_insertions.is_some() {
+            "separate_before_burst"
+        } else {
+            "none"
+        },
+        evidence.invocation_ids.len(),
+        evidence.hold_min_ms,
+        evidence.hold_max_ms,
+        evidence.gap_min_ms,
+        evidence.gap_max_ms,
+        evidence.trace_fence.report_token(),
+        facts.injection.input_desktop.replace(';', ","),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25678,6 +27442,7 @@ where
     let currently_visible =
         root.visible && !root.minimized && intersects_display_bounds(root.bounds, &displays);
     let mut setup_trace_cursor = None;
+    let mut setup_insertions = None;
     if currently_visible != initial_visible {
         setup_trace_cursor = Some(trace_lines(trace_path).len());
         if let Some(anchor) = focus_anchor {
@@ -25688,7 +27453,7 @@ where
             focus_is_validated(target_hwnd, target_process_id)
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         }
-        child
+        let setup = child
             .send_acceptance_hotkey(
                 target_hwnd,
                 target_process_id,
@@ -25696,6 +27461,7 @@ where
                 Duration::from_millis(25),
             )
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        setup_insertions = Some((setup.down.inserted, setup.up.inserted));
         if !wait_root_visibility(child, initial_visible, ROOT_TIMEOUT) {
             return Err(CaseFailure::new(
                 FailureStage::NativeRootState,
@@ -25805,7 +27571,7 @@ where
             released_time,
         )
         .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
-    if injection.input_desktop != "thread=Default;active=Default" {
+    if !native_input_desktop_is_default(&injection.input_desktop) {
         return Err(CaseFailure::new(
             FailureStage::InputInjection,
             format!(
@@ -25956,6 +27722,15 @@ where
         ));
     }
     complete_hotkey_capture_at_current_trace(trace_path)?;
+    let report_facts = retain_hotkey_burst_report_facts(
+        &events,
+        taps,
+        initial_visible,
+        trace_fence,
+        setup_insertions,
+        injection,
+    )
+    .map_err(|error| CaseFailure::new(FailureStage::GestureDecision, error))?;
     Ok(HotkeyBurstEvidence {
         final_visible: summary.final_visible,
         invocation_ids: summary.invocation_ids,
@@ -25989,6 +27764,7 @@ where
         preflight_matching_edges: preflight.map_or(0, |quiet| quiet.matching_edges),
         foreign_matching_edges,
         trace_fence,
+        report_facts,
     })
 }
 
@@ -26770,10 +28546,11 @@ pub fn record_environment_failure(
         AcceptanceSuite::GateD => &super::super::GATE_D_CASE_IDS,
         AcceptanceSuite::GateS => &super::super::GATE_S_CASE_IDS,
     };
+    let defer_cleanup = report.suite == AcceptanceSuite::All;
     for (index, id) in ids
         .iter()
         .copied()
-        .filter(|id| *id != "R0" && !DEFERRED_REPORT_CASE_IDS.contains(id))
+        .filter(|id| (*id == "CLEANUP" && !defer_cleanup) || !DEFERRED_REPORT_CASE_IDS.contains(id))
         .enumerate()
     {
         if index == 0 {
@@ -28550,8 +30327,20 @@ fn run_designer_entry(
                 "accepted InitialSnapshot reply omitted its Designer session identity".into(),
             )
         })?;
+    let current = child.designer().ok_or_else(|| {
+        CaseFailure::new(
+            FailureStage::DesignerNativeTarget,
+            "Designer disappeared after its accepted InitialSnapshot".into(),
+        )
+    })?;
+    if !super::same_owned_designer(&designer, &current, child.process_id()) {
+        return Err(CaseFailure::new(
+            FailureStage::DesignerNativeTarget,
+            "Designer identity changed after its accepted InitialSnapshot".into(),
+        ));
+    }
     Ok(DesignerEntry {
-        window: designer,
+        window: current,
         session_id,
         root_recovery: restored,
         root_menu_resolution: closed_apps_menu,
@@ -29875,6 +31664,280 @@ fn click_authoring_target(
     Ok((control, evidence))
 }
 
+fn ready_authoring_control(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+    target: AuthoringControlTarget,
+    index: Option<usize>,
+    role: AuthoringControlRole,
+) -> Result<AuthoringControlSnapshot, CaseFailure> {
+    let before = gate_d_live_observation(child, session_id)?;
+    let boundary = GateDPresentationBoundary {
+        first_line: trace_lines(trace_path).len(),
+        trace_sequence: before.trace_sequence,
+        session_id,
+        generation: before.generation,
+        client_size: child
+            .request_designer_repaint(designer)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?,
+    };
+    gate_d_ready_control(
+        child, designer, trace_path, boundary, target, index, role, None,
+    )
+}
+
+fn click_ready_authoring_control(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    mut control: AuthoringControlSnapshot,
+) -> Result<PointerClickEvidence, CaseFailure> {
+    let before = gate_d_live_observation(child, control.session_id)?;
+    click_designer_client_bounds_with_pre_down_check(
+        child,
+        designer,
+        control.bounds,
+        trace_path,
+        |point, cursor| {
+            control = gate_d_wait_control_before_pointer_down(
+                child,
+                designer,
+                trace_path,
+                cursor,
+                &control,
+                &before,
+                [point.0, point.1],
+                UIA_TIMEOUT,
+            )?;
+            Ok(())
+        },
+    )
+    .map_err(|error| match error {
+        PointerClickPreDownError::StaleGeometry(message) => {
+            CaseFailure::new(FailureStage::DesignerReadiness, message)
+        }
+        PointerClickPreDownError::Input(message) => {
+            CaseFailure::new(FailureStage::InputInjection, message)
+        }
+    })
+}
+
+fn skin_glow_resources_step(
+    anchor: &AuthoringControlSnapshot,
+    controls: &[AuthoringControlSnapshot],
+    boundary: GateDPresentationBoundary,
+) -> Result<Result<AuthoringControlSnapshot, ([i32; 4], i16)>, String> {
+    gate_d_ready_control_step(
+        anchor,
+        boundary,
+        AuthoringControlTarget::SkinRow,
+        anchor.index,
+        AuthoringControlRole::Button,
+        None,
+    )?;
+    if !anchor.selected
+        || !anchor.scroll_viewport.as_ref().is_some_and(|viewport| {
+            authoring_scroll_viewport_matches(anchor, viewport)
+                && viewport.measured.owner == GateDControlScrollOwner::Resources
+        })
+    {
+        return Err("selected skin omitted its current measured outer Resources owner".into());
+    }
+    let matching = controls
+        .iter()
+        .filter(|control| {
+            control.target == AuthoringControlTarget::SkinGlowEnabled
+                && control.trace_sequence > boundary.trace_sequence
+        })
+        .collect::<Vec<_>>();
+    let mut clipped_distance = 0;
+    match matching.as_slice() {
+        [glow] => {
+            if glow.role != AuthoringControlRole::Checkbox
+                || glow.session_id != boundary.session_id
+                || glow.generation != boundary.generation
+                || glow.client_size != boundary.client_size
+                || !glow.enabled
+                || glow.clicked
+                || glow.frame_nr.is_none()
+            {
+                return Err("nested glow has stale identity or rendered ownership".into());
+            }
+            let [left, top, right, bottom] = glow.bounds;
+            let [cl, ct, cr, cb] = glow
+                .clip_bounds
+                .ok_or("nested glow omitted its actual clip")?;
+            if cl < 0
+                || ct < 0
+                || cr > boundary.client_size[0]
+                || cb > boundary.client_size[1]
+                || cr <= cl
+                || cb <= ct
+                || right <= left
+                || bottom <= top
+                || left < cl
+                || right > cr
+            {
+                return Err("nested glow has invalid or horizontally clipped geometry".into());
+            }
+            if top >= ct && bottom <= cb {
+                gate_d_ready_control_step(
+                    glow,
+                    boundary,
+                    glow.target,
+                    glow.index,
+                    glow.role,
+                    None,
+                )?;
+                return Ok(Ok(**glow));
+            }
+            clipped_distance = (i64::from(bottom) - i64::from(cb)).max(0);
+        }
+        [] => {}
+        _ => return Err("nested style published ambiguous glow controls".into()),
+    }
+    let [left, top, right, bottom] = anchor.scroll_viewport.unwrap().measured.input_bounds;
+    if right - left <= 2 || bottom - top <= 2 {
+        return Err("outer Resources input viewport has no safe wheel interior".into());
+    }
+    // The upper outer-pane interior precedes the selected skin's nested style
+    // editor. Do not route the wheel through the off-client nested widget.
+    let amount =
+        resources_presentation_wheel_amount(clipped_distance, i64::from(bottom) - i64::from(top));
+    Ok(Err(([left + 1, top + 1, left + 2, top + 2], -amount)))
+}
+
+fn expose_skin_glow_with(
+    boundary: GateDPresentationBoundary,
+    deadline: Instant,
+    mut refresh: impl FnMut() -> Result<
+        (AuthoringControlSnapshot, Vec<AuthoringControlSnapshot>),
+        CaseFailure,
+    >,
+    mut scroll: impl FnMut(&AuthoringControlSnapshot, [i32; 4], i16) -> Result<(), CaseFailure>,
+) -> Result<AuthoringControlSnapshot, CaseFailure> {
+    let mut previous = None::<AuthoringControlSnapshot>;
+    let mut scrolls = 0;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "outer Resources did not expose the actual nested glow before its deadline".into(),
+            ));
+        }
+        let (anchor, controls) = refresh()?;
+        if let Some(prior) = previous {
+            if anchor.trace_sequence <= prior.trace_sequence
+                || anchor.frame_nr <= prior.frame_nr
+                || anchor.bounds[1] >= prior.bounds[1]
+            {
+                return Err(CaseFailure::new(FailureStage::DesignerReadiness, "owned outer Resources scrolling did not move the selected skin toward its nested style".into()));
+            }
+        }
+        match skin_glow_resources_step(&anchor, &controls, boundary)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?
+        {
+            Ok(glow) => return Ok(glow),
+            Err((bounds, delta)) => {
+                if scrolls >= MAX_PRESENTATION_SCROLLS {
+                    return Err(CaseFailure::new(
+                        FailureStage::DesignerReadiness,
+                        "bounded outer Resources scrolling did not expose nested glow".into(),
+                    ));
+                }
+                scroll(&anchor, bounds, delta)?;
+                previous = Some(anchor);
+                scrolls += 1;
+            }
+        }
+    }
+}
+
+fn expose_selected_skin_glow(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    session_id: u64,
+    skin_index: usize,
+) -> Result<AuthoringControlSnapshot, CaseFailure> {
+    let before = gate_d_live_observation(child, session_id)?;
+    let boundary = GateDPresentationBoundary {
+        first_line: trace_lines(trace_path).len(),
+        trace_sequence: before.trace_sequence,
+        session_id,
+        generation: before.generation,
+        client_size: child
+            .request_designer_repaint(designer)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?,
+    };
+    let deadline =
+        Instant::now() + UIA_TIMEOUT.saturating_mul((MAX_PRESENTATION_SCROLLS + 1) as u32);
+    let cursor = std::cell::Cell::new(boundary.first_line);
+    let sequence = std::cell::Cell::new(boundary.trace_sequence);
+    expose_skin_glow_with(
+        boundary,
+        deadline,
+        || {
+            let latest_controls = RefCell::new(Vec::new());
+            let (anchor, _) = gate_d_wait_settled_control_with(
+                &before,
+                GateDPresentationBoundary {
+                    first_line: cursor.get(),
+                    trace_sequence: sequence.get(),
+                    ..boundary
+                },
+                AuthoringControlTarget::SkinRow,
+                Some(skin_index),
+                AuthoringControlRole::Button,
+                None,
+                true,
+                UIA_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+                || {
+                    let client_size =
+                        child.request_designer_repaint(designer).map_err(|error| {
+                            CaseFailure::new(FailureStage::DesignerReadiness, error)
+                        })?;
+                    let controls = latest_authoring_controls_after(
+                        &trace_lines(trace_path),
+                        cursor.get(),
+                        session_id,
+                    );
+                    let after = gate_d_live_observation(child, session_id)?;
+                    *latest_controls.borrow_mut() = controls.clone();
+                    Ok((client_size, controls, after))
+                },
+                std::thread::sleep,
+            )?;
+            Ok((anchor, latest_controls.into_inner()))
+        },
+        |anchor, bounds, delta| {
+            let current = gate_d_live_observation(child, session_id)?;
+            if !gate_d_presentation_state_is_unchanged(&before, &current)
+                || !gate_d_presentation_scroll_state_is_unchanged(anchor, &current, &current)
+            {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerReadiness,
+                    "skin owner changed before outer Resources scroll".into(),
+                ));
+            }
+            scroll_designer_client_bounds(child, designer, bounds, delta)
+                .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+            let after = gate_d_live_observation(child, session_id)?;
+            if !gate_d_presentation_state_is_unchanged(&before, &after) {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerReadiness,
+                    "outer Resources scrolling changed authoring state or effects".into(),
+                ));
+            }
+            sequence.set(after.trace_sequence);
+            cursor.set(trace_lines(trace_path).len());
+            Ok(())
+        },
+    )
+}
+
 fn set_requested_slots(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -29968,28 +32031,30 @@ fn run_authoring_geometry_cases(
     let mut authored_menu_graph = None;
     let mut overflow_root_graph = None;
     append_authoring_case(report, child, output, trace_path, "A0", || {
-        let menus = wait_for_designer_semantic_target_in_session(
+        let deadline = Instant::now() + UIA_TIMEOUT;
+        child
+            .focus_window(designer)
+            .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
+        let before_mode = gate_d_live_observation(child, session_id)?;
+        let menus = ready_designer_semantic_target(
+            child,
+            designer,
             trace_path,
+            &before_mode,
             DesignerSemanticTarget::Menus,
-            session_id,
-            UIA_TIMEOUT,
-            |_| true,
-        )
-        .ok_or_else(|| {
-            CaseFailure::new(
-                FailureStage::DesignerReadiness,
-                format!(
-                    "the reopened Designer session {session_id} did not publish its Menus mode target"
-                ),
-            )
-        })?;
+            deadline,
+        )?;
         let mode_evidence = if menus.selected {
             "reopened Designer already selected Menus".to_string()
         } else {
-            let mode_click =
-                click_designer_client_bounds(child, designer, menus.bounds, trace_path).map_err(
-                    |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
-                )?;
+            let mode_click = click_current_designer_semantic_target(
+                child,
+                designer,
+                trace_path,
+                &before_mode,
+                DesignerSemanticTarget::Menus,
+                deadline,
+            )?;
             let selected = wait_for_designer_semantic_target_in_session(
                 trace_path,
                 DesignerSemanticTarget::Menus,
@@ -30577,14 +32642,40 @@ fn run_authoring_geometry_cases(
         });
 
         append_authoring_case(report, child, output, trace_path, "G2", || {
-            let compact = run_compact_geometry_case(child, designer, trace_path, session_id)
-                .map_err(|error| {
-                    authoring_case_failure(FailureStage::DesignerPresentation, error)
-                })?;
-            let working_viewport = restore_authoring_viewport(
-                child, designer, trace_path, session_id,
-            )
-            .map_err(|error| authoring_case_failure(FailureStage::DesignerPresentation, error))?;
+            let working = child.designer().ok_or_else(|| {
+                authoring_case_failure(
+                    FailureStage::DesignerNativeTarget,
+                    "Designer disappeared before compact geometry",
+                )
+            })?;
+            if !super::same_owned_designer(designer, &working, child.process_id()) {
+                return Err(authoring_case_failure(
+                    FailureStage::DesignerNativeTarget,
+                    "Designer identity changed before compact geometry",
+                ));
+            }
+            let original_client = child.client_bounds(&working).map_err(|error| {
+                authoring_case_failure(FailureStage::DesignerPresentation, error)
+            })?;
+            let (compact, working_viewport) = with_restored_authoring_viewport(
+                || {
+                    run_compact_geometry_case(child, &working, trace_path, session_id).map_err(
+                        |error| authoring_case_failure(FailureStage::DesignerPresentation, error),
+                    )
+                },
+                || {
+                    restore_authoring_viewport(
+                        child,
+                        &working,
+                        original_client,
+                        trace_path,
+                        session_id,
+                    )
+                    .map_err(|error| {
+                        authoring_case_failure(FailureStage::DesignerPresentation, error)
+                    })
+                },
+            )?;
             Ok(format!(
                 "{compact}; {working_viewport}; retaining the authored A0/G0/A2 menu and G1 overflow-root draft for the A3-A6 Save/reopen workflow"
             ))
@@ -30653,6 +32744,264 @@ fn run_authoring_geometry_cases(
     );
 }
 
+struct AllAuthoredPin {
+    search: GateCSearchEvidence,
+    row: GateCResultRowEvidence,
+    pin: ActionEditorControlSnapshot,
+    binding_digest: u64,
+    staged: AuthoringObservationEvidence,
+}
+
+fn all_properties_presentation_is_unchanged(
+    before: &AuthoringObservationEvidence,
+    after: &AuthoringObservationEvidence,
+) -> bool {
+    before.editor.properties_popup_open
+        && before
+            .editor
+            .action_editor
+            .as_ref()
+            .is_some_and(|editor| editor.surface == "properties")
+        && after.frame_ordinal > before.frame_ordinal
+        && after.trace_sequence > before.trace_boundary_sequence
+        && after.editor == before.editor
+        && after.root == before.root
+        && after.effects == before.effects
+}
+
+fn all_click_popup_control_with(
+    before: &AuthoringObservationEvidence,
+    current: &AuthoringObservationEvidence,
+    control: AuthoringControlSnapshot,
+    client_size: [i32; 2],
+    click: impl FnOnce(AuthoringControlSnapshot) -> Result<(), CaseFailure>,
+) -> Result<(), CaseFailure> {
+    if !matches!(
+        control.target,
+        AuthoringControlTarget::PopupOpenInspector | AuthoringControlTarget::PopupApplyAndOpen
+    ) || !all_properties_presentation_is_unchanged(before, current)
+        || current.trace_sequence <= control.trace_sequence
+    {
+        return Err(CaseFailure::new(
+            FailureStage::DesignerReadiness,
+            "ALL popup handoff changed the pinned Properties owner before input".into(),
+        ));
+    }
+    let boundary = GateDPresentationBoundary {
+        first_line: 0,
+        trace_sequence: before.trace_boundary_sequence,
+        session_id: before.editor.session_id,
+        generation: before.editor.generation,
+        client_size,
+    };
+    if !matches!(
+        gate_d_ready_control_step(
+            &control,
+            boundary,
+            control.target,
+            None,
+            AuthoringControlRole::Button,
+            None,
+        ),
+        Ok(GateDReadyControlStep::Visible)
+    ) {
+        return Err(CaseFailure::new(
+            FailureStage::DesignerNativeTarget,
+            "ALL popup handoff control is not fresh and fully inside its current client/clip; no button-down was sent".into(),
+        ));
+    }
+    click(control)
+}
+
+fn all_click_popup_control(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    before: &AuthoringObservationEvidence,
+    target: AuthoringControlTarget,
+) -> Result<(), CaseFailure> {
+    let deadline = Instant::now() + UIA_TIMEOUT;
+    let boundary = GateDPresentationBoundary {
+        first_line: trace_lines(trace_path).len(),
+        trace_sequence: before.trace_boundary_sequence,
+        session_id: before.editor.session_id,
+        generation: before.editor.generation,
+        client_size: gate_c_live_designer_client_size(child, designer)
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?,
+    };
+    let control = gate_d_ready_control_before_deadline(
+        child,
+        designer,
+        trace_path,
+        boundary,
+        target,
+        None,
+        AuthoringControlRole::Button,
+        None,
+        deadline,
+    )?;
+    let current = gate_c_authoring_snapshot(child, before.editor.session_id)?;
+    all_click_popup_control_with(before, &current, control, boundary.client_size, |control| {
+        click_ready_authoring_control(child, designer, trace_path, control).map(|_| ())
+    })
+}
+
+fn all_apply_and_open_is_committed(
+    before: &AuthoringObservationEvidence,
+    after: &AuthoringObservationEvidence,
+    binding_digest: u64,
+    inspector_selected: bool,
+) -> bool {
+    inspector_selected
+        && !after.editor.properties_popup_open
+        && after.editor.session_id == before.editor.session_id
+        && after.editor.generation > before.editor.generation
+        && after.editor.selected_cell_digest == before.editor.selected_cell_digest
+        && after.editor.selected_target_digest == before.editor.selected_target_digest
+        && after.editor.assigned_binding_digest == binding_digest
+        && after.editor.undo_depth == before.editor.undo_depth.saturating_add(1)
+        && after.editor.redo_depth == 0
+        && after.editor.document_digest != before.editor.document_digest
+        && after.root == before.root
+        && after.effects == before.effects
+}
+
+fn all_custom_action_target(
+    profile: &Path,
+    source_index: usize,
+) -> Result<(String, GateCReadableTarget, u64), String> {
+    let bytes = fs::read(profile.join("actions.json"))
+        .map_err(|error| format!("read ALL custom-action fixture: {error}"))?;
+    let actions: Vec<multi_launcher::actions::Action> = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("decode ALL custom-action fixture: {error}"))?;
+    let action = actions
+        .get(source_index)
+        .ok_or_else(|| "ALL target source index is absent from actions.json".to_string())?;
+    if actions
+        .iter()
+        .filter(|candidate| *candidate == action)
+        .count()
+        != 1
+        || action.label.trim().is_empty()
+    {
+        return Err("ALL target custom action is ambiguous or has no searchable label".into());
+    }
+    let disambiguator = format!("custom action {}", source_index + 1);
+    let target_type = "Custom action";
+    let action_id = multi_launcher::universal_actions::action_ids::RESULT_EXECUTE;
+    let binding = ActionBinding::Persisted {
+        action: PersistedUniversalActionRef {
+            target: Some(PersistableActionTargetRef::CustomAction {
+                action: action.clone(),
+            }),
+            action_id: action_id.clone(),
+        },
+    };
+    Ok((
+        format!("app {}", action.label),
+        GateCReadableTarget {
+            target_digest: super::super::gate_c_trace_parts_digest(&[
+                &action.action,
+                &action.label,
+                target_type,
+                &disambiguator,
+            ]),
+            // This is the exact-label query's primary Execute result, not its
+            // source position or the separately observed unfiltered rank.
+            result_index: Some(0),
+            title_digest: super::super::gate_c_trace_text_digest(&action.label),
+            type_digest: super::super::gate_c_trace_text_digest(target_type),
+            disambiguator_digest: super::super::gate_c_trace_text_digest(&disambiguator),
+            action_digest: super::super::gate_c_trace_parts_digest(&[action_id.as_str()]),
+            readable_label: format!(
+                "{} · {target_type} · {disambiguator} — Execute",
+                action.label
+            ),
+        },
+        gate_c_action_binding_digest(&binding)?,
+    ))
+}
+
+fn all_properties_pin_is_staged(
+    before: &AuthoringObservationEvidence,
+    after: &AuthoringObservationEvidence,
+    search: &GateCSearchEvidence,
+    row: &GateCResultRowEvidence,
+    pin: &ActionEditorControlSnapshot,
+    binding_digest: u64,
+) -> Result<(), String> {
+    let before_identity = gate_c_observed_action_editor_identity(before, GateCSurface::Properties)
+        .map_err(|error| error.message)?;
+    let observed = gate_c_observed_action_editor_identity(after, GateCSurface::Properties)
+        .map_err(|error| error.message)?;
+    let current = after
+        .editor
+        .action_editor
+        .as_ref()
+        .ok_or_else(|| "ALL Pin has no current Properties identity".to_string())?;
+    if before_identity != search.identity
+        || !search.settled
+        || search.surface != GateCSurface::Properties
+        || !(search.search_control_sequence < search.queued_sequence
+            && search.queued_sequence < search.worker_started_sequence
+            && search.worker_started_sequence < search.worker_terminal_sequence
+            && search.worker_terminal_sequence < row.observed_trace_sequence)
+        || row.identity != search.identity
+        || row.search_completion_sequence != search.worker_terminal_sequence
+        || row.target_digest != search.target_digest
+        || row.action_digest != search.action_digest
+        || row.binding_digest != binding_digest
+        || !row.readable
+        || !row.fully_visible
+        || !row.enabled
+        || row.bounds != row.full_bounds
+        || pin.control != "pin_result"
+        || !pin.clicked
+        || !pin.enabled
+        || !pin.selected
+        || !pin.fully_visible
+        || pin.bounds != pin.full_bounds
+        || pin.binding_digest != binding_digest
+        || pin.target_digest != row.target_digest
+        || pin.action_digest != row.action_digest
+        || pin.index.and_then(|index| index.checked_add(1)) != Some(row.order)
+        || pin.trace_sequence <= row.observed_trace_sequence
+        || !gate_c_pin_identity_transition_matches(
+            &gate_c_identity_from_native(pin.identity),
+            &search.identity,
+            binding_digest,
+        )
+        || pin.identity.test_request_generation != search.identity.test_request_generation
+        || !gate_c_pin_identity_transition_matches(&observed, &search.identity, binding_digest)
+        || observed.test_request_generation != search.identity.test_request_generation
+        || observed.binding_digest != binding_digest
+        || current.search_pending
+        || current.test_pending
+        || current.selected_binding_digest != binding_digest
+        || !after.editor.properties_popup_open
+        || !after.editor.properties_dirty
+        || after.editor.assigned_binding_digest != binding_digest
+        || after.editor.properties_staged_digest == before.editor.properties_staged_digest
+        || after.frame_ordinal <= before.frame_ordinal
+        || after.trace_sequence <= pin.trace_sequence
+        || after.root != before.root
+        || after.effects != before.effects
+    {
+        return Err("ALL Pin did not retain the exact completed-search target/action in the current staged Properties visit".into());
+    }
+    // Pin stages the Properties binding; it does not change the authored
+    // document, selection/navigation, assets, or Undo/Redo history.
+    let mut permitted = after.editor.clone();
+    permitted.assigned_binding_digest = before.editor.assigned_binding_digest;
+    permitted.properties_staged_digest = before.editor.properties_staged_digest;
+    permitted.properties_dirty = before.editor.properties_dirty;
+    permitted.action_editor = before.editor.action_editor.clone();
+    if permitted != before.editor {
+        return Err("ALL Properties Pin changed the draft, history, assets, selection, or navigation before Apply".into());
+    }
+    Ok(())
+}
+
 fn run_radial_action_authoring_cases(
     report: &mut AcceptanceReport,
     child: &mut NativeChild,
@@ -30674,6 +33023,8 @@ fn run_radial_action_authoring_cases(
     let mut selected_cell_slot_index = None;
     let mut authored_cell_identity = None;
     let mut action_mutation_generation = None;
+    let mut assigned_pin = None;
+    let mut binding_packet = empty_gate_c_packet(report, "A3");
     let mut style_mutation_generation = None;
     let mut style_glow_after_edit = None;
     append_authoring_case(report, child, output, trace_path, "A3", || {
@@ -30846,6 +33197,8 @@ fn run_radial_action_authoring_cases(
             AuthoringControlRole::ComboBox,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        let before_action_type = gate_c_authoring_snapshot(child, session_id)?;
+        let action_editor_cursor = trace_lines(trace_path).len();
         click_authoring_target(
             child,
             designer,
@@ -30857,9 +33210,29 @@ fn run_radial_action_authoring_cases(
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
 
+        let (query, target, binding_digest) =
+            all_custom_action_target(profile, target_action_index)
+                .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        let query_field = gate_c_ensure_action_tab_after(
+            child,
+            designer,
+            trace_path,
+            &mut binding_packet,
+            GateCSurface::Properties,
+            false,
+            action_editor_cursor,
+            &before_action_type,
+        )?;
+        if query_field.identity.draft_generation != blank_menu.generation {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "ALL Properties query field changed the authored draft generation".into(),
+            ));
+        }
         let target_rank = wait_for_action_catalog_rank(
             trace_path,
             session_id,
+            query_field.identity.draft_generation,
             target_action_index,
             TRACE_TIMEOUT,
         )
@@ -30873,55 +33246,58 @@ fn run_radial_action_authoring_cases(
                 ),
             ));
         }
-        let search = wait_for_authoring_control(
+        let search = run_gate_c_search(
+            &mut binding_packet,
+            child,
+            designer,
+            uia,
             trace_path,
-            session_id,
-            AuthoringControlTarget::ActionSearch,
-            None,
-            AuthoringControlRole::TextEdit,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
-        click_designer_client_bounds(child, designer, search.bounds, trace_path)
-            .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
-        let query = format!("Radial Acceptance Harmless Action {target_action_index:03}");
-        send_text_to_focused_window(child, designer, &query)
-            .map_err(|error| authoring_case_failure(FailureStage::InputInjection, error))?;
-        let action_row = wait_for_authoring_control(
+            output,
+            GateCSurface::Properties,
+            &query,
+            GateCSearchPurpose::BeyondFifty,
+            std::slice::from_ref(&target),
+            target.target_digest,
+            target.action_digest,
+            Some(query_field),
+        )?;
+        let row = binding_packet
+            .ordered_results
+            .iter()
+            .rev()
+            .find(|row| {
+                row.identity == search.identity
+                    && row.search_completion_sequence == search.worker_terminal_sequence
+                    && row.target_digest == target.target_digest
+                    && row.action_digest == target.action_digest
+            })
+            .cloned()
+            .ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::DesignerReadiness,
+                    "ALL search did not retain its readable exact custom-action result".into(),
+                )
+            })?;
+        let before_pin = gate_c_authoring_snapshot(child, session_id)?;
+        let pin = pin_gate_c_result(
+            &mut binding_packet,
+            child,
+            uia,
+            designer,
             trace_path,
-            session_id,
-            AuthoringControlTarget::ActionRow,
-            Some(target_action_index),
-            AuthoringControlRole::Selectable,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
-        if !action_row.enabled {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerMutation,
-                "searched custom action row was not assignable".into(),
-            ));
-        }
-        let action_click =
-            click_designer_client_bounds(child, designer, action_row.bounds, trace_path).map_err(
-                |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
-            )?;
-        let assigned_row = wait_for_authoring_control_selected(
-            trace_path,
-            session_id,
-            AuthoringControlTarget::ActionRow,
-            Some(target_action_index),
-            AuthoringControlRole::Selectable,
-            true,
-            TRACE_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        if assigned_row.index != Some(target_action_index) || !assigned_row.selected {
-            return Err(CaseFailure::new(
-                FailureStage::DesignerMutation,
-                "native custom action click did not retain the exact selected source row".into(),
-            ));
-        }
+            &target,
+            &row,
+        )?;
+        let staged = gate_c_authoring_snapshot(child, session_id)?;
+        all_properties_pin_is_staged(&before_pin, &staged, &search, &row, &pin, binding_digest)
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        assigned_pin = Some(AllAuthoredPin {
+            search,
+            row,
+            pin,
+            binding_digest,
+            staged,
+        });
         let _ = (
             entry_evidence,
             menu_click,
@@ -30929,7 +33305,6 @@ fn run_radial_action_authoring_cases(
             selector_click,
             ring_click,
             click,
-            action_click,
         );
         Ok(format!(
             "evidence:v1; blank_cell_selected=true; geometry=[8,10]; cell_slot={cell_slot_index}; catalog_rank_gt_50={}; catalog_rank={}/{}; searched_action_assigned=true; source_index={}; menu_graph={}",
@@ -30955,16 +33330,45 @@ fn run_radial_action_authoring_cases(
                     .into(),
             )
         })?;
-        let row = wait_for_authoring_control_selected(
+        let assigned = assigned_pin.as_ref().ok_or_else(|| {
+            CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "A3 did not complete the current Properties search and exact staged Pin".into(),
+            )
+        })?;
+        let current = gate_c_authoring_snapshot(child, session_id)?;
+        if current.editor != assigned.staged.editor
+            || current.root != assigned.staged.root
+            || current.effects != assigned.staged.effects
+            || current.editor.assigned_binding_digest != assigned.binding_digest
+            || assigned.row.identity != assigned.search.identity
+            || !assigned.pin.clicked
+            || !assigned.pin.selected
+        {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "A4 lost the current exact staged Properties Pin before Apply-and-open".into(),
+            ));
+        }
+        // The Query result list reserves height below the pinned search. The
+        // existing Advanced tab presents the same binding without that list,
+        // leaving room for the ordinary Apply-and-open handoff prompt.
+        let _ = gate_c_ensure_action_tab(
+            child,
+            designer,
             trace_path,
+            &mut binding_packet,
             session_id,
-            AuthoringControlTarget::ActionRow,
-            Some(target_action_index),
-            AuthoringControlRole::Selectable,
+            GateCSurface::Properties,
             true,
-            TRACE_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        )?;
+        let compacted = gate_c_authoring_snapshot(child, session_id)?;
+        if !all_properties_presentation_is_unchanged(&current, &compacted) {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "compact Properties presentation changed the pinned query, binding, draft, history, assets, selection, or effects".into(),
+            ));
+        }
         let before = latest_geometry_state(trace_path)
             .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?
             .filter(|state| state.session_id == session_id)
@@ -30981,26 +33385,20 @@ fn run_radial_action_authoring_cases(
                     .into(),
             )
         })?;
-        click_authoring_target(
+        all_click_popup_control(
             child,
             designer,
             trace_path,
-            session_id,
+            &compacted,
             AuthoringControlTarget::PopupOpenInspector,
-            None,
-            AuthoringControlRole::Button,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
-        click_authoring_target(
+        )?;
+        all_click_popup_control(
             child,
             designer,
             trace_path,
-            session_id,
+            &compacted,
             AuthoringControlTarget::PopupApplyAndOpen,
-            None,
-            AuthoringControlRole::Button,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        )?;
         let applied =
             wait_for_geometry_state_matching(trace_path, session_id, TRACE_TIMEOUT, |state| {
                 state.generation > before.generation
@@ -31020,12 +33418,17 @@ fn run_radial_action_authoring_cases(
             UIA_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerPresentation, error))?;
-        if !row.selected || !inspector.selected {
+        let committed = gate_c_authoring_snapshot(child, session_id)?;
+        if !all_apply_and_open_is_committed(
+            &current,
+            &committed,
+            assigned.binding_digest,
+            inspector.selected,
+        ) {
             return Err(CaseFailure::new(
                 FailureStage::DesignerMutation,
                 format!(
-                    "Apply and open did not retain the authored binding/cell handoff: pre-apply action row selected={}, post-apply model cell={:?} identity={:?} action source={:?} (known={}), Inspector selected={}, expected cell/action={cell_index}/{target_action_index}",
-                    row.selected,
+                    "Apply and open did not retain the exact authored Pin/cell/history: model cell={:?} identity={:?} action source={:?} (known={}), Inspector selected={}, expected cell/action={cell_index}/{target_action_index}",
                     applied.selected_cell_index,
                     applied.selected_cell_id_digest,
                     applied.selected_cell_custom_action_index,
@@ -31048,6 +33451,13 @@ fn run_radial_action_authoring_cases(
     });
 
     append_authoring_case(report, child, output, trace_path, "A5", || {
+        if action_mutation_generation.is_none() {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "A5 is blocked until A4 completes the same-cell Properties Apply-and-open handoff"
+                    .into(),
+            ));
+        }
         let skin_index = copied.map_or(0, |options| options.skin_index);
         let skins = wait_for_designer_semantic_target_in_session(
             trace_path,
@@ -31084,23 +33494,21 @@ fn run_radial_action_authoring_cases(
                 "checked mode click did not select Skins".into(),
             )
         })?;
-        let skin = wait_for_authoring_control(
+        let skin = ready_authoring_control(
+            child,
+            designer,
             trace_path,
             session_id,
             AuthoringControlTarget::SkinRow,
             Some(skin_index),
             AuthoringControlRole::Button,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        )?;
         let skin_click = if skin.selected {
             None
         } else {
-            Some(
-                click_designer_client_bounds(child, designer, skin.bounds, trace_path).map_err(
-                    |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
-                )?,
-            )
+            Some(click_ready_authoring_control(
+                child, designer, trace_path, skin,
+            )?)
         };
         wait_for_authoring_control_selected(
             trace_path,
@@ -31112,21 +33520,23 @@ fn run_radial_action_authoring_cases(
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        let glow = wait_for_unique_authoring_control_any_index(
+        let glow_identity =
+            expose_selected_skin_glow(child, designer, trace_path, session_id, skin_index)?;
+        let glow = ready_authoring_control(
+            child,
+            designer,
             trace_path,
             session_id,
             AuthoringControlTarget::SkinGlowEnabled,
+            glow_identity.index,
             AuthoringControlRole::Checkbox,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        )?;
         let glow_before = glow.selected;
         let glow_after = !glow_before;
         let before = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |_| true)
             .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
         let preview_cursor = trace_lines(trace_path).len();
-        let glow_click = click_designer_client_bounds(child, designer, glow.bounds, trace_path)
-            .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        let glow_click = click_ready_authoring_control(child, designer, trace_path, glow)?;
         let after = wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
             state.generation > before.generation
         })
@@ -31337,24 +33747,21 @@ fn run_radial_action_authoring_cases(
             ));
         }
         let menu_index = expected_graph.menu_index;
-        let menu_row = wait_for_authoring_control(
+        let menu_row = ready_authoring_control(
+            child,
+            designer,
             trace_path,
             session_id,
             AuthoringControlTarget::MenuRow,
             Some(menu_index),
             AuthoringControlRole::Selectable,
-            UIA_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        )?;
         let menu_click = if menu_row.selected {
             None
         } else {
-            Some(
-                click_designer_client_bounds(child, designer, menu_row.bounds, trace_path)
-                    .map_err(|error| {
-                        authoring_case_failure(FailureStage::DesignerNativeTarget, error)
-                    })?,
-            )
+            Some(click_ready_authoring_control(
+                child, designer, trace_path, menu_row,
+            )?)
         };
         let menu_geometry =
             wait_for_geometry_state(trace_path, session_id, TRACE_TIMEOUT, |state| {
@@ -31384,16 +33791,79 @@ fn run_radial_action_authoring_cases(
                 ),
             ));
         }
-        let (_, policy_combo_click) = click_authoring_target(
+        let policy_deadline = Instant::now() + UIA_TIMEOUT;
+        let policy_owner = gate_d_live_observation(child, session_id)?;
+        if policy_owner.generation != menu_geometry.generation {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "authored menu generation changed before policy activation".into(),
+            ));
+        }
+        let policy_boundary = GateDPresentationBoundary {
+            first_line: trace_lines(trace_path).len(),
+            trace_sequence: policy_owner.trace_sequence,
+            session_id,
+            generation: policy_owner.generation,
+            client_size: child
+                .request_designer_repaint(designer)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?,
+        };
+        let policy_control = gate_d_ready_control_before_deadline(
             child,
             designer,
             trace_path,
-            session_id,
+            policy_boundary,
             AuthoringControlTarget::MenuAfterAction,
             None,
             AuthoringControlRole::ComboBox,
+            None,
+            policy_deadline,
+        )?;
+        let policy_failure =
+            |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error);
+        let policy_combo_click = click_designer_client_bounds_before_deadline(
+            child,
+            designer,
+            policy_control.bounds,
+            trace_path,
+            policy_deadline,
+            |point, cursor| {
+                let current_trace = gate_d_wait_control_before_pointer_down(
+                    child,
+                    designer,
+                    trace_path,
+                    cursor,
+                    &policy_control,
+                    &policy_owner,
+                    [point.0, point.1],
+                    policy_deadline.saturating_duration_since(Instant::now()),
+                )?;
+                if latest_geometry_state(trace_path).map_err(PointerClickPreDownError::Input)?
+                    != Some(menu_geometry)
+                {
+                    return Err(PointerClickPreDownError::Input(
+                        "authored menu or policy state changed before ComboBox button-down".into(),
+                    ));
+                }
+                if current_trace.bounds != policy_control.bounds
+                    || !gate_c_point_is_inside_rect([point.0, point.1], current_trace.bounds)
+                {
+                    return Err(PointerClickPreDownError::StaleGeometry(
+                        "Menu after action traced button moved before button-down".into(),
+                    ));
+                }
+                if Instant::now() >= policy_deadline {
+                    return Err(PointerClickPreDownError::Input(
+                        "Menu after action readiness deadline expired before button-down".into(),
+                    ));
+                }
+                Ok(())
+            },
         )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerNativeTarget, error))?;
+        .map_err(|error| match error {
+            PointerClickPreDownError::StaleGeometry(message)
+            | PointerClickPreDownError::Input(message) => policy_failure(message),
+        })?;
         let close_tree_option = wait_for_authoring_control(
             trace_path,
             session_id,
@@ -31649,29 +34119,32 @@ fn run_radial_action_authoring_cases(
         let row = match row {
             Ok(row) => row,
             Err(_) => {
-                let row = wait_for_authoring_control(
+                let row = ready_authoring_control(
+                    child,
+                    &reopened.window,
                     trace_path,
                     reopened.session_id,
                     AuthoringControlTarget::MenuRow,
                     Some(menu_index),
                     AuthoringControlRole::Selectable,
-                    UIA_TIMEOUT,
-                )
-                .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
-                click_designer_client_bounds(child, &reopened.window, row.bounds, trace_path)
+                )?;
+                if row.selected {
+                    row
+                } else {
+                    let cursor = trace_lines(trace_path).len();
+                    click_ready_authoring_control(child, &reopened.window, trace_path, row)?;
+                    wait_for_authoring_control_selected_after(
+                        trace_path,
+                        cursor,
+                        row,
+                        row.generation,
+                        true,
+                        TRACE_TIMEOUT,
+                    )
                     .map_err(|error| {
-                        authoring_case_failure(FailureStage::DesignerNativeTarget, error)
-                    })?;
-                wait_for_authoring_control_selected(
-                    trace_path,
-                    reopened.session_id,
-                    AuthoringControlTarget::MenuRow,
-                    Some(menu_index),
-                    AuthoringControlRole::Selectable,
-                    true,
-                    TRACE_TIMEOUT,
-                )
-                .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?
+                        authoring_case_failure(FailureStage::DesignerMutation, error)
+                    })?
+                }
             }
         };
         let reloaded =
@@ -32283,20 +34756,20 @@ fn run_designer_lifecycle_cases(
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
         if !skin.selected {
+            let cursor = trace_lines(trace_path).len();
             click_designer_client_bounds(child, &entry.window, skin.bounds, trace_path).map_err(
                 |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
             )?;
+            wait_for_authoring_control_selected_after(
+                trace_path,
+                cursor,
+                skin,
+                skin.generation,
+                true,
+                TRACE_TIMEOUT,
+            )
+            .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
         }
-        wait_for_authoring_control_selected(
-            trace_path,
-            entry.session_id,
-            AuthoringControlTarget::SkinRow,
-            Some(skin_index),
-            AuthoringControlRole::Button,
-            true,
-            TRACE_TIMEOUT,
-        )
-        .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
         let glow = wait_for_unique_authoring_control_any_index(
             trace_path,
             entry.session_id,
@@ -32314,6 +34787,7 @@ fn run_designer_lifecycle_cases(
         let before_edit =
             wait_for_geometry_state(trace_path, entry.session_id, TRACE_TIMEOUT, |_| true)
                 .map_err(|error| authoring_case_failure(FailureStage::DesignerReadiness, error))?;
+        let edit_cursor = trace_lines(trace_path).len();
         let edit_click =
             click_designer_client_bounds(child, &entry.window, glow.bounds, trace_path).map_err(
                 |error| authoring_case_failure(FailureStage::DesignerNativeTarget, error),
@@ -32323,16 +34797,16 @@ fn run_designer_lifecycle_cases(
                 state.generation > before_edit.generation
             })
             .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        wait_for_authoring_control_selected(
+        let edited_glow = wait_for_authoring_control_selected_after(
             trace_path,
-            entry.session_id,
-            AuthoringControlTarget::SkinGlowEnabled,
-            glow.index,
-            AuthoringControlRole::Checkbox,
+            edit_cursor,
+            glow,
+            edited.generation,
             !saved_glow,
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        let undo_cursor = trace_lines(trace_path).len();
         let undo = click_authoring_target(
             child,
             &entry.window,
@@ -32348,16 +34822,16 @@ fn run_designer_lifecycle_cases(
                 state.generation > edited.generation
             })
             .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        let restored = wait_for_authoring_control_selected(
+        let restored = wait_for_authoring_control_selected_after(
             trace_path,
-            entry.session_id,
-            AuthoringControlTarget::SkinGlowEnabled,
-            glow.index,
-            AuthoringControlRole::Checkbox,
+            undo_cursor,
+            edited_glow,
+            undone.generation,
             saved_glow,
             TRACE_TIMEOUT,
         )
         .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
+        let redo_cursor = trace_lines(trace_path).len();
         let redo = click_authoring_target(
             child,
             &entry.window,
@@ -32373,12 +34847,11 @@ fn run_designer_lifecycle_cases(
                 state.generation > undone.generation
             })
             .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
-        let reapplied = wait_for_authoring_control_selected(
+        let reapplied = wait_for_authoring_control_selected_after(
             trace_path,
-            entry.session_id,
-            AuthoringControlTarget::SkinGlowEnabled,
-            glow.index,
-            AuthoringControlRole::Checkbox,
+            redo_cursor,
+            restored,
+            redone.generation,
             !saved_glow,
             TRACE_TIMEOUT,
         )
@@ -33460,6 +35933,58 @@ fn wait_for_authoring_control_selected(
     }
 }
 
+fn wait_for_authoring_control_selected_after(
+    trace_path: &Path,
+    mut cursor: usize,
+    previous: AuthoringControlSnapshot,
+    generation: u64,
+    selected: bool,
+    timeout: Duration,
+) -> Result<AuthoringControlSnapshot, String> {
+    let boundary = GateDPresentationBoundary {
+        first_line: cursor,
+        trace_sequence: previous.trace_sequence,
+        session_id: previous.session_id,
+        generation,
+        client_size: previous.client_size,
+    };
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (next_cursor, current) = authoring_control_after_snapshot(
+            trace_path,
+            cursor,
+            previous.session_id,
+            previous.target,
+            previous.index,
+            previous.role,
+        )?;
+        cursor = next_cursor;
+        if let Some(current) = current
+            && current.selected == selected
+            && !current.clicked
+        {
+            let step = gate_d_ready_control_step(
+                &current,
+                boundary,
+                previous.target,
+                previous.index,
+                previous.role,
+                None,
+            )?;
+            if matches!(step, GateDReadyControlStep::Visible) {
+                return Ok(current);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Designer target {:?} index={:?} did not become selected={selected} for session {}",
+                previous.target, previous.index, previous.session_id
+            ));
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
 fn wait_for_canvas_cell_in_generation(
     trace_path: &Path,
     session_id: u64,
@@ -33540,17 +36065,46 @@ fn wait_for_authoring_control_click_finished(
     }
 }
 
+fn all_current_action_catalog_rank(
+    ranks: &[ActionCatalogRankSnapshot],
+    session_id: u64,
+    generation: u64,
+    source_index: usize,
+) -> Result<Option<ActionCatalogRankSnapshot>, String> {
+    let mut current = None;
+    for rank in ranks.iter().filter(|rank| {
+        rank.session_id == session_id
+            && rank.generation == generation
+            && rank.custom_action_index == source_index
+    }) {
+        if rank.rank >= rank.catalog_len || rank.catalog_len == 0 {
+            return Err(
+                "current unfiltered custom-action rank is outside its actual catalog".into(),
+            );
+        }
+        if current.is_some_and(|previous| previous != *rank) {
+            return Err("current unfiltered custom-action rank is ambiguous".into());
+        }
+        current = Some(*rank);
+    }
+    Ok(current)
+}
+
 fn wait_for_action_catalog_rank(
     trace_path: &Path,
     session_id: u64,
+    generation: u64,
     custom_action_index: usize,
     timeout: Duration,
 ) -> Result<ActionCatalogRankSnapshot, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(rank) = action_catalog_ranks(trace_path)?.into_iter().find(|rank| {
-            rank.session_id == session_id && rank.custom_action_index == custom_action_index
-        }) {
+        if let Some(rank) = all_current_action_catalog_rank(
+            &action_catalog_ranks(trace_path)?,
+            session_id,
+            generation,
+            custom_action_index,
+        )? {
             return Ok(rank);
         }
         if Instant::now() >= deadline {
@@ -33934,9 +36488,30 @@ fn run_compact_geometry_case(
     ))
 }
 
+fn with_restored_authoring_viewport<T, U>(
+    operation: impl FnOnce() -> Result<T, CaseFailure>,
+    restore: impl FnOnce() -> Result<U, CaseFailure>,
+) -> Result<(T, U), CaseFailure> {
+    let result = operation();
+    let restoration = restore();
+    match (result, restoration) {
+        (Ok(result), Ok(restoration)) => Ok((result, restoration)),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(mut error), Err(restoration)) => {
+            error.message.push_str(&format!(
+                "; authoring viewport restoration failed: {}",
+                restoration.message
+            ));
+            Err(error)
+        }
+    }
+}
+
 fn restore_authoring_viewport(
     child: &NativeChild,
     original: &WindowSnapshot,
+    original_client: [i32; 4],
     trace_path: &Path,
     session_id: u64,
 ) -> Result<String, String> {
@@ -33965,6 +36540,7 @@ fn restore_authoring_viewport(
             && !current.minimized
             && current_width == width
             && current_height == height
+            && client == original_client
         {
             break (current, client);
         }
@@ -34800,13 +37376,754 @@ fn append_case(
     output: &Path,
     trace_path: &Path,
 ) {
+    append_case_with_precleanup_artifacts(
+        report, id, expected, started, result, child, output, trace_path, None,
+    );
+}
+
+/// A case owns its failure-time snapshot before cleanup. Some(empty) still
+/// means capture was attempted; later ROOT images cannot replace it.
+fn append_case_with_precleanup_artifacts(
+    report: &mut AcceptanceReport,
+    id: &str,
+    expected: &str,
+    started: Instant,
+    result: Result<String, CaseFailure>,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+    precleanup_artifacts: Option<Vec<PathBuf>>,
+) {
+    append_case_with_diagnostic_context(
+        report,
+        id,
+        expected,
+        started,
+        result,
+        child,
+        output,
+        trace_path,
+        precleanup_artifacts,
+        None,
+    );
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaseOperationDiagnostic {
+    succeeded: bool,
+    stage: Option<FailureStage>,
+    detail: String,
+    detail_chars: usize,
+}
+
+impl CaseOperationDiagnostic {
+    fn from_result(result: &Result<String, CaseFailure>) -> Self {
+        let (succeeded, stage, detail) = match result {
+            Ok(detail) => (true, None, detail),
+            Err(error) => (false, Some(error.stage), &error.message),
+        };
+        Self {
+            succeeded,
+            stage,
+            detail: bounded_text(detail, MAX_RESULT_BYTES),
+            detail_chars: detail.chars().count(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailedHotkeyCollectionCounts {
+    runner_edges: usize,
+    candidate_events: usize,
+    gestures: usize,
+    standalone_decisions: usize,
+    follow_on_restorations: usize,
+    root_identities: usize,
+    physical_displays: usize,
+    root_command_spans: usize,
+    priority_runner_edges: usize,
+    priority_foreign_edges: usize,
+    priority_primary_edges: usize,
+    priority_admissions: usize,
+    priority_configured_primary: usize,
+    priority_candidate_events: usize,
+    priority_restorations: usize,
+    priority_root_command_spans: usize,
+    case_id_chars: usize,
+    runner_clock_chars: usize,
+}
+
+impl FailedHotkeyCollectionCounts {
+    fn observed(packet: &HotkeyCaseEvidence) -> Self {
+        let priority = packet.screen_draw_priority.as_ref();
+        Self {
+            runner_edges: packet.runner_edges.len(),
+            candidate_events: packet.candidate_events.len(),
+            gestures: packet.gestures.len(),
+            standalone_decisions: packet.standalone_decisions.len(),
+            follow_on_restorations: packet.follow_on_restorations.len(),
+            root_identities: packet.root_identities.len(),
+            physical_displays: packet.physical_displays.len(),
+            root_command_spans: packet
+                .gestures
+                .iter()
+                .map(|gesture| match &gesture.decision {
+                    HotkeyDecisionProof::Applied { root_commands, .. } => root_commands.len(),
+                    _ => 0,
+                })
+                .sum::<usize>()
+                + packet
+                    .standalone_decisions
+                    .iter()
+                    .map(|decision| decision.root_commands.len())
+                    .sum::<usize>()
+                + packet
+                    .follow_on_restorations
+                    .iter()
+                    .map(|restore| restore.root_commands.len())
+                    .sum::<usize>(),
+            priority_runner_edges: priority.map_or(0, |p| p.runner_edges.len()),
+            priority_foreign_edges: priority.map_or(0, |p| p.foreign_edges.len()),
+            priority_primary_edges: priority.map_or(0, |p| p.primary_edges.len()),
+            priority_admissions: priority.map_or(0, |p| p.admissions.len()),
+            priority_configured_primary: priority.map_or(0, |p| p.configured_primary.len()),
+            priority_candidate_events: priority.map_or(0, |p| p.candidate_events.len()),
+            priority_restorations: priority.map_or(0, |p| p.restorations.len()),
+            priority_root_command_spans: priority.map_or(0, |p| {
+                p.restorations
+                    .iter()
+                    .map(|restore| restore.root_commands.len())
+                    .sum()
+            }),
+            case_id_chars: packet.case_id.chars().count(),
+            runner_clock_chars: packet.runner_clock.chars().count(),
+        }
+    }
+
+    fn omitted_after(&self, packet: &HotkeyCaseEvidence) -> Self {
+        let retained = Self::observed(packet);
+        Self {
+            runner_edges: self.runner_edges.saturating_sub(retained.runner_edges),
+            candidate_events: self
+                .candidate_events
+                .saturating_sub(retained.candidate_events),
+            gestures: self.gestures.saturating_sub(retained.gestures),
+            standalone_decisions: self
+                .standalone_decisions
+                .saturating_sub(retained.standalone_decisions),
+            follow_on_restorations: self
+                .follow_on_restorations
+                .saturating_sub(retained.follow_on_restorations),
+            root_identities: self
+                .root_identities
+                .saturating_sub(retained.root_identities),
+            physical_displays: self
+                .physical_displays
+                .saturating_sub(retained.physical_displays),
+            root_command_spans: self
+                .root_command_spans
+                .saturating_sub(retained.root_command_spans),
+            priority_runner_edges: self
+                .priority_runner_edges
+                .saturating_sub(retained.priority_runner_edges),
+            priority_foreign_edges: self
+                .priority_foreign_edges
+                .saturating_sub(retained.priority_foreign_edges),
+            priority_primary_edges: self
+                .priority_primary_edges
+                .saturating_sub(retained.priority_primary_edges),
+            priority_admissions: self
+                .priority_admissions
+                .saturating_sub(retained.priority_admissions),
+            priority_configured_primary: self
+                .priority_configured_primary
+                .saturating_sub(retained.priority_configured_primary),
+            priority_candidate_events: self
+                .priority_candidate_events
+                .saturating_sub(retained.priority_candidate_events),
+            priority_restorations: self
+                .priority_restorations
+                .saturating_sub(retained.priority_restorations),
+            priority_root_command_spans: self
+                .priority_root_command_spans
+                .saturating_sub(retained.priority_root_command_spans),
+            case_id_chars: self.case_id_chars.saturating_sub(retained.case_id_chars),
+            runner_clock_chars: self
+                .runner_clock_chars
+                .saturating_sub(retained.runner_clock_chars),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum FailedHotkeyQualification {
+    UNQUALIFIED,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum FailedHotkeyCaptureBoundary {
+    AppendValidation,
+    AfterOwnedCleanupAttempt,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailedHotkeyDiagnostic {
+    qualification: FailedHotkeyQualification,
+    status: CaseStatus,
+    case_id: String,
+    run_id: String,
+    candidate_sha256: String,
+    runner_sha256: Option<String>,
+    source_revision: Option<String>,
+    child_process_id: Option<u32>,
+    runner_process_id: u32,
+    failure_stage: FailureStage,
+    validation_reason: String,
+    validation_reason_chars: usize,
+    original_operation: CaseOperationDiagnostic,
+    capture_boundary: FailedHotkeyCaptureBoundary,
+    capture_at_case_relative_us: Option<u64>,
+    h15: Option<proof_remediation::H15CaseDiagnosticContext>,
+    rejected_packet: Option<HotkeyCaseEvidence>,
+    collected: Option<FailedHotkeyCollectionCounts>,
+    omitted: Option<FailedHotkeyCollectionCounts>,
+    packet_projection_truncated: bool,
+}
+
+/// Stop serialization at the existing private JSON bound, including an
+/// adversarial packet. No overlarge intermediary byte buffer is allocated.
+fn failed_hotkey_diagnostic_bytes(
+    diagnostic: &mut FailedHotkeyDiagnostic,
+) -> Result<Vec<u8>, String> {
+    struct BoundedBytes(Vec<u8>);
+    impl Write for BoundedBytes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.0.len().saturating_add(bytes.len()) > MAX_PRIVATE_LOG_BYTES {
+                return Err(std::io::Error::other(
+                    "failed packet diagnostic exceeds private JSON cap",
+                ));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let serialize = |diagnostic: &FailedHotkeyDiagnostic| {
+        let mut bytes = BoundedBytes(Vec::new());
+        serde_json::to_writer(&mut bytes, diagnostic).map(|_| bytes.0)
+    };
+    if let Ok(bytes) = serialize(diagnostic) {
+        return Ok(bytes);
+    }
+    let Some(packet) = diagnostic.rejected_packet.as_mut() else {
+        return Err(
+            "failed packet context cannot be serialized within the private JSON cap".into(),
+        );
+    };
+    diagnostic.packet_projection_truncated = true;
+    packet.case_id = bounded_text(&packet.case_id, 16);
+    packet.runner_clock = bounded_text(&packet.runner_clock, 64);
+    packet.runner_edges.truncate(16);
+    packet.candidate_events.truncate(16);
+    packet.gestures.truncate(2);
+    packet.standalone_decisions.truncate(2);
+    packet.follow_on_restorations.truncate(2);
+    packet.root_identities.truncate(8);
+    packet.physical_displays.truncate(8);
+    for gesture in &mut packet.gestures {
+        if let HotkeyDecisionProof::Applied { root_commands, .. } = &mut gesture.decision {
+            root_commands.truncate(8);
+        }
+    }
+    for decision in &mut packet.standalone_decisions {
+        decision.root_commands.truncate(8);
+    }
+    for restore in &mut packet.follow_on_restorations {
+        restore.root_commands.truncate(8);
+    }
+    if let Some(priority) = packet.screen_draw_priority.as_mut() {
+        priority.runner_edges.truncate(16);
+        priority.foreign_edges.truncate(16);
+        priority.primary_edges.truncate(2);
+        priority.admissions.truncate(2);
+        priority.configured_primary.truncate(1);
+        priority.candidate_events.truncate(16);
+        priority.restorations.truncate(1);
+        for restore in &mut priority.restorations {
+            restore.root_commands.truncate(8);
+        }
+    }
+    diagnostic.omitted = diagnostic
+        .collected
+        .as_ref()
+        .map(|counts| counts.omitted_after(packet));
+    serialize(diagnostic)
+        .map_err(|error| format!("serialize bounded unqualified diagnostic: {error}"))
+}
+
+fn persist_failed_hotkey_diagnostic(
+    output: &Path,
+    id: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    persist_private_case_diagnostic(output, PrivateCaseDiagnosticFile::Hotkey(id), bytes)
+}
+
+/// Only these existing case owners may write private diagnostics. This shares
+/// the H failure writer's ACL/create-new/regular-file boundary; it is not a
+/// second persistence path in the note-close orchestrator.
+enum PrivateCaseDiagnosticFile<'a> {
+    Hotkey(&'a str),
+    L08FirstFailure,
+    L08Cleanup,
+    L08Tree,
+    L08Trace,
+    L08RootCrop,
+}
+
+impl PrivateCaseDiagnosticFile<'_> {
+    fn name_and_limit(&self) -> Result<(String, usize), String> {
+        Ok(match self {
+            Self::Hotkey(id) if hotkey_expected_state(id).is_some() => {
+                (format!("case-{id}-unqualified.json"), MAX_PRIVATE_LOG_BYTES)
+            }
+            Self::Hotkey(_) => return Err("unqualified diagnostic has an invalid case name".into()),
+            Self::L08FirstFailure => (
+                "case-L08-before-note-cleanup-unqualified.json".into(),
+                MAX_PRIVATE_LOG_BYTES,
+            ),
+            Self::L08Cleanup => (
+                "case-L08-after-note-cleanup-unqualified.json".into(),
+                MAX_PRIVATE_LOG_BYTES,
+            ),
+            Self::L08Tree => (
+                "case-L08-before-note-cleanup-private-tree.log".into(),
+                MAX_PRIVATE_LOG_BYTES,
+            ),
+            Self::L08Trace => (
+                "case-L08-before-note-cleanup-trace.log".into(),
+                MAX_TRACE_BYTES,
+            ),
+            // Match the existing private_artifacts PNG cap; that owner still
+            // verifies aggregate retention after profile disposal.
+            Self::L08RootCrop => (
+                "case-L08-before-note-cleanup-root.png".into(),
+                16 * 1024 * 1024,
+            ),
+        })
+    }
+}
+
+fn persist_private_case_diagnostic(
+    output: &Path,
+    file: PrivateCaseDiagnosticFile<'_>,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let (name, maximum) = file.name_and_limit()?;
+    if bytes.is_empty() || bytes.len() > maximum {
+        return Err("unqualified diagnostic has an invalid private artifact size".into());
+    }
+    let metadata = fs::symlink_metadata(output)
+        .map_err(|error| format!("inspect diagnostic directory: {error}"))?;
+    if !metadata.is_dir() || super::super::is_reparse_point(&metadata) {
+        return Err("unqualified diagnostic directory is not an owned regular directory".into());
+    }
+    super::super::private_artifacts::restrict_directory_acl(output)?;
+    let destination = output.join(name);
+    super::super::write_new(&destination, bytes)?;
+    let metadata = fs::symlink_metadata(&destination)
+        .map_err(|error| format!("inspect saved unqualified diagnostic: {error}"))?;
+    if !metadata.is_file()
+        || super::super::is_reparse_point(&metadata)
+        || metadata.len() != bytes.len() as u64
+    {
+        return Err("saved unqualified diagnostic has invalid regular-file facts".into());
+    }
+    Ok(destination)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivateCaseDiagnosticIdentity {
+    run_id: String,
+    candidate_sha256: String,
+    runner_sha256: Option<String>,
+    source_revision: Option<String>,
+    child_process_id: Option<u32>,
+    runner_process_id: u32,
+}
+
+impl PrivateCaseDiagnosticIdentity {
+    fn from_report(report: &AcceptanceReport) -> Self {
+        Self {
+            run_id: bounded_text(&report.run_id, 256),
+            candidate_sha256: bounded_text(&report.candidate.sha256, 64),
+            runner_sha256: report
+                .environment
+                .runner_sha256
+                .as_ref()
+                .map(|v| bounded_text(v, 64)),
+            source_revision: report
+                .environment
+                .source_revision
+                .as_ref()
+                .map(|v| bounded_text(v, 256)),
+            child_process_id: report.environment.child_process_id,
+            runner_process_id: report.environment.runner_process_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+enum L08PrivateObservation {
+    #[default]
+    NotAttempted,
+    Absent,
+    Retained {
+        file_name: String,
+        bytes: usize,
+    },
+    Failed {
+        detail: String,
+        original_bytes: usize,
+        truncated: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+enum L08PrecleanupState {
+    OperationFailed,
+    AwaitingCleanupAndValidation,
+}
+
+impl L08PrecleanupState {
+    fn from_context(context: &proof_remediation::L08CaseDiagnosticContext) -> Self {
+        if context.original_operation().succeeded {
+            Self::AwaitingCleanupAndValidation
+        } else {
+            Self::OperationFailed
+        }
+    }
+
+    fn status(self) -> Option<CaseStatus> {
+        match self {
+            Self::OperationFailed => Some(CaseStatus::Failed),
+            Self::AwaitingCleanupAndValidation => None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct L08FirstFailureDiagnostic {
+    qualification: FailedHotkeyQualification,
+    state: L08PrecleanupState,
+    status: Option<CaseStatus>,
+    case_id: &'static str,
+    phase: &'static str,
+    identity: PrivateCaseDiagnosticIdentity,
+    context: proof_remediation::L08CaseDiagnosticContext,
+    root: Option<WindowRecord>,
+    root_error: Option<String>,
+    root_error_original_bytes: Option<usize>,
+    windows: Vec<WindowRecord>,
+    windows_observed: usize,
+    windows_omitted: usize,
+    private_tree: L08PrivateObservation,
+    safe_trace: L08PrivateObservation,
+    root_crop: L08PrivateObservation,
+    capture_errors: Vec<String>,
+    capture_errors_omitted: usize,
+}
+
+fn bounded_l08_diagnostic_bytes(
+    diagnostic: &mut L08FirstFailureDiagnostic,
+) -> Result<Vec<u8>, String> {
+    diagnostic.state = L08PrecleanupState::from_context(&diagnostic.context);
+    diagnostic.status = diagnostic.state.status();
+    diagnostic.context = diagnostic.context.bounded();
+    diagnostic.root_error = diagnostic
+        .root_error
+        .as_ref()
+        .map(|error| bounded_text(error, 256));
+    diagnostic.windows_omitted = diagnostic
+        .windows_omitted
+        .saturating_add(diagnostic.windows.len().saturating_sub(32));
+    diagnostic.windows.truncate(32);
+    diagnostic.capture_errors_omitted = diagnostic
+        .capture_errors_omitted
+        .saturating_add(diagnostic.capture_errors.len().saturating_sub(8));
+    diagnostic.capture_errors.truncate(8);
+    for error in &mut diagnostic.capture_errors {
+        *error = bounded_text(error, 256);
+    }
+    for observation in [
+        &mut diagnostic.private_tree,
+        &mut diagnostic.safe_trace,
+        &mut diagnostic.root_crop,
+    ] {
+        if let L08PrivateObservation::Failed {
+            detail, truncated, ..
+        } = observation
+        {
+            *truncated |= detail.len() > 256;
+            *detail = bounded_text(detail, 256);
+        }
+    }
+    let bytes = serde_json::to_vec_pretty(diagnostic)
+        .map_err(|error| format!("serialize L08 first-failure diagnostic: {error}"))?;
+    if bytes.len() > MAX_PRIVATE_LOG_BYTES {
+        return Err("L08 first-failure JSON exceeds the existing private bound".into());
+    }
+    Ok(bytes)
+}
+
+fn retain_l08_capture_piece(
+    captured: &mut PrecleanupDiagnosticArtifacts,
+    output: &Path,
+    file: PrivateCaseDiagnosticFile<'_>,
+    bytes: Result<Vec<u8>, String>,
+) -> L08PrivateObservation {
+    let result = bytes.and_then(|bytes| {
+        let path = persist_private_case_diagnostic(output, file, &bytes)?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        captured.paths.push(path);
+        Ok((file_name, bytes.len()))
+    });
+    match result {
+        Ok((file_name, bytes)) => L08PrivateObservation::Retained { file_name, bytes },
+        Err(error) => {
+            let detail = bounded_text(&error, 256);
+            captured.errors.push(detail.clone());
+            L08PrivateObservation::Failed {
+                detail,
+                original_bytes: error.len(),
+                truncated: error.len() > 256,
+            }
+        }
+    }
+}
+
+fn capture_l08_first_failure(
+    identity: &PrivateCaseDiagnosticIdentity,
+    context: &proof_remediation::L08CaseDiagnosticContext,
+    child: &NativeChild,
+    ui: &UiAutomation,
+    trace_path: &Path,
+    output: &Path,
+) -> PrecleanupDiagnosticArtifacts {
+    let mut captured = PrecleanupDiagnosticArtifacts::default();
+    let root = child.refresh_root().and_then(|root| {
+        child.validate_window(root.hwnd)?;
+        if root.process_id != child.process_id() || root.role != WindowRole::Root {
+            return Err("first-failure ROOT does not belong to the candidate".into());
+        }
+        Ok(root)
+    });
+    let windows = child.windows();
+    let state = L08PrecleanupState::from_context(context);
+    let mut diagnostic = L08FirstFailureDiagnostic {
+        qualification: FailedHotkeyQualification::UNQUALIFIED,
+        state,
+        status: state.status(),
+        case_id: "L08",
+        phase: "before-note-cleanup",
+        identity: identity.clone(),
+        context: context.clone(),
+        root: root.as_ref().ok().map(WindowRecord::from),
+        root_error: root.as_ref().err().cloned(),
+        root_error_original_bytes: root.as_ref().err().map(String::len),
+        windows: windows
+            .iter()
+            .filter(|window| window.process_id == child.process_id())
+            .take(32)
+            .map(WindowRecord::from)
+            .collect(),
+        windows_observed: windows.len(),
+        windows_omitted: windows.len().saturating_sub(32),
+        private_tree: L08PrivateObservation::Absent,
+        safe_trace: L08PrivateObservation::NotAttempted,
+        root_crop: L08PrivateObservation::Absent,
+        capture_errors: Vec::new(),
+        capture_errors_omitted: 0,
+    };
+    diagnostic.safe_trace = retain_l08_capture_piece(
+        &mut captured,
+        output,
+        PrivateCaseDiagnosticFile::L08Trace,
+        fs::read_to_string(trace_path)
+            .map(|trace| safe_trace_excerpt(&trace).into_bytes())
+            .map_err(|error| format!("read first-failure trace: {error}")),
+    );
+    match &root {
+        Ok(root) => {
+            diagnostic.private_tree = retain_l08_capture_piece(
+                &mut captured,
+                output,
+                PrivateCaseDiagnosticFile::L08Tree,
+                ui.describe_candidate_private_tree(root.hwnd, child.process_id())
+                    .map(String::into_bytes),
+            );
+            diagnostic.root_crop = retain_l08_capture_piece(
+                &mut captured,
+                output,
+                PrivateCaseDiagnosticFile::L08RootCrop,
+                (|| {
+                    if !root.visible || root.minimized || !root.is_nonzero() {
+                        return Err("first-failure owned ROOT has no visible crop".into());
+                    }
+                    child.validate_window(root.hwnd)?;
+                    let image = capture_window_image(root)?;
+                    let mut bytes = std::io::Cursor::new(Vec::new());
+                    image
+                        .write_to(&mut bytes, image::ImageOutputFormat::Png)
+                        .map_err(|error| {
+                            format!("encode first-failure owned ROOT crop: {error}")
+                        })?;
+                    Ok(bytes.into_inner())
+                })(),
+            );
+        }
+        Err(error) => {
+            let original = format!("first-failure ROOT discovery: {error}");
+            let detail = bounded_text(&original, 256);
+            diagnostic.private_tree = L08PrivateObservation::Failed {
+                detail: detail.clone(),
+                original_bytes: original.len(),
+                truncated: original.len() > 256,
+            };
+            diagnostic.root_crop = diagnostic.private_tree.clone();
+            captured.errors.push(detail);
+        }
+    }
+    diagnostic.capture_errors = captured.errors.clone();
+    let bytes = bounded_l08_diagnostic_bytes(&mut diagnostic);
+    retain_l08_capture_piece(
+        &mut captured,
+        output,
+        PrivateCaseDiagnosticFile::L08FirstFailure,
+        bytes,
+    );
+    captured
+}
+
+fn l08_cleanup_diagnostic_bytes(
+    report: &AcceptanceReport,
+    context: &proof_remediation::L08CaseDiagnosticContext,
+    capture_errors: &[String],
+    case_result: &Result<String, CaseFailure>,
+) -> Result<Vec<u8>, String> {
+    let mut verdict = CaseOperationDiagnostic::from_result(case_result);
+    verdict.detail = bounded_text(&verdict.detail, 512);
+    let receipt = serde_json::json!({
+        "qualification": FailedHotkeyQualification::UNQUALIFIED,
+        "status": CaseStatus::Failed,
+        "case_id": "L08",
+        "phase": "after-note-cleanup",
+        "identity": PrivateCaseDiagnosticIdentity::from_report(report),
+        "context": context.bounded(),
+        "case_result": verdict,
+        "precleanup_capture_errors": capture_errors.iter().take(8).map(|error| bounded_text(error, 256)).collect::<Vec<_>>(),
+        "precleanup_capture_errors_omitted": capture_errors.len().saturating_sub(8),
+    });
+    let bytes = serde_json::to_vec_pretty(&receipt)
+        .map_err(|error| format!("serialize L08 cleanup diagnostic: {error}"))?;
+    if bytes.len() > MAX_PRIVATE_LOG_BYTES {
+        return Err("L08 cleanup JSON exceeds the existing private bound".into());
+    }
+    Ok(bytes)
+}
+
+fn append_case_with_diagnostic_context(
+    report: &mut AcceptanceReport,
+    id: &str,
+    expected: &str,
+    started: Instant,
+    result: Result<String, CaseFailure>,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+    precleanup_artifacts: Option<Vec<PathBuf>>,
+    h15_context: Option<proof_remediation::H15CaseDiagnosticContext>,
+) {
+    append_case_with_case_diagnostics(
+        report,
+        id,
+        expected,
+        started,
+        result,
+        child,
+        output,
+        trace_path,
+        precleanup_artifacts,
+        h15_context,
+        None,
+    );
+}
+
+fn append_case_with_case_diagnostics(
+    report: &mut AcceptanceReport,
+    id: &str,
+    expected: &str,
+    started: Instant,
+    result: Result<String, CaseFailure>,
+    child: Option<&NativeChild>,
+    output: &Path,
+    trace_path: &Path,
+    precleanup_artifacts: Option<Vec<PathBuf>>,
+    h15_context: Option<proof_remediation::H15CaseDiagnosticContext>,
+    l08_context: Option<(proof_remediation::L08CaseDiagnosticContext, Vec<String>)>,
+) {
     let mut artifacts = Vec::new();
+    let mut result = result;
+    if let Some((context, capture_errors)) = l08_context {
+        if id != "L08" {
+            result = Err(CaseFailure::new(
+                FailureStage::Cleanup,
+                "note-cleanup diagnostic was supplied to another case".into(),
+            ));
+        } else if result.is_err() {
+            // This separately labeled receipt cannot alter the immutable
+            // before-cleanup file or qualify a failed placement experiment.
+            match l08_cleanup_diagnostic_bytes(report, &context, &capture_errors, &result).and_then(
+                |bytes| {
+                    persist_private_case_diagnostic(
+                        output,
+                        PrivateCaseDiagnosticFile::L08Cleanup,
+                        &bytes,
+                    )
+                },
+            ) {
+                Ok(path) => {
+                    report.push_artifact(path.to_string_lossy());
+                    artifacts.push(bounded_text(&path.to_string_lossy(), MAX_PATH_BYTES));
+                }
+                Err(error) => {
+                    if let Err(primary) = &mut result {
+                        primary.message.push_str("; cleanup diagnostic capture: ");
+                        primary.message.push_str(&bounded_text(&error, 256));
+                    }
+                }
+            }
+        }
+    }
     let mut evidence_packet = if super::super::hotkey_expected_state(id).is_some() {
         finish_hotkey_evidence_capture(id)
     } else {
         None
     };
-    let mut result = result;
+    let original_operation = h15_context
+        .as_ref()
+        .map(|context| context.original_operation().clone())
+        .unwrap_or_else(|| CaseOperationDiagnostic::from_result(&result));
     let evidence_validation = evidence_packet.as_ref().map(|packet| {
         crate::validate_hotkey_evidence_packet_with_context(
             packet,
@@ -34825,7 +38142,54 @@ fn append_case(
         None => None,
     };
     if let Some(error) = evidence_error {
-        evidence_packet = None;
+        let mut diagnostic = FailedHotkeyDiagnostic {
+            qualification: FailedHotkeyQualification::UNQUALIFIED,
+            status: CaseStatus::Failed,
+            case_id: id.to_owned(),
+            run_id: bounded_text(&report.run_id, 256),
+            candidate_sha256: bounded_text(&report.candidate.sha256, 64),
+            runner_sha256: report
+                .environment
+                .runner_sha256
+                .as_ref()
+                .map(|hash| bounded_text(hash, 64)),
+            source_revision: report
+                .environment
+                .source_revision
+                .as_ref()
+                .map(|revision| bounded_text(revision, 256)),
+            child_process_id: report.environment.child_process_id,
+            runner_process_id: report.environment.runner_process_id,
+            failure_stage: result
+                .as_ref()
+                .err()
+                .map_or(FailureStage::GestureDecision, |failure| failure.stage),
+            validation_reason: bounded_text(&error, MAX_RESULT_BYTES),
+            validation_reason_chars: error.chars().count(),
+            original_operation,
+            capture_boundary: if h15_context.is_some() {
+                FailedHotkeyCaptureBoundary::AfterOwnedCleanupAttempt
+            } else {
+                FailedHotkeyCaptureBoundary::AppendValidation
+            },
+            capture_at_case_relative_us: u64::try_from(started.elapsed().as_micros()).ok(),
+            collected: evidence_packet
+                .as_ref()
+                .map(FailedHotkeyCollectionCounts::observed),
+            omitted: None,
+            rejected_packet: evidence_packet.take(),
+            h15: h15_context,
+            packet_projection_truncated: false,
+        };
+        // Existing early no-packet fixtures have no measured context to retain.
+        // A completed rejected packet or the real H15 attempt always does.
+        let retained = if diagnostic.rejected_packet.is_some() || diagnostic.h15.is_some() {
+            failed_hotkey_diagnostic_bytes(&mut diagnostic)
+                .and_then(|bytes| persist_failed_hotkey_diagnostic(output, id, &bytes))
+                .map(Some)
+        } else {
+            Ok(None)
+        };
         result = Err(match result {
             Ok(observed) if id == "H04" => CaseFailure::new(
                 FailureStage::GestureDecision,
@@ -34836,6 +38200,21 @@ fn append_case(
                 CaseFailure::new(existing.stage, format!("{}; {error}", existing.message))
             }
         });
+        match retained {
+            Ok(Some(path)) => {
+                report.push_artifact(path.to_string_lossy());
+                artifacts.push(bounded_text(&path.to_string_lossy(), MAX_PATH_BYTES));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                if let Err(primary) = &mut result {
+                    primary
+                        .message
+                        .push_str("; unqualified diagnostic capture: ");
+                    primary.message.push_str(&bounded_text(&error, 512));
+                }
+            }
+        }
     }
     if let Some(packet) = evidence_packet.take() {
         if report.hotkey_evidence.len() >= super::super::MAX_HOTKEY_EVIDENCE_GESTURES {
@@ -34854,7 +38233,8 @@ fn append_case(
             {
                 Vec::new()
             } else {
-                save_failure_artifacts(id, child, output, trace_path)
+                precleanup_artifacts
+                    .unwrap_or_else(|| save_failure_artifacts(id, child, output, trace_path))
             };
             for path in saved {
                 report.push_artifact(path.to_string_lossy());
@@ -35185,6 +38565,11 @@ fn safe_trace_excerpt(trace: &str) -> String {
         .join("\n")
 }
 
+#[cfg(test)]
+pub(crate) fn controlled_stage_trace_fixture(raw: &str) -> String {
+    safe_trace_excerpt(raw)
+}
+
 fn retain_trace_segment<'a>(
     lines: impl Iterator<Item = &'a String>,
     byte_budget: usize,
@@ -35208,6 +38593,8 @@ fn retain_trace_segment<'a>(
 
 fn sanitize_trace_line(line: &str) -> Option<String> {
     const EVENT_NAMES: &[&str] = &[
+        "screen_draw_toolbar",
+        "screen_draw_restore_decision",
         "designer_callback",
         "designer_focus",
         "designer_pointer",
@@ -35226,6 +38613,7 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "runtime_radial_hover",
         "radial_query_resolution",
         "radial_query_dispatch",
+        "radial_dispatch_requested",
         "designer_mutation",
         "authoring",
         "hook_primary",
@@ -35269,6 +38657,74 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
         "trace_ready",
     ];
     const SAFE_FIELDS: &[&str] = &[
+        "sd_owner_revision",
+        "sd_owner_invocation_present",
+        "sd_owner_invocation",
+        "sd_owner_focus",
+        "sd_owner_visible",
+        "sd_root_present",
+        "sd_root_hwnd",
+        "sd_root_pid",
+        "sd_root_generation",
+        "sd_parking_present",
+        "sd_transaction_hwnd",
+        "sd_transaction_generation",
+        "sd_transaction_cycle",
+        "sd_transaction_state",
+        "sd_restore_cause",
+        "sd_recovery_intent",
+        "sd_recovery_admission",
+        "sd_recovery_epoch",
+        "sd_restore_generation",
+        "sd_restore_lifecycle",
+        "sd_parking_cycle",
+        "sd_restore_start_revision",
+        "sd_restore_current_revision",
+        "sd_restore_outcome",
+        "sd_client_height",
+        "sd_client_width",
+        "sd_frame",
+        "sd_generation",
+        "sd_hwnd",
+        "sd_label_bottom",
+        "sd_label_clip_bottom",
+        "sd_label_clip_left",
+        "sd_label_clip_right",
+        "sd_label_clip_top",
+        "sd_label_enabled",
+        "sd_label_fully_visible",
+        "sd_label_id",
+        "sd_label_left",
+        "sd_label_right",
+        "sd_label_role",
+        "sd_label_target",
+        "sd_label_top",
+        "sd_label_visible_bottom",
+        "sd_label_visible_left",
+        "sd_label_visible_right",
+        "sd_label_visible_top",
+        "sd_lifetime",
+        "sd_pid",
+        "sd_resume_bottom",
+        "sd_resume_clip_bottom",
+        "sd_resume_clip_left",
+        "sd_resume_clip_right",
+        "sd_resume_clip_top",
+        "sd_resume_enabled",
+        "sd_resume_fully_visible",
+        "sd_resume_id",
+        "sd_resume_left",
+        "sd_resume_present",
+        "sd_resume_right",
+        "sd_resume_role",
+        "sd_resume_target",
+        "sd_resume_top",
+        "sd_resume_visible_bottom",
+        "sd_resume_visible_left",
+        "sd_resume_visible_right",
+        "sd_resume_visible_top",
+        "sd_runtime",
+        "sd_state",
         "menu_digest",
         "catalog_count",
         "current_builtin",
@@ -35576,6 +39032,67 @@ fn sanitize_trace_line(line: &str) -> Option<String> {
 }
 
 fn safe_trace_field_value(key: &str, value: &str) -> bool {
+    // Only the explicit SAFE_FIELDS above reach this branch. New facts stay
+    // finite and numeric; arbitrary toolbar text never enters the excerpt.
+    if key.starts_with("sd_") {
+        return match key {
+            "sd_owner_focus" => matches!(value, "ActivateRoot" | "PreserveForeground"),
+            "sd_transaction_state" => {
+                matches!(value, "Active" | "Committed" | "Restored" | "None")
+            }
+            "sd_restore_cause" => matches!(
+                value,
+                "LauncherRecovery"
+                    | "EmergencyRecovery"
+                    | "CapturePoll"
+                    | "ParkingReconciliation"
+                    | "NewCapture"
+                    | "ResumeFailure"
+                    | "SessionClose"
+            ),
+            "sd_restore_outcome" => matches!(
+                value,
+                "Published" | "Duplicate" | "StaleIntent" | "Reconciled" | "Superseded" | "Error"
+            ),
+            "sd_recovery_intent"
+            | "sd_recovery_admission"
+            | "sd_recovery_epoch"
+            | "sd_restore_generation"
+            | "sd_restore_lifecycle"
+            | "sd_parking_cycle"
+            | "sd_restore_start_revision"
+            | "sd_restore_current_revision" => value.parse::<u64>().is_ok(),
+            "sd_state" | "sd_runtime" => matches!(value, "Drawing" | "Ghost" | "Finish" | "Other"),
+            "sd_label_target" | "sd_resume_target" => {
+                matches!(value, "StateLabel" | "ResumeDrawing")
+            }
+            "sd_label_role" | "sd_resume_role" => matches!(value, "Label" | "Button"),
+            "sd_resume_present"
+            | "sd_owner_invocation_present"
+            | "sd_owner_visible"
+            | "sd_root_present"
+            | "sd_parking_present"
+            | "sd_label_enabled"
+            | "sd_resume_enabled"
+            | "sd_label_fully_visible"
+            | "sd_resume_fully_visible" => matches!(value, "true" | "false"),
+            "sd_hwnd"
+            | "sd_generation"
+            | "sd_lifetime"
+            | "sd_frame"
+            | "sd_label_id"
+            | "sd_resume_id"
+            | "sd_owner_revision"
+            | "sd_owner_invocation"
+            | "sd_root_hwnd"
+            | "sd_root_generation"
+            | "sd_transaction_hwnd"
+            | "sd_transaction_generation"
+            | "sd_transaction_cycle" => value.parse::<u64>().is_ok(),
+            "sd_pid" | "sd_root_pid" => value.parse::<u32>().is_ok(),
+            _ => value.parse::<i32>().is_ok(),
+        };
+    }
     match key {
         "scroll_owner" => GateDControlScrollOwner::from_trace_label(value).is_some(),
         "scroll_id" | "frame_nr" => value.parse::<u64>().is_ok(),
@@ -35622,7 +39139,10 @@ fn safe_trace_field_value(key: &str, value: &str) -> bool {
         }
         "event_budget" | "reserved_event_budget" => value.parse::<u64>().is_ok(),
         "trace_budget_profile" => {
-            matches!(value, "default" | "gate_c_v1" | "gate_d_v1" | "gate_s_v1")
+            matches!(
+                value,
+                "default" | "all_v1" | "gate_c_v1" | "gate_d_v1" | "gate_s_v1"
+            )
         }
         "request_id" | "baseline_request_id" | "captured_trace_sequence" | "trace_sequence" => {
             value.parse::<u64>().is_ok()
@@ -35924,6 +39444,12 @@ fn capture_gate_c_designer_screenshot(
 }
 
 fn capture_window_screenshot(window: &WindowSnapshot, path: &Path) -> Result<(), String> {
+    capture_window_image(window)?
+        .save(path)
+        .map_err(|error| format!("save candidate-owned Designer screenshot: {error}"))
+}
+
+fn capture_window_image(window: &WindowSnapshot) -> Result<image::RgbaImage, String> {
     let displays = native_display_bounds()?;
     if !intersects_display_bounds(window.bounds, &displays) {
         return Err("screenshot HWND does not intersect a physical display".into());
@@ -35942,9 +39468,7 @@ fn capture_window_screenshot(window: &WindowSnapshot, path: &Path) -> Result<(),
     }
     screen
         .capture_area(left, top, (right - left) as u32, (bottom - top) as u32)
-        .map_err(|error| format!("capture candidate-owned Designer: {error}"))?
-        .save(path)
-        .map_err(|error| format!("save candidate-owned Designer screenshot: {error}"))
+        .map_err(|error| format!("capture candidate-owned Designer: {error}"))
 }
 
 #[derive(Serialize)]
@@ -36082,6 +39606,9 @@ fn expected(id: &str) -> &'static str {
         "H12" => {
             "runtime hold and tap dismiss only runtime radial while dirty Designer and native preview surfaces, session, and draft survive"
         }
+        "H15" => {
+            "normal Screen Draw entry owns one configured recovery chord without launcher/radial dispatch; the tool closes and the next normal launcher gesture works"
+        }
         "H16" => {
             "a direct-trigger binding opens runtime radial; native and supported legacy-route launcher taps each dismiss it and toggle ROOT without selection, while the binding remains usable"
         }
@@ -36106,6 +39633,9 @@ fn expected(id: &str) -> &'static str {
         }
         "Q11" => {
             "saved exact note command opens the real note editor through its launcher UI handoff"
+        }
+        "L08" => {
+            "real moved ROOT geometry survives a normal radial note-editor handoff; exact hide/show gestures then reapply configured placement"
         }
         "Q12" => {
             "explicit launcher command applies its requested launcher/query effect through the radial handoff"
@@ -36669,13 +40199,210 @@ fn attempt_cleanup_step(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DesignerSemanticTargetState {
     bounds: [i32; 4],
     selected: bool,
     focused: bool,
     session_id: u64,
     generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompletedDesignerSemanticSample {
+    state: DesignerSemanticTargetState,
+    frame: u64,
+    client: [i32; 4],
+    client_screen: [i32; 4],
+}
+
+fn completed_designer_semantic_sample(
+    lines: &[String],
+    first_line: usize,
+    target: DesignerSemanticTarget,
+    before: &GateDObservationEvidence,
+    client: [i32; 4],
+    client_screen: [i32; 4],
+) -> Result<Option<CompletedDesignerSemanticSample>, String> {
+    let marker = format!("target={target:?} ");
+    let Some((semantic_line, line)) = lines.iter().enumerate().rev().find(|(_, line)| {
+        line.contains("trace_event=\"designer_semantic_target\"") && line.contains(&marker)
+    }) else {
+        return Ok(None);
+    };
+    let state = parse_designer_semantic_target(line, target)
+        .ok_or("current Designer semantic target is malformed")?;
+    if state.session_id != before.session_id || state.generation != before.generation {
+        return Err("current Designer semantic target changed owner".into());
+    }
+    let latest = lines
+        .iter()
+        .enumerate()
+        .skip(first_line.max(semantic_line + 1))
+        .rev()
+        .find(|(_, line)| line.contains("trace_event=\"designer_authoring_scroll_viewport\""));
+    let Some((_, line)) = latest else {
+        return Ok(None);
+    };
+    let viewport = parse_authoring_scroll_viewport(line)
+        .ok_or("following Designer frame viewport is malformed")?;
+    let measured = viewport.measured;
+    if measured.session_id != before.session_id
+        || measured.generation != before.generation
+        || viewport.trace_sequence <= before.trace_sequence
+        || measured.client_size != [client[2] - client[0], client[3] - client[1]]
+    {
+        return Err("following Designer frame has stale ownership or client size".into());
+    }
+    designer_click_points(state.bounds, client, client_screen)?;
+    Ok(Some(CompletedDesignerSemanticSample {
+        state,
+        frame: measured.frame_nr,
+        client,
+        client_screen,
+    }))
+}
+
+fn wait_completed_designer_semantic_with(
+    timeout: Duration,
+    mut refresh: impl FnMut() -> Result<Option<CompletedDesignerSemanticSample>, CaseFailure>,
+    mut pause: impl FnMut(Duration),
+) -> Result<CompletedDesignerSemanticSample, CaseFailure> {
+    let deadline = Instant::now() + timeout;
+    let mut previous = None::<CompletedDesignerSemanticSample>;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(CaseFailure::new(FailureStage::DesignerReadiness,
+                "following completed Designer frames did not settle current native placement before input".into()));
+        }
+        if let Some(current) = refresh()? {
+            if let Some(prior) = previous {
+                if current.frame > prior.frame
+                    && current.state == prior.state
+                    && current.client == prior.client
+                    && current.client_screen == prior.client_screen
+                {
+                    return Ok(current);
+                }
+            }
+            previous = Some(current);
+        }
+        pause(WINDOW_POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn ready_designer_semantic_target(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    before: &GateDObservationEvidence,
+    target: DesignerSemanticTarget,
+    deadline: Instant,
+) -> Result<DesignerSemanticTargetState, CaseFailure> {
+    let first_line = trace_lines(trace_path).len();
+    wait_completed_designer_semantic_with(
+        deadline.saturating_duration_since(Instant::now()),
+        || {
+            let current = child.designer().ok_or_else(|| {
+                CaseFailure::new(
+                    FailureStage::DesignerNativeTarget,
+                    "Designer disappeared while waiting for its following frame".into(),
+                )
+            })?;
+            if !same_owned_designer(designer, &current, child.process_id()) {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerNativeTarget,
+                    "Designer identity changed before first input".into(),
+                ));
+            }
+            child
+                .request_designer_repaint(&current)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?;
+            let after = gate_d_live_observation(child, before.session_id)?;
+            if !gate_d_presentation_state_is_unchanged(before, &after) {
+                return Err(CaseFailure::new(
+                    FailureStage::DesignerReadiness,
+                    "Designer state changed during first-click readiness".into(),
+                ));
+            }
+            completed_designer_semantic_sample(
+                &trace_lines(trace_path),
+                first_line,
+                target,
+                before,
+                child
+                    .client_bounds(&current)
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?,
+                child
+                    .client_screen_bounds(&current)
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?,
+            )
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
+        },
+        std::thread::sleep,
+    )
+    .map(|sample| sample.state)
+}
+
+fn click_current_designer_semantic_target(
+    child: &NativeChild,
+    designer: &WindowSnapshot,
+    trace_path: &Path,
+    before: &GateDObservationEvidence,
+    target: DesignerSemanticTarget,
+    deadline: Instant,
+) -> Result<PointerClickEvidence, CaseFailure> {
+    click_designer_semantic_before_deadline_with(deadline, || {
+        let ready =
+            ready_designer_semantic_target(child, designer, trace_path, before, target, deadline)
+                .map_err(|error| PointerClickPreDownError::Input(error.message))?;
+        click_designer_client_bounds_before_deadline(
+            child,
+            designer,
+            ready.bounds,
+            trace_path,
+            deadline,
+            |_, _| {
+                let current = ready_designer_semantic_target(
+                    child, designer, trace_path, before, target, deadline,
+                )
+                .map_err(|error| PointerClickPreDownError::Input(error.message))?;
+                if current != ready {
+                    return Err(PointerClickPreDownError::Input("semantic owner changed during pointer preparation; no button-down was sent".into()));
+                }
+                Ok(())
+            },
+        )
+    })
+}
+
+fn click_designer_semantic_before_deadline_with<T>(
+    deadline: Instant,
+    mut attempt: impl FnMut() -> Result<T, PointerClickPreDownError>,
+) -> Result<T, CaseFailure> {
+    let mut stale = 0;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(CaseFailure::new(
+                FailureStage::DesignerReadiness,
+                "current Designer first-click deadline expired before input".into(),
+            ));
+        }
+        match attempt() {
+            Ok(click) => return Ok(click),
+            Err(PointerClickPreDownError::StaleGeometry(message)) => {
+                stale += 1;
+                if stale >= MAX_PRE_DOWN_GEOMETRY_REACQUISITIONS || Instant::now() >= deadline {
+                    return Err(CaseFailure::new(FailureStage::DesignerReadiness, message));
+                }
+                // Only a measured native tuple change reaches this branch. A
+                // disagreeing GUI receipt with unchanged placement is an error.
+            }
+            Err(PointerClickPreDownError::Input(message)) => {
+                return Err(CaseFailure::new(FailureStage::InputInjection, message));
+            }
+        }
+    }
 }
 
 fn parse_designer_semantic_target(
@@ -36877,12 +40604,6 @@ fn trace_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
     line.split_ascii_whitespace()
         .find_map(|part| part.strip_prefix(&format!("{field}=")))
         .map(|value| value.trim_matches('"'))
-}
-
-fn trace_line_is_executable_hover(line: &str) -> bool {
-    line.contains("trace_event=\"runtime_radial_hover\"")
-        && trace_field_value(line, "role") == Some("Action")
-        && trace_field_value(line, "executable") == Some("true")
 }
 
 fn hook_service_thread_id(path: &Path) -> Option<u32> {
@@ -37205,6 +40926,42 @@ fn wait_hotkey_fixture_ready(
         timeout.as_millis(),
         latest_root.map(|root| (root.visible, root.minimized, root.bounds))
     ))
+}
+
+fn all_trace_profile_is_ready(lines: &[String]) -> bool {
+    let mut receipts = lines
+        .iter()
+        .filter(|line| super::trace_static_enum_field(line, "trace_event") == Some("trace_ready"));
+    let Some(ready) = receipts.next() else {
+        return false;
+    };
+    receipts.next().is_none()
+        && super::trace_static_enum_field(ready, "trace_budget_profile") == Some("all_v1")
+        && trace_field(ready, "event_budget") == Some("81920")
+        && trace_field(ready, "reserved_event_budget") == Some("256")
+}
+
+fn wait_all_trace_budget_profile(trace_path: &Path, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let lines = trace_lines(trace_path);
+        if all_trace_profile_is_ready(&lines) {
+            return Ok(());
+        }
+        if let Some(ready) = lines
+            .iter()
+            .find(|line| super::trace_static_enum_field(line, "trace_event") == Some("trace_ready"))
+        {
+            return Err(format!(
+                "All child selected the wrong bounded trace profile: {}",
+                sanitize_trace_line(ready).unwrap_or_else(|| "unrecognized trace header".into())
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err("All child did not publish its bounded trace profile".into());
+        }
+        std::thread::sleep(WINDOW_POLL);
+    }
 }
 
 fn gate_c_trace_profile_is_ready(lines: &[String]) -> bool {
@@ -37637,6 +41394,1277 @@ fn bounded_text(text: &str, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_cell_digest;
+
+    fn action_tab_readiness_fixture() -> (AuthoringObservationEvidence, String, String) {
+        let mut before = authoring_observation_evidence(278, 4_128);
+        before.editor.session_id = 2;
+        before.editor.generation = 6;
+        before.editor.selected_target_digest = 2_222_147_650_851_502_751;
+        before.editor.action_editor = None;
+        let raw = |name, sequence, bounds: [i32; 4], selected| {
+            format!(
+                "WARN radial acceptance trace elapsed_ms=33437 trace_event=\"designer_action_editor_control\" editor_surface=\"properties\" editor_control=\"{name}\" control_index=-1 editor_session_id=2 draft_generation=6 stable_target_digest=2222147650851502751 editor_epoch=16 edit_generation=0 query_generation=0 query_request_generation=0 search_request_generation=0 test_request_generation=0 query_digest=101 editor_assigned_binding_digest=0 target_digest=0 title_digest=0 type_digest=0 disambiguator_digest=0 action_digest=0 binding_digest=0 value_digest=101 displayed_text_digest=0 trace_sequence={sequence} left_px={} top_px={} right_px={} bottom_px={} full_left_px={} full_top_px={} full_right_px={} full_bottom_px={} client_width_px=900 client_height_px=650 fully_visible=true enabled=true selected={selected} focused=false clicked=false changed=false enter_pressed=false visible=true",
+                bounds[0],
+                bounds[1],
+                bounds[2],
+                bounds[3],
+                bounds[0],
+                bounds[1],
+                bounds[2],
+                bounds[3],
+            )
+        };
+        (
+            before,
+            raw("query_tab", 4_132, [23, 115, 93, 133], true),
+            raw("query_field", 4_134, [23, 167, 323, 185], false),
+        )
+    }
+
+    #[test]
+    fn gate_c_action_tab_waits_for_following_editor_frame_without_extra_click() {
+        let (before, raw_tab, raw_field) = action_tab_readiness_fixture();
+        let click = "WARN radial acceptance trace elapsed_ms=33429 trace_event=\"designer_authoring_control\" target=\"ActionTypeOption\" clicked=true session_id=2 generation=6 trace_sequence=4131";
+        let click_time = trace_field(click, "elapsed_ms")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let tab_time = trace_field(&raw_tab, "elapsed_ms")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(tab_time - click_time, 8);
+        for arrives_during_click in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let trace_path = directory.path().join("trace.log");
+            let old_visit = raw_tab
+                .replace("trace_sequence=4132", "trace_sequence=4100")
+                .replace("editor_epoch=16", "editor_epoch=15");
+            fs::write(&trace_path, format!("{old_visit}\n")).unwrap();
+            let cursor = trace_lines(&trace_path).len();
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&trace_path)
+                .unwrap()
+                .write_all(format!("{click}\n").as_bytes())
+                .unwrap();
+            let publish = || {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&trace_path)
+                    .unwrap()
+                    .write_all(format!("{raw_tab}\n{raw_field}\n").as_bytes())
+                    .unwrap();
+            };
+            if arrives_during_click {
+                publish();
+            }
+            let repaints = Cell::new(0);
+            let waits = Cell::new(0);
+            let clicks = Cell::new(0);
+            let (tab, field) = gate_c_ensure_action_tab_with(
+                false,
+                Duration::from_millis(50),
+                |field, epoch, timeout| {
+                    gate_c_wait_repainted_action_control_with(
+                        [900, 650],
+                        timeout,
+                        || {
+                            repaints.set(repaints.get() + 1);
+                            Ok(())
+                        },
+                        || {
+                            gate_c_action_tab_controls(
+                                &action_editor_controls_after(&trace_path, cursor)?,
+                                &before,
+                                GateCSurface::Properties,
+                                false,
+                                field,
+                                epoch,
+                                [900, 650],
+                            )
+                        },
+                        |_| {
+                            waits.set(waits.get() + 1);
+                            publish();
+                        },
+                        &mut |control| control.enabled && (field || !control.clicked),
+                    )
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
+                },
+                |_, _| {
+                    clicks.set(clicks.get() + 1);
+                    panic!("selected Query must not be clicked")
+                },
+            )
+            .unwrap();
+            assert_eq!(tab.trace_sequence, 4_132);
+            assert_eq!(field.trace_sequence, 4_134);
+            assert_eq!(tab.identity, field.identity);
+            assert_eq!(field.identity.editor_epoch, 16);
+            assert_eq!(field.identity.session_id, 2);
+            assert_eq!(field.identity.draft_generation, 6);
+            assert_eq!(
+                field.identity.stable_target_digest,
+                before.editor.selected_target_digest
+            );
+            assert_eq!(field.full_bounds, [23, 167, 323, 185]);
+            assert!(tab.selected && field.enabled && field.fully_visible);
+            assert_eq!(clicks.get(), 0);
+            assert_eq!(waits.get(), usize::from(!arrives_during_click));
+            assert_eq!(repaints.get(), if arrives_during_click { 2 } else { 3 });
+        }
+    }
+
+    #[test]
+    fn gate_c_action_tab_rejects_stale_wrong_owner_or_clipped_receipts_without_input() {
+        let (before, raw_tab, raw_field) = action_tab_readiness_fixture();
+        let tab = super::super::parse_action_editor_control(&raw_tab).unwrap();
+        let field = super::super::parse_action_editor_control(&raw_field).unwrap();
+        let mut cases = Vec::new();
+        cases.push(("missing", Vec::new()));
+        let mut stale = tab.clone();
+        stale.trace_sequence = before.trace_boundary_sequence;
+        cases.push(("pre-transition tab", vec![stale, field.clone()]));
+        for owner in ["session", "generation", "target", "surface"] {
+            let mut wrong = tab.clone();
+            match owner {
+                "session" => wrong.identity.session_id += 1,
+                "generation" => wrong.identity.draft_generation += 1,
+                "target" => wrong.identity.stable_target_digest += 1,
+                "surface" => wrong.identity.surface = ActionEditorSurface::Inspector,
+                _ => unreachable!(),
+            }
+            cases.push((owner, vec![wrong, field.clone()]));
+        }
+        for mismatch in [
+            "epoch",
+            "request",
+            "field order",
+            "client",
+            "clip",
+            "disabled",
+        ] {
+            let mut wrong = field.clone();
+            match mismatch {
+                "epoch" => wrong.identity.editor_epoch += 1,
+                "request" => wrong.identity.query_request_generation += 1,
+                "field order" => wrong.trace_sequence = tab.trace_sequence,
+                "client" => wrong.client_size[0] += 1,
+                "clip" => {
+                    wrong.bounds[3] -= 1;
+                    wrong.fully_visible = false;
+                }
+                "disabled" => wrong.enabled = false,
+                _ => unreachable!(),
+            }
+            cases.push((mismatch, vec![tab.clone(), wrong]));
+        }
+        let mut replacement = tab.clone();
+        replacement.trace_sequence = 4_135;
+        replacement.identity.stable_target_digest += 1;
+        cases.push((
+            "latest owner replaces valid older receipt",
+            vec![tab.clone(), field.clone(), replacement],
+        ));
+        for (name, controls) in cases {
+            let clicks = Cell::new(0);
+            let result = gate_c_ensure_action_tab_with(
+                false,
+                Duration::ZERO,
+                |field, epoch, timeout| {
+                    gate_c_wait_repainted_action_control_with(
+                        [900, 650],
+                        timeout,
+                        || Ok(()),
+                        || {
+                            gate_c_action_tab_controls(
+                                &controls,
+                                &before,
+                                GateCSurface::Properties,
+                                false,
+                                field,
+                                epoch,
+                                [900, 650],
+                            )
+                        },
+                        |_| panic!("zero-duration readiness must not wait"),
+                        &mut |control| control.enabled && (field || !control.clicked),
+                    )
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
+                },
+                |_, _| {
+                    clicks.set(clicks.get() + 1);
+                    panic!("invalid owner must not click")
+                },
+            );
+            assert!(result.is_err(), "{name}");
+            assert_eq!(clicks.get(), 0, "{name}");
+        }
+        let mut unselected = tab;
+        unselected.selected = false;
+        let clicks = Cell::new(0);
+        assert!(
+            gate_c_ensure_action_tab_with(
+                false,
+                Duration::ZERO,
+                |_, _, _| Ok(unselected.clone()),
+                |_, _| {
+                    clicks.set(clicks.get() + 1);
+                    Ok(unselected.clone())
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(clicks.get(), 0);
+    }
+
+    #[test]
+    fn gate_c_action_tab_switches_once_and_waits_for_its_selected_current_field() {
+        let (before, raw_tab, raw_field) = action_tab_readiness_fixture();
+        for advanced in [false, true] {
+            let tab_name = if advanced {
+                "advanced_tab"
+            } else {
+                "query_tab"
+            };
+            let field_name = if advanced {
+                "exact_command_field"
+            } else {
+                "query_field"
+            };
+            let tab = super::super::parse_action_editor_control(
+                &raw_tab
+                    .replace("query_tab", tab_name)
+                    .replace("selected=true", "selected=false"),
+            )
+            .unwrap();
+            let clicked = super::super::parse_action_editor_control(
+                &raw_tab
+                    .replace("query_tab", tab_name)
+                    .replace("trace_sequence=4132", "trace_sequence=4136")
+                    .replace("clicked=false", "clicked=true"),
+            )
+            .unwrap();
+            let field = super::super::parse_action_editor_control(
+                &raw_field
+                    .replace("query_field", field_name)
+                    .replace("trace_sequence=4134", "trace_sequence=4138"),
+            )
+            .unwrap();
+            let clicks = Cell::new(0);
+            let field_reads = Cell::new(0);
+            let (selected, ready) = gate_c_ensure_action_tab_with(
+                advanced,
+                Duration::from_millis(50),
+                |needs_field, epoch, timeout| {
+                    gate_c_wait_repainted_action_control_with(
+                        [900, 650],
+                        timeout,
+                        || Ok(()),
+                        || {
+                            let controls = if needs_field {
+                                assert_eq!(clicks.get(), 1);
+                                field_reads.set(field_reads.get() + 1);
+                                if field_reads.get() == 1 {
+                                    vec![clicked.clone()]
+                                } else {
+                                    vec![clicked.clone(), field.clone()]
+                                }
+                            } else {
+                                vec![tab.clone()]
+                            };
+                            gate_c_action_tab_controls(
+                                &controls,
+                                &before,
+                                GateCSurface::Properties,
+                                advanced,
+                                needs_field,
+                                epoch,
+                                [900, 650],
+                            )
+                        },
+                        |_| {},
+                        &mut |control| control.enabled && (needs_field || !control.clicked),
+                    )
+                    .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
+                },
+                |current, _| {
+                    assert_eq!(current, tab);
+                    clicks.set(clicks.get() + 1);
+                    Ok(clicked.clone())
+                },
+            )
+            .unwrap();
+            assert_eq!(clicks.get(), 1);
+            assert_eq!(field_reads.get(), 2);
+            assert_eq!(selected, clicked);
+            assert_eq!(ready, field);
+            assert!(selected.clicked && selected.selected);
+        }
+    }
+
+    #[test]
+    fn first_designer_click_requires_following_completed_frames_and_current_native_tuple() {
+        let (_, _, mut before) = moving_menu_row_fixture();
+        before.session_id = 2;
+        before.generation = 2;
+        before.trace_sequence = 70;
+        let client = [0, 0, 900, 650];
+        let semantic = "trace_event=\"designer_semantic_target\" target=Menus role=\"SelectableLabel\" viewport=Deferred left_px=244 top_px=89 right_px=289 bottom_px=107 selected=false focused=false session_id=2 generation=2".to_owned();
+        let frame = |ordinal, sequence| {
+            format!(
+                "trace_event=\"designer_authoring_scroll_viewport\" viewport=Deferred scroll_owner=\"Resources\" scroll_id=31 frame_nr={ordinal} session_id=2 generation=2 input_left_px=3 input_top_px=110 input_right_px=896 input_bottom_px=642 clip_left_px=0 clip_top_px=107 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence={sequence}"
+            )
+        };
+        assert!(
+            completed_designer_semantic_sample(
+                &[semantic.clone(), frame(0, 71)],
+                2,
+                DesignerSemanticTarget::Menus,
+                &before,
+                client,
+                [104, 104, 1004, 754]
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut attempts = [
+            (1, [104, 104, 1004, 754]),
+            (2, [130, 130, 1030, 780]),
+            (3, [130, 130, 1030, 780]),
+        ]
+        .into_iter();
+        let ready = wait_completed_designer_semantic_with(
+            Duration::from_secs(1),
+            || {
+                let (ordinal, screen) = attempts.next().unwrap();
+                completed_designer_semantic_sample(
+                    &[semantic.clone(), frame(ordinal, 80 + ordinal)],
+                    1,
+                    DesignerSemanticTarget::Menus,
+                    &before,
+                    client,
+                    screen,
+                )
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(ready.frame, 3);
+        assert_eq!(ready.client_screen, [130, 130, 1030, 780]);
+        assert_eq!(ready.state.bounds, [244, 89, 289, 107]);
+        for replacement in [
+            frame(4, 84).replace("session_id=2", "session_id=3"),
+            frame(4, 84).replace("generation=2", "generation=3"),
+            frame(4, 84).replace("client_width_px=900", "client_width_px=901"),
+            frame(4, 84).replace("trace_sequence=84", "trace_sequence=70"),
+            frame(4, 84).replace("frame_nr=4", "frame_nr=bad"),
+        ] {
+            assert!(
+                completed_designer_semantic_sample(
+                    &[semantic.clone(), replacement],
+                    1,
+                    DesignerSemanticTarget::Menus,
+                    &before,
+                    client,
+                    ready.client_screen
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            wait_completed_designer_semantic_with(
+                Duration::ZERO,
+                || panic!("expired readiness cannot advance to input"),
+                |_| {}
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn first_designer_click_reacquires_only_measured_predown_drift_within_existing_bound() {
+        let client = [0, 0, 900, 650];
+        let initial = [104, 104, 1004, 754];
+        let current = [130, 130, 1030, 780];
+        let attempts = Cell::new(0);
+        let downs = Cell::new(0);
+        click_designer_semantic_before_deadline_with(Instant::now() + UIA_TIMEOUT, || {
+            let attempt = attempts.get();
+            attempts.set(attempt + 1);
+            dispatch_pointer_down_after_preflight(
+                || {
+                    validate_designer_click_geometry(
+                        Some((client, if attempt == 0 { initial } else { current })),
+                        client,
+                        current,
+                    )
+                },
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            )
+        })
+        .unwrap();
+        assert_eq!((attempts.get(), downs.get()), (2, 1));
+        let input_attempts = Cell::new(0);
+        assert!(
+            click_designer_semantic_before_deadline_with::<()>(
+                Instant::now() + UIA_TIMEOUT,
+                || {
+                    input_attempts.set(input_attempts.get() + 1);
+                    Err(PointerClickPreDownError::Input(
+                        "unchanged physical tuple, wrong GUI receipt".into(),
+                    ))
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(input_attempts.get(), 1);
+        let stale_attempts = Cell::new(0);
+        assert!(
+            click_designer_semantic_before_deadline_with::<()>(
+                Instant::now() + UIA_TIMEOUT,
+                || {
+                    stale_attempts.set(stale_attempts.get() + 1);
+                    validate_designer_click_geometry(Some((client, initial)), client, current)
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(stale_attempts.get(), MAX_PRE_DOWN_GEOMETRY_REACQUISITIONS);
+        assert!(
+            click_designer_semantic_before_deadline_with::<()>(Instant::now(), || panic!(
+                "expired input"
+            ))
+            .is_err()
+        );
+    }
+
+    fn nested_skin_glow_frame(
+        frame: u64,
+        sequence: u64,
+        top: i32,
+        glow: bool,
+    ) -> (AuthoringControlSnapshot, Vec<AuthoringControlSnapshot>) {
+        let mut lines = vec![
+            format!(
+                "trace_event=\"designer_authoring_control\" target=SkinRow role=\"Button\" viewport=Deferred control_index=0 left_px=130 top_px={top} right_px=242 bottom_px={} clip_left_px=0 clip_top_px=107 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence={sequence} frame_nr={frame} enabled=true selected=true focused=false clicked=false session_id=2 generation=2 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1",
+                top + 18
+            ),
+            format!(
+                "trace_event=\"designer_authoring_scroll_viewport\" viewport=Deferred scroll_owner=\"Resources\" scroll_id=31 frame_nr={frame} session_id=2 generation=2 input_left_px=3 input_top_px=110 input_right_px=896 input_bottom_px=642 clip_left_px=0 clip_top_px=107 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence={}",
+                sequence + 1
+            ),
+        ];
+        if glow {
+            lines.push(format!("trace_event=\"designer_authoring_control\" target=SkinGlowEnabled role=\"Checkbox\" viewport=Deferred control_index=7 left_px=268 top_px=420 right_px=286 bottom_px=438 clip_left_px=8 clip_top_px=390 clip_right_px=880 clip_bottom_px=630 client_width_px=900 client_height_px=650 trace_sequence={} frame_nr={frame} enabled=true selected=false focused=false clicked=false session_id=2 generation=2 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1", sequence + 2));
+        }
+        let controls = latest_authoring_controls_after(&lines, 0, 2);
+        (
+            *controls
+                .iter()
+                .find(|control| control.target == AuthoringControlTarget::SkinRow)
+                .unwrap(),
+            controls,
+        )
+    }
+
+    #[test]
+    fn outer_resources_scroll_exposes_actual_nested_glow_without_borrowing_its_owner() {
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: 70,
+            session_id: 2,
+            generation: 2,
+            client_size: [900, 650],
+        };
+        let mut samples = [
+            (3, 80, 623, false),
+            (4, 90, 473, false),
+            (5, 100, 323, true),
+        ]
+        .into_iter();
+        let scrolls = Cell::new(0);
+        let glow = expose_skin_glow_with(
+            boundary,
+            Instant::now() + UIA_TIMEOUT,
+            || {
+                let (frame, sequence, top, glow) = samples.next().unwrap();
+                Ok(nested_skin_glow_frame(frame, sequence, top, glow))
+            },
+            |anchor, bounds, delta| {
+                assert_eq!(anchor.target, AuthoringControlTarget::SkinRow);
+                assert_eq!(bounds, [4, 111, 5, 112]);
+                assert_eq!(delta, -120);
+                scrolls.set(scrolls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(scrolls.get(), 2);
+        assert_eq!(glow.bounds, [268, 420, 286, 438]);
+        assert_eq!(glow.clip_bounds, Some([8, 390, 880, 630]));
+        assert_eq!(glow.scroll_viewport, None);
+        assert_eq!(gate_d_control_scroll_owner(&glow), None);
+        assert_eq!(glow.index, Some(7));
+        assert!(
+            gate_d_ready_control_step(&glow, boundary, glow.target, glow.index, glow.role, None)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn outer_resources_glow_scroll_sizes_measured_distance_and_keeps_unpublished_steps_small() {
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: 70,
+            session_id: 2,
+            generation: 2,
+            client_size: [900, 650],
+        };
+        let (anchor, controls) = nested_skin_glow_frame(3, 80, 623, false);
+        assert_eq!(
+            skin_glow_resources_step(&anchor, &controls, boundary).unwrap(),
+            Err(([4, 111, 5, 112], -120)),
+            "an unpublished nested widget supplies no measured target distance"
+        );
+        let mut samples = [(4, 90, 473, 972), (5, 100, 323, 637), (6, 110, 273, 420)].into_iter();
+        let mut deltas = Vec::new();
+        let glow = expose_skin_glow_with(
+            boundary,
+            Instant::now() + UIA_TIMEOUT,
+            || {
+                let (frame, sequence, top, glow_top) = samples.next().unwrap();
+                let (anchor, mut controls) = nested_skin_glow_frame(frame, sequence, top, true);
+                let glow = controls
+                    .iter_mut()
+                    .find(|control| control.target == AuthoringControlTarget::SkinGlowEnabled)
+                    .unwrap();
+                glow.bounds = [268, glow_top, 286, glow_top + 18];
+                Ok((anchor, controls))
+            },
+            |anchor, bounds, delta| {
+                assert_eq!(anchor.target, AuthoringControlTarget::SkinRow);
+                assert_eq!(bounds, [4, 111, 5, 112]);
+                assert_eq!(
+                    anchor.scroll_viewport.unwrap().measured.owner,
+                    GateDControlScrollOwner::Resources
+                );
+                deltas.push(delta);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(deltas, [-360, -120]);
+        assert!(samples.next().is_none());
+        assert_eq!(glow.bounds, [268, 420, 286, 438]);
+        assert_eq!(glow.scroll_viewport, None);
+        assert_eq!(gate_d_control_scroll_owner(&glow), None);
+        assert_eq!(glow.frame_nr, Some(6));
+    }
+
+    #[test]
+    fn outer_resources_glow_exposure_rejects_stale_owners_missing_progress_and_timeout() {
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: 70,
+            session_id: 2,
+            generation: 2,
+            client_size: [900, 650],
+        };
+        let (anchor, controls) = nested_skin_glow_frame(3, 80, 623, false);
+        for corrupt in [0, 1, 2, 3] {
+            let mut stale = anchor;
+            match corrupt {
+                0 => stale.session_id += 1,
+                1 => stale.generation += 1,
+                2 => stale.selected = false,
+                _ => stale.scroll_viewport = None,
+            }
+            assert!(skin_glow_resources_step(&stale, &controls, boundary).is_err());
+        }
+        let calls = Cell::new(0);
+        assert!(
+            expose_skin_glow_with(
+                boundary,
+                Instant::now() + UIA_TIMEOUT,
+                || Ok((anchor, controls.clone())),
+                |_, _, _| {
+                    calls.set(calls.get() + 1);
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(
+            expose_skin_glow_with(
+                boundary,
+                Instant::now(),
+                || panic!("expired observation"),
+                |_, _, _| panic!("expired wheel")
+            )
+            .is_err()
+        );
+        let (anchor, mut controls) = nested_skin_glow_frame(4, 90, 473, true);
+        controls
+            .iter_mut()
+            .find(|control| control.target == AuthoringControlTarget::SkinGlowEnabled)
+            .unwrap()
+            .generation += 1;
+        assert!(skin_glow_resources_step(&anchor, &controls, boundary).is_err());
+    }
+
+    fn retained_burst_report_fixture(
+        hotkey: AcceptanceHotkey,
+        taps: usize,
+        setup: bool,
+    ) -> HotkeyBurstEvidence {
+        let events = crate::tests::synthetic_hotkey_burst(taps, true);
+        let keys = expected_hotkey_edges(hotkey, 1).len() / 2;
+        let trace_fence = HotkeyTraceFence {
+            cursor: 29,
+            probe_id: 7,
+            baseline_invocation_id: Some(99),
+            baseline_visibility_revision: Some(0),
+        };
+        HotkeyBurstEvidence {
+            final_visible: taps % 2 == 0,
+            invocation_ids: (100..100 + taps as u64).collect(),
+            exact_key_edges: expected_hotkey_edges(hotkey, taps),
+            input_group_id: 4,
+            hold_min_ms: 25,
+            hold_max_ms: 26,
+            gap_min_ms: 25,
+            gap_max_ms: 26,
+            preflight_quiet_ms: None,
+            preflight_matching_edges: 0,
+            foreign_matching_edges: 0,
+            trace_fence,
+            report_facts: retain_hotkey_burst_report_facts(
+                &events,
+                taps,
+                true,
+                trace_fence,
+                setup.then_some((keys, keys)),
+                AcceptanceHotkeyBurstEvidence {
+                    down_inserted: taps * keys,
+                    up_inserted: taps * keys,
+                    input_desktop: "thread=Default;active=Default".into(),
+                    cleanup: "no_owned_keydowns_remain;async_state_clear".into(),
+                },
+            )
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn all_burst_production_formatter_retains_actual_h7_h8_fields_through_report_readback() {
+        for hotkey in [AcceptanceHotkey::F11, AcceptanceHotkey::ShiftAltWinEnd] {
+            for (id, taps, setup) in [("H7", 3, false), ("H8", 4, true)] {
+                let evidence = retained_burst_report_fixture(hotkey, taps, setup);
+                let observed = format_hotkey_burst_case_evidence(hotkey, taps, &evidence).unwrap();
+                assert!(observed.len() < MAX_RESULT_BYTES);
+                assert_eq!(
+                    crate::report_evidence_value(&observed, "setup_tap="),
+                    Some(if setup {
+                        "separate_before_burst"
+                    } else {
+                        "none"
+                    })
+                );
+                assert!(
+                    crate::validate_required_case_evidence(id, CaseStatus::Passed, &observed)
+                        .is_ok()
+                );
+                let mut report = crate::tests::acceptance_report("real");
+                report.hotkey = hotkey;
+                append_case_without_artifacts(&mut report, id, Ok(observed.clone()));
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("report.json");
+                crate::write_report(&path, &mut report).unwrap();
+                let stored: serde_json::Value =
+                    serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                let readback = stored["cases"][0]["observed"].as_str().unwrap();
+                assert_eq!(readback, observed);
+                assert!(
+                    crate::validate_required_case_evidence(id, CaseStatus::Passed, readback)
+                        .is_ok()
+                );
+                for key in [
+                    "parity=",
+                    "hook_pairs=",
+                    "configured_pairs=",
+                    "short_taps=",
+                    "visibility_edges=",
+                    "inter_tap_ui_poll=",
+                    "inter_tap_refocus=",
+                    "preflight=",
+                    "runner_observer=",
+                    "observer_order=",
+                    "observer_keys=",
+                    "sendinput_down=",
+                    "sendinput_up=",
+                    "invocation_count=",
+                    "setup_tap=",
+                    "input_desktop=",
+                ] {
+                    let missing = observed
+                        .split(';')
+                        .filter(|part| !part.trim().starts_with(key))
+                        .collect::<Vec<_>>()
+                        .join(";");
+                    assert!(
+                        crate::validate_required_case_evidence(id, CaseStatus::Passed, &missing)
+                            .is_err(),
+                        "{id} accepted missing {key}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_burst_formatter_rejects_unverified_counts_order_setup_and_desktop() {
+        for corrupt in [0, 1, 2, 3, 4] {
+            let mut evidence = retained_burst_report_fixture(AcceptanceHotkey::F11, 4, true);
+            match corrupt {
+                0 => evidence.report_facts.hook_pairs -= 1,
+                1 => evidence.report_facts.injection.up_inserted -= 1,
+                2 => evidence.report_facts.setup_insertions = Some((1, 0)),
+                3 => evidence.exact_key_edges.swap(0, 1),
+                _ => {
+                    evidence.report_facts.injection.input_desktop =
+                        "thread=Default;active=Other".into()
+                }
+            }
+            assert!(
+                format_hotkey_burst_case_evidence(AcceptanceHotkey::F11, 4, &evidence).is_err()
+            );
+        }
+    }
+
+    fn query_notes_dialog_observation() -> QueryNotesDialogObservation<u32> {
+        QueryNotesDialogObservation {
+            root: root_snapshot(42, 202, true, false, [240, 180, 1156, 869]),
+            client_bounds: [248, 211, 1148, 861],
+            buttons: [
+                Some(([400, 320, 500, 340], true)),
+                Some(([510, 320, 690, 340], true)),
+                Some(([700, 320, 760, 340], true)),
+            ],
+            close: Some(3),
+        }
+    }
+
+    #[test]
+    fn query_notes_dialog_cleanup_clicks_once_and_observes_all_controls_absent() {
+        let expected = query_notes_dialog_observation().root;
+        let mut pending = query_notes_dialog_observation();
+        pending.buttons[1] = None;
+        let mut disabled = query_notes_dialog_observation();
+        disabled.buttons = disabled
+            .buttons
+            .map(|button| button.map(|(bounds, _)| (bounds, false)));
+        let mut partial = query_notes_dialog_observation();
+        partial.buttons[0] = None;
+        partial.buttons[1] = None;
+        let mut absent = query_notes_dialog_observation();
+        absent.buttons = [None; 3];
+        absent.close = None;
+        let mut observations = std::collections::VecDeque::from([
+            pending,
+            query_notes_dialog_observation(),
+            query_notes_dialog_observation(),
+            disabled,
+            partial,
+            absent,
+        ]);
+        let clock = Cell::new(Duration::ZERO);
+        let clicks = Cell::new(0);
+        let reads = Cell::new(0);
+        close_query_notes_dialog_with(
+            &expected,
+            UIA_TIMEOUT,
+            || {
+                reads.set(reads.get() + 1);
+                Ok(observations
+                    .pop_front()
+                    .expect("bounded dialog observation"))
+            },
+            |root, close| {
+                assert_eq!(
+                    (hwnd_id(root.hwnd), root.process_id, root.bounds),
+                    (42, 202, expected.bounds)
+                );
+                assert_eq!(*close, 3);
+                assert_eq!(reads.get(), 3, "full context was freshly reacquired");
+                clicks.set(clicks.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            || clock.set(clock.get() + WINDOW_POLL),
+        )
+        .unwrap();
+        assert_eq!((clicks.get(), reads.get()), (1, 6));
+        assert!(observations.is_empty());
+        assert_eq!(clock.get(), WINDOW_POLL * 3);
+    }
+
+    #[test]
+    fn query_notes_dialog_cleanup_refuses_missing_context_ineligible_controls_and_wrong_owner() {
+        for mutation in 0..10 {
+            let expected = query_notes_dialog_observation().root;
+            let clock = Cell::new(Duration::ZERO);
+            let error = close_query_notes_dialog_with(
+                &expected,
+                UIA_TIMEOUT,
+                || {
+                    let mut observed = query_notes_dialog_observation();
+                    match mutation {
+                        0 => observed.buttons[0] = None,
+                        1 => observed.buttons[1] = None,
+                        2 => observed.buttons[2] = None,
+                        3 => observed.buttons[2].as_mut().unwrap().1 = false,
+                        4 => observed.root.hwnd = HWND(43usize as *mut _),
+                        5 => observed.root.process_id = 203,
+                        6 => observed.root.role = WindowRole::Designer,
+                        7 => observed.root.visible = false,
+                        8 => observed.root.minimized = true,
+                        9 => observed.buttons[2] = Some(([1102, 181, 1149, 211], true)),
+                        _ => unreachable!(),
+                    }
+                    Ok(observed)
+                },
+                |_, _| panic!("ineligible dialog context must not receive input: {mutation}"),
+                || clock.get(),
+                || clock.set(UIA_TIMEOUT),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error.stage,
+                FailureStage::WindowDiscovery | FailureStage::NativeRootState
+            ));
+        }
+    }
+
+    #[test]
+    fn query_notes_dialog_cleanup_refuses_changed_context_before_its_one_click() {
+        for mutation in 0..5 {
+            let expected = query_notes_dialog_observation().root;
+            let reads = Cell::new(0);
+            let error = close_query_notes_dialog_with(
+                &expected,
+                UIA_TIMEOUT,
+                || {
+                    let mut observed = query_notes_dialog_observation();
+                    if reads.get() == 1 {
+                        match mutation {
+                            0 => observed.buttons[2].as_mut().unwrap().0[0] += 1,
+                            1 => observed.buttons[1] = None,
+                            2 => observed.client_bounds[0] += 1,
+                            3 => observed.root.bounds[0] += 1,
+                            4 => observed.close = None,
+                            _ => unreachable!(),
+                        }
+                    }
+                    reads.set(reads.get() + 1);
+                    Ok(observed)
+                },
+                |_, _| panic!("changed dialog context must not receive input: {mutation}"),
+                || Duration::ZERO,
+                || panic!("a ready dialog needs no polling before revalidation"),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error.stage,
+                FailureStage::WindowDiscovery | FailureStage::NativeRootState
+            ));
+            assert_eq!(reads.get(), 2);
+        }
+    }
+
+    #[test]
+    fn query_notes_dialog_cleanup_propagates_click_failure_and_times_out_without_reclicking() {
+        for click_fails in [false, true] {
+            let expected = query_notes_dialog_observation().root;
+            let clock = Cell::new(Duration::ZERO);
+            let clicks = Cell::new(0);
+            let reads = Cell::new(0);
+            let error = close_query_notes_dialog_with(
+                &expected,
+                UIA_TIMEOUT,
+                || {
+                    reads.set(reads.get() + 1);
+                    Ok(query_notes_dialog_observation())
+                },
+                |_, _| {
+                    clicks.set(clicks.get() + 1);
+                    if click_fails {
+                        Err(CaseFailure::new(
+                            FailureStage::InputInjection,
+                            "actual click failed".into(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || clock.get(),
+                || clock.set(UIA_TIMEOUT),
+            )
+            .unwrap_err();
+            assert_eq!(clicks.get(), 1);
+            if click_fails {
+                assert_eq!(error.stage, FailureStage::InputInjection);
+                assert_eq!(error.message, "actual click failed");
+                assert_eq!(reads.get(), 2);
+            } else {
+                assert_eq!(error.stage, FailureStage::WindowDiscovery);
+                assert!(
+                    error
+                        .message
+                        .contains("remained after its one client Close click")
+                );
+                assert_eq!(reads.get(), 3);
+            }
+        }
+        let expected = query_notes_dialog_observation().root;
+        assert!(
+            close_query_notes_dialog_with::<u32>(
+                &expected,
+                Duration::ZERO,
+                || panic!("expired operation must not look up a control"),
+                |_, _| panic!("expired operation must not send input"),
+                || Duration::ZERO,
+                || panic!("expired operation must not poll"),
+            )
+            .is_err()
+        );
+    }
+
+    fn note_close_wire_fixture() -> (NoteCloseGuiRequest, NoteCloseGuiResponse) {
+        let request = NoteCloseGuiRequest {
+            schema_version: 1,
+            fixture: NoteCloseFixture::Q11,
+            request_id: 19,
+            run_nonce: [71, 73],
+            expected_hwnd: 42,
+            expected_pid: 202,
+            expected_generation: Some(3),
+            after_frame_ordinal: 9,
+        };
+        let response = NoteCloseGuiResponse {
+            schema_version: 1,
+            fixture: NoteCloseFixture::Q11,
+            request_id: 19,
+            run_nonce: request.run_nonce,
+            status: NoteCloseGuiStatus::Captured,
+            error: None,
+            observed_frame_ordinal: 10,
+            root: Some(NoteCloseGuiRoot {
+                hwnd: 42,
+                process_id: 202,
+                generation: 3,
+            }),
+            snapshot: Some(NoteCloseGuiSnapshot {
+                client_size: [900, 650],
+                open_note_count: 1,
+                sole_note: Some(NoteCloseGuiNote {
+                    slug_digest: query_cell_digest("radial-acceptance-q11"),
+                    fixture_slug: true,
+                    fixture_marker: true,
+                    pending_discard: true,
+                    rendered_discard: Some(NoteCloseGuiDiscard {
+                        owner_slug_digest: query_cell_digest("radial-acceptance-q11"),
+                        widget_id: 9,
+                        role: NoteCloseGuiWidgetRole::DiscardChanges,
+                        enabled: true,
+                        visible: true,
+                        fully_visible: true,
+                        bounds: [40, 100, 170, 120],
+                        clip: [0, 0, 900, 650],
+                    }),
+                }),
+            }),
+        };
+        (request, response)
+    }
+
+    #[test]
+    fn l08_note_close_wire_requires_exact_fresh_frame_root_nonce_and_finite_schema() {
+        let (request, response) = note_close_wire_fixture();
+        let bytes = serde_json::to_vec(&response).unwrap();
+        let parsed: NoteCloseGuiResponse = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed, response);
+        validate_note_close_gui_response(&request, &parsed).unwrap();
+        let mut discovery = request.clone();
+        discovery.expected_generation = None;
+        validate_note_close_gui_response(&discovery, &parsed).unwrap();
+        let mut missing_lifetime = serde_json::to_value(&discovery).unwrap();
+        missing_lifetime
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_generation");
+        assert!(serde_json::from_value::<NoteCloseGuiRequest>(missing_lifetime).is_err());
+        for field in ["error", "root", "snapshot"] {
+            let mut missing = serde_json::to_value(&response).unwrap();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<NoteCloseGuiResponse>(missing).is_err(),
+                "missing {field}"
+            );
+        }
+        for field in ["sole_note", "rendered_discard"] {
+            let mut missing = serde_json::to_value(&response).unwrap();
+            let object = if field == "sole_note" {
+                &mut missing["snapshot"]
+            } else {
+                &mut missing["snapshot"]["sole_note"]
+            };
+            object.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<NoteCloseGuiResponse>(missing).is_err(),
+                "missing {field}"
+            );
+        }
+        for path in [
+            "nonce",
+            "request",
+            "frame",
+            "hwnd",
+            "pid",
+            "generation",
+            "zero_generation",
+            "client",
+            "count",
+            "status",
+        ] {
+            let mut wrong = response.clone();
+            match path {
+                "nonce" => wrong.run_nonce[1] ^= 1,
+                "request" => wrong.request_id += 1,
+                "frame" => wrong.observed_frame_ordinal = request.after_frame_ordinal,
+                "hwnd" => wrong.root.as_mut().unwrap().hwnd += 1,
+                "pid" => wrong.root.as_mut().unwrap().process_id += 1,
+                "generation" => wrong.root.as_mut().unwrap().generation += 1,
+                "zero_generation" => wrong.root.as_mut().unwrap().generation = 0,
+                "client" => wrong.snapshot.as_mut().unwrap().client_size[0] = 0,
+                "count" => wrong.snapshot.as_mut().unwrap().open_note_count = 2,
+                "status" => wrong.status = NoteCloseGuiStatus::Failed,
+                _ => unreachable!(),
+            }
+            let decoded: NoteCloseGuiResponse =
+                serde_json::from_slice(&serde_json::to_vec(&wrong).unwrap()).unwrap();
+            assert!(
+                validate_note_close_gui_response(&request, &decoded).is_err(),
+                "{path}"
+            );
+        }
+        let text = String::from_utf8(bytes).unwrap();
+        for invalid in [
+            text.replace("\"q11\"", "\"other_note\""),
+            text.replace("\"discard_changes\"", "\"save_note\""),
+            text.replace("\"process_id\":202", "\"process_id\":4294967296"),
+            text.replace("\"generation\":3", "\"generation\":18446744073709551616"),
+            text.replace("\"generation\":3", "\"generation\":-1"),
+            text.replace("\"generation\":3", "\"generation\":3.5"),
+            text.replacen("{", "{\"unrecognized\":true,", 1),
+        ] {
+            assert!(
+                serde_json::from_str::<NoteCloseGuiResponse>(&invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn l08_note_close_transport_awaits_actual_reply_within_remaining_budget_and_refuses_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note-close.response.json");
+        let (request, response) = note_close_wire_fixture();
+        let start = Instant::now();
+        let clock = std::cell::Cell::new(start);
+        let polls = std::cell::Cell::new(0);
+        let actual = await_note_close_gui_response(
+            &request,
+            &path,
+            start + Duration::from_millis(100),
+            || clock.get(),
+            || Ok(false),
+            || {
+                polls.set(polls.get() + 1);
+                clock.set(clock.get() + WINDOW_POLL);
+                if polls.get() == 2 {
+                    fs::write(&path, serde_json::to_vec(&response).unwrap()).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(actual, response);
+        assert_eq!(polls.get(), 2);
+        assert_eq!(clock.get().duration_since(start), Duration::from_millis(50));
+        assert!(!path.exists());
+        for (label, bytes) in [
+            ("malformed", b"{not-json}".to_vec()),
+            (
+                "bounded",
+                vec![b'x'; QUERY_OBSERVATION_MAX_RESPONSE_BYTES + 1],
+            ),
+            (
+                "stale",
+                serde_json::to_vec(&NoteCloseGuiResponse {
+                    observed_frame_ordinal: 9,
+                    ..response.clone()
+                })
+                .unwrap(),
+            ),
+        ] {
+            fs::write(&path, bytes).unwrap();
+            assert!(
+                await_note_close_gui_response(
+                    &request,
+                    &path,
+                    start + WINDOW_POLL,
+                    || start,
+                    || Ok(false),
+                    || panic!("{label} must be rejected before polling")
+                )
+                .is_err()
+            );
+            if path.exists() {
+                fs::remove_file(&path).unwrap();
+            }
+        }
+        for exited in [false, true] {
+            fs::write(&path, serde_json::to_vec(&response).unwrap()).unwrap();
+            let deadline = if exited { start + WINDOW_POLL } else { start };
+            assert!(
+                await_note_close_gui_response(
+                    &request,
+                    &path,
+                    deadline,
+                    || start,
+                    || Ok(exited),
+                    || panic!("no poll after terminal refusal")
+                )
+                .is_err()
+            );
+            assert!(
+                path.exists(),
+                "an expired or exited owner must not consume a late reply"
+            );
+            fs::remove_file(&path).unwrap();
+        }
+        assert!(
+            await_note_close_gui_response(
+                &request,
+                &path,
+                start + WINDOW_POLL,
+                || start,
+                || Err(query_window_error("actual child status error".into())),
+                || panic!("status error must be terminal")
+            )
+            .is_err()
+        );
+        let clock = std::cell::Cell::new(start);
+        let polls = std::cell::Cell::new(0);
+        assert!(
+            await_note_close_gui_response(
+                &request,
+                &path,
+                start + WINDOW_POLL,
+                || clock.get(),
+                || Ok(false),
+                || {
+                    polls.set(polls.get() + 1);
+                    clock.set(clock.get() + WINDOW_POLL);
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(polls.get(), 1);
+    }
+
+    #[test]
+    fn h15_precleanup_artifact_attachment_preserves_files_and_never_captures_postclose_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let observation = directory.path().join("case-H15-preclose-observation.json");
+        let trace = directory.path().join("case-H15-preclose-trace.log");
+        fs::write(
+            &observation,
+            b"{\"phase\":\"before-owned-close\",\"tool\":1002}",
+        )
+        .unwrap();
+        fs::write(&trace, b"trace_event=screen_draw_toolbar sd_hwnd=1002").unwrap();
+        let before = [fs::read(&observation).unwrap(), fs::read(&trace).unwrap()];
+        let mut report = test_acceptance_report(AcceptanceHotkey::F11);
+        append_case_with_precleanup_artifacts(
+            &mut report,
+            "H15",
+            expected("H15"),
+            Instant::now(),
+            Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "original Drawing predicate".into(),
+            )),
+            None,
+            directory.path(),
+            &directory.path().join("already-closed-trace.log"),
+            Some(vec![observation.clone(), trace.clone()]),
+        );
+        assert_eq!(report.cases.len(), 1);
+        assert_eq!(report.cases[0].status, CaseStatus::Failed);
+        assert!(
+            report.cases[0]
+                .observed
+                .starts_with("original Drawing predicate")
+        );
+        assert_eq!(
+            report.cases[0].failure_stage,
+            Some(FailureStage::NativeRootState)
+        );
+        assert_eq!(report.cases[0].artifacts.len(), 2);
+        assert_eq!(report.artifacts.len(), 2);
+        assert_eq!(
+            [fs::read(&observation).unwrap(), fs::read(&trace).unwrap()],
+            before
+        );
+        assert!(!directory.path().join("case-H15.png").exists());
+        assert!(!directory.path().join("case-H15-windows.json").exists());
+        assert!(!directory.path().join("case-H15-trace.log").exists());
+    }
+
+    #[test]
+    fn h15_empty_precleanup_capture_attempt_does_not_fabricate_postclose_tool_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut report = test_acceptance_report(AcceptanceHotkey::F11);
+        append_case_with_precleanup_artifacts(
+            &mut report,
+            "H15",
+            expected("H15"),
+            Instant::now(),
+            Err(CaseFailure::new(
+                FailureStage::NativeRootState,
+                "no current owned toolbar; pre-close capture diagnostics: failed".into(),
+            )),
+            None,
+            directory.path(),
+            &directory.path().join("not-present.log"),
+            Some(Vec::new()),
+        );
+        assert!(report.cases[0].artifacts.is_empty() && report.artifacts.is_empty());
+        assert!(
+            report.cases[0]
+                .observed
+                .starts_with("no current owned toolbar")
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
 
     fn presentation_toggle_events(target: DesignerSemanticTarget, selected: bool) -> Vec<String> {
         vec![
@@ -38012,6 +43040,417 @@ mod tests {
     }
 
     #[test]
+    fn gate_d_canvas_readiness_waits_for_preparation_and_settled_authored_frames() {
+        let mut before = crate::tests::gate_d_test_observation(2, 901, &[], 0, 0, 0, 0, false);
+        before.session_id = 1;
+        before.trace_sequence = 77;
+        before.root_visible = false;
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: before.trace_sequence,
+            session_id: before.session_id,
+            generation: before.generation,
+            client_size: [900, 650],
+        };
+        // D10's observed first cell arrived after the snapshot/preparation boundary.
+        let first = "trace_event=\"designer_authoring_control\" target=CanvasCell role=\"Region\" viewport=Deferred control_index=0 left_px=446 top_px=312 right_px=454 bottom_px=320 clip_left_px=0 clip_top_px=0 clip_right_px=900 clip_bottom_px=650 client_width_px=900 client_height_px=650 trace_sequence=84 frame_nr=4 enabled=true selected=false focused=false clicked=false session_id=1 generation=2 menu_cell_ids_digest=701 menu_id_digest=14353821810295443444 authored_target_digest=3681172846438889646 cell_ring_index=0 cell_slot_index=0";
+        assert_eq!(
+            parse_authoring_control(first).unwrap().menu_cell_ids_digest,
+            Some(701)
+        );
+        let settled = first
+            .replace("trace_sequence=84", "trace_sequence=92")
+            .replace("frame_nr=4", "frame_nr=5");
+        let mut samples = [
+            (Vec::new(), 78),
+            (vec![first.to_owned()], 86),
+            (vec![first.to_owned(), settled.clone()], 94),
+        ]
+        .into_iter();
+        let polls = Cell::new(0);
+        let (control, step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            AuthoringControlTarget::CanvasCell,
+            None,
+            AuthoringControlRole::Region,
+            Some(3681172846438889646),
+            false,
+            UIA_TIMEOUT,
+            || {
+                polls.set(polls.get() + 1);
+                let (lines, sequence) = samples.next().unwrap();
+                let mut after = before.clone();
+                after.frame_ordinal += polls.get() as u64;
+                after.trace_sequence = sequence;
+                assert!(gate_d_presentation_state_is_unchanged(&before, &after));
+                Ok((
+                    boundary.client_size,
+                    latest_authoring_controls_after(&lines, boundary.first_line, before.session_id),
+                    after,
+                ))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(polls.get(), 3);
+        assert_eq!(control, parse_authoring_control(&settled).unwrap());
+        assert_eq!(control.frame_nr, Some(5));
+        assert_eq!(control.trace_sequence, 92);
+        assert_eq!(control.bounds, [446, 312, 454, 320]);
+        assert_eq!(control.menu_id_digest, Some(14353821810295443444));
+        assert_eq!(control.authored_target_digest, Some(3681172846438889646));
+        assert_eq!((control.ring_index, control.slot_index), (Some(0), Some(0)));
+        assert_eq!(step, GateDReadyControlStep::Visible);
+        assert!(samples.next().is_none());
+    }
+
+    fn all_menu_policy_control_fixture() -> (
+        GateDPresentationBoundary,
+        AuthoringControlSnapshot,
+        GateDObservationEvidence,
+    ) {
+        let (_, _, mut before) = moving_menu_row_fixture();
+        before.session_id = 2;
+        before.generation = 8;
+        before.trace_sequence = 10_950;
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: before.trace_sequence,
+            session_id: before.session_id,
+            generation: before.generation,
+            client_size: [900, 650],
+        };
+        let control = parse_authoring_control(
+            "trace_event=\"designer_authoring_control\" target=MenuAfterAction role=\"ComboBox\" viewport=Deferred control_index=-1 left_px=592 top_px=343 right_px=650 bottom_px=361 clip_left_px=0 clip_top_px=0 clip_right_px=900 clip_bottom_px=650 client_width_px=900 client_height_px=650 trace_sequence=10971 frame_nr=836 enabled=true selected=false focused=false clicked=false session_id=2 generation=8 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1",
+        )
+        .unwrap();
+        // Model a button-only receipt; actual candidate button dimensions were
+        // not retained. The old label-union center must not own this click.
+        (boundary, control, before)
+    }
+
+    #[test]
+    fn all_a6_policy_click_uses_traced_button_after_fresh_frame_admission() {
+        let (boundary, control, before) = all_menu_policy_control_fixture();
+        let mut settled = control;
+        settled.trace_sequence = 11_074;
+        settled.frame_nr = Some(843);
+        let mut samples = [control, settled].into_iter();
+        let (admitted, step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            AuthoringControlTarget::MenuAfterAction,
+            None,
+            AuthoringControlRole::ComboBox,
+            None,
+            false,
+            UIA_TIMEOUT,
+            || {
+                let current = samples.next().unwrap();
+                let after = presentation_following_owner(&before, current);
+                assert!(gate_d_presentation_state_is_unchanged(&before, &after));
+                Ok((boundary.client_size, vec![current], after))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(admitted, settled);
+        assert_eq!(step, GateDReadyControlStep::Visible);
+        assert!(samples.next().is_none());
+        let button = admitted.bounds;
+        assert_eq!(button, [592, 343, 650, 361]);
+        let combined_center =
+            semantic_client_center([592, 343, 800, 361], [0, 0, 900, 650]).unwrap();
+        assert_eq!((combined_center.x, combined_center.y), (696, 352));
+        assert!(!gate_c_point_is_inside_rect(
+            [combined_center.x, combined_center.y],
+            button,
+        ));
+        let point = semantic_client_center(button, [0, 0, 900, 650]).unwrap();
+        assert_eq!((point.x, point.y), (621, 352));
+        let mut following = settled;
+        following.trace_sequence = 11_082;
+        following.frame_nr = Some(844);
+        let after = presentation_following_owner(&before, following);
+        let downs = Cell::new(0);
+        dispatch_pointer_down_after_preflight(
+            || {
+                let current = gate_d_wait_control_before_pointer_down_with(
+                    &admitted,
+                    &before,
+                    [point.x, point.y],
+                    UIA_TIMEOUT,
+                    || Ok((boundary.client_size, vec![following], after.clone())),
+                    |_| panic!("the following owned frame is already available"),
+                )?;
+                assert_eq!(current.bounds, button);
+                Ok(())
+            },
+            || {
+                assert!(gate_c_point_is_inside_rect([point.x, point.y], button));
+                downs.set(downs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(downs.get(), 1);
+        assert!(gate_d_presentation_state_is_unchanged(&before, &after));
+    }
+
+    #[test]
+    fn all_a6_policy_refuses_stale_foreign_clipped_or_replaced_button_before_down() {
+        let (boundary, control, before) = all_menu_policy_control_fixture();
+        let trace_corruptions: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.session_id += 1,
+            |control| control.generation += 1,
+            |control| control.trace_sequence = 10_950,
+            |control| control.target = AuthoringControlTarget::RingSelector,
+            |control| control.role = AuthoringControlRole::Button,
+            |control| control.index = Some(3),
+            |control| control.client_size[0] += 1,
+            |control| control.enabled = false,
+            |control| control.clicked = true,
+            |control| control.clip_bounds = None,
+            |control| control.clip_bounds = Some([0, 0, 900, 350]),
+        ];
+        let downs = Cell::new(0);
+        for corrupt in trace_corruptions {
+            let mut current = control;
+            corrupt(&mut current);
+            assert!(
+                dispatch_pointer_down_after_preflight(
+                    || gate_d_ready_control_step(
+                        &current,
+                        boundary,
+                        AuthoringControlTarget::MenuAfterAction,
+                        None,
+                        AuthoringControlRole::ComboBox,
+                        None,
+                    )
+                    .map(|_| ())
+                    .map_err(PointerClickPreDownError::Input),
+                    || {
+                        downs.set(downs.get() + 1);
+                        Ok(())
+                    },
+                )
+                .is_err()
+            );
+        }
+        for bounds in [
+            [591, 343, 650, 361],
+            [592, 343, 801, 361],
+            [592, 343, 592, 361],
+        ] {
+            let following = AuthoringControlSnapshot {
+                bounds,
+                trace_sequence: control.trace_sequence + 2,
+                frame_nr: Some(837),
+                ..control
+            };
+            let after = presentation_following_owner(&before, following);
+            assert!(
+                dispatch_pointer_down_after_preflight(
+                    || gate_d_control_pre_down_status(
+                        &[following],
+                        &control,
+                        &before,
+                        &after,
+                        boundary.client_size,
+                        [621, 352],
+                    )
+                    .map(|_| ()),
+                    || {
+                        downs.set(downs.get() + 1);
+                        Ok(())
+                    },
+                )
+                .is_err()
+            );
+        }
+        let mut following = control;
+        following.trace_sequence += 2;
+        following.frame_nr = Some(837);
+        let mut changed = presentation_following_owner(&before, following);
+        changed.document_digest ^= 1;
+        assert!(
+            dispatch_pointer_down_after_preflight(
+                || gate_d_control_pre_down_status(
+                    &[following],
+                    &control,
+                    &before,
+                    &changed,
+                    boundary.client_size,
+                    [621, 352],
+                )
+                .map(|_| ()),
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(downs.get(), 0);
+    }
+
+    #[test]
+    fn all_a6_menu_row_requires_owned_scroll_and_fresh_visible_frames_before_one_down() {
+        let (_, _, mut before) = moving_menu_row_fixture();
+        before.session_id = 2;
+        before.generation = 8;
+        before.trace_sequence = 10_537;
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: before.trace_sequence,
+            session_id: before.session_id,
+            generation: before.generation,
+            client_size: [900, 650],
+        };
+        let frame = |sequence: u64, ordinal: u64, top: i32| {
+            vec![
+                format!(
+                    "trace_event=\"designer_authoring_control\" target=MenuRow role=\"Selectable\" viewport=Deferred control_index=9 left_px=8 top_px={top} right_px=91 bottom_px={} clip_left_px=0 clip_top_px=206 clip_right_px=900 clip_bottom_px=638 client_width_px=900 client_height_px=650 trace_sequence={sequence} frame_nr={ordinal} enabled=true selected=false focused=false clicked=false session_id=2 generation=8 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1",
+                    top + 18
+                ),
+                format!(
+                    "trace_event=\"designer_authoring_scroll_viewport\" viewport=Deferred scroll_owner=\"MenuTree\" scroll_id=10543418435404023934 frame_nr={ordinal} session_id=2 generation=8 input_left_px=8 input_top_px=210 input_right_px=166 input_bottom_px=635 clip_left_px=0 clip_top_px=206 clip_right_px=900 clip_bottom_px=638 client_width_px=900 client_height_px=650 trace_sequence={}",
+                    sequence + 1
+                ),
+            ]
+        };
+        let mut clipped_samples = [(frame(10_538, 783, 641), 10_540)].into_iter();
+        let (clipped, step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            AuthoringControlTarget::MenuRow,
+            Some(9),
+            AuthoringControlRole::Selectable,
+            None,
+            false,
+            UIA_TIMEOUT,
+            || {
+                let (events, sequence) = clipped_samples.next().unwrap();
+                let mut after = before.clone();
+                after.trace_sequence = sequence;
+                Ok((
+                    boundary.client_size,
+                    latest_authoring_controls_after(&events, 0, before.session_id),
+                    after,
+                ))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(clipped.bounds, [8, 641, 91, 659]);
+        let GateDReadyControlStep::Scroll {
+            owner,
+            bounds,
+            delta,
+        } = step
+        else {
+            panic!("the retained A6 row must be presented by its MenuTree owner");
+        };
+        assert_eq!(owner, GateDControlScrollOwner::MenuTree);
+        assert_eq!(delta, -120);
+        assert!(gate_c_point_is_inside_rect(
+            [(bounds[0] + bounds[2]) / 2, bounds[1]],
+            clipped.scroll_viewport.unwrap().measured.input_bounds,
+        ));
+        let fresh_clipped = latest_authoring_controls_after(&frame(10_542, 784, 641), 0, 2);
+        let mut after = before.clone();
+        after.trace_sequence = 10_544;
+        let downs = Cell::new(0);
+        assert!(
+            dispatch_pointer_down_after_preflight(
+                || {
+                    gate_d_control_pre_down_status(
+                        &fresh_clipped,
+                        &clipped,
+                        &before,
+                        &after,
+                        boundary.client_size,
+                        [49, 650],
+                    )
+                    .map(|_| ())
+                },
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            )
+            .is_err()
+        );
+        assert_eq!(downs.get(), 0);
+        let mut progress = GateDPresentationScrollProgress::default();
+        progress.check(&clipped, step).unwrap();
+        progress.record(clipped);
+        let mut visible_samples = [
+            (frame(10_546, 785, 591), 10_548),
+            (frame(10_550, 786, 591), 10_552),
+        ]
+        .into_iter();
+        let visible_polls = Cell::new(0);
+        let (visible, terminal) = gate_d_wait_settled_control_with(
+            &before,
+            GateDPresentationBoundary {
+                trace_sequence: after.trace_sequence,
+                ..boundary
+            },
+            AuthoringControlTarget::MenuRow,
+            Some(9),
+            AuthoringControlRole::Selectable,
+            None,
+            true,
+            UIA_TIMEOUT,
+            || {
+                visible_polls.set(visible_polls.get() + 1);
+                assert_eq!(downs.get(), 0);
+                let (events, sequence) = visible_samples.next().unwrap();
+                let mut after = before.clone();
+                after.trace_sequence = sequence;
+                Ok((
+                    boundary.client_size,
+                    latest_authoring_controls_after(&events, 0, before.session_id),
+                    after,
+                ))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(visible_polls.get(), 2);
+        assert_eq!(terminal, GateDReadyControlStep::Visible);
+        assert_eq!(visible.bounds, [8, 591, 91, 609]);
+        progress.check(&visible, terminal).unwrap();
+        assert_eq!(progress.scrolls, 1);
+        let current = latest_authoring_controls_after(&frame(10_554, 787, 591), 0, 2);
+        after.trace_sequence = 10_556;
+        dispatch_pointer_down_after_preflight(
+            || {
+                gate_d_control_pre_down_status(
+                    &current,
+                    &visible,
+                    &before,
+                    &after,
+                    boundary.client_size,
+                    [49, 600],
+                )
+                .map(|current| assert!(current.is_some()))
+            },
+            || {
+                downs.set(downs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(downs.get(), 1);
+        assert!(!visible.selected);
+        assert_eq!(before.document_digest, 901);
+        assert_eq!((before.undo_depth, before.redo_depth), (5, 0));
+    }
+
+    #[test]
     fn gate_d_settled_presentation_reacquires_moving_row_across_distinct_frames() {
         let (boundary, initial, before) = moving_menu_row_fixture();
         let moved = menu_row_next_frame(initial, 7072, 718, 596);
@@ -38055,10 +43494,12 @@ mod tests {
         let (mut boundary, _, mut before) = moving_menu_row_fixture();
         boundary.trace_sequence = 13890;
         before.trace_sequence = 13890;
-        let first = cadence_menu_row_lines(13894, 1274, 773, 126930);
+        // Preserve the real refresh cadence while testing final visible-click
+        // readiness; a clipped wheel target no longer needs stationary frames.
+        let first = cadence_menu_row_lines(13894, 1274, 607, 126930);
         // The next real control refresh occurred 534ms later, not on each
         // intervening viewport publication. Retain both actual sequence/frames.
-        let second = cadence_menu_row_lines(13945, 1279, 773, 127464);
+        let second = cadence_menu_row_lines(13945, 1279, 607, 127464);
         let records = [
             first[0].clone(),
             first[1].clone(),
@@ -38105,20 +43546,13 @@ mod tests {
             (control.trace_sequence, control.frame_nr),
             (13945, Some(1279))
         );
-        assert_eq!(control.bounds, [8, 773, 128, 791]);
+        assert_eq!(control.bounds, [8, 607, 128, 625]);
         let receipt = control.scroll_viewport.unwrap();
         assert_eq!(
             (receipt.trace_sequence, receipt.measured.frame_nr),
             (13947, 1279)
         );
-        assert_eq!(
-            step,
-            GateDReadyControlStep::Scroll {
-                owner: GateDControlScrollOwner::MenuTree,
-                bounds: [9, 412, 128, 413],
-                delta: -120,
-            }
-        );
+        assert_eq!(step, GateDReadyControlStep::Visible);
         assert_eq!(
             (before.document_digest, before.undo_depth, before.redo_depth),
             (901, 5, 0)
@@ -39605,6 +45039,7 @@ mod tests {
             ),
             (AppearanceApply, Button, GateDControlScrollOwner::Resources),
             (AppearanceCancel, Button, GateDControlScrollOwner::Resources),
+            (SkinRow, Button, GateDControlScrollOwner::Resources),
             (SimpleAccent, Button, GateDControlScrollOwner::Resources),
             (SimpleOpacity, Button, GateDControlScrollOwner::Resources),
             (SimpleOpacity, DragValue, GateDControlScrollOwner::Resources),
@@ -39645,7 +45080,7 @@ mod tests {
             (Undo, Button),
             (DesignerBack, Button),
             (PopupApply, Button),
-            (SkinRow, Button),
+            (SkinRow, Checkbox),
             (SkinGlowEnabled, Checkbox),
             (CanvasCell, AuthoringControlRole::Region),
             (MenuRow, Button),
@@ -39663,6 +45098,615 @@ mod tests {
                 gate_d_ready_control_step(&control, boundary, target, None, role, None).is_err()
             );
         }
+    }
+
+    fn resources_skin_row_frame(sequence: u64, frame: u64, top: i32) -> Vec<String> {
+        vec![
+            format!(
+                "trace_event=\"designer_authoring_control\" target=SkinRow role=\"Button\" viewport=Deferred control_index=0 left_px=130 top_px={top} right_px=242 bottom_px={} clip_left_px=0 clip_top_px=128 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence={sequence} frame_nr={frame} enabled=true selected=false focused=false clicked=false session_id=2 generation=7 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1",
+                top + 18
+            ),
+            format!(
+                "trace_event=\"designer_authoring_scroll_viewport\" viewport=Deferred scroll_owner=\"Resources\" scroll_id=5695539457918290532 frame_nr={frame} session_id=2 generation=7 input_left_px=8 input_top_px=131 input_right_px=892 input_bottom_px=642 clip_left_px=0 clip_top_px=128 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence={}",
+                sequence + 1
+            ),
+        ]
+    }
+
+    #[test]
+    fn gate_d_resources_wheel_amount_uses_fresh_distance_and_viewport_with_bounded_notches() {
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: 6_359,
+            session_id: 2,
+            generation: 7,
+            client_size: [900, 650],
+        };
+        let mut previous = None;
+        for (ordinal, top, delta) in [
+            (0, 994, -360),
+            (1, 894, -360),
+            (2, 794, -240),
+            (3, 744, -120),
+            (4, 628, -120),
+        ] {
+            let control = latest_authoring_controls_after(
+                &resources_skin_row_frame(6_360 + ordinal * 10, 493 + ordinal, top),
+                0,
+                2,
+            )[0];
+            let step = gate_d_ready_control_step(
+                &control,
+                boundary,
+                control.target,
+                control.index,
+                control.role,
+                None,
+            )
+            .unwrap();
+            assert!(matches!(
+                step,
+                GateDReadyControlStep::Scroll {
+                    owner: GateDControlScrollOwner::Resources,
+                    delta: actual,
+                    ..
+                } if actual == delta
+            ));
+            if let Some(prior) = previous {
+                assert!(gate_d_control_scroll_made_progress(&prior, &control));
+            }
+            previous = Some(control);
+        }
+        let base =
+            latest_authoring_controls_after(&resources_skin_row_frame(6_420, 499, 744), 0, 2)[0];
+        for (top, delta) in [
+            (1, 120),
+            (0, 240),
+            (-240, 360),
+            (i32::MIN, 360),
+            (i32::MAX - 18, -360),
+        ] {
+            let control = AuthoringControlSnapshot {
+                bounds: [130, top, 242, top + 18],
+                ..base
+            };
+            assert!(matches!(
+                gate_d_ready_control_step(
+                    &control, boundary, control.target, control.index, control.role, None
+                ).unwrap(),
+                GateDReadyControlStep::Scroll { delta: actual, .. } if actual == delta
+            ));
+        }
+        let mut narrow = base;
+        narrow
+            .scroll_viewport
+            .as_mut()
+            .unwrap()
+            .measured
+            .input_bounds[3] = 300;
+        assert!(matches!(
+            gate_d_ready_control_step(
+                &narrow,
+                boundary,
+                narrow.target,
+                narrow.index,
+                narrow.role,
+                None
+            )
+            .unwrap(),
+            GateDReadyControlStep::Scroll { delta: -360, .. }
+        ));
+        for (target, role, owner) in [
+            (
+                AuthoringControlTarget::MenuRow,
+                AuthoringControlRole::Selectable,
+                GateDControlScrollOwner::MenuTree,
+            ),
+            (
+                AuthoringControlTarget::BulkSetLabel,
+                AuthoringControlRole::Button,
+                GateDControlScrollOwner::Inspector,
+            ),
+        ] {
+            let mut control = AuthoringControlSnapshot {
+                target,
+                role,
+                bounds: [130, 994, 242, 1012],
+                ..base
+            };
+            control.scroll_viewport.as_mut().unwrap().measured.owner = owner;
+            assert!(matches!(
+                gate_d_ready_control_step(
+                    &control,
+                    boundary,
+                    control.target,
+                    control.index,
+                    control.role,
+                    None
+                )
+                .unwrap(),
+                GateDReadyControlStep::Scroll { delta: -120, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn gate_d_scroll_preparation_uses_current_moving_frames_but_final_click_still_settles() {
+        let mut before = crate::tests::gate_d_test_observation(7, 901, &[], 0, 0, 0, 0, false);
+        before.session_id = 2;
+        before.trace_sequence = 6_687;
+        let mut boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: before.trace_sequence,
+            session_id: before.session_id,
+            generation: before.generation,
+            client_size: [900, 650],
+        };
+        let mut progress = GateDPresentationScrollProgress::default();
+        let mut wheels = 0;
+        let mut downs = 0;
+        // Actual Resources bounds and the observed 994 -> 944 -> 894 motion
+        // remain clipped. Each fresh measured frame can prepare one wheel.
+        for (sequence, frame, top) in [(6_688, 521, 994), (6_708, 522, 944), (6_728, 523, 894)] {
+            let controls = latest_authoring_controls_after(
+                &resources_skin_row_frame(sequence, frame, top),
+                0,
+                before.session_id,
+            );
+            let expected = controls[0];
+            let mut after = presentation_following_owner(&before, expected);
+            // The owner's captured frontier can equal the last viewport
+            // receipt; the observation boundary follows that frontier.
+            after.trace_sequence = expected.scroll_viewport.unwrap().trace_sequence;
+            let polls = Cell::new(0);
+            let (control, step) = gate_d_wait_settled_control_with(
+                &before,
+                boundary,
+                AuthoringControlTarget::SkinRow,
+                Some(0),
+                AuthoringControlRole::Button,
+                None,
+                true,
+                UIA_TIMEOUT,
+                || {
+                    polls.set(polls.get() + 1);
+                    assert_eq!(
+                        polls.get(),
+                        1,
+                        "wheel preparation must not wait for stationary geometry"
+                    );
+                    Ok((boundary.client_size, controls.clone(), after.clone()))
+                },
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(control, expected);
+            assert_eq!(polls.get(), 1);
+            assert_eq!(
+                step,
+                GateDReadyControlStep::Scroll {
+                    owner: GateDControlScrollOwner::Resources,
+                    bounds: [130, 386, 242, 387],
+                    delta: -360,
+                }
+            );
+            progress.check(&control, step).unwrap();
+            assert!(gate_d_presentation_scroll_state_is_unchanged(
+                &control, &before, &after
+            ));
+            wheels += 1;
+            progress.record(control);
+            boundary.trace_sequence = after.trace_sequence;
+            let current = latest_authoring_controls_after(
+                &resources_skin_row_frame(sequence + 2, frame + 1, top - 16),
+                0,
+                before.session_id,
+            );
+            assert!(
+                dispatch_pointer_down_after_preflight(
+                    || {
+                        gate_d_control_pre_down_status(
+                            &current,
+                            &control,
+                            &before,
+                            &presentation_following_owner(&before, current[0]),
+                            boundary.client_size,
+                            [186, 386],
+                        )
+                        .map(|_| ())
+                    },
+                    || {
+                        downs += 1;
+                        Ok(())
+                    },
+                )
+                .is_err()
+            );
+            assert_eq!(downs, 0);
+        }
+        assert_eq!((wheels, progress.scrolls), (3, 3));
+        let mut visible_frames = [
+            resources_skin_row_frame(6_748, 524, 615),
+            resources_skin_row_frame(6_758, 525, 605),
+            resources_skin_row_frame(6_758, 525, 605),
+            resources_skin_row_frame(6_768, 526, 605),
+        ]
+        .into_iter();
+        let polls = Cell::new(0);
+        let (visible, step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            AuthoringControlTarget::SkinRow,
+            Some(0),
+            AuthoringControlRole::Button,
+            None,
+            true,
+            UIA_TIMEOUT,
+            || {
+                polls.set(polls.get() + 1);
+                let controls = latest_authoring_controls_after(
+                    &visible_frames.next().unwrap(),
+                    0,
+                    before.session_id,
+                );
+                let after = presentation_following_owner(&before, controls[0]);
+                Ok((boundary.client_size, controls, after))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(polls.get(), 4);
+        assert_eq!(step, GateDReadyControlStep::Visible);
+        assert_eq!(
+            (visible.trace_sequence, visible.frame_nr),
+            (6_768, Some(526))
+        );
+        assert_eq!(visible.bounds, [130, 605, 242, 623]);
+        progress.check(&visible, step).unwrap();
+        let current = latest_authoring_controls_after(
+            &resources_skin_row_frame(6_778, 527, 605),
+            0,
+            before.session_id,
+        );
+        dispatch_pointer_down_after_preflight(
+            || {
+                gate_d_control_pre_down_status(
+                    &current,
+                    &visible,
+                    &before,
+                    &presentation_following_owner(&before, current[0]),
+                    boundary.client_size,
+                    [186, 614],
+                )
+                .map(|control| assert!(control.is_some()))
+            },
+            || {
+                downs += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(downs, 1);
+        assert_eq!(
+            (before.document_digest, before.undo_depth, before.redo_depth),
+            (901, 0, 0)
+        );
+    }
+
+    #[test]
+    fn gate_d_scroll_preparation_rejects_unmeasured_stale_or_changed_owners_without_input() {
+        let mut before = crate::tests::gate_d_test_observation(7, 901, &[], 0, 0, 0, 0, false);
+        before.session_id = 2;
+        before.trace_sequence = 6_687;
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: before.trace_sequence,
+            session_id: before.session_id,
+            generation: before.generation,
+            client_size: [900, 650],
+        };
+        let control = latest_authoring_controls_after(
+            &resources_skin_row_frame(6_688, 521, 994),
+            0,
+            before.session_id,
+        )[0];
+        let mutations: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.session_id += 1,
+            |control| control.generation += 1,
+            |control| control.role = AuthoringControlRole::Checkbox,
+            |control| control.trace_sequence = 6_687,
+            |control| control.frame_nr = None,
+            |control| control.clip_bounds = None,
+            |control| control.scroll_viewport = None,
+            |control| {
+                control.scroll_viewport.as_mut().unwrap().measured.owner =
+                    GateDControlScrollOwner::MenuTree
+            },
+            |control| control.scroll_viewport.as_mut().unwrap().measured.frame_nr += 1,
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .session_id += 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .generation += 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .input_bounds[2] = 901
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .paint_clip_bounds[3] -= 1
+            },
+            |control| {
+                control
+                    .scroll_viewport
+                    .as_mut()
+                    .unwrap()
+                    .measured
+                    .client_size[0] -= 1
+            },
+            |control| {
+                control.scroll_viewport.as_mut().unwrap().trace_sequence = control.trace_sequence
+            },
+            // An otherwise valid receipt published after the captured owner
+            // frontier cannot authorize a wheel from that older snapshot.
+            |control| control.scroll_viewport.as_mut().unwrap().trace_sequence += 2,
+        ];
+        let mut cases = Vec::new();
+        for mutate in mutations {
+            let mut bad = control;
+            mutate(&mut bad);
+            cases.push((vec![bad], presentation_following_owner(&before, control)));
+        }
+        let owner_mutations: &[fn(&mut GateDObservationEvidence)] = &[
+            |owner| owner.trace_sequence = 6_688,
+            |owner| owner.session_id += 1,
+            |owner| owner.generation += 1,
+            |owner| owner.document_digest ^= 1,
+            |owner| owner.pending_assets_digest ^= 1,
+            |owner| owner.undo_depth += 1,
+            |owner| owner.selected_member_target_digests.push(99),
+            |owner| owner.navigation_menu_id_digests.push(99),
+            |owner| owner.root_history_digest ^= 1,
+            |owner| owner.root_usage_digest ^= 1,
+        ];
+        for mutate in owner_mutations {
+            let mut bad = presentation_following_owner(&before, control);
+            mutate(&mut bad);
+            cases.push((vec![control], bad));
+        }
+        cases.push((
+            vec![control, control],
+            presentation_following_owner(&before, control),
+        ));
+        for (controls, after) in cases {
+            let refreshes = Cell::new(0);
+            let mut wheels = 0;
+            let result = gate_d_wait_settled_control_with(
+                &before,
+                boundary,
+                control.target,
+                control.index,
+                control.role,
+                None,
+                true,
+                UIA_TIMEOUT,
+                || {
+                    refreshes.set(refreshes.get() + 1);
+                    if refreshes.get() > 1 {
+                        return Err(CaseFailure::new(
+                            FailureStage::DesignerReadiness,
+                            "fixture has no later valid measurement".into(),
+                        ));
+                    }
+                    Ok((boundary.client_size, controls.clone(), after.clone()))
+                },
+                |_| {},
+            )
+            .map(|(_, step)| {
+                assert!(matches!(step, GateDReadyControlStep::Scroll { .. }));
+                wheels += 1;
+            });
+            assert!(result.is_err(), "{controls:?}, {after:?}");
+            assert_eq!(wheels, 0);
+            assert!((1..=2).contains(&refreshes.get()));
+        }
+    }
+
+    #[test]
+    fn all_skin_row_resources_scroll_settles_actual_clipped_control_before_one_fresh_click() {
+        let mut before = crate::tests::gate_d_test_observation(2, 901, &[], 0, 0, 0, 0, false);
+        before.session_id = 2;
+        before.trace_sequence = 77;
+        let boundary = GateDPresentationBoundary {
+            first_line: 0,
+            trace_sequence: 77,
+            session_id: 2,
+            generation: 2,
+            client_size: [900, 650],
+        };
+        let frame = |sequence: u64, ordinal: u64, top: i32| {
+            vec![
+                format!(
+                    "trace_event=\"designer_authoring_control\" target=SkinRow role=\"Button\" viewport=Deferred control_index=0 left_px=130 top_px={top} right_px=242 bottom_px={} clip_left_px=0 clip_top_px=107 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence={sequence} frame_nr={ordinal} enabled=true selected=false focused=false clicked=false session_id=2 generation=2 menu_cell_ids_digest=0 cell_ring_index=-1 cell_slot_index=-1",
+                    top + 18
+                ),
+                format!(
+                    "trace_event=\"designer_authoring_scroll_viewport\" viewport=Deferred scroll_owner=\"Resources\" scroll_id=31 frame_nr={ordinal} session_id=2 generation=2 input_left_px=3 input_top_px=110 input_right_px=896 input_bottom_px=642 clip_left_px=0 clip_top_px=107 clip_right_px=900 clip_bottom_px=645 client_width_px=900 client_height_px=650 trace_sequence={}",
+                    sequence + 1
+                ),
+            ]
+        };
+        let mut clipped_samples = [(frame(84, 4, 974), 86)].into_iter();
+        let (clipped, step) = gate_d_wait_settled_control_with(
+            &before,
+            boundary,
+            AuthoringControlTarget::SkinRow,
+            Some(0),
+            AuthoringControlRole::Button,
+            None,
+            false,
+            Duration::from_secs(1),
+            || {
+                let (events, sequence) = clipped_samples.next().unwrap();
+                let mut after = before.clone();
+                after.trace_sequence = sequence;
+                Ok((
+                    boundary.client_size,
+                    latest_authoring_controls_after(&events, 0, 2),
+                    after,
+                ))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(clipped.bounds, [130, 974, 242, 992]);
+        assert_eq!((clipped.trace_sequence, clipped.frame_nr), (84, Some(4)));
+        assert!(clipped_samples.next().is_none());
+        assert_eq!(
+            step,
+            GateDReadyControlStep::Scroll {
+                owner: GateDControlScrollOwner::Resources,
+                bounds: [130, 376, 242, 377],
+                delta: -360
+            }
+        );
+        let mut progress = GateDPresentationScrollProgress::default();
+        progress.check(&clipped, step).unwrap();
+        progress.record(clipped);
+        let scrolled_boundary = GateDPresentationBoundary {
+            trace_sequence: 86,
+            ..boundary
+        };
+        let mut visible_samples =
+            [(frame(100, 6, 615), 102), (frame(108, 7, 615), 110)].into_iter();
+        let (visible, terminal) = gate_d_wait_settled_control_with(
+            &before,
+            scrolled_boundary,
+            AuthoringControlTarget::SkinRow,
+            Some(0),
+            AuthoringControlRole::Button,
+            None,
+            true,
+            Duration::from_secs(1),
+            || {
+                let (events, sequence) = visible_samples.next().unwrap();
+                let mut after = before.clone();
+                after.trace_sequence = sequence;
+                Ok((
+                    boundary.client_size,
+                    latest_authoring_controls_after(&events, 0, 2),
+                    after,
+                ))
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(terminal, GateDReadyControlStep::Visible);
+        assert_eq!(visible.bounds, [130, 615, 242, 633]);
+        assert_eq!(visible.frame_nr, Some(7));
+        progress.check(&visible, terminal).unwrap();
+        assert_eq!(progress.scrolls, 1);
+        let current = latest_authoring_controls_after(&frame(120, 8, 615), 0, 2);
+        let mut after = before.clone();
+        after.trace_sequence = 122;
+        let mut downs = 0;
+        dispatch_pointer_down_after_preflight(
+            || {
+                gate_d_control_pre_down_status(
+                    &current,
+                    &visible,
+                    &before,
+                    &after,
+                    boundary.client_size,
+                    [186, 624],
+                )
+                .map(|control| assert!(control.is_some()))
+            },
+            || {
+                downs += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(downs, 1);
+        for corrupt in [
+            AuthoringControlSnapshot {
+                role: AuthoringControlRole::Checkbox,
+                ..clipped
+            },
+            AuthoringControlSnapshot {
+                session_id: 3,
+                ..clipped
+            },
+            AuthoringControlSnapshot {
+                generation: 3,
+                ..clipped
+            },
+            AuthoringControlSnapshot {
+                scroll_viewport: None,
+                ..clipped
+            },
+        ] {
+            assert!(
+                gate_d_ready_control_step(
+                    &corrupt,
+                    boundary,
+                    AuthoringControlTarget::SkinRow,
+                    Some(0),
+                    AuthoringControlRole::Button,
+                    None
+                )
+                .is_err()
+            );
+        }
+        // The nested Advanced field retains its actual widget clip. Only a fully
+        // visible glow checkbox is admitted; it does not borrow the parent viewport.
+        let glow = AuthoringControlSnapshot {
+            target: AuthoringControlTarget::SkinGlowEnabled,
+            role: AuthoringControlRole::Checkbox,
+            bounds: [310, 604, 330, 622],
+            clip_bounds: Some([130, 600, 460, 640]),
+            scroll_viewport: None,
+            ..visible
+        };
+        assert_eq!(
+            gate_d_ready_control_step(&glow, boundary, glow.target, glow.index, glow.role, None)
+                .unwrap(),
+            GateDReadyControlStep::Visible
+        );
+        assert!(
+            gate_d_ready_control_step(
+                &AuthoringControlSnapshot {
+                    bounds: [310, 634, 330, 652],
+                    ..glow
+                },
+                boundary,
+                glow.target,
+                glow.index,
+                glow.role,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -40316,6 +46360,89 @@ mod tests {
     }
 
     #[test]
+    fn all_trace_profile_receipt_admits_case_setup_only_after_exact_owned_header() {
+        let ready = "WARN target trace_event=\"trace_ready\" trace_budget_profile=\"all_v1\" event_budget=81920 reserved_event_budget=256";
+        assert!(all_trace_profile_is_ready(&[ready.into()]));
+        let sanitized = safe_trace_excerpt(ready);
+        assert_eq!(
+            super::trace_static_enum_field(&sanitized, "trace_budget_profile"),
+            Some("all_v1")
+        );
+        assert_eq!(trace_field(&sanitized, "event_budget"), Some("81920"));
+        assert_eq!(
+            trace_field(&sanitized, "reserved_event_budget"),
+            Some("256")
+        );
+        assert!(all_trace_profile_is_ready(&[sanitized]));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("acceptance.log");
+        let admitted = Cell::new(0);
+        for invalid in [
+            String::new(),
+            ready.replace("all_v1", "default"),
+            ready.replace("all_v1", "gate_s_v1"),
+            ready.replace("all_v1", "all_v1_extra"),
+            ready.replace(" trace_budget_profile=\"all_v1\"", ""),
+            ready.replace("81920", "8192"),
+            ready.replace("81920", "81921"),
+            ready.replace(" event_budget=81920", ""),
+            ready.replace("256", "0"),
+            ready.replace("256", "257"),
+            ready.replace(" reserved_event_budget=256", ""),
+            ready.replace("trace_ready", "trace_ready_like"),
+            format!("{ready}\n{ready}"),
+            format!("{}\n{ready}", ready.replace("all_v1", "default")),
+        ] {
+            fs::write(&path, &invalid).unwrap();
+            assert!(
+                !all_trace_profile_is_ready(&trace_lines(&path)),
+                "{invalid}"
+            );
+            assert!(
+                wait_all_trace_budget_profile(&path, Duration::ZERO)
+                    .and_then(|_| {
+                        admitted.set(admitted.get() + 1);
+                        Ok(())
+                    })
+                    .is_err(),
+                "{invalid}"
+            );
+            assert_eq!(admitted.get(), 0);
+        }
+        fs::write(&path, ready).unwrap();
+        wait_all_trace_budget_profile(&path, Duration::ZERO)
+            .and_then(|_| {
+                admitted.set(admitted.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(admitted.get(), 1);
+        let terminal = concat!(
+            "\ntrace_event=\"budget_exhausted\" trace_sequence=81921 event_budget=81920 reserved_event_budget=256",
+            "\ntrace_event=\"authoring_observation_boundary\" phase=\"terminal\" request_id=2 baseline_request_id=1 captured_trace_sequence=81921 trace_sequence=81922"
+        );
+        fs::write(&path, format!("{ready}{terminal}")).unwrap();
+        assert!(gate_c_trace_budget_exhausted(&path));
+        assert!(
+            result_with_trace_budget_status(Ok("actual terminal cleanup retained".into()), true)
+                .is_err()
+        );
+        assert_eq!(
+            safe_trace_excerpt(terminal)
+                .matches("trace_event=budget_exhausted")
+                .count(),
+            1
+        );
+        assert!(
+            safe_trace_excerpt(terminal).contains("trace_event=authoring_observation_boundary")
+        );
+        assert!(!safe_trace_field_value(
+            "trace_budget_profile",
+            "all_v1_extra"
+        ));
+    }
+
+    #[test]
     fn gate_c_trace_profile_receipt_is_exact_and_budget_exhaustion_is_fail_closed() {
         let ready = "WARN target trace_event=\"trace_ready\" trace_sequence=1 trace_budget_profile=\"gate_c_v1\" event_budget=65536 reserved_event_budget=256";
         assert!(gate_c_trace_profile_is_ready(&[ready.into()]));
@@ -40383,6 +46510,7 @@ mod tests {
             copied_profile_status: super::super::super::CopiedProfileStatus::NotRun,
             copied_profile: None,
             private_artifacts: None,
+            controlled_failures: None,
             h6_repeat_mode: H6RepeatMode::Quiescent,
             mouse_gesture_mode: super::super::super::MouseGestureMode::Enabled,
             suite: AcceptanceSuite::GateC,
@@ -41174,8 +47302,8 @@ mod tests {
     #[test]
     fn mandatory_hotkey_cases_have_case_specific_expected_states() {
         let ids = [
-            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H16", "H17",
-            "H18",
+            "H01", "H02", "H04", "H06", "H07", "H08", "H09", "H10", "H11", "H12", "H15", "H16",
+            "H17", "H18",
         ];
         let generic = "candidate exits normally through production close path";
         let descriptions = ids
@@ -41299,6 +47427,7 @@ mod tests {
             physical_displays: vec![[0, 0, 1920, 1080]],
             next_input_group_id: 2,
             current_purpose: None,
+            screen_draw_priority: None,
         };
         ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| *slot.borrow_mut() = Some(capture));
 
@@ -41379,6 +47508,8 @@ mod tests {
 
     fn snapshot_wait_events(include_snapshot: bool) -> Vec<HotkeyCandidateEventEvidence> {
         let mut lines = vec![
+            "trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=5 modifiers_match=true provenance=ExternalInjected",
+            "trace_event=\"configured_primary\" elapsed_ms=20 transition=Release invocation_id=5 modifiers_match=false provenance=ExternalInjected",
             "trace_event=\"short_tap\" elapsed_ms=22 invocation_id=5 terminal=true",
             "trace_event=\"desired_visibility\" elapsed_ms=24 visible=true revision=7 source=ToggleBatch invocation_id=5",
             "trace_event=\"root_command\" elapsed_ms=26 command=Focus request_id=9 visibility_revision=7 invocation_id=5",
@@ -41399,6 +47530,960 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn screen_draw_follow_on_wait_events(
+        focus: HotkeyRootFocusIntent,
+    ) -> Vec<HotkeyCandidateEventEvidence> {
+        let mut events = snapshot_wait_events(true);
+        let mut lines = vec![
+            "trace_event=\"desired_visibility\" elapsed_ms=34 visible=true revision=8 source=ScreenDrawRestore invocation_id=5",
+            if focus == HotkeyRootFocusIntent::ActivateRoot {
+                "trace_event=\"screen_draw_restore_focus_intent\" elapsed_ms=34 revision=8 invocation_id=5 focus_intent=ActivateRoot"
+            } else {
+                "trace_event=\"screen_draw_restore_focus_intent\" elapsed_ms=34 revision=8 invocation_id=5 focus_intent=PreserveForeground"
+            },
+            "trace_event=\"root_command\" elapsed_ms=36 command=Show request_id=20 visibility_revision=8 invocation_id=5",
+        ];
+        if focus == HotkeyRootFocusIntent::ActivateRoot {
+            lines.push("trace_event=\"native_activation\" elapsed_ms=37 edge=RestoreRequested hwnd=1001 request_id=30 visibility_revision=8 invocation_id=5 terminal=false");
+        }
+        lines.push("trace_event=\"native_window_snapshot\" elapsed_ms=40 hwnd=1001 process_id=202 left=100 top=100 right=900 bottom=700 visible=true minimized=false request_id=20 visibility_revision=8 invocation_id=5");
+        if focus == HotkeyRootFocusIntent::ActivateRoot {
+            lines.push("trace_event=\"native_activation\" elapsed_ms=41 edge=RestoreCompleted hwnd=1001 request_id=30 visibility_revision=8 invocation_id=5 terminal=true");
+        }
+        for (index, line) in lines.iter().enumerate() {
+            events.push(
+                parse_hotkey_candidate_event(
+                    line,
+                    HotkeyCandidateStream::MainCandidate,
+                    3,
+                    HotkeyRunnerInputPurpose::MatrixBurst,
+                    index + 7,
+                )
+                .unwrap(),
+            );
+        }
+        events
+    }
+
+    #[test]
+    fn screen_draw_follow_on_waiter_and_builder_reject_coherent_false_restore_with_parked_root() {
+        let context = snapshot_wait_context();
+        let root = HotkeyRootIdentityEvidence {
+            stream: context.stream,
+            hwnd: context.root_hwnd,
+            process_id: context.root_process_id,
+        };
+        for focus in [
+            HotkeyRootFocusIntent::ActivateRoot,
+            HotkeyRootFocusIntent::PreserveForeground,
+        ] {
+            let mut events = screen_draw_follow_on_wait_events(focus);
+            assert!(hotkey_segment_has_physical_snapshot_proof(
+                &context, &events
+            ));
+            for event in &mut events {
+                if event.visibility_revision != Some(8) {
+                    continue;
+                }
+                match event.kind {
+                    HotkeyTraceEventKind::VisibilityIntent => event.visible = Some(false),
+                    HotkeyTraceEventKind::RootCommand => {
+                        event.command = Some(HotkeyRootCommand::Position)
+                    }
+                    HotkeyTraceEventKind::NativeWindowSnapshot => {
+                        event.bounds = Some([2000, 2000, 2800, 2600])
+                    }
+                    _ => {}
+                }
+            }
+            let restores = build_hotkey_follow_on_restorations(&events);
+            assert_eq!(restores.len(), 1);
+            assert!(!restores[0].visible);
+            assert_eq!(restores[0].focus_intent, focus);
+            assert_eq!(restores[0].parent_visibility_revision, Some(7));
+            assert_eq!(restores[0].invocation_id, Some(5));
+            assert_eq!(restores[0].root_commands.len(), 1);
+            let snapshot = restores[0].root_commands[0]
+                .observed_snapshot_event_ordinal
+                .unwrap();
+            let proof_context = HotkeyRootProofContext {
+                candidate_events: &events,
+                root_identities: std::slice::from_ref(&root),
+                physical_displays: &context.physical_displays,
+                follow_on_restorations: &restores,
+            };
+            assert_eq!(
+                crate::hotkey_current_intent_physical_snapshot(proof_context, &events[3], &root),
+                Some(6)
+            );
+            assert_eq!(
+                crate::hotkey_current_intent_physical_snapshot(proof_context, &events[6], &root),
+                Some(snapshot),
+            );
+            assert!(crate::root_command_span_matches(
+                proof_context,
+                root.stream,
+                &restores[0].root_commands[0]
+            ));
+            assert!(!hotkey_segment_has_physical_snapshot_proof(
+                &context, &events
+            ));
+            let (_, _, error) = build_hotkey_decision_proofs(
+                "H01",
+                &events,
+                &[],
+                std::slice::from_ref(&root),
+                &context.physical_displays,
+            );
+            assert!(error);
+        }
+    }
+
+    #[test]
+    fn screen_draw_follow_on_waiter_and_builder_reject_viewport_focus_under_preserve_foreground() {
+        let context = snapshot_wait_context();
+        let root = HotkeyRootIdentityEvidence {
+            stream: context.stream,
+            hwnd: context.root_hwnd,
+            process_id: context.root_process_id,
+        };
+        for focus in [
+            HotkeyRootFocusIntent::ActivateRoot,
+            HotkeyRootFocusIntent::PreserveForeground,
+        ] {
+            let mut events = screen_draw_follow_on_wait_events(focus);
+            assert!(hotkey_segment_has_physical_snapshot_proof(
+                &context, &events
+            ));
+            events[8].command = Some(HotkeyRootCommand::Focus);
+            let restores = build_hotkey_follow_on_restorations(&events);
+            assert_eq!(restores.len(), 1);
+            assert_eq!(restores[0].focus_intent, focus);
+            assert_eq!(restores[0].root_commands.len(), 1);
+            assert_eq!(
+                restores[0].root_commands[0].command,
+                HotkeyRootCommand::Focus
+            );
+            let snapshot = restores[0].root_commands[0]
+                .observed_snapshot_event_ordinal
+                .unwrap();
+            let proof_context = HotkeyRootProofContext {
+                candidate_events: &events,
+                root_identities: std::slice::from_ref(&root),
+                physical_displays: &context.physical_displays,
+                follow_on_restorations: &restores,
+            };
+            assert_eq!(
+                crate::hotkey_current_intent_physical_snapshot(proof_context, &events[3], &root),
+                Some(6)
+            );
+            assert_eq!(
+                crate::hotkey_current_intent_physical_snapshot(proof_context, &events[6], &root),
+                Some(snapshot),
+            );
+            assert!(crate::root_command_span_matches(
+                proof_context,
+                root.stream,
+                &restores[0].root_commands[0]
+            ));
+            let ready = hotkey_segment_has_physical_snapshot_proof(&context, &events);
+            let (gestures, standalone, error) = build_hotkey_decision_proofs(
+                "H01",
+                &events,
+                &[],
+                std::slice::from_ref(&root),
+                &context.physical_displays,
+            );
+            assert!(standalone.is_empty());
+            if focus == HotkeyRootFocusIntent::PreserveForeground {
+                assert!(restores[0].native_activation.is_none());
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| event.kind == HotkeyTraceEventKind::NativeActivation)
+                );
+                assert!(!ready);
+                assert!(error);
+            } else {
+                assert!(ready);
+                assert!(!error);
+                assert_eq!(gestures.len(), 1);
+                let HotkeyDecisionProof::Applied {
+                    visibility_revision,
+                    root_commands,
+                    ..
+                } = &gestures[0].decision
+                else {
+                    panic!("ActivateRoot Focus must preserve the original applied gesture");
+                };
+                assert_eq!(*visibility_revision, 7);
+                assert_eq!(root_commands[0].observed_snapshot_event_ordinal, Some(6));
+            }
+        }
+    }
+
+    #[test]
+    fn screen_draw_follow_on_waiter_and_builder_retain_original_snapshot_with_fresh_child_owner() {
+        let context = snapshot_wait_context();
+        let root = HotkeyRootIdentityEvidence {
+            stream: context.stream,
+            hwnd: context.root_hwnd,
+            process_id: context.root_process_id,
+        };
+        for focus in [
+            HotkeyRootFocusIntent::ActivateRoot,
+            HotkeyRootFocusIntent::PreserveForeground,
+        ] {
+            let events = screen_draw_follow_on_wait_events(focus);
+            let before = serde_json::to_vec(&events).unwrap();
+            assert!(hotkey_segment_has_physical_snapshot_proof(
+                &context, &events
+            ));
+            let (gestures, standalone, error) = build_hotkey_decision_proofs(
+                "H01",
+                &events,
+                &[],
+                std::slice::from_ref(&root),
+                &context.physical_displays,
+            );
+            assert!(!error);
+            assert!(standalone.is_empty());
+            assert_eq!(gestures.len(), 1);
+            let HotkeyDecisionProof::Applied {
+                visibility_revision,
+                root_commands,
+                ..
+            } = &gestures[0].decision
+            else {
+                panic!("separately owned restoration must not supersede the original gesture");
+            };
+            assert_eq!(*visibility_revision, 7);
+            assert_eq!(root_commands.len(), 1);
+            assert_eq!(root_commands[0].observed_snapshot_event_ordinal, Some(6));
+            let restores = build_hotkey_follow_on_restorations(&events);
+            assert_eq!(restores.len(), 1);
+            assert_eq!(restores[0].parent_visibility_revision, Some(7));
+            assert_eq!(restores[0].visibility_revision, 8);
+            assert_eq!(restores[0].invocation_id, Some(5));
+            assert_eq!(restores[0].focus_intent, focus);
+            assert_eq!(restores[0].root_commands.len(), 1);
+            assert_eq!(restores[0].root_commands[0].command_event_ordinal, 9);
+            assert_eq!(
+                restores[0].native_activation.is_some(),
+                focus == HotkeyRootFocusIntent::ActivateRoot
+            );
+            assert_eq!(serde_json::to_vec(&events).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn screen_draw_follow_on_waiter_and_builder_reject_incomplete_or_conflicting_child_owners() {
+        let context = snapshot_wait_context();
+        let root = HotkeyRootIdentityEvidence {
+            stream: context.stream,
+            hwnd: context.root_hwnd,
+            process_id: context.root_process_id,
+        };
+        let events = screen_draw_follow_on_wait_events(HotkeyRootFocusIntent::ActivateRoot);
+        let mutations: &[(&str, fn(&mut Vec<HotkeyCandidateEventEvidence>))] = &[
+            ("missing restore", |events| {
+                events.retain(|e| {
+                    e.visibility_source != Some(HotkeyVisibilitySource::ScreenDrawRestore)
+                })
+            }),
+            ("missing focus", |events| {
+                events.retain(|e| e.kind != HotkeyTraceEventKind::ScreenDrawRestoreFocusIntent)
+            }),
+            ("incomplete activation", |events| {
+                events.retain(|e| e.activation_edge != Some(HotkeyActivationEdge::RestoreCompleted))
+            }),
+            ("missing parent presentation", |events| {
+                events.remove(5);
+            }),
+            ("wrong child group", |events| {
+                for e in &mut events[6..] {
+                    e.input_group_id = 4;
+                }
+            }),
+            ("wrong child purpose", |events| {
+                for e in &mut events[6..] {
+                    e.input_purpose = HotkeyRunnerInputPurpose::AuxiliaryProbe;
+                }
+            }),
+            ("wrong restore stream", |events| {
+                events[6].stream = HotkeyCandidateStream::AlternateProfileCandidate
+            }),
+            ("orphaned invocation", |events| {
+                for e in &mut events[6..] {
+                    e.invocation_id = Some(6);
+                }
+            }),
+            ("stale child revision", |events| {
+                for e in &mut events[6..] {
+                    e.visibility_revision = Some(7);
+                }
+            }),
+            ("before parent presentation", |events| {
+                events[6].event_ordinal = 6;
+                events[6].elapsed_ms = 31;
+            }),
+            ("wrong child HWND", |events| events[10].hwnd = Some(1002)),
+            ("wrong child PID", |events| {
+                events[10].process_id = Some(203)
+            }),
+            ("wrong child request", |events| {
+                events[10].request_id = Some(21)
+            }),
+            ("wrong final presentation", |events| {
+                events[10].minimized = Some(true)
+            }),
+            ("PreserveForeground activation", |events| {
+                events[7].focus_intent = Some(HotkeyRootFocusIntent::PreserveForeground)
+            }),
+        ];
+        assert!(hotkey_segment_has_physical_snapshot_proof(
+            &context, &events
+        ));
+        for (name, mutate) in mutations {
+            let mut changed = events.clone();
+            mutate(&mut changed);
+            assert!(
+                !hotkey_segment_has_physical_snapshot_proof(&context, &changed),
+                "{name}"
+            );
+            let (_, _, error) = build_hotkey_decision_proofs(
+                "H01",
+                &changed,
+                &[],
+                std::slice::from_ref(&root),
+                &context.physical_displays,
+            );
+            assert!(error, "{name}");
+        }
+    }
+
+    #[test]
+    fn issued_supersession_waiter_and_builder_replay_both_physical_directions() {
+        for reverse in [false, true] {
+            let mut packet = crate::tests::hotkey_issued_superseded_fixture();
+            if reverse {
+                for event in &mut packet.candidate_events {
+                    if let Some(visible) = &mut event.visible {
+                        *visible = !*visible;
+                    }
+                    if event.kind == HotkeyTraceEventKind::NativeWindowSnapshot {
+                        let physically_shown = event.visible == Some(true);
+                        event.visible = Some(true);
+                        event.minimized = Some(false);
+                        event.bounds = Some(if physically_shown {
+                            [100, 100, 900, 700]
+                        } else {
+                            [2000, 2000, 2800, 2600]
+                        });
+                    }
+                }
+            }
+            let context = HotkeySnapshotWaitContext {
+                input_group_id: 1,
+                purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                ..snapshot_wait_context()
+            };
+            assert!(hotkey_segment_has_physical_snapshot_proof(
+                &context,
+                &packet.candidate_events
+            ));
+            let before_events = serde_json::to_vec(&packet.candidate_events).unwrap();
+            let (gestures, standalone, error) = build_hotkey_decision_proofs(
+                "H07",
+                &packet.candidate_events,
+                &packet.runner_edges,
+                &packet.root_identities,
+                &packet.physical_displays,
+            );
+            assert!(!error);
+            assert!(standalone.is_empty());
+            assert_eq!(gestures.len(), 3);
+            assert!(matches!(
+                gestures[0].decision,
+                HotkeyDecisionProof::Superseded {
+                    visibility_revision: 7,
+                    by_revision: 8,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                gestures[1].decision,
+                HotkeyDecisionProof::Applied {
+                    visibility_revision: 8,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                gestures[2].decision,
+                HotkeyDecisionProof::Applied {
+                    visibility_revision: 9,
+                    ..
+                }
+            ));
+            assert_eq!(
+                serde_json::to_vec(&packet.candidate_events).unwrap(),
+                before_events
+            );
+            if !reverse {
+                packet.gestures = gestures;
+                crate::validate_hotkey_evidence_packet(&packet).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn issued_supersession_waiter_and_builder_reject_unowned_or_stale_work() {
+        let mutations: &[fn(&mut Vec<HotkeyCandidateEventEvidence>)] = &[
+            |events| {
+                events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .input_group_id = 2
+            },
+            |events| {
+                events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .input_purpose = HotkeyRunnerInputPurpose::MatrixBurst
+            },
+            |events| {
+                events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .stream = HotkeyCandidateStream::AlternateProfileCandidate
+            },
+            |events| {
+                events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::VisibilityIntent
+                    })
+                    .unwrap()
+                    .visibility_revision = Some(7)
+            },
+            |events| {
+                events
+                    .iter_mut()
+                    .find(|event| {
+                        event.invocation_id == Some(6)
+                            && event.kind == HotkeyTraceEventKind::PrimaryRelease
+                    })
+                    .unwrap()
+                    .invocation_id = Some(99)
+            },
+            |events| {
+                events
+                    .iter_mut()
+                    .find(|event| {
+                        event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                            && event.request_id == Some(21)
+                    })
+                    .unwrap()
+                    .hwnd = Some(1002)
+            },
+            |events| {
+                events
+                    .iter_mut()
+                    .find(|event| {
+                        event.kind == HotkeyTraceEventKind::NativeWindowSnapshot
+                            && event.request_id == Some(21)
+                    })
+                    .unwrap()
+                    .process_id = Some(203)
+            },
+            |events| {
+                events.retain(|event| {
+                    !(matches!(event.invocation_id, Some(6 | 7))
+                        && event.kind == HotkeyTraceEventKind::NativeWindowSnapshot)
+                })
+            },
+            |events| {
+                let successor = events
+                    .iter()
+                    .find(|event| {
+                        event.kind == HotkeyTraceEventKind::VisibilityIntent
+                            && event.invocation_id == Some(6)
+                    })
+                    .unwrap()
+                    .clone();
+                let command = events
+                    .iter_mut()
+                    .find(|event| {
+                        event.kind == HotkeyTraceEventKind::RootCommand
+                            && event.request_id == Some(20)
+                    })
+                    .unwrap();
+                command.event_ordinal = successor.event_ordinal + 1;
+                command.elapsed_ms = successor.elapsed_ms + 1;
+            },
+        ];
+        for (index, mutate) in mutations.iter().enumerate() {
+            let mut packet = crate::tests::hotkey_issued_superseded_fixture();
+            mutate(&mut packet.candidate_events);
+            let context = HotkeySnapshotWaitContext {
+                input_group_id: 1,
+                purpose: HotkeyRunnerInputPurpose::LauncherChord,
+                ..snapshot_wait_context()
+            };
+            assert!(
+                !hotkey_segment_has_physical_snapshot_proof(&context, &packet.candidate_events),
+                "waiter negative {index}"
+            );
+            let (_, _, error) = build_hotkey_decision_proofs(
+                "H07",
+                &packet.candidate_events,
+                &packet.runner_edges,
+                &packet.root_identities,
+                &packet.physical_displays,
+            );
+            assert!(error, "builder negative {index}");
+        }
+    }
+
+    fn opening_hold_hover_lines() -> (Vec<String>, usize) {
+        let lines = [
+            "trace_event=\"runtime_radial_hover\" elapsed_ms=20111 session_digest=4293134719646749379 cell_digest=8094860968890429075 layout_generation=4 role=\"Action\" executable=true",
+            "trace_event=\"configured_primary\" elapsed_ms=21000 transition=Press invocation_id=84 modifiers_match=true provenance=ExternalInjected",
+            "trace_event=\"runtime_preparation\" elapsed_ms=21463 edge=ReplyQueued invocation_id=84 generation=6",
+            "trace_event=\"runtime_radial_hover\" elapsed_ms=21550 session_digest=4293133620135121168 cell_digest=8094860968890429075 layout_generation=5 role=\"Action\" executable=true",
+            "trace_event=\"configured_primary\" elapsed_ms=21675 transition=Release invocation_id=84 modifiers_match=true provenance=ExternalInjected",
+        ].into_iter().map(str::to_owned).collect();
+        (lines, 1)
+    }
+
+    fn hotkey_hover_setup_surfaces() -> Vec<WindowSnapshot> {
+        let mut surfaces = vec![
+            window(101, 44, WindowRole::OtherChild, true),
+            window(102, 44, WindowRole::OtherChild, true),
+        ];
+        for surface in &mut surfaces {
+            surface.bounds = [0, 751, 316, 1067];
+        }
+        surfaces
+    }
+
+    #[test]
+    fn hotkey_hover_no_initial_receipt_establishes_actual_owned_neutral_target_ack() {
+        for start in [POINT { x: 1, y: 909 }, POINT { x: 158, y: 909 }] {
+            let surfaces = hotkey_hover_setup_surfaces();
+            let (mut lines, boundary) = opening_hold_hover_lines();
+            lines.remove(3);
+            let opening = hotkey_current_open_hover_state(&lines, boundary).unwrap();
+            assert_eq!(opening.hover, None);
+            assert_eq!(
+                (
+                    opening.preparation.invocation_id,
+                    opening.preparation.generation
+                ),
+                (84, 6)
+            );
+            assert!(hotkey_current_open_hover(&lines, boundary).is_none());
+            let lines = std::cell::RefCell::new(lines);
+            let cursor = Cell::new(start);
+            let moves = std::cell::RefCell::new(Vec::new());
+            let result = hover_executable_radial_cell_with(
+                &surfaces,
+                44,
+                boundary,
+                || Ok(HotkeyHoverSetupObservation {
+                    lines: lines.borrow().clone(),
+                    windows: surfaces.clone(),
+                    cursor: cursor.get(),
+                }),
+                |point| {
+                    moves.borrow_mut().push((point.x, point.y));
+                    cursor.set(point);
+                    let (cell, role, executable) = match (point.x, point.y) {
+                        (158, 909) => ("__center", "Drag", false),
+                        (158, 798) => ("starter-root-favorites", "Action", true),
+                        other => panic!("unexpected owned setup point: {other:?}"),
+                    };
+                    lines.borrow_mut().push(format!(
+                        "trace_event=\"runtime_radial_hover\" elapsed_ms={} session_digest=4293133620135121168 cell_digest={} layout_generation=5 role=\"{}\" executable={}",
+                        21700 + moves.borrow().len(), acceptance_id_digest(cell), role, executable,
+                    ));
+                    Ok(())
+                },
+                || Duration::ZERO,
+                || panic!("the actual post-motion acknowledgment is already available"),
+            ).unwrap();
+            assert_eq!(result, acceptance_id_digest("starter-root-favorites"));
+            let expected = if start.x == 1 {
+                vec![(158, 909), (158, 798)]
+            } else {
+                vec![(158, 798)]
+            };
+            assert_eq!(*moves.borrow(), expected);
+            assert_eq!((cursor.get().x, cursor.get().y), (158, 798));
+            let final_ack = hotkey_current_open_hover(&lines.borrow(), boundary).unwrap();
+            assert_eq!(
+                (final_ack.session_digest, final_ack.layout_generation),
+                (4293133620135121168, 5)
+            );
+            assert!(final_ack.executable && final_ack.ordinal > opening.preparation.ordinal);
+        }
+    }
+
+    #[test]
+    fn hotkey_hover_setup_invalid_or_stale_opening_allows_zero_motion() {
+        for mutation in 0..8 {
+            let surfaces = hotkey_hover_setup_surfaces();
+            let (mut lines, boundary) = opening_hold_hover_lines();
+            match mutation {
+                0 => {
+                    lines.remove(2);
+                }
+                1 => lines[2] = lines[2].replace("invocation_id=84", "invocation_id=83"),
+                2 => lines[2] = lines[2].replace("generation=6", "generation=0"),
+                3 => lines[4] = lines[4].replace("invocation_id=84", "invocation_id=83"),
+                4 => lines[1] = lines[1].replace("modifiers_match=true", "modifiers_match=false"),
+                5 => lines[1] = lines[1].replace("ExternalInjected", "ApplicationInjected"),
+                6 => {
+                    lines[3] = lines[3].replace(
+                        "session_digest=4293133620135121168",
+                        "session_digest=4293134719646749379",
+                    )
+                }
+                7 => lines[3] = lines[3].replace("layout_generation=5", "layout_generation=4"),
+                _ => unreachable!(),
+            }
+            assert!(hotkey_current_open_hover_state(&lines, boundary).is_none());
+            let result = hover_executable_radial_cell_with(
+                &surfaces,
+                44,
+                boundary,
+                || {
+                    Ok(HotkeyHoverSetupObservation {
+                        lines: lines.clone(),
+                        windows: surfaces.clone(),
+                        cursor: POINT { x: 1, y: 909 },
+                    })
+                },
+                |_| panic!("invalid opening cannot authorize motion: {mutation}"),
+                || Duration::ZERO,
+                || panic!("invalid opening is not an optional missing hover: {mutation}"),
+            );
+            assert_eq!(result.unwrap_err().stage, FailureStage::GestureDecision);
+        }
+    }
+
+    #[test]
+    fn hotkey_hover_setup_requires_real_ack_and_keeps_one_total_deadline() {
+        for mutation in 0..5 {
+            let surfaces = hotkey_hover_setup_surfaces();
+            let (mut initial, boundary) = opening_hold_hover_lines();
+            initial.remove(3);
+            let lines = std::cell::RefCell::new(initial);
+            let cursor = Cell::new(POINT { x: 1, y: 909 });
+            let clock = Cell::new(Duration::ZERO);
+            let moves = Cell::new(0);
+            let result = hover_executable_radial_cell_with(
+                &surfaces,
+                44,
+                boundary,
+                || {
+                    Ok(HotkeyHoverSetupObservation {
+                        lines: lines.borrow().clone(),
+                        windows: surfaces.clone(),
+                        cursor: cursor.get(),
+                    })
+                },
+                |point| {
+                    moves.set(moves.get() + 1);
+                    cursor.set(point);
+                    match mutation {
+                        0 => {}, // Native cursor delivery alone is not a production hover receipt.
+                        1 => lines.borrow_mut().push(format!("trace_event=\"runtime_radial_hover\" elapsed_ms=21700 session_digest=4293134719646749379 cell_digest={} layout_generation=5 role=\"Drag\" executable=false", acceptance_id_digest("__center"))),
+                        2 => lines.borrow_mut().push(format!("trace_event=\"runtime_radial_hover\" elapsed_ms=21700 session_digest=4293133620135121168 cell_digest={} layout_generation=4 role=\"Drag\" executable=false", acceptance_id_digest("__center"))),
+                        3 => {
+                            let changed = lines.borrow()[2].replace("generation=6", "generation=7");
+                            lines.borrow_mut()[2] = changed;
+                        },
+                        4 => {},
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                },
+                || clock.get(),
+                || {
+                    clock.set(clock.get() + WINDOW_POLL);
+                    if mutation == 4 && clock.get() == Duration::from_secs(2) {
+                        lines.borrow_mut().push(format!("trace_event=\"runtime_radial_hover\" elapsed_ms=21700 session_digest=4293133620135121168 cell_digest={} layout_generation=5 role=\"Drag\" executable=false", acceptance_id_digest("__center")));
+                    }
+                },
+            );
+            assert_eq!(result.unwrap_err().stage, FailureStage::GestureDecision);
+            assert_eq!(
+                moves.get(),
+                if mutation == 4 { 2 } else { 1 },
+                "a target motion requires the real neutral acknowledgment"
+            );
+            if mutation == 0 || mutation == 4 {
+                assert_eq!(clock.get(), TRACE_TIMEOUT);
+            }
+        }
+        let surfaces = hotkey_hover_setup_surfaces();
+        assert!(
+            hover_executable_radial_cell_with(
+                &surfaces,
+                44,
+                1,
+                || panic!("expired setup cannot acquire input ownership"),
+                |_| panic!("expired setup cannot move the pointer"),
+                || TRACE_TIMEOUT,
+                || panic!("expired setup cannot poll"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hotkey_hover_setup_same_point_reuses_only_current_ack_and_live_delivery() {
+        for mutation in 0..3 {
+            let surfaces = hotkey_hover_setup_surfaces();
+            let (lines, boundary) = opening_hold_hover_lines();
+            let reads = Cell::new(0);
+            let result = hover_executable_radial_cell_with(
+                &surfaces,
+                44,
+                boundary,
+                || {
+                    let mut observed = HotkeyHoverSetupObservation {
+                        lines: lines.clone(),
+                        windows: surfaces.clone(),
+                        cursor: POINT { x: 158, y: 798 },
+                    };
+                    if reads.get() == 1 {
+                        match mutation {
+                            0 => {}
+                            1 => observed.windows[0].visible = false,
+                            2 => observed.cursor.x += 1,
+                            _ => unreachable!(),
+                        }
+                    }
+                    reads.set(reads.get() + 1);
+                    Ok(observed)
+                },
+                |_| panic!("same-point path must not fabricate a new selection edge"),
+                || Duration::ZERO,
+                || panic!("same-point path already has its genuine receipt"),
+            );
+            if mutation == 0 {
+                assert_eq!(
+                    result.unwrap(),
+                    acceptance_id_digest("starter-root-favorites")
+                );
+            } else {
+                assert_eq!(result.unwrap_err().stage, FailureStage::NativeRootState);
+            }
+            assert_eq!(reads.get(), 2);
+        }
+    }
+
+    #[test]
+    fn hotkey_hover_same_point_accepts_current_opening_hold_ack_before_release() {
+        let (lines, boundary) = opening_hold_hover_lines();
+        let ack = hotkey_current_open_hover(&lines, boundary).unwrap();
+        assert_eq!(ack.ordinal, 4);
+        assert_eq!(ack.elapsed_ms, 21550);
+        assert_eq!(ack.session_digest, 4293133620135121168);
+        assert_eq!(ack.layout_generation, 5);
+        assert!(
+            ack.ordinal < lines.len(),
+            "actual selection acknowledgment preceded hold release"
+        );
+        assert_eq!(
+            ack.cell_digest,
+            acceptance_id_digest("starter-root-favorites")
+        );
+        assert!(hotkey_hover_ack_matches(
+            ack,
+            ack,
+            boundary,
+            acceptance_id_digest("starter-root-favorites"),
+            true
+        ));
+        let mut surfaces = vec![
+            window(101, 44, WindowRole::OtherChild, true),
+            window(102, 44, WindowRole::OtherChild, true),
+        ];
+        for surface in &mut surfaces {
+            surface.bounds = [1063, 0, 1379, 316];
+        }
+        let point = POINT { x: 1221, y: 47 };
+        assert!(hotkey_hover_delivery_is_current(
+            &surfaces, &surfaces, 44, point, point
+        ));
+        // No newer hover is required when the same measured point already has
+        // this current lifetime's acknowledgment; repeating it is deduplicated.
+        assert_eq!(hotkey_current_open_hover(&lines, boundary), Some(ack));
+    }
+
+    #[test]
+    fn hotkey_hover_neutral_target_ack_requires_new_boundary_exact_cell_session_and_layout() {
+        let (mut lines, boundary) = opening_hold_hover_lines();
+        let lifetime = hotkey_current_open_hover(&lines, boundary).unwrap();
+        let neutral_cursor = lines.len();
+        lines.push(format!("trace_event=\"runtime_radial_hover\" elapsed_ms=21680 session_digest={} cell_digest={} layout_generation=5 role=\"Drag\" executable=false", lifetime.session_digest, acceptance_id_digest("__center")));
+        let neutral = hotkey_current_open_hover(&lines, boundary).unwrap();
+        assert!(hotkey_hover_ack_matches(
+            neutral,
+            lifetime,
+            neutral_cursor,
+            acceptance_id_digest("__center"),
+            false
+        ));
+        let target_cursor = lines.len();
+        assert!(!hotkey_hover_ack_matches(
+            lifetime,
+            lifetime,
+            target_cursor,
+            lifetime.cell_digest,
+            true
+        ));
+        lines.push(format!("trace_event=\"runtime_radial_hover\" elapsed_ms=21690 session_digest={} cell_digest={} layout_generation=5 role=\"Action\" executable=true", lifetime.session_digest, lifetime.cell_digest));
+        let target = hotkey_current_open_hover(&lines, boundary).unwrap();
+        assert!(hotkey_hover_ack_matches(
+            target,
+            lifetime,
+            target_cursor,
+            lifetime.cell_digest,
+            true
+        ));
+        let mutations: &[fn(&mut HotkeyRuntimeHoverAck)] = &[
+            |ack: &mut HotkeyRuntimeHoverAck| ack.session_digest += 1,
+            |ack: &mut HotkeyRuntimeHoverAck| ack.layout_generation += 1,
+            |ack: &mut HotkeyRuntimeHoverAck| ack.cell_digest += 1,
+            |ack: &mut HotkeyRuntimeHoverAck| ack.ordinal = 0,
+            |ack: &mut HotkeyRuntimeHoverAck| ack.executable = false,
+        ];
+        for mutate in mutations {
+            let mut changed = target;
+            mutate(&mut changed);
+            assert!(!hotkey_hover_ack_matches(
+                changed,
+                lifetime,
+                target_cursor,
+                lifetime.cell_digest,
+                true
+            ));
+        }
+        let mut not_fresh = target;
+        not_fresh.ordinal = target_cursor;
+        assert!(!hotkey_hover_ack_matches(
+            not_fresh,
+            lifetime,
+            target_cursor,
+            lifetime.cell_digest,
+            true
+        ));
+    }
+
+    #[test]
+    fn hotkey_hover_open_lifetime_rejects_stale_missing_malformed_or_conflicting_receipts() {
+        let substitutions = [
+            (
+                3,
+                "session_digest=4293133620135121168",
+                "session_digest=4293134719646749379",
+            ),
+            (3, "layout_generation=5", "layout_generation=4"),
+            (3, "cell_digest=8094860968890429075", "cell_digest=0"),
+            (3, "elapsed_ms=21550", "elapsed_ms=21001"),
+            (3, "role=\"Action\"", "role=\"ActionSuffix\""),
+            (3, "executable=true", "executable=false"),
+            (2, "invocation_id=84", "invocation_id=83"),
+            (2, "generation=6", "generation=0"),
+            (4, "invocation_id=84", "invocation_id=83"),
+        ];
+        for (index, from, to) in substitutions {
+            let (mut lines, boundary) = opening_hold_hover_lines();
+            assert!(lines[index].contains(from));
+            lines[index] = lines[index].replace(from, to);
+            assert!(
+                hotkey_current_open_hover(&lines, boundary).is_none(),
+                "{from} -> {to}"
+            );
+        }
+        for index in [1, 2, 3, 4] {
+            let (mut lines, boundary) = opening_hold_hover_lines();
+            lines.remove(index);
+            assert!(hotkey_current_open_hover(&lines, boundary).is_none());
+        }
+        let (mut lines, boundary) = opening_hold_hover_lines();
+        lines.push("trace_event=\"runtime_radial_hover\" elapsed_ms=21690 session_digest=99 cell_digest=1 layout_generation=6 role=\"Action\" executable=true".into());
+        assert!(hotkey_current_open_hover(&lines, boundary).is_none());
+        let (mut lines, boundary) = opening_hold_hover_lines();
+        lines.push(lines[2].clone());
+        assert!(hotkey_current_open_hover(&lines, boundary).is_none());
+    }
+
+    #[test]
+    fn hotkey_hover_delivery_requires_live_exact_surface_geometry_and_actual_cursor_ack() {
+        let mut surfaces = vec![
+            window(101, 44, WindowRole::OtherChild, true),
+            window(102, 44, WindowRole::OtherChild, true),
+        ];
+        for surface in &mut surfaces {
+            surface.bounds = [1063, 0, 1379, 316];
+        }
+        let point = POINT { x: 1221, y: 47 };
+        let mutations: &[fn(&mut WindowSnapshot)] = &[
+            |window| window.visible = false,
+            |window| window.minimized = true,
+            |window| window.hwnd = HWND(999_usize as *mut std::ffi::c_void),
+            |window| window.process_id += 1,
+            |window| window.bounds[0] += 1,
+            |window| window.class_name = "stale class".into(),
+        ];
+        for mutate in mutations {
+            let mut changed = surfaces.clone();
+            mutate(&mut changed[0]);
+            assert!(!hotkey_hover_delivery_is_current(
+                &surfaces, &changed, 44, point, point
+            ));
+        }
+        assert!(!hotkey_hover_delivery_is_current(
+            &surfaces,
+            &surfaces[1..],
+            44,
+            point,
+            point
+        ));
+        assert!(!hotkey_hover_delivery_is_current(
+            &surfaces,
+            &surfaces,
+            44,
+            POINT {
+                x: point.x + 1,
+                y: point.y
+            },
+            point
+        ));
+        let outside = POINT { x: 2000, y: 1000 };
+        assert!(!hotkey_hover_delivery_is_current(
+            &surfaces, &surfaces, 44, outside, outside
+        ));
     }
 
     #[test]
@@ -41487,6 +48572,7 @@ mod tests {
             physical_displays: vec![[0, 0, 1920, 1080]],
             next_input_group_id: 1,
             current_purpose: None,
+            screen_draw_priority: None,
         };
         let (_, first_group, _) = open_hotkey_capture_segment(
             &mut capture,
@@ -41600,6 +48686,7 @@ mod tests {
             physical_displays: vec![[0, 0, 1920, 1080]],
             next_input_group_id: 1,
             current_purpose: None,
+            screen_draw_priority: None,
         };
         let main = open_hotkey_capture_segment(
             &mut capture,
@@ -41714,6 +48801,7 @@ mod tests {
                     physical_displays: vec![[0, 0, 1920, 1080]],
                     next_input_group_id: 2,
                     current_purpose: None,
+                    screen_draw_priority: None,
                 });
             });
             finish_hotkey_evidence_capture("H01").unwrap()
@@ -41903,7 +48991,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let (gestures, standalone, proof_error) = build_hotkey_decision_proofs("H16", &events, &[]);
+        let (gestures, standalone, proof_error) =
+            build_hotkey_decision_proofs("H16", &events, &[], &[], &[]);
         assert!(!proof_error);
         assert_eq!(gestures.len(), 1);
         assert!(gestures[0].short_tap_elapsed_ms.is_none());
@@ -41921,7 +49010,8 @@ mod tests {
         for event in unrelated_group.iter_mut().skip(2) {
             event.input_group_id = 7;
         }
-        let (unpaired_gestures, _, _) = build_hotkey_decision_proofs("H16", &unrelated_group, &[]);
+        let (unpaired_gestures, _, _) =
+            build_hotkey_decision_proofs("H16", &unrelated_group, &[], &[], &[]);
         assert!(matches!(
             unpaired_gestures[0].decision,
             HotkeyDecisionProof::NotApplicable {
@@ -41970,7 +49060,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
         let (gestures, standalone, proof_error) =
-            build_hotkey_decision_proofs("H16", &events, &complex_edges);
+            build_hotkey_decision_proofs("H16", &events, &complex_edges, &[], &[]);
         assert!(!proof_error);
         assert_eq!(gestures.len(), 1);
         assert_eq!(standalone.len(), 1);
@@ -41982,12 +49072,12 @@ mod tests {
         );
 
         let (wrong_case_gestures, _, wrong_case_error) =
-            build_hotkey_decision_proofs("H17", &events, &complex_edges);
+            build_hotkey_decision_proofs("H17", &events, &complex_edges, &[], &[]);
         assert!(wrong_case_error);
         assert_eq!(wrong_case_gestures.len(), 1);
 
         let (missing_edges_gestures, _, missing_edges_error) =
-            build_hotkey_decision_proofs("H16", &events, &[]);
+            build_hotkey_decision_proofs("H16", &events, &[], &[], &[]);
         assert!(missing_edges_error);
         assert_eq!(missing_edges_gestures.len(), 1);
 
@@ -42010,7 +49100,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let (_, _, simple_fallback_error) =
-            build_hotkey_decision_proofs("H16", &events, &simple_edges);
+            build_hotkey_decision_proofs("H16", &events, &simple_edges, &[], &[]);
         assert!(simple_fallback_error);
 
         let mut deferred_legacy = events.clone();
@@ -42020,7 +49110,7 @@ mod tests {
         deferred_legacy[2].event_ordinal = 3;
         deferred_legacy[2].elapsed_ms = 22;
         let (deferred_gestures, deferred_standalone, deferred_error) =
-            build_hotkey_decision_proofs("H16", &deferred_legacy, &complex_edges);
+            build_hotkey_decision_proofs("H16", &deferred_legacy, &complex_edges, &[], &[]);
         assert!(!deferred_error);
         assert_eq!(deferred_gestures.len(), 1);
         assert_eq!(deferred_standalone.len(), 1);
@@ -42028,32 +49118,32 @@ mod tests {
         let mut same_millisecond_legacy = events.clone();
         same_millisecond_legacy[1].elapsed_ms = same_millisecond_legacy[0].elapsed_ms;
         let (_, _, same_millisecond_error) =
-            build_hotkey_decision_proofs("H16", &same_millisecond_legacy, &complex_edges);
+            build_hotkey_decision_proofs("H16", &same_millisecond_legacy, &complex_edges, &[], &[]);
         assert!(!same_millisecond_error);
 
         let mut pre_press_legacy = events.clone();
         pre_press_legacy[1].elapsed_ms = 9;
         let (_, _, pre_press_error) =
-            build_hotkey_decision_proofs("H16", &pre_press_legacy, &complex_edges);
+            build_hotkey_decision_proofs("H16", &pre_press_legacy, &complex_edges, &[], &[]);
         assert!(pre_press_error);
 
         let mut pre_press_ordinal = events.clone();
         pre_press_ordinal[1].event_ordinal = 0;
         let (_, _, pre_press_ordinal_error) =
-            build_hotkey_decision_proofs("H16", &pre_press_ordinal, &complex_edges);
+            build_hotkey_decision_proofs("H16", &pre_press_ordinal, &complex_edges, &[], &[]);
         assert!(pre_press_ordinal_error);
 
         let mut missing_modifier = events.clone();
         missing_modifier[0].modifiers_match = None;
         let (_, _, missing_modifier_error) =
-            build_hotkey_decision_proofs("H16", &missing_modifier, &complex_edges);
+            build_hotkey_decision_proofs("H16", &missing_modifier, &complex_edges, &[], &[]);
         assert!(missing_modifier_error);
 
         let mut reducer_active = events.clone();
         reducer_active[1].visibility_source = Some(HotkeyVisibilitySource::ToggleBatch);
         reducer_active[1].invocation_id = Some(17);
         let (_, _, reducer_error) =
-            build_hotkey_decision_proofs("H16", &reducer_active, &complex_edges);
+            build_hotkey_decision_proofs("H16", &reducer_active, &complex_edges, &[], &[]);
         assert!(reducer_error);
 
         let mut short_tap = events;
@@ -42069,7 +49159,7 @@ mod tests {
             .expect("parse unexpected ShortTap"),
         );
         let (_, _, short_tap_error) =
-            build_hotkey_decision_proofs("H16", &short_tap, &complex_edges);
+            build_hotkey_decision_proofs("H16", &short_tap, &complex_edges, &[], &[]);
         assert!(short_tap_error);
     }
 
@@ -42247,7 +49337,7 @@ mod tests {
         }
     }
 
-    fn test_acceptance_report(hotkey: AcceptanceHotkey) -> AcceptanceReport {
+    pub(super) fn test_acceptance_report(hotkey: AcceptanceHotkey) -> AcceptanceReport {
         AcceptanceReport {
             schema_version: 7,
             run_id: "test-run".into(),
@@ -42257,6 +49347,7 @@ mod tests {
             copied_profile_status: super::super::super::CopiedProfileStatus::NotRun,
             copied_profile: None,
             private_artifacts: None,
+            controlled_failures: None,
             h6_repeat_mode: H6RepeatMode::Quiescent,
             mouse_gesture_mode: super::super::super::MouseGestureMode::Enabled,
             suite: AcceptanceSuite::Hotkey,
@@ -42964,6 +50055,7 @@ mod tests {
             copied_profile_status: super::super::super::CopiedProfileStatus::NotRun,
             copied_profile: None,
             private_artifacts: None,
+            controlled_failures: None,
             h6_repeat_mode: H6RepeatMode::Quiescent,
             mouse_gesture_mode: super::super::super::MouseGestureMode::Enabled,
             suite: AcceptanceSuite::Hotkey,
@@ -43440,6 +50532,626 @@ mod tests {
         cell
     }
 
+    fn all_pin_test_fixture() -> (
+        AuthoringObservationEvidence,
+        AuthoringObservationEvidence,
+        GateCSearchEvidence,
+        GateCResultRowEvidence,
+        ActionEditorControlSnapshot,
+        u64,
+    ) {
+        let profile = tempfile::tempdir().unwrap();
+        let actions = (0..64)
+            .map(|index| multi_launcher::actions::Action {
+                label: format!("Radial Acceptance Harmless Action {index:03}"),
+                desc: "Deterministic native authoring fixture".into(),
+                action: format!("radial_acceptance_harmless_{index:03}"),
+                args: None,
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            profile.path().join("actions.json"),
+            serde_json::to_vec(&actions).unwrap(),
+        )
+        .unwrap();
+        let (query, target, binding_digest) = all_custom_action_target(profile.path(), 63).unwrap();
+        let mut before = authoring_observation_evidence(100, 1_000);
+        before.editor.action_editor.as_mut().unwrap().query_digest =
+            super::super::super::gate_c_trace_text_digest(&query);
+        let identity =
+            gate_c_observed_action_editor_identity(&before, GateCSurface::Properties).unwrap();
+        let native = native_identity_from_gate_c(&identity);
+        let fields = format!(
+            "editor_surface=\"properties\" editor_session_id={} draft_generation={} stable_target_digest={} editor_epoch={} edit_generation={} query_generation={} query_request_generation={} search_request_generation={} test_request_generation={} query_digest={} editor_assigned_binding_digest={}",
+            native.session_id,
+            native.draft_generation,
+            native.stable_target_digest,
+            native.editor_epoch,
+            native.edit_generation,
+            native.query_generation,
+            native.query_request_generation,
+            native.search_request_generation,
+            native.test_request_generation,
+            native.query_digest,
+            native.assigned_binding_digest,
+        );
+        let raw_control = |name: &str,
+                           sequence: u64,
+                           selected: bool,
+                           clicked: bool,
+                           bounds: [i32; 4]| {
+            format!(
+                "WARN multi_launcher.radial_acceptance: radial acceptance trace trace_event=\"designer_action_editor_control\" editor_control=\"{name}\" control_index=0 target_digest={} title_digest={} type_digest={} disambiguator_digest={} action_digest={} binding_digest={binding_digest} value_digest=0 displayed_text_digest={} {fields} trace_sequence={sequence} left_px={} top_px={} right_px={} bottom_px={} full_left_px={} full_top_px={} full_right_px={} full_bottom_px={} client_width_px=900 client_height_px=650 fully_visible=true enabled=true selected={selected} focused=false clicked={clicked} changed=false enter_pressed=false visible=true",
+                target.target_digest,
+                target.title_digest,
+                target.type_digest,
+                target.disambiguator_digest,
+                target.action_digest,
+                if name == "result_target" {
+                    super::super::super::gate_c_trace_text_digest(&target.readable_label)
+                } else {
+                    0
+                },
+                bounds[0],
+                bounds[1],
+                bounds[2],
+                bounds[3],
+                bounds[0],
+                bounds[1],
+                bounds[2],
+                bounds[3],
+            )
+        };
+        let result = super::super::parse_action_editor_control(&raw_control(
+            "result_target",
+            1_010,
+            false,
+            false,
+            [23, 200, 315, 240],
+        ))
+        .unwrap();
+        let pin = super::super::parse_action_editor_control(&raw_control(
+            "pin_result",
+            1_020,
+            true,
+            true,
+            [23, 245, 135, 263],
+        ))
+        .unwrap();
+        assert!(gate_c_result_control_matches_target(
+            &result, native, &target
+        ));
+        let row = gate_c_result_from_native(result, 1, 1_005, 1_010, true);
+        let search = GateCSearchEvidence {
+            purpose: GateCSearchPurpose::BeyondFifty,
+            surface: GateCSurface::Properties,
+            identity,
+            query_digest: native.query_digest,
+            query_binding_digest: 33,
+            search_control_sequence: 1_001,
+            queued_sequence: 1_002,
+            worker_started_sequence: 1_003,
+            worker_terminal_sequence: 1_005,
+            observed_trace_sequence: 1_011,
+            result_count: 2,
+            target_digest: target.target_digest,
+            action_digest: target.action_digest,
+            result_order: 1,
+            settled: true,
+        };
+        let mut after = before.clone();
+        after.frame_ordinal += 1;
+        after.trace_sequence = 1_021;
+        after.trace_boundary_sequence = 1_022;
+        after.editor.assigned_binding_digest = binding_digest;
+        after.editor.properties_staged_digest = Some(999);
+        after.editor.properties_dirty = true;
+        let editor = after.editor.action_editor.as_mut().unwrap();
+        editor.edit_generation += 1;
+        editor.assigned_binding_digest = binding_digest;
+        editor.selected_binding_digest = binding_digest;
+        (before, after, search, row, pin, binding_digest)
+    }
+
+    #[test]
+    fn all_properties_query_pin_requires_current_readable_search_and_preserves_history_effects() {
+        let (before, after, search, row, pin, binding) = all_pin_test_fixture();
+        all_properties_pin_is_staged(&before, &after, &search, &row, &pin, binding).unwrap();
+        assert_eq!(before.editor.document_digest, after.editor.document_digest);
+        assert_eq!(
+            (before.editor.undo_depth, before.editor.redo_depth),
+            (after.editor.undo_depth, after.editor.redo_depth)
+        );
+        let corruptions: &[fn(&mut AuthoringObservationEvidence)] = &[
+            |state| state.editor.session_id += 1,
+            |state| state.editor.generation += 1,
+            |state| state.editor.selected_target_digest += 1,
+            |state| state.editor.selected_cell_digest += 1,
+            |state| state.editor.document_digest += 1,
+            |state| state.editor.undo_depth += 1,
+            |state| state.editor.redo_depth += 1,
+            |state| state.editor.pending_assets_digest += 1,
+            |state| state.editor.navigation_path_digest += 1,
+            |state| state.editor.assigned_binding_digest += 1,
+            |state| state.editor.properties_dirty = false,
+            |state| state.editor.action_editor.as_mut().unwrap().editor_epoch += 1,
+            |state| {
+                state
+                    .editor
+                    .action_editor
+                    .as_mut()
+                    .unwrap()
+                    .test_request_generation += 1
+            },
+            |state| {
+                state
+                    .editor
+                    .action_editor
+                    .as_mut()
+                    .unwrap()
+                    .selected_binding_digest += 1
+            },
+            |state| state.effects.history_entries += 1,
+            |state| state.effects.usage_digest += 1,
+            |state| state.root.query_digest += 1,
+            |state| state.trace_sequence = 1_020,
+        ];
+        for corrupt in corruptions {
+            let mut wrong = after.clone();
+            corrupt(&mut wrong);
+            assert!(
+                all_properties_pin_is_staged(&before, &wrong, &search, &row, &pin, binding)
+                    .is_err()
+            );
+        }
+        let mut wrong_pin = pin.clone();
+        wrong_pin.control = "result_target".into();
+        assert!(
+            all_properties_pin_is_staged(&before, &after, &search, &row, &wrong_pin, binding)
+                .is_err()
+        );
+        wrong_pin = pin.clone();
+        wrong_pin.identity.editor_epoch += 1;
+        assert!(
+            all_properties_pin_is_staged(&before, &after, &search, &row, &wrong_pin, binding)
+                .is_err()
+        );
+        let mut wrong_row = row.clone();
+        wrong_row.readable = false;
+        assert!(
+            all_properties_pin_is_staged(&before, &after, &search, &wrong_row, &pin, binding)
+                .is_err()
+        );
+        let mut wrong_search = search.clone();
+        wrong_search.worker_terminal_sequence = row.observed_trace_sequence;
+        assert!(
+            all_properties_pin_is_staged(&before, &after, &wrong_search, &row, &pin, binding)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn all_apply_and_open_requires_same_cell_binding_and_one_real_history_mutation() {
+        let (_, staged, _, _, _, binding) = all_pin_test_fixture();
+        let mut committed = staged.clone();
+        committed.editor.generation += 1;
+        committed.editor.properties_popup_open = false;
+        committed.editor.properties_dirty = false;
+        committed.editor.properties_staged_digest = None;
+        committed.editor.undo_depth += 1;
+        committed.editor.redo_depth = 0;
+        committed.editor.document_digest += 1;
+        assert!(all_apply_and_open_is_committed(
+            &staged, &committed, binding, true
+        ));
+        assert!(!all_apply_and_open_is_committed(
+            &staged, &committed, binding, false
+        ));
+        assert!(!all_apply_and_open_is_committed(
+            &staged, &staged, binding, true
+        ));
+        let corruptions: &[fn(&mut AuthoringObservationEvidence)] = &[
+            |state| state.editor.properties_popup_open = true,
+            |state| state.editor.session_id += 1,
+            |state| state.editor.generation -= 1,
+            |state| state.editor.selected_cell_digest += 1,
+            |state| state.editor.selected_target_digest += 1,
+            |state| state.editor.assigned_binding_digest += 1,
+            |state| state.editor.undo_depth += 1,
+            |state| state.editor.redo_depth = 1,
+            |state| state.editor.document_digest -= 1,
+            |state| state.effects.history_digest += 1,
+            |state| state.root.query_digest += 1,
+        ];
+        for corrupt in corruptions {
+            let mut wrong = committed.clone();
+            corrupt(&mut wrong);
+            assert!(!all_apply_and_open_is_committed(
+                &staged, &wrong, binding, true
+            ));
+        }
+    }
+
+    #[test]
+    fn all_compact_properties_retains_the_pinned_query_binding_and_complete_owner() {
+        let (before, staged, search, row, pin, binding) = all_pin_test_fixture();
+        all_properties_pin_is_staged(&before, &staged, &search, &row, &pin, binding).unwrap();
+        let identity = native_identity_from_gate_c(
+            &gate_c_observed_action_editor_identity(&staged, GateCSurface::Properties).unwrap(),
+        );
+        let raw = |name, sequence, selected, clicked| {
+            format!(
+                "WARN radial acceptance trace trace_event=\"designer_action_editor_control\" editor_surface=\"properties\" editor_control=\"{name}\" control_index=-1 editor_session_id={} draft_generation={} stable_target_digest={} editor_epoch={} edit_generation={} query_generation={} query_request_generation={} search_request_generation={} test_request_generation={} query_digest={} editor_assigned_binding_digest={} target_digest=0 title_digest=0 type_digest=0 disambiguator_digest=0 action_digest=0 binding_digest={binding} value_digest=0 displayed_text_digest=0 trace_sequence={sequence} left_px=23 top_px=160 right_px=323 bottom_px=178 full_left_px=23 full_top_px=160 full_right_px=323 full_bottom_px=178 client_width_px=900 client_height_px=650 fully_visible=true enabled=true selected={selected} focused=false clicked={clicked} changed=false enter_pressed=false visible=true",
+                identity.session_id,
+                identity.draft_generation,
+                identity.stable_target_digest,
+                identity.editor_epoch,
+                identity.edit_generation,
+                identity.query_generation,
+                identity.query_request_generation,
+                identity.search_request_generation,
+                identity.test_request_generation,
+                identity.query_digest,
+                identity.assigned_binding_digest,
+            )
+        };
+        let tab =
+            super::super::parse_action_editor_control(&raw("advanced_tab", 1_024, false, false))
+                .unwrap();
+        let clicked =
+            super::super::parse_action_editor_control(&raw("advanced_tab", 1_026, true, true))
+                .unwrap();
+        let field = super::super::parse_action_editor_control(&raw(
+            "exact_command_field",
+            1_027,
+            false,
+            false,
+        ))
+        .unwrap();
+        let clicks = Cell::new(0);
+        let (selected, ready) = gate_c_ensure_action_tab_with(
+            true,
+            Duration::from_millis(50),
+            |needs_field, epoch, timeout| {
+                gate_c_wait_repainted_action_control_with(
+                    [900, 650],
+                    timeout,
+                    || Ok(()),
+                    || {
+                        gate_c_action_tab_controls(
+                            &if needs_field {
+                                vec![clicked.clone(), field.clone()]
+                            } else {
+                                vec![tab.clone()]
+                            },
+                            &staged,
+                            GateCSurface::Properties,
+                            true,
+                            needs_field,
+                            epoch,
+                            [900, 650],
+                        )
+                    },
+                    |_| {},
+                    &mut |control| control.enabled && (needs_field || !control.clicked),
+                )
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
+            },
+            |current, _| {
+                assert_eq!(current, tab);
+                clicks.set(clicks.get() + 1);
+                Ok(clicked.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(clicks.get(), 1);
+        assert!(selected.selected && selected.clicked);
+        assert_eq!(ready.control, "exact_command_field");
+        assert_eq!(ready.identity, identity);
+        assert_eq!(ready.identity.query_digest, search.query_digest);
+        assert_eq!(ready.identity.assigned_binding_digest, binding);
+        let mut compacted = staged.clone();
+        compacted.frame_ordinal += 1;
+        compacted.trace_sequence = 1_030;
+        compacted.trace_boundary_sequence = 1_031;
+        assert!(all_properties_presentation_is_unchanged(
+            &staged, &compacted
+        ));
+        assert_eq!(compacted.editor, staged.editor);
+        assert_eq!(compacted.root, staged.root);
+        assert_eq!(compacted.effects, staged.effects);
+        let corruptions: &[fn(&mut AuthoringObservationEvidence)] = &[
+            |state| state.editor.session_id += 1,
+            |state| state.editor.generation += 1,
+            |state| state.editor.selected_cell_digest += 1,
+            |state| state.editor.selected_target_digest += 1,
+            |state| state.editor.properties_staged_digest = None,
+            |state| state.editor.properties_dirty = false,
+            |state| state.editor.assigned_binding_digest += 1,
+            |state| state.editor.document_digest += 1,
+            |state| state.editor.undo_depth += 1,
+            |state| state.editor.redo_depth += 1,
+            |state| state.editor.pending_assets_digest += 1,
+            |state| state.editor.navigation_path_digest += 1,
+            |state| state.editor.action_editor.as_mut().unwrap().query_digest += 1,
+            |state| {
+                state
+                    .editor
+                    .action_editor
+                    .as_mut()
+                    .unwrap()
+                    .authored_input_digest += 1
+            },
+            |state| {
+                state
+                    .editor
+                    .action_editor
+                    .as_mut()
+                    .unwrap()
+                    .selected_binding_digest += 1
+            },
+            |state| state.root.query_digest += 1,
+            |state| state.effects.history_digest += 1,
+            |state| state.effects.usage_digest += 1,
+            |state| state.frame_ordinal -= 1,
+            |state| state.trace_sequence = 1_022,
+        ];
+        for corrupt in corruptions {
+            let mut wrong = compacted.clone();
+            corrupt(&mut wrong);
+            assert!(!all_properties_presentation_is_unchanged(&staged, &wrong));
+        }
+    }
+
+    #[test]
+    fn all_popup_handoff_requires_fresh_settled_controls_inside_client_and_popup_clip() {
+        let (_, mut staged, _, _, _, _) = all_pin_test_fixture();
+        staged.frame_ordinal = 390;
+        staged.trace_sequence = 5_250;
+        staged.trace_boundary_sequence = 5_251;
+        let raw = |target, sequence, frame, bounds: [i32; 4], clip: [i32; 4]| {
+            format!(
+                "WARN radial acceptance trace trace_event=\"designer_authoring_control\" viewport=Deferred target={target:?} role=\"Button\" control_index=-1 frame_nr={frame} left_px={} top_px={} right_px={} bottom_px={} clip_left_px={} clip_top_px={} clip_right_px={} clip_bottom_px={} client_width_px=900 client_height_px=650 enabled=true selected=false focused=false clicked=false session_id={} generation={} menu_cell_ids_digest=0 trace_sequence={sequence}",
+                bounds[0],
+                bounds[1],
+                bounds[2],
+                bounds[3],
+                clip[0],
+                clip[1],
+                clip[2],
+                clip[3],
+                staged.editor.session_id,
+                staged.editor.generation,
+            )
+        };
+        let open = parse_authoring_control(&raw(
+            AuthoringControlTarget::PopupOpenInspector,
+            5_253,
+            397,
+            [123, 619, 229, 637],
+            [20, 52, 339, 640],
+        ))
+        .unwrap();
+        let clipped_apply = parse_authoring_control(&raw(
+            AuthoringControlTarget::PopupApplyAndOpen,
+            5_280,
+            398,
+            [23, 650, 116, 668],
+            [20, 36, 339, 650],
+        ))
+        .unwrap();
+        let compact_apply = parse_authoring_control(&raw(
+            AuthoringControlTarget::PopupApplyAndOpen,
+            5_290,
+            399,
+            [23, 565, 116, 583],
+            [20, 36, 339, 650],
+        ))
+        .unwrap();
+        let (mut boundary, _, mut owner) = moving_menu_row_fixture();
+        boundary.trace_sequence = staged.trace_boundary_sequence;
+        boundary.session_id = staged.editor.session_id;
+        boundary.generation = staged.editor.generation;
+        boundary.client_size = [900, 650];
+        owner.session_id = boundary.session_id;
+        owner.generation = boundary.generation;
+        owner.trace_sequence = staged.trace_sequence;
+        owner.properties_popup_open = staged.editor.properties_popup_open;
+        owner.properties_dirty = staged.editor.properties_dirty;
+        let inputs = RefCell::new(Vec::new());
+        for control in [open, compact_apply] {
+            let samples = Cell::new(0u64);
+            let (ready, step) = gate_d_wait_settled_control_with(
+                &owner,
+                boundary,
+                control.target,
+                None,
+                AuthoringControlRole::Button,
+                None,
+                false,
+                Duration::from_millis(50),
+                || {
+                    let sample = samples.get();
+                    samples.set(sample + 1);
+                    let mut fresh = control;
+                    fresh.trace_sequence += sample;
+                    fresh.frame_nr = fresh.frame_nr.map(|frame| frame + sample);
+                    let mut after = owner.clone();
+                    after.frame_ordinal += sample + 1;
+                    after.trace_sequence = fresh.trace_sequence + 1;
+                    Ok(([900, 650], vec![fresh], after))
+                },
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(samples.get(), 2);
+            assert!(matches!(step, GateDReadyControlStep::Visible));
+            let mut current = staged.clone();
+            current.frame_ordinal += 1;
+            current.trace_sequence = ready.trace_sequence + 1;
+            current.trace_boundary_sequence = current.trace_sequence + 1;
+            all_click_popup_control_with(&staged, &current, ready, [900, 650], |admitted| {
+                inputs.borrow_mut().push(admitted.target);
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            *inputs.borrow(),
+            vec![
+                AuthoringControlTarget::PopupOpenInspector,
+                AuthoringControlTarget::PopupApplyAndOpen,
+            ]
+        );
+        let corruptions: &[fn(&mut AuthoringControlSnapshot)] = &[
+            |control| control.session_id += 1,
+            |control| control.generation += 1,
+            |control| control.trace_sequence = 5_251,
+            |control| control.role = AuthoringControlRole::Region,
+            |control| control.index = Some(0),
+            |control| control.client_size[0] += 1,
+            |control| control.clip_bounds = None,
+            |control| control.clip_bounds = Some([20, 36, 339, 570]),
+            |control| control.bounds[2] = 901,
+            |control| control.enabled = false,
+            |control| control.clicked = true,
+        ];
+        for corrupt in corruptions {
+            let mut wrong = compact_apply;
+            corrupt(&mut wrong);
+            let mut current = staged.clone();
+            current.frame_ordinal += 1;
+            current.trace_sequence = 5_300;
+            current.trace_boundary_sequence = 5_301;
+            let count = Cell::new(0);
+            assert!(
+                all_click_popup_control_with(&staged, &current, wrong, [900, 650], |_| {
+                    count.set(count.get() + 1);
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(count.get(), 0);
+        }
+        let mut current = staged.clone();
+        current.frame_ordinal += 1;
+        current.trace_sequence = 5_300;
+        current.trace_boundary_sequence = 5_301;
+        let count = Cell::new(0);
+        assert!(
+            all_click_popup_control_with(&staged, &current, clipped_apply, [900, 650], |_| {
+                count.set(count.get() + 1);
+                Ok(())
+            })
+            .is_err()
+        );
+        current.editor.pending_assets_digest += 1;
+        assert!(
+            all_click_popup_control_with(&staged, &current, compact_apply, [900, 650], |_| {
+                count.set(count.get() + 1);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(count.get(), 0);
+    }
+
+    #[test]
+    fn all_catalog_rank_receipt_requires_current_generation_and_unambiguous_actual_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.log");
+        let line = |source, rank, len, session, generation| {
+            format!(
+                "WARN multi_launcher.radial_acceptance: radial acceptance trace trace_event=\"designer_action_catalog_rank\" custom_action_index={source} rank={rank} catalog_len={len} session_id={session} generation={generation}\n"
+            )
+        };
+        fs::write(
+            &path,
+            line(63, 130, 150, 77, 18) + &line(63, 130, 150, 78, 19),
+        )
+        .unwrap();
+        assert_eq!(
+            all_current_action_catalog_rank(&action_catalog_ranks(&path).unwrap(), 77, 19, 63)
+                .unwrap(),
+            None
+        );
+        assert!(wait_for_action_catalog_rank(&path, 77, 19, 63, Duration::ZERO).is_err());
+        let current = line(63, 130, 150, 77, 19);
+        fs::write(&path, current.clone()).unwrap();
+        let rank = wait_for_action_catalog_rank(&path, 77, 19, 63, Duration::ZERO).unwrap();
+        assert_eq!(
+            (
+                rank.custom_action_index,
+                rank.rank,
+                rank.catalog_len,
+                rank.generation
+            ),
+            (63, 130, 150, 19)
+        );
+        assert_eq!(
+            all_current_action_catalog_rank(&action_catalog_ranks(&path).unwrap(), 77, 19, 130)
+                .unwrap(),
+            None
+        );
+        fs::write(&path, current + &line(63, 131, 150, 77, 19)).unwrap();
+        assert!(
+            all_current_action_catalog_rank(&action_catalog_ranks(&path).unwrap(), 77, 19, 63)
+                .is_err()
+        );
+        fs::write(&path, line(63, 150, 150, 77, 19)).unwrap();
+        assert!(
+            all_current_action_catalog_rank(&action_catalog_ranks(&path).unwrap(), 77, 19, 63)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn all_action_target_uses_actual_profile_source_and_never_gate_c_marker_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let action = multi_launcher::actions::Action {
+            label: "Radial Acceptance Harmless Action 063".into(),
+            desc: "Deterministic native authoring fixture".into(),
+            action: "radial_acceptance_harmless_063".into(),
+            args: None,
+        };
+        let mut actions = (0..63)
+            .map(|index| multi_launcher::actions::Action {
+                label: format!("Radial Acceptance Harmless Action {index:03}"),
+                desc: action.desc.clone(),
+                action: format!("radial_acceptance_harmless_{index:03}"),
+                args: None,
+            })
+            .collect::<Vec<_>>();
+        actions.push(action.clone());
+        let bytes = serde_json::to_vec(&actions).unwrap();
+        fs::write(dir.path().join("actions.json"), &bytes).unwrap();
+        let (query, target, digest) = all_custom_action_target(dir.path(), 63).unwrap();
+        assert_eq!(query, "app Radial Acceptance Harmless Action 063");
+        assert_eq!(target.result_index, Some(0));
+        assert_eq!(
+            target.readable_label,
+            "Radial Acceptance Harmless Action 063 · Custom action · custom action 64 — Execute"
+        );
+        let expected = ActionBinding::Persisted {
+            action: PersistedUniversalActionRef {
+                target: Some(PersistableActionTargetRef::CustomAction {
+                    action: action.clone(),
+                }),
+                action_id: multi_launcher::universal_actions::action_ids::RESULT_EXECUTE,
+            },
+        };
+        assert_eq!(digest, gate_c_action_binding_digest(&expected).unwrap());
+        assert_eq!(fs::read(dir.path().join("actions.json")).unwrap(), bytes);
+        assert!(all_custom_action_target(dir.path(), 64).is_err());
+        actions.push(action);
+        fs::write(
+            dir.path().join("actions.json"),
+            serde_json::to_vec(&actions).unwrap(),
+        )
+        .unwrap();
+        assert!(all_custom_action_target(dir.path(), 63).is_err());
+    }
+
     fn write_saved_graph_fixture(
         profile: &Path,
     ) -> (PersistedMenuGraphExpectation, PersistedMenuGraphExpectation) {
@@ -43658,6 +51370,210 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(prior_results.len(), CASE_IDS.len() - 1);
         assert_eq!(missing_case_ids(&prior_results), vec!["G0"]);
+    }
+
+    #[test]
+    fn all_cleanup_inventory_is_owned_once_through_environment_and_final_readback() {
+        for child_unavailable in [true, false] {
+            let output = tempfile::tempdir().unwrap();
+            let trace_path = output.path().join("acceptance.log");
+            fs::write(&trace_path, "bounded setup trace\n").unwrap();
+            let mut runner_log = File::create(output.path().join("runner.log")).unwrap();
+            let mut report = gate_c_failure_test_report(output.path());
+            report.suite = AcceptanceSuite::All;
+            report.hotkey = AcceptanceHotkey::F11;
+            report.profile.configured_hotkey = AcceptanceHotkey::F11.as_str();
+            if child_unavailable {
+                record_environment_failure(
+                    "owned startup unavailable".into(),
+                    &mut report,
+                    output.path(),
+                    &trace_path,
+                    &mut runner_log,
+                );
+                assert!(!report.cases.iter().any(|case| case.id == "CLEANUP"));
+            } else {
+                for id in CASE_IDS
+                    .into_iter()
+                    .filter(|id| !DEFERRED_REPORT_CASE_IDS.contains(id))
+                {
+                    append_case_without_artifacts(
+                        &mut report,
+                        id,
+                        Err(CaseFailure::new(
+                            FailureStage::DesignerReadiness,
+                            "not run because authoring prerequisites failed".into(),
+                        )),
+                    );
+                }
+                // This is the existing stop_child result shape, not a functional-case padding slot.
+                append_case_without_artifacts(&mut report, "CLEANUP",
+                    Ok("candidate exited normally with exit code: 0 after bounded WM_CLOSE; all child-owned HWNDs closed".into()));
+                report.environment.child_process_id = Some(7);
+                report.cleanup.child_closed_normally = true;
+                report.cleanup.child_owned_windows_closed = true;
+                report.cleanup.profile_removed = true;
+                report.cleanup.cursor_restored = true;
+                report.cleanup.input_desktop_released = true;
+            }
+            assert!(
+                DEFERRED_REPORT_CASE_IDS
+                    .iter()
+                    .all(|id| *id == "CLEANUP" || !report.cases.iter().any(|case| case.id == *id))
+            );
+            super::super::super::ensure_final_acceptance_cases(
+                &mut report,
+                output.path(),
+                true,
+                Instant::now(),
+            );
+            assert_eq!(report.cases.len(), 33);
+            for id in CASE_IDS {
+                assert_eq!(
+                    report.cases.iter().filter(|case| case.id == id).count(),
+                    1,
+                    "{id}"
+                );
+            }
+            let cleanup = report
+                .cases
+                .iter()
+                .find(|case| case.id == "CLEANUP")
+                .unwrap()
+                .clone();
+            assert_eq!(
+                matches!(cleanup.status, CaseStatus::Failed),
+                child_unavailable
+            );
+            assert_eq!(
+                cleanup.failure_stage,
+                child_unavailable.then_some(FailureStage::Cleanup)
+            );
+            if child_unavailable {
+                assert!(
+                    cleanup
+                        .observed
+                        .contains("no successful normal-close receipt")
+                );
+                assert!(!report.cleanup.child_closed_normally);
+            } else {
+                assert!(cleanup.observed.contains("after bounded WM_CLOSE"));
+            }
+            // Exact inventory does not qualify failed mandatory native cases.
+            // The unchanged ALL integrity owner first rejects the failed D2.
+            let integrity = report.cases.iter().find(|case| case.id == "R0").unwrap();
+            assert!(matches!(integrity.status, CaseStatus::Failed));
+            assert_eq!(integrity.failure_stage, Some(FailureStage::Environment));
+            assert_eq!(
+                integrity.observed,
+                "report integrity validation failed: case D2 is not passed"
+            );
+            assert!(!report.passed_native_cases());
+            let mut pre_final = report.clone();
+            pre_final.cases.retain(|case| case.id != "R0");
+            assert_eq!(
+                super::super::super::validate_r0_report(&pre_final, output.path(), true)
+                    .unwrap_err(),
+                "case D2 is not passed"
+            );
+            let mut missing = pre_final.clone();
+            missing.cases.retain(|case| case.id != "CLEANUP");
+            assert_eq!(
+                super::super::super::validate_r0_report(&missing, output.path(), true).unwrap_err(),
+                "report elapsed time or pre-final case count is invalid"
+            );
+            let mut duplicate = pre_final;
+            duplicate.cases[0] = cleanup.clone();
+            duplicate.cases[1] = cleanup.clone();
+            assert_eq!(
+                super::super::super::validate_r0_report(&duplicate, output.path(), true)
+                    .unwrap_err(),
+                "case CLEANUP is missing typed stage/evidence or has invalid bounds"
+            );
+            let path = output.path().join("report.json");
+            super::super::super::write_report(&path, &mut report).unwrap();
+            let stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            let cases = stored["cases"].as_array().unwrap();
+            assert_eq!(cases.len(), 33);
+            assert_eq!(
+                cases.iter().filter(|case| case["id"] == "CLEANUP").count(),
+                1
+            );
+            assert_eq!(cases.iter().filter(|case| case["id"] == "R0").count(), 1);
+            assert_eq!(
+                cases.iter().find(|case| case["id"] == "R0").unwrap()["status"],
+                serde_json::to_value(CaseStatus::Failed).unwrap()
+            );
+            assert_eq!(
+                cases.iter().find(|case| case["id"] == "CLEANUP").unwrap()["status"],
+                serde_json::to_value(cleanup.status).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn compact_authoring_error_always_restores_captured_viewport_and_preserves_primary_failure() {
+        use std::cell::{Cell, RefCell};
+        for compact_fails in [false, true] {
+            for restore_fails in [false, true] {
+                let client = Cell::new([0, 0, 900, 650]);
+                let phases = RefCell::new(Vec::new());
+                let result = with_restored_authoring_viewport(
+                    || {
+                        phases.borrow_mut().push("compact");
+                        client.set([0, 0, 624, 441]);
+                        if compact_fails {
+                            Err(CaseFailure::new(
+                                FailureStage::DesignerPresentation,
+                                "original compact assertion".into(),
+                            ))
+                        } else {
+                            Ok("compact geometry proved")
+                        }
+                    },
+                    || {
+                        phases.borrow_mut().push("restore");
+                        assert_eq!(client.get(), [0, 0, 624, 441]);
+                        client.set([0, 0, 900, 650]);
+                        if restore_fails {
+                            Err(CaseFailure::new(
+                                FailureStage::DesignerReadiness,
+                                "fresh restored viewport receipt unavailable".into(),
+                            ))
+                        } else {
+                            Ok("original viewport proved")
+                        }
+                    },
+                );
+                assert_eq!(*phases.borrow(), ["compact", "restore"]);
+                assert_eq!(client.get(), [0, 0, 900, 650]);
+                match result {
+                    Ok(pair) => {
+                        assert!(!compact_fails && !restore_fails);
+                        assert_eq!(
+                            pair,
+                            ("compact geometry proved", "original viewport proved")
+                        );
+                    }
+                    Err(error) => {
+                        assert!(compact_fails || restore_fails);
+                        if compact_fails {
+                            assert_eq!(error.stage, FailureStage::DesignerPresentation);
+                            assert!(error.message.starts_with("original compact assertion"));
+                        } else {
+                            assert_eq!(error.stage, FailureStage::DesignerReadiness);
+                        }
+                        assert_eq!(
+                            error
+                                .message
+                                .contains("fresh restored viewport receipt unavailable"),
+                            restore_fails
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -48548,6 +56464,27 @@ mod tests {
             Some(-120)
         );
         assert_eq!(gate_c_result_row_scroll_delta(Some(1), 6), Some(120));
+        for (distance, amount) in [
+            (1, 120),
+            (8, 120),
+            (9, 240),
+            (16, 240),
+            (17, 360),
+            (60, 360),
+        ] {
+            assert_eq!(
+                gate_c_result_row_scroll_delta(target.result_index, 60 - distance),
+                Some(-amount)
+            );
+            assert_eq!(
+                gate_c_result_row_scroll_delta(Some(0), distance),
+                Some(amount)
+            );
+        }
+        assert_eq!(
+            gate_c_result_row_navigation_delta(target.result_index, &rows[0], identity),
+            Some(-360)
+        );
         assert_eq!(gate_c_result_row_scroll_delta(Some(60), 60), None);
         assert_eq!(
             gate_c_result_row_scroll_delta(Some(MAX_GATE_C_RESULTS), 60),
@@ -48569,19 +56506,149 @@ mod tests {
             &target
         ));
 
+        let make_scroll =
+            |sequence: u64, offset_y_milli: i64, client_size: [i32; 2], inner: [i32; 4]| {
+                let thumb_top = inner[1] + (offset_y_milli * 178 / 3_266_000) as i32;
+                let track = [inner[2] - 1, inner[1], inner[2], inner[3]];
+                let thumb = [inner[2] - 1, thumb_top, inner[2], thumb_top + 12];
+                ActionEditorScrollSnapshot {
+                    identity,
+                    scroll_id: 9_265_164_520_231_449_928,
+                    frame_nr: sequence,
+                    trace_sequence: sequence,
+                    offset_y_milli,
+                    velocity_y_milli: 0,
+                    content_height_milli: 3_456_000,
+                    inner_height_milli: 190_000,
+                    pixels_per_point_milli: 1_000,
+                    handle_min_length_milli: 12_000,
+                    inner_bounds: inner,
+                    inner_visible_bounds: inner,
+                    track_bounds: track,
+                    track_visible_bounds: track,
+                    thumb_bounds: thumb,
+                    thumb_visible_bounds: thumb,
+                    painted_thumb_bounds: thumb,
+                    painted_thumb_visible_bounds: thumb,
+                    paint_clip_bounds: [0, 0, client_size[0], client_size[1]],
+                    client_size,
+                }
+            };
         let mut progress = GateCResultScrollProgress::default();
-        assert!(progress.observe(60));
-        assert!(progress.observe(60));
-        assert!(progress.observe(60));
-        assert!(progress.observe(60));
+        let mut stationary = rows[60].clone();
+        let mut scroll = make_scroll(200, 0, stationary.client_size, [12, 80, 288, 270]);
+        assert!(progress.observe(&stationary, Some(&scroll), -120));
+        for _ in 0..3 {
+            stationary.trace_sequence += 1;
+            scroll.trace_sequence += 1;
+            scroll.frame_nr += 1;
+            assert!(progress.observe(&stationary, Some(&scroll), -120));
+        }
+        stationary.trace_sequence += 1;
+        scroll.trace_sequence += 1;
+        scroll.frame_nr += 1;
         assert!(
-            !progress.observe(60),
+            !progress.observe(&stationary, Some(&scroll), -120),
             "a stalled list fails closed after its bounded allowance"
         );
+        let mut advanced = rows[61].clone();
+        advanced.trace_sequence = stationary.trace_sequence + 1;
+        scroll.trace_sequence += 1;
+        scroll.frame_nr += 1;
+        scroll.offset_y_milli = 12_000;
         assert!(
-            progress.observe(61),
+            progress.observe(&advanced, Some(&scroll), -120),
             "a changed row order resets the stall counter"
         );
+
+        let mut moving = rows[3].clone();
+        moving.client_size = [900, 650];
+        let viewport = [23, 312, 336, 502];
+        let mut progress = GateCResultScrollProgress::default();
+        for (ordinal, (top, offset)) in [
+            (474, 0),
+            (462, 11_584),
+            (455, 18_460),
+            (451, 22_899),
+            (424, 49_424),
+            (389, 84_860),
+            (349, 125_146),
+            (296, 177_695),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            moving.trace_sequence = 800 + ordinal as u64;
+            moving.full_bounds = [23, top, 336, top + 54];
+            moving.bounds = [23, top.max(viewport[1]), 336, (top + 54).min(viewport[3])];
+            moving.fully_visible = moving.bounds == moving.full_bounds;
+            scroll = make_scroll(900 + ordinal as u64, offset, moving.client_size, viewport);
+            assert!(progress.observe(&moving, Some(&scroll), -120));
+            assert_eq!(
+                progress.stalled_attempts, 0,
+                "the same row moving through the unchanged owned viewport is real progress"
+            );
+        }
+
+        let mut wrong_direction = GateCResultScrollProgress::default();
+        assert!(wrong_direction.observe(&moving, Some(&scroll), -120));
+        for attempt in 1..=MAX_GATE_C_RESULT_ROW_STALLS {
+            moving.trace_sequence += 1;
+            moving.full_bounds[1] += 4;
+            moving.full_bounds[3] += 4;
+            moving.bounds = [
+                23,
+                moving.full_bounds[1].max(viewport[1]),
+                336,
+                moving.full_bounds[3].min(viewport[3]),
+            ];
+            moving.fully_visible = moving.bounds == moving.full_bounds;
+            scroll.trace_sequence += 1;
+            scroll.frame_nr += 1;
+            scroll.offset_y_milli += 4_000;
+            assert_eq!(
+                wrong_direction.observe(&moving, Some(&scroll), -120),
+                attempt < MAX_GATE_C_RESULT_ROW_STALLS,
+                "wrong-direction row motion cannot reset the four-stall bound"
+            );
+        }
+
+        for changed_owner in 0..3 {
+            let mut progress = GateCResultScrollProgress::default();
+            assert!(progress.observe(&moving, Some(&scroll), -120));
+            let mut shifted = moving.clone();
+            shifted.trace_sequence += 1;
+            shifted.full_bounds[1] -= 12;
+            shifted.full_bounds[3] -= 12;
+            let mut shifted_viewport = viewport;
+            if changed_owner == 0 {
+                shifted_viewport[1] -= 12;
+                shifted_viewport[3] -= 12;
+            } else if changed_owner == 1 {
+                shifted.client_size[1] += 1;
+            } else {
+                shifted.identity.editor_epoch += 1;
+            }
+            shifted.bounds = [
+                23,
+                shifted.full_bounds[1].max(shifted_viewport[1]),
+                336,
+                shifted.full_bounds[3].min(shifted_viewport[3]),
+            ];
+            shifted.fully_visible = shifted.bounds == shifted.full_bounds;
+            let mut shifted_scroll = make_scroll(
+                scroll.trace_sequence + 1,
+                scroll.offset_y_milli + 12_000,
+                shifted.client_size,
+                shifted_viewport,
+            );
+            shifted_scroll.identity = shifted.identity;
+            assert!(progress.observe(&shifted, Some(&shifted_scroll), -120));
+            assert_eq!(
+                progress.stalled_attempts, 1,
+                "viewport/client/editor changes are not wheel progress"
+            );
+        }
 
         let mut partially_clipped_target = rows[60].clone();
         partially_clipped_target.bounds = [12, 100, 288, 140];

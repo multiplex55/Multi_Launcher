@@ -1083,11 +1083,33 @@ mod tests {
     fn health_scan_is_requested_on_open_transition_not_while_already_open() {
         let directory = tempfile::tempdir().unwrap();
         let root = AppDataRoot::from_path(directory.path());
-        let mut dialog = DataRecoveryDialog::new(root, Settings::default(), || {});
+        let mut settings = Settings::default();
+        settings.dashboard.config_path = Some(
+            directory
+                .path()
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let mut dialog = DataRecoveryDialog::new(root, settings, || {});
         assert!(
             dialog.service.is_none(),
             "construction adds no startup worker"
         );
+        // Keep canonical probes and real worker completion, with all I/O in this fixture.
+        let stores = crate::persistence::PersistenceCatalog::new(&dialog.root, &dialog.settings)
+            .stores()
+            .iter()
+            .cloned()
+            .map(|mut store| {
+                store.path = directory.path().join(format!("store-{:?}", store.id));
+                store
+            })
+            .collect();
+        let catalog = crate::persistence::PersistenceCatalog::from_stores(stores);
+        let repaint = Arc::clone(&dialog.repaint);
+        dialog.service =
+            Some(DataService::start(dialog.root.clone(), catalog, move || repaint()).unwrap());
         dialog.open(DataDialogFocus::Overview).unwrap();
         let first = dialog.latest_health;
         assert!(first.is_some());

@@ -30,8 +30,242 @@ const GATE_D_TRACE_PROFILE: &str = "gate_d_v1";
 pub(crate) const GATE_S_EVENT_BUDGET: usize = EVENT_BUDGET * 10;
 pub(crate) const GATE_S_TERMINAL_RESERVE: usize = 256;
 const GATE_S_TRACE_PROFILE: &str = "gate_s_v1";
+// Composite All retains its dependent authoring/save/reopen proof in one run,
+// using the existing largest finite authoring envelope rather than the default.
+pub(crate) const ALL_EVENT_BUDGET: usize = EVENT_BUDGET * 10;
+pub(crate) const ALL_TERMINAL_RESERVE: usize = 256;
+const ALL_TRACE_PROFILE: &str = "all_v1";
 const TRACE_TARGET: &str = "multi_launcher.radial_acceptance";
 const AUTHORING_CONTROL_REFRESH_MS: u128 = 500;
+
+/// Finite, payload-free facts collected at the Screen Draw widget call sites.
+/// These are shared with the acceptance runner, not a second session state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScreenDrawToolbarMode {
+    Drawing,
+    Ghost,
+    Finish,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScreenDrawToolbarTarget {
+    StateLabel,
+    ResumeDrawing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScreenDrawToolbarRole {
+    Label,
+    Button,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenDrawToolbarWidget {
+    pub target: ScreenDrawToolbarTarget,
+    pub role: ScreenDrawToolbarRole,
+    pub widget_id: u64,
+    pub enabled: bool,
+    pub bounds: [i32; 4],
+    pub clip: [i32; 4],
+    pub visible_bounds: [i32; 4],
+    pub fully_visible: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenDrawRootIdentity {
+    pub hwnd: u64,
+    pub process_id: u32,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScreenDrawParkingState {
+    Active,
+    Committed,
+    Restored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenDrawParkingObservation {
+    pub hwnd: u64,
+    pub generation: u64,
+    pub cycle: u64,
+    pub state: ScreenDrawParkingState,
+}
+
+/// Read-only facts from the current visibility gate and GUI-owned transaction.
+/// An explicitly absent owner is different from an old wire record omitting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenDrawLauncherObservation {
+    pub visibility_revision: u64,
+    #[serde(deserialize_with = "deserialize_observed_option")]
+    pub invocation_id: Option<u64>,
+    pub focus_intent: crate::visibility::RootFocusIntent,
+    pub visible: bool,
+    #[serde(deserialize_with = "deserialize_observed_option")]
+    pub root: Option<ScreenDrawRootIdentity>,
+    #[serde(deserialize_with = "deserialize_observed_option")]
+    pub parking: Option<ScreenDrawParkingObservation>,
+}
+
+fn deserialize_observed_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreenDrawToolbarObservation {
+    pub hwnd: u64,
+    pub process_id: u32,
+    pub generation: u64,
+    pub lifetime: u64,
+    /// The current child viewport's actual egui frame number, plus one.
+    pub frame_nr: u64,
+    pub state: ScreenDrawToolbarMode,
+    pub runtime_mode: ScreenDrawToolbarMode,
+    pub client_size: [i32; 2],
+    pub launcher: ScreenDrawLauncherObservation,
+    pub label: ScreenDrawToolbarWidget,
+    pub resume: Option<ScreenDrawToolbarWidget>,
+}
+
+impl ScreenDrawToolbarObservation {
+    /// The finite client-local control predicate shared by live and persisted
+    /// admission. Native identity, presentation and freshness remain separate
+    /// required checks at the runner's receipt boundary.
+    pub fn has_visible_controls_for_mode(&self, mode: ScreenDrawToolbarMode) -> bool {
+        let valid_widget = |widget: &ScreenDrawToolbarWidget, target, role| {
+            let bounds = widget.bounds;
+            let clip = widget.clip;
+            let intersection = [
+                bounds[0].max(clip[0]),
+                bounds[1].max(clip[1]),
+                bounds[2].min(clip[2]),
+                bounds[3].min(clip[3]),
+            ];
+            widget.target == target
+                && widget.role == role
+                && widget.widget_id != 0
+                && widget.enabled
+                && bounds[2]
+                    .checked_sub(bounds[0])
+                    .is_some_and(|size| size > 0)
+                && bounds[3]
+                    .checked_sub(bounds[1])
+                    .is_some_and(|size| size > 0)
+                && clip[0] >= 0
+                && clip[1] >= 0
+                && clip[2] <= self.client_size[0]
+                && clip[3] <= self.client_size[1]
+                && clip[2] > clip[0]
+                && clip[3] > clip[1]
+                && widget.fully_visible
+                && widget.visible_bounds == bounds
+                && intersection == bounds
+        };
+        valid_widget(
+            &self.label,
+            ScreenDrawToolbarTarget::StateLabel,
+            ScreenDrawToolbarRole::Label,
+        ) && match mode {
+            ScreenDrawToolbarMode::Drawing => self.resume.is_none(),
+            ScreenDrawToolbarMode::Ghost => self.resume.is_some_and(|resume| {
+                resume.widget_id != self.label.widget_id
+                    && valid_widget(
+                        &resume,
+                        ScreenDrawToolbarTarget::ResumeDrawing,
+                        ScreenDrawToolbarRole::Button,
+                    )
+            }),
+            ScreenDrawToolbarMode::Finish | ScreenDrawToolbarMode::Other => false,
+        }
+    }
+}
+
+/// Canonical finite wire record, also used to verify sanitized runner readback.
+/// The caller supplies the sequence only inside the existing publication fence.
+pub fn screen_draw_toolbar_trace_record(
+    observation: ScreenDrawToolbarObservation,
+    trace_sequence: u64,
+    elapsed_ms: u64,
+) -> String {
+    let mut line = format!(
+        "trace_event=\"screen_draw_toolbar\" elapsed_ms={elapsed_ms} trace_sequence={trace_sequence} sd_hwnd={} sd_pid={} sd_generation={} sd_lifetime={} sd_frame={} sd_state={:?} sd_runtime={:?} sd_client_width={} sd_client_height={}",
+        observation.hwnd,
+        observation.process_id,
+        observation.generation,
+        observation.lifetime,
+        observation.frame_nr,
+        observation.state,
+        observation.runtime_mode,
+        observation.client_size[0],
+        observation.client_size[1]
+    );
+    let owner = observation.launcher;
+    let root = owner.root;
+    let parking = owner.parking;
+    line.push_str(&format!(
+        " sd_owner_revision={} sd_owner_invocation_present={} sd_owner_invocation={} sd_owner_focus={:?} sd_owner_visible={} sd_root_present={} sd_root_hwnd={} sd_root_pid={} sd_root_generation={} sd_parking_present={} sd_transaction_hwnd={} sd_transaction_generation={} sd_transaction_cycle={} sd_transaction_state={}",
+        owner.visibility_revision,
+        owner.invocation_id.is_some(),
+        owner.invocation_id.unwrap_or(0),
+        owner.focus_intent,
+        owner.visible,
+        root.is_some(),
+        root.map_or(0, |root| root.hwnd),
+        root.map_or(0, |root| root.process_id),
+        root.map_or(0, |root| root.generation),
+        parking.is_some(),
+        parking.map_or(0, |parking| parking.hwnd),
+        parking.map_or(0, |parking| parking.generation),
+        parking.map_or(0, |parking| parking.cycle),
+        parking.map_or_else(|| "None".to_owned(), |parking| format!("{:?}", parking.state)),
+    ));
+    let mut widget = |prefix: &str, widget: ScreenDrawToolbarWidget| {
+        line.push_str(&format!(
+            " {prefix}_target={:?} {prefix}_role={:?} {prefix}_id={} {prefix}_enabled={}",
+            widget.target, widget.role, widget.widget_id, widget.enabled
+        ));
+        for (part, rect) in [
+            ("", widget.bounds),
+            ("clip_", widget.clip),
+            ("visible_", widget.visible_bounds),
+        ] {
+            for (edge, value) in ["left", "top", "right", "bottom"].into_iter().zip(rect) {
+                line.push_str(&format!(" {prefix}_{part}{edge}={value}"));
+            }
+        }
+        line.push_str(&format!(" {prefix}_fully_visible={}", widget.fully_visible));
+    };
+    widget("sd_label", observation.label);
+    widget(
+        "sd_resume",
+        observation.resume.unwrap_or(ScreenDrawToolbarWidget {
+            target: ScreenDrawToolbarTarget::ResumeDrawing,
+            role: ScreenDrawToolbarRole::Button,
+            widget_id: 0,
+            enabled: false,
+            bounds: [0; 4],
+            clip: [0; 4],
+            visible_bounds: [0; 4],
+            fully_visible: false,
+        }),
+    );
+    line.push_str(&format!(
+        " sd_resume_present={}",
+        observation.resume.is_some()
+    ));
+    line
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RequestKind {
@@ -827,6 +1061,9 @@ pub(crate) struct DesignerCloseState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
+    ScreenDrawToolbar {
+        observation: ScreenDrawToolbarObservation,
+    },
     DesignerCallback {
         phase: CallbackPhase,
         viewport: ViewportClass,
@@ -1341,6 +1578,18 @@ pub(crate) enum Event {
         invocation_id: Option<u64>,
         focus_intent: crate::visibility::RootFocusIntent,
     },
+    ScreenDrawRestoreDecision {
+        cause: crate::screen_draw::ScreenDrawRestoreCause,
+        intent_id: u64,
+        admission_serial: u64,
+        activity_epoch: u64,
+        generation: u64,
+        lifecycle: u64,
+        parking_cycle: u64,
+        starting_revision: u64,
+        current_revision: u64,
+        outcome: crate::screen_draw::ScreenDrawRestoreOutcome,
+    },
     RootCommand {
         command: RootCommandKind,
         correlation: Correlation,
@@ -1502,12 +1751,18 @@ impl TraceBudgetProfile {
         event_limit: GATE_S_EVENT_BUDGET,
         terminal_reserve: GATE_S_TERMINAL_RESERVE,
     };
+    const ALL: Self = Self {
+        name: ALL_TRACE_PROFILE,
+        event_limit: ALL_EVENT_BUDGET,
+        terminal_reserve: ALL_TERMINAL_RESERVE,
+    };
 
     fn from_environment(value: Option<&str>) -> Self {
         match value {
             Some(GATE_C_TRACE_PROFILE) => Self::GATE_C,
             Some(GATE_D_TRACE_PROFILE) => Self::GATE_D,
             Some(GATE_S_TRACE_PROFILE) => Self::GATE_S,
+            Some(ALL_TRACE_PROFILE) => Self::ALL,
             _ => Self::DEFAULT,
         }
     }
@@ -1560,7 +1815,8 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_RADIAL_INSERTION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static RADIAL_INSERTION_CONTROLS: OnceLock<Mutex<Vec<RadialInsertionControlSnapshot>>> =
     OnceLock::new();
-static ACTION_CATALOG_RANKS: OnceLock<Mutex<Vec<(u64, usize, usize, usize)>>> = OnceLock::new();
+static ACTION_CATALOG_RANKS: OnceLock<Mutex<Vec<(u64, u64, usize, usize, usize)>>> =
+    OnceLock::new();
 static ACTION_EDITOR_SCROLLS: OnceLock<Mutex<Vec<ActionEditorScrollSnapshot>>> = OnceLock::new();
 const WINDOW_SAMPLE_CAPACITY: usize = 32;
 const WINDOW_SAMPLE_DELAY_FRAMES: u64 = 2;
@@ -1903,6 +2159,17 @@ pub(crate) fn next_request_id() -> u64 {
 }
 
 pub(crate) fn request_window_sample(correlation: Correlation) {
+    #[cfg(test)]
+    TEST_ROOT_SAMPLE_REQUESTS.with(|samples| {
+        let mut samples = samples.borrow_mut();
+        if let Some(samples) = samples.as_mut() {
+            assert!(
+                samples.len() < 256,
+                "bounded ROOT sample request test observation exhausted"
+            );
+            samples.push(correlation);
+        }
+    });
     if !enabled() {
         return;
     }
@@ -2155,7 +2422,63 @@ pub(crate) fn emit_radial_insertion_control_with_widget(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SCREEN_DRAW_RESTORE: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+    static TEST_ROOT_ACTIVATION: RefCell<Option<Vec<Event>>> = const { RefCell::new(None) };
+    static TEST_ROOT_SAMPLE_REQUESTS: RefCell<Option<Vec<Correlation>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_root_activation_test_events() -> Vec<Event> {
+    TEST_ROOT_ACTIVATION
+        .with(|events| std::mem::take(events.borrow_mut().get_or_insert_with(Vec::new)))
+}
+
+#[cfg(test)]
+pub(crate) fn take_root_sample_requests_for_test() -> Vec<Correlation> {
+    TEST_ROOT_SAMPLE_REQUESTS
+        .with(|events| std::mem::take(events.borrow_mut().get_or_insert_with(Vec::new)))
+}
+
+#[cfg(test)]
+pub(crate) fn take_screen_draw_restore_test_events() -> Vec<Event> {
+    TEST_SCREEN_DRAW_RESTORE.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
 pub(crate) fn emit(event: Event) {
+    #[cfg(test)]
+    if matches!(
+        event,
+        Event::RootCommand { .. } | Event::NativeActivation { .. }
+    ) {
+        TEST_ROOT_ACTIVATION.with(|events| {
+            let mut events = events.borrow_mut();
+            if let Some(events) = events.as_mut() {
+                assert!(
+                    events.len() < 256,
+                    "bounded ROOT activation test observation exhausted"
+                );
+                events.push(event.clone());
+            }
+        });
+    }
+    #[cfg(test)]
+    if matches!(
+        event,
+        Event::ScreenDrawRestoreDecision { .. }
+            | Event::DesiredVisibility {
+                source: VisibilitySource::ScreenDrawRestore,
+                ..
+            }
+    ) {
+        TEST_SCREEN_DRAW_RESTORE.with(|events| {
+            let mut events = events.borrow_mut();
+            if events.len() < 128 {
+                events.push(event.clone());
+            }
+        });
+    }
     let runtime = runtime();
     if !runtime.enabled {
         return;
@@ -2226,6 +2549,13 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                 trace_sequence,
                 elapsed_ms,
             } => match event {
+                Event::ScreenDrawToolbar { observation } => {
+                    // The same finite serializer is used by retained evidence
+                    // round trips; publication still owns the ordinary fence.
+                    let record =
+                        screen_draw_toolbar_trace_record(observation, trace_sequence, elapsed_ms);
+                    tracing::warn!(target: TRACE_TARGET, "{record}");
+                }
                 Event::DesignerCallback { phase, viewport } => {
                     tracing::warn!(
                         target: TRACE_TARGET,
@@ -3638,6 +3968,32 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                         "radial acceptance trace"
                     );
                 }
+                Event::ScreenDrawRestoreDecision {
+                    cause,
+                    intent_id,
+                    admission_serial,
+                    activity_epoch,
+                    generation,
+                    lifecycle,
+                    parking_cycle,
+                    starting_revision,
+                    current_revision,
+                    outcome,
+                } => {
+                    tracing::warn!(target: TRACE_TARGET,
+                        trace_event = "screen_draw_restore_decision", elapsed_ms,
+                        sd_restore_cause = ?cause,
+                        sd_recovery_intent = intent_id,
+                        sd_recovery_admission = admission_serial,
+                        sd_recovery_epoch = activity_epoch,
+                        sd_restore_generation = generation,
+                        sd_restore_lifecycle = lifecycle,
+                        sd_parking_cycle = parking_cycle,
+                        sd_restore_start_revision = starting_revision,
+                        sd_restore_current_revision = current_revision,
+                        sd_restore_outcome = ?outcome,
+                        "radial acceptance trace");
+                }
                 Event::ScreenDrawRestoreFocusIntent {
                     revision,
                     invocation_id,
@@ -4932,13 +5288,16 @@ pub(crate) fn emit_designer_action_catalog_rank(
         .get_or_init(|| Mutex::new(Vec::new()))
         .lock()
         .map(|mut previous| {
-            let key = (session_id, custom_action_index, rank, catalog_len);
-            if previous.contains(&key) || previous.len() >= 1_024 {
-                false
-            } else {
-                previous.push(key);
-                true
-            }
+            record_action_catalog_rank(
+                &mut previous,
+                (
+                    session_id,
+                    generation,
+                    custom_action_index,
+                    rank,
+                    catalog_len,
+                ),
+            )
         })
         .unwrap_or(false);
     if emitted {
@@ -4950,6 +5309,17 @@ pub(crate) fn emit_designer_action_catalog_rank(
             generation,
         });
     }
+}
+
+fn record_action_catalog_rank(
+    previous: &mut Vec<(u64, u64, usize, usize, usize)>,
+    key: (u64, u64, usize, usize, usize),
+) -> bool {
+    if previous.contains(&key) || previous.len() >= 1_024 {
+        return false;
+    }
+    previous.push(key);
+    true
 }
 
 fn authoring_control_snapshot_should_emit(
@@ -5098,6 +5468,194 @@ impl Drop for DesignerCallbackGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_catalog_rank_dedup_preserves_fresh_draft_generation_and_existing_bound() {
+        let mut receipts = Vec::new();
+        let first = (77, 19, 63, 128, 150);
+        assert!(record_action_catalog_rank(&mut receipts, first));
+        assert!(!record_action_catalog_rank(&mut receipts, first));
+        assert!(record_action_catalog_rank(
+            &mut receipts,
+            (77, 20, 63, 128, 150)
+        ));
+        assert!(record_action_catalog_rank(
+            &mut receipts,
+            (78, 19, 63, 128, 150)
+        ));
+        while receipts.len() < 1_024 {
+            let source = receipts.len();
+            assert!(record_action_catalog_rank(
+                &mut receipts,
+                (79, 1, source, source, 2_048)
+            ));
+        }
+        assert!(!record_action_catalog_rank(
+            &mut receipts,
+            (80, 1, 63, 128, 150)
+        ));
+        assert_eq!(receipts.len(), 1_024);
+    }
+
+    fn toolbar_observation_fixture() -> ScreenDrawToolbarObservation {
+        let label = ScreenDrawToolbarWidget {
+            target: ScreenDrawToolbarTarget::StateLabel,
+            role: ScreenDrawToolbarRole::Label,
+            widget_id: 31,
+            enabled: true,
+            bounds: [8, 35, 60, 50],
+            clip: [0, 0, 264, 700],
+            visible_bounds: [8, 35, 60, 50],
+            fully_visible: true,
+        };
+        let resume = ScreenDrawToolbarWidget {
+            target: ScreenDrawToolbarTarget::ResumeDrawing,
+            role: ScreenDrawToolbarRole::Button,
+            widget_id: 32,
+            enabled: true,
+            bounds: [8, 60, 130, 80],
+            clip: [0, 0, 264, 700],
+            visible_bounds: [8, 60, 130, 80],
+            fully_visible: true,
+        };
+        ScreenDrawToolbarObservation {
+            hwnd: 101,
+            process_id: 202,
+            generation: 7,
+            lifetime: 9,
+            frame_nr: 11,
+            state: ScreenDrawToolbarMode::Ghost,
+            runtime_mode: ScreenDrawToolbarMode::Ghost,
+            client_size: [264, 700],
+            launcher: ScreenDrawLauncherObservation {
+                visibility_revision: 116,
+                invocation_id: None,
+                focus_intent: crate::visibility::RootFocusIntent::ActivateRoot,
+                visible: true,
+                root: Some(ScreenDrawRootIdentity {
+                    hwnd: 42,
+                    process_id: 202,
+                    generation: 3,
+                }),
+                parking: Some(ScreenDrawParkingObservation {
+                    hwnd: 42,
+                    generation: 7,
+                    cycle: 1,
+                    state: ScreenDrawParkingState::Restored,
+                }),
+            },
+            label,
+            resume: Some(resume),
+        }
+    }
+
+    #[test]
+    fn toolbar_observation_real_event_serializer_publishes_all_finite_frame_fields() {
+        let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let writer = bytes.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || CapturedTraceWriter(writer.clone()))
+            .finish();
+        let frame = toolbar_observation_fixture();
+        tracing::subscriber::with_default(subscriber, || {
+            emit_with_budget(
+                Event::ScreenDrawToolbar { observation: frame },
+                &EventBudget::new(1),
+            )
+        });
+        let line = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(line.contains("trace_event=\"screen_draw_toolbar\""));
+        assert!(line.contains("sd_state=Ghost sd_runtime=Ghost"));
+        assert!(line.contains("sd_label_target=StateLabel sd_label_role=Label sd_label_id=31"));
+        assert!(line.contains("sd_resume_present=true"));
+        assert!(line.contains("sd_resume_visible_bottom=80"));
+        assert!(line.contains("sd_client_width=264 sd_client_height=700"));
+        assert!(trace_line_sequence(&line).is_some_and(|sequence| sequence > 0));
+        assert!(line.len() < 2048);
+        assert!(!line.contains("Resume Drawing") && !line.contains(TOOLBAR_PRIVATE_PAYLOAD));
+    }
+
+    const TOOLBAR_PRIVATE_PAYLOAD: &str = "private Screen Draw capture";
+
+    #[test]
+    fn toolbar_observation_serializes_current_owner_none_some_and_exact_absent_identities() {
+        let mut frame = toolbar_observation_fixture();
+        let absent_invocation = screen_draw_toolbar_trace_record(frame, 41, 51);
+        assert!(absent_invocation.contains(
+            "sd_owner_revision=116 sd_owner_invocation_present=false sd_owner_invocation=0"
+        ));
+        assert!(absent_invocation.contains("sd_owner_focus=ActivateRoot sd_owner_visible=true"));
+        assert!(
+            absent_invocation.contains(
+                "sd_root_present=true sd_root_hwnd=42 sd_root_pid=202 sd_root_generation=3"
+            )
+        );
+        assert!(absent_invocation.contains("sd_parking_present=true sd_transaction_hwnd=42 sd_transaction_generation=7 sd_transaction_cycle=1 sd_transaction_state=Restored"));
+        frame.launcher.invocation_id = Some(124);
+        let present = screen_draw_toolbar_trace_record(frame, 42, 52);
+        assert!(present.contains("sd_owner_invocation_present=true sd_owner_invocation=124"));
+        frame.launcher.root = None;
+        frame.launcher.parking = None;
+        let unresolved = screen_draw_toolbar_trace_record(frame, 43, 53);
+        assert!(
+            unresolved.contains(
+                "sd_root_present=false sd_root_hwnd=0 sd_root_pid=0 sd_root_generation=0"
+            )
+        );
+        assert!(unresolved.contains("sd_parking_present=false sd_transaction_hwnd=0 sd_transaction_generation=0 sd_transaction_cycle=0 sd_transaction_state=None"));
+        let decoded: ScreenDrawToolbarObservation =
+            serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+        assert_eq!(decoded, frame);
+        for field in ["invocation_id", "root", "parking"] {
+            let mut value = serde_json::to_value(frame).unwrap();
+            value["launcher"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<ScreenDrawToolbarObservation>(value).is_err(),
+                "missing observed {field} must not mean observed absence"
+            );
+        }
+    }
+
+    #[test]
+    fn toolbar_observation_uses_only_ordinary_budget_and_serializes_exact_absence() {
+        let mut frame = toolbar_observation_fixture();
+        frame.resume = None;
+        let absent = screen_draw_toolbar_trace_record(frame, 41, 51);
+        assert!(absent.contains("sd_resume_id=0 sd_resume_enabled=false"));
+        assert!(absent.contains("sd_resume_present=false"));
+        assert!(absent.contains("sd_resume_visible_bottom=0"));
+        let event = Event::ScreenDrawToolbar { observation: frame };
+        assert!(!event_uses_terminal_reserve(&event));
+        let budget = EventBudget::with_terminal_reserve(1, 8);
+        let fence = TracePublicationFence::new();
+        let mut records = Vec::new();
+        assert_eq!(
+            publish_budgeted_event(event, &budget, &fence, |record| records.push(record)),
+            EventBudgetAdmission::Normal
+        );
+        assert_eq!(
+            publish_budgeted_event(event, &budget, &fence, |record| records.push(record)),
+            EventBudgetAdmission::Rejected
+        );
+        assert_eq!(records.len(), 2);
+        assert!(matches!(
+            records[0],
+            BudgetTraceEntry::Event {
+                trace_sequence: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            records[1],
+            BudgetTraceEntry::Exhausted {
+                trace_sequence: 2,
+                ..
+            }
+        ));
+        assert_eq!(budget.terminal_reserved.load(Ordering::Relaxed), 0);
+    }
 
     #[derive(Clone)]
     struct CapturedTraceWriter(std::sync::Arc<Mutex<Vec<u8>>>);
@@ -6104,6 +6662,7 @@ mod tests {
 
     fn schema_labels(event: Event) -> &'static [&'static str] {
         match event {
+            Event::ScreenDrawToolbar { .. } => &["observation"],
             Event::AppearanceState { .. } => &["state"],
             Event::NativeAppearanceTarget { .. } => &["state"],
             Event::DesignerCallback { .. } => &["phase", "viewport"],
@@ -6609,6 +7168,18 @@ mod tests {
                 "usage_count",
             ],
             Event::DesiredVisibility { .. } => &["visible", "revision", "source", "invocation_id"],
+            Event::ScreenDrawRestoreDecision { .. } => &[
+                "cause",
+                "intent_id",
+                "admission_serial",
+                "activity_epoch",
+                "generation",
+                "lifecycle",
+                "parking_cycle",
+                "starting_revision",
+                "current_revision",
+                "outcome",
+            ],
             Event::ScreenDrawRestoreFocusIntent { .. } => {
                 &["revision", "invocation_id", "focus_intent"]
             }
@@ -6725,6 +7296,99 @@ mod tests {
         assert_eq!(TraceBudgetProfile::GATE_S.event_limit, 81920);
         assert_eq!(TraceBudgetProfile::GATE_S.terminal_reserve, 256);
     }
+
+    #[test]
+    fn all_profile_is_explicit_and_overflow_keeps_one_marker_and_bounded_terminal_receipts() {
+        let profile = TraceBudgetProfile::from_environment(Some("all_v1"));
+        assert_eq!(profile, TraceBudgetProfile::ALL);
+        assert_eq!(profile.event_limit, 81_920);
+        assert_eq!(profile.terminal_reserve, 256);
+        assert_eq!(profile.event_limit, TraceBudgetProfile::GATE_S.event_limit);
+        for value in [None, Some("all-v1"), Some("ALL_V1"), Some("all_v1_extra")] {
+            let standard = TraceBudgetProfile::from_environment(value);
+            assert_eq!(standard, TraceBudgetProfile::DEFAULT);
+            assert_eq!(
+                (standard.event_limit, standard.terminal_reserve),
+                (8_192, 0)
+            );
+        }
+        let budget =
+            EventBudget::with_terminal_reserve(profile.event_limit, profile.terminal_reserve);
+        let fence = TracePublicationFence::new();
+        let entries = RefCell::new(Vec::new());
+        let primary_count = std::cell::Cell::new(0);
+        let mut publish = |entry| match entry {
+            BudgetTraceEntry::Event { trace_sequence, .. }
+                if trace_sequence <= profile.event_limit as u64 =>
+            {
+                primary_count.set(primary_count.get() + 1);
+                assert_eq!(trace_sequence, primary_count.get());
+            }
+            _ => entries.borrow_mut().push(entry),
+        };
+        let ordinary = || Event::RootMenuBody {
+            menu: RootMenuControl::File,
+            entered: false,
+        };
+        for _ in 0..profile.event_limit {
+            assert_eq!(
+                publish_budgeted_event(ordinary(), &budget, &fence, &mut publish),
+                EventBudgetAdmission::Normal
+            );
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                publish_budgeted_event(ordinary(), &budget, &fence, &mut publish),
+                EventBudgetAdmission::Rejected
+            );
+        }
+        assert_eq!(primary_count.get(), 81_920);
+        for index in 0..profile.terminal_reserve {
+            let receipt = publish_authoring_observation_boundary_with_budget(
+                "terminal",
+                index as u64 + 2,
+                Some(1),
+                &budget,
+                &fence,
+                &mut publish,
+            )
+            .unwrap();
+            assert_eq!(receipt, (81_921 + index as u64, 81_922 + index as u64));
+        }
+        assert!(
+            publish_authoring_observation_boundary_with_budget(
+                "terminal",
+                258,
+                Some(1),
+                &budget,
+                &fence,
+                &mut publish
+            )
+            .is_none()
+        );
+        let entries = entries.into_inner();
+        assert_eq!(entries.len(), 257);
+        assert!(matches!(
+            entries[0],
+            BudgetTraceEntry::Exhausted {
+                trace_sequence: 81_921,
+                event_budget: 81_920,
+                reserved_event_budget: 256,
+                ..
+            }
+        ));
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| matches!(entry, BudgetTraceEntry::Exhausted { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(budget.emitted(), 81_920);
+        assert_eq!(budget.terminal_reserved(), 256);
+        assert!(budget.exhausted.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn appearance_receipts_serialize_only_typed_owner_facts_with_a_hard_budget() {
         let bytes = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -7384,6 +8048,9 @@ mod tests {
             ..Correlation::default()
         };
         let events = [
+            Event::ScreenDrawToolbar {
+                observation: toolbar_observation_fixture(),
+            },
             Event::DesignerCallback {
                 phase: CallbackPhase::Enter,
                 viewport: ViewportClass::Deferred,
@@ -7920,6 +8587,18 @@ mod tests {
                 revision: 3,
                 source: VisibilitySource::Queued,
                 invocation_id: None,
+            },
+            Event::ScreenDrawRestoreDecision {
+                cause: crate::screen_draw::ScreenDrawRestoreCause::LauncherRecovery,
+                intent_id: 1,
+                admission_serial: 2,
+                activity_epoch: 1,
+                generation: 3,
+                lifecycle: 4,
+                parking_cycle: 5,
+                starting_revision: 7,
+                current_revision: 8,
+                outcome: crate::screen_draw::ScreenDrawRestoreOutcome::Published,
             },
             Event::ScreenDrawRestoreFocusIntent {
                 revision: 8,

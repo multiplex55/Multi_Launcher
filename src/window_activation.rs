@@ -1953,6 +1953,16 @@ impl ActivationBackend for WindowsActivationBackend {
 }
 
 #[cfg(test)]
+pub(crate) fn activate_root_fixture_for_test(
+    request: WindowActivationRequest,
+    fence: WindowActivationFence,
+    deny_foreground: bool,
+    supersede_during_desktop: bool,
+) -> (Result<(), WindowActivationError>, Vec<String>) {
+    tests::activate_root_fixture(request, fence, deny_foreground, supersede_during_desktop)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2044,6 +2054,27 @@ mod tests {
                 journal.record_test_foreground(hwnd, process_id, thread_id);
             }
         }
+    }
+
+    pub(super) fn activate_root_fixture(
+        request: WindowActivationRequest,
+        fence: WindowActivationFence,
+        deny_foreground: bool,
+        supersede_during_desktop: bool,
+    ) -> (Result<(), WindowActivationError>, Vec<String>) {
+        let mut backend = FakeBackend::new();
+        backend
+            .identity_overrides
+            .insert(request.hwnd, (fence.expected_process, 3));
+        if deny_foreground {
+            backend.activate_on_attempt = usize::MAX;
+        }
+        if supersede_during_desktop {
+            backend.transition_delay_after_action = 1;
+            backend.cancel_on_pause = Some((fence.revision.clone(), fence.visible.clone()));
+        }
+        let result = activate_with_fence(&mut backend, request, Some(&fence));
+        (result, backend.events)
     }
 
     fn id(number: u32) -> VirtualDesktopId {

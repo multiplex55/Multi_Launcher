@@ -10,6 +10,13 @@ pub(crate) enum LauncherSearchState {
     Pending,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ProviderSearchDeferral {
+    #[default]
+    None,
+    Capacity,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LauncherSearchOutcome {
     pub state: LauncherSearchState,
@@ -17,6 +24,7 @@ pub(crate) struct LauncherSearchOutcome {
     pub provider_revision: u64,
     pub result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
     pub result_catalog_versions_stable: bool,
+    pub(super) provider_deferral: ProviderSearchDeferral,
 }
 
 impl LauncherApp {
@@ -270,6 +278,7 @@ impl LauncherApp {
             trimmed.starts_with("timer list") || trimmed.starts_with("alarm list");
         self.last_stopwatch_query = trimmed.starts_with("sw list");
         if trimmed.is_empty() {
+            self.last_search_provider_deferral = ProviderSearchDeferral::None;
             self.autocomplete_index = 0;
             self.suggestions.clear();
             self.results = self.search_read_only_outcome(&self.query).actions;
@@ -285,10 +294,11 @@ impl LauncherApp {
         } else {
             self.search_read_only_outcome(&self.query)
         };
+        self.last_search_provider_deferral = outcome.provider_deferral;
         self.results = outcome.actions;
         self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
-        self.last_results_valid = true;
+        self.last_results_valid = outcome.provider_deferral == ProviderSearchDeferral::None;
         let completion_started = crate::performance::started_if(perf_enabled);
         self.update_suggestions();
         crate::performance::log_elapsed("search.completion", completion_started);
@@ -296,6 +306,20 @@ impl LauncherApp {
         self.recompute_query_results_layout();
         crate::performance::log_elapsed("search.layout", layout_started);
         crate::performance::log_elapsed("search.total", total_started);
+    }
+
+    pub(super) fn resume_capacity_deferred_search(&mut self) {
+        if std::mem::take(&mut self.last_search_provider_deferral)
+            == ProviderSearchDeferral::Capacity
+            && !self.last_results_valid
+            && self.query == self.last_search_query
+        {
+            // Refresh the current cache owner; never restore a query captured
+            // by the worker that released capacity. Deliberate failed-query
+            // fallback has no capacity deferral and stays suppressed.
+            self.last_results_valid = false;
+            self.search();
+        }
     }
 
     fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
@@ -515,11 +539,12 @@ impl LauncherApp {
                     crate::radial::dynamic::MutableResultCatalogVersions::current(),
                 ),
                 result_catalog_versions_stable: true,
+                provider_deferral: ProviderSearchDeferral::None,
             };
         }
         if self.radial_provider_search_capacity.is_occupied() {
             let revision = self.plugins.search_generation();
-            return self.search_read_only_outcome_from_scored_plugins(
+            let mut outcome = self.search_read_only_outcome_from_scored_plugins(
                 raw_query,
                 Vec::new(),
                 true,
@@ -528,6 +553,8 @@ impl LauncherApp {
                 Some(crate::radial::dynamic::MutableResultCatalogVersions::current()),
                 false,
             );
+            outcome.provider_deferral = ProviderSearchDeferral::Capacity;
+            return outcome;
         }
         let catalog_versions_at_start =
             crate::radial::dynamic::MutableResultCatalogVersions::current();
@@ -621,6 +648,7 @@ impl LauncherApp {
                 provider_revision,
                 result_catalog_versions,
                 result_catalog_versions_stable: catalog_versions_stable,
+                provider_deferral: ProviderSearchDeferral::None,
             };
         }
         let search_actions =
@@ -654,6 +682,7 @@ impl LauncherApp {
             provider_revision,
             result_catalog_versions,
             result_catalog_versions_stable: catalog_versions_stable,
+            provider_deferral: ProviderSearchDeferral::None,
         }
     }
 
@@ -946,6 +975,63 @@ mod tests {
         assert_eq!(
             (app.query.clone(), app.results.clone(), app.selected),
             before
+        );
+    }
+
+    #[test]
+    fn screen_draw_priority_fixture_requires_normal_app_query_without_read_only_effects() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let label = "Radial Acceptance Screen Draw Priority Smoke";
+        let fixture_action = Action {
+            label: label.into(),
+            desc: "Safe owned Screen Draw acceptance entry".into(),
+            action: "screen_draw:start".into(),
+            args: None,
+        };
+        app.actions = Arc::new(vec![fixture_action.clone()]);
+        app.update_action_cache();
+        app.query = "unchanged root query".into();
+        assert!(app.launcher_hwnd.is_none());
+        app.selected = Some(0);
+        app.results = vec![Action {
+            label: "Existing row".into(),
+            desc: String::new(),
+            action: "existing".into(),
+            args: None,
+        }];
+        let before = (
+            app.query.clone(),
+            app.results.clone(),
+            app.selected,
+            app.usage.clone(),
+            app.test_activation_trace.clone(),
+            app.test_recorded_history_queries.clone(),
+            app.visible_flag.load(std::sync::atomic::Ordering::SeqCst),
+            app.restore_flag.load(std::sync::atomic::Ordering::SeqCst),
+        );
+
+        // The normal read-only boundary calls the real custom-action search.
+        // A bare label deliberately does not opt into that search namespace.
+        let prefixed = app.search_read_only_outcome(&format!("app {label}"));
+        assert_eq!(prefixed.state, LauncherSearchState::Results);
+        assert_eq!(prefixed.actions, vec![fixture_action.clone()]);
+        let bare = app.search_read_only_outcome(label);
+        assert!(!bare.actions.iter().any(|action| action == &fixture_action));
+        assert_eq!(bare.state, LauncherSearchState::NoResults);
+        assert!(app.launcher_hwnd.is_none());
+        assert_eq!(
+            (
+                app.query.clone(),
+                app.results.clone(),
+                app.selected,
+                app.usage.clone(),
+                app.test_activation_trace.clone(),
+                app.test_recorded_history_queries.clone(),
+                app.visible_flag.load(std::sync::atomic::Ordering::SeqCst),
+                app.restore_flag.load(std::sync::atomic::Ordering::SeqCst)
+            ),
+            before,
         );
     }
 

@@ -115,10 +115,7 @@ impl ScreenDrawCommandHost for LauncherApp {
 
         match command {
             ScreenDrawCommand::Start => self.start_or_focus_screen_draw().map(|_| ()),
-            ScreenDrawCommand::OpenToolbar => {
-                self.focus_screen_draw_toolbar();
-                Ok(())
-            }
+            ScreenDrawCommand::OpenToolbar => self.focus_screen_draw_toolbar(),
             ScreenDrawCommand::NewCapture => self.request_new_screen_draw_capture(),
             ScreenDrawCommand::Ghost => self
                 .screen_draw_controller
@@ -917,6 +914,7 @@ impl LauncherApp {
             self.selected = None;
             self.last_search_query = self.query.clone();
             self.last_results_valid = true;
+            self.last_search_provider_deferral = super::search::ProviderSearchDeferral::None;
             self.update_suggestions();
         }
         if outcome.invalidate_results {
@@ -1041,6 +1039,81 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
+    }
+
+    fn with_isolated_root_restore_fixture<T>(
+        app: &mut LauncherApp,
+        run: impl FnOnce(&mut LauncherApp) -> T,
+    ) -> T {
+        #[cfg(windows)]
+        {
+            use crate::radial::acceptance_trace::{
+                self, Event, NativeActivationEdge, RootCommandKind,
+            };
+
+            assert!(
+                !unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::IsWindow(
+                        windows::Win32::Foundation::HWND(42 as *mut _),
+                    )
+                }
+                .as_bool(),
+                "the isolated ROOT fixture must not name a live OS window"
+            );
+            app.launcher_hwnd = Some(42);
+            app.root_window_bridge.set_identity_for_test(42);
+            let identity = app
+                .root_window_bridge
+                .qualify_simulated_wake_for_test()
+                .unwrap();
+            assert_eq!(identity, app.root_window_bridge.identity());
+            let revision = app.visibility_revision.current();
+            let (result, queued) =
+                crate::window_manager::with_launcher_restore_queue_for_test(|| run(app));
+            assert_eq!(app.visibility_revision.current(), revision + 1);
+            assert_eq!(queued, [(revision + 1, 42)]);
+
+            let events = acceptance_trace::take_root_activation_test_events();
+            let focus = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::RootCommand {
+                        command: RootCommandKind::Focus,
+                        correlation,
+                    } => Some(*correlation),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let native = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::NativeActivation {
+                        edge: NativeActivationEdge::RestoreRequested,
+                        hwnd,
+                        correlation,
+                    } => Some((*hwnd as usize, *correlation)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(focus.len(), 1);
+            assert_eq!(native.len(), 1);
+            assert_eq!(native[0].0, 42);
+            assert_eq!(focus[0].visibility_revision, revision + 1);
+            assert_eq!(native[0].1.visibility_revision, revision + 1);
+            assert_eq!(focus[0].invocation_id, native[0].1.invocation_id);
+            assert!(focus[0].request_id > 0 && focus[0].request_id < native[0].1.request_id);
+            assert!(!focus[0].terminal && !native[0].1.terminal);
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                Event::NativeActivation {
+                    edge: NativeActivationEdge::RestoreCompleted,
+                    ..
+                }
+            )));
+            return result;
+        }
+        #[cfg(not(windows))]
+        run(app)
     }
 
     fn action(raw: &str) -> crate::actions::Action {
@@ -1278,11 +1351,13 @@ mod tests {
         assert_eq!(app.screen_draw_controller.state().generation(), generation);
         assert!(!app.screen_draw_controller.toolbar_open());
 
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut app,
-            crate::commands::ScreenDrawCommand::Close,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut app, |app| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                app,
+                crate::commands::ScreenDrawCommand::Close,
+            )
+            .unwrap();
+        });
         ScreenDrawCommandHost::execute_screen_draw_command(
             &mut app,
             crate::commands::ScreenDrawCommand::OpenToolbar,
@@ -1371,11 +1446,13 @@ mod tests {
         parking.commit_hidden();
         app.screen_draw_launcher_parking = Some(parking);
 
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut app,
-            crate::commands::ScreenDrawCommand::NewCapture,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut app, |app| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                app,
+                crate::commands::ScreenDrawCommand::NewCapture,
+            )
+            .unwrap();
+        });
         let replacement = app.screen_draw_controller.state().generation().unwrap();
         assert_ne!(first, replacement);
         assert!(matches!(
@@ -1428,11 +1505,13 @@ mod tests {
         parking.restore().unwrap();
         app.screen_draw_launcher_parking = Some(parking);
 
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut app,
-            crate::commands::ScreenDrawCommand::NewCapture,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut app, |app| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                app,
+                crate::commands::ScreenDrawCommand::NewCapture,
+            )
+            .unwrap();
+        });
 
         assert!(matches!(
             app.screen_draw_controller.state(),
@@ -1472,11 +1551,13 @@ mod tests {
             parking.commit_hidden();
             app.screen_draw_launcher_parking = Some(parking);
 
-            ScreenDrawCommandHost::execute_screen_draw_command(
-                &mut app,
-                crate::commands::ScreenDrawCommand::Close,
-            )
-            .unwrap();
+            with_isolated_root_restore_fixture(&mut app, |app| {
+                ScreenDrawCommandHost::execute_screen_draw_command(
+                    app,
+                    crate::commands::ScreenDrawCommand::Close,
+                )
+                .unwrap();
+            });
 
             assert_eq!(
                 app.screen_draw_controller.state(),
@@ -1491,11 +1572,13 @@ mod tests {
         }
 
         let mut idle = test_app();
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut idle,
-            crate::commands::ScreenDrawCommand::Close,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut idle, |idle| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                idle,
+                crate::commands::ScreenDrawCommand::Close,
+            )
+            .unwrap();
+        });
         assert_eq!(
             idle.screen_draw_controller.state(),
             &crate::screen_draw::ScreenDrawState::NoSession

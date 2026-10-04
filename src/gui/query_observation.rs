@@ -14,6 +14,248 @@ const MAX_SUMMARY_KEYS: usize = 4096;
 const AUTHORING_SCHEMA_VERSION: u16 = 1;
 const AUTHORING_REQUEST_SUFFIX: &str = ".authoring.request.json";
 const AUTHORING_RESPONSE_SUFFIX: &str = ".authoring.response.json";
+const NOTE_CLOSE_REQUEST_SUFFIX: &str = ".note-close.request.json";
+const NOTE_CLOSE_RESPONSE_SUFFIX: &str = ".note-close.response.json";
+pub(super) const Q11_NOTE_SLUG: &str = "radial-acceptance-q11";
+pub(super) const Q11_NOTE_MARKER: &str = "# radial acceptance q11";
+
+// Nullable protocol fields are present explicitly, including the first
+// read-only lifetime discovery. Missing fields are malformed wire evidence.
+fn note_close_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum NoteCloseFixture {
+    Q11,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NoteCloseObservationRequest {
+    pub schema_version: u16,
+    pub fixture: NoteCloseFixture,
+    pub request_id: u64,
+    pub run_nonce: [u64; 2],
+    pub expected_hwnd: u64,
+    pub expected_pid: u32,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    pub expected_generation: Option<u64>,
+    pub after_frame_ordinal: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NoteCloseRootIdentity {
+    pub hwnd: u64,
+    pub process_id: u32,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NoteCloseRenderedDiscard {
+    pub owner_slug_digest: u64,
+    pub widget_id: u64,
+    pub role: NoteCloseWidgetRole,
+    pub enabled: bool,
+    pub visible: bool,
+    pub fully_visible: bool,
+    pub bounds: [i32; 4],
+    pub clip: [i32; 4],
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum NoteCloseWidgetRole {
+    DiscardChanges,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NoteCloseSoleNote {
+    pub slug_digest: u64,
+    pub fixture_slug: bool,
+    pub fixture_marker: bool,
+    pub pending_discard: bool,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    pub rendered_discard: Option<NoteCloseRenderedDiscard>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NoteCloseSnapshot {
+    pub client_size: [i32; 2],
+    pub open_note_count: usize,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    pub sole_note: Option<NoteCloseSoleNote>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum NoteCloseObservationStatus {
+    Captured,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum NoteCloseObservationError {
+    MalformedRequest,
+    InvalidIdentity,
+    StaleRequest,
+    WrongRoot,
+    StaleFrame,
+    UnavailableClient,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NoteCloseObservationResponse {
+    pub schema_version: u16,
+    pub fixture: NoteCloseFixture,
+    pub request_id: u64,
+    pub run_nonce: [u64; 2],
+    pub status: NoteCloseObservationStatus,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    pub error: Option<NoteCloseObservationError>,
+    pub observed_frame_ordinal: u64,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    pub root: Option<NoteCloseRootIdentity>,
+    #[serde(deserialize_with = "note_close_required_nullable")]
+    pub snapshot: Option<NoteCloseSnapshot>,
+}
+
+/// Local to one ROOT render; no last-frame note/widget state is retained.
+pub(super) struct NoteCloseRenderFrame {
+    client_size: Option<[i32; 2]>,
+    rendered_open_count: usize,
+    sole_rendered_note: Option<NoteCloseSoleNote>,
+}
+
+impl NoteCloseRenderFrame {
+    pub(super) fn new(ctx: &eframe::egui::Context) -> Self {
+        let size = ctx.input(|input| input.screen_rect().size());
+        let scale = ctx.pixels_per_point();
+        let dimension = |logical: f32| {
+            let pixels = (f64::from(logical) * f64::from(scale)).round();
+            (logical.is_finite()
+                && logical > 0.0
+                && scale.is_finite()
+                && scale > 0.0
+                && pixels >= 1.0
+                && pixels <= f64::from(i32::MAX))
+            .then_some(pixels as i32)
+        };
+        Self {
+            client_size: dimension(size.x)
+                .zip(dimension(size.y))
+                .map(|(x, y)| [x, y]),
+            rendered_open_count: 0,
+            sole_rendered_note: None,
+        }
+    }
+
+    pub(super) fn observe_panel(
+        &mut self,
+        panel: &super::note_panel::NotePanel,
+        discard: Option<NoteCloseRenderedDiscard>,
+    ) {
+        if !panel.open {
+            return;
+        }
+        self.rendered_open_count = self.rendered_open_count.saturating_add(1);
+        self.sole_rendered_note = (self.rendered_open_count == 1).then(|| {
+            let mut note = panel.note_close_observation();
+            note.rendered_discard = discard;
+            note
+        });
+    }
+
+    pub(super) fn snapshot(
+        self,
+        panels: &[super::note_panel::NotePanel],
+    ) -> Option<NoteCloseSnapshot> {
+        let mut open = panels.iter().filter(|panel| panel.open);
+        let first = open.next();
+        let count = usize::from(first.is_some()) + open.count();
+        let sole_note = if count == 1 {
+            let mut current = first?.note_close_observation();
+            if self.rendered_open_count == 1
+                && let Some(rendered) = self.sole_rendered_note
+                && current
+                    == (NoteCloseSoleNote {
+                        rendered_discard: None,
+                        ..rendered.clone()
+                    })
+            {
+                current.rendered_discard = rendered.rendered_discard;
+            }
+            Some(current)
+        } else {
+            None
+        };
+        Some(NoteCloseSnapshot {
+            client_size: self.client_size?,
+            open_note_count: count,
+            sole_note,
+        })
+    }
+}
+
+pub(super) fn observe_note_discard_response(
+    ui: &eframe::egui::Ui,
+    response: &eframe::egui::Response,
+    slug: &str,
+) -> Option<NoteCloseRenderedDiscard> {
+    let scale = ui.ctx().pixels_per_point();
+    let rect = |rect: eframe::egui::Rect| {
+        let rect = crate::screen_draw::window_layers::desktop_rect_from_logical_edges(
+            rect.left(),
+            rect.top(),
+            rect.right(),
+            rect.bottom(),
+            scale,
+        )?;
+        Some([
+            rect.x,
+            rect.y,
+            rect.x.checked_add(i32::try_from(rect.width).ok()?)?,
+            rect.y.checked_add(i32::try_from(rect.height).ok()?)?,
+        ])
+    };
+    let bounds = rect(response.rect)?;
+    let client = NoteCloseRenderFrame::new(ui.ctx()).client_size?;
+    let outward_clip = rect(
+        ui.clip_rect()
+            .intersect(ui.ctx().input(|input| input.screen_rect())),
+    )?;
+    let clip = [
+        outward_clip[0].max(0),
+        outward_clip[1].max(0),
+        outward_clip[2].min(client[0]),
+        outward_clip[3].min(client[1]),
+    ];
+    Some(NoteCloseRenderedDiscard {
+        owner_slug_digest: id_digest(slug),
+        widget_id: response.id.value(),
+        role: NoteCloseWidgetRole::DiscardChanges,
+        enabled: response.enabled(),
+        visible: ui.is_rect_visible(response.rect),
+        fully_visible: ui.clip_rect().contains_rect(response.rect)
+            && ui
+                .ctx()
+                .input(|input| input.screen_rect())
+                .contains_rect(response.rect),
+        bounds,
+        clip,
+    })
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -418,6 +660,7 @@ pub(crate) struct QueryObservationMailbox {
     binding_error: Option<String>,
     authoring_baseline: Option<AuthoringCapturedBaseline>,
     last_authoring_request_id: u64,
+    last_note_close_request_id: u64,
 }
 
 impl QueryObservationMailbox {
@@ -452,6 +695,110 @@ impl QueryObservationMailbox {
         self.base_path.as_ref().is_some_and(|base| {
             std::fs::metadata(path_with_suffix(base, AUTHORING_REQUEST_SUFFIX)).is_ok()
         })
+    }
+
+    pub(super) fn has_note_close_request(&self) -> bool {
+        self.base_path.as_ref().is_some_and(|base| {
+            std::fs::metadata(path_with_suffix(base, NOTE_CLOSE_REQUEST_SUFFIX)).is_ok()
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn isolated_note_close_test(base_path: PathBuf) -> Self {
+        Self {
+            base_path: Some(base_path),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn poll_note_close(
+        &mut self,
+        root: Option<NoteCloseRootIdentity>,
+        snapshot: Option<NoteCloseSnapshot>,
+    ) -> bool {
+        let Some(base) = self.base_path.as_ref() else {
+            return false;
+        };
+        let request_path = path_with_suffix(base, NOTE_CLOSE_REQUEST_SUFFIX);
+        let response_path = path_with_suffix(base, NOTE_CLOSE_RESPONSE_SUFFIX);
+        let Ok(metadata) = std::fs::metadata(&request_path) else {
+            return true;
+        };
+        let request = (metadata.len() <= MAX_REQUEST_BYTES as u64)
+            .then(|| std::fs::read(&request_path).ok())
+            .flatten()
+            .filter(|bytes| bytes.len() <= MAX_REQUEST_BYTES)
+            .and_then(|bytes| serde_json::from_slice::<NoteCloseObservationRequest>(&bytes).ok());
+        let _ = std::fs::remove_file(&request_path);
+        let response = if let Some(request) = request {
+            self.apply_note_close_request(request, root, snapshot)
+        } else {
+            NoteCloseObservationResponse {
+                schema_version: 1,
+                fixture: NoteCloseFixture::Q11,
+                request_id: 0,
+                run_nonce: [0, 0],
+                status: NoteCloseObservationStatus::Failed,
+                error: Some(NoteCloseObservationError::MalformedRequest),
+                observed_frame_ordinal: self.frame_ordinal,
+                root,
+                snapshot: None,
+            }
+        };
+        let _ = write_response(&response_path, &response);
+        true
+    }
+
+    fn apply_note_close_request(
+        &mut self,
+        request: NoteCloseObservationRequest,
+        root: Option<NoteCloseRootIdentity>,
+        snapshot: Option<NoteCloseSnapshot>,
+    ) -> NoteCloseObservationResponse {
+        let mut response = NoteCloseObservationResponse {
+            schema_version: 1,
+            fixture: request.fixture,
+            request_id: request.request_id,
+            run_nonce: request.run_nonce,
+            status: NoteCloseObservationStatus::Failed,
+            error: None,
+            observed_frame_ordinal: self.frame_ordinal,
+            root,
+            snapshot: None,
+        };
+        let error = if request.schema_version != 1
+            || request.request_id == 0
+            || request.run_nonce == [0, 0]
+            || request.expected_hwnd == 0
+            || request.expected_pid == 0
+            || request.expected_generation == Some(0)
+        {
+            Some(NoteCloseObservationError::InvalidIdentity)
+        } else if request.request_id <= self.last_note_close_request_id {
+            Some(NoteCloseObservationError::StaleRequest)
+        } else if !response.root.as_ref().is_some_and(|root| {
+            root.hwnd == request.expected_hwnd
+                && root.process_id == request.expected_pid
+                && root.generation > 0
+                && request
+                    .expected_generation
+                    .is_none_or(|generation| generation == root.generation)
+        }) {
+            Some(NoteCloseObservationError::WrongRoot)
+        } else if self.frame_ordinal == 0 || self.frame_ordinal <= request.after_frame_ordinal {
+            Some(NoteCloseObservationError::StaleFrame)
+        } else if snapshot.is_none() {
+            Some(NoteCloseObservationError::UnavailableClient)
+        } else {
+            None
+        };
+        self.last_note_close_request_id = self.last_note_close_request_id.max(request.request_id);
+        response.error = error;
+        if error.is_none() {
+            response.status = NoteCloseObservationStatus::Captured;
+            response.snapshot = snapshot;
+        }
+        response
     }
 
     pub(crate) fn bind_selection(
@@ -1058,6 +1405,176 @@ fn id_digest(value: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn note_close_request(request_id: u64, after: u64) -> NoteCloseObservationRequest {
+        NoteCloseObservationRequest {
+            schema_version: 1,
+            fixture: NoteCloseFixture::Q11,
+            request_id,
+            run_nonce: [71, 73],
+            expected_hwnd: 42,
+            expected_pid: 202,
+            expected_generation: Some(3),
+            after_frame_ordinal: after,
+        }
+    }
+
+    #[test]
+    fn note_close_mailbox_publishes_actual_frame_and_rejects_stale_or_wrong_root_without_query_mutation()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("observation");
+        let mut mailbox = QueryObservationMailbox::isolated_note_close_test(base.clone());
+        mailbox.frame_ordinal = 1;
+        let baseline = mailbox.apply_request(
+            request(QueryObservationPhase::Baseline, 10, &identity()),
+            root(10),
+            Ok(QueryObservationCounts::default()),
+        );
+        assert_eq!(baseline.status, "captured");
+        let original_baseline = mailbox.baseline.clone();
+        let original_authoring_id = mailbox.last_authoring_request_id;
+        let request_path = path_with_suffix(&base, NOTE_CLOSE_REQUEST_SUFFIX);
+        let response_path = path_with_suffix(&base, NOTE_CLOSE_RESPONSE_SUFFIX);
+        let owner = NoteCloseRootIdentity {
+            hwnd: 42,
+            process_id: 202,
+            generation: 3,
+        };
+        let snapshot = NoteCloseSnapshot {
+            client_size: [900, 650],
+            open_note_count: 0,
+            sole_note: None,
+        };
+        for (request, supplied, expected_error) in [
+            (note_close_request(1, 0), Some(owner.clone()), None),
+            (
+                note_close_request(1, 0),
+                Some(owner.clone()),
+                Some(NoteCloseObservationError::StaleRequest),
+            ),
+            (
+                note_close_request(2, 9),
+                Some(owner.clone()),
+                Some(NoteCloseObservationError::StaleFrame),
+            ),
+            (
+                note_close_request(3, 0),
+                Some(NoteCloseRootIdentity {
+                    hwnd: 43,
+                    ..owner.clone()
+                }),
+                Some(NoteCloseObservationError::WrongRoot),
+            ),
+            (
+                note_close_request(4, 0),
+                Some(NoteCloseRootIdentity {
+                    process_id: 999,
+                    ..owner.clone()
+                }),
+                Some(NoteCloseObservationError::WrongRoot),
+            ),
+            (
+                note_close_request(5, 0),
+                Some(NoteCloseRootIdentity {
+                    generation: 4,
+                    ..owner.clone()
+                }),
+                Some(NoteCloseObservationError::WrongRoot),
+            ),
+            (
+                note_close_request(6, 0),
+                None,
+                Some(NoteCloseObservationError::WrongRoot),
+            ),
+        ] {
+            mailbox.advance_frame();
+            std::fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
+            assert!(mailbox.has_note_close_request());
+            assert!(mailbox.poll_note_close(supplied.clone(), Some(snapshot.clone())));
+            assert!(!request_path.exists());
+            let response: NoteCloseObservationResponse =
+                serde_json::from_slice(&std::fs::read(&response_path).unwrap()).unwrap();
+            assert_eq!(response.request_id, request.request_id);
+            assert_eq!(response.run_nonce, request.run_nonce);
+            assert_eq!(response.root, supplied);
+            assert_eq!(response.observed_frame_ordinal, mailbox.frame_ordinal);
+            assert_eq!(response.error, expected_error);
+            assert_eq!(
+                response.status == NoteCloseObservationStatus::Captured,
+                expected_error.is_none()
+            );
+            assert_eq!(response.snapshot.is_some(), expected_error.is_none());
+        }
+        assert_eq!(mailbox.last_request_id, 10);
+        assert_eq!(mailbox.last_authoring_request_id, original_authoring_id);
+        assert_eq!(
+            mailbox.baseline.as_ref().unwrap().request_id,
+            original_baseline.as_ref().unwrap().request_id
+        );
+        assert_eq!(
+            mailbox.baseline.as_ref().unwrap().root,
+            original_baseline.as_ref().unwrap().root
+        );
+        assert!(mailbox.authoring_baseline.is_none());
+        assert!(mailbox.selection.is_none());
+    }
+
+    #[test]
+    fn note_close_mailbox_bounds_wire_and_never_invents_unavailable_client_or_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("observation");
+        let mut mailbox = QueryObservationMailbox::isolated_note_close_test(base.clone());
+        mailbox.advance_frame();
+        let owner = NoteCloseRootIdentity {
+            hwnd: 42,
+            process_id: 202,
+            generation: 3,
+        };
+        for bytes in [
+            b"{bad}".to_vec(),
+            vec![b'x'; MAX_REQUEST_BYTES + 1],
+            serde_json::to_vec(&serde_json::json!({"schema_version":1,"fixture":"other"})).unwrap(),
+        ] {
+            std::fs::write(path_with_suffix(&base, NOTE_CLOSE_REQUEST_SUFFIX), bytes).unwrap();
+            mailbox.poll_note_close(Some(owner.clone()), None);
+            let bytes = std::fs::read(path_with_suffix(&base, NOTE_CLOSE_RESPONSE_SUFFIX)).unwrap();
+            assert!(bytes.len() <= MAX_RESPONSE_BYTES);
+            let response: NoteCloseObservationResponse = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response.status, NoteCloseObservationStatus::Failed);
+            assert_eq!(
+                response.error,
+                Some(NoteCloseObservationError::MalformedRequest)
+            );
+            assert!(response.snapshot.is_none());
+            assert!(!mailbox.has_note_close_request());
+        }
+        let response =
+            mailbox.apply_note_close_request(note_close_request(1, 0), Some(owner.clone()), None);
+        assert_eq!(
+            response.error,
+            Some(NoteCloseObservationError::UnavailableClient)
+        );
+        let mut discovery = note_close_request(2, 0);
+        discovery.expected_generation = None;
+        let response = mailbox.apply_note_close_request(
+            discovery,
+            Some(owner.clone()),
+            Some(NoteCloseSnapshot {
+                client_size: [317, 840],
+                open_note_count: 0,
+                sole_note: None,
+            }),
+        );
+        assert_eq!(response.status, NoteCloseObservationStatus::Captured);
+        assert_eq!(response.root, Some(owner));
+        let mut invalid = note_close_request(3, 0);
+        invalid.run_nonce = [0, 0];
+        assert_eq!(
+            mailbox.apply_note_close_request(invalid, None, None).error,
+            Some(NoteCloseObservationError::InvalidIdentity)
+        );
+    }
 
     fn action() -> crate::actions::Action {
         crate::actions::Action {

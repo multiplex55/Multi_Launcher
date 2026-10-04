@@ -5219,6 +5219,25 @@ mod tests {
         let root_origin = controller.active.as_ref().unwrap().layout.origin;
         let root_center = controller.active.as_ref().unwrap().spatial.visible_center;
         assert_eq!(root_origin, root_center);
+        // Navigation geometry is independent of the developer's cursor, monitor and DPI.
+        let room = 10_000.0
+            * controller
+                .active
+                .as_ref()
+                .unwrap()
+                .spatial
+                .scale_factor
+                .get();
+        controller.active.as_mut().unwrap().spatial.work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: root_center.x - room,
+                y: root_center.y - room,
+            },
+            max: PhysicalPoint {
+                x: root_center.x + room,
+                y: root_center.y + room,
+            },
+        };
         let first_delta = PhysicalPoint { x: 77.0, y: -41.0 };
         events.lock().unwrap().push_back(NativeEvent::Relocated {
             session_id: session_id.clone(),
@@ -5272,6 +5291,7 @@ mod tests {
             &mut output,
         );
         let favorites_frame = controller.active.as_ref().unwrap().current_frame_id;
+        assert_eq!(controller.active.as_ref().unwrap().layout.scale, 1.0);
         assert_eq!(
             controller.active.as_ref().unwrap().layout.origin,
             moved_center
@@ -5282,6 +5302,8 @@ mod tests {
             &mut output,
         );
         let applications_frame = controller.active.as_ref().unwrap().current_frame_id;
+        assert_ne!(favorites_frame, applications_frame);
+        assert_eq!(controller.active.as_ref().unwrap().layout.scale, 1.0);
         assert!(
             controller
                 .active
@@ -5366,6 +5388,104 @@ mod tests {
         ));
         assert!(output.is_empty());
         assert!(first_generation > root_generation);
+    }
+
+    #[test]
+    fn tight_same_center_fit_emits_only_owned_density_warning_without_execution() {
+        use super::super::diagnostics::{
+            DensityPressure, RadialDiagnosticKind, RadialDiagnosticSeverity, RadialDiagnosticSource,
+        };
+        let mut document = RadialDocument::starter();
+        document.menus[0].submenu_presentation = SubmenuPresentation::SameCenter;
+        let child_id = MenuId::new("starter-favorites");
+        document
+            .menus
+            .iter_mut()
+            .find(|menu| menu.id == child_id)
+            .unwrap()
+            .rings[0]
+            .radius = 130.0;
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let factory_sent = Arc::clone(&sent);
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let factory_events = Arc::clone(&events);
+        let mut controller = RadialController::with_factory(
+            Arc::new(document),
+            true,
+            Arc::new(move || {
+                Ok(Box::new(Fake {
+                    sent: Arc::clone(&factory_sent),
+                    events: Arc::clone(&factory_events),
+                }))
+            }),
+        );
+        controller.handle_intents(vec![open()], false);
+        let pending = controller.pending.as_ref().unwrap();
+        let session_id = pending.session_id.clone();
+        events.lock().unwrap().push_back(NativeEvent::Ready {
+            session_id: session_id.clone(),
+            layout_generation: pending.generation,
+        });
+        controller.poll();
+        let active = controller.active.as_mut().unwrap();
+        let center = active.layout.origin;
+        let room = 160.0 * active.spatial.scale_factor.get();
+        active.spatial.work_area = PhysicalRect {
+            min: PhysicalPoint {
+                x: center.x - room,
+                y: center.y - room,
+            },
+            max: PhysicalPoint {
+                x: center.x + room,
+                y: center.y + room,
+            },
+        };
+        let child = controller
+            .document
+            .menus
+            .iter()
+            .find(|menu| menu.id == child_id)
+            .unwrap();
+        let expected = layout_document_menu_fixed_center(
+            &controller.document,
+            child,
+            center,
+            active.spatial.work_area,
+            active.spatial.scale_factor,
+            0.55,
+        )
+        .unwrap();
+        assert!((0.55..0.95).contains(&expected.scale));
+        let before_commands = sent.lock().unwrap().len();
+        let mut output = Vec::new();
+        controller.open_submenu(
+            &session_id,
+            &CellId::new("starter-root-favorites"),
+            &mut output,
+        );
+        let active = controller.active.as_ref().unwrap();
+        assert_eq!(active.menu_id, child_id);
+        assert_eq!(active.layout.origin, center);
+        assert_eq!(active.layout.scale, expected.scale);
+        assert_eq!(active.reducer.state.stack.len(), 2);
+        assert_eq!(output.len(), 1);
+        let ControllerEvent::Diagnostic(diagnostic) = &output[0] else {
+            panic!("tight fit must only warn, observed {output:?}");
+        };
+        assert_eq!(diagnostic.severity, RadialDiagnosticSeverity::Warning);
+        assert_eq!(
+            diagnostic.kind,
+            RadialDiagnosticKind::DensityPressure(DensityPressure::WorkAreaFit)
+        );
+        assert_eq!(
+            diagnostic.source,
+            RadialDiagnosticSource::Menu { menu_id: child_id }
+        );
+        assert!(diagnostic.message.len() <= 512);
+        assert_eq!(sent.lock().unwrap().len(), before_commands + 1);
+        assert!(
+            matches!(sent.lock().unwrap().last(), Some(NativeCommand::Present { session_id: id, .. }) if id == &session_id)
+        );
     }
 
     #[test]

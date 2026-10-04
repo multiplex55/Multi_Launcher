@@ -4,9 +4,12 @@
 
 mod suite;
 use super::{AcceptanceHotkey, foreign_edge_indices_interfering_owned_spans, owned_gesture_spans};
+#[cfg(test)]
+pub(super) use suite::controlled_stage_trace_fixture;
 pub(super) use suite::{
-    CopiedAuthoringOptions, record_environment_failure, run_copied_profile_suite, run_gate_c_suite,
-    run_gate_d_suite, run_gate_s_suite, run_hotkey_suite, run_query_suite, run_suite,
+    CopiedAuthoringOptions, record_environment_failure, run_controlled_failure_probe,
+    run_copied_profile_suite, run_gate_c_suite, run_gate_d_suite, run_gate_s_suite,
+    run_hotkey_suite, run_query_suite, run_suite, verify_controlled_stage_trace,
 };
 
 use multi_launcher::radial::acceptance_trace::{
@@ -20,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{
-    BOOL, CloseHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, HWND, LPARAM,
-    POINT, RECT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    BOOL, CloseHandle, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, HWND,
+    LPARAM, POINT, RECT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, ScreenToClient};
 use windows::Win32::System::Com::{
@@ -36,9 +39,10 @@ use windows::Win32::System::StationsAndDesktops::{
 use windows::Win32::System::SystemServices::SS_NOTIFY;
 use windows::Win32::System::Threading::{
     AttachThreadInput, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetCurrentThreadId,
-    GetExitCodeProcess, GetExitCodeThread, GetProcessIdOfThread, OpenThread, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOW, THREAD_QUERY_LIMITED_INFORMATION, TerminateProcess,
-    WaitForSingleObject,
+    GetExitCodeProcess, GetExitCodeThread, GetProcessIdOfThread, GetProcessTimes, OpenProcess,
+    OpenThread, PROCESS_INFORMATION, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, QueryFullProcessImageNameW, STARTF_USESTDHANDLES,
+    STARTUPINFOW, THREAD_QUERY_LIMITED_INFORMATION, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern,
@@ -58,15 +62,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
-    EnumWindows, GetClassNameW, GetClientRect, GetClipCursor, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsChild, IsIconic, IsWindowVisible,
-    KBDLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW,
+    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetClientRect, GetClipCursor, GetForegroundWindow,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsChild, IsIconic,
+    IsWindowVisible, KBDLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostMessageW, PostThreadMessageW,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursorPos, SetForegroundWindow, SetWindowPos,
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WINDOW_STYLE, WM_APP,
-    WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_CAPTION,
-    WS_EX_TOOLWINDOW, WS_SYSMENU, WS_VISIBLE, WindowFromPoint,
+    WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WS_CAPTION, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_SYSMENU, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::w;
 use windows::core::{Interface, PCWSTR, PWSTR, VARIANT};
@@ -98,7 +102,7 @@ pub(super) const RADIAL_HOST_WINDOW_CLASS: &str = "MultiLauncherRadialHost";
 const WINDOW_POLL: Duration = Duration::from_millis(25);
 const ACTION_EDITOR_SCROLL_REFRESH_INTERVAL: Duration = Duration::from_millis(600);
 const FOREGROUND_TRANSITION_TIMEOUT: Duration = Duration::from_millis(500);
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+pub(super) const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const CASE_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_ENUMERATED_WINDOWS: usize = 256;
 const MAX_POINTER_CORRECTIONS: usize = 4;
@@ -113,6 +117,7 @@ const FOCUS_ANCHOR_COMMAND_MESSAGE: u32 = WM_APP + 0x55;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AcceptanceTraceBudgetProfile {
     Standard,
+    All,
     GateC,
     GateD,
     GateS,
@@ -122,6 +127,7 @@ impl AcceptanceTraceBudgetProfile {
     fn environment_value(self) -> Option<&'static str> {
         match self {
             Self::Standard => None,
+            Self::All => Some("all_v1"),
             Self::GateC => Some("gate_c_v1"),
             Self::GateD => Some("gate_d_v1"),
             Self::GateS => Some("gate_s_v1"),
@@ -176,6 +182,192 @@ impl NativeInputEdgeEvidence {
                 key.async_state_after as u16
             ))
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DiagnosticInputCookie {
+    RunnerOwned,
+    MultiLauncherInjected,
+    Untagged,
+    Other,
+}
+
+fn diagnostic_cookie(cookie: usize) -> DiagnosticInputCookie {
+    if cookie == ACCEPTANCE_RUNNER_INPUT_COOKIE {
+        DiagnosticInputCookie::RunnerOwned
+    } else if cookie == multi_launcher::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG {
+        DiagnosticInputCookie::MultiLauncherInjected
+    } else if cookie == 0 {
+        DiagnosticInputCookie::Untagged
+    } else {
+        DiagnosticInputCookie::Other
+    }
+}
+
+fn diagnostic_micros(duration: Duration) -> Option<u64> {
+    u64::try_from(duration.as_micros()).ok()
+}
+
+fn diagnostic_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NativeKeyboardDiagnostic {
+    vk: u16,
+    scan: u16,
+    flags: u32,
+    cookie: u64,
+    cookie_owner: DiagnosticInputCookie,
+    async_state_before: i16,
+    async_state_after: i16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NativeInputDiagnostic {
+    pub inserted: usize,
+    pub at_unix_ms: Option<u64>,
+    pub timestamp_overflow: bool,
+    pub foreground_hwnd: u64,
+    pub foreground_pid: u32,
+    pub input_desktop: String,
+    pub input_desktop_chars: usize,
+    pub cleanup_status: String,
+    pub cleanup_status_chars: usize,
+    pub keyboard: Option<NativeKeyboardDiagnostic>,
+}
+
+impl NativeInputEdgeEvidence {
+    pub fn diagnostic(&self) -> NativeInputDiagnostic {
+        NativeInputDiagnostic {
+            inserted: self.inserted,
+            at_unix_ms: u64::try_from(self.at_unix_ms).ok(),
+            timestamp_overflow: u64::try_from(self.at_unix_ms).is_err(),
+            foreground_hwnd: self.foreground_hwnd,
+            foreground_pid: self.foreground_pid,
+            input_desktop: diagnostic_text(&self.input_desktop),
+            input_desktop_chars: self.input_desktop.chars().count(),
+            cleanup_status: diagnostic_text(&self.cleanup_status),
+            cleanup_status_chars: self.cleanup_status.chars().count(),
+            keyboard: self
+                .keyboard_input
+                .as_ref()
+                .map(|key| NativeKeyboardDiagnostic {
+                    vk: key.vk,
+                    scan: key.scan,
+                    flags: key.flags,
+                    cookie: key.extra_info as u64,
+                    cookie_owner: diagnostic_cookie(key.extra_info),
+                    async_state_before: key.async_state_before,
+                    async_state_after: key.async_state_after,
+                }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChordEdgeDiagnostic {
+    pub vk: u32,
+    pub down: bool,
+    pub injected: bool,
+    pub cookie: u64,
+    pub cookie_owner: DiagnosticInputCookie,
+    pub relative_us: Option<u64>,
+    pub before_attempt: bool,
+    pub timestamp_overflow: bool,
+}
+
+impl RunnerChordEdge {
+    fn diagnostic(self, epoch: Instant) -> ChordEdgeDiagnostic {
+        let relative = self.at.checked_duration_since(epoch);
+        let relative_us = relative.and_then(diagnostic_micros);
+        ChordEdgeDiagnostic {
+            vk: self.vk,
+            down: self.down,
+            injected: self.injected,
+            cookie: self.extra_info as u64,
+            cookie_owner: diagnostic_cookie(self.extra_info),
+            relative_us,
+            before_attempt: relative.is_none(),
+            timestamp_overflow: relative.is_some() && relative_us.is_none(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChordKeyDiagnostic {
+    pub vk: u32,
+    pub down: usize,
+    pub up: usize,
+    pub injected_down: usize,
+    pub injected_up: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChordObservationDiagnostic {
+    pub desktop: String,
+    pub desktop_chars: usize,
+    pub keys: Vec<ChordKeyDiagnostic>,
+    pub total_keys: usize,
+    pub ordered_edges: Vec<ChordEdgeDiagnostic>,
+    pub total_ordered_edges: usize,
+    pub foreign_edges: Vec<ChordEdgeDiagnostic>,
+    pub total_foreign_edges: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PendingChordDiagnostic {
+    pub observation: ChordObservationDiagnostic,
+    pub drained_events: usize,
+    pub scan_limit: usize,
+    pub scan_limit_reached: bool,
+}
+
+impl RunnerChordObservation {
+    pub fn diagnostic(&self, epoch: Instant) -> ChordObservationDiagnostic {
+        ChordObservationDiagnostic {
+            desktop: diagnostic_text(&self.desktop),
+            desktop_chars: self.desktop.chars().count(),
+            keys: self
+                .keys
+                .iter()
+                .take(8)
+                .map(|key| ChordKeyDiagnostic {
+                    vk: key.vk,
+                    down: key.down,
+                    up: key.up,
+                    injected_down: key.injected_down,
+                    injected_up: key.injected_up,
+                })
+                .collect(),
+            total_keys: self.keys.len(),
+            ordered_edges: self
+                .ordered_edges
+                .iter()
+                .take(32)
+                .map(|edge| edge.diagnostic(epoch))
+                .collect(),
+            total_ordered_edges: self.ordered_edges.len(),
+            foreign_edges: self
+                .foreign_edges
+                .iter()
+                .take(32)
+                .map(|edge| edge.diagnostic(epoch))
+                .collect(),
+            total_foreign_edges: self.foreign_edges.len(),
+        }
     }
 }
 
@@ -720,6 +912,22 @@ impl RunnerHookObserver {
         drained
     }
 
+    pub fn pending_chord_diagnostic_after_stop(
+        &self,
+        vks: &[u32],
+        epoch: Instant,
+    ) -> Option<PendingChordDiagnostic> {
+        if self.join.is_some() || self.thread_id != 0 {
+            return None;
+        }
+        Some(drain_stopped_chord_diagnostic(
+            &self.events,
+            &self.desktop,
+            vks,
+            epoch,
+        ))
+    }
+
     pub fn wait_for_vk_edge(
         &mut self,
         vk: u32,
@@ -837,6 +1045,47 @@ impl RunnerHookObserver {
         } else {
             Err(errors.join("; "))
         }
+    }
+}
+
+fn drain_stopped_chord_diagnostic(
+    events: &std::sync::mpsc::Receiver<RunnerHookEdge>,
+    desktop: &str,
+    vks: &[u32],
+    epoch: Instant,
+) -> PendingChordDiagnostic {
+    // Diagnostic-only, after the observer producer has joined. This does not
+    // wait for missing edges or qualify a partially inserted chord.
+    const SCAN_LIMIT: usize = 256;
+    let mut counts = vks.iter().take(8).map(|vk| (*vk, [0; 4])).collect();
+    let mut owned = Vec::new();
+    let mut foreign = Vec::new();
+    let mut drained_events = 0;
+    for edge in events.try_iter().take(SCAN_LIMIT) {
+        drained_events += 1;
+        record_runner_chord_edge(edge, &mut counts, &mut owned, &mut foreign);
+    }
+    PendingChordDiagnostic {
+        observation: RunnerChordObservation {
+            desktop: desktop.to_owned(),
+            keys: counts
+                .into_iter()
+                .map(|(vk, edges)| RunnerChordKeyObservation {
+                    vk,
+                    down: edges[0],
+                    up: edges[1],
+                    injected_down: edges[2],
+                    injected_up: edges[3],
+                })
+                .collect(),
+            ordered_edges: owned,
+            foreign_edges: foreign,
+        }
+        .diagnostic(epoch),
+        drained_events,
+        scan_limit: SCAN_LIMIT,
+        // Reaching the scan cap does not claim the remaining queue is empty.
+        scan_limit_reached: drained_events == SCAN_LIMIT,
     }
 }
 
@@ -1247,6 +1496,118 @@ impl WindowSnapshot {
     }
 }
 
+pub(super) fn designer_clear_position(
+    bounds: [i32; 4],
+    preview_bounds: &[[i32; 4]],
+    displays: &[[i32; 4]],
+) -> Result<[i32; 2], String> {
+    let width = bounds[2]
+        .checked_sub(bounds[0])
+        .filter(|value| *value > 0)
+        .ok_or("Designer relocation width is invalid")?;
+    let height = bounds[3]
+        .checked_sub(bounds[1])
+        .filter(|value| *value > 0)
+        .ok_or("Designer relocation height is invalid")?;
+    if preview_bounds.is_empty() || preview_bounds.iter().any(|b| b[2] <= b[0] || b[3] <= b[1]) {
+        return Err("Designer relocation lacks measured live preview bounds".into());
+    }
+    let clear = |candidate: [i32; 4]| {
+        !preview_bounds.iter().any(|preview| {
+            candidate[0] < preview[2]
+                && preview[0] < candidate[2]
+                && candidate[1] < preview[3]
+                && preview[1] < candidate[3]
+        })
+    };
+    for display in displays {
+        let Some(right_x) = display[2].checked_sub(width) else {
+            continue;
+        };
+        let Some(bottom_y) = display[3].checked_sub(height) else {
+            continue;
+        };
+        if right_x < display[0] || bottom_y < display[1] {
+            continue;
+        }
+        for position in [
+            [bounds[0], bounds[1]],
+            [right_x, display[1]],
+            [display[0], bottom_y],
+            [right_x, bottom_y],
+            [display[0], display[1]],
+        ] {
+            let Some(right) = position[0].checked_add(width) else {
+                continue;
+            };
+            let Some(bottom) = position[1].checked_add(height) else {
+                continue;
+            };
+            let candidate = [position[0], position[1], right, bottom];
+            if candidate[0] >= display[0]
+                && candidate[1] >= display[1]
+                && candidate[2] <= display[2]
+                && candidate[3] <= display[3]
+                && clear(candidate)
+            {
+                return Ok(position);
+            }
+        }
+    }
+    Err("no measured physical monitor can fit the Designer clear of the live preview".into())
+}
+
+fn owned_designer_move_bounds(
+    expected: &WindowSnapshot,
+    current: &WindowSnapshot,
+    process_id: u32,
+    position: [i32; 2],
+    displays: &[[i32; 4]],
+) -> Result<[i32; 4], String> {
+    if process_id == 0
+        || expected.hwnd.is_invalid()
+        || current.hwnd != expected.hwnd
+        || expected.process_id != process_id
+        || current.process_id != process_id
+        || expected.role != WindowRole::Designer
+        || current.role != WindowRole::Designer
+        || expected.class_name != current.class_name
+        || current.class_name.is_empty()
+        || expected.bounds != current.bounds
+        || !expected.visible
+        || !current.visible
+        || expected.minimized
+        || current.minimized
+    {
+        return Err(
+            "refused Designer move with stale exact window ownership or presentation".into(),
+        );
+    }
+    let width = current.bounds[2]
+        .checked_sub(current.bounds[0])
+        .filter(|value| *value > 0)
+        .ok_or("Designer move width is invalid")?;
+    let height = current.bounds[3]
+        .checked_sub(current.bounds[1])
+        .filter(|value| *value > 0)
+        .ok_or("Designer move height is invalid")?;
+    let right = position[0]
+        .checked_add(width)
+        .ok_or("Designer move x overflow")?;
+    let bottom = position[1]
+        .checked_add(height)
+        .ok_or("Designer move y overflow")?;
+    if !displays.iter().any(|display| {
+        position[0] >= display[0]
+            && position[1] >= display[1]
+            && right <= display[2]
+            && bottom <= display[3]
+    }) {
+        return Err("refused Designer move outside a physical monitor".into());
+    }
+    Ok([position[0], position[1], right, bottom])
+}
+
 pub(super) struct NativeChild {
     process: ChildProcessHandle,
     process_id: u32,
@@ -1275,6 +1636,9 @@ pub(super) struct NativeExitStatus {
 }
 
 impl NativeExitStatus {
+    pub fn code(self) -> u32 {
+        self.code
+    }
     pub fn success(self) -> bool {
         self.code == 0
     }
@@ -1312,12 +1676,7 @@ impl ChildProcessHandle {
         if self.try_wait()?.is_some() {
             return Ok(());
         }
-        unsafe { TerminateProcess(self.handle, 1) }.map_err(|error| {
-            format!(
-                "terminate isolated candidate PID {}: {error}",
-                self.process_id
-            )
-        })?;
+        self.request_termination()?;
         match unsafe { WaitForSingleObject(self.handle, 5_000) } {
             WAIT_OBJECT_0 => Ok(()),
             WAIT_TIMEOUT => Err(format!(
@@ -1330,6 +1689,113 @@ impl ChildProcessHandle {
             )),
         }
     }
+
+    fn request_termination(&self) -> Result<(), String> {
+        unsafe { TerminateProcess(self.handle, 1) }.map_err(|error| {
+            format!(
+                "terminate isolated candidate PID {}: {error}",
+                self.process_id
+            )
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingChildWait {
+    entered_at: Instant,
+    observed_unix_ms: u128,
+    after_entry_us: u64,
+    poll_index: usize,
+}
+
+struct ObservedChildWait {
+    entered_unix_ms: u128,
+    observed_unix_ms: u128,
+    after_entry_us: u64,
+    poll_index: usize,
+    status: NativeExitStatus,
+}
+
+fn wait_for_candidate_exit(
+    process_id: u32,
+    timeout: Duration,
+    mut inspect: impl FnMut() -> Result<Option<NativeExitStatus>, String>,
+    mut on_pending: impl FnMut(PendingChildWait) -> Result<(), String>,
+) -> Result<ObservedChildWait, String> {
+    let entered_at = Instant::now();
+    let entered_unix_ms = unix_time_ms();
+    let deadline = entered_at + timeout;
+    let mut poll_index = 0_usize;
+    loop {
+        poll_index = poll_index.saturating_add(1);
+        if let Some(status) = inspect()? {
+            return Ok(ObservedChildWait {
+                entered_unix_ms,
+                observed_unix_ms: unix_time_ms(),
+                after_entry_us: entered_at
+                    .elapsed()
+                    .as_micros()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                poll_index,
+                status,
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("timed out waiting for candidate PID {process_id}"));
+        }
+        // Native inspection has returned WAIT_TIMEOUT inside this outstanding
+        // bounded operation. A controlled termination is admitted here, before
+        // this same wait observes the exit; ordinary waits use no pending action.
+        on_pending(PendingChildWait {
+            entered_at,
+            observed_unix_ms: unix_time_ms(),
+            after_entry_us: entered_at
+                .elapsed()
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            poll_index,
+        })?;
+        std::thread::sleep(WINDOW_POLL);
+    }
+}
+
+fn wait_for_controlled_child_exit(
+    process_id: u32,
+    inspect: impl FnMut() -> Result<Option<NativeExitStatus>, String>,
+    mut terminate: impl FnMut() -> Result<(), String>,
+) -> Result<super::controlled_failures::ChildExitWait, String> {
+    let mut injected = None;
+    let observed =
+        wait_for_candidate_exit(process_id, Duration::from_secs(5), inspect, |pending| {
+            if injected.is_none() {
+                let injected_unix_ms = unix_time_ms();
+                let injected_after_entry_us = pending
+                    .entered_at
+                    .elapsed()
+                    .as_micros()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                terminate()?;
+                injected = Some((pending, injected_unix_ms, injected_after_entry_us));
+            }
+            Ok(())
+        })?;
+    let (pending, termination_injected_unix_ms, termination_after_entry_us) =
+        injected.ok_or("controlled child exited before an owned wait became pending")?;
+    Ok(super::controlled_failures::ChildExitWait {
+        wait_entered_unix_ms: observed.entered_unix_ms,
+        pending_observed_unix_ms: pending.observed_unix_ms,
+        termination_injected_unix_ms,
+        exit_observed_unix_ms: observed.observed_unix_ms,
+        pending_after_entry_us: pending.after_entry_us,
+        termination_after_entry_us,
+        exit_after_entry_us: observed.after_entry_us,
+        pending_poll_index: pending.poll_index,
+        exit_poll_index: observed.poll_index,
+        observed_exit_code: observed.status.code(),
+    })
 }
 
 impl Drop for ChildProcessHandle {
@@ -2033,6 +2499,107 @@ impl Drop for FocusAnchor {
 }
 
 impl NativeChild {
+    pub fn controlled_owner(&self) -> Result<super::controlled_failures::NativeOwner, String> {
+        let root = self.refresh_root()?;
+        self.focus_window(&root)?;
+        let measured = input_preflight(root.hwnd, self.process_id, &[])?;
+        self.controlled_owner_from_measurement(&root, &measured)
+    }
+
+    fn controlled_owner_from_measurement(
+        &self,
+        root: &WindowSnapshot,
+        measured: &NativeInputPreflight,
+    ) -> Result<super::controlled_failures::NativeOwner, String> {
+        Ok(super::controlled_failures::NativeOwner {
+            child_pid: self.process_id,
+            child_started_unix_ms: self
+                .started
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_millis(),
+            process_created_filetime: process_creation_filetime(self.process.handle)?,
+            root_hwnd: hwnd_id(root.hwnd),
+            foreground_hwnd: hwnd_id(measured.foreground),
+            foreground_pid: measured.foreground_pid,
+            foreground_thread_id: measured.foreground_thread_id,
+            input_desktop: measured.input_desktop.clone(),
+            observed_unix_ms: unix_time_ms(),
+        })
+    }
+
+    pub fn controlled_startup_wait(
+        &self,
+    ) -> Result<super::controlled_failures::StageProof, String> {
+        let started = Instant::now();
+        let at = unix_time_ms();
+        let mut observed = None;
+        let mut withheld = 0;
+        let result = wait_for_root_admission(
+            &self.process,
+            self.process_id,
+            Duration::from_millis(250),
+            |root| {
+                observed = Some(hwnd_id(root.hwnd));
+                withheld += 1;
+                false
+            },
+        );
+        if result.is_ok() || observed != Some(hwnd_id(self.root.hwnd)) {
+            return Err(
+                "controlled startup wait did not withhold the actual owned ROOT handoff".into(),
+            );
+        }
+        Ok(super::controlled_failures::StageProof::Startup {
+            root_hwnd: observed.unwrap_or(0),
+            wait_started_unix_ms: at,
+            wait_finished_unix_ms: unix_time_ms(),
+            elapsed_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            withheld_observations: withheld,
+        })
+    }
+
+    pub fn controlled_child_exit_during_wait(
+        &mut self,
+    ) -> Result<super::controlled_failures::StageProof, String> {
+        let wait = wait_for_controlled_child_exit(
+            self.process_id,
+            || self.process.try_wait(),
+            || self.process.request_termination(),
+        )?;
+        let event = OwnedKeyboardKey {
+            vk: VK_LSHIFT,
+            extended: false,
+        };
+        let refusal = send_validated_input_allowing_owned_keys(
+            self.root.hwnd,
+            self.process_id,
+            &[event.down()],
+            "refused controlled input after owned child exit",
+            &[],
+        );
+        let (input_refused_after_exit, input_inserted_after_exit) = match refusal {
+            Err((inserted, _)) => {
+                let mut guard = OwnedKeyboardReleaseGuard::new();
+                guard.owned.extend(std::iter::once(event).take(inserted));
+                if inserted > 0 {
+                    let _ = guard.release();
+                }
+                (inserted == 0, inserted)
+            }
+            Ok(evidence) => {
+                let mut guard = OwnedKeyboardReleaseGuard::new();
+                guard.owned.push(event);
+                let _ = guard.release();
+                (false, evidence.inserted)
+            }
+        };
+        Ok(super::controlled_failures::StageProof::ChildExit {
+            wait,
+            input_refused_after_exit,
+            input_inserted_after_exit,
+        })
+    }
     pub fn launch(
         executable: &Path,
         profile: &Path,
@@ -2047,6 +2614,44 @@ impl NativeChild {
             stdout_path,
             stderr_path,
             AcceptanceTraceBudgetProfile::Standard,
+            None,
+        )
+    }
+
+    pub fn launch_controlled(
+        executable: &Path,
+        profile: &Path,
+        log_path: &Path,
+        stdout_path: &Path,
+        stderr_path: &Path,
+        ownership: &super::controlled_failures::LaunchOwnership,
+    ) -> Result<Self, NativeLaunchFailure> {
+        Self::launch_with_trace_profile(
+            executable,
+            profile,
+            log_path,
+            stdout_path,
+            stderr_path,
+            AcceptanceTraceBudgetProfile::Standard,
+            Some(ownership),
+        )
+    }
+
+    pub fn launch_all(
+        executable: &Path,
+        profile: &Path,
+        log_path: &Path,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) -> Result<Self, NativeLaunchFailure> {
+        Self::launch_with_trace_profile(
+            executable,
+            profile,
+            log_path,
+            stdout_path,
+            stderr_path,
+            AcceptanceTraceBudgetProfile::All,
+            None,
         )
     }
 
@@ -2064,6 +2669,7 @@ impl NativeChild {
             stdout_path,
             stderr_path,
             AcceptanceTraceBudgetProfile::GateC,
+            None,
         )
     }
 
@@ -2081,6 +2687,7 @@ impl NativeChild {
             stdout_path,
             stderr_path,
             AcceptanceTraceBudgetProfile::GateD,
+            None,
         )
     }
 
@@ -2098,6 +2705,7 @@ impl NativeChild {
             stdout_path,
             stderr_path,
             AcceptanceTraceBudgetProfile::GateS,
+            None,
         )
     }
 
@@ -2108,6 +2716,7 @@ impl NativeChild {
         stdout_path: &Path,
         stderr_path: &Path,
         trace_profile: AcceptanceTraceBudgetProfile,
+        controlled_ownership: Option<&super::controlled_failures::LaunchOwnership>,
     ) -> Result<Self, NativeLaunchFailure> {
         let stdout = File::create(stdout_path)
             .map_err(|error| launch_failure(format!("create child stdout log: {error}")))?;
@@ -2123,6 +2732,22 @@ impl NativeChild {
             process_id,
         };
         let _ = unsafe { CloseHandle(process_information.hThread) };
+
+        if let Some(ownership) = controlled_ownership {
+            let publication = process_creation_filetime(process.handle)
+                .and_then(|filetime| ownership.publish_created(process_id, started, filetime));
+            if let Err(error) = publication {
+                let cleanup = process.terminate_and_wait();
+                return Err(launch_failure_for_child(
+                    process_id,
+                    started,
+                    enumerate_process_windows(process_id),
+                    format!(
+                        "publish actual controlled child creation before ROOT wait: {error}; cleanup={cleanup:?}"
+                    ),
+                ));
+            }
+        }
 
         let root = match wait_for_root(&process, process_id, STARTUP_TIMEOUT) {
             Ok(root) => root,
@@ -2243,6 +2868,12 @@ impl NativeChild {
         height: i32,
     ) -> Result<(), String> {
         self.validate_window(window.hwnd)?;
+        let current = self
+            .designer()
+            .ok_or("owned Designer disappeared before resize")?;
+        if !same_owned_designer(window, &current, self.process_id) {
+            return Err("Designer identity changed before resize".into());
+        }
         if width < 520 || height < 380 {
             return Err("refused Designer size below its declared minimum viewport".into());
         }
@@ -2250,14 +2881,135 @@ impl NativeChild {
             SetWindowPos(
                 window.hwnd,
                 None,
-                window.bounds[0],
-                window.bounds[1],
+                0,
+                0,
                 width,
                 height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             )
         }
         .map_err(|error| format!("resize child-owned Designer window: {error}"))
+    }
+
+    pub fn move_owned_root(
+        &self,
+        window: &WindowSnapshot,
+        position: [i32; 2],
+    ) -> Result<WindowSnapshot, String> {
+        self.validate_window(window.hwnd)?;
+        let current = self.refresh_root()?;
+        if window.role != WindowRole::Root
+            || window.process_id != self.process_id
+            || current.hwnd != window.hwnd
+            || current.bounds != window.bounds
+            || !current.visible
+            || current.minimized
+            || !current.is_nonzero()
+            || position == [current.bounds[0], current.bounds[1]]
+        {
+            return Err(
+                "refused ROOT move with stale ownership, presentation, or unchanged position"
+                    .into(),
+            );
+        }
+        let width = current.bounds[2]
+            .checked_sub(current.bounds[0])
+            .filter(|value| *value > 0)
+            .ok_or("ROOT move width is invalid")?;
+        let height = current.bounds[3]
+            .checked_sub(current.bounds[1])
+            .filter(|value| *value > 0)
+            .ok_or("ROOT move height is invalid")?;
+        let right = position[0]
+            .checked_add(width)
+            .ok_or("ROOT move x overflow")?;
+        let bottom = position[1]
+            .checked_add(height)
+            .ok_or("ROOT move y overflow")?;
+        let displays = suite::native_display_bounds()?;
+        if !displays.iter().any(|display| {
+            position[0] >= display[0]
+                && position[1] >= display[1]
+                && right <= display[2]
+                && bottom <= display[3]
+        }) {
+            return Err("refused ROOT move outside a physical monitor".into());
+        }
+        // This operation changes only the owned ROOT position. Its size, z-order,
+        // activation, and the application's configured show policy remain owned
+        // by the existing presentation path.
+        unsafe {
+            SetWindowPos(
+                window.hwnd,
+                None,
+                position[0],
+                position[1],
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| format!("move child-owned ROOT: {error}"))?;
+        let moved = self.refresh_root()?;
+        if moved.hwnd != current.hwnd
+            || moved.process_id != current.process_id
+            || moved.bounds != [position[0], position[1], right, bottom]
+            || !moved.visible
+            || moved.minimized
+        {
+            return Err(
+                "owned ROOT move did not preserve identity, dimensions, and requested geometry"
+                    .into(),
+            );
+        }
+        Ok(moved)
+    }
+
+    pub fn move_owned_designer(
+        &self,
+        window: &WindowSnapshot,
+        position: [i32; 2],
+    ) -> Result<WindowSnapshot, String> {
+        self.validate_window(window.hwnd)?;
+        let current = self
+            .designer()
+            .ok_or("owned Designer is no longer present")?;
+        let displays = suite::native_display_bounds()?;
+        let requested =
+            owned_designer_move_bounds(window, &current, self.process_id, position, &displays)?;
+        if requested != current.bounds {
+            // The runner temporarily changes only this exact Designer's position;
+            // the preview remains topmost and normal input coverage guards apply.
+            unsafe {
+                SetWindowPos(
+                    window.hwnd,
+                    None,
+                    position[0],
+                    position[1],
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            }
+            .map_err(|error| format!("move child-owned Designer: {error}"))?;
+        }
+        let moved = self
+            .designer()
+            .ok_or("owned Designer disappeared after its move")?;
+        let mut expected = current;
+        expected.bounds = requested;
+        owned_designer_move_bounds(&expected, &moved, self.process_id, position, &displays)?;
+        Ok(moved)
+    }
+
+    pub fn owned_window_dpi(&self, window: &WindowSnapshot) -> Result<u32, String> {
+        self.validate_window(window.hwnd)?;
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(window.hwnd) };
+        if dpi == 0 {
+            Err("could not measure the owned window DPI".into())
+        } else {
+            Ok(dpi)
+        }
     }
 
     pub fn validate_window(&self, hwnd: HWND) -> Result<(), String> {
@@ -2300,18 +3052,58 @@ impl NativeChild {
         target_process_id: u32,
         down_time: Duration,
     ) -> Result<F11TapEvidence, String> {
+        self.send_f11_observed(
+            target_hwnd,
+            target_process_id,
+            down_time,
+            &mut |_| {},
+            &mut |_| {},
+        )
+    }
+
+    fn send_f11_observed(
+        &self,
+        target_hwnd: HWND,
+        target_process_id: u32,
+        down_time: Duration,
+        down_observer: &mut dyn FnMut(&NativeInputEdgeEvidence),
+        up_observer: &mut dyn FnMut(&NativeInputEdgeEvidence),
+    ) -> Result<F11TapEvidence, String> {
         if target_process_id != self.process_id && target_process_id != std::process::id() {
             return Err("F11 target must be owned by the acceptance runner or child".into());
         }
         let down = [runner_owned_key_input(VK_F11, Default::default())];
-        let down = send_validated_input(target_hwnd, target_process_id, &down, "F11 down")?;
         let mut release_guard = OwnedKeyboardReleaseGuard::new();
-        release_guard.owned.push(OwnedKeyboardKey {
-            vk: VK_F11,
-            extended: false,
-        });
+        let down = match send_validated_input_allowing_owned_keys_observed(
+            target_hwnd,
+            target_process_id,
+            &down,
+            "F11 down",
+            &[],
+            down_observer,
+        ) {
+            Ok(evidence) => {
+                release_guard.owned.push(OwnedKeyboardKey {
+                    vk: VK_F11,
+                    extended: false,
+                });
+                evidence
+            }
+            Err((inserted, error)) => {
+                if inserted != 0 {
+                    release_guard.owned.push(OwnedKeyboardKey {
+                        vk: VK_F11,
+                        extended: false,
+                    });
+                }
+                if !release_guard.owned.is_empty() {
+                    let _ = release_guard.release_observed(up_observer);
+                }
+                return Err(error);
+            }
+        };
         std::thread::sleep(down_time);
-        let up = release_guard.release()?;
+        let up = release_guard.release_observed(up_observer)?;
         Ok(F11TapEvidence { down, up })
     }
 
@@ -2322,9 +3114,34 @@ impl NativeChild {
         hotkey: AcceptanceHotkey,
         dwell: Duration,
     ) -> Result<AcceptanceHotkeyTapEvidence, String> {
+        self.send_acceptance_hotkey_observed(
+            target_hwnd,
+            target_process_id,
+            hotkey,
+            dwell,
+            &mut |_| {},
+            &mut |_| {},
+        )
+    }
+
+    pub fn send_acceptance_hotkey_observed(
+        &self,
+        target_hwnd: HWND,
+        target_process_id: u32,
+        hotkey: AcceptanceHotkey,
+        dwell: Duration,
+        down_observer: &mut dyn FnMut(&NativeInputEdgeEvidence),
+        up_observer: &mut dyn FnMut(&NativeInputEdgeEvidence),
+    ) -> Result<AcceptanceHotkeyTapEvidence, String> {
         match hotkey {
             AcceptanceHotkey::F11 => {
-                let evidence = self.send_f11(target_hwnd, target_process_id, dwell)?;
+                let evidence = self.send_f11_observed(
+                    target_hwnd,
+                    target_process_id,
+                    dwell,
+                    down_observer,
+                    up_observer,
+                )?;
                 Ok(AcceptanceHotkeyTapEvidence {
                     down: evidence.down,
                     up: evidence.up,
@@ -2338,7 +3155,13 @@ impl NativeChild {
                             .into(),
                     );
                 }
-                send_shift_alt_win_end(target_hwnd, target_process_id, dwell)
+                send_shift_alt_win_end(
+                    target_hwnd,
+                    target_process_id,
+                    dwell,
+                    down_observer,
+                    up_observer,
+                )
             }
         }
     }
@@ -2531,19 +3354,13 @@ impl NativeChild {
     }
 
     pub fn wait(&mut self) -> Result<NativeExitStatus, String> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(status) = self.process.try_wait()? {
-                return Ok(status);
-            }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out waiting for candidate PID {}",
-                    self.process_id
-                ));
-            }
-            std::thread::sleep(WINDOW_POLL);
-        }
+        wait_for_candidate_exit(
+            self.process_id,
+            Duration::from_secs(5),
+            || self.process.try_wait(),
+            |_| Ok(()),
+        )
+        .map(|observed| observed.status)
     }
 }
 
@@ -2669,13 +3486,21 @@ fn acceptance_environment_block(
     profile: &Path,
     trace_profile: AcceptanceTraceBudgetProfile,
 ) -> Vec<u16> {
+    acceptance_environment_block_from_entries(profile, trace_profile, std::env::vars_os())
+}
+
+fn acceptance_environment_block_from_entries(
+    profile: &Path,
+    trace_profile: AcceptanceTraceBudgetProfile,
+    inherited: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<u16> {
     const COPY_CONTROLLED_ENV: [&str; 4] = [
         "ML_NOTES_DIR",
         "ML_NOTE_TEMPLATES_DIR",
         "ML_TMP_DIR",
         "ML_SKIP_CLIPBOARD_SYNC",
     ];
-    let mut entries = std::env::vars_os()
+    let mut entries = inherited
         .filter_map(|(name, value)| {
             let wide_name = name.encode_wide().collect::<Vec<_>>();
             if wide_key_eq_ascii(&wide_name, TRACE_ENV)
@@ -2835,20 +3660,32 @@ fn send_validated_input_allowing_owned_keys(
     operation: &str,
     owned_keys: &[VIRTUAL_KEY],
 ) -> Result<NativeInputEdgeEvidence, (usize, String)> {
-    let input_desktop = input_desktop_evidence().map_err(|error| (0, error))?;
-    focus_is_validated(target_hwnd, target_process_id).map_err(|error| (0, error))?;
-    input_modifiers_clear_except(owned_keys).map_err(|error| (0, error))?;
-    let (foreground, foreground_pid) = capture_foreground();
-    if foreground != target_hwnd || foreground_pid != target_process_id {
-        return Err((
-            0,
-            format!(
-                "refused {operation}: target foreground changed before SendInput; expected HWND={} PID={target_process_id}, actual HWND={} PID={foreground_pid}; {input_desktop}",
-                hwnd_id(target_hwnd),
-                hwnd_id(foreground)
-            ),
-        ));
-    }
+    send_validated_input_allowing_owned_keys_observed(
+        target_hwnd,
+        target_process_id,
+        events,
+        operation,
+        owned_keys,
+        &mut |_| {},
+    )
+}
+
+fn send_validated_input_allowing_owned_keys_observed(
+    target_hwnd: HWND,
+    target_process_id: u32,
+    events: &[INPUT],
+    operation: &str,
+    owned_keys: &[VIRTUAL_KEY],
+    observe: &mut dyn FnMut(&NativeInputEdgeEvidence),
+) -> Result<NativeInputEdgeEvidence, (usize, String)> {
+    let measured =
+        input_preflight(target_hwnd, target_process_id, owned_keys).map_err(|error| (0, error))?;
+    let NativeInputPreflight {
+        input_desktop,
+        foreground,
+        foreground_pid,
+        ..
+    } = measured;
     let at_unix_ms = unix_time_ms();
     let mut keyboard_input = events.first().and_then(|event| {
         (event.r#type == INPUT_KEYBOARD).then(|| {
@@ -2876,10 +3713,278 @@ fn send_validated_input_allowing_owned_keys(
         cleanup_status: "not_required_for_down_edge".into(),
         keyboard_input,
     };
+    observe(&evidence);
     if let Some(error) = error {
         Err((inserted, error))
     } else {
         Ok(evidence)
+    }
+}
+
+struct NativeInputPreflight {
+    input_desktop: String,
+    foreground: HWND,
+    foreground_pid: u32,
+    foreground_thread_id: u32,
+}
+
+fn input_preflight(
+    target_hwnd: HWND,
+    target_process_id: u32,
+    owned_keys: &[VIRTUAL_KEY],
+) -> Result<NativeInputPreflight, String> {
+    match input_preflight_with_expectation(
+        target_hwnd,
+        target_process_id,
+        owned_keys,
+        NativeDesktopExpectation::Supported,
+    )? {
+        NativeInputAdmission::Admitted(measured) => Ok(measured),
+        NativeInputAdmission::EnvironmentMismatch { .. } => {
+            Err("supported input environment was refused before SendInput".into())
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NativeDesktopExpectation {
+    Supported,
+    ControlledMismatch,
+}
+
+enum NativeInputAdmission {
+    Admitted(NativeInputPreflight),
+    EnvironmentMismatch {
+        measured: NativeInputPreflight,
+        expected: &'static str,
+    },
+}
+
+fn admit_measured_environment(
+    measured: NativeInputPreflight,
+    expectation: NativeDesktopExpectation,
+) -> NativeInputAdmission {
+    let expected = match expectation {
+        NativeDesktopExpectation::Supported => "thread=Default;active=Default",
+        NativeDesktopExpectation::ControlledMismatch => "controlled_expected_nondefault",
+    };
+    if measured.input_desktop.eq_ignore_ascii_case(expected) {
+        NativeInputAdmission::Admitted(measured)
+    } else {
+        NativeInputAdmission::EnvironmentMismatch { measured, expected }
+    }
+}
+
+fn input_preflight_with_expectation(
+    target_hwnd: HWND,
+    target_process_id: u32,
+    owned_keys: &[VIRTUAL_KEY],
+    expectation: NativeDesktopExpectation,
+) -> Result<NativeInputAdmission, String> {
+    let input_desktop = input_desktop_evidence()?;
+    focus_is_validated(target_hwnd, target_process_id)?;
+    input_modifiers_clear_except(owned_keys)?;
+    let (foreground, foreground_pid) = capture_foreground();
+    if foreground != target_hwnd || foreground_pid != target_process_id {
+        return Err(format!(
+            "refused input: target foreground changed before SendInput; expected HWND={} PID={target_process_id}, actual HWND={} PID={foreground_pid}; {input_desktop}",
+            hwnd_id(target_hwnd),
+            hwnd_id(foreground)
+        ));
+    }
+    let foreground_thread_id = unsafe { GetWindowThreadProcessId(foreground, None) };
+    if foreground_thread_id == 0 {
+        return Err("input foreground has no native thread identity".into());
+    }
+    Ok(admit_measured_environment(
+        NativeInputPreflight {
+            input_desktop,
+            foreground,
+            foreground_pid,
+            foreground_thread_id,
+        },
+        expectation,
+    ))
+}
+
+pub(super) fn controlled_desktop_refusal(
+    child: &NativeChild,
+) -> Result<super::controlled_failures::EnvironmentRefusal, String> {
+    let before = child.refresh_root()?;
+    let admission = input_preflight_with_expectation(
+        before.hwnd,
+        child.process_id(),
+        &[],
+        NativeDesktopExpectation::ControlledMismatch,
+    )?;
+    let NativeInputAdmission::EnvironmentMismatch { measured, expected } = admission else {
+        return Err("controlled environment expectation unexpectedly admitted native input".into());
+    };
+    let actual = child.controlled_owner_from_measurement(&before, &measured)?;
+    let after = child.refresh_root()?;
+    Ok(super::controlled_failures::EnvironmentRefusal {
+        actual,
+        expected_desktop: expected.into(),
+        checked_at_unix_ms: unix_time_ms(),
+        input_inserted: 0,
+        refused_before_send_input: true,
+        owned_state_unchanged: before.bounds == after.bounds
+            && before.visible == after.visible
+            && before.minimized == after.minimized,
+    })
+}
+
+fn process_creation_filetime(handle: HANDLE) -> Result<u64, String> {
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }
+        .map_err(|e| e.to_string())?;
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+pub(super) struct OwnedProbeProcess {
+    cleanup: ProbeCleanupProcess,
+}
+
+// Birth identity and the actual image path establish a cleanup owner for the
+// child reported by this isolated runner. Hash qualification remains a separate
+// admission step: a rejected image must never become an input/stage lease.
+pub(super) struct ProbeCleanupProcess {
+    process: ChildProcessHandle,
+    image_path: PathBuf,
+}
+
+pub(super) struct ProbeAcquireFailure {
+    pub error: String,
+    pub cleanup: Option<ProbeCleanupProcess>,
+}
+
+pub(super) fn qualify_probe_cleanup_owner<C>(
+    cleanup: C,
+    expected_sha256: &str,
+    measure_sha256: impl FnOnce(&C) -> Result<String, String>,
+) -> Result<C, (C, String)> {
+    match measure_sha256(&cleanup) {
+        Ok(actual) if actual == expected_sha256 => Ok(cleanup),
+        Ok(_) => Err((
+            cleanup,
+            "refused lease for a different application image SHA256".into(),
+        )),
+        Err(error) => Err((
+            cleanup,
+            format!("measure owned probe image SHA256: {error}"),
+        )),
+    }
+}
+
+pub(super) fn validate_probe_cleanup_identity(
+    expected_filetime: u64,
+    actual_filetime: u64,
+    candidate_path: &Path,
+    actual_path: &Path,
+) -> Result<(), String> {
+    if expected_filetime == 0
+        || actual_filetime != expected_filetime
+        || actual_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            != candidate_path
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+    {
+        return Err("refused lease for a reused PID or different application image".into());
+    }
+    Ok(())
+}
+
+impl ProbeCleanupProcess {
+    fn acquire(
+        owner: &super::controlled_failures::CreatedOwnership,
+        candidate: &super::CandidateIdentity,
+    ) -> Result<Self, String> {
+        if owner.child_pid == 0 || owner.process_created_filetime == 0 {
+            return Err("probe lease omitted process identity".into());
+        }
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                false,
+                owner.child_pid,
+            )
+        }
+        .map_err(|e| format!("open owned probe process: {e}"))?;
+        let process = ChildProcessHandle {
+            handle,
+            process_id: owner.child_pid,
+        };
+        let mut path = vec![0_u16; super::MAX_PATH_BYTES];
+        let mut len = path.len() as u32;
+        unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                PWSTR(path.as_mut_ptr()),
+                &mut len,
+            )
+        }
+        .map_err(|e| format!("measure owned probe image: {e}"))?;
+        let actual =
+            PathBuf::from(String::from_utf16(&path[..len as usize]).map_err(|e| e.to_string())?);
+        validate_probe_cleanup_identity(
+            owner.process_created_filetime,
+            process_creation_filetime(handle)?,
+            Path::new(&candidate.executable),
+            &actual,
+        )?;
+        Ok(Self {
+            process,
+            image_path: actual,
+        })
+    }
+    pub fn terminate_owned(&self) -> Result<(), String> {
+        self.process.terminate_and_wait()
+    }
+}
+
+impl OwnedProbeProcess {
+    pub fn acquire(
+        owner: &super::controlled_failures::CreatedOwnership,
+        candidate: &super::CandidateIdentity,
+    ) -> Result<Self, ProbeAcquireFailure> {
+        let cleanup = ProbeCleanupProcess::acquire(owner, candidate).map_err(|error| {
+            ProbeAcquireFailure {
+                error,
+                cleanup: None,
+            }
+        })?;
+        qualify_probe_cleanup_owner(cleanup, &candidate.sha256, |cleanup| {
+            super::sha256_file(&cleanup.image_path).map_err(|error| error.to_string())
+        })
+        .map(|cleanup| Self { cleanup })
+        .map_err(|(cleanup, error)| ProbeAcquireFailure {
+            error,
+            cleanup: Some(cleanup),
+        })
+    }
+    pub fn exited_with_closed_windows(&self) -> Result<bool, String> {
+        Ok(self.cleanup.process.try_wait()?.is_some()
+            && enumerate_process_windows(self.cleanup.process.process_id).is_empty())
+    }
+    pub fn observed_exit_code(&self) -> Result<Option<u32>, String> {
+        Ok(self.cleanup.process.try_wait()?.map(|s| s.code()))
+    }
+    pub fn terminate_owned(&self) -> Result<(), String> {
+        self.cleanup.terminate_owned()
+    }
+}
+
+impl Drop for ProbeCleanupProcess {
+    fn drop(&mut self) {
+        if self.process.try_wait().ok().flatten().is_none() {
+            let _ = self.process.terminate_and_wait();
+        }
     }
 }
 
@@ -2902,9 +4007,21 @@ fn input_desktop_evidence() -> Result<String, String> {
     Ok(format!("thread={thread_name};active={active_name}"))
 }
 
+pub(super) fn native_input_desktop_is_default(evidence: &str) -> bool {
+    evidence == "thread=Default;active=Default"
+}
+
 fn send_owned_keyboard_release(
     events: &[INPUT],
     operation: &str,
+) -> Result<NativeInputEdgeEvidence, (usize, String)> {
+    send_owned_keyboard_release_observed(events, operation, &mut |_| {})
+}
+
+fn send_owned_keyboard_release_observed(
+    events: &[INPUT],
+    operation: &str,
+    observe: &mut dyn FnMut(&NativeInputEdgeEvidence),
 ) -> Result<NativeInputEdgeEvidence, (usize, String)> {
     let input_desktop = input_desktop_evidence().map_err(|error| (0, error))?;
     let (foreground, foreground_pid) = capture_foreground();
@@ -2926,10 +4043,7 @@ fn send_owned_keyboard_release(
     if let Some(keyboard) = keyboard_input.as_mut() {
         keyboard.async_state_after = unsafe { GetAsyncKeyState(i32::from(keyboard.vk)) };
     }
-    if let Some(error) = error {
-        return Err((inserted, error));
-    }
-    Ok(NativeInputEdgeEvidence {
+    let evidence = NativeInputEdgeEvidence {
         inserted,
         at_unix_ms,
         foreground_hwnd: hwnd_id(foreground),
@@ -2937,7 +4051,13 @@ fn send_owned_keyboard_release(
         input_desktop,
         cleanup_status: "release_inserted;async_state_to_be_verified_by_owner".into(),
         keyboard_input,
-    })
+    };
+    observe(&evidence);
+    if let Some(error) = error {
+        Err((inserted, error))
+    } else {
+        Ok(evidence)
+    }
 }
 
 fn key_input(key: VIRTUAL_KEY, key_up: bool) -> INPUT {
@@ -3154,6 +4274,8 @@ fn send_shift_alt_win_end(
     target_hwnd: HWND,
     target_process_id: u32,
     dwell: Duration,
+    down_observer: &mut dyn FnMut(&NativeInputEdgeEvidence),
+    up_observer: &mut dyn FnMut(&NativeInputEdgeEvidence),
 ) -> Result<AcceptanceHotkeyTapEvidence, String> {
     const CHORD: [OwnedKeyboardKey; 4] = [
         OwnedKeyboardKey {
@@ -3182,12 +4304,13 @@ fn send_shift_alt_win_end(
 
     let mut release_guard = OwnedKeyboardReleaseGuard::new();
     let down_events = CHORD.map(OwnedKeyboardKey::down);
-    let down = match send_validated_input_allowing_owned_keys(
+    let down = match send_validated_input_allowing_owned_keys_observed(
         target_hwnd,
         target_process_id,
         &down_events,
         "Shift+Alt+Win+End chord down",
         &[],
+        down_observer,
     ) {
         Ok(evidence) => {
             release_guard.owned.extend(CHORD);
@@ -3199,7 +4322,7 @@ fn send_shift_alt_win_end(
                 "no_owned_keys".to_string()
             } else {
                 release_guard
-                    .release()
+                    .release_observed(up_observer)
                     .map(|evidence| format!("released={}", evidence.inserted))
                     .unwrap_or_else(|cleanup_error| cleanup_error)
             };
@@ -3207,7 +4330,7 @@ fn send_shift_alt_win_end(
         }
     };
     std::thread::sleep(dwell);
-    let up = release_guard.release()?;
+    let up = release_guard.release_observed(up_observer)?;
     Ok(AcceptanceHotkeyTapEvidence {
         down,
         up,
@@ -3302,6 +4425,22 @@ impl OwnedKeyboardReleaseGuard {
         )
     }
 
+    fn release_observed(
+        &mut self,
+        observe: &mut dyn FnMut(&NativeInputEdgeEvidence),
+    ) -> Result<NativeInputEdgeEvidence, String> {
+        let result = self.release_with(
+            |events, operation| send_owned_keyboard_release_observed(events, operation, observe),
+            verify_no_acceptance_hotkey_keys_held,
+            cleanup_owned_keyboard_keys,
+            keys_still_down,
+        );
+        if let Ok(evidence) = &result {
+            observe(evidence);
+        }
+        result
+    }
+
     fn release_with(
         &mut self,
         send_release: impl FnOnce(&[INPUT], &str) -> Result<NativeInputEdgeEvidence, (usize, String)>,
@@ -3370,6 +4509,197 @@ impl Drop for OwnedKeyboardReleaseGuard {
             let _ = self.release();
         }
     }
+}
+
+fn controlled_key_edge(
+    edge: &NativeInputEdgeEvidence,
+) -> Result<super::controlled_failures::KeyEdge, String> {
+    let keyboard = edge
+        .keyboard_input
+        .as_ref()
+        .ok_or("native keyboard evidence missing")?;
+    Ok(super::controlled_failures::KeyEdge {
+        inserted: edge.inserted,
+        at_unix_ms: edge.at_unix_ms,
+        foreground_hwnd: edge.foreground_hwnd,
+        foreground_pid: edge.foreground_pid,
+        input_desktop: edge.input_desktop.clone(),
+        vk: keyboard.vk,
+        scan: keyboard.scan,
+        flags: keyboard.flags,
+        cookie: keyboard.extra_info as u64,
+        async_before: keyboard.async_state_before as u16,
+        async_after: keyboard.async_state_after as u16,
+    })
+}
+
+pub(super) fn controlled_held_key_timeout(
+    child: &NativeChild,
+    output: &Path,
+    nonce: &str,
+) -> Result<super::controlled_failures::HeldKeyProof, String> {
+    use super::controlled_failures::{HeldKeyProof, ObservedKeyEdge, publish_owned_key};
+    let target = child.refresh_root()?;
+    child.validate_window(target.hwnd)?;
+    child.focus_window(&target)?;
+    let mut observer = RunnerHookObserver::start()?;
+    observer.wait_for_key_quiet(
+        &[VK_LSHIFT.0 as u32],
+        Duration::from_millis(40),
+        Duration::from_secs(1),
+    )?;
+    input_modifiers_clear()?;
+    let key = OwnedKeyboardKey {
+        vk: VK_LSHIFT,
+        extended: false,
+    };
+    let mut guard = OwnedKeyboardReleaseGuard::new();
+    let down = match send_validated_input_allowing_owned_keys(
+        target.hwnd,
+        child.process_id(),
+        &[key.down()],
+        "controlled owned LeftShift down",
+        &[],
+    ) {
+        Ok(evidence) => {
+            guard.owned.push(key);
+            evidence
+        }
+        Err((inserted, error)) => {
+            guard.owned.extend(std::iter::once(key).take(inserted));
+            return Err(error);
+        }
+    };
+    let down = controlled_key_edge(&down)?;
+    // Persist the actual inserted ownership before the held-key deadline. An
+    // outer timeout can retire this exact down without releasing unrelated keys.
+    publish_owned_key(output, nonce, &down, true)?;
+    let at = Instant::now();
+    let deadline = at + Duration::from_millis(250);
+    let mut observed = Vec::new();
+    let mut observation_error = None;
+    while Instant::now() < deadline {
+        match observer
+            .events
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(edge) if observed.len() < 8 => observed.push(edge),
+            Ok(_) => {
+                observation_error =
+                    Some("owned key observer exceeded its eight-edge bound".to_string())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                observation_error =
+                    Some("owned hook observer disconnected while LeftShift was held".into());
+                break;
+            }
+        }
+    }
+    let timeout_at_unix_ms = unix_time_ms();
+    let timeout_async_state = unsafe { GetAsyncKeyState(i32::from(VK_LSHIFT.0)) } as u16;
+    let timeout_elapsed_ms = at.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    let primary: Result<(), &str> =
+        Err("controlled input acknowledgement deadline expired while owned LeftShift was held");
+    // The error exists while the inserted key is held. Release is the existing
+    // error-cleanup owner, and remains attempted even when observation fails.
+    let release = guard.release();
+    let (up, mut release_error) = match release {
+        Ok(edge) => match controlled_key_edge(&edge) {
+            Ok(up) => {
+                let error = publish_owned_key(output, nonce, &up, false).err();
+                (Some(up), error)
+            }
+            Err(error) => (None, Some(error)),
+        },
+        Err(error) => (None, Some(error)),
+    };
+    if let Some(error) = observation_error {
+        release_error = Some(format!(
+            "{error}; release: {}",
+            release_error.unwrap_or_default()
+        ));
+    }
+    let drain_deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < drain_deadline {
+        match observer.events.recv_timeout(Duration::from_millis(40)) {
+            Ok(edge) if observed.len() < 8 => observed.push(edge),
+            Ok(_) => {
+                release_error = Some("owned key observer exceeded its eight-edge bound".into());
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    let observer_desktop = observer.desktop.clone();
+    let stopped = observer.stop_and_report();
+    let observer_stopped = stopped.is_ok();
+    if let Err(error) = stopped {
+        release_error = Some(format!(
+            "{}; observer cleanup: {error}",
+            release_error.unwrap_or_default()
+        ));
+    }
+    let origin = observed.first().map(|e| e.at);
+    let observed_edges = observed
+        .into_iter()
+        .map(|e| ObservedKeyEdge {
+            vk: e.vk,
+            down: e.down,
+            injected: e.injected,
+            cookie: e.extra_info as u64,
+            relative_us: origin.map_or(0, |origin| {
+                e.at.saturating_duration_since(origin)
+                    .as_micros()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
+            }),
+        })
+        .collect();
+    Ok(HeldKeyProof {
+        down,
+        up,
+        timeout_at_unix_ms,
+        timeout_async_state,
+        timeout_elapsed_ms,
+        async_after_cleanup: unsafe { GetAsyncKeyState(i32::from(VK_LSHIFT.0)) } as u16,
+        observer_desktop,
+        observed_edges,
+        outstanding_keys: guard.owned.len() + keys_still_down(&[key]).len(),
+        observer_stopped,
+        primary_error: primary.unwrap_err().into(),
+        release_error,
+    })
+}
+
+pub(super) fn recover_reported_owned_shift(
+    edge: &super::controlled_failures::KeyEdge,
+) -> Result<(), String> {
+    if !super::controlled_failures::owned_shift_down(edge) {
+        return Err("refused recovery for a key without exact inserted runner ownership".into());
+    }
+    let join = std::thread::spawn(|| {
+        let (_, desktop) = attach_to_input_desktop()?;
+        let mut guard = OwnedKeyboardReleaseGuard::new();
+        let result = if unsafe { GetAsyncKeyState(i32::from(VK_LSHIFT.0)) } as u16 & 0x8000 == 0 {
+            Ok(())
+        } else {
+            guard.owned.push(OwnedKeyboardKey {
+                vk: VK_LSHIFT,
+                extended: false,
+            });
+            guard.release().map(|_| ())
+        };
+        let handle = desktop.release_for_thread_exit();
+        Ok::<_, String>((result, handle))
+    });
+    let (result, handle) = join
+        .join()
+        .map_err(|_| "owned key recovery thread panicked")??;
+    if let Some(handle) = handle {
+        close_input_desktop_after_driver_exit(handle)?;
+    }
+    result
 }
 
 struct OwnedModifierGuard {
@@ -3534,9 +4864,20 @@ fn wait_for_root(
     process_id: u32,
     timeout: Duration,
 ) -> Result<WindowSnapshot, String> {
+    wait_for_root_admission(child, process_id, timeout, |_| true)
+}
+
+fn wait_for_root_admission(
+    child: &ChildProcessHandle,
+    process_id: u32,
+    timeout: Duration,
+    mut admit: impl FnMut(&WindowSnapshot) -> bool,
+) -> Result<WindowSnapshot, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(window) = find_window(process_id, WindowRole::Root) {
+        if let Some(window) = find_window(process_id, WindowRole::Root)
+            && admit(&window)
+        {
             return Ok(window);
         }
         if let Some(status) = child.try_wait()? {
@@ -3982,6 +5323,25 @@ pub(super) struct SemanticControl {
     pub enabled: bool,
 }
 
+/// Current provider facts, without leaking COM ownership or control text into
+/// the runner's close protocol. SetFocus admission is not a focus receipt.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SemanticControlReadiness {
+    pub process_id: u32,
+    pub bounds: [i32; 4],
+    pub enabled: bool,
+    pub offscreen: bool,
+    pub has_keyboard_focus: bool,
+    pub same_as_admitted: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditLookupAvailability {
+    Enabled,
+    IncludingDisabled,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum VisibleTextLookupError {
     TransientElementUnavailable(String),
@@ -4191,7 +5551,7 @@ fn gate_d_control_scroll_owner(
             Some(GateDControlScrollOwner::MenuTree)
         }
         (AppearanceTile, Selectable)
-        | (AppearanceApply | AppearanceCancel | SimpleAccent, Button)
+        | (AppearanceApply | AppearanceCancel | SimpleAccent | SkinRow, Button)
         | (SimpleOpacity | SimpleScale | SimpleSpacing | SimpleLabelSize, Button | DragValue)
         | (SimpleLabels | SimpleBold | SimpleShadow, Checkbox) => {
             Some(GateDControlScrollOwner::Resources)
@@ -4950,6 +6310,35 @@ impl UiAutomation {
         self.find_visible_named(hwnd, expected_pid, expected, true)
     }
 
+    /// Keep disabled client buttons observable so their presence cannot look like
+    /// a closed dialog. Caption controls outside the measured client are excluded.
+    pub(super) fn find_visible_client_button(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        expected: &str,
+        client_bounds: [i32; 4],
+    ) -> Result<Option<SemanticControl>, String> {
+        semantic_client_center(client_bounds, client_bounds)?;
+        self.find_visible_named_in_client_classified(
+            hwnd,
+            expected_pid,
+            expected,
+            true,
+            Some(client_bounds),
+        )
+        .map_err(VisibleTextLookupError::into_message)
+    }
+
+    pub(super) fn find_visible_button_classified(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        expected: &str,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
+        self.find_visible_named_classified(hwnd, expected_pid, expected, true)
+    }
+
     fn find_visible_named(
         &self,
         hwnd: HWND,
@@ -4967,6 +6356,23 @@ impl UiAutomation {
         expected_pid: u32,
         expected: &str,
         require_button: bool,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
+        self.find_visible_named_in_client_classified(
+            hwnd,
+            expected_pid,
+            expected,
+            require_button,
+            None,
+        )
+    }
+
+    fn find_visible_named_in_client_classified(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        expected: &str,
+        require_button: bool,
+        client_bounds: Option<[i32; 4]>,
     ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
         let root = unsafe { self.automation.ElementFromHandle(hwnd) }
             .map_err(|error| classify_element_property_error(error, "semantic root"))?;
@@ -5006,13 +6412,23 @@ impl UiAutomation {
                 expected_pid,
                 offscreen,
                 bounds,
-            ) || (require_button
-                && (!enabled
-                    || unsafe { element.CurrentControlType() }
-                        .map_err(|error| classify_element_property_error(error, "button type"))?
-                        != windows::Win32::UI::Accessibility::UIA_ButtonControlTypeId))
-            {
+            ) {
                 continue;
+            }
+            if require_button {
+                if client_bounds.is_none() && !enabled {
+                    continue;
+                }
+                let is_button = unsafe { element.CurrentControlType() }
+                    .map_err(|error| classify_element_property_error(error, "button type"))?
+                    == UIA_ButtonControlTypeId;
+                let eligible = match client_bounds {
+                    Some(client) => visible_button_in_client(is_button, bounds, client),
+                    None => enabled && is_button,
+                };
+                if !eligible {
+                    continue;
+                }
             }
             let candidate = SemanticControl {
                 element,
@@ -5020,7 +6436,13 @@ impl UiAutomation {
                 process_id: expected_pid,
                 enabled,
             };
-            if require_button && found.as_ref().is_some_and(|prior| prior.bounds != bounds) {
+            if require_button
+                && visible_button_match_is_ambiguous(
+                    found.as_ref().map(|prior| prior.bounds),
+                    bounds,
+                    client_bounds.is_some(),
+                )
+            {
                 return Err(VisibleTextLookupError::Other(format!(
                     "multiple distinct visible buttons named {expected:?}"
                 )));
@@ -5154,6 +6576,35 @@ impl UiAutomation {
         expected_pid: u32,
         fragment: &str,
     ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
+        self.find_edit_with_value_fragment_with_availability(
+            hwnd,
+            expected_pid,
+            fragment,
+            EditLookupAvailability::Enabled,
+        )
+    }
+
+    pub(super) fn find_edit_with_value_fragment_for_confirmation_classified(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        fragment: &str,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
+        self.find_edit_with_value_fragment_with_availability(
+            hwnd,
+            expected_pid,
+            fragment,
+            EditLookupAvailability::IncludingDisabled,
+        )
+    }
+
+    fn find_edit_with_value_fragment_with_availability(
+        &self,
+        hwnd: HWND,
+        expected_pid: u32,
+        fragment: &str,
+        availability: EditLookupAvailability,
+    ) -> Result<Option<SemanticControl>, VisibleTextLookupError> {
         let root = unsafe { self.automation.ElementFromHandle(hwnd) }
             .map_err(|error| classify_element_property_error(error, "edit root"))?;
         validate_uia_root_owner(&root, expected_pid)?;
@@ -5203,7 +6654,11 @@ impl UiAutomation {
             let enabled = unsafe { element.CurrentIsEnabled() }
                 .map_err(|error| classify_element_property_error(error, "edit enabled state"))?
                 .as_bool();
-            if offscreen || !enabled || bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+            if offscreen
+                || (availability == EditLookupAvailability::Enabled && !enabled)
+                || bounds.right <= bounds.left
+                || bounds.bottom <= bounds.top
+            {
                 continue;
             }
             let candidate = SemanticControl {
@@ -5224,6 +6679,54 @@ impl UiAutomation {
 
     pub fn control_has_focus(&self, control: &SemanticControl) -> bool {
         self.element_has_focus(&control.element)
+    }
+
+    pub(super) fn current_control_readiness(
+        &self,
+        admitted: &SemanticControl,
+        current: &SemanticControl,
+    ) -> Result<SemanticControlReadiness, VisibleTextLookupError> {
+        let same_as_admitted = unsafe {
+            self.automation
+                .CompareElements(&admitted.element, &current.element)
+        }
+        .map_err(|error| classify_element_property_error(error, "close-target identity"))?
+        .as_bool();
+        let process_id = unsafe { current.element.CurrentProcessId() }
+            .map_err(|error| classify_element_property_error(error, "close-target process ID"))?;
+        let process_id = u32::try_from(process_id).map_err(|_| {
+            VisibleTextLookupError::Other("close-target process ID is invalid".into())
+        })?;
+        let bounds = unsafe { current.element.CurrentBoundingRectangle() }
+            .map_err(|error| classify_element_property_error(error, "close-target bounds"))?;
+        let enabled = unsafe { current.element.CurrentIsEnabled() }
+            .map_err(|error| classify_element_property_error(error, "close-target enabled state"))?
+            .as_bool();
+        let offscreen = unsafe { current.element.CurrentIsOffscreen() }
+            .map_err(|error| {
+                classify_element_property_error(error, "close-target offscreen state")
+            })?
+            .as_bool();
+        let has_keyboard_focus = unsafe { current.element.CurrentHasKeyboardFocus() }
+            .map_err(|error| classify_element_property_error(error, "close-target keyboard focus"))?
+            .as_bool();
+        Ok(SemanticControlReadiness {
+            process_id,
+            bounds: [bounds.left, bounds.top, bounds.right, bounds.bottom],
+            enabled,
+            offscreen,
+            has_keyboard_focus,
+            same_as_admitted,
+        })
+    }
+
+    pub(super) fn current_control_is_button(
+        &self,
+        control: &SemanticControl,
+    ) -> Result<bool, VisibleTextLookupError> {
+        unsafe { control.element.CurrentControlType() }
+            .map(|role| role == UIA_ButtonControlTypeId)
+            .map_err(|error| classify_element_property_error(error, "note confirmation role"))
     }
 
     pub fn edit_focus_at_screen_point(
@@ -5351,6 +6854,18 @@ fn owned_visible_name_matches(
         && !offscreen
         && bounds[2] > bounds[0]
         && bounds[3] > bounds[1]
+}
+
+fn visible_button_in_client(is_button: bool, bounds: [i32; 4], client_bounds: [i32; 4]) -> bool {
+    is_button && semantic_client_center(bounds, client_bounds).is_ok()
+}
+
+fn visible_button_match_is_ambiguous(
+    prior_bounds: Option<[i32; 4]>,
+    bounds: [i32; 4],
+    client_scoped: bool,
+) -> bool {
+    prior_bounds.is_some_and(|prior| client_scoped || prior != bounds)
 }
 
 fn semantic_name_contains(name: &str, fragment: &str) -> bool {
@@ -5573,6 +7088,15 @@ pub(super) fn click_designer_semantic_control(
     control: &SemanticControl,
     trace_path: &Path,
 ) -> Result<PointerClickEvidence, String> {
+    let bounds = designer_semantic_client_bounds(child, target, control)?;
+    click_designer_client_bounds(child, target, bounds, trace_path)
+}
+
+pub(super) fn designer_semantic_client_bounds(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    control: &SemanticControl,
+) -> Result<[i32; 4], String> {
     child.validate_window(target.hwnd)?;
     if target.role != WindowRole::Designer
         || target.process_id != child.process_id()
@@ -5596,12 +7120,7 @@ pub(super) fn click_designer_semantic_control(
     {
         return Err("could not convert Designer UIA screen bounds to client coordinates".into());
     }
-    click_designer_client_bounds(
-        child,
-        target,
-        [top_left.x, top_left.y, bottom_right.x, bottom_right.y],
-        trace_path,
-    )
+    Ok([top_left.x, top_left.y, bottom_right.x, bottom_right.y])
 }
 
 fn click_semantic_control_with_button(
@@ -5812,6 +7331,7 @@ fn click_designer_client_bounds_with_button_and_owned_keys(
         trace_path,
         button,
         owned_keys,
+        None,
         |_, _| Ok(()),
     )
 }
@@ -5848,6 +7368,27 @@ fn click_designer_client_bounds_with_pre_down_check_and_button(
         trace_path,
         button,
         &[],
+        None,
+        pre_down_check,
+    )
+}
+
+pub(super) fn click_designer_client_bounds_before_deadline(
+    child: &NativeChild,
+    target: &WindowSnapshot,
+    bounds: [i32; 4],
+    trace_path: &Path,
+    deadline: Instant,
+    pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
+) -> Result<PointerClickEvidence, PointerClickPreDownError> {
+    click_designer_client_bounds_with_pre_down_check_and_owned_keys(
+        child,
+        target,
+        bounds,
+        trace_path,
+        PointerButton::Left,
+        &[],
+        Some(deadline),
         pre_down_check,
     )
 }
@@ -5859,42 +7400,173 @@ fn click_designer_client_bounds_with_pre_down_check_and_owned_keys(
     trace_path: &Path,
     button: PointerButton,
     owned_keys: &[VIRTUAL_KEY],
+    deadline: Option<Instant>,
     pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
 ) -> Result<PointerClickEvidence, PointerClickPreDownError> {
-    child.validate_window(target.hwnd)?;
-    let mut client = RECT::default();
-    unsafe { GetClientRect(target.hwnd, &mut client) }
-        .map_err(|error| format!("read Designer client bounds: {error}"))?;
-    let point = semantic_client_center(
-        bounds,
-        [client.left, client.top, client.right, client.bottom],
-    )?;
-    let client_point = (point.x, point.y);
-    let nudge_client = adjacent_pointer_point(point, bounds)?;
-    let mut nudge_screen = nudge_client;
-    if !unsafe { ClientToScreen(target.hwnd, &mut nudge_screen) }.as_bool() {
-        return Err("could not convert Designer pointer nudge to screen coordinates".into());
-    }
-    let mut screen_point = point;
-    if !unsafe { ClientToScreen(target.hwnd, &mut screen_point) }.as_bool() {
-        return Err("could not convert Designer semantic point to screen coordinates".into());
+    if target.role != WindowRole::Designer || target.process_id != child.process_id() {
+        return Err("semantic client click requires the exact candidate Designer owner".into());
     }
     click_screen_point_with_pre_down_check_and_owned_keys(
         child,
         target,
-        screen_point,
         button,
         "Designer semantic click",
-        PointerMoveAcknowledgement {
-            trace_path,
-            kind: PointerTraceKind::DesignerClient,
-            nudge_screen_point: nudge_screen,
-            nudge_trace_point: (nudge_client.x, nudge_client.y),
-            target_trace_point: client_point,
+        PointerTraceKind::DesignerClient,
+        || {
+            let current = child
+                .designer()
+                .ok_or("owned Designer disappeared after focus")?;
+            if !same_owned_designer(target, &current, child.process_id()) {
+                return Err("Designer identity changed after focus".into());
+            }
+            let client = child.client_bounds(&current)?;
+            let client_screen = child.client_screen_bounds(&current)?;
+            let (point, nudge, screen_point, nudge_screen) =
+                designer_click_points(bounds, client, client_screen)?;
+            Ok(PreparedPointerClick {
+                point: screen_point,
+                acknowledgement: PointerMoveAcknowledgement {
+                    trace_path,
+                    kind: PointerTraceKind::DesignerClient,
+                    nudge_screen_point: nudge_screen,
+                    nudge_trace_point: (nudge.x, nudge.y),
+                    target_trace_point: (point.x, point.y),
+                },
+                designer_client_geometry: Some((client, client_screen)),
+            })
         },
         owned_keys,
+        deadline,
         pre_down_check,
     )
+}
+
+fn radial_input_style(style: u32) -> bool {
+    style & (WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0) == WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0
+        && style & WS_EX_TRANSPARENT.0 == 0
+}
+
+fn radial_point_in_bounds(point: POINT, bounds: [i32; 4]) -> bool {
+    point.x >= bounds[0] && point.y >= bounds[1] && point.x < bounds[2] && point.y < bounds[3]
+}
+
+fn radial_input_surface_at_with(
+    surfaces: &[WindowSnapshot],
+    process_id: u32,
+    point: POINT,
+    mut style: impl FnMut(HWND) -> u32,
+) -> Result<WindowSnapshot, String> {
+    let mut input = surfaces.iter().filter(|surface| {
+        surface.process_id == process_id
+            && surface.role == WindowRole::OtherChild
+            && surface.class_name == RADIAL_HOST_WINDOW_CLASS
+            && !surface.hwnd.is_invalid()
+            && surface.visible
+            && !surface.minimized
+            && radial_point_in_bounds(point, surface.bounds)
+            && radial_input_style(style(surface.hwnd))
+    });
+    let surface = input.next().ok_or_else(|| {
+        "prepared radial point has no visible candidate-owned input proxy".to_string()
+    })?;
+    if input.next().is_some() {
+        return Err("prepared radial point has ambiguous candidate-owned input proxies".into());
+    }
+    Ok(surface.clone())
+}
+
+pub(super) fn radial_input_surface_at(
+    child: &NativeChild,
+    surfaces: &[WindowSnapshot],
+    point: POINT,
+) -> Result<WindowSnapshot, String> {
+    let input = radial_input_surface_at_with(surfaces, child.process_id(), point, |hwnd| {
+        (unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) }) as u32
+    })?;
+    child.validate_window(input.hwnd)?;
+    Ok(input)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RadialPointReadiness {
+    Ready,
+    CoveredByDesigner { hwnd: u64, process_id: u32 },
+}
+
+fn radial_point_readiness(
+    expected: &WindowSnapshot,
+    current: &WindowSnapshot,
+    current_style: u32,
+    point: POINT,
+    cursor: POINT,
+    hit: (HWND, u32),
+    designer: Option<&WindowSnapshot>,
+) -> Result<RadialPointReadiness, String> {
+    if current.hwnd != expected.hwnd
+        || current.process_id != expected.process_id
+        || current.role != WindowRole::OtherChild
+        || current.class_name != RADIAL_HOST_WINDOW_CLASS
+        || current.bounds != expected.bounds
+        || current.minimized
+        || !radial_input_style(current_style)
+        || !radial_point_in_bounds(point, current.bounds)
+    {
+        return Err(format!(
+            "radial input proxy changed before down: expected HWND={} PID={} bounds={:?}, current HWND={} PID={} bounds={:?}",
+            hwnd_id(expected.hwnd),
+            expected.process_id,
+            expected.bounds,
+            hwnd_id(current.hwnd),
+            current.process_id,
+            current.bounds,
+        ));
+    }
+    if cursor.x != point.x || cursor.y != point.y {
+        return Err("radial pointer moved away from its exact prepared point before down".into());
+    }
+    if hit == (expected.hwnd, expected.process_id) && current.visible {
+        return Ok(RadialPointReadiness::Ready);
+    }
+    if designer.is_some_and(|designer| {
+        hit == (designer.hwnd, expected.process_id)
+            && designer.process_id == expected.process_id
+            && designer.role == WindowRole::Designer
+            && designer.visible
+            && !designer.minimized
+            && radial_point_in_bounds(point, designer.bounds)
+    }) {
+        return Ok(RadialPointReadiness::CoveredByDesigner {
+            hwnd: hwnd_id(hit.0),
+            process_id: hit.1,
+        });
+    }
+    Err(format!(
+        "radial selection point is covered by an unowned/non-input HWND={} PID={}; expected input HWND={} PID={}",
+        hwnd_id(hit.0),
+        hit.1,
+        hwnd_id(expected.hwnd),
+        expected.process_id,
+    ))
+}
+
+fn with_ready_radial_point<T>(
+    deadline: Instant,
+    mut sample: impl FnMut() -> Result<RadialPointReadiness, String>,
+    mut wait: impl FnMut(Duration),
+    click: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    loop {
+        let readiness = sample()?;
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "radial point did not become input-owned before the presentation deadline; last ownership={readiness:?}"
+            ));
+        }
+        if readiness == RadialPointReadiness::Ready {
+            return click();
+        }
+        wait(WINDOW_POLL.min(deadline.saturating_duration_since(Instant::now())));
+    }
 }
 
 pub(super) fn click_owned_radial_point(
@@ -5904,96 +7576,117 @@ pub(super) fn click_owned_radial_point(
     trace_path: &Path,
     trace_cursor: usize,
     layout_generation: u64,
+    deadline: Instant,
+    mut validate_target: impl FnMut() -> Result<(), String>,
 ) -> Result<super::QueryPointerClickEvidence, String> {
     child.validate_window(surface.hwnd)?;
     if surface.process_id != child.process_id()
         || surface.class_name != RADIAL_HOST_WINDOW_CLASS
         || !surface.visible
         || surface.minimized
-        || point.x < surface.bounds[0]
-        || point.y < surface.bounds[1]
-        || point.x >= surface.bounds[2]
-        || point.y >= surface.bounds[3]
+        || surface.role != WindowRole::OtherChild
+        || !radial_input_style(unsafe { GetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE) } as u32)
+        || !radial_point_in_bounds(point, surface.bounds)
+        || layout_generation == 0
     {
         return Err("refused radial cell input outside an active candidate-owned surface".into());
     }
+    validate_target()?;
+    let designer = child.designer();
     child.focus_window(surface)?;
     unsafe { SetCursorPos(point.x, point.y) }
         .map_err(|error| format!("position pointer over acknowledged radial cell: {error}"))?;
-    let hit = unsafe { WindowFromPoint(point) };
-    let hit_pid = window_process_id(hit);
-    let hit_is_owned_surface = hit == surface.hwnd
-        || (hit_pid == child.process_id() && unsafe { IsChild(surface.hwnd, hit).as_bool() });
-    if !hit_is_owned_surface {
-        return Err(format!(
-            "radial selection point is covered by an unowned/non-surface HWND={} PID={hit_pid}",
-            hwnd_id(hit)
-        ));
-    }
-    if layout_generation == 0 {
-        return Err("refused radial click without a production layout generation".into());
-    }
-    focus_is_validated(surface.hwnd, child.process_id())?;
-    let mut button_guard =
-        MouseButtonGuard::new(surface.hwnd, child.process_id(), PointerButton::Left);
-    let down = match send_validated_input_allowing_owned_keys(
-        surface.hwnd,
-        child.process_id(),
-        &[mouse_input(true)],
-        "radial cell primary down",
-        &[],
-    ) {
-        Ok(evidence) => {
-            button_guard.armed = evidence.inserted > 0;
-            if evidence.inserted != 1 {
+    with_ready_radial_point(
+        deadline,
+        || {
+            validate_target()?;
+            child.validate_window(surface.hwnd)?;
+            let windows = child.windows();
+            let current = windows
+                .iter()
+                .find(|window| window.hwnd == surface.hwnd)
+                .ok_or("radial input proxy disappeared before down")?;
+            let current_designer = designer.as_ref().and_then(|expected| {
+                windows.iter().find(|window| {
+                    window.hwnd == expected.hwnd && window.class_name == expected.class_name
+                })
+            });
+            let hit = unsafe { WindowFromPoint(point) };
+            radial_point_readiness(
+                surface,
+                current,
+                unsafe { GetWindowLongPtrW(surface.hwnd, GWL_EXSTYLE) } as u32,
+                point,
+                cursor_position()?,
+                (hit, window_process_id(hit)),
+                current_designer,
+            )
+        },
+        std::thread::sleep,
+        || {
+            focus_is_validated(surface.hwnd, child.process_id())?;
+            let mut button_guard =
+                MouseButtonGuard::new(surface.hwnd, child.process_id(), PointerButton::Left);
+            let down = match send_validated_input_allowing_owned_keys(
+                surface.hwnd,
+                child.process_id(),
+                &[mouse_input(true)],
+                "radial cell primary down",
+                &[],
+            ) {
+                Ok(evidence) => {
+                    button_guard.armed = evidence.inserted > 0;
+                    if evidence.inserted != 1 {
+                        return Err(format!(
+                            "radial primary down inserted {} events; expected exactly one",
+                            evidence.inserted
+                        ));
+                    }
+                    evidence
+                }
+                Err((inserted, error)) => {
+                    button_guard.armed = inserted > 0;
+                    if button_guard.armed {
+                        let cleanup = button_guard
+                            .release()
+                            .map(|evidence| format!("released={}", evidence.inserted))
+                            .unwrap_or_else(|cleanup| format!("release_failed={cleanup}"));
+                        return Err(format!("{error}; radial button cleanup={cleanup}"));
+                    }
+                    return Err(error);
+                }
+            };
+            let up = button_guard.release()?;
+            if up.inserted != 1 {
                 return Err(format!(
-                    "radial primary down inserted {} events; expected exactly one",
-                    evidence.inserted
+                    "radial primary up inserted {} events; expected exactly one",
+                    up.inserted
                 ));
             }
-            evidence
-        }
-        Err((inserted, error)) => {
-            button_guard.armed = inserted > 0;
-            if button_guard.armed {
-                let cleanup = button_guard
-                    .release()
-                    .map(|evidence| format!("released={}", evidence.inserted))
-                    .unwrap_or_else(|cleanup| format!("release_failed={cleanup}"));
-                return Err(format!("{error}; radial button cleanup={cleanup}"));
-            }
-            return Err(error);
-        }
-    };
-    let up = button_guard.release()?;
-    if up.inserted != 1 {
-        return Err(format!(
-            "radial primary up inserted {} events; expected exactly one",
-            up.inserted
-        ));
-    }
-    let (ack, release_settle_ms) = wait_for_radial_primary_release(
-        trace_path,
-        trace_cursor,
-        hwnd_id(surface.hwnd),
-        layout_generation,
-        Duration::from_secs(2),
+            let (ack, release_settle_ms) = wait_for_radial_primary_release(
+                trace_path,
+                trace_cursor,
+                hwnd_id(surface.hwnd),
+                layout_generation,
+                Duration::from_secs(2),
+            )
+            .map_err(|error| {
+                format!(
+                    "{error}; runner down=[{}]; runner up=[{}]",
+                    down.describe(),
+                    up.describe()
+                )
+            })?;
+            Ok(super::QueryPointerClickEvidence {
+                down_inserted: down.inserted,
+                up_inserted: up.inserted,
+                layout_generation,
+                down_event_ordinal: ack.down_event_ordinal,
+                up_event_ordinal: ack.up_event_ordinal,
+                release_settle_ms,
+            })
+        },
     )
-    .map_err(|error| {
-        format!(
-            "{error}; runner down=[{}]; runner up=[{}]",
-            down.describe(),
-            up.describe()
-        )
-    })?;
-    Ok(super::QueryPointerClickEvidence {
-        down_inserted: down.inserted,
-        up_inserted: up.inserted,
-        layout_generation,
-        down_event_ordinal: ack.down_event_ordinal,
-        up_event_ordinal: ack.up_event_ordinal,
-        release_settle_ms,
-    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6139,6 +7832,79 @@ struct PointerMoveAcknowledgement<'a> {
     target_trace_point: (i32, i32),
 }
 
+struct PreparedPointerClick<'a> {
+    point: POINT,
+    acknowledgement: PointerMoveAcknowledgement<'a>,
+    designer_client_geometry: Option<([i32; 4], [i32; 4])>,
+}
+
+fn same_owned_designer(
+    expected: &WindowSnapshot,
+    current: &WindowSnapshot,
+    process_id: u32,
+) -> bool {
+    !expected.hwnd.is_invalid()
+        && expected.hwnd == current.hwnd
+        && expected.process_id == process_id
+        && current.process_id == process_id
+        && expected.role == WindowRole::Designer
+        && current.role == WindowRole::Designer
+        && expected.class_name == current.class_name
+        && current.visible
+        && !current.minimized
+        && current.is_nonzero()
+}
+
+fn designer_click_points(
+    bounds: [i32; 4],
+    client: [i32; 4],
+    client_screen: [i32; 4],
+) -> Result<(POINT, POINT, POINT, POINT), String> {
+    if i64::from(client[2]) - i64::from(client[0])
+        != i64::from(client_screen[2]) - i64::from(client_screen[0])
+        || i64::from(client[3]) - i64::from(client[1])
+            != i64::from(client_screen[3]) - i64::from(client_screen[1])
+    {
+        return Err("Designer client geometry changed while converting its points".into());
+    }
+    let point = semantic_client_center(bounds, client)?;
+    let nudge = adjacent_pointer_point(point, bounds)?;
+    let to_screen = |point: POINT| -> Result<POINT, String> {
+        Ok(POINT {
+            x: i32::try_from(
+                i64::from(client_screen[0]) + i64::from(point.x) - i64::from(client[0]),
+            )
+            .map_err(|_| "Designer client-to-screen x coordinate overflow")?,
+            y: i32::try_from(
+                i64::from(client_screen[1]) + i64::from(point.y) - i64::from(client[1]),
+            )
+            .map_err(|_| "Designer client-to-screen y coordinate overflow")?,
+        })
+    };
+    Ok((point, nudge, to_screen(point)?, to_screen(nudge)?))
+}
+
+fn prepare_pointer_after_focus<T>(
+    focus: impl FnOnce() -> Result<(), String>,
+    prepare: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    focus()?;
+    prepare()
+}
+
+fn validate_designer_click_geometry(
+    expected: Option<([i32; 4], [i32; 4])>,
+    client: [i32; 4],
+    client_screen: [i32; 4],
+) -> Result<(), PointerClickPreDownError> {
+    if expected.is_some_and(|expected| expected != (client, client_screen)) {
+        return Err(PointerClickPreDownError::StaleGeometry(
+            "Designer client position or size changed after focused pointer conversion; no button-down was sent".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn click_screen_point(
     child: &NativeChild,
     target: &WindowSnapshot,
@@ -6171,31 +7937,43 @@ fn click_screen_point_with_pre_down_check(
     click_screen_point_with_pre_down_check_and_owned_keys(
         child,
         target,
-        point,
         button,
         operation,
-        pointer_move_ack,
+        pointer_move_ack.kind,
+        || {
+            Ok(PreparedPointerClick {
+                point,
+                acknowledgement: pointer_move_ack,
+                designer_client_geometry: None,
+            })
+        },
         &[],
+        None,
         pre_down_check,
     )
 }
 
-fn click_screen_point_with_pre_down_check_and_owned_keys(
+fn click_screen_point_with_pre_down_check_and_owned_keys<'a>(
     child: &NativeChild,
     target: &WindowSnapshot,
-    point: POINT,
     button: PointerButton,
     operation: &str,
-    pointer_move_ack: PointerMoveAcknowledgement<'_>,
+    kind: PointerTraceKind,
+    prepare: impl FnOnce() -> Result<PreparedPointerClick<'a>, String>,
     owned_keys: &[VIRTUAL_KEY],
+    deadline: Option<Instant>,
     pre_down_check: impl FnOnce((i32, i32), usize) -> Result<(), PointerClickPreDownError>,
 ) -> Result<PointerClickEvidence, PointerClickPreDownError> {
     child.validate_window(target.hwnd)?;
-    let root_screen_click = matches!(pointer_move_ack.kind, PointerTraceKind::RootScreen);
+    let root_screen_click = matches!(kind, PointerTraceKind::RootScreen);
     if root_screen_click {
         validate_root_pointer_geometry(target)?;
     }
-    child.focus_window(target)?;
+    // Focus can apply deferred placement. Client points are measured and converted
+    // only after that ownership boundary, and remain exact through button-down.
+    let prepared = prepare_pointer_after_focus(|| child.focus_window(target), prepare)?;
+    let point = prepared.point;
+    let pointer_move_ack = prepared.acknowledgement;
     if root_screen_click {
         validate_root_pointer_geometry(target)?;
     }
@@ -6219,6 +7997,11 @@ fn click_screen_point_with_pre_down_check_and_owned_keys(
     {
         return Err("semantic click point lies outside the target client area".into());
     }
+    validate_designer_click_geometry(
+        prepared.designer_client_geometry,
+        [client.left, client.top, client.right, client.bottom],
+        [top_left.x, top_left.y, bottom_right.x, bottom_right.y],
+    )?;
     let cursor_before_move = cursor_position()?;
     let pointer_position_preexisting_ack = cursor_before_move.x == point.x
         && cursor_before_move.y == point.y
@@ -6264,7 +8047,7 @@ fn click_screen_point_with_pre_down_check_and_owned_keys(
         owned_keys,
     )
     .map_err(|(_, error)| error)?;
-    let nudge_correction_events = wait_for_pointer_move_ack(
+    let nudge_correction_events = wait_for_pointer_move_ack_checked(
         child,
         target,
         operation,
@@ -6272,7 +8055,8 @@ fn click_screen_point_with_pre_down_check_and_owned_keys(
         trace_cursor,
         pointer_move_ack.nudge_trace_point,
         nudge_screen_point,
-        Duration::from_secs(3),
+        pointer_prepare_remaining(deadline)?,
+        prepared.designer_client_geometry,
     )?;
 
     let target_move_cursor = trace_line_count(pointer_move_ack.trace_path)?;
@@ -6296,7 +8080,7 @@ fn click_screen_point_with_pre_down_check_and_owned_keys(
         owned_keys,
     )
     .map_err(|(_, error)| error)?;
-    let target_correction_events = wait_for_pointer_move_ack(
+    let target_correction_events = wait_for_pointer_move_ack_checked(
         child,
         target,
         operation,
@@ -6304,7 +8088,8 @@ fn click_screen_point_with_pre_down_check_and_owned_keys(
         target_move_cursor,
         pointer_move_ack.target_trace_point,
         point,
-        Duration::from_secs(3),
+        pointer_prepare_remaining(deadline)?,
+        prepared.designer_client_geometry,
     )?;
     let foreground_hwnd = unsafe { GetForegroundWindow() };
     if foreground_hwnd != target.hwnd {
@@ -6320,7 +8105,25 @@ fn click_screen_point_with_pre_down_check_and_owned_keys(
     }
     let down = [mouse_button_input(button, true)];
     let (down_trace_cursor, down) = dispatch_pointer_down_after_preflight(
-        || pre_down_check(pointer_move_ack.target_trace_point, target_move_cursor),
+        || {
+            pointer_prepare_remaining(deadline)?;
+            if prepared.designer_client_geometry.is_some() {
+                validate_designer_click_geometry(
+                    prepared.designer_client_geometry,
+                    child.client_bounds(target)?,
+                    child.client_screen_bounds(target)?,
+                )?;
+            }
+            pre_down_check(pointer_move_ack.target_trace_point, target_move_cursor)?;
+            if prepared.designer_client_geometry.is_some() {
+                validate_designer_click_geometry(
+                    prepared.designer_client_geometry,
+                    child.client_bounds(target)?,
+                    child.client_screen_bounds(target)?,
+                )?;
+            }
+            Ok(())
+        },
         || {
             child.validate_window(target.hwnd)?;
             if unsafe { GetForegroundWindow() } != target.hwnd {
@@ -6355,6 +8158,22 @@ fn click_screen_point_with_pre_down_check_and_owned_keys(
                     "{operation} target client geometry changed before button-down"
                 ));
             }
+            validate_designer_click_geometry(
+                prepared.designer_client_geometry,
+                [
+                    current_client.left,
+                    current_client.top,
+                    current_client.right,
+                    current_client.bottom,
+                ],
+                [
+                    current_top_left.x,
+                    current_top_left.y,
+                    current_bottom_right.x,
+                    current_bottom_right.y,
+                ],
+            )
+            .map_err(PointerClickPreDownError::into_message)?;
             validate_pointer_coverage(target.hwnd, child.process_id(), point, operation)?;
             let trace_cursor = trace_line_count(pointer_move_ack.trace_path)?;
             let evidence = send_validated_input_allowing_owned_keys(
@@ -6459,16 +8278,115 @@ fn wait_for_pointer_move_ack(
     expected_screen_point: POINT,
     timeout: Duration,
 ) -> Result<usize, String> {
+    wait_for_pointer_move_ack_checked(
+        child,
+        target_window,
+        operation,
+        acknowledgement,
+        cursor,
+        expected_point,
+        expected_screen_point,
+        timeout,
+        None,
+    )
+    .map_err(PointerClickPreDownError::into_message)
+}
+
+fn pointer_prepare_remaining(
+    deadline: Option<Instant>,
+) -> Result<Duration, PointerClickPreDownError> {
+    let remaining = deadline.map_or(Duration::from_secs(3), |deadline| {
+        Duration::from_secs(3).min(deadline.saturating_duration_since(Instant::now()))
+    });
+    if remaining.is_zero() {
+        return Err(PointerClickPreDownError::Input(
+            "owned pointer preparation deadline expired before button-down".into(),
+        ));
+    }
+    Ok(remaining)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DesignerPointerMeasurement {
+    cursor_screen: (i32, i32),
+    cursor_client: (i32, i32),
+    client: [i32; 4],
+    client_screen: [i32; 4],
+}
+
+fn check_designer_pointer_measurement(
+    prepared: ([i32; 4], [i32; 4]),
+    measured: DesignerPointerMeasurement,
+) -> Result<String, PointerClickPreDownError> {
+    let diagnostic = format!(
+        "prepared_client={:?} prepared_client_screen={:?} current_client={:?} current_client_screen={:?} physical_cursor={:?} ScreenToClient={:?}",
+        prepared.0,
+        prepared.1,
+        measured.client,
+        measured.client_screen,
+        measured.cursor_screen,
+        measured.cursor_client
+    );
+    validate_designer_click_geometry(Some(prepared), measured.client, measured.client_screen)
+        .map_err(|error| {
+            PointerClickPreDownError::StaleGeometry(format!(
+                "{}; {diagnostic}",
+                error.into_message()
+            ))
+        })?;
+    Ok(diagnostic)
+}
+
+fn wait_for_pointer_move_ack_checked(
+    child: &NativeChild,
+    target_window: &WindowSnapshot,
+    operation: &str,
+    acknowledgement: &PointerMoveAcknowledgement<'_>,
+    cursor: usize,
+    expected_point: (i32, i32),
+    expected_screen_point: POINT,
+    timeout: Duration,
+    prepared_geometry: Option<([i32; 4], [i32; 4])>,
+) -> Result<usize, PointerClickPreDownError> {
     let surface = match acknowledgement.kind {
         PointerTraceKind::RootScreen => "ROOT screen point",
         PointerTraceKind::DesignerClient => "Designer client point",
     };
     let event_cursor = std::cell::Cell::new(cursor);
-    wait_for_pointer_move_ack_with(
+    wait_for_pointer_move_ack_measured_with(
         operation,
         surface,
         expected_point,
         timeout,
+        || {
+            let Some(prepared) = prepared_geometry else {
+                return Ok(None);
+            };
+            child.validate_window(target_window.hwnd)?;
+            let current = child
+                .designer()
+                .ok_or("owned Designer disappeared while awaiting pointer receipt")?;
+            if !same_owned_designer(target_window, &current, child.process_id()) {
+                return Err("Designer identity changed while awaiting pointer receipt".into());
+            }
+            let cursor = cursor_position()?;
+            let mut client_point = cursor;
+            if !unsafe { ScreenToClient(current.hwnd, &mut client_point) }.as_bool() {
+                return Err(
+                    "could not measure physical pointer in the current Designer client".into(),
+                );
+            }
+            check_designer_pointer_measurement(
+                prepared,
+                DesignerPointerMeasurement {
+                    cursor_screen: (cursor.x, cursor.y),
+                    cursor_client: (client_point.x, client_point.y),
+                    client: child.client_bounds(&current)?,
+                    client_screen: child.client_screen_bounds(&current)?,
+                },
+            )
+            .map(Some)
+        },
         || {
             latest_pointer_move_after(
                 acknowledgement.trace_path,
@@ -6523,20 +8441,49 @@ fn send_pointer_correction_after_cursor(
     send()
 }
 
+#[cfg(test)]
 fn wait_for_pointer_move_ack_with(
     operation: &str,
     surface: &str,
     expected_point: (i32, i32),
     timeout: Duration,
+    read_latest: impl FnMut() -> Result<Option<(i32, i32)>, String>,
+    verify_physical_owner: impl FnMut() -> Result<(), String>,
+    send_correction: impl FnMut(i32, i32) -> Result<usize, String>,
+    wait: impl FnMut(Duration),
+) -> Result<usize, String> {
+    wait_for_pointer_move_ack_measured_with(
+        operation,
+        surface,
+        expected_point,
+        timeout,
+        || Ok(None),
+        read_latest,
+        verify_physical_owner,
+        send_correction,
+        wait,
+    )
+    .map_err(PointerClickPreDownError::into_message)
+}
+
+fn wait_for_pointer_move_ack_measured_with(
+    operation: &str,
+    surface: &str,
+    expected_point: (i32, i32),
+    timeout: Duration,
+    mut measure: impl FnMut() -> Result<Option<String>, PointerClickPreDownError>,
     mut read_latest: impl FnMut() -> Result<Option<(i32, i32)>, String>,
     mut verify_physical_owner: impl FnMut() -> Result<(), String>,
     mut send_correction: impl FnMut(i32, i32) -> Result<usize, String>,
     mut wait: impl FnMut(Duration),
-) -> Result<usize, String> {
+) -> Result<usize, PointerClickPreDownError> {
     let deadline = Instant::now() + timeout;
     let mut correction_events = 0usize;
     let mut last_observed = None;
     loop {
+        // Measure even a disagreeing GUI receipt. Only native tuple drift is
+        // classified as stale geometry; an unchanged tuple never excuses it.
+        let physical = measure()?;
         if let Some(observed) = read_latest()? {
             last_observed = Some(observed);
             match pointer_correction_delta(observed, expected_point) {
@@ -6548,22 +8495,22 @@ fn wait_for_pointer_move_ack_with(
                     if correction_events >= MAX_POINTER_CORRECTIONS {
                         return Err(format!(
                             "{operation} pointer move remained inexact after {correction_events} bounded corrections: expected={expected_point:?} observed={observed:?}"
-                        ));
+                        ).into());
                     }
                     correction_events = correction_events.saturating_add(send_correction(dx, dy)?);
                 }
                 // Large changes belong to another physical move or to a stale
                 // surface coordinate frame. They are not a rounding error to
                 // correct. Keep waiting for the exact owner trace; the physical
-                // cursor is checked only when that exact trace arrives.
+                // cursor equality is required when that exact trace arrives.
                 Err(_) => {}
             }
         }
         let now = Instant::now();
         if now >= deadline {
             return Err(format!(
-                "production {surface} pointer move did not reach exact point {expected_point:?} before click; last observed={last_observed:?}, bounded correction events={correction_events}"
-            ));
+                "production {surface} pointer move did not reach exact point {expected_point:?} before click; last observed={last_observed:?}, bounded correction events={correction_events}; physical measurement={physical:?}"
+            ).into());
         }
         wait(Duration::from_millis(10).min(deadline.saturating_duration_since(now)));
     }
@@ -9312,6 +11259,390 @@ fn bounded_label(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn h15_native_diagnostics_keep_actual_metadata_cookie_and_checked_clock_limits() {
+        let evidence = super::NativeInputEdgeEvidence {
+            inserted: 4,
+            at_unix_ms: 1700000000000,
+            foreground_hwnd: 1002,
+            foreground_pid: 202,
+            input_desktop: "thread=Default;active=Default".into(),
+            cleanup_status: "async_state_clear_after_owned_release".into(),
+            keyboard_input: Some(super::KeyboardInputEvidence {
+                vk: 0x23,
+                scan: 0,
+                flags: 3,
+                extra_info: super::ACCEPTANCE_RUNNER_INPUT_COOKIE,
+                async_state_before: -32768,
+                async_state_after: 0,
+            }),
+        };
+        let actual = evidence.diagnostic();
+        assert_eq!(actual.at_unix_ms, Some(1700000000000));
+        assert!(!actual.timestamp_overflow);
+        assert_eq!(
+            (
+                actual.foreground_hwnd,
+                actual.foreground_pid,
+                actual.inserted
+            ),
+            (1002, 202, 4)
+        );
+        let keyboard = actual.keyboard.as_ref().unwrap();
+        assert_eq!((keyboard.vk, keyboard.scan, keyboard.flags), (0x23, 0, 3));
+        assert_eq!(
+            keyboard.cookie_owner,
+            super::DiagnosticInputCookie::RunnerOwned
+        );
+        assert_eq!(
+            (keyboard.async_state_before, keyboard.async_state_after),
+            (-32768, 0)
+        );
+        let persisted: super::NativeInputDiagnostic =
+            serde_json::from_slice(&serde_json::to_vec(&actual).unwrap()).unwrap();
+        assert_eq!(persisted, actual);
+        let mut overflow = evidence.clone();
+        overflow.at_unix_ms = u128::MAX;
+        assert!(
+            overflow.diagnostic().timestamp_overflow && overflow.diagnostic().at_unix_ms.is_none()
+        );
+        assert_eq!(
+            super::diagnostic_micros(Duration::from_micros(u64::MAX)),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            super::diagnostic_micros(Duration::from_secs(u64::MAX)),
+            None
+        );
+        let epoch = super::Instant::now();
+        let edge = super::RunnerChordEdge {
+            vk: 0x23,
+            down: true,
+            injected: true,
+            extra_info: multi_launcher::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG,
+            at: epoch + Duration::from_micros(350),
+        };
+        let actual = edge.diagnostic(epoch);
+        assert_eq!(actual.relative_us, Some(350));
+        assert!(!actual.before_attempt && !actual.timestamp_overflow);
+        assert_eq!(
+            actual.cookie_owner,
+            super::DiagnosticInputCookie::MultiLauncherInjected
+        );
+        let old = super::RunnerChordEdge {
+            at: epoch - Duration::from_micros(1),
+            ..edge
+        }
+        .diagnostic(epoch);
+        assert!(old.before_attempt && old.relative_us.is_none());
+    }
+
+    #[test]
+    fn h15_native_observation_diagnostics_preserve_foreign_matching_order_and_ignore_unrelated_keys()
+     {
+        let epoch = super::Instant::now();
+        let mut counts = [(0x23, [0; 4])].into_iter().collect();
+        let mut owned = Vec::new();
+        let mut foreign = Vec::new();
+        for (index, cookie) in [
+            super::ACCEPTANCE_RUNNER_INPUT_COOKIE,
+            multi_launcher::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG,
+            0,
+            0x1234,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            super::record_runner_chord_edge(
+                super::RunnerHookEdge {
+                    vk: 0x23,
+                    down: true,
+                    injected: true,
+                    extra_info: cookie,
+                    at: epoch + Duration::from_micros(index as u64),
+                },
+                &mut counts,
+                &mut owned,
+                &mut foreign,
+            );
+        }
+        super::record_runner_chord_edge(
+            super::RunnerHookEdge {
+                vk: 0x87,
+                down: true,
+                injected: true,
+                extra_info: 0,
+                at: epoch,
+            },
+            &mut counts,
+            &mut owned,
+            &mut foreign,
+        );
+        assert_eq!((owned.len(), foreign.len()), (1, 3));
+        let observation = super::RunnerChordObservation {
+            desktop: "thread=Default;active=Default".into(),
+            keys: counts
+                .into_iter()
+                .map(|(vk, count)| super::RunnerChordKeyObservation {
+                    vk,
+                    down: count[0],
+                    up: count[1],
+                    injected_down: count[2],
+                    injected_up: count[3],
+                })
+                .collect(),
+            ordered_edges: owned,
+            foreign_edges: foreign,
+        };
+        let receipt = observation.diagnostic(epoch);
+        assert_eq!(receipt.total_ordered_edges, 1);
+        assert_eq!(receipt.total_foreign_edges, 3);
+        assert_eq!(
+            receipt
+                .foreign_edges
+                .iter()
+                .map(|edge| edge.cookie_owner)
+                .collect::<Vec<_>>(),
+            [
+                super::DiagnosticInputCookie::MultiLauncherInjected,
+                super::DiagnosticInputCookie::Untagged,
+                super::DiagnosticInputCookie::Other
+            ]
+        );
+        assert_eq!(
+            receipt
+                .foreign_edges
+                .iter()
+                .map(|edge| edge.relative_us)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(receipt.keys[0].down, 1);
+        assert!(!observation.exact_injected_sequence(&[(0x23, true), (0x23, false)]));
+    }
+
+    #[test]
+    fn h15_pending_after_stop_diagnostic_reads_only_actual_bounded_queued_edges() {
+        let epoch = super::Instant::now();
+        let (send, events) = std::sync::mpsc::channel();
+        for (index, (vk, cookie)) in [
+            (0x23, super::ACCEPTANCE_RUNNER_INPUT_COOKIE),
+            (0x87, 0),
+            (
+                0x23,
+                multi_launcher::hotkey::launcher_invocation::MULTI_LAUNCHER_INJECT_TAG,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            send.send(super::RunnerHookEdge {
+                vk,
+                down: true,
+                injected: true,
+                extra_info: cookie,
+                at: epoch + Duration::from_micros(index as u64),
+            })
+            .unwrap();
+        }
+        drop(send);
+        let measured = super::drain_stopped_chord_diagnostic(
+            &events,
+            "thread=Default;active=Default",
+            &[0x23],
+            epoch,
+        );
+        assert_eq!(measured.drained_events, 3);
+        assert!(!measured.scan_limit_reached);
+        assert_eq!(measured.observation.total_ordered_edges, 1);
+        assert_eq!(measured.observation.total_foreign_edges, 1);
+        assert_eq!(
+            (
+                measured.observation.keys[0].down,
+                measured.observation.keys[0].up
+            ),
+            (1, 0)
+        );
+        assert_eq!(
+            measured.observation.foreign_edges[0].cookie_owner,
+            super::DiagnosticInputCookie::MultiLauncherInjected
+        );
+        assert_eq!(measured.observation.foreign_edges[0].relative_us, Some(2));
+        assert!(events.try_recv().is_err());
+
+        let (send, events) = std::sync::mpsc::channel();
+        for index in 0..257 {
+            send.send(super::RunnerHookEdge {
+                vk: 0x23,
+                down: true,
+                injected: true,
+                extra_info: 0,
+                at: epoch + Duration::from_micros(index),
+            })
+            .unwrap();
+        }
+        drop(send);
+        let measured = super::drain_stopped_chord_diagnostic(
+            &events,
+            "thread=Default;active=Default",
+            &[0x23],
+            epoch,
+        );
+        assert_eq!((measured.drained_events, measured.scan_limit), (256, 256));
+        assert!(measured.scan_limit_reached);
+        assert_eq!(measured.observation.total_foreign_edges, 256);
+        assert_eq!(measured.observation.foreign_edges.len(), 32);
+        assert!(
+            events.try_recv().is_ok(),
+            "a capped diagnostic must not claim or consume the remaining stream"
+        );
+    }
+
+    #[test]
+    fn controlled_child_exit_wait_enters_pending_then_injects_and_observes_same_operation() {
+        use std::cell::{Cell, RefCell};
+        let terminated = Cell::new(false);
+        let polls = Cell::new(0);
+        let events = RefCell::new(Vec::new());
+        let wait = super::wait_for_controlled_child_exit(
+            7,
+            || {
+                let index = polls.get() + 1;
+                polls.set(index);
+                if index == 3 {
+                    assert!(terminated.get());
+                    events.borrow_mut().push("observed exit");
+                    Ok(Some(super::NativeExitStatus { code: 1 }))
+                } else {
+                    events.borrow_mut().push("pending wait");
+                    Ok(None)
+                }
+            },
+            || {
+                assert_eq!(
+                    polls.get(),
+                    1,
+                    "termination requires the actual first pending result"
+                );
+                assert!(
+                    !terminated.replace(true),
+                    "only one owned termination request"
+                );
+                events.borrow_mut().push("injected termination");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *events.borrow(),
+            [
+                "pending wait",
+                "injected termination",
+                "pending wait",
+                "observed exit"
+            ]
+        );
+        assert_eq!(wait.pending_poll_index, 1);
+        assert_eq!(wait.exit_poll_index, 3);
+        assert_eq!(wait.observed_exit_code, 1);
+        assert!(wait.wait_entered_unix_ms <= wait.pending_observed_unix_ms);
+        assert!(wait.pending_observed_unix_ms <= wait.termination_injected_unix_ms);
+        assert!(wait.termination_injected_unix_ms <= wait.exit_observed_unix_ms);
+        assert!(wait.pending_after_entry_us <= wait.termination_after_entry_us);
+        assert!(wait.termination_after_entry_us < wait.exit_after_entry_us);
+    }
+
+    #[test]
+    fn controlled_child_exit_wait_refuses_preclosed_or_failed_injection_before_observation() {
+        use std::cell::{Cell, RefCell};
+        let terminations = Cell::new(0);
+        let preclosed = super::wait_for_controlled_child_exit(
+            7,
+            || Ok(Some(super::NativeExitStatus { code: 1 })),
+            || {
+                terminations.set(terminations.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(preclosed.contains("before an owned wait became pending"));
+        assert_eq!(
+            terminations.get(),
+            0,
+            "kill-then-wait cannot become a proof"
+        );
+        let events = RefCell::new(Vec::new());
+        let failure = super::wait_for_controlled_child_exit(
+            7,
+            || {
+                events.borrow_mut().push("pending wait");
+                Ok(None)
+            },
+            || {
+                events.borrow_mut().push("failed termination");
+                Err("actual owned termination request failed".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(failure, "actual owned termination request failed");
+        assert_eq!(*events.borrow(), ["pending wait", "failed termination"]);
+        let timed_out = super::wait_for_candidate_exit(
+            7,
+            std::time::Duration::ZERO,
+            || Ok(None),
+            |_| {
+                terminations.set(terminations.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(timed_out.is_err());
+        assert_eq!(
+            terminations.get(),
+            0,
+            "a timed-out wait cannot inject termination"
+        );
+    }
+
+    #[test]
+    fn controlled_environment_admission_retains_actual_measurement_and_refuses_before_input() {
+        use super::{
+            NativeDesktopExpectation, NativeInputAdmission, NativeInputPreflight,
+            admit_measured_environment,
+        };
+        let measured = || NativeInputPreflight {
+            input_desktop: "thread=Default;active=Default".into(),
+            foreground: windows::Win32::Foundation::HWND(44_usize as *mut std::ffi::c_void),
+            foreground_pid: 7,
+            foreground_thread_id: 9,
+        };
+        let NativeInputAdmission::Admitted(normal) =
+            admit_measured_environment(measured(), NativeDesktopExpectation::Supported)
+        else {
+            panic!("normal supported measurement must retain existing admission")
+        };
+        assert_eq!(normal.foreground_pid, 7);
+        assert_eq!(normal.foreground_thread_id, 9);
+        let NativeInputAdmission::EnvironmentMismatch {
+            measured: actual,
+            expected,
+        } = admit_measured_environment(measured(), NativeDesktopExpectation::ControlledMismatch)
+        else {
+            panic!("controlled mismatch must refuse before SendInput")
+        };
+        assert_eq!(actual.input_desktop, "thread=Default;active=Default");
+        assert_eq!(super::hwnd_id(actual.foreground), 44);
+        assert_eq!(actual.foreground_pid, 7);
+        assert_eq!(actual.foreground_thread_id, 9);
+        assert_eq!(expected, "controlled_expected_nondefault");
+        assert_ne!(actual.input_desktop, expected);
+        let mut case_insensitive = measured();
+        case_insensitive.input_desktop = "thread=default;active=default".into();
+        assert!(matches!(
+            admit_measured_environment(case_insensitive, NativeDesktopExpectation::Supported),
+            NativeInputAdmission::Admitted(_)
+        ));
+    }
+
     use super::{
         ACCEPTANCE_RUNNER_INPUT_COOKIE, AcceptanceTraceBudgetProfile, ActionCatalogRankSnapshot,
         ActionEditorProviderEdge, ActionEditorProviderKind, ActionEditorSurface,
@@ -9870,6 +12201,53 @@ mod tests {
     }
 
     #[test]
+    fn all_trace_profile_replaces_inherited_opt_in_only_in_its_owned_child_environment() {
+        let profile = tempfile::tempdir().unwrap();
+        let inherited = vec![
+            (super::TRACE_BUDGET_PROFILE_ENV.into(), "gate_s_v1".into()),
+            (
+                super::TRACE_BUDGET_PROFILE_ENV.to_ascii_lowercase().into(),
+                "all_v1".into(),
+            ),
+            ("UNCHANGED_ACCEPTANCE_TEST_VALUE".into(), "retained".into()),
+        ];
+        let values = |block: &[u16], key: &str| {
+            block
+                .split(|unit| *unit == 0)
+                .filter_map(|entry| {
+                    let value = String::from_utf16(entry).ok()?;
+                    let (name, value) = value.split_once('=')?;
+                    name.eq_ignore_ascii_case(key).then(|| value.to_owned())
+                })
+                .collect::<Vec<_>>()
+        };
+        for (selection, expected) in [
+            (AcceptanceTraceBudgetProfile::Standard, None),
+            (AcceptanceTraceBudgetProfile::All, Some("all_v1")),
+            (AcceptanceTraceBudgetProfile::GateC, Some("gate_c_v1")),
+            (AcceptanceTraceBudgetProfile::GateD, Some("gate_d_v1")),
+            (AcceptanceTraceBudgetProfile::GateS, Some("gate_s_v1")),
+        ] {
+            let block = super::acceptance_environment_block_from_entries(
+                profile.path(),
+                selection,
+                inherited.clone().into_iter(),
+            );
+            assert_eq!(
+                values(&block, super::TRACE_BUDGET_PROFILE_ENV),
+                expected.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            );
+            assert_eq!(values(&block, super::TRACE_ENV), ["1"]);
+            assert_eq!(
+                values(&block, "UNCHANGED_ACCEPTANCE_TEST_VALUE"),
+                ["retained"]
+            );
+            assert_eq!(block.last(), Some(&0));
+            assert_eq!(block[block.len() - 2], 0);
+        }
+    }
+
+    #[test]
     fn authoring_boundary_wait_requires_exact_ordered_mailbox_receipt() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("acceptance.log");
@@ -10166,6 +12544,54 @@ mod tests {
     }
 
     #[test]
+    fn combo_box_wait_never_fabricates_a_target_on_absence_or_ambiguity() {
+        use std::cell::Cell;
+        let downs = Cell::new(0);
+        let lookups = Cell::new(0);
+        for failure in [None, Some("multiple distinct controls")] {
+            let result = super::dispatch_pointer_down_after_preflight(
+                || {
+                    super::wait_uia_control_with::<[i32; 4]>(
+                        "owned named Menu after action ComboBox",
+                        Duration::ZERO,
+                        || {
+                            lookups.set(lookups.get() + 1);
+                            match failure {
+                                None => Ok(None),
+                                Some(message) => Err(VisibleTextLookupError::Other(message.into())),
+                            }
+                        },
+                    )?;
+                    Ok(())
+                },
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            );
+            let super::PointerClickPreDownError::Input(message) = result.unwrap_err() else {
+                panic!("an absent or ambiguous provider cannot admit button-down");
+            };
+            assert!(match failure {
+                None => message.contains("was not exposed"),
+                Some(expected) => message == expected,
+            });
+        }
+        assert_eq!(lookups.get(), 2);
+        assert_eq!(downs.get(), 0);
+        let measured = [626, 400, 684, 418];
+        assert_eq!(
+            super::wait_uia_control_with(
+                "owned named Menu after action ComboBox",
+                Duration::from_secs(1),
+                || Ok(Some(measured)),
+            )
+            .unwrap(),
+            measured
+        );
+    }
+
+    #[test]
     fn explanation_match_requires_owned_visible_full_query_text() {
         let expected = "No launcher result is currently available for \"fixture query\"";
         let matches = |name, pid, hidden, bounds| {
@@ -10184,6 +12610,59 @@ mod tests {
         assert!(!matches(expected, 8, false, [0, 0, 200, 30]));
         assert!(!matches(expected, 7, true, [0, 0, 200, 30]));
         assert!(!matches(expected, 7, false, [0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn client_button_lookup_excludes_caption_and_ineligible_controls() {
+        let client = [248, 211, 1148, 861];
+        let matches = |name, pid, offscreen, is_button, bounds| {
+            super::owned_visible_name_matches(name, "Close", pid, 202, offscreen, bounds)
+                && super::visible_button_in_client(is_button, bounds, client)
+        };
+        assert!(matches("Close", 202, false, true, [700, 320, 760, 340]));
+        assert!(!matches("Close", 202, false, true, [1102, 181, 1149, 211]));
+        assert!(!matches("Close", 203, false, true, [700, 320, 760, 340]));
+        assert!(!matches(
+            "Close note",
+            202,
+            false,
+            true,
+            [700, 320, 760, 340]
+        ));
+        assert!(!matches("Close", 202, true, true, [700, 320, 760, 340]));
+        assert!(!matches("Close", 202, false, false, [700, 320, 760, 340]));
+        assert!(!matches("Close", 202, false, true, [700, 320, 700, 340]));
+        assert!(!matches("Close", 202, false, true, [1130, 320, 1150, 340]));
+        assert!(!super::visible_button_in_client(true, [0, 0, 1, 1], [0; 4]));
+    }
+
+    #[test]
+    fn client_button_lookup_rejects_duplicates_without_changing_legacy_matching() {
+        let client = [248, 211, 1148, 861];
+        let caption = [1102, 181, 1149, 211];
+        let close = [700, 320, 760, 340];
+        let mut prior = None;
+        for bounds in [caption, close] {
+            if super::visible_button_in_client(true, bounds, client) {
+                assert!(!super::visible_button_match_is_ambiguous(
+                    prior, bounds, true
+                ));
+                prior = Some(bounds);
+            }
+        }
+        assert_eq!(prior, Some(close));
+        assert!(super::visible_button_match_is_ambiguous(prior, close, true));
+        assert!(super::visible_button_match_is_ambiguous(
+            prior,
+            [770, 320, 830, 340],
+            true
+        ));
+        assert!(!super::visible_button_match_is_ambiguous(
+            prior, close, false
+        ));
+        assert!(super::visible_button_match_is_ambiguous(
+            prior, caption, false
+        ));
     }
 
     #[test]
@@ -11821,6 +14300,385 @@ mod tests {
         assert!(radial_pointer_release_ack_after(&lines, 9, 42, 7).is_none());
     }
 
+    fn radial_point_fixture() -> (super::WindowSnapshot, super::WindowSnapshot, POINT, u32) {
+        let input = super::WindowSnapshot {
+            hwnd: super::HWND(64752042usize as *mut _),
+            process_id: 3812,
+            role: super::WindowRole::OtherChild,
+            class_name: super::RADIAL_HOST_WINDOW_CLASS.into(),
+            visible: true,
+            minimized: false,
+            bounds: [95, 95, 420, 420],
+        };
+        let designer = super::WindowSnapshot {
+            hwnd: super::HWND(285477068usize as *mut _),
+            process_id: 3812,
+            role: super::WindowRole::Designer,
+            class_name: "eframe".into(),
+            visible: true,
+            minimized: false,
+            bounds: [104, 104, 1020, 793],
+        };
+        (
+            input,
+            designer,
+            POINT { x: 257, y: 257 },
+            super::WS_EX_LAYERED.0 | super::WS_EX_TOOLWINDOW.0,
+        )
+    }
+
+    #[test]
+    fn designer_stop_relocation_plans_with_measured_preview_and_monitor_bounds() {
+        let designer = [26, 26, 942, 715];
+        let preview = [[0, 0, 515, 515], [0, 0, 515, 515]];
+        assert_eq!(
+            super::designer_clear_position(designer, &preview, &[[0, 0, 2560, 1440]]).unwrap(),
+            [1644, 0]
+        );
+        assert_eq!(
+            super::designer_clear_position([1644, 0, 2560, 689], &preview, &[[0, 0, 2560, 1440]])
+                .unwrap(),
+            [1644, 0]
+        );
+        assert_eq!(
+            super::designer_clear_position(
+                designer,
+                &[[-2560, 0, -2045, 515]],
+                &[[-2560, 0, 0, 1440]]
+            )
+            .unwrap(),
+            [-916, 0]
+        );
+        assert!(super::designer_clear_position(designer, &preview, &[[0, 0, 942, 715]]).is_err());
+        assert!(super::designer_clear_position(designer, &preview, &[[0, 0, 800, 600]]).is_err());
+        assert!(super::designer_clear_position(designer, &[], &[[0, 0, 2560, 1440]]).is_err());
+        assert!(
+            super::designer_clear_position(designer, &[[0, 0, 0, 515]], &[[0, 0, 2560, 1440]])
+                .is_err()
+        );
+        assert!(
+            super::designer_clear_position(
+                [i32::MIN, 0, i32::MAX, 689],
+                &preview,
+                &[[0, 0, 2560, 1440]]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn owned_designer_move_preserves_dimensions_and_rejects_stale_or_other_roles() {
+        let (_, mut original, _, _) = radial_point_fixture();
+        original.bounds = [26, 26, 942, 715];
+        let displays = [[0, 0, 2560, 1440]];
+        assert_eq!(
+            super::owned_designer_move_bounds(
+                &original,
+                &original,
+                original.process_id,
+                [1644, 0],
+                &displays
+            )
+            .unwrap(),
+            [1644, 0, 2560, 689]
+        );
+        assert_eq!(
+            super::owned_designer_move_bounds(
+                &original,
+                &original,
+                original.process_id,
+                [26, 26],
+                &displays
+            )
+            .unwrap(),
+            original.bounds
+        );
+        for invalid in 0..8 {
+            let mut current = original.clone();
+            match invalid {
+                0 => current.hwnd = super::HWND(99usize as *mut _),
+                1 => current.process_id += 1,
+                2 => current.role = super::WindowRole::Root,
+                3 => current.class_name = "unrelated".into(),
+                4 => current.bounds[0] += 1,
+                5 => current.visible = false,
+                6 => current.minimized = true,
+                _ => current.bounds[2] += 1,
+            }
+            assert!(
+                super::owned_designer_move_bounds(
+                    &original,
+                    &current,
+                    original.process_id,
+                    [1644, 0],
+                    &displays
+                )
+                .is_err(),
+                "invalid owner {invalid}"
+            );
+        }
+        let mut root = original.clone();
+        root.role = super::WindowRole::Root;
+        assert!(
+            super::owned_designer_move_bounds(&root, &root, root.process_id, [1644, 0], &displays)
+                .is_err()
+        );
+        assert!(
+            super::owned_designer_move_bounds(
+                &original,
+                &original,
+                original.process_id,
+                [1645, 0],
+                &displays
+            )
+            .is_err()
+        );
+        assert!(
+            super::owned_designer_move_bounds(
+                &original,
+                &original,
+                original.process_id,
+                [i32::MAX, 0],
+                &displays
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn radial_input_surface_selection_uses_input_style_not_first_visual_or_same_pid() {
+        let (input, designer, point, style) = radial_point_fixture();
+        let mut visual = input.clone();
+        visual.hwnd = super::HWND(183044226usize as *mut _);
+        let windows = vec![visual.clone(), designer, input.clone()];
+        let chosen =
+            super::radial_input_surface_at_with(&windows, input.process_id, point, |hwnd| {
+                if hwnd == visual.hwnd {
+                    style | super::WS_EX_TRANSPARENT.0
+                } else {
+                    style
+                }
+            })
+            .unwrap();
+        assert_eq!(chosen.hwnd, input.hwnd);
+        let mut duplicate = input.clone();
+        duplicate.hwnd = super::HWND(99usize as *mut _);
+        assert!(
+            super::radial_input_surface_at_with(
+                &[input.clone(), duplicate],
+                input.process_id,
+                point,
+                |_| style
+            )
+            .is_err()
+        );
+        for invalid in 0..5 {
+            let mut wrong = input.clone();
+            match invalid {
+                0 => wrong.process_id += 1,
+                1 => wrong.class_name = "other".into(),
+                2 => wrong.role = super::WindowRole::Designer,
+                3 => wrong.visible = false,
+                _ => wrong.bounds = [0, 0, 100, 100],
+            }
+            assert!(
+                super::radial_input_surface_at_with(&[wrong], input.process_id, point, |_| style)
+                    .is_err()
+            );
+        }
+        assert!(
+            super::radial_input_surface_at_with(&[visual], input.process_id, point, |_| style
+                | super::WS_EX_TRANSPARENT.0)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn radial_point_readiness_waits_for_owned_designer_coverage_then_clicks_once() {
+        let (input, designer, point, style) = radial_point_fixture();
+        let mut samples = 0;
+        let mut waits = 0;
+        let mut edges = Vec::new();
+        let result = super::with_ready_radial_point(
+            super::Instant::now() + Duration::from_secs(2),
+            || {
+                samples += 1;
+                let mut current = input.clone();
+                current.visible = samples != 2;
+                let hit = if samples < 3 {
+                    (designer.hwnd, designer.process_id)
+                } else {
+                    (input.hwnd, input.process_id)
+                };
+                super::radial_point_readiness(
+                    &input,
+                    &current,
+                    style,
+                    point,
+                    point,
+                    hit,
+                    Some(&designer),
+                )
+            },
+            |_| waits += 1,
+            || {
+                edges.extend(["down", "up"]);
+                Ok(12_u64)
+            },
+        )
+        .unwrap();
+        assert_eq!(result, 12);
+        assert_eq!(samples, 3);
+        assert_eq!(waits, 2);
+        assert_eq!(edges, ["down", "up"]);
+    }
+
+    #[test]
+    fn radial_point_readiness_timeout_reports_actual_coverage_without_input() {
+        let (input, designer, point, style) = radial_point_fixture();
+        let mut edges = 0;
+        let error = super::with_ready_radial_point(
+            super::Instant::now() + Duration::from_millis(2),
+            || {
+                super::radial_point_readiness(
+                    &input,
+                    &input,
+                    style,
+                    point,
+                    point,
+                    (designer.hwnd, designer.process_id),
+                    Some(&designer),
+                )
+            },
+            std::thread::sleep,
+            || {
+                edges += 2;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("presentation deadline"));
+        assert!(error.contains("285477068") && error.contains("3812"));
+        assert_eq!(edges, 0);
+    }
+
+    #[test]
+    fn radial_point_readiness_rejects_foreign_same_pid_and_stale_input_without_click() {
+        let (input, designer, point, style) = radial_point_fixture();
+        for invalid in 0..11 {
+            let mut current = input.clone();
+            let mut cursor = point;
+            let mut hit = (input.hwnd, input.process_id);
+            let mut observed_style = style;
+            match invalid {
+                0 => hit = (super::HWND(44usize as *mut _), 99),
+                1 => hit = (super::HWND(44usize as *mut _), input.process_id),
+                2 => current.hwnd = super::HWND(99usize as *mut _),
+                3 => current.process_id += 1,
+                4 => current.bounds[0] += 1,
+                5 => current.class_name = "other".into(),
+                6 => current.minimized = true,
+                7 => observed_style |= super::WS_EX_TRANSPARENT.0,
+                8 => cursor.x += 1,
+                9 => current.visible = false,
+                _ => current.role = super::WindowRole::Designer,
+            }
+            let mut edges = 0;
+            let error = super::with_ready_radial_point(
+                super::Instant::now() + Duration::from_secs(2),
+                || {
+                    super::radial_point_readiness(
+                        &input,
+                        &current,
+                        observed_style,
+                        point,
+                        cursor,
+                        hit,
+                        Some(&designer),
+                    )
+                },
+                |_| panic!("contradictory owner must not be retried"),
+                || {
+                    edges += 2;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert!(!error.contains("deadline"), "{invalid}: {error}");
+            assert_eq!(edges, 0, "{invalid}");
+        }
+        let mut wrong_designer = designer.clone();
+        wrong_designer.process_id += 1;
+        assert!(
+            super::radial_point_readiness(
+                &input,
+                &input,
+                style,
+                point,
+                point,
+                (designer.hwnd, designer.process_id),
+                Some(&wrong_designer)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn radial_point_readiness_current_target_rejection_and_click_failure_never_retry_input() {
+        let (input, designer, point, style) = radial_point_fixture();
+        let mut edges = 0;
+        let mut samples = 0;
+        let error = super::with_ready_radial_point(
+            super::Instant::now() + Duration::from_secs(2),
+            || {
+                samples += 1;
+                if samples == 2 {
+                    return Err("prepared generation changed from 12 to 13".into());
+                }
+                super::radial_point_readiness(
+                    &input,
+                    &input,
+                    style,
+                    point,
+                    point,
+                    (designer.hwnd, designer.process_id),
+                    Some(&designer),
+                )
+            },
+            |_| {},
+            || {
+                edges += 2;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("generation changed"));
+        assert_eq!(samples, 2);
+        assert_eq!(edges, 0);
+        let error = super::with_ready_radial_point(
+            super::Instant::now() + Duration::from_secs(2),
+            || {
+                super::radial_point_readiness(
+                    &input,
+                    &input,
+                    style,
+                    point,
+                    point,
+                    (input.hwnd, input.process_id),
+                    Some(&designer),
+                )
+            },
+            |_| panic!("ready input must not wait or retry"),
+            || {
+                edges += 1;
+                Err::<(), _>("down insertion failed".into())
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("down insertion failed"));
+        assert_eq!(edges, 1);
+    }
+
     #[test]
     fn radial_release_ack_does_not_require_surface_to_survive_release() {
         let ack = RadialPointerReleaseAck {
@@ -11883,6 +14741,244 @@ mod tests {
         assert!(semantic_client_center([80, 10, 120, 30], [0, 0, 100, 80]).is_err());
         assert!(semantic_client_center([10, 20, 10, 30], [0, 0, 100, 80]).is_err());
         assert!(semantic_client_center([i32::MIN, 0, i32::MAX, 20], [0, 0, 100, 80]).is_err());
+    }
+
+    #[test]
+    fn designer_pointer_mismatch_measures_native_origin_before_any_button_down() {
+        use std::cell::Cell;
+        let client = [0, 0, 900, 650];
+        let prepared = (client, [104, 104, 1004, 754]);
+        let measured = super::DesignerPointerMeasurement {
+            cursor_screen: (371, 202),
+            cursor_client: (241, 72),
+            client,
+            client_screen: [130, 130, 1030, 780],
+        };
+        let downs = Cell::new(0);
+        let result = super::dispatch_pointer_down_after_preflight(
+            || {
+                super::wait_for_pointer_move_ack_measured_with(
+                    "Designer",
+                    "Designer client point",
+                    (267, 98),
+                    Duration::from_secs(1),
+                    || super::check_designer_pointer_measurement(prepared, measured).map(Some),
+                    || Ok(Some((293, 124))),
+                    || panic!("drift is rejected before GUI equality"),
+                    |_, _| panic!("26 pixels is never compensated"),
+                    |_| {},
+                )?;
+                Ok(())
+            },
+            || {
+                downs.set(downs.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(downs.get(), 0);
+        let super::PointerClickPreDownError::StaleGeometry(message) = result.unwrap_err() else {
+            panic!("an actually measured origin change is stale geometry");
+        };
+        for fact in [
+            "prepared_client_screen=[104, 104, 1004, 754]",
+            "current_client_screen=[130, 130, 1030, 780]",
+            "physical_cursor=(371, 202)",
+            "ScreenToClient=(241, 72)",
+        ] {
+            assert!(message.contains(fact), "{message}");
+        }
+    }
+
+    #[test]
+    fn designer_pointer_unchanged_native_tuple_never_excuses_a_far_gui_receipt() {
+        use std::cell::Cell;
+        let geometry = ([0, 0, 900, 650], [164, 187, 1064, 837]);
+        let measurement = super::DesignerPointerMeasurement {
+            cursor_screen: (431, 285),
+            cursor_client: (267, 98),
+            client: geometry.0,
+            client_screen: geometry.1,
+        };
+        let samples = Cell::new(0);
+        let downs = Cell::new(0);
+        let error = super::dispatch_pointer_down_after_preflight(
+            || {
+                super::wait_for_pointer_move_ack_measured_with(
+                    "Designer",
+                    "Designer client point",
+                    (267, 98),
+                    Duration::from_millis(5),
+                    || {
+                        samples.set(samples.get() + 1);
+                        super::check_designer_pointer_measurement(geometry, measurement).map(Some)
+                    },
+                    || Ok(Some((293, 124))),
+                    || panic!("no exact GUI receipt"),
+                    |_, _| panic!("far disagreement has no correction"),
+                    std::thread::sleep,
+                )?;
+                Ok(())
+            },
+            || {
+                downs.set(downs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, super::PointerClickPreDownError::Input(_)));
+        let message = error.into_message();
+        assert!(message.contains("last observed=Some((293, 124))"));
+        assert!(message.contains("ScreenToClient=(267, 98)"));
+        assert!(samples.get() > 0);
+        assert_eq!(downs.get(), 0);
+    }
+
+    #[test]
+    fn designer_client_click_converts_after_focus_and_keeps_exact_ack_points() {
+        use std::cell::Cell;
+        let client = [0, 0, 900, 650];
+        let screen = Cell::new([78, 78, 978, 728]);
+        let phases = std::cell::RefCell::new(Vec::new());
+        let (_, _, stale_point, _) =
+            super::designer_click_points([244, 89, 289, 107], client, screen.get()).unwrap();
+        let (point, nudge, screen_point, screen_nudge) = super::prepare_pointer_after_focus(
+            || {
+                phases.borrow_mut().push("focus");
+                screen.set([104, 104, 1004, 754]);
+                Ok(())
+            },
+            || {
+                phases.borrow_mut().push("measure/convert");
+                super::designer_click_points([244, 89, 289, 107], client, screen.get())
+            },
+        )
+        .unwrap();
+        assert_eq!(*phases.borrow(), ["focus", "measure/convert"]);
+        assert_eq!((point.x, point.y), (266, 98));
+        assert_eq!((nudge.x, nudge.y), (267, 98));
+        assert_eq!((screen_point.x, screen_point.y), (370, 202));
+        assert_eq!((screen_nudge.x, screen_nudge.y), (371, 202));
+        assert_eq!(
+            (
+                screen_point.x - stale_point.x,
+                screen_point.y - stale_point.y
+            ),
+            (26, 26)
+        );
+        assert_eq!(
+            (
+                screen_point.x - screen.get()[0],
+                screen_point.y - screen.get()[1]
+            ),
+            (266, 98)
+        );
+        assert_eq!(
+            (
+                screen_nudge.x - screen.get()[0],
+                screen_nudge.y - screen.get()[1]
+            ),
+            (267, 98)
+        );
+        let downs = Cell::new(0);
+        let ups = Cell::new(0);
+        super::dispatch_pointer_down_after_preflight(
+            || {
+                super::validate_designer_click_geometry(
+                    Some((client, screen.get())),
+                    client,
+                    screen.get(),
+                )
+            },
+            || {
+                downs.set(downs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        ups.set(ups.get() + 1);
+        assert_eq!((downs.get(), ups.get()), (1, 1));
+    }
+
+    #[test]
+    fn designer_client_click_rejects_post_focus_drift_and_failed_or_unowned_preparation() {
+        use std::cell::Cell;
+        let client = [0, 0, 900, 650];
+        let expected_screen = [104, 104, 1004, 754];
+        let downs = Cell::new(0);
+        for (current_client, current_screen) in [
+            (client, [130, 130, 1030, 780]),
+            ([0, 0, 901, 650], [104, 104, 1005, 754]),
+            ([0, 0, 900, 651], [104, 104, 1004, 755]),
+        ] {
+            let result = super::dispatch_pointer_down_after_preflight(
+                || {
+                    super::validate_designer_click_geometry(
+                        Some((client, expected_screen)),
+                        current_client,
+                        current_screen,
+                    )
+                },
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(super::PointerClickPreDownError::StaleGeometry(_))
+            ));
+        }
+        assert_eq!(downs.get(), 0);
+        let measured = Cell::new(false);
+        let error = super::prepare_pointer_after_focus(
+            || Err("focus owner was unavailable".to_owned()),
+            || {
+                measured.set(true);
+                super::designer_click_points([244, 89, 289, 107], client, expected_screen)
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("focus owner"));
+        assert!(!measured.get());
+        let (_, expected, _, _) = radial_point_fixture();
+        assert!(super::same_owned_designer(
+            &expected,
+            &expected,
+            expected.process_id
+        ));
+        let corruptions: &[fn(&mut super::WindowSnapshot)] = &[
+            |window| window.hwnd = super::HWND(99usize as *mut _),
+            |window| window.process_id += 1,
+            |window| window.role = super::WindowRole::Root,
+            |window| window.class_name = "other".into(),
+            |window| window.visible = false,
+            |window| window.minimized = true,
+        ];
+        for corrupt in corruptions {
+            let mut current = expected.clone();
+            corrupt(&mut current);
+            let result = super::dispatch_pointer_down_after_preflight(
+                || {
+                    if super::same_owned_designer(&expected, &current, expected.process_id) {
+                        Ok(())
+                    } else {
+                        Err(super::PointerClickPreDownError::Input(
+                            "Designer owner changed".into(),
+                        ))
+                    }
+                },
+                || {
+                    downs.set(downs.get() + 1);
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+        }
+        assert_eq!(downs.get(), 0);
+        assert!(
+            super::designer_click_points([244, 89, 289, 107], client, [104, 104, 1005, 754])
+                .is_err()
+        );
     }
 
     #[test]

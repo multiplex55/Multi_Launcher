@@ -25,13 +25,30 @@ pub(crate) enum UniversalActionExecution {
 }
 
 impl LauncherApp {
-    pub(super) fn poll_radial_query_observation(&mut self, ctx: &eframe::egui::Context) {
+    pub(super) fn poll_radial_query_observation(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        note_close_snapshot: Option<Option<super::query_observation::NoteCloseSnapshot>>,
+    ) {
         if !self.radial_query_observation.enabled() {
             return;
         }
         self.radial_query_observation.advance_frame();
         let query_requested = self.radial_query_observation.has_request();
         let authoring_requested = self.radial_query_observation.has_authoring_request();
+        if let Some(snapshot) = note_close_snapshot {
+            let (hwnd, generation) = self.root_window_bridge.identity();
+            let identity = (hwnd != 0 && generation != 0).then_some(
+                super::query_observation::NoteCloseRootIdentity {
+                    hwnd: hwnd as u64,
+                    process_id: std::process::id(),
+                    generation,
+                },
+            );
+            let _ = self
+                .radial_query_observation
+                .poll_note_close(identity, snapshot);
+        }
         if !query_requested && !authoring_requested {
             ctx.request_repaint_after(std::time::Duration::from_millis(25));
             return;
@@ -692,6 +709,7 @@ pub(super) struct RadialRootState {
     focus_query: bool,
     move_cursor_end: bool,
     last_results_valid: bool,
+    last_search_provider_deferral: super::search::ProviderSearchDeferral,
     last_search_query: String,
     suggestions: Vec<String>,
     autocomplete_index: usize,
@@ -718,6 +736,7 @@ impl RadialRootState {
             focus_query: app.focus_query,
             move_cursor_end: app.move_cursor_end,
             last_results_valid: app.last_results_valid,
+            last_search_provider_deferral: app.last_search_provider_deferral,
             last_search_query: app.last_search_query.clone(),
             suggestions: app.suggestions.clone(),
             autocomplete_index: app.autocomplete_index,
@@ -794,6 +813,7 @@ impl RadialRootState {
         app.focus_query = self.focus_query;
         app.move_cursor_end = self.move_cursor_end;
         app.last_results_valid = self.last_results_valid;
+        app.last_search_provider_deferral = self.last_search_provider_deferral;
         app.last_search_query = self.last_search_query;
         app.suggestions = self.suggestions;
         app.autocomplete_index = self.autocomplete_index;
@@ -1354,6 +1374,10 @@ mod tests {
         assert!(app.focus_query);
         assert!(app.move_cursor_end);
         assert!(app.last_results_valid);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            super::super::search::ProviderSearchDeferral::None
+        );
         assert_eq!(app.last_search_query, "last search");
         assert_eq!(app.suggestions, ["one", "two"]);
         assert_eq!(app.autocomplete_index, 1);

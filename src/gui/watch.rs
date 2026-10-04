@@ -67,7 +67,11 @@ impl LauncherApp {
                     self.fail_authoring_provider_search_from_provider(request, reason)
                 }
                 WatchEvent::AuthoringProviderCapacityAvailable => {
-                    self.start_next_authoring_provider_search()
+                    if !self.radial_provider_search_capacity.is_occupied() {
+                        self.retire_capacity_deferred_authoring_catalog();
+                        self.resume_capacity_deferred_search();
+                    }
+                    self.start_next_authoring_provider_search();
                 }
                 WatchEvent::RadialInvalidate => {
                     if let Ok(mut editor) = self.radial_editor.lock() {
@@ -314,11 +318,11 @@ impl LauncherApp {
                     }
                     self.screen_draw_controller.reconcile_recovery_publication();
                 }
-                WatchEvent::ScreenDrawRecover => {
-                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+                WatchEvent::ScreenDrawRecover(intent) => {
+                    self.recover_screen_draw(intent);
                 }
-                WatchEvent::ScreenDrawEmergency => {
-                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::Emergency);
+                WatchEvent::ScreenDrawEmergency(intent) => {
+                    self.recover_screen_draw(intent);
                 }
                 WatchEvent::ClipboardModify(ev) => {
                     self.handle_clipboard_modify_gui_event(ev);
@@ -1053,13 +1057,24 @@ mod tests {
             )),
             TestWatchEvent::Actions
         );
+        let bridge = crate::screen_draw::ScreenDrawRecoveryBridge::default();
+        bridge.stage_start();
+        let recover = bridge
+            .admit(
+                crate::screen_draw::ScreenDrawRecoveryKind::LauncherToggle,
+                None,
+            )
+            .unwrap();
+        let emergency = bridge
+            .admit(crate::screen_draw::ScreenDrawRecoveryKind::Emergency, None)
+            .unwrap();
         assert_eq!(
-            TestWatchEvent::from(WatchEvent::ScreenDrawRecover),
-            TestWatchEvent::ScreenDrawRecover
+            TestWatchEvent::from(WatchEvent::ScreenDrawRecover(recover)),
+            TestWatchEvent::ScreenDrawRecover(recover)
         );
         assert_eq!(
-            TestWatchEvent::from(WatchEvent::ScreenDrawEmergency),
-            TestWatchEvent::ScreenDrawEmergency
+            TestWatchEvent::from(WatchEvent::ScreenDrawEmergency(emergency)),
+            TestWatchEvent::ScreenDrawEmergency(emergency)
         );
 
         let (tx, rx) = channel();

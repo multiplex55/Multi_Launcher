@@ -354,9 +354,21 @@ impl ScreenDrawController {
     }
 
     fn set_state(&mut self, state: ScreenDrawState) {
-        self.recovery_bridge
-            .set_active(Self::state_is_active(&state));
+        if Self::state_is_active(&state)
+            && Self::state_is_active(&self.state)
+            && self.state.generation().is_some()
+            && self.state.generation() != state.generation()
+        {
+            self.recovery_bridge.replace_active_session();
+        } else {
+            self.recovery_bridge
+                .set_active(Self::state_is_active(&state));
+        }
         self.state = state;
+    }
+
+    pub(crate) fn begin_launcher_repark(&self) -> Result<(), String> {
+        self.recovery_bridge.advance_active_lifetime()
     }
 
     /// Re-publishes controller-owned lifecycle state after an external trigger

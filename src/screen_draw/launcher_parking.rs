@@ -95,6 +95,7 @@ pub(crate) struct LauncherParkingTransaction {
     parked_rect: LauncherWindowRect,
     virtual_desktop: ScreenRect,
     state: LauncherParkingState,
+    cycle: u64,
     window_api: Arc<dyn LauncherWindowApi>,
 }
 
@@ -148,6 +149,7 @@ impl LauncherParkingTransaction {
             parked_rect,
             virtual_desktop,
             state: LauncherParkingState::Active,
+            cycle: 1,
             window_api,
         })
     }
@@ -166,6 +168,18 @@ impl LauncherParkingTransaction {
 
     pub(crate) const fn state(&self) -> LauncherParkingState {
         self.state
+    }
+
+    pub(crate) const fn cycle(&self) -> u64 {
+        self.cycle
+    }
+
+    fn advance_cycle(&mut self) -> Result<(), String> {
+        self.cycle = self
+            .cycle
+            .checked_add(1)
+            .ok_or_else(|| "Screen Draw parking cycle identity exhausted".to_string())?;
+        Ok(())
     }
 
     /// A committed transaction deliberately leaves the launcher parked when
@@ -197,7 +211,10 @@ impl LauncherParkingTransaction {
     /// visibility request wins while any native activation/restore is in
     /// flight. The native effect may have moved the window even if this
     /// transaction had not begun its own exact restore yet.
-    pub(crate) fn repark_after_stale_restore(&mut self) -> Result<(), String> {
+    pub(crate) fn repark_after_stale_restore(
+        &mut self,
+        before_repark: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         let must_repark = self.state == LauncherParkingState::Restored
             || !self
                 .window_api
@@ -205,6 +222,11 @@ impl LauncherParkingTransaction {
         if !must_repark {
             return Ok(());
         }
+        // The controller retires undelivered recovery admissions before this
+        // fresh native attempt, including a failed park and its fallback.
+        // An already safe no-op keeps the current operation lifetime.
+        before_repark()?;
+        self.advance_cycle()?;
         let previous_state = self.state;
         self.window_api.park(
             self.original_snapshot.hwnd,
@@ -222,6 +244,8 @@ impl LauncherParkingTransaction {
     /// had to queue an ordinary offscreen fallback after a failed native park.
     pub(crate) fn retain_restore_point_after_fallback_park(&mut self) {
         if self.state == LauncherParkingState::Restored {
+            // The fallible repark already advanced this cycle before the
+            // fallback. Retain that new restore point without another token.
             self.state = LauncherParkingState::Active;
         }
     }
@@ -235,6 +259,7 @@ impl LauncherParkingTransaction {
     ) -> Result<(), String> {
         let snapshot = self.window_api.snapshot(self.original_snapshot.hwnd)?;
         let (width, height) = snapshot.rect.dimensions()?;
+        self.advance_cycle()?;
         // Publish the fresh restore point before any fallible parking work so
         // recovery can never fall back to geometry captured before the user
         // moved or resized the restored launcher.
@@ -780,7 +805,7 @@ mod tests {
         observer.set_current_rect(original);
         assert!(!transaction.verify().unwrap());
 
-        transaction.repark_after_stale_restore().unwrap();
+        transaction.repark_after_stale_restore(|| Ok(())).unwrap();
 
         assert_eq!(
             observer.current_rect(),
@@ -804,7 +829,7 @@ mod tests {
         transaction.restore().unwrap();
         observer.fail_next_park();
 
-        assert!(transaction.repark_after_stale_restore().is_err());
+        assert!(transaction.repark_after_stale_restore(|| Ok(())).is_err());
         transaction.retain_restore_point_after_fallback_park();
         assert_eq!(transaction.state(), LauncherParkingState::Active);
         transaction.restore().unwrap();
@@ -860,9 +885,11 @@ mod tests {
             api.clone(),
         )
         .unwrap();
+        let cycle = transaction.cycle();
         transaction.restore().unwrap();
         transaction.restore().unwrap();
         assert_eq!(api.restores.lock().unwrap().len(), 1);
+        assert_eq!(transaction.cycle(), cycle);
     }
 
     #[test]
@@ -875,6 +902,7 @@ mod tests {
             api.clone(),
         )
         .unwrap();
+        let cycle = transaction.cycle();
         transaction.restore().unwrap();
         *api.snapshot.lock().unwrap() = Some(LauncherWindowSnapshot {
             hwnd: 42,
@@ -885,6 +913,7 @@ mod tests {
             .unwrap();
         transaction.restore().unwrap();
 
+        assert_eq!(transaction.cycle(), cycle + 1);
         let restores = api.restores.lock().unwrap();
         assert_eq!(restores.len(), 2);
         assert_eq!(restores[1].rect, rect(500, 600, 400, 250));

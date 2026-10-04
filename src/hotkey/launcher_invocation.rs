@@ -89,7 +89,7 @@ pub struct KeyEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PriorityOwner {
     Launcher,
-    ScreenDrawRecovery,
+    ScreenDrawRecovery(crate::screen_draw::ScreenDrawRecoveryLifetime),
     ExclusiveTool,
 }
 
@@ -137,14 +137,14 @@ pub struct InvocationConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdapterOutcome {
     pub consume: bool,
-    pub recovery: bool,
+    pub recovery: Option<crate::screen_draw::ScreenDrawRecoveryAdmission>,
     pub intents: Vec<InvocationIntent>,
 }
 impl AdapterOutcome {
     fn pass() -> Self {
         Self {
             consume: false,
-            recovery: false,
+            recovery: None,
             intents: vec![],
         }
     }
@@ -288,6 +288,7 @@ pub struct LauncherInvocationAdapter {
     reducer: InvocationReducer,
     modifiers: Modifiers,
     next_id: u64,
+    next_recovery_serial: u64,
     owned: Option<InvocationId>,
     owned_primary: Option<u32>,
     owned_provenance: Option<InputProvenance>,
@@ -320,6 +321,7 @@ impl LauncherInvocationAdapter {
             reducer: InvocationReducer::default(),
             modifiers: Modifiers::default(),
             next_id: 1,
+            next_recovery_serial: 1,
             owned: None,
             owned_primary: None,
             owned_provenance: None,
@@ -457,7 +459,7 @@ impl LauncherInvocationAdapter {
             }
             return AdapterOutcome {
                 consume: ownership.down_suppressed,
-                recovery: false,
+                recovery: None,
                 intents: Vec::new(),
             };
         }
@@ -500,7 +502,7 @@ impl LauncherInvocationAdapter {
                     .reduce(InvocationEvent::ModifierChanged { id, at: event.at });
                 return AdapterOutcome {
                     consume: false,
-                    recovery: false,
+                    recovery: None,
                     intents,
                 };
             }
@@ -536,7 +538,19 @@ impl LauncherInvocationAdapter {
         owner: PriorityOwner,
         primary_down_suppressed: bool,
     ) -> AdapterOutcome {
-        if owner == PriorityOwner::ScreenDrawRecovery {
+        // A recovery owns the entire primary cycle, including modifier changes.
+        // Modifier bookkeeping still runs in `process`, but it cannot replace
+        // the admission or start a launcher deadline before the matching Up.
+        if self.recovery_primary.is_some() {
+            return AdapterOutcome::pass();
+        }
+        if let PriorityOwner::ScreenDrawRecovery(lifetime) = owner {
+            let Some(admission) = self.admit_screen_draw_recovery(
+                crate::screen_draw::ScreenDrawRecoveryKind::LauncherToggle,
+                lifetime,
+            ) else {
+                return AdapterOutcome::pass();
+            };
             self.recovery_primary = Some(RecoveryOwnership {
                 primary,
                 provenance,
@@ -544,7 +558,7 @@ impl LauncherInvocationAdapter {
             });
             return AdapterOutcome {
                 consume: primary_down_suppressed,
-                recovery: true,
+                recovery: Some(admission),
                 intents: vec![],
             };
         }
@@ -559,7 +573,7 @@ impl LauncherInvocationAdapter {
         self.owned_primary_down_suppressed = primary_down_suppressed;
         AdapterOutcome {
             consume: true,
-            recovery: false,
+            recovery: None,
             intents: self.reducer.reduce_with_provenance(
                 InvocationEvent::ChordPressed {
                     id,
@@ -574,6 +588,38 @@ impl LauncherInvocationAdapter {
                 },
                 provenance,
             ),
+        }
+    }
+
+    fn admit_screen_draw_recovery(
+        &mut self,
+        kind: crate::screen_draw::ScreenDrawRecoveryKind,
+        lifetime: crate::screen_draw::ScreenDrawRecoveryLifetime,
+    ) -> Option<crate::screen_draw::ScreenDrawRecoveryAdmission> {
+        let next = self.next_recovery_serial.checked_add(1)?;
+        let admission = crate::screen_draw::ScreenDrawRecoveryAdmission {
+            serial: self.next_recovery_serial,
+            lifetime,
+            kind,
+        };
+        self.next_recovery_serial = next;
+        Some(admission)
+    }
+
+    fn admit_related_screen_draw_emergency(
+        &mut self,
+        action: &RelatedAction,
+        owner: PriorityOwner,
+    ) -> Option<crate::screen_draw::ScreenDrawRecoveryAdmission> {
+        if matches!(action, RelatedAction::ScreenDrawEmergency)
+            && let PriorityOwner::ScreenDrawRecovery(lifetime) = owner
+        {
+            self.admit_screen_draw_recovery(
+                crate::screen_draw::ScreenDrawRecoveryKind::Emergency,
+                lifetime,
+            )
+        } else {
+            None
         }
     }
 
@@ -605,13 +651,13 @@ impl LauncherInvocationAdapter {
             }
             return AdapterOutcome {
                 consume,
-                recovery: false,
+                recovery: None,
                 intents,
             };
         }
         AdapterOutcome {
             consume: true,
-            recovery: false,
+            recovery: None,
             intents: self.reducer.reduce_with_provenance(
                 InvocationEvent::ChordPressed {
                     id,
@@ -903,7 +949,7 @@ impl EscapeOwnership {
             }
             return Some(AdapterOutcome {
                 consume: true,
-                recovery: false,
+                recovery: None,
                 intents: Vec::new(),
             });
         }
@@ -932,7 +978,7 @@ impl EscapeOwnership {
         };
         Some(AdapterOutcome {
             consume: true,
-            recovery: false,
+            recovery: None,
             intents,
         })
     }
@@ -989,11 +1035,36 @@ fn route_escape_event(
 
 #[derive(Clone, Debug)]
 pub struct ServiceNotice {
-    pub recovery: bool,
+    pub recovery: Option<crate::screen_draw::ScreenDrawRecoveryAdmission>,
     pub intents: Vec<InvocationIntent>,
     pub error: Option<String>,
     pub action: Option<RelatedAction>,
     pub cancellation: Option<LifecycleCancellation>,
+}
+
+impl ServiceNotice {
+    /// Main consumes this admission once; its hook-captured lifetime is never
+    /// replaced by the session currently active when the notice is dequeued.
+    pub fn take_screen_draw_recovery(
+        &mut self,
+        bridge: &crate::screen_draw::ScreenDrawRecoveryBridge,
+    ) -> Option<crate::screen_draw::ScreenDrawRecoveryIntent> {
+        self.recovery
+            .take()
+            .and_then(|admission| bridge.admit(admission.kind, Some(admission)))
+    }
+}
+
+impl From<AdapterOutcome> for ServiceNotice {
+    fn from(outcome: AdapterOutcome) -> Self {
+        Self {
+            recovery: outcome.recovery,
+            intents: outcome.intents,
+            error: None,
+            action: None,
+            cancellation: None,
+        }
+    }
 }
 
 /// Completion of an input-route transition. Success is published only after
@@ -1539,7 +1610,7 @@ mod native_service {
         let Some(state) = guard.as_mut() else { return };
         let intents = cancel_lifecycle(state, reason);
         let _ = state.notices.send(ServiceNotice {
-            recovery: false,
+            recovery: None,
             intents,
             error: None,
             action: None,
@@ -1549,14 +1620,8 @@ mod native_service {
         let _ = state.wake.send(());
     }
     fn publish(state: &State, out: AdapterOutcome) {
-        if out.recovery || !out.intents.is_empty() {
-            let _ = state.notices.send(ServiceNotice {
-                recovery: out.recovery,
-                intents: out.intents,
-                error: None,
-                action: None,
-                cancellation: None,
-            });
+        if out.recovery.is_some() || !out.intents.is_empty() {
+            let _ = state.notices.send(out.into());
             let _ = state.wake.send(());
         }
     }
@@ -1689,7 +1754,7 @@ mod native_service {
                         .expect("matched direct ownership")
                         .id;
                     let _ = state.notices.send(ServiceNotice {
-                        recovery: false,
+                        recovery: None,
                         intents: vec![InvocationIntent::TriggerReleased { id }],
                         error: None,
                         action: None,
@@ -1710,7 +1775,7 @@ mod native_service {
                     let id = state.item_owned.take().expect("matched item ownership").id;
                     let consume = std::mem::take(&mut state.item_primary_suppressed);
                     let _ = state.notices.send(ServiceNotice {
-                        recovery: false,
+                        recovery: None,
                         intents: vec![InvocationIntent::TriggerReleased { id }],
                         error: None,
                         action: None,
@@ -1802,6 +1867,16 @@ mod native_service {
                     {
                         let mut intents = state.adapter.preempt();
                         let mut published_action = Some(action.clone());
+                        let recovery = if matches!(action, RelatedAction::ScreenDrawEmergency) {
+                            // This hook already made the physical priority decision.
+                            // Do not reduce its lifetime to a later legacy boolean.
+                            published_action = None;
+                            state
+                                .adapter
+                                .admit_related_screen_draw_emergency(&action, current_owner)
+                        } else {
+                            None
+                        };
                         if let RelatedAction::DirectMenu { menu_id, .. } = &action {
                             let id = InvocationId(state.next_direct_id);
                             state.next_direct_id =
@@ -1822,7 +1897,7 @@ mod native_service {
                         }
                         let _ = update_timers(state, &intents);
                         let _ = state.notices.send(ServiceNotice {
-                            recovery: false,
+                            recovery,
                             intents,
                             error: None,
                             action: published_action,
@@ -1877,7 +1952,7 @@ mod native_service {
                     };
                     let consume = matched.consume_current;
                     let _ = state.notices.send(ServiceNotice {
-                        recovery: false,
+                        recovery: None,
                         intents: vec![InvocationIntent::ActivateItem {
                             id,
                             menu_id: matched.binding.menu_id,
@@ -1925,14 +2000,14 @@ mod native_service {
                         provenance,
                         owner: match current_owner {
                             PriorityOwner::Launcher => HookPriorityOwner::Launcher,
-                            PriorityOwner::ScreenDrawRecovery => {
+                            PriorityOwner::ScreenDrawRecovery(_) => {
                                 HookPriorityOwner::ScreenDrawRecovery
                             }
                             PriorityOwner::ExclusiveTool => HookPriorityOwner::ExclusiveTool,
                         },
                         global_exclusive_owners: super::exclusive_owners(),
                         adapter_exclusive: state.adapter.is_exclusive(),
-                        recovery: out.recovery,
+                        recovery: out.recovery.is_some(),
                         deadline_scheduled,
                         radial_intent,
                     });
@@ -1942,7 +2017,7 @@ mod native_service {
                     state.shutdown_requested = true;
                     let cancel = cancel_lifecycle(state, LifecycleCancellation::HookFailure);
                     let _ = state.notices.send(ServiceNotice {
-                        recovery: false,
+                        recovery: None,
                         intents: cancel,
                         error: Some(error),
                         action: None,
@@ -2222,7 +2297,7 @@ mod native_service {
                                         );
                                         let _ = update_timers(state, &intents);
                                         let _ = state.notices.send(ServiceNotice {
-                                            recovery: false,
+                                            recovery: None,
                                             intents,
                                             error: None,
                                             action: None,
@@ -2250,7 +2325,7 @@ mod native_service {
                                                 state.item_recognizer.clear();
                                                 let _ = update_timers(state, &intents);
                                                 let _ = state.notices.send(ServiceNotice {
-                                                    recovery: false,
+                                                    recovery: None,
                                                     intents,
                                                     error: None,
                                                     action: None,
@@ -2265,7 +2340,7 @@ mod native_service {
                                             Err(error) => {
                                                 let _ = acknowledgement.send(Err(error.clone()));
                                                 let _ = state.notices.send(ServiceNotice {
-                                                    recovery: false,
+                                                    recovery: None,
                                                     intents: vec![],
                                                     error: Some(error),
                                                     action: None,
@@ -2278,7 +2353,7 @@ mod native_service {
                                     ServiceCommand::Cancel(reason) => {
                                         let intents = cancel_lifecycle(state, reason);
                                         let _ = state.notices.send(ServiceNotice {
-                                            recovery: false,
+                                            recovery: None,
                                             intents,
                                             error: None,
                                             action: None,
@@ -2294,7 +2369,7 @@ mod native_service {
                                         let intents = state.adapter.set_exclusive(active);
                                         let _ = update_timers(state, &intents);
                                         let _ = state.notices.send(ServiceNotice {
-                                            recovery: false,
+                                            recovery: None,
                                             intents,
                                             error: None,
                                             action: None,
@@ -2317,7 +2392,7 @@ mod native_service {
                                             LifecycleCancellation::Shutdown,
                                         );
                                         let _ = state.notices.send(ServiceNotice {
-                                            recovery: false,
+                                            recovery: None,
                                             intents,
                                             error: None,
                                             action: None,
@@ -2362,7 +2437,7 @@ mod native_service {
                                                 LifecycleCancellation::HookFailure,
                                             );
                                             let _ = state.notices.send(ServiceNotice {
-                                                recovery: false,
+                                                recovery: None,
                                                 intents,
                                                 error: Some(error),
                                                 action: None,
@@ -2411,7 +2486,7 @@ mod native_service {
                                         global_exclusive_owners: super::exclusive_owners(),
                                     });
                                     let _ = state.notices.send(ServiceNotice {
-                                        recovery: false,
+                                        recovery: None,
                                         intents,
                                         error: None,
                                         action: None,
@@ -2543,6 +2618,14 @@ mod native_service {
 
 #[cfg(test)]
 mod tests {
+    fn recovery_owner() -> super::PriorityOwner {
+        let bridge = crate::screen_draw::ScreenDrawRecoveryBridge::default();
+        bridge.stage_start();
+        let lifetime = bridge.active_lifetime().unwrap();
+        bridge.set_active(false);
+        super::PriorityOwner::ScreenDrawRecovery(lifetime)
+    }
+
     use super::*;
 
     #[test]
@@ -2933,6 +3016,115 @@ mod tests {
         );
     }
     #[test]
+    fn admitted_recovery_notice_keeps_its_identity_without_allocating_a_launcher_invocation() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let mut admissions = Vec::new();
+        for cycle in 0..2 {
+            let down = adapter.process(
+                e(0x23, KeyTransition::Down, cycle * 10 + 1),
+                recovery_owner(),
+            );
+            assert!(down.consume && down.intents.is_empty());
+            let notice = ServiceNotice::from(down);
+            admissions.push(notice.recovery.unwrap());
+            assert!(notice.intents.is_empty() && notice.action.is_none() && notice.error.is_none());
+            let repeat = adapter.process(
+                e(0x23, KeyTransition::Repeat, cycle * 10 + 2),
+                recovery_owner(),
+            );
+            assert!(repeat.consume && repeat.recovery.is_none());
+            let up = adapter.process(e(0x23, KeyTransition::Up, cycle * 10 + 3), recovery_owner());
+            assert!(up.consume && up.recovery.is_none());
+        }
+        assert_eq!(
+            admissions
+                .iter()
+                .map(|admission| admission.serial)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let normal = adapter.process(e(0x23, KeyTransition::Down, 30), PriorityOwner::Launcher);
+        assert!(normal.recovery.is_none());
+        assert!(matches!(
+            normal.intents.as_slice(),
+            [InvocationIntent::ScheduleDeadline {
+                id: InvocationId(1),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn recovery_admission_serial_exhaustion_refuses_without_claiming_the_primary_cycle() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        adapter.next_recovery_serial = u64::MAX;
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
+        }
+        let out = adapter.process(e(0x23, KeyTransition::Down, 1), recovery_owner());
+        assert!(!out.consume && out.recovery.is_none() && out.intents.is_empty());
+        assert!(!adapter.has_owned_cycle());
+    }
+
+    #[test]
+    fn related_emergency_notice_retains_hook_lifetime_and_cannot_be_promoted_to_a_replacement() {
+        let bridge = crate::screen_draw::ScreenDrawRecoveryBridge::default();
+        bridge.stage_start();
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        let first_owner = PriorityOwner::ScreenDrawRecovery(bridge.active_lifetime().unwrap());
+        let admission = adapter
+            .admit_related_screen_draw_emergency(&RelatedAction::ScreenDrawEmergency, first_owner)
+            .unwrap();
+        assert_eq!(
+            admission.kind,
+            crate::screen_draw::ScreenDrawRecoveryKind::Emergency
+        );
+        let mut queued = ServiceNotice {
+            recovery: Some(admission),
+            intents: Vec::new(),
+            error: None,
+            action: None,
+            cancellation: None,
+        };
+        bridge.replace_active_session();
+        assert!(queued.take_screen_draw_recovery(&bridge).is_none());
+        assert!(queued.recovery.is_none());
+        assert!(queued.take_screen_draw_recovery(&bridge).is_none());
+        let fresh_owner = PriorityOwner::ScreenDrawRecovery(bridge.active_lifetime().unwrap());
+        let fresh = adapter
+            .admit_related_screen_draw_emergency(&RelatedAction::ScreenDrawEmergency, fresh_owner)
+            .unwrap();
+        queued.recovery = Some(fresh);
+        let intent = queued.take_screen_draw_recovery(&bridge).unwrap();
+        assert_eq!(intent.admission, Some(fresh));
+        assert_eq!(
+            intent.kind,
+            crate::screen_draw::ScreenDrawRecoveryKind::Emergency
+        );
+        assert!(fresh.serial > admission.serial);
+        assert_eq!(
+            adapter.next_id, 1,
+            "emergencies do not consume launcher InvocationId"
+        );
+        for owner in [PriorityOwner::Launcher, PriorityOwner::ExclusiveTool] {
+            assert!(
+                adapter
+                    .admit_related_screen_draw_emergency(&RelatedAction::ScreenDrawEmergency, owner)
+                    .is_none()
+            );
+        }
+        assert!(
+            adapter
+                .admit_related_screen_draw_emergency(&RelatedAction::ScreenDrawLaunch, fresh_owner)
+                .is_none()
+        );
+        bridge.set_active(false);
+    }
+
+    #[test]
     fn provenance_and_screen_draw_priority_are_explicit() {
         let mut a = LauncherInvocationAdapter::new(cfg()).unwrap();
         for vk in [0xA0, 0xA4, 0x5B] {
@@ -2941,11 +3133,8 @@ mod tests {
         let mut own = e(0x23, KeyTransition::Down, 1);
         own.provenance = InputProvenance::SelfInjected;
         assert!(!a.process(own, PriorityOwner::Launcher).consume);
-        let recovery = a.process(
-            e(0x23, KeyTransition::Down, 2),
-            PriorityOwner::ScreenDrawRecovery,
-        );
-        assert!(recovery.recovery && recovery.consume && recovery.intents.is_empty());
+        let recovery = a.process(e(0x23, KeyTransition::Down, 2), recovery_owner());
+        assert!(recovery.recovery.is_some() && recovery.consume && recovery.intents.is_empty());
         let mut external = e(0x23, KeyTransition::Down, 3);
         external.provenance = InputProvenance::ExternalInjected;
         assert!(
@@ -2959,34 +3148,25 @@ mod tests {
         for vk in [0xA0, 0xA4, 0x5B] {
             adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
         }
-        let first = adapter.process(
-            e(0x23, KeyTransition::Down, 1),
-            PriorityOwner::ScreenDrawRecovery,
-        );
-        assert!(first.recovery && first.consume);
+        let first = adapter.process(e(0x23, KeyTransition::Down, 1), recovery_owner());
+        assert!(first.recovery.is_some() && first.consume);
         let mut external_up = e(0x23, KeyTransition::Up, 2);
         external_up.provenance = InputProvenance::ExternalInjected;
-        let unrelated_up = adapter.process(external_up, PriorityOwner::ScreenDrawRecovery);
-        assert!(!unrelated_up.recovery && !unrelated_up.consume);
+        let unrelated_up = adapter.process(external_up, recovery_owner());
+        assert!(!unrelated_up.recovery.is_some() && !unrelated_up.consume);
         let mut external_repeat = e(0x23, KeyTransition::Repeat, 3);
         external_repeat.provenance = InputProvenance::ExternalInjected;
-        let unrelated_repeat = adapter.process(external_repeat, PriorityOwner::ScreenDrawRecovery);
-        assert!(!unrelated_repeat.recovery && !unrelated_repeat.consume);
-        let repeat = adapter.process(
-            e(0x23, KeyTransition::Repeat, 4),
-            PriorityOwner::ScreenDrawRecovery,
-        );
-        assert!(!repeat.recovery && repeat.consume);
-        let release = adapter.process(
-            e(0x23, KeyTransition::Up, 5),
-            PriorityOwner::ScreenDrawRecovery,
-        );
-        assert!(!release.recovery && release.consume);
-        let second = adapter.process(
-            e(0x23, KeyTransition::Down, 6),
-            PriorityOwner::ScreenDrawRecovery,
-        );
-        assert!(second.recovery && second.consume);
+        let unrelated_repeat = adapter.process(external_repeat, recovery_owner());
+        assert!(!unrelated_repeat.recovery.is_some() && !unrelated_repeat.consume);
+        let repeat = adapter.process(e(0x23, KeyTransition::Repeat, 4), recovery_owner());
+        assert!(!repeat.recovery.is_some() && repeat.consume);
+        let release = adapter.process(e(0x23, KeyTransition::Up, 5), recovery_owner());
+        assert!(!release.recovery.is_some() && release.consume);
+        let second = adapter.process(e(0x23, KeyTransition::Down, 6), recovery_owner());
+        assert!(second.recovery.is_some() && second.consume);
+        assert_eq!(first.recovery.unwrap().serial, 1);
+        assert_eq!(second.recovery.unwrap().serial, 2);
+        assert_ne!(first.recovery, second.recovery);
 
         let mut self_injected = e(0x23, KeyTransition::Down, 7);
         self_injected.provenance = InputProvenance::SelfInjected;
@@ -2994,8 +3174,8 @@ mod tests {
         for vk in [0xA0, 0xA4, 0x5B] {
             provenance_adapter.process(e(vk, KeyTransition::Down, 0), PriorityOwner::Launcher);
         }
-        let ignored = provenance_adapter.process(self_injected, PriorityOwner::ScreenDrawRecovery);
-        assert!(!ignored.recovery && !ignored.consume);
+        let ignored = provenance_adapter.process(self_injected, recovery_owner());
+        assert!(!ignored.recovery.is_some() && !ignored.consume);
 
         let mut rejected_config = cfg();
         rejected_config.accept_external_injected = false;
@@ -3005,8 +3185,8 @@ mod tests {
         }
         let mut external = e(0x23, KeyTransition::Down, 8);
         external.provenance = InputProvenance::ExternalInjected;
-        let ignored = rejected_external.process(external, PriorityOwner::ScreenDrawRecovery);
-        assert!(!ignored.recovery && !ignored.consume);
+        let ignored = rejected_external.process(external, recovery_owner());
+        assert!(!ignored.recovery.is_some() && !ignored.consume);
 
         let mut externally_owned = LauncherInvocationAdapter::new(cfg()).unwrap();
         for vk in [0xA0, 0xA4, 0x5B] {
@@ -3016,22 +3196,206 @@ mod tests {
         external_down.provenance = InputProvenance::ExternalInjected;
         assert!(
             externally_owned
-                .process(external_down, PriorityOwner::ScreenDrawRecovery)
+                .process(external_down, recovery_owner())
                 .recovery
+                .is_some()
         );
         for transition in [KeyTransition::Repeat, KeyTransition::Up] {
-            let physical = externally_owned
-                .process(e(0x23, transition, 10), PriorityOwner::ScreenDrawRecovery);
-            assert!(!physical.recovery && !physical.consume);
+            let physical = externally_owned.process(e(0x23, transition, 10), recovery_owner());
+            assert!(!physical.recovery.is_some() && !physical.consume);
         }
         let mut external_up = e(0x23, KeyTransition::Up, 11);
         external_up.provenance = InputProvenance::ExternalInjected;
         assert!(
             externally_owned
-                .process(external_up, PriorityOwner::ScreenDrawRecovery)
+                .process(external_up, recovery_owner())
                 .consume
         );
     }
+    #[test]
+    fn recovery_modifier_repeats_and_represses_cannot_replace_the_held_cycle() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        let owner = recovery_owner();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            assert_eq!(
+                adapter.process(e(vk, KeyTransition::Down, 0), owner),
+                AdapterOutcome::pass()
+            );
+        }
+        let first = adapter
+            .process(e(0x23, KeyTransition::Down, 1), owner)
+            .recovery
+            .unwrap();
+        let held = adapter.recovery_primary.unwrap();
+        let next_id = adapter.next_id;
+        for vk in [0xA0, 0xA4, 0x5B] {
+            for transition in [
+                KeyTransition::Down,
+                KeyTransition::Repeat,
+                KeyTransition::Up,
+                KeyTransition::Down,
+            ] {
+                assert_eq!(
+                    adapter.process(e(vk, transition, 2), owner),
+                    AdapterOutcome::pass()
+                );
+                assert_eq!(adapter.recovery_primary, Some(held));
+                assert!(adapter.owned.is_none());
+                assert_eq!(adapter.next_id, next_id);
+                assert_eq!(adapter.next_recovery_serial, first.serial + 1);
+            }
+        }
+        assert!(adapter.modifiers.matches(&adapter.config.hotkey));
+        // The shared claim boundary also refuses a different priority owner.
+        assert_eq!(
+            adapter.claim(
+                3,
+                0x23,
+                InputProvenance::Physical,
+                PriorityOwner::Launcher,
+                true
+            ),
+            AdapterOutcome::pass()
+        );
+        let up = adapter.process(e(0x23, KeyTransition::Up, 4), owner);
+        assert!(up.consume && up.recovery.is_none() && up.intents.is_empty());
+        assert!(adapter.recovery_primary.is_none());
+        let second = adapter.process(e(0x23, KeyTransition::Down, 5), owner);
+        assert!(second.consume && second.intents.is_empty());
+        assert_eq!(second.recovery.unwrap().serial, first.serial + 1);
+    }
+
+    #[test]
+    fn recovery_cross_provenance_modifiers_keep_original_release_ownership() {
+        for (primary_provenance, modifier_provenance) in [
+            (InputProvenance::Physical, InputProvenance::ExternalInjected),
+            (InputProvenance::ExternalInjected, InputProvenance::Physical),
+        ] {
+            let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+            let owner = recovery_owner();
+            for vk in [0xA0, 0xA4, 0x5B] {
+                adapter.process(e(vk, KeyTransition::Down, 0), owner);
+            }
+            let mut primary = e(0x23, KeyTransition::Down, 1);
+            primary.provenance = primary_provenance;
+            let first = adapter.process(primary, owner).recovery.unwrap();
+            let held = adapter.recovery_primary;
+            for transition in [
+                KeyTransition::Up,
+                KeyTransition::Down,
+                KeyTransition::Repeat,
+            ] {
+                let mut modifier = e(0xA4, transition, 2);
+                modifier.provenance = modifier_provenance;
+                assert_eq!(adapter.process(modifier, owner), AdapterOutcome::pass());
+                assert_eq!(adapter.modifiers.alt_left, transition != KeyTransition::Up);
+                assert_eq!(adapter.recovery_primary, held);
+            }
+            let mut wrong_up = e(0x23, KeyTransition::Up, 3);
+            wrong_up.provenance = modifier_provenance;
+            assert_eq!(adapter.process(wrong_up, owner), AdapterOutcome::pass());
+            assert_eq!(adapter.recovery_primary, held);
+            primary.transition = KeyTransition::Up;
+            assert!(adapter.process(primary, owner).consume);
+            primary.transition = KeyTransition::Down;
+            assert_eq!(
+                adapter.process(primary, owner).recovery.unwrap().serial,
+                first.serial + 1
+            );
+        }
+    }
+
+    #[test]
+    fn primary_first_recovery_keeps_forwarded_release_after_modifier_completion() {
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        let owner = recovery_owner();
+        assert_eq!(
+            adapter.process(e(0x23, KeyTransition::Down, 0), owner),
+            AdapterOutcome::pass()
+        );
+        for vk in [0xA0, 0xA4] {
+            assert_eq!(
+                adapter.process(e(vk, KeyTransition::Down, 1), owner),
+                AdapterOutcome::pass()
+            );
+        }
+        let admitted = adapter.process(e(0x5B, KeyTransition::Down, 2), owner);
+        assert!(!admitted.consume && admitted.intents.is_empty());
+        let first = admitted.recovery.unwrap();
+        assert!(!adapter.recovery_primary.unwrap().down_suppressed);
+        for vk in [0xA0, 0xA4, 0x5B, 0x23] {
+            let repeated = adapter.process(e(vk, KeyTransition::Repeat, 3), owner);
+            assert_eq!(repeated, AdapterOutcome::pass());
+        }
+        assert_eq!(
+            adapter.process(e(0x23, KeyTransition::Up, 4), owner),
+            AdapterOutcome::pass()
+        );
+        let next = adapter.process(e(0x23, KeyTransition::Down, 5), owner);
+        assert!(next.consume && next.intents.is_empty());
+        assert_eq!(next.recovery.unwrap().serial, first.serial + 1);
+        assert!(
+            adapter
+                .process(e(0x23, KeyTransition::Up, 6), owner)
+                .consume
+        );
+    }
+
+    #[test]
+    fn recovery_held_cycle_survives_continuous_reload_and_ignores_excluded_modifier_edges() {
+        let mut config = cfg();
+        config.accept_external_injected = false;
+        let mut adapter = LauncherInvocationAdapter::new(config.clone()).unwrap();
+        let owner = recovery_owner();
+        for vk in [0xA0, 0xA4, 0x5B] {
+            adapter.process(e(vk, KeyTransition::Down, 0), owner);
+        }
+        let first = adapter
+            .process(e(0x23, KeyTransition::Down, 1), owner)
+            .recovery
+            .unwrap();
+        let held = adapter.recovery_primary;
+        for provenance in [
+            InputProvenance::SelfInjected,
+            InputProvenance::ExternalInjected,
+        ] {
+            let mut modifier = e(0xA4, KeyTransition::Up, 2);
+            modifier.provenance = provenance;
+            assert_eq!(adapter.process(modifier, owner), AdapterOutcome::pass());
+            assert!(adapter.modifiers.alt_left);
+        }
+        config.generation += 1;
+        assert!(
+            adapter
+                .reload(config, LifecycleCancellation::SettingsReload)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(adapter.recovery_primary, held);
+        assert_eq!(
+            adapter.process(e(0xA4, KeyTransition::Repeat, 3), PriorityOwner::Launcher),
+            AdapterOutcome::pass()
+        );
+        assert_eq!(adapter.next_recovery_serial, first.serial + 1);
+        assert!(
+            adapter
+                .process(e(0x23, KeyTransition::Up, 4), owner)
+                .consume
+        );
+        let later_owner = recovery_owner();
+        let later = adapter
+            .process(e(0x23, KeyTransition::Down, 5), later_owner)
+            .recovery
+            .unwrap();
+        assert_eq!(later.serial, first.serial + 1);
+        let PriorityOwner::ScreenDrawRecovery(lifetime) = later_owner else {
+            unreachable!()
+        };
+        assert_eq!(later.lifetime, lifetime);
+        adapter.cancel_lifecycle(LifecycleCancellation::HookFailure);
+        assert!(adapter.recovery_primary.is_none() && adapter.candidate_primary_down.is_none());
+    }
+
     #[test]
     fn route_handoff_waits_for_old_release_and_new_admission_is_unambiguous() {
         let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();

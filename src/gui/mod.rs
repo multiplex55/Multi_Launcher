@@ -39,6 +39,7 @@ mod query_observation;
 mod radial_actions;
 mod radial_editor;
 mod render;
+mod screen_draw_restore;
 mod screen_draw_toolbar;
 mod screenshot_editor;
 mod search;
@@ -121,12 +122,6 @@ pub use volume_dialog::VolumeDialog;
 struct ScreenDrawRegionOperation {
     generation: crate::screen_draw::ScreenDrawGeneration,
     operation_id: mkmacro_dialog::visual_overlay::OperationId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScreenDrawRecoveryRequest {
-    LauncherToggle,
-    Emergency,
 }
 
 use crate::actions::folders;
@@ -680,6 +675,7 @@ pub struct LauncherApp {
     screen_draw_launcher_parking:
         Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
+    screen_draw_restore_publication: screen_draw_restore::ScreenDrawRestorePublication,
     pub selected: Option<usize>,
     action_sheet: ActionSheetState,
     /// Test seam for verifying that command dispatch used normal activation,
@@ -904,6 +900,7 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    last_search_provider_deferral: search::ProviderSearchDeferral,
     last_plugin_search_generation: u64,
     last_timer_query: bool,
     last_stopwatch_query: bool,
@@ -2049,6 +2046,8 @@ impl LauncherApp {
             },
             screen_draw_recovery_bridge,
             screen_draw_launcher_parking: None,
+            screen_draw_restore_publication:
+                screen_draw_restore::ScreenDrawRestorePublication::default(),
             screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi::default(),
             selected: None,
             action_sheet: ActionSheetState::default(),
@@ -2274,6 +2273,7 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            last_search_provider_deferral: Default::default(),
             last_plugin_search_generation: 0,
             last_timer_query: false,
             last_stopwatch_query: false,
@@ -2309,7 +2309,7 @@ impl LauncherApp {
         apply_visibility(
             initial_visible,
             VisiblePlacementPolicy::ApplyConfiguredPlacement,
-            ctx,
+            &RootViewportCtx::with_window_bridge(ctx, app.root_window_bridge.clone()),
             offscreen_pos,
             follow_mouse,
             static_enabled,
@@ -2317,6 +2317,11 @@ impl LauncherApp {
             static_size.map(|(w, h)| (w as f32, h as f32)),
             (win_size.0 as f32, win_size.1 as f32),
         );
+        // Creation precedes the first native frame. Preserve its activation
+        // through the existing current visibility/restore request owner.
+        if initial_visible {
+            restore_flag.store(true, Ordering::SeqCst);
+        }
 
         app.enforce_pinned();
         app.update_panel_stack();
@@ -2773,16 +2778,21 @@ impl LauncherApp {
         visible: Option<bool>,
         restore: Option<bool>,
     ) -> u64 {
-        self.visibility_revision
+        let revision = self
+            .visibility_revision
             .request(|| {
                 if let Some(visible) = visible {
                     self.visible_flag.store(visible, Ordering::SeqCst);
                 }
                 if let Some(restore) = restore {
                     self.restore_flag.store(restore, Ordering::SeqCst);
+                } else if visible == Some(true) {
+                    self.restore_flag.store(true, Ordering::SeqCst);
                 }
             })
-            .0
+            .0;
+        self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
+        revision
     }
 
     pub(crate) fn toggle_launcher_visibility(&self) -> bool {
@@ -3892,7 +3902,7 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::ScreenDrawStart => {
                 continue;
             }
-            WatchEvent::ScreenDrawRecover | WatchEvent::ScreenDrawEmergency => {
+            WatchEvent::ScreenDrawRecover(_) | WatchEvent::ScreenDrawEmergency(_) => {
                 return Some(ev.into());
             }
             WatchEvent::ClipboardModify(_) => return Some(ev.into()),
@@ -3915,8 +3925,8 @@ pub fn recv_test_event_timeout(
             WatchEvent::Actions
             | WatchEvent::Folders
             | WatchEvent::Bookmarks
-            | WatchEvent::ScreenDrawRecover
-            | WatchEvent::ScreenDrawEmergency => {
+            | WatchEvent::ScreenDrawRecover(_)
+            | WatchEvent::ScreenDrawEmergency(_) => {
                 return Some(event.into());
             }
             _ if Instant::now() < deadline => {}

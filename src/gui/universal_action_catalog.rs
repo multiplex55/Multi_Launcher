@@ -29,12 +29,61 @@ pub(crate) struct UniversalActionCatalogSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct AuthoringCatalogDemand(u64);
 
-pub(super) type AuthoringCatalogCache = Option<(
-    AuthoringCatalogDemand,
-    std::sync::Arc<UniversalActionCatalogSnapshot>,
-)>;
+pub(super) struct CachedAuthoringCatalog {
+    pub(super) demand: AuthoringCatalogDemand,
+    pub(super) snapshot: std::sync::Arc<UniversalActionCatalogSnapshot>,
+    provider_deferral: super::search::ProviderSearchDeferral,
+}
+
+pub(super) type AuthoringCatalogCache = Option<CachedAuthoringCatalog>;
 
 impl UniversalActionCatalogSnapshot {
+    pub(crate) fn trace_unfiltered_custom_action_ranks(
+        &self,
+        invocation: &InvocationContext,
+        session_id: u64,
+        generation: u64,
+    ) {
+        if !crate::radial::acceptance_trace::enabled() {
+            return;
+        }
+        self.emit_unfiltered_custom_action_ranks_with(
+            invocation,
+            session_id,
+            generation,
+            crate::radial::acceptance_trace::emit_designer_action_catalog_rank,
+        );
+    }
+
+    fn emit_unfiltered_custom_action_ranks_with(
+        &self,
+        invocation: &InvocationContext,
+        session_id: u64,
+        generation: u64,
+        mut emit: impl FnMut(usize, usize, usize, u64, u64),
+    ) {
+        if session_id == 0 || generation == 0 {
+            return;
+        }
+        // Use the same full snapshot and catalog owner as this editor visit.
+        // Filtered launcher result ordinals and custom source indexes are not
+        // positions in this unfiltered target/action catalog.
+        let catalog = UniversalActionAuthoringCatalog::build(self, invocation, "");
+        for (rank, row) in catalog.rows().iter().enumerate() {
+            if row.action_id == crate::universal_actions::action_ids::RESULT_EXECUTE
+                && let Some(source_index) = row.custom_action_index
+            {
+                emit(
+                    source_index,
+                    rank,
+                    catalog.rows().len(),
+                    session_id,
+                    generation,
+                );
+            }
+        }
+    }
+
     pub(crate) fn empty() -> Self {
         Self {
             entries: Vec::new(),
@@ -573,6 +622,11 @@ fn resolved_window(window: &WindowIdentity) -> ResolvedActionTarget {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn retained_window_target(window: &WindowIdentity) -> ResolvedActionTarget {
+    resolved_window(window)
+}
+
 impl LauncherApp {
     pub(super) fn authoring_catalog_for_ranked_actions(
         &self,
@@ -749,15 +803,20 @@ impl LauncherApp {
     ) -> std::sync::Arc<UniversalActionCatalogSnapshot> {
         let demand = self.authoring_catalog_demand();
         if let Ok(cache) = self.authoring_catalog_cache.lock()
-            && let Some((cached_demand, snapshot)) = cache.as_ref()
-            && *cached_demand == demand
+            && let Some(cached) = cache.as_ref()
+            && cached.demand == demand
         {
-            return std::sync::Arc::clone(snapshot);
+            return std::sync::Arc::clone(&cached.snapshot);
         }
 
-        let snapshot = std::sync::Arc::new(self.universal_action_catalog_snapshot());
+        let (snapshot, provider_deferral) = self.build_universal_action_catalog_snapshot();
+        let snapshot = std::sync::Arc::new(snapshot);
         if let Ok(mut cache) = self.authoring_catalog_cache.lock() {
-            *cache = Some((demand, std::sync::Arc::clone(&snapshot)));
+            *cache = Some(CachedAuthoringCatalog {
+                demand,
+                snapshot: std::sync::Arc::clone(&snapshot),
+                provider_deferral,
+            });
         }
         #[cfg(test)]
         self.authoring_catalog_build_count
@@ -765,7 +824,29 @@ impl LauncherApp {
         snapshot
     }
 
+    pub(super) fn retire_capacity_deferred_authoring_catalog(&self) {
+        if let Ok(mut cache) = self.authoring_catalog_cache.lock()
+            && cache.as_ref().is_some_and(|cached| {
+                cached.provider_deferral == super::search::ProviderSearchDeferral::Capacity
+            })
+        {
+            // Retire incomplete discovery without acquiring a new catalog.
+            // Closed Designer frames must continue to do no provider work.
+            *cache = None;
+        }
+    }
+
     pub(crate) fn universal_action_catalog_snapshot(&self) -> UniversalActionCatalogSnapshot {
+        self.build_universal_action_catalog_snapshot().0
+    }
+
+    fn build_universal_action_catalog_snapshot(
+        &self,
+    ) -> (
+        UniversalActionCatalogSnapshot,
+        super::search::ProviderSearchDeferral,
+    ) {
+        let mut provider_deferral = super::search::ProviderSearchDeferral::None;
         let resolver = ActionTargetResolver;
         let custom_len = self.custom_len.min(self.actions.len());
         let resolver_context = ActionTargetResolverContext::new(
@@ -819,8 +900,13 @@ impl LauncherApp {
         // Screen Draw and dashboard actions are present in `command_cache`;
         // every route still resolves through Universal Actions.
         for query in ["crop", "ss", "fav", "mkmacro", "note", "cs", "cb"] {
+            let outcome = self.search_read_only_outcome(query);
+            if outcome.provider_deferral == super::search::ProviderSearchDeferral::Capacity {
+                provider_deferral = outcome.provider_deferral;
+            }
             entries.extend(
-                self.search_read_only(query)
+                outcome
+                    .actions
                     .iter()
                     .map(|action| resolver.resolve(action, &resolver_context)),
             );
@@ -937,11 +1023,14 @@ impl LauncherApp {
         })
         .unwrap_or_default();
         entries.extend(recent_entries.iter().map(|(entry, _)| entry.clone()));
-        UniversalActionCatalogSnapshot {
-            entries,
-            recent_entries,
-            dashboard,
-        }
+        (
+            UniversalActionCatalogSnapshot {
+                entries,
+                recent_entries,
+                dashboard,
+            },
+            provider_deferral,
+        )
     }
 
     pub(crate) fn universal_action_authoring_catalog(
@@ -1723,6 +1812,128 @@ mod tests {
         assert!(!filtered.rows().iter().any(|row| {
             row.custom_action_index != Some(63) && row.target_command == "zz_radial_acceptance_063"
         }));
+    }
+
+    #[test]
+    fn unfiltered_rank_receipt_uses_the_actual_snapshot_and_visit_before_search_filtering() {
+        let actions = (0..64)
+            .map(|index| Action {
+                label: format!("Radial Acceptance Harmless Action {index:03}"),
+                desc: "Deterministic native authoring fixture".into(),
+                action: format!("radial_acceptance_harmless_{index:03}"),
+                args: None,
+            })
+            .collect::<Vec<_>>();
+        let entries = actions
+            .iter()
+            .enumerate()
+            .map(|(index, action)| ResolvedActionTarget {
+                target: ActionTarget::CustomAction {
+                    index,
+                    action: action.clone(),
+                },
+                selected_action: action.clone(),
+                custom_action_index: Some(index),
+            })
+            .collect();
+        let snapshot = snapshot(entries);
+        let invocation = InvocationContext::empty(41);
+        let full = UniversalActionAuthoringCatalog::build(&snapshot, &invocation, "");
+        let actual_rank = full
+            .rows()
+            .iter()
+            .position(|row| {
+                row.custom_action_index == Some(63) && row.action_id == action_ids::RESULT_EXECUTE
+            })
+            .unwrap();
+        assert!(actual_rank >= 50);
+        assert_ne!(actual_rank, 63, "source position is not full-catalog rank");
+        let mut receipts = Vec::new();
+        snapshot.emit_unfiltered_custom_action_ranks_with(
+            &invocation,
+            77,
+            19,
+            |source, rank, len, session, generation| {
+                receipts.push((source, rank, len, session, generation))
+            },
+        );
+        assert_eq!(receipts.len(), 64);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt.0 == 63)
+                .collect::<Vec<_>>(),
+            [&(63, actual_rank, full.rows().len(), 77, 19)]
+        );
+        let filtered = UniversalActionAuthoringCatalog::build(
+            &snapshot,
+            &invocation,
+            "Radial Acceptance Harmless Action 063",
+        );
+        assert!(
+            filtered
+                .rows()
+                .iter()
+                .position(|row| row.action_id == action_ids::RESULT_EXECUTE)
+                .unwrap()
+                < 50
+        );
+        assert!(filtered.rows().iter().any(|row| {
+            row.custom_action_index == Some(63)
+                && row.binding
+                    == Some(ActionBinding::Persisted {
+                        action: PersistedUniversalActionRef {
+                            target: Some(PersistableActionTargetRef::CustomAction {
+                                action: actions[63].clone(),
+                            }),
+                            action_id: action_ids::RESULT_EXECUTE,
+                        },
+                    })
+        }));
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .map(|entry| entry.selected_action.clone())
+                .collect::<Vec<_>>(),
+            actions
+        );
+        let context = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&context);
+        app.custom_len = actions.len();
+        app.actions = std::sync::Arc::new(actions.clone());
+        app.update_action_cache();
+        let history_before =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap();
+        let usage_before = app.usage.clone();
+        let activations_before = app.test_activation_trace.clone();
+        let query = "app Radial Acceptance Harmless Action 063";
+        let outcome = app.search_read_only_outcome(query);
+        assert_eq!(outcome.actions.first(), Some(&actions[63]));
+        let search_catalog = app.authoring_catalog_for_ranked_actions(&outcome.actions, query);
+        let execute = &search_catalog.rows()[0];
+        assert_eq!(execute.custom_action_index, Some(63));
+        assert_eq!(execute.action_id, action_ids::RESULT_EXECUTE);
+        assert_eq!(
+            execute.display_label(),
+            "Radial Acceptance Harmless Action 063 · Custom action · custom action 64 — Execute"
+        );
+        assert_eq!(
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap(),
+            history_before
+        );
+        assert_eq!(app.usage, usage_before);
+        assert_eq!(app.test_activation_trace, activations_before);
+        let mut invalid_receipts = 0;
+        for (session, generation) in [(0, 19), (77, 0)] {
+            snapshot.emit_unfiltered_custom_action_ranks_with(
+                &invocation,
+                session,
+                generation,
+                |_, _, _, _, _| invalid_receipts += 1,
+            );
+        }
+        assert_eq!(invalid_receipts, 0);
     }
 
     #[test]

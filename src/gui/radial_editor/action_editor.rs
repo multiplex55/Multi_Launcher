@@ -994,10 +994,20 @@ impl ActionBindingEditorState {
             &crate::gui::universal_action_catalog::UniversalActionCatalogSnapshot,
         >,
     ) -> Vec<ActionBindingEditorIntent> {
+        let new_catalog_visit =
+            !self.matches_scope(&scope) || self.active_binding.as_ref() != assigned_binding;
         if !self.matches_buffer_owner(&scope) || self.active_binding.as_ref() != assigned_binding {
             self.reset_for(scope.clone(), assigned_binding);
         } else if !self.matches_scope(&scope) {
             self.rebind_draft_generation(scope.clone());
+        }
+
+        if new_catalog_visit && let Some(catalog) = action_catalog {
+            catalog.trace_unfiltered_custom_action_ranks(
+                invocation,
+                scope.editor_session.0,
+                scope.draft_generation.0,
+            );
         }
 
         let mut intents = Vec::new();
@@ -1294,6 +1304,12 @@ impl ActionBindingEditorState {
                 mode: self.query_mode,
             };
             let response = ui.add_enabled(save_enabled, egui::Button::new("Save query"));
+            #[cfg(test)]
+            crate::gui::render::observe_d08_response(
+                ui.ctx(),
+                crate::gui::render::D08Control::PickerSaveQuery,
+                &response,
+            );
             if response.clicked() {
                 intents.push(ActionBindingEditorIntent::SaveQuery {
                     binding: binding.clone(),
@@ -1429,6 +1445,12 @@ impl ActionBindingEditorState {
                                         assignable,
                                         egui::Button::new("Pin this action"),
                                     );
+                                    #[cfg(test)]
+                                    crate::gui::render::observe_d08_response(
+                                        ui.ctx(),
+                                        crate::gui::render::D08Control::PickerPin,
+                                        &response,
+                                    );
                                     if response.clicked()
                                         && let Ok(binding) = row.assignment()
                                     {
@@ -1459,6 +1481,12 @@ impl ActionBindingEditorState {
                                         assignable && row.availability.is_available();
                                     let response =
                                         ui.add_enabled(test_enabled, egui::Button::new("Test"));
+                                    #[cfg(test)]
+                                    crate::gui::render::observe_d08_response(
+                                        ui.ctx(),
+                                        crate::gui::render::D08Control::PickerTest,
+                                        &response,
+                                    );
                                     if response.clicked()
                                         && let Ok(binding) = row.assignment()
                                     {
@@ -3097,6 +3125,160 @@ mod tests {
             },
             custom_action_index: None,
         }
+    }
+
+    #[test]
+    fn d08_live_window_pin_and_test_are_disabled_and_save_query_is_typed_on_both_surfaces() {
+        use crate::gui::render::{
+            D08Control, begin_d08_response_observation, d08_response_enabled,
+        };
+        use crate::gui::universal_action_catalog::{
+            PickerPersistence, UniversalActionAuthoringCatalog, retained_window_target,
+        };
+        use crate::radial::context::WindowIdentity;
+        let query = "D08 live window";
+        let window = WindowIdentity {
+            hwnd: 91,
+            pid: 7,
+            process_name: Some("editor.exe".into()),
+            process_path: Some("C:\\Apps\\editor.exe".into()),
+            class_name: Some("EditorWindow".into()),
+            title: query.into(),
+        };
+        let catalog = action_snapshot(vec![retained_window_target(&window)]);
+        let rows =
+            UniversalActionAuthoringCatalog::build(&catalog, &InvocationContext::empty(1), query);
+        let row = rows
+            .rows()
+            .iter()
+            .find(|row| {
+                row.persistence == PickerPersistence::Ephemeral
+                    && row.action_id == crate::universal_actions::action_ids::WINDOW_ACTIVATE
+            })
+            .unwrap()
+            .clone();
+        assert!(row.binding.is_none());
+        let reason = row.assignment().unwrap_err().reason;
+        assert_eq!(
+            reason,
+            "This live target cannot be saved; choose a contextual binding"
+        );
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        begin_d08_response_observation(&context);
+        let app = crate::gui::actions::tests::new_app(&context);
+        let before_history =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap();
+        let before_usage = app.usage.clone();
+        let before_activation = app.test_activation_trace.clone();
+        for surface in [
+            BindingEditorSurface::Properties,
+            BindingEditorSurface::Inspector,
+        ] {
+            for mode in [QueryRunMode::OpenLauncher, QueryRunMode::ExecuteFirst] {
+                let binding = ActionBinding::LauncherQuery {
+                    query: query.into(),
+                    mode,
+                };
+                let mut editor_scope = scope();
+                editor_scope.surface = surface;
+                let mut state = ActionBindingEditorState::default();
+                state.reset_for(editor_scope.clone(), Some(&binding));
+                state.search_rows = vec![row.clone()];
+                let identity = state.identity().unwrap();
+                let (mut output, intents) = render_editor_with_catalog(
+                    &context,
+                    &mut state,
+                    editor_scope.clone(),
+                    &binding,
+                    &catalog,
+                    Vec::new(),
+                );
+                assert!(intents.is_empty());
+                assert!(format!("{:?}", output.shapes).contains(&reason));
+                for (name, control) in [
+                    ("Pin this action", D08Control::PickerPin),
+                    ("Test", D08Control::PickerTest),
+                ] {
+                    let update = output.platform_output.accesskit_update.as_ref().unwrap();
+                    let node = update
+                        .nodes
+                        .iter()
+                        .find(|(_, node)| {
+                            node.role() == egui::accesskit::Role::Button
+                                && node.name() == Some(name)
+                        })
+                        .unwrap();
+                    assert!(!d08_response_enabled(
+                        &context,
+                        control,
+                        node.0,
+                        node.1.bounds().unwrap(),
+                    ));
+                    let (next, intents) = click_action_editor_button(
+                        &context,
+                        &mut state,
+                        editor_scope.clone(),
+                        &binding,
+                        &catalog,
+                        &output,
+                        name,
+                    );
+                    assert!(intents.is_empty(), "disabled {name} emitted {intents:?}");
+                    assert_eq!(state.identity(), Some(identity.clone()));
+                    assert_eq!(state.active_binding.as_ref(), Some(&binding));
+                    assert!(state.pending_test_binding.is_none());
+                    assert!(state.pending_test_identity.is_none());
+                    output = next;
+                }
+                let save_node = output
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button
+                            && node.name() == Some("Save query")
+                    })
+                    .unwrap();
+                assert!(d08_response_enabled(
+                    &context,
+                    D08Control::PickerSaveQuery,
+                    save_node.0,
+                    save_node.1.bounds().unwrap(),
+                ));
+                let (_, intents) = click_action_editor_button(
+                    &context,
+                    &mut state,
+                    editor_scope,
+                    &binding,
+                    &catalog,
+                    &output,
+                    "Save query",
+                );
+                assert_eq!(intents.len(), 1);
+                let ActionBindingEditorIntent::SaveQuery { binding: saved } = &intents[0] else {
+                    panic!("Save query emitted {intents:?}");
+                };
+                assert_eq!(saved, &binding);
+                let json = serde_json::to_string(saved).unwrap();
+                assert!(
+                    !json.contains("hwnd")
+                        && !json.contains("window:switch")
+                        && !json.contains("91")
+                );
+                assert_eq!(state.active_binding.as_ref(), Some(&binding));
+            }
+        }
+        assert_eq!(
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap(),
+            before_history
+        );
+        assert_eq!(app.usage, before_usage);
+        assert_eq!(app.test_activation_trace, before_activation);
+        assert!(app.test_recorded_history_queries.is_empty());
     }
 
     #[test]

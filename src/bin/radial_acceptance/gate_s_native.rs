@@ -64,15 +64,38 @@ fn parse_appearance(line: &str) -> Option<AppearanceObservation> {
 }
 
 fn native_targets(trace: &Path, session: u64) -> Vec<(u64, NativeAppearanceTarget)> {
-    trace_lines(trace).iter().filter_map(|line| {
+    native_targets_in_lines(&trace_lines(trace))
+        .into_iter()
+        .filter(|(_, state)| state.session_id == session)
+        .collect()
+}
+
+fn native_targets_in_lines(lines: &[String]) -> Vec<(u64, NativeAppearanceTarget)> {
+    lines.iter().filter_map(|line| {
         if !line.contains("trace_event=\"native_appearance_target\"") {return None;}
         let mut state=NativeAppearanceTarget::default();
         macro_rules! number {($($field:ident),+) => {$(state.$field=trace_field(line,stringify!($field))?.parse().ok()?;)+};}
         number!(session_id,generation,menu_digest,cell_digest,geometry_digest,point_x,point_y,dpi_milli);
         state.kind=trace_field(line,"cell_kind")?.parse().ok()?;state.clicked=trace_bool_field(line,"clicked")?;
         state.work_area=[trace_field(line,"work_left")?.parse().ok()?,trace_field(line,"work_top")?.parse().ok()?,trace_field(line,"work_right")?.parse().ok()?,trace_field(line,"work_bottom")?.parse().ok()?];
-        (state.session_id==session).then_some((trace_field(line,"trace_sequence")?.parse().ok()?,state))
+        Some((trace_field(line,"trace_sequence")?.parse().ok()?,state))
     }).collect()
+}
+
+fn native_prepared_target_is_current(
+    targets: &[(u64, NativeAppearanceTarget)],
+    expected: NativeAppearanceTarget,
+) -> bool {
+    targets.last().is_some_and(|(_, latest)| {
+        latest.session_id == expected.session_id
+            && latest.generation == expected.generation
+            && latest.menu_digest == expected.menu_digest
+            && latest.geometry_digest == expected.geometry_digest
+            && latest.dpi_milli == expected.dpi_milli
+            && latest.work_area == expected.work_area
+    }) && targets
+        .iter()
+        .any(|(_, target)| *target == expected && !target.clicked)
 }
 
 fn wait_appearance_after(
@@ -775,32 +798,121 @@ fn run_case(
                     native_generation += 1;
                 }
             }
-            let before = snapshot(child, designer, trace, session)?;
-            let control = ready(
+            let original = child
+                .designer()
+                .filter(|current| current.hwnd == designer.hwnd)
+                .ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::DesignerPresentation,
+                        "S07 Designer owner changed before Stop".into(),
+                    )
+                })?;
+            let before = snapshot(child, &original, trace, session)?;
+            let target = packet
+                .steps
+                .last()
+                .and_then(|step| step.native_result)
+                .ok_or_else(|| {
+                    CaseFailure::new(
+                        FailureStage::DesignerNativeTarget,
+                        "S07 Back result missing before Stop".into(),
+                    )
+                })?;
+            let preview = runtime_windows(child);
+            validate_radial_surfaces(child, &preview)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?;
+            radial_input_surface_at(
                 child,
-                designer,
-                trace,
-                session,
-                AuthoringControlTarget::StopDesktopPreview,
-                None,
-                AuthoringControlRole::Button,
-            )?;
-            let cursor = trace_lines(trace).len();
-            let input = click(child, designer, trace, control)?;
-            wait_for_terminal_authoring_request(
-                trace,
-                cursor,
-                session,
-                "StopNativePreview",
-                UIA_TIMEOUT,
+                &preview,
+                POINT {
+                    x: target.point_x,
+                    y: target.point_y,
+                },
             )
-            .ok_or_else(|| {
-                CaseFailure::new(
-                    FailureStage::DesignerReadiness,
-                    "native preview stop lacked correlated reply".into(),
-                )
-            })?;
-            let after = snapshot(child, designer, trace, session)?;
+            .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
+            let preview_bounds = preview
+                .iter()
+                .map(|surface| surface.bounds)
+                .collect::<Vec<_>>();
+            let displays = native_display_bounds()
+                .map_err(|error| CaseFailure::new(FailureStage::Environment, error))?;
+            let position = designer_clear_position(original.bounds, &preview_bounds, &displays)
+                .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?;
+            let input = with_relocated_designer_for_preview_stop(
+                || {
+                    child
+                        .move_owned_designer(&original, position)
+                        .map_err(|error| {
+                            CaseFailure::new(FailureStage::DesignerPresentation, error)
+                        })
+                },
+                |moved| {
+                    // Repaint and reacquire the actual client control after the
+                    // move; no screen point from the covered position is reused.
+                    let control = ready(
+                        child,
+                        moved,
+                        trace,
+                        session,
+                        AuthoringControlTarget::StopDesktopPreview,
+                        None,
+                        AuthoringControlRole::Button,
+                    )?;
+                    let current = gate_d_live_observation(child, session)?;
+                    if !gate_d_presentation_state_is_unchanged(&before.0, &current)
+                        || !radial_surfaces_are_active(child, &preview)
+                        || !native_prepared_target_is_current(
+                            &native_targets_in_lines(&trace_lines(trace)),
+                            target,
+                        )
+                    {
+                        return Err(CaseFailure::new(FailureStage::DesignerReadiness,
+                            "S07 authoring or exact preview owner changed during Designer relocation".into()));
+                    }
+                    let cursor = trace_lines(trace).len();
+                    let input = click(child, moved, trace, control)?;
+                    wait_for_terminal_authoring_request(
+                        trace,
+                        cursor,
+                        session,
+                        "StopNativePreview",
+                        UIA_TIMEOUT,
+                    )
+                    .ok_or_else(|| {
+                        CaseFailure::new(
+                            FailureStage::DesignerReadiness,
+                            "native preview stop lacked correlated reply".into(),
+                        )
+                    })?;
+                    Ok(input)
+                },
+                || {
+                    let current = child
+                        .designer()
+                        .filter(|current| {
+                            current.hwnd == original.hwnd
+                                && current.process_id == original.process_id
+                                && current.class_name == original.class_name
+                        })
+                        .ok_or_else(|| {
+                            CaseFailure::new(
+                                FailureStage::DesignerPresentation,
+                                "original S07 Designer owner missing during restoration".into(),
+                            )
+                        })?;
+                    let restored = child
+                        .move_owned_designer(&current, [original.bounds[0], original.bounds[1]])
+                        .map_err(|error| {
+                            CaseFailure::new(FailureStage::DesignerPresentation, error)
+                        })?;
+                    if restored.bounds != original.bounds {
+                        return Err(CaseFailure::new(FailureStage::DesignerPresentation,
+                            "S07 Designer restoration did not preserve its original dimensions and position".into()));
+                    }
+                    Ok(())
+                },
+            )?;
+            let after = snapshot(child, &original, trace, session)?;
             step(
                 packet,
                 GateSOperation::NativeStop,
@@ -946,35 +1058,43 @@ fn native_transition(
             )
         })?
         .1;
-    let surfaces = wait_runtime_windows(child, &[], TRACE_TIMEOUT)
-        .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?;
-    let surface = surfaces
-        .iter()
-        .find(|surface| {
-            target.point_x >= surface.bounds[0]
-                && target.point_x < surface.bounds[2]
-                && target.point_y >= surface.bounds[1]
-                && target.point_y < surface.bounds[3]
-        })
-        .ok_or_else(|| {
-            CaseFailure::new(
-                FailureStage::DesignerNativeTarget,
-                "prepared target outside native owned surfaces".into(),
-            )
-        })?;
+    let presentation_deadline = Instant::now() + TRACE_TIMEOUT;
+    let surfaces = wait_runtime_windows(
+        child,
+        &[],
+        presentation_deadline.saturating_duration_since(Instant::now()),
+    )
+    .map_err(|error| CaseFailure::new(FailureStage::DesignerPresentation, error))?;
+    let point = POINT {
+        x: target.point_x,
+        y: target.point_y,
+    };
+    let surface = radial_input_surface_at(child, &surfaces, point)
+        .map_err(|error| CaseFailure::new(FailureStage::DesignerNativeTarget, error))?;
     let before = snapshot(child, designer, trace, session)?;
     let count_before = preview_dispatch_count(trace, session);
     let cursor = trace_lines(trace).len();
     let pointer = click_owned_radial_point(
         child,
-        surface,
-        POINT {
-            x: target.point_x,
-            y: target.point_y,
-        },
+        &surface,
+        point,
         trace,
         cursor,
         target.generation,
+        presentation_deadline,
+        || {
+            if native_prepared_target_is_current(
+                &native_targets_in_lines(&trace_lines(trace)),
+                target,
+            ) {
+                Ok(())
+            } else {
+                Err(
+                    "native prepared target session, generation or geometry changed before down"
+                        .into(),
+                )
+            }
+        },
     )
     .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
     let deadline = Instant::now() + TRACE_TIMEOUT;
@@ -1066,6 +1186,35 @@ fn native_transition(
             .native_result = Some(result);
     }
     Ok(())
+}
+
+fn with_relocated_designer_for_preview_stop<T>(
+    relocate: impl FnOnce() -> Result<WindowSnapshot, CaseFailure>,
+    stop: impl FnOnce(&WindowSnapshot) -> Result<T, CaseFailure>,
+    restore: impl FnOnce() -> Result<(), CaseFailure>,
+) -> Result<T, CaseFailure> {
+    let result = relocate().and_then(|moved| stop(&moved));
+    // A move can take effect before its measurement fails. Always restore the
+    // captured exact owner after the move attempt, including a failed Stop.
+    let restoration = restore();
+    match (result, restoration) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(mut error)) => {
+            error.message = format!(
+                "native preview Stop completed; Designer restoration failed: {}",
+                error.message
+            );
+            Err(error)
+        }
+        (Err(mut error), Err(restoration)) => {
+            error.message = format!(
+                "{}; Designer restoration failed: {restoration}",
+                error.message
+            );
+            Err(error)
+        }
+    }
 }
 
 fn preview_dispatch_count(trace: &Path, session: u64) -> u64 {
@@ -1255,6 +1404,232 @@ fn gate_s_trace_profile_ready(lines: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stop_designer_fixture() -> WindowSnapshot {
+        WindowSnapshot {
+            hwnd: HWND(43780596usize as *mut _),
+            process_id: 2796,
+            role: WindowRole::Designer,
+            class_name: "eframe".into(),
+            visible: true,
+            minimized: false,
+            bounds: [26, 26, 942, 715],
+        }
+    }
+
+    #[test]
+    fn gate_s_stop_relocation_reacquires_current_control_once_then_restores() {
+        let original = stop_designer_fixture();
+        let current = std::cell::RefCell::new(original.clone());
+        let calls = std::cell::RefCell::new(Vec::new());
+        let position =
+            designer_clear_position(original.bounds, &[[0, 0, 515, 515]], &[[0, 0, 2560, 1440]])
+                .unwrap();
+        let receipt = with_relocated_designer_for_preview_stop(
+            || {
+                calls.borrow_mut().push("move");
+                let mut moved = original.clone();
+                moved.bounds = [
+                    position[0],
+                    position[1],
+                    position[0] + 916,
+                    position[1] + 689,
+                ];
+                *current.borrow_mut() = moved.clone();
+                Ok(moved)
+            },
+            |moved| {
+                assert_eq!(moved.hwnd, original.hwnd);
+                assert_eq!(moved.bounds, current.borrow().bounds);
+                assert_ne!(moved.bounds, original.bounds);
+                calls
+                    .borrow_mut()
+                    .extend(["repaint", "measure_client", "fresh_stop_control"]);
+                // Retained Stop [159,59,286,77] is reacquired against the
+                // moved client origin, not the old covered point (257,125).
+                let stop_point = [moved.bounds[0] + 8 + 223, moved.bounds[1] + 31 + 68];
+                assert!(stop_point[0] > 515);
+                calls
+                    .borrow_mut()
+                    .extend(["one_down", "one_up", "actual_stop_terminal"]);
+                Ok((1, 1))
+            },
+            || {
+                calls.borrow_mut().push("restore");
+                assert_eq!(current.borrow().hwnd, original.hwnd);
+                *current.borrow_mut() = original.clone();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(receipt, (1, 1));
+        assert_eq!(current.borrow().bounds, original.bounds);
+        assert_eq!(
+            *calls.borrow(),
+            [
+                "move",
+                "repaint",
+                "measure_client",
+                "fresh_stop_control",
+                "one_down",
+                "one_up",
+                "actual_stop_terminal",
+                "restore"
+            ]
+        );
+    }
+
+    #[test]
+    fn gate_s_stop_relocation_restores_after_move_readiness_input_or_terminal_failure() {
+        for failure in 0..6 {
+            let original = stop_designer_fixture();
+            let current = std::cell::RefCell::new(original.clone());
+            let stop_calls = std::cell::Cell::new(0);
+            let restore_calls = std::cell::Cell::new(0);
+            let result = with_relocated_designer_for_preview_stop(
+                || {
+                    // A successful native move followed by failed measurement
+                    // still has to restore the captured owner before returning.
+                    current.borrow_mut().bounds = [1644, 0, 2560, 689];
+                    if failure == 0 {
+                        Err(CaseFailure::new(
+                            FailureStage::DesignerPresentation,
+                            "move measurement failed".into(),
+                        ))
+                    } else {
+                        Ok(current.borrow().clone())
+                    }
+                },
+                |_| {
+                    stop_calls.set(stop_calls.get() + 1);
+                    match failure {
+                        1 => Err(CaseFailure::new(
+                            FailureStage::DesignerReadiness,
+                            "fresh control missing".into(),
+                        )),
+                        2 => Err(CaseFailure::new(
+                            FailureStage::InputInjection,
+                            "coverage rejected before down".into(),
+                        )),
+                        3 | 5 => Err(CaseFailure::new(
+                            FailureStage::DesignerReadiness,
+                            "actual Stop terminal missing".into(),
+                        )),
+                        _ => Ok(()),
+                    }
+                },
+                || {
+                    restore_calls.set(restore_calls.get() + 1);
+                    if failure >= 4 {
+                        Err(CaseFailure::new(
+                            FailureStage::DesignerPresentation,
+                            "restoration measurement failed".into(),
+                        ))
+                    } else {
+                        *current.borrow_mut() = original.clone();
+                        Ok(())
+                    }
+                },
+            );
+            let error = result.unwrap_err();
+            assert_eq!(restore_calls.get(), 1);
+            assert_eq!(stop_calls.get(), usize::from(failure != 0));
+            if failure < 4 {
+                assert_eq!(current.borrow().bounds, original.bounds);
+            }
+            match failure {
+                0 => assert!(error.message.contains("move measurement failed")),
+                1 => assert!(error.message.contains("fresh control missing")),
+                2 => assert_eq!(error.stage, FailureStage::InputInjection),
+                3 => assert!(error.message.contains("actual Stop terminal missing")),
+                4 => assert!(
+                    error
+                        .message
+                        .contains("Stop completed; Designer restoration failed")
+                ),
+                _ => assert!(
+                    error.message.contains("actual Stop terminal missing")
+                        && error.message.contains("restoration measurement failed")
+                ),
+            }
+        }
+    }
+
+    fn native_target_line(sequence: u64, target: NativeAppearanceTarget) -> String {
+        format!(
+            "trace_event=\"native_appearance_target\" trace_sequence={sequence} session_id={} generation={} menu_digest={} cell_digest={} geometry_digest={} point_x={} point_y={} dpi_milli={} cell_kind={} clicked={} work_left={} work_top={} work_right={} work_bottom={}",
+            target.session_id,
+            target.generation,
+            target.menu_digest,
+            target.cell_digest,
+            target.geometry_digest,
+            target.point_x,
+            target.point_y,
+            target.dpi_milli,
+            target.kind,
+            target.clicked,
+            target.work_area[0],
+            target.work_area[1],
+            target.work_area[2],
+            target.work_area[3],
+        )
+    }
+
+    #[test]
+    fn gate_s_native_target_readiness_keeps_exact_current_prepared_owner() {
+        let back = NativeAppearanceTarget {
+            session_id: 1,
+            generation: 12,
+            menu_digest: 4556281056013730015,
+            cell_digest: 4644805793077333250,
+            geometry_digest: 9221716653986904436,
+            point_x: 257,
+            point_y: 257,
+            dpi_milli: 1000,
+            work_area: [0, 0, 2560, 1440],
+            kind: 2,
+            clicked: false,
+        };
+        let mut action = back;
+        action.cell_digest = 99;
+        action.kind = 0;
+        action.point_x = 310;
+        let lines = vec![
+            native_target_line(16296, back),
+            native_target_line(16470, action),
+        ];
+        let parsed = native_targets_in_lines(&lines);
+        assert_eq!(parsed, [(16296, back), (16470, action)]);
+        assert!(native_prepared_target_is_current(&parsed, back));
+        assert!(native_prepared_target_is_current(&parsed, action));
+        for invalid in 0..6 {
+            let mut newer = action;
+            match invalid {
+                0 => newer.session_id += 1,
+                1 => newer.generation += 1,
+                2 => newer.menu_digest += 1,
+                3 => newer.geometry_digest += 1,
+                4 => newer.dpi_milli += 1,
+                _ => newer.work_area[0] -= 1,
+            }
+            let changed =
+                native_targets_in_lines(&[lines[0].clone(), native_target_line(16471, newer)]);
+            assert!(
+                !native_prepared_target_is_current(&changed, back),
+                "{invalid}"
+            );
+        }
+        let mut moved = back;
+        moved.point_x += 1;
+        assert!(!native_prepared_target_is_current(&parsed, moved));
+        let mut clicked = back;
+        clicked.clicked = true;
+        assert!(!native_prepared_target_is_current(
+            &[(16471, clicked)],
+            back
+        ));
+        assert!(!native_prepared_target_is_current(&[], back));
+    }
 
     fn producer_menu_row_lines(
         sequence: u64,

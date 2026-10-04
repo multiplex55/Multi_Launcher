@@ -3308,6 +3308,631 @@ mod tests {
         }
     }
 
+    const CAPACITY_GATE_QUERY: &str = "blocked capacity probe";
+    const CAPACITY_CATALOG_COMMAND: &str = "clipboard:capacity-recovery-catalog-only";
+
+    struct CapacityRecoverySearchPlugin {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl crate::plugin::Plugin for CapacityRecoverySearchPlugin {
+        fn search(&self, query: &str) -> Vec<crate::actions::Action> {
+            self.calls.lock().unwrap().push(query.into());
+            if query == CAPACITY_GATE_QUERY {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                return Vec::new();
+            }
+            if query == "crop" {
+                return vec![result_action(
+                    "Capacity catalog only",
+                    CAPACITY_CATALOG_COMMAND,
+                )];
+            }
+            if query.starts_with("ordinary ") {
+                return vec![result_action(query, "help:show")];
+            }
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            "capacity_recovery_search"
+        }
+
+        fn description(&self) -> &str {
+            "channel-gated synchronous provider without refresh tickets"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+
+        fn always_search(&self) -> bool {
+            true
+        }
+    }
+
+    struct CapacityRecoveryWorker {
+        cancellation: Arc<std::sync::atomic::AtomicBool>,
+        release: mpsc::Sender<()>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn start_capacity_recovery_worker(app: &mut LauncherApp) -> CapacityRecoveryWorker {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        app.plugins.register(Box::new(CapacityRecoverySearchPlugin {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+            calls: Arc::clone(&calls),
+        }));
+        // Keep the materialized catalog demand stable across the measured
+        // release frame; dashboard startup refresh is an unrelated producer.
+        app.dashboard_initial_refresh_queued = true;
+        app.last_plugin_search_generation = app.plugins.search_generation();
+        let (envelope, _, _) = deferred_query_envelope(app, CAPACITY_GATE_QUERY);
+        let cancellation = Arc::clone(&envelope.cancellation);
+        app.resolve_deferred_radial(envelope);
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the real bounded provider worker must enter its channel gate");
+        assert!(app.radial_provider_search_capacity.is_occupied());
+        CapacityRecoveryWorker {
+            cancellation,
+            release: release_tx,
+            calls,
+        }
+    }
+
+    fn release_capacity_worker_in_root_frame(
+        app: &mut LauncherApp,
+        ctx: &eframe::egui::Context,
+        worker: &CapacityRecoveryWorker,
+    ) -> eframe::egui::FullOutput {
+        worker.release.send(()).unwrap();
+        let event = app
+            .rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the returning real worker must publish a capacity event even when cancelled");
+        app.event_sink.event_consumed();
+        assert!(matches!(
+            event,
+            crate::gui::WatchEvent::AuthoringProviderCapacityAvailable
+        ));
+        assert!(!app.radial_provider_search_capacity.is_occupied());
+        // Retain and deliver the actual worker-produced event through the same
+        // queue the ROOT render consumes; do not synthesize a capacity proof.
+        app.event_tx.send(event).unwrap();
+        ctx.run(eframe::egui::RawInput::default(), |root| {
+            app.render_root_frame(root, None);
+        })
+    }
+
+    fn assert_capacity_refresh_has_no_action_or_visibility_effects(
+        app: &LauncherApp,
+        history_before: &[u8],
+        usage_before: &std::collections::HashMap<String, u32>,
+        revision_before: u64,
+    ) {
+        assert_eq!(
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap(),
+            history_before,
+        );
+        assert_eq!(&app.usage, usage_before);
+        assert!(app.test_activation_trace.is_empty());
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.visibility_revision.current(), revision_before);
+        let designer = app
+            .radial_editor
+            .lock()
+            .unwrap()
+            .acceptance_observation()
+            .unwrap();
+        assert!(!designer.open);
+        assert_eq!(designer.session_id, 0);
+        assert!(!designer.draft_dirty);
+        assert_eq!((designer.undo_depth, designer.redo_depth), (0, 0));
+    }
+
+    #[test]
+    fn capacity_deferred_ordinary_query_resumes_on_real_worker_release_without_generation_change() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        let worker = start_capacity_recovery_worker(&mut app);
+        let generation = app.plugins.search_generation();
+        let history =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap();
+        let usage = app.usage.clone();
+        let revision = app.visibility_revision.current();
+        app.query = "ordinary first needle".into();
+        app.search();
+        assert!(app.results.is_empty());
+        assert!(!app.last_results_valid);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            super::super::search::ProviderSearchDeferral::Capacity
+        );
+        assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
+
+        let output = release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
+
+        assert_eq!(app.query, "ordinary first needle");
+        assert_eq!(app.last_search_query, app.query);
+        assert!(app.last_results_valid);
+        assert_eq!(
+            app.results
+                .iter()
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["ordinary first needle"]
+        );
+        assert_eq!(
+            *worker.calls.lock().unwrap(),
+            [CAPACITY_GATE_QUERY, "ordinary first needle"]
+        );
+        assert_eq!(app.plugins.search_generation(), generation);
+        assert!(
+            !output
+                .viewport_output
+                .contains_key(&crate::gui::radial_editor::radial_designer_viewport_id())
+        );
+        assert_eq!(
+            app.authoring_catalog_build_count
+                .load(AtomicOrdering::SeqCst),
+            0
+        );
+        assert_capacity_refresh_has_no_action_or_visibility_effects(
+            &app, &history, &usage, revision,
+        );
+        app.search();
+        assert_eq!(
+            *worker.calls.lock().unwrap(),
+            [CAPACITY_GATE_QUERY, "ordinary first needle"],
+            "a completed current query returns to normal cache reuse"
+        );
+    }
+
+    #[test]
+    fn capacity_deferred_query_recovery_uses_current_edit_and_cancelled_worker_event() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        let worker = start_capacity_recovery_worker(&mut app);
+        let generation = app.plugins.search_generation();
+        let history =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap();
+        let usage = app.usage.clone();
+        let revision = app.visibility_revision.current();
+        app.query = "ordinary old needle".into();
+        app.search();
+        app.query = "ordinary current needle".into();
+        app.search();
+        worker.cancellation.store(true, Ordering::Release);
+        assert!(
+            app.radial_provider_search_capacity.is_occupied(),
+            "cancellation keeps the permit until provider return"
+        );
+        assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
+
+        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
+
+        assert_eq!(app.query, "ordinary current needle");
+        assert_eq!(app.last_search_query, app.query);
+        assert_eq!(
+            app.results
+                .iter()
+                .map(|action| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["ordinary current needle"]
+        );
+        assert_eq!(
+            *worker.calls.lock().unwrap(),
+            [CAPACITY_GATE_QUERY, "ordinary current needle"]
+        );
+        assert_eq!(app.plugins.search_generation(), generation);
+        assert_capacity_refresh_has_no_action_or_visibility_effects(
+            &app, &history, &usage, revision,
+        );
+    }
+
+    #[test]
+    fn capacity_release_event_preserves_deliberate_failed_query_fallback_suppression() {
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        let worker = start_capacity_recovery_worker(&mut app);
+        app.query = "ordinary failed needle".into();
+        app.search();
+        assert_eq!(
+            app.last_search_provider_deferral,
+            super::super::search::ProviderSearchDeferral::Capacity
+        );
+        app.radial_suppressed_provider_query = Some(app.query.clone());
+        app.search();
+        assert_eq!(
+            app.last_search_provider_deferral,
+            super::super::search::ProviderSearchDeferral::None
+        );
+        assert!(app.last_results_valid);
+        worker.cancellation.store(true, Ordering::Release);
+
+        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
+
+        assert_eq!(app.query, "ordinary failed needle");
+        assert!(app.results.is_empty());
+        assert!(app.last_results_valid);
+        assert_eq!(
+            *worker.calls.lock().unwrap(),
+            [CAPACITY_GATE_QUERY],
+            "the real release event cannot retry the failed Auto Submit provider"
+        );
+        app.query = "ordinary user edit needle".into();
+        app.search();
+        assert_eq!(app.results[0].label, "ordinary user edit needle");
+    }
+
+    fn apply_capacity_test_calendar_results(app: &mut LauncherApp) -> Vec<crate::actions::Action> {
+        let rows = vec![crate::actions::Action {
+            label: "Authoritative calendar fixture".into(),
+            desc: "Calendar".into(),
+            action: "calendar:jump:2026-09-30".into(),
+            args: None,
+        }];
+        let invocation = crate::commands::parse_command(
+            result_action("Upcoming calendar", "calendar:upcoming"),
+            None,
+            ActivationSource::Click,
+        )
+        .unwrap();
+        app.apply_command_outcome_with_root_policy(
+            crate::commands::CommandOutcome {
+                query: crate::commands::QueryPolicy::Set("cal upcoming".into()),
+                results: crate::commands::ResultsPolicy::Replace(rows.clone()),
+                ..Default::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        rows
+    }
+
+    #[test]
+    fn capacity_release_preserves_authoritative_command_results_for_same_and_changed_queries() {
+        use super::super::search::ProviderSearchDeferral;
+        for previous_query in ["cal upcoming", "ordinary prior needle"] {
+            for stale_cause in [false, true] {
+                let ctx = eframe::egui::Context::default();
+                let mut app = crate::gui::actions::tests::new_app(&ctx);
+                let worker = start_capacity_recovery_worker(&mut app);
+                app.query = previous_query.into();
+                app.search();
+                let deferred_cause = app.last_search_provider_deferral;
+                assert_eq!(deferred_cause, ProviderSearchDeferral::Capacity);
+                assert!(!app.last_results_valid);
+                let rows = apply_capacity_test_calendar_results(&mut app);
+                assert!(app.last_results_valid);
+                assert_eq!(
+                    app.last_search_provider_deferral,
+                    ProviderSearchDeferral::None
+                );
+                if stale_cause {
+                    // A late cause cannot override a now-completed owner even
+                    // independently of the replacement owner's cause clearing.
+                    app.last_search_provider_deferral = deferred_cause;
+                }
+                worker.cancellation.store(true, Ordering::Release);
+                let generation = app.plugins.search_generation();
+
+                release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
+
+                assert_eq!(app.query, "cal upcoming");
+                assert_eq!(app.last_search_query, "cal upcoming");
+                assert_eq!(app.results, rows);
+                assert!(app.last_results_valid);
+                assert_eq!(
+                    app.last_search_provider_deferral,
+                    ProviderSearchDeferral::None
+                );
+                assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
+                assert_eq!(app.plugins.search_generation(), generation);
+                assert!(app.test_activation_trace.is_empty());
+                assert!(app.test_recorded_history_queries.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn capacity_deferred_root_snapshot_round_trip_restores_cause_and_recovers_only_incomplete_query()
+     {
+        use super::super::search::ProviderSearchDeferral;
+        use super::super::universal_action_executor::RadialRootState;
+        for capacity_deferred in [true, false] {
+            let ctx = eframe::egui::Context::default();
+            let mut app = crate::gui::actions::tests::new_app(&ctx);
+            let worker = start_capacity_recovery_worker(&mut app);
+            app.query = "ordinary restored needle".into();
+            app.search();
+            assert_eq!(
+                app.last_search_provider_deferral,
+                ProviderSearchDeferral::Capacity
+            );
+            if !capacity_deferred {
+                apply_capacity_test_calendar_results(&mut app);
+            }
+            let query = app.query.clone();
+            let rows = app.results.clone();
+            let cause = app.last_search_provider_deferral;
+            let valid = app.last_results_valid;
+            let snapshot = RadialRootState::capture(&app);
+            app.query = if capacity_deferred {
+                ""
+            } else {
+                "ordinary temporary needle"
+            }
+            .into();
+            app.search();
+            assert_ne!(
+                app.last_search_provider_deferral, cause,
+                "the temporary search really changes cache completion cause"
+            );
+
+            snapshot.restore(&mut app);
+
+            assert_eq!(app.query, query);
+            assert_eq!(app.last_search_query, query);
+            assert_eq!(app.results, rows);
+            assert_eq!(app.last_search_provider_deferral, cause);
+            assert_eq!(app.last_results_valid, valid);
+            worker.cancellation.store(true, Ordering::Release);
+            let history =
+                serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap();
+            let usage = app.usage.clone();
+            let revision = app.visibility_revision.current();
+
+            release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
+
+            assert_eq!(app.query, query);
+            assert_eq!(app.last_search_query, query);
+            assert!(app.last_results_valid);
+            assert_eq!(
+                app.last_search_provider_deferral,
+                ProviderSearchDeferral::None
+            );
+            if capacity_deferred {
+                assert_eq!(
+                    app.results
+                        .iter()
+                        .map(|action| action.label.as_str())
+                        .collect::<Vec<_>>(),
+                    [query.as_str()]
+                );
+                assert_eq!(
+                    *worker.calls.lock().unwrap(),
+                    [CAPACITY_GATE_QUERY, query.as_str()]
+                );
+            } else {
+                assert_eq!(app.results, rows);
+                assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
+            }
+            assert_capacity_refresh_has_no_action_or_visibility_effects(
+                &app, &history, &usage, revision,
+            );
+        }
+    }
+
+    #[test]
+    fn capacity_release_after_real_clipboard_remove_preserves_completed_root_cache_and_cause() {
+        use super::super::search::ProviderSearchDeferral;
+        struct RestoreWorkingDirectory(std::path::PathBuf);
+        impl Drop for RestoreWorkingDirectory {
+            fn drop(&mut self) {
+                std::env::set_current_dir(&self.0)
+                    .expect("restore the test's original working directory");
+            }
+        }
+        // Clipboard persistence uses relative paths. This isolated test process
+        // owns a temporary profile and restores cwd even on assertion failure.
+        let fixture = tempfile::tempdir().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(fixture.path()).unwrap();
+        let _restore = RestoreWorkingDirectory(original);
+        let ctx = eframe::egui::Context::default();
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        app.require_confirm_destructive = false;
+        crate::plugins::clipboard::save_history(
+            crate::plugins::clipboard::CLIPBOARD_FILE,
+            &std::collections::VecDeque::from(["remove fixture".into(), "retained fixture".into()]),
+        )
+        .unwrap();
+        let worker = start_capacity_recovery_worker(&mut app);
+        let rows = apply_capacity_test_calendar_results(&mut app);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            ProviderSearchDeferral::None
+        );
+        let history =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap();
+        let usage = app.usage.clone();
+        let revision = app.visibility_revision.current();
+        let operation = crate::universal_actions::UniversalAction {
+            id: crate::universal_actions::action_ids::CLIPBOARD_REMOVE,
+            target: crate::universal_actions::ActionTarget::ClipboardEntry { index: 0 },
+            presentation: crate::universal_actions::ActionPresentation::new("Remove fixture"),
+            availability: crate::universal_actions::ActionAvailability::Available,
+            safety: crate::universal_actions::ActionSafety::Destructive,
+            operation: crate::universal_actions::UniversalActionOperation::UiIntent(
+                crate::universal_actions::UniversalUiIntent::RemoveClipboardEntry {
+                    index: 0,
+                    label: "remove fixture".into(),
+                },
+            ),
+        };
+
+        assert_eq!(
+            app.execute_universal_action_with_context(
+                operation,
+                UniversalActionInvocationContext {
+                    surface: ActionSurface::RadialMenu,
+                    source: ActivationSource::Click,
+                    stable_request: None,
+                    history_query: "isolated clipboard removal".into(),
+                    root_policy: RootLauncherPolicy::PreserveOrdinaryState,
+                    primary_invocation: false,
+                },
+                None,
+            ),
+            super::super::universal_action_executor::UniversalActionExecution::Executed
+        );
+        assert_eq!(
+            crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE)
+                .unwrap(),
+            std::collections::VecDeque::from(["retained fixture".to_string()])
+        );
+        assert_eq!(app.query, "cal upcoming");
+        assert_eq!(app.last_search_query, "cal upcoming");
+        assert_eq!(app.results, rows);
+        assert!(app.last_results_valid);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            ProviderSearchDeferral::None,
+            "the real intent's temporary capacity-deferred search cannot leak through preserved ROOT state"
+        );
+        worker.cancellation.store(true, Ordering::Release);
+
+        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
+
+        assert_eq!(app.results, rows);
+        assert_eq!(app.query, "cal upcoming");
+        assert!(app.last_results_valid);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            ProviderSearchDeferral::None
+        );
+        assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
+        assert_capacity_refresh_has_no_action_or_visibility_effects(
+            &app, &history, &usage, revision,
+        );
+    }
+
+    #[test]
+    fn capacity_deferred_catalog_retires_on_real_release_and_reuses_completed_snapshot_while_designer_closed()
+     {
+        let ctx = eframe::egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        let worker = start_capacity_recovery_worker(&mut app);
+        let generation = app.plugins.search_generation();
+        let history =
+            serde_json::to_vec(&crate::history::with_history(Clone::clone).unwrap()).unwrap();
+        let usage = app.usage.clone();
+        let revision = app.visibility_revision.current();
+        let first = app.cached_universal_action_catalog_snapshot();
+        let demand = app
+            .authoring_catalog_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .demand;
+        assert!(
+            !first
+                .entries
+                .iter()
+                .any(|entry| entry.selected_action.action == CAPACITY_CATALOG_COMMAND)
+        );
+        assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
+        for _ in 0..16 {
+            assert!(Arc::ptr_eq(
+                &first,
+                &app.cached_universal_action_catalog_snapshot()
+            ));
+        }
+        assert_eq!(
+            app.authoring_catalog_build_count
+                .load(AtomicOrdering::SeqCst),
+            1
+        );
+        worker.cancellation.store(true, Ordering::Release);
+
+        let output = release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
+
+        assert_eq!(app.plugins.search_generation(), generation);
+        assert_eq!(
+            app.authoring_catalog_build_count
+                .load(AtomicOrdering::SeqCst),
+            1,
+            "capacity notification retires the incomplete catalog without rebuilding a closed Designer"
+        );
+        assert!(app.authoring_catalog_cache.lock().unwrap().is_none());
+        assert!(
+            !output
+                .viewport_output
+                .contains_key(&crate::gui::radial_editor::radial_designer_viewport_id())
+        );
+        assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
+        let completed = app.cached_universal_action_catalog_snapshot();
+        assert!(!Arc::ptr_eq(&first, &completed));
+        assert_eq!(
+            app.authoring_catalog_cache
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .demand,
+            demand,
+            "provider generation and materialized catalog demand did not change"
+        );
+        let catalog =
+            super::super::universal_action_catalog::UniversalActionAuthoringCatalog::build(
+                &completed,
+                &InvocationContext::empty(1),
+                "",
+            );
+        assert!(
+            catalog
+                .rows()
+                .iter()
+                .any(|row| row.target_command == CAPACITY_CATALOG_COMMAND
+                    && row.display_label().contains("Capacity catalog only"))
+        );
+        assert_eq!(
+            worker
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|query| query.as_str() == "crop")
+                .count(),
+            1
+        );
+        for _ in 0..16 {
+            assert!(Arc::ptr_eq(
+                &completed,
+                &app.cached_universal_action_catalog_snapshot()
+            ));
+            let output = ctx.run(eframe::egui::RawInput::default(), |root| {
+                app.render_root_frame(root, None);
+            });
+            assert!(
+                !output
+                    .viewport_output
+                    .contains_key(&crate::gui::radial_editor::radial_designer_viewport_id())
+            );
+        }
+        assert_eq!(
+            app.authoring_catalog_build_count
+                .load(AtomicOrdering::SeqCst),
+            2
+        );
+        assert_eq!(app.plugins.search_generation(), generation);
+        assert_capacity_refresh_has_no_action_or_visibility_effects(
+            &app, &history, &usage, revision,
+        );
+    }
+
     fn result_action(label: &str, action: &str) -> crate::actions::Action {
         crate::actions::Action {
             label: label.into(),

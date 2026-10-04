@@ -12,7 +12,7 @@ const MAX_TRACE_BYTES: u64 = 128 * 1024;
 const MAX_LOG_BYTES: u64 = 64 * 1024;
 const MAX_TEXT_BYTES: u64 = 64 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum PrivateArtifactStatus {
     NotRun,
@@ -21,7 +21,7 @@ pub(super) enum PrivateArtifactStatus {
     Failed,
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) struct PrivateArtifactSummary {
     pub status: PrivateArtifactStatus,
     pub artifact_id: Option<String>,
@@ -538,7 +538,7 @@ fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-fn restrict_directory_acl(path: &Path) -> Result<(), String> {
+pub(super) fn restrict_directory_acl(path: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::{
@@ -586,7 +586,7 @@ fn restrict_directory_acl(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn restrict_directory_acl(_path: &Path) -> Result<(), String> {
+pub(super) fn restrict_directory_acl(_path: &Path) -> Result<(), String> {
     Err("private evidence ACL enforcement is only supported on Windows".into())
 }
 

@@ -10585,9 +10585,17 @@ fn traced_menu_after_action_combo(
                 );
             }
         });
+    if !acceptance_trace::enabled() {
+        return;
+    }
+    // The labelled ComboBox response includes its separate label. Its ID still
+    // belongs to the button registered this frame, which opens the popup.
+    let Some(button_response) = ui.ctx().read_response(response.response.id) else {
+        return;
+    };
     trace_designer_authoring_control(
         ui,
-        &response.response,
+        &button_response,
         DesignerAuthoringTarget::MenuAfterAction,
         DesignerAuthoringRole::ComboBox,
         None,
@@ -15813,6 +15821,115 @@ mod tests {
         assert!(!editor.open);
         assert!(editor.session.is_none());
         assert!(editor.viewport_close_pending);
+    }
+
+    #[test]
+    fn closed_show_deferred_frames_skip_catalog_and_real_retained_callback_drains_close() {
+        use std::sync::atomic::Ordering;
+
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let app = crate::gui::actions::tests::new_app(&ctx);
+        let shared = Arc::clone(&app.radial_editor);
+        let viewport_id = radial_designer_viewport_id();
+        let root_frame = || {
+            ctx.run(egui::RawInput::default(), |root| {
+                RadialEditorState::show_deferred(&shared, root, &app);
+            })
+        };
+        let initial_builds = app.authoring_catalog_build_count.load(Ordering::SeqCst);
+        for _ in 0..32 {
+            let output = root_frame();
+            assert!(!output.viewport_output.contains_key(&viewport_id));
+            assert_eq!(
+                app.authoring_catalog_build_count.load(Ordering::SeqCst),
+                initial_builds
+            );
+        }
+
+        shared.lock().unwrap().open_test_snapshot();
+        let opened = root_frame();
+        assert!(
+            opened.viewport_output[&viewport_id]
+                .viewport_ui_cb
+                .is_some()
+        );
+        assert_eq!(
+            app.authoring_catalog_build_count.load(Ordering::SeqCst),
+            initial_builds + 1
+        );
+        for _ in 0..8 {
+            assert!(root_frame().viewport_output.contains_key(&viewport_id));
+        }
+        assert_eq!(
+            app.authoring_catalog_build_count.load(Ordering::SeqCst),
+            initial_builds + 1,
+            "unchanged open ROOT frames reuse the actual provider snapshot"
+        );
+        {
+            let mut editor = shared.lock().unwrap();
+            let session = editor.session.as_mut().unwrap();
+            session.pending_request = Some(crate::radial::authoring::PendingAuthoringRequest {
+                id: crate::radial::authoring::AuthoringRequestId(42),
+                generation: session.generation,
+                editor_session: session.editor_session,
+                kind: crate::radial::authoring::PendingRequestKind::PrepareEmbeddedPreview,
+            });
+            editor.request_close();
+            assert!(!editor.open);
+            assert!(editor.session.is_none());
+            assert!(editor.viewport_close_pending);
+        }
+        app.root_window_bridge.set_designer_identity_for_test(23);
+        let prior_identity = app.root_window_bridge.designer_identity_for_test();
+        let closing = root_frame();
+        let callback = closing.viewport_output[&viewport_id]
+            .viewport_ui_cb
+            .clone()
+            .expect("the real closing deferred callback is retained by egui");
+        assert!(shared.lock().unwrap().viewport_close_pending);
+        assert_eq!(
+            app.authoring_catalog_build_count.load(Ordering::SeqCst),
+            initial_builds + 1
+        );
+        let mut child_input = egui::RawInput {
+            viewport_id,
+            ..Default::default()
+        };
+        child_input.viewports.insert(
+            viewport_id,
+            egui::ViewportInfo {
+                parent: Some(egui::ViewportId::ROOT),
+                ..Default::default()
+            },
+        );
+        let drained = ctx.run(child_input, |child| callback(child));
+        {
+            let editor = shared.lock().unwrap();
+            assert!(!editor.open);
+            assert!(!editor.viewport_close_pending);
+            assert!(editor.session.is_none());
+        }
+        let cleared_identity = app.root_window_bridge.designer_identity_for_test();
+        assert_eq!(cleared_identity.0, 0);
+        assert!(cleared_identity.1 > prior_identity.1);
+        assert!(drained.viewport_output[&viewport_id].commands.is_empty());
+        for _ in 0..32 {
+            let output = root_frame();
+            assert!(!output.viewport_output.contains_key(&viewport_id));
+            assert_eq!(output.viewport_output.len(), 1);
+            assert_eq!(
+                app.authoring_catalog_build_count.load(Ordering::SeqCst),
+                initial_builds + 1
+            );
+            let editor = shared.lock().unwrap();
+            assert!(!editor.viewport_close_pending);
+            assert!(editor.session.is_none());
+            assert_eq!(
+                app.root_window_bridge.designer_identity_for_test(),
+                cleared_identity
+            );
+        }
     }
 
     #[test]

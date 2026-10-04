@@ -60,9 +60,9 @@ pub enum WatchEvent {
     /// Event-driven request from the process-wide launcher hotkey listener.
     ScreenDrawStart,
     /// Launcher hotkey was pressed while Screen Draw owns the foreground flow.
-    ScreenDrawRecover,
+    ScreenDrawRecover(crate::screen_draw::ScreenDrawRecoveryIntent),
     /// Process-wide emergency chord was pressed.
-    ScreenDrawEmergency,
+    ScreenDrawEmergency(crate::screen_draw::ScreenDrawRecoveryIntent),
     ClipboardModify(ClipboardModifyGuiEvent),
     VirtualDesktop(VirtualDesktopGuiCompletion),
 }
@@ -325,8 +325,8 @@ pub enum TestWatchEvent {
     Actions,
     Folders,
     Bookmarks,
-    ScreenDrawRecover,
-    ScreenDrawEmergency,
+    ScreenDrawRecover(crate::screen_draw::ScreenDrawRecoveryIntent),
+    ScreenDrawEmergency(crate::screen_draw::ScreenDrawRecoveryIntent),
     ClipboardModify(ClipboardModifyGuiEvent),
 }
 
@@ -361,8 +361,8 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::RadialMigrationNotice(_) => TestWatchEvent::Actions,
             WatchEvent::RadialMigrationState { .. } => TestWatchEvent::Actions,
             WatchEvent::ScreenDrawStart => TestWatchEvent::Actions,
-            WatchEvent::ScreenDrawRecover => TestWatchEvent::ScreenDrawRecover,
-            WatchEvent::ScreenDrawEmergency => TestWatchEvent::ScreenDrawEmergency,
+            WatchEvent::ScreenDrawRecover(intent) => TestWatchEvent::ScreenDrawRecover(intent),
+            WatchEvent::ScreenDrawEmergency(intent) => TestWatchEvent::ScreenDrawEmergency(intent),
             WatchEvent::ClipboardModify(event) => TestWatchEvent::ClipboardModify(event),
             WatchEvent::VirtualDesktop(_) => TestWatchEvent::Actions,
         }

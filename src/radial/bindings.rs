@@ -1136,21 +1136,48 @@ mod tests {
                 )
             })
             .collect();
-        let first = project_menu_frame(&menu, BTreeMap::new(), &dynamic, 0, 1);
+        let mut document = RadialDocument::starter();
+        document.menus[0] = menu.clone();
+        let style = super::super::skin::compile_menu_tree(&document, &menu).unwrap();
+        let raw = project_menu_frame(&menu, BTreeMap::new(), &dynamic, 0, 1);
+        let mut raw_document = document.clone();
+        raw_document.menus[0] = raw.menu;
+        assert!(super::super::validation::validate(&raw_document).is_err());
+        let first =
+            project_menu_frame_with_style(&menu, BTreeMap::new(), &dynamic, 0, Some(&style));
         assert!(first.page_count > 1);
         for (definition, projected) in menu.rings.iter().zip(&first.menu.rings) {
-            assert!(projected.cells.len() <= ring_accessible_capacity(definition));
+            let values = &style.rings[&definition.id].values.geometry;
+            let scale = super::super::skin::resolved_f32(&values.menu_scale);
+            let radius =
+                definition.radius * super::super::skin::resolved_f32(&values.radius_scale) * scale;
+            let item_radius = super::super::skin::resolved_f32(&values.item_size) * scale * 0.5;
+            let required = item_radius * 2.0 + definition.gap * scale;
+            let capacity = (1..=super::super::model::limits::MAX_CELLS_PER_RING)
+                .take_while(|count| {
+                    *count == 1
+                        || 2.0 * radius * (std::f32::consts::PI / *count as f32).sin() >= required
+                })
+                .last()
+                .unwrap();
+            assert!(projected.cells.len() <= capacity);
+            if definition.id.as_str() == "outer" {
+                assert_eq!(capacity, 17);
+                assert!(capacity < ring_accessible_capacity(definition));
+            }
             assert!(projected.cells.iter().any(|cell| {
                 cell.id.as_str() == format!("__radial_page_next:{}", definition.id.as_str())
             }));
         }
         let mut seen = std::collections::BTreeSet::new();
         for page in 0..first.page_count {
-            let frame = project_menu_frame(&menu, BTreeMap::new(), &dynamic, page, 1);
-            let mut document = RadialDocument::starter();
-            document.menus[0] = frame.menu.clone();
-            crate::radial::validation::validate(&document).unwrap();
-            let layout = crate::radial::geometry::layout_menu(
+            let frame =
+                project_menu_frame_with_style(&menu, BTreeMap::new(), &dynamic, page, Some(&style));
+            let mut projected_document = document.clone();
+            projected_document.menus[0] = frame.menu.clone();
+            crate::radial::validation::validate(&projected_document).unwrap();
+            let layout = crate::radial::geometry::layout_document_menu(
+                &projected_document,
                 &frame.menu,
                 crate::radial::geometry::PhysicalPoint { x: 500.0, y: 500.0 },
                 crate::radial::geometry::PhysicalRect {
