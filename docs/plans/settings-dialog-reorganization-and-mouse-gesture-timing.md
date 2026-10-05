@@ -2,7 +2,7 @@
 
 ## Status
 
-**State:** Pending implementation
+**State:** Complete
 
 **Source of truth:** Current repository checkout corresponding to:
 
@@ -1895,60 +1895,60 @@ Preserve pre-existing user/application changes.
 
 ## Main Settings
 
-- [ ] Main Settings remains one vertically scrolling window.
-- [ ] Seven approved top-level collapsible categories exist.
-- [ ] Category order is correct.
-- [ ] Hotkeys defaults open.
-- [ ] Launcher Window & Appearance defaults open.
-- [ ] Search & Results defaults open.
-- [ ] Actions, Safety & Feedback defaults closed.
-- [ ] Dashboard defaults closed.
-- [ ] Radial Menus defaults closed.
-- [ ] Plugin Settings defaults closed.
-- [ ] Top-level Expand all works.
-- [ ] Top-level Collapse all works.
-- [ ] Top-level controls do not recursively alter plugin subsections.
-- [ ] Existing plugin subsection expansion remains functional.
-- [ ] Every previous main Settings control exists exactly once.
-- [ ] Unsaved values survive collapse/expand.
-- [ ] Save behavior remains unchanged.
-- [ ] Main Settings serialization/schema remains unchanged.
-- [ ] Launcher behavior remains unchanged.
-- [ ] Radial behavior remains unchanged.
-- [ ] Plugin behavior remains unchanged.
+- [x] Main Settings remains one vertically scrolling window.
+- [x] Seven approved top-level collapsible categories exist.
+- [x] Category order is correct.
+- [x] Hotkeys defaults open.
+- [x] Launcher Window & Appearance defaults open.
+- [x] Search & Results defaults open.
+- [x] Actions, Safety & Feedback defaults closed.
+- [x] Dashboard defaults closed.
+- [x] Radial Menus defaults closed.
+- [x] Plugin Settings defaults closed.
+- [x] Top-level Expand all works.
+- [x] Top-level Collapse all works.
+- [x] Top-level controls do not recursively alter plugin subsections.
+- [x] Existing plugin subsection expansion remains functional.
+- [x] Every previous main Settings control exists exactly once.
+- [x] Unsaved values survive collapse/expand.
+- [x] Save behavior remains unchanged.
+- [x] Main Settings serialization/schema remains unchanged.
+- [x] Launcher behavior remains unchanged.
+- [x] Radial behavior remains unchanged.
+- [x] Plugin behavior remains unchanged.
 
 ## Mouse Gestures
 
-- [ ] Trail refresh interval is exposed.
-- [ ] Recognition interval is exposed.
-- [ ] Defaults remain 16 ms / 40 ms.
-- [ ] UI ranges are 4–250 / 4–500 ms.
-- [ ] Values remain independently configurable.
-- [ ] Existing configs missing the fields load with defaults.
-- [ ] Custom values round-trip correctly.
-- [ ] Values live-apply through the existing mechanism.
-- [ ] Runtime config receives configured values.
-- [ ] Worker cadence algorithm is unchanged.
-- [ ] No dirty-rectangle/render optimization was added.
+- [x] Trail refresh interval is exposed.
+- [x] Recognition interval is exposed.
+- [x] Defaults remain 16 ms / 40 ms.
+- [x] UI ranges are 4–250 / 4–500 ms.
+- [x] Values remain independently configurable.
+- [x] Existing configs missing the fields load with defaults.
+- [x] Custom values round-trip correctly.
+- [x] Values live-apply through the existing mechanism.
+- [x] Runtime config receives configured values.
+- [x] Worker cadence algorithm is unchanged.
+- [x] No dirty-rectangle/render optimization was added.
 
 ## Verification
 
-- [ ] Focused Mouse Gesture tests pass.
-- [ ] `cargo build --bin multi_launcher` passes.
-- [ ] Scoped formatting checks pass.
-- [ ] `git diff --check` passes.
-- [ ] Focused reviewer has no unresolved concrete findings.
-- [ ] No full repository Nextest run was performed merely for ceremony.
-- [ ] No manual UI acceptance gate was introduced.
+- [x] Focused Mouse Gesture tests pass.
+- [x] `cargo build --bin multi_launcher` passes.
+- [x] Scoped formatting checks pass.
+- [x] `git diff --check` passes.
+- [x] Focused reviewer has no unresolved concrete findings.
+- [x] No full repository Nextest run was performed merely for ceremony.
+- [x] No manual UI acceptance gate was introduced.
 
 ## Git History
 
-- [ ] Major implementation subsections have clear checkpoint commits.
-- [ ] M2 was not accumulated into one giant settings-reorganization commit.
-- [ ] Commit subjects include plan-stage identifiers.
-- [ ] Commit messages clearly describe meaningful changes.
-- [ ] No meaningless WIP/checkpoint commits were created.
-- [ ] Commit history was not squashed unless explicitly requested by the user.
+- [x] Major implementation subsections have clear checkpoint commits.
+- [x] M2 was not accumulated into one giant settings-reorganization commit.
+- [x] Commit subjects include plan-stage identifiers.
+- [x] Commit messages clearly describe meaningful changes.
+- [x] No meaningless WIP/checkpoint commits were created.
+- [x] Commit history was not squashed unless explicitly requested by the user.
 
 ---
 
@@ -2052,7 +2052,7 @@ Maintain a compact ledger at the bottom of this plan.
 
 Do not create candidate/pass histories.
 
-Initial state:
+Execution state:
 
 ```text
 - M0 Focused reconnaissance — complete
@@ -2068,11 +2068,10 @@ Initial state:
 - M3-A complete — `1d798380` feat(mouse-gestures): [M3-A] persist configurable gesture timing intervals
 - M3-B complete — `29cafd8a` refactor(mouse-gestures): [M3-B] map timing settings into runtime config
 - M3-C complete — `a26a6046` feat(mouse-gestures): [M3-C] add timing controls to settings dialog
-- Next checkpoint: M4 Targeted automated verification
-- M4 Targeted automated verification — pending
-- M5 Build/static checks — pending
-- M6 Focused review/remediation — pending
-- Final diff/completion — pending
+- M4-A complete — `ff480f2a` test(mouse-gestures): [M4-A] cover timing defaults and runtime mapping — `cargo nextest run --lib -E 'test(=plugins::mouse_gestures::persistence_tests::mouse_gesture_timing_defaults_and_round_trip) | test(=plugins::mouse_gestures::persistence_tests::mouse_gesture_timing_runtime_mapping)'`: 2 passed, 4,439 skipped
+- M5 complete — `cargo build --bin multi_launcher` passed (2m20s); `rustfmt --edition 2024 --check` on four Rust files, `git diff --check`, and `git diff bba3e671 --check` passed
+- M6 complete — focused review of `bba3e671..ff480f2a` found no substantive findings; no remediation
+- Final diff/completion — complete after final audit; Next: none
 ```
 
 When a checkpoint commit is created, update compactly:
