@@ -2064,8 +2064,8 @@ Initial state:
 - M2-D complete — `00895e0e` refactor(settings): [M2-D] group action safety and feedback settings
 - M2-E complete — `e7593293` refactor(settings): [M2-E] place dashboard settings in their top-level section
 - M2-F complete — `3465c760` refactor(settings): [M2-F] place radial settings in their top-level section
-- Next checkpoint: M2-G Plugin Settings
-- M2-G Plugin Settings — pending
+- M2-G complete — `c558e8e7` refactor(settings): [M2-G] isolate plugin settings under top-level section
+- Next checkpoint: M3-A Mouse Gesture timing persistence/defaults
 - M3-A Mouse Gesture timing persistence/defaults — pending
 - M3-B Mouse Gesture runtime mapping — pending
 - M3-C Mouse Gesture timing UI — pending

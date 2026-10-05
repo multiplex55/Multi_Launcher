@@ -6,8 +6,8 @@ use crate::mouse_gestures::db::{
     format_search_result_label, load_gestures,
 };
 use crate::mouse_gestures::service::{
-    CancelBehavior, MouseGestureConfig, NoMatchBehavior, WheelCycleGate,
-    with_service as with_gesture_service,
+    CancelBehavior, DEFAULT_RECOGNITION_INTERVAL_MS, DEFAULT_TRAIL_INTERVAL_MS, MouseGestureConfig,
+    NoMatchBehavior, WheelCycleGate, with_service as with_gesture_service,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -34,6 +34,10 @@ pub struct MouseGestureSettings {
     pub trail_width: f32,
     #[serde(default = "default_trail_start_move_px")]
     pub trail_start_move_px: f32,
+    #[serde(default = "default_trail_interval_ms")]
+    pub trail_interval_ms: u64,
+    #[serde(default = "default_recognition_interval_ms")]
+    pub recognition_interval_ms: u64,
     #[serde(default = "default_show_hint")]
     pub show_hint: bool,
     #[serde(default = "default_hint_offset")]
@@ -59,6 +63,8 @@ impl Default for MouseGestureSettings {
             trail_color: default_trail_color(),
             trail_width: default_trail_width(),
             trail_start_move_px: default_trail_start_move_px(),
+            trail_interval_ms: default_trail_interval_ms(),
+            recognition_interval_ms: default_recognition_interval_ms(),
             show_hint: default_show_hint(),
             hint_offset: default_hint_offset(),
             cancel_behavior: default_cancel_behavior(),
@@ -92,6 +98,14 @@ fn default_trail_width() -> f32 {
 
 fn default_trail_start_move_px() -> f32 {
     8.0
+}
+
+fn default_trail_interval_ms() -> u64 {
+    DEFAULT_TRAIL_INTERVAL_MS
+}
+
+fn default_recognition_interval_ms() -> u64 {
+    DEFAULT_RECOGNITION_INTERVAL_MS
 }
 
 fn default_show_hint() -> bool {
