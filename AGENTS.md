@@ -1258,3 +1258,42 @@ A targeted bug fix should not become a regression initiative.
 A feature that can reuse an existing abstraction should not create a parallel system.
 
 Tests should prove the behavior being changed, not serve as an excuse to revalidate the entire application.
+
+## Active Checkpoint Commit Cadence
+
+Use an active checkpoint commit cadence for implementation work.
+
+Do not allow several substantial, independently understandable changes to
+accumulate into one large commit merely because they belong to the same
+milestone.
+
+For larger milestones, identify coherent implementation checkpoints such as
+`M1-A`, `M1-B`, `M2-A`, etc., and prefer committing after each checkpoint is
+complete.
+
+Commit sizing should remain practical:
+
+- do not commit every trivial edit or individual line;
+- do not create meaningless WIP/checkpoint commits;
+- do not wait until an entire large feature or milestone is complete when it
+  contains several natural commit boundaries;
+- before beginning a materially different subsection, prefer committing the
+  previous coherent subsection.
+
+Use descriptive stage-tagged commit subjects where an implementation plan
+defines stage identifiers:
+
+`<type>(<scope>): [M#-X] <clear description>`
+
+When useful, include a short commit body explaining what changed, why, and what
+behavior was intentionally preserved.
+
+Do not require expensive full verification before every checkpoint commit.
+Use inexpensive/local checks where useful, keep the repository in a coherent
+state, and perform substantive targeted verification at the appropriate
+verification milestone.
+
+Do not squash or rewrite checkpoint history unless explicitly requested.
+
+When planning substantial work, the planner should explicitly identify the
+natural checkpoint boundaries and suggested stage identifiers for that task.
