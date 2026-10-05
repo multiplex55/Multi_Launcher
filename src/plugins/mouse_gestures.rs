@@ -274,25 +274,32 @@ impl MouseGestureRuntime {
     }
 
     fn apply(&self) {
-        let mut config = MouseGestureConfig::default();
-        config.enabled = self.settings.enabled && self.plugin_enabled;
-        config.debug_logging = self.settings.debug_logging;
-        config.trail_start_move_px = self.settings.trail_start_move_px;
-        config.show_trail = self.settings.show_trail;
-        config.trail_color = self.settings.trail_color;
-        config.trail_width = self.settings.trail_width;
-        config.show_hint = self.settings.show_hint;
-        config.hint_offset = self.settings.hint_offset;
-        config.cancel_behavior = self.settings.cancel_behavior;
-        config.no_match_behavior = self.settings.no_match_behavior;
-        config.wheel_cycle_gate = self.settings.wheel_cycle_gate;
-        config.practice_mode = self.settings.practice_mode;
-        config.ignore_window_titles = self.settings.ignore_window_titles.clone();
+        let config = settings_to_config(&self.settings, self.plugin_enabled);
         with_gesture_service(|svc| {
             svc.update_config(config);
             svc.update_db(Some(self.db.clone()));
         });
     }
+}
+
+fn settings_to_config(settings: &MouseGestureSettings, plugin_enabled: bool) -> MouseGestureConfig {
+    let mut config = MouseGestureConfig::default();
+    config.enabled = settings.enabled && plugin_enabled;
+    config.debug_logging = settings.debug_logging;
+    config.trail_start_move_px = settings.trail_start_move_px;
+    config.trail_interval_ms = settings.trail_interval_ms;
+    config.recognition_interval_ms = settings.recognition_interval_ms;
+    config.show_trail = settings.show_trail;
+    config.trail_color = settings.trail_color;
+    config.trail_width = settings.trail_width;
+    config.show_hint = settings.show_hint;
+    config.hint_offset = settings.hint_offset;
+    config.cancel_behavior = settings.cancel_behavior;
+    config.no_match_behavior = settings.no_match_behavior;
+    config.wheel_cycle_gate = settings.wheel_cycle_gate;
+    config.practice_mode = settings.practice_mode;
+    config.ignore_window_titles = settings.ignore_window_titles.clone();
+    config
 }
 
 static SERVICE: OnceCell<Mutex<MouseGestureRuntime>> = OnceCell::new();

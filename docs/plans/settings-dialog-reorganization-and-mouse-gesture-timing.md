@@ -2065,8 +2065,8 @@ Initial state:
 - M2-E complete — `e7593293` refactor(settings): [M2-E] place dashboard settings in their top-level section
 - M2-F complete — `3465c760` refactor(settings): [M2-F] place radial settings in their top-level section
 - M2-G complete — `c558e8e7` refactor(settings): [M2-G] isolate plugin settings under top-level section
-- Next checkpoint: M3-A Mouse Gesture timing persistence/defaults
-- M3-A Mouse Gesture timing persistence/defaults — pending
+- M3-A complete — `1d798380` feat(mouse-gestures): [M3-A] persist configurable gesture timing intervals
+- Next checkpoint: M3-B Mouse Gesture runtime mapping
 - M3-B Mouse Gesture runtime mapping — pending
 - M3-C Mouse Gesture timing UI — pending
 - M4 Targeted automated verification — pending
