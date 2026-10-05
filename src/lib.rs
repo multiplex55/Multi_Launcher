@@ -33,6 +33,7 @@ pub mod history;
 pub mod hotkey;
 pub mod image_crop;
 pub mod indexer;
+pub mod json_transform;
 pub mod launcher;
 pub mod linking;
 pub mod logging;
