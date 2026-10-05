@@ -2055,8 +2055,8 @@ Do not create candidate/pass histories.
 Initial state:
 
 ```text
-- M0 Focused reconnaissance — pending
-- M1-A Top-level collapse framework — pending
+- M0 Focused reconnaissance — complete
+- M1-A complete — `cd44fb95` refactor(settings): [M1-A] add top-level collapsible section framework
 - M1-B Expand/Collapse All — pending
 - M2-A Hotkeys — pending
 - M2-B Launcher Window & Appearance — pending

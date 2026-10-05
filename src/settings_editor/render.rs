@@ -19,6 +19,16 @@ enum TopLevelSettingsSection {
 }
 
 impl TopLevelSettingsSection {
+    const ALL: [Self; 7] = [
+        Self::Hotkeys,
+        Self::LauncherWindow,
+        Self::SearchResults,
+        Self::ActionsFeedback,
+        Self::Dashboard,
+        Self::Radial,
+        Self::Plugins,
+    ];
+
     const fn persistent_id(self) -> &'static str {
         match self {
             Self::Hotkeys => "settings_section_hotkeys",
@@ -49,6 +59,10 @@ impl TopLevelSettingsSection {
             Self::Hotkeys | Self::LauncherWindow | Self::SearchResults
         )
     }
+
+    fn egui_id(self, ui: &egui::Ui) -> egui::Id {
+        ui.make_persistent_id(self.persistent_id())
+    }
 }
 
 fn show_settings_section(
@@ -57,10 +71,9 @@ fn show_settings_section(
     forced_open: Option<bool>,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
-    let id = ui.make_persistent_id(section.persistent_id());
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
-        id,
+        section.egui_id(ui),
         section.default_open(),
     );
     if let Some(open) = forced_open {
@@ -71,6 +84,18 @@ fn show_settings_section(
             ui.heading(section.title());
         })
         .body(add_contents);
+}
+
+fn set_all_settings_sections_open(ui: &egui::Ui, open: bool) {
+    for section in TopLevelSettingsSection::ALL {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            section.egui_id(ui),
+            section.default_open(),
+        );
+        state.set_open(open);
+        state.store(ui.ctx());
+    }
 }
 
 impl SettingsEditor {
@@ -86,6 +111,22 @@ impl SettingsEditor {
                 egui::ScrollArea::vertical()
                     .max_height(settings_content_height)
                     .show(ui, |ui| {
+                        let top_level_expand_request = ui
+                            .horizontal(|ui| {
+                                let mut request = None;
+                                if ui.button("Expand all").clicked() {
+                                    request = Some(true);
+                                }
+                                if ui.button("Collapse all").clicked() {
+                                    request = Some(false);
+                                }
+                                request
+                            })
+                            .inner;
+                        if let Some(open) = top_level_expand_request {
+                            set_all_settings_sections_open(ui, open);
+                        }
+
                         self.render_hotkey_section(ui);
                         self.render_radial_section(ui, app);
                         self.render_general_section(ui, app);
