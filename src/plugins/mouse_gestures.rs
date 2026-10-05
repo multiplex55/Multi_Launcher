@@ -838,6 +838,54 @@ mod persistence_tests {
     }
 
     #[test]
+    fn mouse_gesture_timing_defaults_and_round_trip() {
+        let old_settings: MouseGestureSettings = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "show_trail": true,
+        }))
+        .unwrap();
+
+        assert_eq!(old_settings.trail_interval_ms, 16);
+        assert_eq!(old_settings.recognition_interval_ms, 40);
+
+        let default_config = MouseGestureConfig::default();
+        assert_eq!(default_config.trail_interval_ms, 16);
+        assert_eq!(default_config.recognition_interval_ms, 40);
+
+        let mut custom_settings = old_settings;
+        custom_settings.trail_interval_ms = 8;
+        custom_settings.recognition_interval_ms = 20;
+        let round_trip: MouseGestureSettings =
+            serde_json::from_value(serde_json::to_value(&custom_settings).unwrap()).unwrap();
+
+        assert_eq!(round_trip, custom_settings);
+        assert_eq!(round_trip.trail_interval_ms, 8);
+        assert_eq!(round_trip.recognition_interval_ms, 20);
+    }
+
+    #[test]
+    fn mouse_gesture_timing_runtime_mapping() {
+        let mut settings = MouseGestureSettings::default();
+        settings.trail_interval_ms = 8;
+        settings.recognition_interval_ms = 20;
+
+        let mapped = settings_to_config(&settings, true);
+        assert!(mapped.enabled);
+        assert_eq!(mapped.trail_interval_ms, 8);
+        assert_eq!(mapped.recognition_interval_ms, 20);
+
+        settings.trail_interval_ms = 40;
+        settings.recognition_interval_ms = 8;
+        let reversed = settings_to_config(&settings, true);
+        assert_eq!(reversed.trail_interval_ms, 40);
+        assert_eq!(reversed.recognition_interval_ms, 8);
+
+        assert!(!settings_to_config(&settings, false).enabled);
+        settings.enabled = false;
+        assert!(!settings_to_config(&settings, true).enabled);
+    }
+
+    #[test]
     fn runtime_reload_retains_last_good_recovers_and_deduplicates() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mouse_gestures.json");

@@ -2067,8 +2067,8 @@ Initial state:
 - M2-G complete — `c558e8e7` refactor(settings): [M2-G] isolate plugin settings under top-level section
 - M3-A complete — `1d798380` feat(mouse-gestures): [M3-A] persist configurable gesture timing intervals
 - M3-B complete — `29cafd8a` refactor(mouse-gestures): [M3-B] map timing settings into runtime config
-- Next checkpoint: M3-C Mouse Gesture timing UI
-- M3-C Mouse Gesture timing UI — pending
+- M3-C complete — `a26a6046` feat(mouse-gestures): [M3-C] add timing controls to settings dialog
+- Next checkpoint: M4 Targeted automated verification
 - M4 Targeted automated verification — pending
 - M5 Build/static checks — pending
 - M6 Focused review/remediation — pending
