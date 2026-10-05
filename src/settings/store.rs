@@ -1,5 +1,6 @@
 use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
+use anyhow::Context;
 use once_cell::sync::Lazy;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -42,6 +43,62 @@ impl Settings {
         save_json_atomic(path, &settings)?;
         Ok(settings)
     }
+
+    /// Update settings only when the raw bytes still match the caller's
+    /// inspected SHA-256. The exact serialized bytes are atomically committed
+    /// and read back before their digest is returned.
+    pub fn update_checked(
+        path: impl AsRef<Path>,
+        expected_sha256: &str,
+        mutate: impl FnOnce(&mut Self) -> anyhow::Result<()>,
+    ) -> anyhow::Result<(Self, String)> {
+        let _transaction = transaction_guard();
+        let path = path.as_ref();
+        let source_bytes = read_exact_bytes(path)?;
+        let source_sha256 = crate::radial::package::sha256_hex(&source_bytes);
+        anyhow::ensure!(
+            source_sha256 == expected_sha256,
+            "settings changed since the checked update was prepared"
+        );
+        let mut settings = if source_bytes.iter().all(u8::is_ascii_whitespace) {
+            Self::default()
+        } else {
+            serde_json::from_slice(&source_bytes)
+                .map_err(|error| anyhow::anyhow!("failed to parse settings: {error}"))?
+        };
+        mutate(&mut settings)?;
+        let bytes = serde_json::to_vec_pretty(&settings)
+            .map_err(|error| anyhow::anyhow!("failed to serialize settings: {error}"))?;
+        crate::common::atomic_file::save_atomic(path, &bytes)
+            .map_err(|error| anyhow::anyhow!("failed to atomically save settings: {error}"))?;
+        let saved = std::fs::read(path)
+            .map_err(|error| anyhow::anyhow!("failed to verify saved settings: {error}"))?;
+        let saved_sha256 = crate::radial::package::sha256_hex(&saved);
+        anyhow::ensure!(
+            saved == bytes,
+            "settings changed while verifying the checked update"
+        );
+        Ok((settings, saved_sha256))
+    }
+}
+
+/// SHA-256 of the exact persisted settings bytes. Missing files hash as empty
+/// bytes, matching the radial authoring store's empty-source convention.
+pub fn settings_file_sha256(path: impl AsRef<Path>) -> anyhow::Result<String> {
+    Ok(crate::radial::package::sha256_hex(&read_exact_bytes(
+        path.as_ref(),
+    )?))
+}
+
+fn read_exact_bytes(path: &Path) -> anyhow::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(anyhow::Error::new(error).context(format!(
+            "failed to read settings bytes from {}",
+            path.display()
+        ))),
+    }
 }
 
 fn transaction_guard() -> MutexGuard<'static, ()> {
@@ -59,7 +116,7 @@ fn load_effective(path: impl AsRef<Path>) -> anyhow::Result<Settings> {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{Settings, settings_file_sha256};
     use crate::common::persistence::{LoadState, PersistenceError};
     use std::sync::{Arc, Barrier};
 
@@ -195,5 +252,51 @@ mod tests {
             std::fs::read_to_string(blocker).unwrap(),
             "block parent creation"
         );
+    }
+
+    #[test]
+    fn checked_update_requires_exact_source_sha_and_returns_verified_target_sha() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        Settings::default().save(path.to_str().unwrap()).unwrap();
+        let source_sha = settings_file_sha256(&path).unwrap();
+
+        let (updated, target_sha) = Settings::update_checked(&path, &source_sha, |settings| {
+            settings.show_examples = true;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(updated.show_examples);
+        assert_eq!(settings_file_sha256(&path).unwrap(), target_sha);
+        let before_conflict = std::fs::read(&path).unwrap();
+        assert!(
+            Settings::update_checked(&path, &source_sha, |settings| {
+                settings.enable_toasts = false;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before_conflict);
+    }
+
+    #[test]
+    fn checked_update_mutator_and_parse_failures_write_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        std::fs::write(&path, b"{broken").unwrap();
+        let source = std::fs::read(&path).unwrap();
+        let source_sha = crate::radial::package::sha256_hex(&source);
+        assert!(Settings::update_checked(&path, &source_sha, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), source);
+
+        std::fs::write(&path, b"{}").unwrap();
+        let source = std::fs::read(&path).unwrap();
+        let source_sha = crate::radial::package::sha256_hex(&source);
+        assert!(
+            Settings::update_checked(&path, &source_sha, |_| { anyhow::bail!("no mutation") })
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), source);
     }
 }

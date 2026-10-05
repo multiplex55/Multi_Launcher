@@ -21,6 +21,40 @@ pub struct WindowDescriptor {
     pub class_name: Option<String>,
 }
 
+/// Stable process/window identity captured for an invocation-scoped target.
+/// Window titles are deliberately excluded because applications may change them
+/// without replacing the underlying target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowTargetIdentity {
+    pub hwnd: usize,
+    pub pid: u32,
+    pub executable: Option<String>,
+    pub process_path: Option<String>,
+    pub class_name: Option<String>,
+}
+
+impl WindowTargetIdentity {
+    pub fn from_descriptor(window: &WindowDescriptor) -> Self {
+        Self {
+            hwnd: window.hwnd,
+            pid: window.pid,
+            executable: window.executable.clone(),
+            process_path: window.process_path.clone(),
+            class_name: window.class_name.clone(),
+        }
+    }
+
+    pub fn matches(&self, window: &WindowDescriptor) -> bool {
+        window.hwnd == self.hwnd
+            && window.pid == self.pid
+            && window.executable == self.executable
+            && window.process_path == self.process_path
+            && window.class_name == self.class_name
+    }
+}
+
+type CurrentWindowDescriptor = dyn Fn(usize) -> Option<WindowDescriptor> + Send + Sync + 'static;
+
 #[derive(Clone)]
 pub struct WindowCatalogSnapshot {
     pub windows: Arc<Vec<WindowDescriptor>>,
@@ -91,6 +125,7 @@ pub struct WindowCatalog {
     publication: Arc<Mutex<()>>,
     changed: Arc<Condvar>,
     updates: Arc<PluginSearchUpdates>,
+    current_window: Arc<CurrentWindowDescriptor>,
 }
 
 impl WindowCatalog {
@@ -99,6 +134,14 @@ impl WindowCatalog {
     }
 
     pub(crate) fn start(provider: impl WindowProvider, updates: Arc<PluginSearchUpdates>) -> Self {
+        Self::start_with_descriptor(provider, updates, describe_window)
+    }
+
+    fn start_with_descriptor(
+        provider: impl WindowProvider,
+        updates: Arc<PluginSearchUpdates>,
+        current_window: impl Fn(usize) -> Option<WindowDescriptor> + Send + Sync + 'static,
+    ) -> Self {
         let state = Arc::new(Mutex::new(CatalogState {
             windows: Arc::new(Vec::new()),
             fresh_until: None,
@@ -151,12 +194,24 @@ impl WindowCatalog {
             publication,
             changed,
             updates,
+            current_window: Arc::new(current_window),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn from_snapshot(windows: Vec<WindowDescriptor>) -> Arc<Self> {
-        Self::from_test_snapshot(windows, HashMap::new(), false)
+        let current = windows.clone();
+        Self::from_test_snapshot(windows, HashMap::new(), false, move |hwnd| {
+            current.iter().find(|window| window.hwnd == hwnd).cloned()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_snapshot_with_descriptor(
+        windows: Vec<WindowDescriptor>,
+        current_window: impl Fn(usize) -> Option<WindowDescriptor> + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Self::from_test_snapshot(windows, HashMap::new(), false, current_window)
     }
 
     #[cfg(test)]
@@ -164,7 +219,10 @@ impl WindowCatalog {
         windows: Vec<WindowDescriptor>,
         desktop_ids: HashMap<usize, Option<crate::virtual_desktop::VirtualDesktopId>>,
     ) -> Arc<Self> {
-        Self::from_test_snapshot(windows, desktop_ids, true)
+        let current = windows.clone();
+        Self::from_test_snapshot(windows, desktop_ids, true, move |hwnd| {
+            current.iter().find(|window| window.hwnd == hwnd).cloned()
+        })
     }
 
     #[cfg(test)]
@@ -172,6 +230,7 @@ impl WindowCatalog {
         windows: Vec<WindowDescriptor>,
         desktop_ids: HashMap<usize, Option<crate::virtual_desktop::VirtualDesktopId>>,
         desktop_ids_ready: bool,
+        current_window: impl Fn(usize) -> Option<WindowDescriptor> + Send + Sync + 'static,
     ) -> Arc<Self> {
         let (wake, receiver) = sync_channel(1);
         drop(receiver);
@@ -194,7 +253,17 @@ impl WindowCatalog {
             publication: Arc::new(Mutex::new(())),
             changed: Arc::new(Condvar::new()),
             updates: Arc::new(PluginSearchUpdates::default()),
+            current_window: Arc::new(current_window),
         })
+    }
+
+    /// Query exactly one known HWND through the live native boundary.
+    ///
+    /// This never enumerates the catalog and rejects a provider result for a
+    /// different handle. The production provider validates `IsWindow` before
+    /// returning its bounded descriptor.
+    pub fn describe_current(&self, hwnd: usize) -> Option<WindowDescriptor> {
+        (self.current_window)(hwnd).filter(|window| window.hwnd == hwnd)
     }
 
     /// Return the last published snapshot and request one refresh if it is stale.
@@ -779,6 +848,7 @@ mod tests {
             publication: Arc::new(Mutex::new(())),
             changed: Arc::new(Condvar::new()),
             updates: Arc::clone(&updates),
+            current_window: Arc::new(describe_window),
         };
         catalog.snapshot_and_refresh();
         repaint_rx.recv().unwrap();

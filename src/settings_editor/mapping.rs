@@ -56,6 +56,26 @@ impl SettingsEditor {
             help_hotkey,
             help_hotkey_valid,
             last_valid_help_hotkey,
+            radial_enabled: settings.radial.enabled,
+            radial_shared_tap_hold: settings.radial.shared_tap_hold,
+            radial_hold_threshold_ms: settings.radial.hold_threshold_ms,
+            radial_tooltip_scope: settings.radial.tooltip_scope,
+            radial_tooltip_delay_ms: settings.radial.tooltip_delay_ms,
+            radial_show_expected_layout_diagnostics: settings
+                .radial
+                .show_expected_layout_diagnostics,
+            radial_default_menu_id: settings
+                .radial
+                .default_menu_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned())
+                .unwrap_or_default(),
+            radial_default_interaction: settings.radial.default_interaction,
+            radial_default_submenu_presentation: settings.radial.default_submenu_presentation,
+            radial_safety_policy: settings.radial.safety_policy,
+            radial_default_item_input_scope: settings.radial.default_item_input_scope,
+            radial_global_item_inputs: settings.radial.global_item_inputs,
+            radial_designer: settings.radial_designer.clone(),
             debug_logging: settings.debug_logging,
             show_toasts: settings.enable_toasts,
             show_inline_errors: settings.show_inline_errors,
@@ -326,6 +346,12 @@ impl SettingsEditor {
             },
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
+            radial: self.radial_settings(),
+            // The Designer persists independently from this editor.  Use the
+            // latest settings snapshot supplied by the caller so an older
+            // SettingsEditor cannot overwrite a concurrent Designer update.
+            radial_designer: current.radial_designer.clone(),
+            radial_submenu_migration: current.radial_submenu_migration.clone(),
         }
     }
 }
@@ -362,6 +388,96 @@ mod tests {
         let editor = SettingsEditor::new(&initial);
         let saved = editor.to_settings(&initial);
         assert_eq!(saved.query_results_layout, initial.query_results_layout);
+    }
+
+    #[test]
+    fn every_radial_setting_round_trips_through_explicit_editor_fields() {
+        let mut initial = Settings::default();
+        initial.radial.enabled = false;
+        initial.radial.shared_tap_hold = false;
+        initial.radial.hold_threshold_ms = 725;
+        initial.radial.default_menu_id = Some(crate::radial::model::MenuId::new("work"));
+        initial.radial.default_interaction = crate::radial::model::InteractionMode::ReleaseToSelect;
+        initial.radial.default_submenu_presentation =
+            crate::radial::model::SubmenuPresentation::SameCenter;
+        initial.radial.safety_policy =
+            crate::radial::model::RadialSafetyPolicy::AlwaysConfirmDestructive;
+        initial.radial.default_item_input_scope = crate::radial::model::TriggerScope::Global;
+        initial.radial.global_item_inputs = true;
+        initial.radial.tooltip_scope = crate::radial::model::TooltipScope::TruncatedOnly;
+        initial.radial.tooltip_delay_ms = 725;
+        initial.radial.show_expected_layout_diagnostics = true;
+
+        let editor = SettingsEditor::from_settings(&initial);
+        let restored = editor.to_settings(&Settings::default());
+        assert_eq!(restored.radial, initial.radial);
+    }
+
+    #[test]
+    fn settings_editor_preserves_concurrent_radial_designer_preferences() {
+        let mut opening = Settings::default();
+        opening.radial_designer.show_skins = true;
+        opening.radial_designer.tree_visible = false;
+        opening.radial_designer.window_size = (1_200.0, 800.0);
+        opening
+            .radial_designer
+            .expanded_sections
+            .insert("menu:work".into(), false);
+
+        let editor = SettingsEditor::from_settings(&opening);
+        let mut current = Settings::default();
+        current.radial_designer.show_skins = false;
+        current.radial_designer.tree_visible = true;
+        current.radial_designer.window_position = Some((-1_440.0, 80.0));
+        current.radial_designer.window_scale_factor = Some(1.5);
+        current
+            .radial_designer
+            .expanded_sections
+            .insert("inspector:cell-content".into(), true);
+        let restored = editor.to_settings(&current);
+
+        assert_eq!(restored.radial_designer, current.radial_designer);
+    }
+
+    #[test]
+    fn settings_editor_preserves_hidden_radial_migration_receipt() {
+        let mut initial = Settings::default();
+        initial.radial_submenu_migration =
+            Some(crate::settings::SubmenuPresentationMigrationReceipt {
+                migration_id: "radial-submenu-same-center-v1".into(),
+                version: 1,
+                state: crate::settings::SubmenuMigrationState::Applied,
+                source_settings_sha256: "settings-source".into(),
+                source_radial_sha256: "radial-source".into(),
+                settings_backup_path: "settings.bak".into(),
+                settings_backup_sha256: "settings-backup".into(),
+                settings_source_existed: true,
+                radial_backup_path: "radial.bak".into(),
+                radial_backup_sha256: "radial-backup".into(),
+                settings_default_before: crate::radial::model::SubmenuPresentation::Cascade,
+                settings_default_target: crate::radial::model::SubmenuPresentation::SameCenter,
+                changed_menus: Vec::new(),
+                target_radial_revision: 2,
+                target_radial_sha256: "radial-target".into(),
+                target_settings_content_sha256: "settings-target".into(),
+                undo_restored_menu_ids: Vec::new(),
+                undo_source_radial_sha256: None,
+                undo_target_radial_revision: None,
+                undo_target_radial_sha256: None,
+                undo_source_settings_content_sha256: None,
+                undo_target_settings_content_sha256: None,
+                undo_settings_default_source: None,
+                undo_restores_settings_default: false,
+                failure: None,
+            });
+
+        let editor = SettingsEditor::from_settings(&initial);
+        let restored = editor.to_settings(&initial);
+
+        assert_eq!(
+            restored.radial_submenu_migration,
+            initial.radial_submenu_migration
+        );
     }
 
     #[test]

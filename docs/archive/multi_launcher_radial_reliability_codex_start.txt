@@ -1,0 +1,49 @@
+Implement the approved Multi Launcher radial reliability and action-authoring initiative.
+
+Read these repository files first, in this order:
+1. AGENTS.md
+2. docs/multi_launcher_radial_reliability_approved_requirements.md
+3. docs/multi_launcher_radial_reliability_source_notes.md
+4. docs/multi_launcher_radial_reliability_codex_plan.md
+5. docs/multi_launcher_radial_reliability_acceptance_matrix.md
+6. docs/plans/radial-reliability-and-action-authoring.md
+
+AUTHORITATIVE STARTING SOURCE
+multi_launcher(20260924-210943).zip
+SHA-256: f21ca0ee92d1b7572f779b936bb3ce1de7e685314f685ae8711d1734952d2544
+
+The ZIP establishes the starting implementation. Compare the current checkout with it and preserve intervening compatible user work. Do not reset the checkout, switch to an older radial branch, or overwrite source files wholesale from the archive. The archive does not contain Git history. Historical first-branch-commit/branch-point references are comparison metadata only when verified from actual Git history, not permission to discard the supplied latest implementation. Record source/commit/diff and candidate binary identities separately.
+
+The product questions have already been answered. Do not restart the questionnaire or ask for approval of each routine implementation decision. Complete the ordered milestones autonomously within the approved scope, updating the execution ledger. Ask only if an actual unresolved blocker requires a user decision and cannot be resolved from the source/contracts; report environmental limitations honestly without inventing passes.
+
+NON-NEGOTIABLE BEHAVIOR
+- Preserve the configured Shift+Alt+Win+End chord mapped to one key, with all keys released between gestures. Keep the configured hold threshold; 350 ms is only the absent-setting default.
+- A short tap toggles the main grid on release, including while the main grid is focused. No outside click, pointer movement, extra hold-threshold wait, speculative key-down show, or debounce that drops rapid taps.
+- IMPORTANT: short tap while the runtime radial is open BOTH toggles the main grid AND dismisses the runtime radial. This deliberately supersedes older tests/plans that kept it open. Dismissal must never execute a hovered cell.
+- Holding opens/closes the runtime radial without changing the grid's existing visibility. A hold's release must not also generate a grid toggle. Retain existing sticky/release-to-select/hold-click semantics.
+- Designer and native authoring preview are separate from runtime radial. Toggling the grid must preserve the Designer's window/session and unsaved draft. Retain exclusive capture/emergency priorities and all unrelated launcher functionality.
+- A stale native restore or captured ROOT snapshot cannot undo a newer hide/show decision. Use the existing input/visibility owners, not competing hotkey handlers or a second state machine.
+
+ACTION/QUERY GOAL
+Create a shared query-first action editor for Cell Properties and Inspector. Rows show target title + action + type/disambiguator without requiring tooltips. Pinning preserves a supported target/action identity; Save query stores a live query. Auto Submit defaults OFF for new queries. ON resolves the same current first result as the main grid at activation time and dispatches it once through the existing action/command/safety boundary.
+
+Do not silently skip an unavailable first result to run another target. No-result/unavailable Auto Submit opens the grid with the original query and explanation. Missing pins do not become queries. Non-UI actions do not flash/open the grid; required note editors/dialogs/confirmations/manual queries get their UI. Preview/search/assignment never execute or increment execution history/usage. Advanced exact commands reuse the existing parser/dispatcher and retain arguments; queries are not shell code. Keep dynamic result menus, contextual targets, alternate actions, and existing Quick Tools semantics.
+
+APPROVED LATER SCOPE
+After core gates: Add to radial from main results; multi-select with transactional bulk label/style/after-action edits; consistent menu/cell search and breadcrumbs/back; modern clean and optional classic-inspired skins, curated thumbnail gallery, simple controls with advanced overrides preserved, compact/comfortable/high-contrast presets and density warnings. No conditional cells/status badges, action chains, extensive animation packs, dependency/renderer upgrade, or unrelated refactor.
+
+EXECUTION WORKFLOW
+Perform M0 briefly, then M1 hotkey/root/radial reliability before dependent work. Use the bounded M0-M7 plan as the handoff, not an invitation for another unbounded planning exercise. Retain existing .codex roles/model configuration. One implementation writer at a time; read-only review/investigation may be parallel. Update or migrate legitimate tests alongside coherent code batches, and verify at milestone boundaries. Do not weaken tests to obtain a green run.
+
+BUILD/TEST COST
+Do more coherent implementation work before validation rather than running the entire build matrix after small edits. Use narrow Cargo Nextest targets/filters; confirm nonempty test selection. Avoid cargo clean, duplicate long jobs, unnecessary debug/release runs, and dependency updates. Final full applicable Nextest, doctests, source-matched application/runner build, and native Windows acceptance are required. For long remote jobs use completion signals or approximately 10-20 minute observation intervals, not frequent polling. This is orchestration cadence, not application/test timing.
+
+NATIVE PROOF
+Extend the current radial_acceptance runner. Test the exact multi-key chord as well as F11, uninterrupted odd/even short-tap bursts with no between-tap UI waits/refocus, dirty Designer states, runtime/preview ownership, delayed restoration, query no-flash and UI-required actions. Generalize fixture/preflight/injection/release guards/observer/reporting together. Preserve production input admission, isolated profiles, owned process/window checks, bounded reports, and key cleanup. Do not claim IsWindowVisible alone proves onscreen presentation. New runner flags in the plan are proposed implementation work, not flags already present in the starting archive.
+
+COMPLETION
+Record code completion separately from verification. Every claimed pass needs command, source/candidate identity, test counts/exit status, and artifact location. Historical reports, screenshots alone, zero-test filters, disabled-subsystem diagnostic runs, or unsupported native environments are not acceptance. Do not label an unverified restore race as the confirmed root cause. Gate H must not be postponed for appearance work; final sign-off requires the mandatory native core cases.
+
+After each milestone report objective achieved, important decisions, changed files, tests added/migrated, actual commands/results, remaining blockers, and commit/diff identity. Perform independent final review, fix substantive findings, rerun affected/final verification as required, and publish the final evidence-backed report.
+
+Begin with M0 and then execute M1. Do not modify application source merely to implement the documentation packet itself, and do not mark any milestone complete just because this plan exists.

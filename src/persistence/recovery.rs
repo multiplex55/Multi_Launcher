@@ -22,6 +22,7 @@ use crate::plugins::macros::MacroEntry;
 use crate::plugins::shell::ShellCmdEntry;
 use crate::plugins::snippets::SnippetEntry;
 use crate::plugins::todo::TodoEntry;
+use crate::radial::model::RadialDocument;
 use crate::settings::Settings;
 use crate::usage::UsageEntry;
 use anyhow::{Context, Result, bail, ensure};
@@ -43,6 +44,16 @@ const LEGACY_RECOVERY_FORMAT_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryGroupId {
     MkMacro,
+    Radial,
+}
+
+impl RecoveryGroupId {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MkMacro => "MkMacro document + assets",
+            Self::Radial => "Radial menus + assets",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +70,10 @@ impl RecoveryTarget {
             Self::Group(RecoveryGroupId::MkMacro) => vec![
                 PersistentStoreId::MkMacroDocument,
                 PersistentStoreId::MkMacroAssets,
+            ],
+            Self::Group(RecoveryGroupId::Radial) => vec![
+                PersistentStoreId::RadialDocument,
+                PersistentStoreId::RadialAssets,
             ],
         }
     }
@@ -285,10 +300,13 @@ impl<'a> RecoveryManager<'a> {
             !matches!(
                 target,
                 RecoveryTarget::Store(
-                    PersistentStoreId::MkMacroDocument | PersistentStoreId::MkMacroAssets
+                    PersistentStoreId::MkMacroDocument
+                        | PersistentStoreId::MkMacroAssets
+                        | PersistentStoreId::RadialDocument
+                        | PersistentStoreId::RadialAssets
                 )
             ),
-            "MkMacro recovery must target the document and assets group"
+            "grouped document/assets recovery cannot target only one member"
         );
         validate_snapshot_id(snapshot_id)?;
         check_cancelled(cancelled)?;
@@ -305,9 +323,26 @@ impl<'a> RecoveryManager<'a> {
             run_traversal_hook(self.root.path(), cancelled);
             let store = self.eligible_store(store_id, true)?;
             self.ensure_bootstrap_target(store)?;
-            let candidate =
-                selected_candidate(store, &snapshot.path, &snapshot.manifest, cancelled)?;
-            ensure_healthy(store, &candidate.path)?;
+            let store_name = format!("{:?}", store.id);
+            let candidate = if store.id == PersistentStoreId::RadialAssets
+                && snapshot
+                    .manifest
+                    .missing
+                    .iter()
+                    .any(|entry| entry.store_id == store_name)
+            {
+                Candidate {
+                    store_id: store.id,
+                    path: snapshot.path.join("stores").join(&store_name),
+                    kind: StoreKind::Directory,
+                    virtual_empty: true,
+                }
+            } else {
+                selected_candidate(store, &snapshot.path, &snapshot.manifest, cancelled)?
+            };
+            if !candidate.virtual_empty {
+                ensure_healthy(store, &candidate.path)?;
+            }
             candidates.push(candidate);
         }
         Ok(candidates)
@@ -381,10 +416,12 @@ pub fn apply_pending_recovery(root: &AppDataRoot) -> RecoveryStartupResult {
                                 store_id,
                                 PersistentStoreId::MkMacroDocument
                                     | PersistentStoreId::MkMacroAssets
+                                    | PersistentStoreId::RadialDocument
+                                    | PersistentStoreId::RadialAssets
                             ) {
                                 return RecoveryStartupResult {
                                 diagnostic: Some(RecoveryStartupDiagnostic::InvalidPending {
-                                    message: "legacy single-store descriptor cannot safely restore the MkMacro document and assets group".into(),
+                                    message: "legacy single-store descriptor cannot safely restore a grouped document and assets store".into(),
                                 }),
                                 ..Default::default()
                             };
@@ -482,6 +519,7 @@ struct Candidate {
     store_id: PersistentStoreId,
     path: PathBuf,
     kind: StoreKind,
+    virtual_empty: bool,
 }
 
 enum ResetCandidate {
@@ -500,7 +538,7 @@ impl ResetCandidate {
                 hash_json(&value, &mut hash);
                 Ok(format!("fnv1a64:{:016x}", hash.0))
             }
-            Self::EmptyDirectory => Ok(fingerprint_bytes(b'D', &[])),
+            Self::EmptyDirectory => Ok(empty_directory_fingerprint()),
         }
     }
 }
@@ -573,6 +611,7 @@ fn selected_candidate(
         store_id: store.id,
         path,
         kind: store.kind,
+        virtual_empty: false,
     })
 }
 
@@ -595,10 +634,18 @@ fn target_fingerprint(
         }]);
         hash_segment(
             &mut hash,
-            fingerprint(&candidate.path, cancelled)?.as_bytes(),
+            candidate_fingerprint(candidate, cancelled)?.as_bytes(),
         );
     }
     Ok(format!("fnv1a64:{:016x}", hash.0))
+}
+
+fn candidate_fingerprint(candidate: &Candidate, cancelled: &dyn Fn() -> bool) -> Result<String> {
+    if candidate.virtual_empty {
+        Ok(empty_directory_fingerprint())
+    } else {
+        fingerprint(&candidate.path, cancelled)
+    }
 }
 
 fn validate_manifest_root(root: &AppDataRoot, manifest: &SnapshotManifest) -> Result<()> {
@@ -685,6 +732,7 @@ fn apply_restore_target(
                 store_id: item.store_id,
                 path: item.path.clone(),
                 kind: item.kind,
+                virtual_empty: false,
             })
             .collect::<Vec<_>>();
         if let Err(error) = (|| -> Result<()> {
@@ -725,7 +773,7 @@ fn materialize_candidate(
     candidate: &Candidate,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<MaterializedCandidate> {
-    let expected = fingerprint(&candidate.path, cancelled)?;
+    let expected = candidate_fingerprint(candidate, cancelled)?;
     let parent = store
         .path
         .parent()
@@ -751,7 +799,12 @@ fn materialize_candidate(
         }
         StoreKind::Directory => {
             let staging = reserve_sibling(&parent, &format!(".{name}.recovery-staging"))?;
-            if let Err(error) = copy_tree(&candidate.path, &staging, cancelled) {
+            let copy_result = if candidate.virtual_empty {
+                Ok(())
+            } else {
+                copy_tree(&candidate.path, &staging, cancelled)
+            };
+            if let Err(error) = copy_result {
                 cleanup_created_directory(&parent, &staging);
                 return Err(error).context("materialize recovery directory");
             }
@@ -1179,6 +1232,7 @@ fn canonical_reset(id: PersistentStoreId, kind: StoreKind) -> Result<ResetCandid
         Id::DashboardConfig => json!(DashboardConfig::default()),
         Id::MouseGestureDefinitions => json!(GestureDb::default()),
         Id::MkMacroDocument => json!(MkMacroDocument::default()),
+        Id::RadialDocument => json!(RadialDocument::starter()),
         Id::MkMacroTemplates => json!(crate::mkmacro::MkMacroTemplateCatalog::default()),
         Id::ClipboardModifiers => json!(crate::clipboard_modify::config::default_model()),
         Id::MultiManagerWorkspaces => json!(Vec::<MmWorkspace>::new()),
@@ -1312,6 +1366,12 @@ fn fingerprint_bytes(kind: u8, bytes: &[u8]) -> String {
     let mut hash = Fnv64::default();
     hash.update(&[kind]);
     hash_segment(&mut hash, bytes);
+    format!("fnv1a64:{:016x}", hash.0)
+}
+
+fn empty_directory_fingerprint() -> String {
+    let mut hash = Fnv64::default();
+    hash.update(&[b'D']);
     format!("fnv1a64:{:016x}", hash.0)
 }
 
@@ -1914,6 +1974,7 @@ mod tests {
             store_id: PersistentStoreId::Notes,
             path: source.clone(),
             kind: StoreKind::Directory,
+            virtual_empty: false,
         };
         let expected_fingerprint = fingerprint(&source, &|| false).unwrap();
         let mut store = catalog.get(PersistentStoreId::Notes).clone();
@@ -2036,20 +2097,39 @@ mod tests {
 
     #[test]
     fn grouped_pending_descriptor_serializes_explicit_target() {
-        let descriptor = PendingRecoveryDescriptor {
-            format_version: RECOVERY_FORMAT_VERSION,
-            action: StagedRecoveryAction::Restore {
-                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
-                snapshot_id: "snapshot".into(),
-            },
-            candidate_fingerprint: "fingerprint".into(),
-        };
-        let value = serde_json::to_value(&descriptor).unwrap();
-        assert_eq!(value["action"]["target"]["kind"], "group");
-        assert_eq!(value["action"]["target"]["id"], "mk_macro");
+        for (group, serialized) in [
+            (RecoveryGroupId::MkMacro, "mk_macro"),
+            (RecoveryGroupId::Radial, "radial"),
+        ] {
+            let descriptor = PendingRecoveryDescriptor {
+                format_version: RECOVERY_FORMAT_VERSION,
+                action: StagedRecoveryAction::Restore {
+                    target: RecoveryTarget::Group(group),
+                    snapshot_id: "snapshot".into(),
+                },
+                candidate_fingerprint: "fingerprint".into(),
+            };
+            let value = serde_json::to_value(&descriptor).unwrap();
+            assert_eq!(value["action"]["target"]["kind"], "group");
+            assert_eq!(value["action"]["target"]["id"], serialized);
+            assert_eq!(
+                serde_json::from_value::<PendingRecoveryDescriptor>(value).unwrap(),
+                descriptor
+            );
+        }
         assert_eq!(
-            serde_json::from_value::<PendingRecoveryDescriptor>(value).unwrap(),
-            descriptor
+            RecoveryTarget::Group(RecoveryGroupId::MkMacro).members(),
+            [
+                PersistentStoreId::MkMacroDocument,
+                PersistentStoreId::MkMacroAssets,
+            ]
+        );
+        assert_eq!(
+            RecoveryTarget::Group(RecoveryGroupId::Radial).members(),
+            [
+                PersistentStoreId::RadialDocument,
+                PersistentStoreId::RadialAssets,
+            ]
         );
     }
 
@@ -2064,8 +2144,22 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("document and assets group")
+                .contains("grouped document/assets")
         );
+    }
+
+    #[test]
+    fn current_radial_single_store_restore_is_rejected() {
+        let (_directory, root, catalog) = fixture();
+        for store_id in [
+            PersistentStoreId::RadialDocument,
+            PersistentStoreId::RadialAssets,
+        ] {
+            let error = RecoveryManager::new(&root, &catalog)
+                .stage_restore(RecoveryTarget::Store(store_id), "snapshot")
+                .unwrap_err();
+            assert!(error.to_string().contains("grouped document/assets"));
+        }
     }
 
     #[test]
@@ -2175,6 +2269,57 @@ mod tests {
         assert_eq!(fs::read(backup).unwrap(), b"current");
     }
 
+    #[test]
+    fn radial_reset_installs_starter_without_cleaning_assets() {
+        let (_dir, root, catalog) = fixture();
+        let document = catalog.get(PersistentStoreId::RadialDocument).path.clone();
+        let assets = catalog.get(PersistentStoreId::RadialAssets).path.clone();
+        fs::write(&document, b"invalid radial document").unwrap();
+        fs::create_dir(&assets).unwrap();
+        fs::write(assets.join("retained.png"), b"referenced-or-shared").unwrap();
+
+        RecoveryManager::new(&root, &catalog)
+            .stage_reset(PersistentStoreId::RadialDocument)
+            .unwrap();
+        let result = apply_pending_recovery(&root);
+
+        assert!(result.diagnostic.is_none(), "{:?}", result.diagnostic);
+        let reset: RadialDocument = serde_json::from_slice(&fs::read(document).unwrap()).unwrap();
+        assert_eq!(reset, RadialDocument::starter());
+        assert_eq!(
+            fs::read(assets.join("retained.png")).unwrap(),
+            b"referenced-or-shared"
+        );
+    }
+
+    #[test]
+    fn radial_group_restore_accepts_snapshot_with_missing_assets_as_empty_member() {
+        let (_dir, root, catalog) = fixture();
+        let document = catalog.get(PersistentStoreId::RadialDocument).path.clone();
+        let assets = catalog.get(PersistentStoreId::RadialAssets).path.clone();
+        fs::write(
+            &document,
+            serde_json::to_vec_pretty(&RadialDocument::starter()).unwrap(),
+        )
+        .unwrap();
+        assert!(!assets.exists());
+        let snapshot = BackupEngine::new(&root, &catalog)
+            .create_snapshot()
+            .unwrap();
+        fs::create_dir(&assets).unwrap();
+        fs::write(assets.join("stale.png"), b"stale").unwrap();
+        RecoveryManager::new(&root, &catalog)
+            .stage_restore(
+                RecoveryTarget::Group(RecoveryGroupId::Radial),
+                &snapshot.manifest.snapshot_id,
+            )
+            .unwrap();
+        let result = apply_pending_recovery(&root);
+        assert!(result.diagnostic.is_none(), "{:?}", result.diagnostic);
+        assert!(assets.is_dir());
+        assert!(fs::read_dir(assets).unwrap().next().is_none());
+    }
+
     fn mkmacro_group_fixture() -> (
         tempfile::TempDir,
         AppDataRoot,
@@ -2233,14 +2378,99 @@ mod tests {
                 store_id: PersistentStoreId::MkMacroDocument,
                 path: document_candidate,
                 kind: StoreKind::File,
+                virtual_empty: false,
             },
             Candidate {
                 store_id: PersistentStoreId::MkMacroAssets,
                 path: assets_candidate,
                 kind: StoreKind::Directory,
+                virtual_empty: false,
             },
         ];
         (directory, root, catalog, candidates)
+    }
+
+    fn radial_group_fixture() -> (
+        tempfile::TempDir,
+        AppDataRoot,
+        PersistenceCatalog,
+        Vec<Candidate>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_path(directory.path());
+        let catalog = PersistenceCatalog::new(&root, &Settings::default());
+        let document_path = catalog.get(PersistentStoreId::RadialDocument).path.clone();
+        let assets_path = catalog.get(PersistentStoreId::RadialAssets).path.clone();
+        fs::write(
+            &document_path,
+            serde_json::to_vec_pretty(&RadialDocument::starter()).unwrap(),
+        )
+        .unwrap();
+        fs::create_dir(&assets_path).unwrap();
+        fs::write(assets_path.join("old.png"), b"old radial asset").unwrap();
+
+        let source = root.path().join("radial-candidate");
+        fs::create_dir(&source).unwrap();
+        let document_candidate = source.join(crate::radial::model::RADIAL_FILE);
+        let mut candidate_document = RadialDocument::starter();
+        candidate_document.menus[0].name = "Restored radial menu".into();
+        fs::write(
+            &document_candidate,
+            serde_json::to_vec_pretty(&candidate_document).unwrap(),
+        )
+        .unwrap();
+        let assets_candidate = source.join(crate::radial::model::RADIAL_ASSETS_DIRECTORY);
+        fs::create_dir(&assets_candidate).unwrap();
+        fs::write(assets_candidate.join("new.png"), b"new radial asset").unwrap();
+        let candidates = vec![
+            Candidate {
+                store_id: PersistentStoreId::RadialDocument,
+                path: document_candidate,
+                kind: StoreKind::File,
+                virtual_empty: false,
+            },
+            Candidate {
+                store_id: PersistentStoreId::RadialAssets,
+                path: assets_candidate,
+                kind: StoreKind::Directory,
+                virtual_empty: false,
+            },
+        ];
+        (directory, root, catalog, candidates)
+    }
+
+    #[test]
+    fn radial_second_member_failure_rolls_back_document_and_assets() {
+        let (_directory, root, catalog, candidates) = radial_group_fixture();
+        let manager = RecoveryManager::new(&root, &catalog);
+        let target = RecoveryTarget::Group(RecoveryGroupId::Radial);
+        let fingerprint = target_fingerprint(target, &candidates, &|| false).unwrap();
+        let document = catalog.get(PersistentStoreId::RadialDocument).path.clone();
+        let assets = catalog.get(PersistentStoreId::RadialAssets).path.clone();
+        let old_document = fs::read(&document).unwrap();
+
+        let result = apply_restore_target_with_expected(
+            &manager,
+            target,
+            &candidates,
+            &fingerprint,
+            &fingerprint,
+            &|| false,
+            &|store_id| {
+                if store_id == PersistentStoreId::RadialAssets {
+                    bail!("injected radial asset install failure");
+                }
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(document).unwrap(), old_document);
+        assert_eq!(
+            fs::read(assets.join("old.png")).unwrap(),
+            b"old radial asset"
+        );
+        assert!(!assets.join("new.png").exists());
     }
 
     #[test]
@@ -2475,6 +2705,7 @@ mod tests {
             if matches!(
                 id,
                 PersistentStoreId::MkMacroAssets
+                    | PersistentStoreId::RadialAssets
                     | PersistentStoreId::NotesAssets
                     | PersistentStoreId::LauncherLog
                     | PersistentStoreId::ToastLog

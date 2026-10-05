@@ -1,0 +1,57 @@
+Implement the approved Multi Launcher radial input recovery and basic ring-authoring goal.
+
+Read fully:
+1. multi_launcher_radial_input_recovery_codex_plan.md
+2. multi_launcher_radial_input_recovery_source_notes.md
+
+The user has already approved the choices and said Proceed. Do not repeat the questionnaire or ask for routine API/layout decisions. Deliver working code, not another broad stabilization plan or an instrumentation-only milestone.
+
+Read AGENTS.md and current project instructions. Use the actual current checkout; the inspected source is multi_launcher(20260922-180803).zip. Preserve newer legitimate work and unrelated user changes. Keep the immutable feature baseline and record a separate INPUT_RECOVERY_START_HEAD/diff. Do not restart M0–M6, R0–R5, or S0–S5.
+
+LATEST OBSERVATIONS:
+- The main Multi Lnchr's short-tap toggle fails while the main window is active/focused. Do not assume an open Designer is a required cause; the latest answers identify main-window focus.
+- Both Menus and Skins paint ordinary controls but accept no client clicks; Tab does not move focus. Title-bar/border drag and resize DO work.
+- Designer failure is the same with grid hidden or visible. Native desktop preview state is uncertain.
+- The chord remains Shift+Alt+Win+End mapped to one key action, with all keys released. Producer is unknown.
+- The executable is in a test directory, but exact binary/data paths and a new trace were not supplied. Discover actual loaded paths; do not hardcode developer G:\ paths or reset the profile.
+
+PRIORITY:
+A. Restore real client input, readiness/close behavior, and focused grid toggling.
+B. Expose New Menu | Add Ring | Ring selector | Slots in the normal visual workspace.
+C. Add safe previewable ring/slot geometry proposals using current effective style and validation.
+D. Do a small integrated acceptance session and final verification.
+
+Earlier fixes are already present: explicit ROOT targeting, live one-shot focus consumption, idempotent ensure_open, disposable-request invalidation, and stop-first preview retirement. Preserve them; do not claim reimplementing them fixes the new symptoms.
+
+Use the existing MULTI_LAUNCHER_RADIAL_ACCEPTANCE_TRACE to identify the first broken boundary: native input -> current viewport/egui input -> UI enabled/layer state -> widget -> authoring mutation -> repaint. Reuse its bounded logging. Extend only a specifically missing probe. Native title-bar interaction does not prove client delivery; ordinary painted controls do not prove the body is enabled.
+
+Trace focused root tap through actual key release, decision, ROOT command, real HWND/bounds, and any later restore. Do not install a duplicate listener, require unfocus, add arbitrary sleeps, force all windows enabled, bypass loading/conflict safety, or make the grid repaint permanently.
+
+Basic editing must reuse current authoring/undo/IDs/Universal Actions. Fix the Open in Inspector cancel-only path and preserve/explicitly resolve popup edits. Search the catalog before truncating displayed results; actions beyond the old first 50 must be reachable. Surface actual edit/geometry failures rather than discarding Result. Design clicks never execute actions; dynamic results retain source identity.
+
+Slots are authored ring.cells.len(), not generated result count. Propose valid geometry from actual radii/cell sizes/styles, not only ring ordinal. Preview before Apply, preserve other rings by default, require explicit approval for broader moves, keep manual controls, and protect populated shrink/undo. Respect current limits and actual runtime fit; do not silently drop cells or claim every large ring fits the monitor.
+
+CODE FIRST / VERY LIGHT DEVELOPMENT TESTING:
+- Use one bounded implementation milestone with ordered work packages, not a Nextest gate per edit.
+- Write/refactor the small necessary regressions alongside code, but defer execution until integration.
+- Use cargo check --lib --bin multi_launcher at meaningful code checkpoints; adapt actual target names.
+- cargo check does not link a new executable or run tests. Use cargo build --bin multi_launcher only when a source-matched interactive candidate is needed.
+- cargo check --tests is optional near the end if useful; do not routinely check all unrelated targets/benches/features.
+- Use at most one small combined targeted test batch when needed; the final full suite can cover the new cases directly instead.
+- Retain one complete required cargo nextest run --no-fail-fast near completion. The user did not authorize deleting tests or dropping that final regression gate.
+- Fix batched failures; rerun final verification only when relevant source changes invalidate it. No endless repeated review/full-suite cycles or large unrelated benchmark project.
+
+LONG JOBS:
+Only one Cargo/check/build/Nextest process tree at a time on this checkout/target. Keep command, source identity, session/PID+start, durable log, true exit code, and next observation time. Reattach, never duplicate a quiet job. Do not modify its source inputs.
+
+Observe a still-running job at 10 minutes after launch, then 15 minutes later, then every 20 minutes. Handle actual completion/failure notifications sooner. These are observation intervals, not kill deadlines, application timers, or test sleeps. Respect actual tool wait limits with a supported persistent job mechanism; do not invent callbacks or revert to rapid polling. No cargo clean, new profile, cache reset, or shortened timeout because compilation is slow.
+
+REQUIRED SHORT NATIVE WORKFLOW:
+- Focus Multi Lnchr -> tap hide -> tap show, with Designer closed and open.
+- Open Menus and Skins -> actual click, typing, Tab -> responsive while grid hidden or visible.
+- New Menu -> Add Ring -> Slots -> geometry proposal -> Apply -> assign searched action -> Inspector handoff -> skin change -> safe preview -> Save -> close -> reopen with data intact.
+- Preserve clean/dirty close, accepted Save/Apply/Cancel, SameCenter/Cascade, sticky tap/hold, and emergency/Screen Draw priority.
+
+Use a human's actual mapped chord when automation cannot synthesize it. If a suitable Windows host is unavailable, continue all unblocked code, deliver the linked candidate and minimal trace instructions, and mark that native gate unverified. Do not claim the editor works solely because cargo check or mocked tests pass; also do not stop at adding another diagnostic-only build.
+
+Finish the bounded implementation, coherent verification, and actual task commits. Report confirmed causes versus hypotheses, changes, check/build/test results separately, real native evidence or its exact gap, preserved data/semantics, and remaining issues. No invented test counts, performance claims, or completion percentage.

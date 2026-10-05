@@ -36,6 +36,7 @@ use crate::plugins::network::NetworkPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::processes::ProcessesPlugin;
+use crate::plugins::radial::RadialPlugin;
 use crate::plugins::random::RandomPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::reddit::RedditPlugin;
@@ -316,12 +317,45 @@ pub struct PluginManager {
     deferred_dynamic_reloads: Vec<(PathBuf, Weak<PluginSlot>)>,
 }
 
+/// Immutable provider ownership captured for a bounded radial resolution
+/// worker. Plugin calls run without holding the GUI's mutable application
+/// state, while the shared refresh-ticket registry still reports provider
+/// publication progress.
+#[derive(Clone)]
+pub(crate) struct PluginSearchSnapshot {
+    plugins: Vec<Arc<PluginSlot>>,
+    updates: Arc<PluginSearchUpdates>,
+    enabled_plugins: Option<HashSet<String>>,
+    enabled_caps: Option<std::collections::HashMap<String, Vec<String>>>,
+}
+
+#[derive(Clone)]
+pub struct PluginSearchSnapshotResult {
+    pub actions: Vec<Action>,
+    pub pending: bool,
+    pub start_revision: u64,
+    pub provider_revision: u64,
+    pub catalog_versions_at_start: crate::radial::dynamic::MutableResultCatalogVersions,
+    pub catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
+}
+
 struct PluginSlot {
     name: String,
     plugin: RwLock<Box<dyn Plugin>>,
+    /// Serializes the latest requested enablement with applying it to the
+    /// provider. Lifecycle requests never wait on the provider lock while a
+    /// search is running; the search owner applies the latest value afterward.
+    enablement: Mutex<PluginEnablement>,
     _library: Option<Arc<libloading::Library>>,
     library_path: Option<PathBuf>,
     epoch: u64,
+}
+
+#[derive(Default)]
+struct PluginEnablement {
+    revision: u64,
+    applied_revision: u64,
+    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -341,6 +375,7 @@ impl OwnedPluginHandle {
         let slot = Arc::new(PluginSlot {
             name: plugin.name().to_string(),
             plugin: RwLock::new(plugin),
+            enablement: Mutex::new(PluginEnablement::default()),
             _library: None,
             library_path: None,
             epoch,
@@ -350,6 +385,141 @@ impl OwnedPluginHandle {
 
     pub(crate) fn read(&self) -> std::sync::LockResult<RwLockReadGuard<'_, Box<dyn Plugin>>> {
         self.slot.plugin.read()
+    }
+}
+
+impl PluginSlot {
+    fn request_enabled(&self, enabled: bool) {
+        {
+            let mut requested = self
+                .enablement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            requested.revision = requested.revision.wrapping_add(1).max(1);
+            requested.enabled = enabled;
+        }
+
+        // Provider callbacks are arbitrary plugin code. Keep the intent lock
+        // out of them, and never wait for a search-held provider lock here.
+        if let Ok(plugin) = self.plugin.try_write() {
+            self.apply_latest_enablement(plugin);
+        }
+    }
+
+    fn apply_pending_enabled(&self) {
+        if let Ok(plugin) = self.plugin.try_write() {
+            self.apply_latest_enablement(plugin);
+        }
+    }
+
+    fn apply_latest_enablement(&self, mut plugin: RwLockWriteGuard<'_, Box<dyn Plugin>>) {
+        loop {
+            let (revision, enabled, applied_revision) = {
+                let requested = self
+                    .enablement
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    requested.revision,
+                    requested.enabled,
+                    requested.applied_revision,
+                )
+            };
+            if revision == applied_revision {
+                // Drop the provider lock while holding the intent lock. A
+                // newer request then either happened before this check and is
+                // applied by the loop, or starts after the provider unlock and
+                // can acquire it itself.
+                let requested = self
+                    .enablement
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if requested.revision == requested.applied_revision {
+                    drop(plugin);
+                    return;
+                }
+                drop(requested);
+                continue;
+            }
+
+            plugin.set_enabled(enabled);
+            let mut requested = self
+                .enablement
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if requested.revision == revision {
+                requested.applied_revision = revision;
+            }
+            if requested.revision == requested.applied_revision {
+                drop(plugin);
+                return;
+            }
+        }
+    }
+}
+
+impl PluginSearchSnapshot {
+    pub(crate) fn search(&self, query: &str) -> PluginSearchSnapshotResult {
+        let start_revision = self.updates.generation.load(Ordering::SeqCst);
+        let catalog_versions_at_start =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let (filtered_query, filters) = split_action_filters(query);
+        let query_head = filtered_query
+            .split_whitespace()
+            .next()
+            .map(str::to_ascii_lowercase);
+        let g_prefix_filter = query
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("g ")
+            .then(|| HashSet::from(["web_search".to_string()]));
+        let enabled_plugins = g_prefix_filter.as_ref().or(self.enabled_plugins.as_ref());
+
+        // Do not hold read guards for every provider while calling a provider.
+        // A hung plugin must not pin unrelated plugin/settings writes behind it.
+        let mut actions = Vec::new();
+        let mut tickets = Vec::new();
+        for slot in &self.plugins {
+            let search_result = slot.plugin.read().ok().and_then(|plugin| {
+                plugin_matches_search(
+                    &**plugin,
+                    query_head.as_deref(),
+                    enabled_plugins,
+                    self.enabled_caps.as_ref(),
+                )
+                .then(|| capture_search_refresh_tickets(|| plugin.search(&filtered_query)))
+            });
+            // Do this only after the provider guard leaves scope. If settings
+            // or reload changed lifecycle state while the provider ran, this
+            // same bounded worker applies the latest requested state instead
+            // of requiring another search or blocking the GUI writer.
+            slot.apply_pending_enabled();
+            if let Some((mut found, mut found_tickets)) = search_result {
+                actions.append(&mut found);
+                tickets.append(&mut found_tickets);
+            }
+        }
+        let actions = if filters.include_kinds.is_empty()
+            && filters.exclude_kinds.is_empty()
+            && filters.include_ids.is_empty()
+            && filters.exclude_ids.is_empty()
+        {
+            actions
+        } else {
+            apply_action_filters(actions, &filters)
+        };
+        let pending = tickets
+            .iter()
+            .any(|(source, ticket)| !self.updates.ticket_resolved(source, *ticket));
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        PluginSearchSnapshotResult {
+            actions,
+            pending,
+            start_revision,
+            provider_revision: self.updates.generation.load(Ordering::SeqCst),
+            catalog_versions_at_start,
+            catalog_versions,
+        }
     }
 }
 
@@ -419,12 +589,35 @@ impl PluginManager {
         &self.services
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_window_catalog_for_test(&mut self, catalog: Arc<WindowCatalog>) {
+        self.services.window_catalog = catalog;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notify_search_update_for_test(&self, source: &'static str) {
+        self.services.search_updates.notify(source);
+    }
+
     pub fn search_generation(&self) -> u64 {
         self.services.search_updates.generation()
     }
 
     pub fn search_generation_for(&self, source: &str) -> u64 {
         self.services.search_updates.source_generation(source)
+    }
+
+    pub(crate) fn search_snapshot(
+        &self,
+        enabled_plugins: Option<&HashSet<String>>,
+        enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ) -> PluginSearchSnapshot {
+        PluginSearchSnapshot {
+            plugins: self.plugins.clone(),
+            updates: Arc::clone(&self.services.search_updates),
+            enabled_plugins: enabled_plugins.cloned(),
+            enabled_caps: enabled_caps.cloned(),
+        }
     }
 
     pub(crate) fn active_search_ticket_for(&self, source: &str) -> Option<u64> {
@@ -514,9 +707,7 @@ impl PluginManager {
         // Stop lifecycle-owned runtimes before slots can be pinned by an in-flight
         // search or deferred dynamic-library handle.
         for slot in &self.plugins {
-            if let Ok(mut plugin) = slot.plugin.write() {
-                plugin.set_enabled(false);
-            }
+            slot.request_enabled(false);
         }
         for slot in &self.plugins {
             if Arc::strong_count(slot) > 1
@@ -619,6 +810,7 @@ impl PluginManager {
             plugin_settings,
         );
         self.register_with_settings(RandomPlugin::default(), plugin_settings);
+        self.register_with_settings(RadialPlugin, plugin_settings);
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
@@ -678,6 +870,7 @@ impl PluginManager {
         self.plugins.push(Arc::new(PluginSlot {
             name,
             plugin: RwLock::new(plugin),
+            enablement: Mutex::new(PluginEnablement::default()),
             _library: library,
             library_path,
             epoch: self.next_plugin_epoch,
@@ -729,11 +922,11 @@ impl PluginManager {
     }
 
     fn apply_runtime_enablement(&mut self, enabled_plugins: Option<&HashSet<String>>) {
-        for mut plugin in self.iter_mut() {
+        for slot in &self.plugins {
             let enabled = enabled_plugins
-                .map(|enabled| enabled.contains(plugin.name()))
+                .map(|enabled| enabled.contains(slot.name.as_str()))
                 .unwrap_or(true);
-            plugin.set_enabled(enabled);
+            slot.request_enabled(enabled);
         }
     }
 
@@ -846,57 +1039,75 @@ impl PluginManager {
         enabled_plugins: Option<&HashSet<String>>,
         enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
     ) -> Vec<Action> {
-        let (filtered_query, filters) = split_action_filters(query);
-        let query_head = filtered_query
-            .split_whitespace()
-            .next()
-            .map(str::to_ascii_lowercase);
-        let mut actions = Vec::new();
-        let perf_enabled = crate::performance::enabled();
-        for p in self.iter() {
-            let name = p.name();
-            if let Some(list) = enabled_plugins
-                && !list.contains(name)
-            {
-                continue;
-            }
-            if let Some(map) = enabled_caps
-                && let Some(caps) = map.get(name)
-                && !caps.iter().any(|c| c == "search")
-            {
-                continue;
-            }
-
-            if !p.always_search() {
-                let prefixes = p.query_prefixes();
-                if !prefixes.is_empty() {
-                    let Some(head) = query_head.as_deref() else {
-                        continue;
-                    };
-                    if !prefixes
-                        .iter()
-                        .any(|prefix| prefix.eq_ignore_ascii_case(head))
-                    {
-                        continue;
-                    }
-                }
-            }
-
-            let timer = crate::performance::Timer::start_if(perf_enabled);
-            let plugin_actions = p.search(&filtered_query);
-            timer.finish_plugin(name);
-            actions.extend(plugin_actions);
-        }
-        if filters.include_kinds.is_empty()
-            && filters.exclude_kinds.is_empty()
-            && filters.include_ids.is_empty()
-            && filters.exclude_ids.is_empty()
-        {
-            actions
-        } else {
-            apply_action_filters(actions, &filters)
-        }
+        let guards = self.iter().collect::<Vec<_>>();
+        search_filtered_plugins(
+            guards.iter().map(|plugin| &***plugin),
+            query,
+            enabled_plugins,
+            enabled_caps,
+        )
     }
+}
+
+fn search_filtered_plugins<'a>(
+    plugins: impl IntoIterator<Item = &'a dyn Plugin>,
+    query: &str,
+    enabled_plugins: Option<&HashSet<String>>,
+    enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Vec<Action> {
+    let (filtered_query, filters) = split_action_filters(query);
+    let query_head = filtered_query
+        .split_whitespace()
+        .next()
+        .map(str::to_ascii_lowercase);
+    let mut actions = Vec::new();
+    let perf_enabled = crate::performance::enabled();
+    for plugin in plugins {
+        if !plugin_matches_search(plugin, query_head.as_deref(), enabled_plugins, enabled_caps) {
+            continue;
+        }
+        let name = plugin.name();
+        let timer = crate::performance::Timer::start_if(perf_enabled);
+        actions.extend(plugin.search(&filtered_query));
+        timer.finish_plugin(name);
+    }
+    if filters.include_kinds.is_empty()
+        && filters.exclude_kinds.is_empty()
+        && filters.include_ids.is_empty()
+        && filters.exclude_ids.is_empty()
+    {
+        actions
+    } else {
+        apply_action_filters(actions, &filters)
+    }
+}
+
+fn plugin_matches_search(
+    plugin: &dyn Plugin,
+    query_head: Option<&str>,
+    enabled_plugins: Option<&HashSet<String>>,
+    enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> bool {
+    let name = plugin.name();
+    if enabled_plugins.is_some_and(|list| !list.contains(name)) {
+        return false;
+    }
+    if enabled_caps
+        .and_then(|map| map.get(name))
+        .is_some_and(|caps| !caps.iter().any(|capability| capability == "search"))
+    {
+        return false;
+    }
+    if plugin.always_search() {
+        return true;
+    }
+    let prefixes = plugin.query_prefixes();
+    prefixes.is_empty()
+        || query_head.is_some_and(|head| {
+            prefixes
+                .iter()
+                .any(|prefix| prefix.eq_ignore_ascii_case(head))
+        })
 }
 
 #[cfg(test)]
@@ -907,6 +1118,18 @@ mod tests {
     struct BlockingPlugin {
         started: std::sync::mpsc::Sender<()>,
         release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    struct BlockingLifecyclePlugin {
+        started: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+        events: Arc<Mutex<Vec<bool>>>,
+    }
+
+    struct BlockingEnablementPlugin {
+        false_started: std::sync::mpsc::Sender<()>,
+        release_false: Mutex<std::sync::mpsc::Receiver<()>>,
+        events: Arc<Mutex<Vec<bool>>>,
     }
 
     struct NamedPlugin(&'static str);
@@ -928,6 +1151,28 @@ mod tests {
         }
         fn set_enabled(&mut self, enabled: bool) {
             self.0.lock().unwrap().push(enabled);
+        }
+    }
+
+    impl Plugin for BlockingEnablementPlugin {
+        fn search(&self, _: &str) -> Vec<Action> {
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "blocking_enablement"
+        }
+        fn description(&self) -> &str {
+            "test"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+        fn set_enabled(&mut self, enabled: bool) {
+            self.events.lock().unwrap().push(enabled);
+            if !enabled {
+                self.false_started.send(()).unwrap();
+                self.release_false.lock().unwrap().recv().unwrap();
+            }
         }
     }
 
@@ -983,6 +1228,135 @@ mod tests {
         fn capabilities(&self) -> &[&str] {
             &["search"]
         }
+    }
+
+    impl Plugin for BlockingLifecyclePlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            Vec::new()
+        }
+        fn name(&self) -> &str {
+            "blocking_lifecycle"
+        }
+        fn description(&self) -> &str {
+            "blocking lifecycle test"
+        }
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+        fn set_enabled(&mut self, enabled: bool) {
+            self.events.lock().unwrap().push(enabled);
+        }
+    }
+
+    #[test]
+    fn deferred_snapshot_releases_unrelated_plugin_guards_while_one_provider_blocks() {
+        let mut manager = PluginManager::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        manager.register(Box::new(BlockingPlugin {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+        }));
+        manager.register(Box::new(NamedPlugin("later")));
+        let snapshot = manager.search_snapshot(None, None);
+        let worker = std::thread::spawn(move || snapshot.search("needle"));
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("blocking provider started");
+        let unrelated_write_succeeds = manager.try_write_plugin("later").is_ok();
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+
+        assert!(unrelated_write_succeeds);
+    }
+
+    #[test]
+    fn clearing_plugins_does_not_wait_for_provider_and_applies_disable_afterward() {
+        let mut manager = PluginManager::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        manager.register(Box::new(BlockingLifecyclePlugin {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+            events: Arc::clone(&events),
+        }));
+        manager.sync_enabled_plugins(None);
+        let snapshot = manager.search_snapshot(None, None);
+        let search = std::thread::spawn(move || snapshot.search("needle"));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("blocking provider started");
+
+        let (cleared_tx, cleared_rx) = std::sync::mpsc::channel();
+        let clearer = std::thread::spawn(move || {
+            manager.clear_plugins();
+            cleared_tx.send(()).unwrap();
+        });
+        let cleared_before_release = cleared_rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .is_ok();
+        release_tx.send(()).unwrap();
+        search.join().unwrap();
+        clearer.join().unwrap();
+
+        assert!(
+            cleared_before_release,
+            "clear must not wait on provider code"
+        );
+        assert_eq!(*events.lock().unwrap(), [true, false]);
+    }
+
+    #[test]
+    fn newer_enablement_cannot_be_overwritten_by_an_in_flight_queued_disable() {
+        let mut manager = PluginManager::new();
+        let (false_started_tx, false_started_rx) = std::sync::mpsc::channel();
+        let (release_false_tx, release_false_rx) = std::sync::mpsc::channel();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        manager.register(Box::new(BlockingEnablementPlugin {
+            false_started: false_started_tx,
+            release_false: Mutex::new(release_false_rx),
+            events: Arc::clone(&events),
+        }));
+        manager.sync_enabled_plugins(None);
+        let slot = Arc::clone(&manager.plugins[0]);
+
+        // Queue a disable while the provider is read-locked, then let the
+        // worker begin applying it. A newer enable request overlaps the
+        // provider's disable hook and must run afterward as the final value.
+        let read_guard = slot.plugin.read().unwrap();
+        slot.request_enabled(false);
+        drop(read_guard);
+
+        let apply_slot = Arc::clone(&slot);
+        let applying = std::thread::spawn(move || apply_slot.apply_pending_enabled());
+        false_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("queued disable entered its lifecycle callback");
+
+        let newer_slot = Arc::clone(&slot);
+        let (request_started_tx, request_started_rx) = std::sync::mpsc::channel();
+        let (request_done_tx, request_done_rx) = std::sync::mpsc::channel();
+        let newer = std::thread::spawn(move || {
+            request_started_tx.send(()).unwrap();
+            newer_slot.request_enabled(true);
+            request_done_tx.send(()).unwrap();
+        });
+        request_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("new enable request started");
+        request_done_rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .expect("newer enablement must publish without waiting for plugin code");
+
+        release_false_tx.send(()).unwrap();
+        applying.join().unwrap();
+        newer.join().unwrap();
+
+        assert_eq!(*events.lock().unwrap(), [true, false, true]);
     }
 
     #[test]

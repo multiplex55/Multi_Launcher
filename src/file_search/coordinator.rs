@@ -306,11 +306,14 @@ pub fn send_result_limited(
 mod tests {
     use super::*;
     use crate::file_search::model::{FileKind, FilenameRank, FilenameResult};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-    use std::time::Duration;
+    use std::sync::{Mutex, MutexGuard};
+    use std::time::{Duration, Instant};
 
-    #[derive(Clone)]
+    const FAKE_WORKER_TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[derive(Clone, Debug)]
     enum FakeMode {
         Success(usize),
         Empty,
@@ -318,21 +321,156 @@ mod tests {
         Wait,
     }
 
+    #[derive(Debug)]
+    enum FakeReceipt {
+        Entered {
+            id: SearchId,
+            token: CancellationToken,
+        },
+        Published(SearchEvent),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum FakeBoundary {
+        Entered,
+        TerminalPublished,
+    }
+
+    struct FakeObservations {
+        receiver: mpsc::Receiver<FakeReceipt>,
+        tokens: BTreeMap<SearchId, CancellationToken>,
+        publications: BTreeMap<SearchId, Vec<SearchEvent>>,
+    }
+
+    struct FakeCancellationGate {
+        release: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
     struct FakeExecutor {
-        modes: Mutex<Vec<FakeMode>>,
-        tokens: Mutex<Vec<CancellationToken>>,
+        modes: BTreeMap<SearchId, FakeMode>,
+        cancellation_gates: BTreeMap<SearchId, FakeCancellationGate>,
+        receipt_sender: mpsc::Sender<FakeReceipt>,
+        observations: Mutex<FakeObservations>,
     }
 
     impl FakeExecutor {
         fn new(modes: Vec<FakeMode>) -> Arc<Self> {
+            // Each fixture owns a fresh coordinator. Modes belong to its submitted
+            // search IDs, independently of the order in which worker threads enter.
+            let modes: BTreeMap<_, _> = modes
+                .into_iter()
+                .enumerate()
+                .map(|(index, mode)| (SearchId(index as u64 + 1), mode))
+                .collect();
+            let cancellation_gates = modes
+                .iter()
+                .filter_map(|(&id, mode)| {
+                    if !matches!(mode, FakeMode::Wait) {
+                        return None;
+                    }
+                    let (release, resume) = mpsc::channel();
+                    Some((
+                        id,
+                        FakeCancellationGate {
+                            release,
+                            resume: Mutex::new(resume),
+                        },
+                    ))
+                })
+                .collect();
+            let (receipt_sender, receiver) = mpsc::channel();
             Arc::new(Self {
-                modes: Mutex::new(modes),
-                tokens: Mutex::new(Vec::new()),
+                modes,
+                cancellation_gates,
+                receipt_sender,
+                observations: Mutex::new(FakeObservations {
+                    receiver,
+                    tokens: BTreeMap::new(),
+                    publications: BTreeMap::new(),
+                }),
             })
         }
 
-        fn token(&self, index: usize) -> CancellationToken {
-            self.tokens.lock().unwrap()[index].clone()
+        fn wait_for(
+            &self,
+            id: SearchId,
+            boundary: FakeBoundary,
+        ) -> MutexGuard<'_, FakeObservations> {
+            assert!(self.modes.contains_key(&id), "unplanned fake search {id:?}");
+            let deadline = Instant::now() + FAKE_WORKER_TIMEOUT;
+            let mut observations = self.observations.lock().unwrap();
+            loop {
+                let ready = match boundary {
+                    FakeBoundary::Entered => observations.tokens.contains_key(&id),
+                    FakeBoundary::TerminalPublished => observations
+                        .publications
+                        .get(&id)
+                        .and_then(|events| events.last())
+                        .is_some_and(|event| {
+                            matches!(
+                                event,
+                                SearchEvent::Completed { .. }
+                                    | SearchEvent::Cancelled { .. }
+                                    | SearchEvent::Failed { .. }
+                            )
+                        }),
+                };
+                if ready {
+                    return observations;
+                }
+                let receipt = observations
+                    .receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "fake search {id:?} did not reach {boundary:?} within {FAKE_WORKER_TIMEOUT:?}: {error}; entered: {:?}; publications: {:?}",
+                            observations.tokens.keys().collect::<Vec<_>>(),
+                            observations.publications,
+                        )
+                    });
+                match receipt {
+                    FakeReceipt::Entered { id, token } => {
+                        assert!(self.modes.contains_key(&id), "unplanned entry {id:?}");
+                        assert!(
+                            observations.tokens.insert(id, token).is_none(),
+                            "duplicate fake worker entry {id:?}"
+                        );
+                    }
+                    FakeReceipt::Published(event) => {
+                        let id = event_id(&event);
+                        assert!(observations.tokens.contains_key(&id));
+                        observations.publications.entry(id).or_default().push(event);
+                    }
+                }
+            }
+        }
+
+        fn token(&self, id: SearchId) -> CancellationToken {
+            self.wait_for(id, FakeBoundary::Entered).tokens[&id].clone()
+        }
+
+        fn publications(&self, id: SearchId) -> Vec<SearchEvent> {
+            self.wait_for(id, FakeBoundary::TerminalPublished)
+                .publications[&id]
+                .clone()
+        }
+
+        fn release_cancelled_worker(&self, id: SearchId) {
+            assert!(self.token(id).is_cancelled());
+            self.cancellation_gates[&id]
+                .release
+                .send(())
+                .expect("cancelled fake worker must still own its release gate");
+        }
+
+        fn publish(&self, events: &mpsc::Sender<SearchEvent>, event: SearchEvent) {
+            events
+                .send(event.clone())
+                .expect("coordinator must receive the fake worker event");
+            self.receipt_sender
+                .send(FakeReceipt::Published(event))
+                .expect("fixture must receive the actual publication receipt");
         }
     }
 
@@ -344,14 +482,19 @@ mod tests {
             token: CancellationToken,
             events: mpsc::Sender<SearchEvent>,
         ) {
-            self.tokens.lock().unwrap().push(token.clone());
-            let mode = self.modes.lock().unwrap().remove(0);
+            let mode = self.modes[&id].clone();
+            self.receipt_sender
+                .send(FakeReceipt::Entered {
+                    id,
+                    token: token.clone(),
+                })
+                .expect("fixture must observe real worker entry");
             match mode {
                 FakeMode::Success(count) => {
                     let mut emitted = 0;
                     for i in 0..count {
                         if token.is_cancelled() {
-                            let _ = events.send(SearchEvent::Cancelled { id });
+                            self.publish(&events, SearchEvent::Cancelled { id });
                             return;
                         }
                         let result = SearchResult::Filename(FilenameResult {
@@ -370,32 +513,39 @@ mod tests {
                         if !send_result_limited(
                             &events,
                             id,
-                            result,
+                            result.clone(),
                             &mut emitted,
                             request.max_results,
                         ) {
                             break;
                         }
+                        self.receipt_sender
+                            .send(FakeReceipt::Published(SearchEvent::Result { id, result }))
+                            .expect("fixture must observe the actual limited result publication");
                     }
-                    let _ = events.send(SearchEvent::Completed { id });
+                    self.publish(&events, SearchEvent::Completed { id });
                 }
                 FakeMode::Empty => {
-                    let _ = events.send(SearchEvent::Completed { id });
+                    self.publish(&events, SearchEvent::Completed { id });
                 }
                 FakeMode::Failure => {
-                    let _ = events.send(SearchEvent::Failed {
-                        id,
-                        error: "fake failure".to_string(),
-                    });
+                    self.publish(
+                        &events,
+                        SearchEvent::Failed {
+                            id,
+                            error: "fake failure".to_string(),
+                        },
+                    );
                 }
                 FakeMode::Wait => {
-                    for _ in 0..100 {
-                        if token.is_cancelled() {
-                            let _ = events.send(SearchEvent::Cancelled { id });
-                            return;
-                        }
-                        thread::sleep(Duration::from_millis(2));
-                    }
+                    self.cancellation_gates[&id]
+                        .resume
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(FAKE_WORKER_TIMEOUT)
+                        .expect("fixture must release the held cancellation worker");
+                    assert!(token.is_cancelled());
+                    self.publish(&events, SearchEvent::Cancelled { id });
                 }
             }
         }
@@ -420,8 +570,14 @@ mod tests {
         }
     }
 
-    fn drain_after(coordinator: &mut SearchCoordinator) -> Vec<SearchEvent> {
-        thread::sleep(Duration::from_millis(20));
+    fn drain_after_publications(
+        coordinator: &mut SearchCoordinator,
+        executor: &FakeExecutor,
+        ids: &[SearchId],
+    ) -> Vec<SearchEvent> {
+        for &id in ids {
+            executor.publications(id);
+        }
         coordinator.drain_current_events()
     }
 
@@ -488,7 +644,7 @@ mod tests {
     #[test]
     fn assigns_monotonic_search_ids() {
         let exec = FakeExecutor::new(vec![FakeMode::Empty, FakeMode::Empty]);
-        let mut coordinator = SearchCoordinator::with_executor(exec);
+        let mut coordinator = SearchCoordinator::with_executor(exec.clone());
         assert_eq!(
             coordinator.start_search(request(
                 SearchKind::Filename,
@@ -505,30 +661,48 @@ mod tests {
             )),
             SearchId(2)
         );
+        assert_eq!(
+            exec.publications(SearchId(1)),
+            vec![SearchEvent::Completed { id: SearchId(1) }]
+        );
+        assert_eq!(
+            exec.publications(SearchId(2)),
+            vec![SearchEvent::Completed { id: SearchId(2) }]
+        );
     }
 
     #[test]
     fn starting_new_search_cancels_previous_token() {
         let exec = FakeExecutor::new(vec![FakeMode::Wait, FakeMode::Empty]);
         let mut coordinator = SearchCoordinator::with_executor(exec.clone());
-        coordinator.start_search(request(
+        let old = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
             10,
         ));
-        thread::sleep(Duration::from_millis(10));
-        coordinator.start_search(request(
+        let old_token = exec.token(old);
+        let new = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
             10,
         ));
-        assert!(exec.token(0).is_cancelled());
+        assert!(exec.token(old).is_cancelled());
+        assert!(old_token.is_cancelled());
+        exec.release_cancelled_worker(old);
+        assert_eq!(
+            exec.publications(old),
+            vec![SearchEvent::Cancelled { id: old }]
+        );
+        assert_eq!(
+            exec.publications(new),
+            vec![SearchEvent::Completed { id: new }]
+        );
     }
 
     #[test]
     fn stale_events_are_ignored_by_current_drain() {
         let exec = FakeExecutor::new(vec![FakeMode::Wait, FakeMode::Empty]);
-        let mut coordinator = SearchCoordinator::with_executor(exec);
+        let mut coordinator = SearchCoordinator::with_executor(exec.clone());
         let old = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
@@ -539,50 +713,75 @@ mod tests {
             SearchScope::Roots { roots: Vec::new() },
             10,
         ));
-        let events = drain_after(&mut coordinator);
+        exec.release_cancelled_worker(old);
+        let events = drain_after_publications(&mut coordinator, &exec, &[old, new]);
+        assert_eq!(
+            exec.publications(old),
+            vec![SearchEvent::Cancelled { id: old }]
+        );
+        assert_eq!(
+            exec.publications(new),
+            vec![SearchEvent::Completed { id: new }]
+        );
+        assert_eq!(events, vec![SearchEvent::Completed { id: new }]);
         assert!(events.iter().all(|event| event_id(event) == new));
         assert!(events.iter().all(|event| event_id(event) != old));
         assert!(coordinator.diagnostics().stale_events_ignored > 0);
+        assert_eq!(coordinator.diagnostics().stale_events_ignored, 1);
+        assert_eq!(coordinator.diagnostics().completed, 1);
+        assert_eq!(coordinator.active_status(), SearchStatus::Completed);
     }
 
     #[test]
     fn successful_completion_updates_status() {
         let exec = FakeExecutor::new(vec![FakeMode::Success(1)]);
-        let mut coordinator = SearchCoordinator::with_executor(exec);
+        let mut coordinator = SearchCoordinator::with_executor(exec.clone());
         let id = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
             10,
         ));
-        let events = drain_after(&mut coordinator);
+        let events = drain_after_publications(&mut coordinator, &exec, &[id]);
+        assert_eq!(events, exec.publications(id));
         assert!(events.contains(&SearchEvent::Completed { id }));
         assert_eq!(coordinator.active_status(), SearchStatus::Completed);
+        assert_eq!(coordinator.diagnostics().completed, 1);
     }
 
     #[test]
     fn empty_completion_updates_status() {
         let exec = FakeExecutor::new(vec![FakeMode::Empty]);
-        let mut coordinator = SearchCoordinator::with_executor(exec);
+        let mut coordinator = SearchCoordinator::with_executor(exec.clone());
         let id = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
             10,
         ));
-        let events = drain_after(&mut coordinator);
+        let events = drain_after_publications(&mut coordinator, &exec, &[id]);
         assert_eq!(events, vec![SearchEvent::Completed { id }]);
+        assert_eq!(coordinator.active_status(), SearchStatus::Completed);
+        assert_eq!(coordinator.diagnostics().completed, 1);
     }
 
     #[test]
     fn failure_updates_status_and_diagnostics() {
         let exec = FakeExecutor::new(vec![FakeMode::Failure]);
-        let mut coordinator = SearchCoordinator::with_executor(exec);
-        coordinator.start_search(request(
+        let mut coordinator = SearchCoordinator::with_executor(exec.clone());
+        let id = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
             10,
         ));
-        drain_after(&mut coordinator);
+        let events = drain_after_publications(&mut coordinator, &exec, &[id]);
+        assert_eq!(
+            events,
+            vec![SearchEvent::Failed {
+                id,
+                error: "fake failure".to_owned(),
+            }]
+        );
         assert_eq!(coordinator.active_status(), SearchStatus::Failed);
+        assert_eq!(coordinator.diagnostics().failed, 1);
         assert_eq!(
             coordinator.diagnostics().last_error.as_deref(),
             Some("fake failure")
@@ -592,34 +791,134 @@ mod tests {
     #[test]
     fn explicit_cancellation_sets_status_without_blocking() {
         let exec = FakeExecutor::new(vec![FakeMode::Wait]);
-        let mut coordinator = SearchCoordinator::with_executor(exec);
+        let mut coordinator = SearchCoordinator::with_executor(exec.clone());
         let id = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
             10,
         ));
+        let token = exec.token(id);
         coordinator.cancel_active();
-        let events = drain_after(&mut coordinator);
+        // The worker is still held. This first event comes from the coordinator's
+        // nonblocking cancellation path, before any fake-worker publication.
+        let mut events = coordinator.drain_current_events();
+        assert_eq!(events, vec![SearchEvent::Cancelled { id }]);
+        assert!(token.is_cancelled());
+        assert_eq!(coordinator.active_status(), SearchStatus::Cancelled);
+        assert_eq!(coordinator.diagnostics().cancelled, 1);
+        exec.release_cancelled_worker(id);
+        let worker_events = drain_after_publications(&mut coordinator, &exec, &[id]);
+        assert_eq!(worker_events, vec![SearchEvent::Cancelled { id }]);
+        assert_eq!(worker_events, exec.publications(id));
+        events.extend(worker_events);
         assert!(events.contains(&SearchEvent::Cancelled { id }));
         assert_eq!(coordinator.active_status(), SearchStatus::Cancelled);
+        assert_eq!(coordinator.diagnostics().cancelled, 2);
     }
 
     #[test]
     fn result_limit_is_enforced() {
         let exec = FakeExecutor::new(vec![FakeMode::Success(5)]);
-        let mut coordinator = SearchCoordinator::with_executor(exec);
-        coordinator.start_search(request(
+        let mut coordinator = SearchCoordinator::with_executor(exec.clone());
+        let id = coordinator.start_search(request(
             SearchKind::Filename,
             SearchScope::Roots { roots: Vec::new() },
             2,
         ));
-        let events = drain_after(&mut coordinator);
+        let events = drain_after_publications(&mut coordinator, &exec, &[id]);
+        assert_eq!(events, exec.publications(id));
         let results = events
             .iter()
             .filter(|event| matches!(event, SearchEvent::Result { .. }))
             .count();
         assert_eq!(results, 2);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events.last(), Some(&SearchEvent::Completed { id }));
+        assert_eq!(coordinator.active_status(), SearchStatus::Completed);
+        assert_eq!(coordinator.diagnostics().completed, 1);
     }
+
+    #[test]
+    fn fake_modes_and_publications_follow_search_ids_when_worker_entry_is_reversed() {
+        struct GatedFirstEntry {
+            executor: Arc<FakeExecutor>,
+            blocked: mpsc::Sender<SearchId>,
+            resume: Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl SearchExecutor for GatedFirstEntry {
+            fn execute(
+                &self,
+                id: SearchId,
+                request: SearchRequest,
+                token: CancellationToken,
+                events: mpsc::Sender<SearchEvent>,
+            ) {
+                if id == SearchId(1) {
+                    self.blocked
+                        .send(id)
+                        .expect("observe the held first worker");
+                    self.resume
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(FAKE_WORKER_TIMEOUT)
+                        .expect("release the first worker after the second has published");
+                }
+                self.executor.execute(id, request, token, events);
+            }
+        }
+
+        let executor = FakeExecutor::new(vec![FakeMode::Empty, FakeMode::Failure]);
+        let (blocked, observed_block) = mpsc::channel();
+        let (resume, await_resume) = mpsc::channel();
+        let mut coordinator = SearchCoordinator::with_executor(Arc::new(GatedFirstEntry {
+            executor: executor.clone(),
+            blocked,
+            resume: Mutex::new(await_resume),
+        }));
+        let old = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
+        assert_eq!(
+            observed_block.recv_timeout(FAKE_WORKER_TIMEOUT).unwrap(),
+            old
+        );
+        let current = coordinator.start_search(request(
+            SearchKind::Filename,
+            SearchScope::Roots { roots: Vec::new() },
+            10,
+        ));
+        let current_failure = SearchEvent::Failed {
+            id: current,
+            error: "fake failure".to_owned(),
+        };
+        assert_eq!(
+            executor.publications(current),
+            vec![current_failure.clone()]
+        );
+        resume
+            .send(())
+            .expect("first worker still owns its entry gate");
+        assert_eq!(
+            executor.publications(old),
+            vec![SearchEvent::Completed { id: old }]
+        );
+
+        let events = coordinator.drain_current_events();
+        assert_eq!(events, vec![current_failure]);
+        assert_eq!(coordinator.active_search_id(), Some(current));
+        assert_eq!(coordinator.active_status(), SearchStatus::Failed);
+        assert_eq!(coordinator.diagnostics().failed, 1);
+        assert_eq!(coordinator.diagnostics().completed, 0);
+        assert_eq!(coordinator.diagnostics().stale_events_ignored, 1);
+        assert_eq!(
+            coordinator.diagnostics().last_error.as_deref(),
+            Some("fake failure")
+        );
+    }
+
     fn drain_until_terminal(coordinator: &mut SearchCoordinator) -> Vec<SearchEvent> {
         // Production searches spawn external processes, which can be slow to start
         // while the full test suite is running in parallel.

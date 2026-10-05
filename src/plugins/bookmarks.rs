@@ -677,7 +677,7 @@ mod tests {
         })
         .unwrap();
 
-        std::fs::write(&path, "invalid").unwrap();
+        crate::common::atomic_file::save_atomic(&path, b"invalid").unwrap();
         notify_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("malformed replacement should notify");

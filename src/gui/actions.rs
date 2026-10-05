@@ -1,6 +1,6 @@
 use super::*;
 use crate::gui::note_mutation::{NoteMutationOutcome, NoteMutationOutput, NoteMutationResult};
-use crate::persistence::{RecoveryGroupId, RecoveryTarget};
+use crate::persistence::RecoveryTarget;
 
 /// A compact, testable description of Launcher-owned UI that can be opened by
 /// an action.  Comparing snapshots keeps macro dispatch independent of action
@@ -29,9 +29,9 @@ impl LauncherApp {
     pub(crate) fn queue_data_recovery_confirmation(&mut self, intent: PendingRecoveryIntent) {
         let label = match &intent {
             PendingRecoveryIntent::Restore {
-                target: RecoveryTarget::Group(RecoveryGroupId::MkMacro),
+                target: RecoveryTarget::Group(group),
                 ..
-            } => "MkMacro document + assets",
+            } => group.label(),
             PendingRecoveryIntent::Restore {
                 target: RecoveryTarget::Store(store_id),
                 ..
@@ -97,14 +97,16 @@ impl LauncherApp {
         before: &LauncherInteractionSnapshot,
     ) {
         let after = self.launcher_interaction_snapshot();
-        let opened_panel = after
-            .panel_instances
+        // The Designer owns an independent viewport and its own focus. A
+        // delayed root restore would take focus back after it opens, even if
+        // the launcher grid was already visible when the action ran.
+        let opened_root_panel = Self::TRACKED_PANELS
             .iter()
+            .zip(&after.panel_instances)
             .zip(&before.panel_instances)
-            .any(|(after, before)| after > before);
-        if opened_panel || (after.confirmation_open && !before.confirmation_open) {
-            self.visible_flag.store(true, Ordering::SeqCst);
-            self.restore_flag.store(true, Ordering::SeqCst);
+            .any(|((panel, after), before)| *panel != Panel::RadialEditor && after > before);
+        if opened_root_panel || (after.confirmation_open && !before.confirmation_open) {
+            self.request_launcher_state(Some(true), Some(true));
         }
     }
 
@@ -128,6 +130,34 @@ impl LauncherApp {
         let before = self.launcher_interaction_snapshot();
         match crate::commands::parse_command(a, query_override, source) {
             Ok(invocation) => {
+                if let crate::commands::Command::Radial(command) = &invocation.command {
+                    let skins = match command {
+                        crate::commands::RadialCommand::Edit => Some(false),
+                        crate::commands::RadialCommand::Skins => Some(true),
+                        _ => None,
+                    };
+                    if let Some(skins) = skins {
+                        crate::radial::acceptance_trace::emit(
+                            crate::radial::acceptance_trace::Event::RadialAction {
+                                stage:
+                                    crate::radial::acceptance_trace::RadialActionStage::Activated,
+                                skins,
+                                editor_open: None,
+                                skins_selected: None,
+                                panel_registered: None,
+                            },
+                        );
+                        crate::radial::acceptance_trace::emit(
+                            crate::radial::acceptance_trace::Event::RadialAction {
+                                stage: crate::radial::acceptance_trace::RadialActionStage::Parsed,
+                                skins,
+                                editor_open: None,
+                                skins_selected: None,
+                                panel_registered: None,
+                            },
+                        );
+                    }
+                }
                 if !self.maybe_confirm_destructive_action(&invocation) {
                     self.dispatch_command_invocation(invocation);
                 }
@@ -163,13 +193,21 @@ impl LauncherApp {
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationComplete,
                     ));
-                    self.record_history_usage(&meta.action, &meta.query, meta.source);
-                    if meta.hide_launcher_on_success {
-                        self.visible_flag.store(false, Ordering::SeqCst);
-                    } else {
-                        self.visible_flag.store(true, Ordering::SeqCst);
-                        self.move_cursor_end = true;
-                        self.focus_input();
+                    self.record_history_usage(
+                        &meta.action,
+                        meta.history_query.as_deref().unwrap_or(&meta.query),
+                        meta.source,
+                    );
+                    if meta.root_policy
+                        != crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState
+                    {
+                        if meta.hide_launcher_on_success {
+                            self.request_launcher_visibility(false);
+                        } else {
+                            self.request_launcher_visibility(true);
+                            self.move_cursor_end = true;
+                            self.focus_input();
+                        }
                     }
                     if self.enable_toasts {
                         push_toast(
@@ -187,12 +225,16 @@ impl LauncherApp {
                     typed_events.push(WatchEvent::ClipboardModify(
                         ClipboardModifyGuiEvent::ImmediateOperationFailed,
                     ));
-                    self.query = meta.query;
-                    self.last_results_valid = false;
-                    self.search();
-                    self.visible_flag.store(true, Ordering::SeqCst);
-                    self.move_cursor_end = true;
-                    self.focus_input();
+                    if meta.root_policy
+                        != crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState
+                    {
+                        self.query = meta.query;
+                        self.last_results_valid = false;
+                        self.search();
+                        self.request_launcher_visibility(true);
+                        self.move_cursor_end = true;
+                        self.focus_input();
+                    }
                     self.report_error_message("clipboard_modify", err.message.clone());
                 }
             }
@@ -274,6 +316,7 @@ impl LauncherApp {
     ) {
         #[cfg(test)]
         self.test_recorded_history_queries.push(query.to_owned());
+        #[cfg(not(test))]
         let _ = history::append_history(
             HistoryEntry {
                 query: query.to_string(),
@@ -284,6 +327,19 @@ impl LauncherApp {
             },
             self.history_limit,
         );
+        #[cfg(test)]
+        if !self.test_skip_history_persistence {
+            let _ = history::append_history(
+                HistoryEntry {
+                    query: query.to_string(),
+                    query_lc: String::new(),
+                    action: action.clone(),
+                    source: Some(source.label().to_string()),
+                    timestamp: 0,
+                },
+                self.history_limit,
+            );
+        }
         let count = self.usage.entry(action.action.clone()).or_insert(0);
         *count += 1;
     }
@@ -1344,6 +1400,23 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn opening_designer_never_queues_a_root_focus_restore() {
+        for root_visible in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.visible_flag.store(root_visible, Ordering::SeqCst);
+            app.restore_flag.store(false, Ordering::SeqCst);
+
+            let before = app.launcher_interaction_snapshot();
+            app.focus_panel(Panel::RadialEditor);
+            app.restore_for_new_launcher_interaction(&before);
+
+            assert_eq!(app.visible_flag.load(Ordering::SeqCst), root_visible);
+            assert!(!app.restore_flag.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
     fn query_activation_applies_args_searches_and_restores_input_focus() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -1888,6 +1961,8 @@ mod clipboard_modify_gui_action_tests {
         let ctx = egui::Context::default();
         let mut app = super::tests::new_app(&ctx);
         app.query = "not canonical".into();
+        app.command_root_policy =
+            crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState;
         let args = encode_action_payload(&execute_stages_payload(vec![StageSpec {
             operation: OperationId::CamelCase,
             arguments: StageArguments::default(),
@@ -1902,6 +1977,11 @@ mod clipboard_modify_gui_action_tests {
         assert_eq!(meta.query, "cm camel-case");
         assert_eq!(meta.action.action, "clipboard_modify:execute");
         assert!(meta.hide_launcher_on_success, "ad-hoc stages always hide");
+        assert_eq!(meta.history_query, None);
+        assert_eq!(
+            meta.root_policy,
+            crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState
+        );
     }
 
     #[test]
@@ -2052,8 +2132,10 @@ mod clipboard_modify_gui_action_tests {
         let meta = ImmediateRequestMetadata {
             action: action("clipboard_modify:execute", None),
             query: "cm uppercase".into(),
+            history_query: None,
             source: ActivationSource::Enter,
             hide_launcher_on_success: false,
+            root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
         };
         app.query = "changed".into();
         app.clipboard_modify_immediate.inject_completion_for_test(
@@ -2090,8 +2172,10 @@ mod clipboard_modify_gui_action_tests {
         let meta = ImmediateRequestMetadata {
             action: action("clipboard_modify:execute", None),
             query: "cm uppercase".into(),
+            history_query: None,
             source: ActivationSource::Gesture,
             hide_launcher_on_success: true,
+            root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
         };
         let before_len = history::get_history().len();
         app.clipboard_modify_immediate.inject_completion_for_test(
@@ -2126,8 +2210,10 @@ mod clipboard_modify_gui_action_tests {
         let meta = ImmediateRequestMetadata {
             action: action("clipboard_modify:execute", None),
             query: "cm template example".into(),
+            history_query: None,
             source: ActivationSource::Enter,
             hide_launcher_on_success: false,
+            root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
         };
         app.clipboard_modify_immediate.inject_completion_for_test(
             meta,
@@ -2144,6 +2230,115 @@ mod clipboard_modify_gui_action_tests {
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.move_cursor_end);
         assert!(app.focus_query);
+    }
+
+    #[test]
+    fn radial_clipboard_modify_completions_preserve_root_and_use_captured_history_query() {
+        let ctx = egui::Context::default();
+        for root_visible in [false, true] {
+            for hide_after_apply in [false, true] {
+                for success in [false, true] {
+                    let mut app = super::tests::new_app(&ctx);
+                    app.test_skip_history_persistence = true;
+                    app.query = "ordinary root query".into();
+                    app.pending_query = Some("pending root query".into());
+                    app.results = vec![action("help:show", None)];
+                    app.selected = Some(0);
+                    app.resolved_grid_layout = true;
+                    app.visible_flag.store(root_visible, Ordering::SeqCst);
+                    app.restore_flag.store(root_visible, Ordering::SeqCst);
+                    app.focus_query = true;
+                    app.move_cursor_end = true;
+                    app.last_results_valid = true;
+                    app.last_search_query = "root search cache".into();
+                    app.suggestions = vec!["root suggestion".into()];
+                    app.autocomplete_index = 0;
+                    app.query_history
+                        .older("ordinary root query", || ["prior root query".to_owned()]);
+                    let before_revision = app.visibility_revision.current();
+                    let before_root = clipboard_completion_root_snapshot(&app);
+                    let metadata = ImmediateRequestMetadata {
+                        action: action("clipboard_modify:execute", None),
+                        query: "cm canonical command".into(),
+                        history_query: Some("radial captured query".into()),
+                        source: ActivationSource::RadialRelease,
+                        hide_launcher_on_success: hide_after_apply,
+                        root_policy:
+                            crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                    };
+                    app.clipboard_modify_immediate.inject_completion_for_test(
+                        metadata.clone(),
+                        crate::clipboard_modify::coordinator::ImmediateCompletionEvent {
+                            request_id: crate::clipboard_modify::coordinator::OperationId(70),
+                            display_label: "Radial test".into(),
+                            character_count: 4,
+                            line_count: 1,
+                            undo_available: true,
+                            result: if success {
+                                Ok(())
+                            } else {
+                                Err(crate::clipboard_modify::coordinator::StructuredClipboardModifyError {
+                                    message: "fixture failure".into(),
+                                })
+                            },
+                        },
+                    );
+
+                    app.drain_clipboard_modify_immediate();
+
+                    assert_eq!(clipboard_completion_root_snapshot(&app), before_root);
+                    assert_eq!(app.visibility_revision.current(), before_revision);
+                    if success {
+                        assert_eq!(app.usage.get(&metadata.action.action), Some(&1));
+                        assert_eq!(app.test_recorded_history_queries, ["radial captured query"]);
+                    } else {
+                        assert!(!app.usage.contains_key(&metadata.action.action));
+                        assert!(app.test_recorded_history_queries.is_empty());
+                        assert!(
+                            app.error
+                                .as_deref()
+                                .unwrap_or_default()
+                                .contains("fixture failure")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn clipboard_completion_root_snapshot(
+        app: &LauncherApp,
+    ) -> (
+        String,
+        Option<String>,
+        Vec<Action>,
+        Option<usize>,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        String,
+        Vec<String>,
+        (usize, u64),
+    ) {
+        (
+            app.query.clone(),
+            app.pending_query.clone(),
+            app.results.clone(),
+            app.selected,
+            app.resolved_grid_layout,
+            app.visible_flag.load(Ordering::SeqCst),
+            app.restore_flag.load(Ordering::SeqCst),
+            app.focus_query,
+            app.move_cursor_end,
+            app.last_search_query.clone(),
+            app.suggestions.clone(),
+            (
+                app.autocomplete_index,
+                app.query_history.acceptance_digest(),
+            ),
+        )
     }
 
     #[test]
@@ -2189,5 +2384,30 @@ mod clipboard_modify_gui_action_tests {
                 .iter()
                 .any(|a| a.action.starts_with("clipboard_modify:"))
         );
+    }
+
+    #[test]
+    fn note_tags_opens_launcher_ui_when_root_was_hidden() {
+        let ctx = egui::Context::default();
+        let mut app = super::tests::new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.query = "ordinary query".into();
+        let invocation = crate::commands::parse_command(
+            Action {
+                label: "Show note tags".into(),
+                desc: "Notes".into(),
+                action: "note:tags".into(),
+                args: None,
+            },
+            None,
+            ActivationSource::Click,
+        )
+        .unwrap();
+
+        app.dispatch_command_invocation(invocation);
+
+        assert_eq!(app.query, "note tags");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.focus_query);
     }
 }

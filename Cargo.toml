@@ -40,11 +40,15 @@ windows = { version = "0.58", features = [
     "Foundation",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemServices",
+    "Win32_System_RemoteDesktop",
     "Win32_System_Registry",
     "Win32_System_WinRT",
     "Win32_UI_Shell",
@@ -59,6 +63,7 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi",
     "Win32_Devices_Display",
     "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
     "Win32_Storage_FileSystem",
 ] }
 log = "0.4"
@@ -79,7 +84,7 @@ trash = { version = "5.2", default-features = false, features = ["coinit_apartme
 sysinfo = "0.35"
 chrono = "0.4"
 screenshots = "0.8.10"
-image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp"] }
+image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp", "ico", "gif", "tiff"] }
 tempfile = "3"
 ipconfig = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
@@ -95,6 +100,7 @@ rodio = { version = "0.17", default-features = false, features = ["wav"] }
 ab_glyph = "0.2"
 time = ">=0.3.47, <0.4"
 bytes = ">=1.11.1, <2"
+sha2 = "0.10"
 
 [features]
 unstable_grab = ["rdev/unstable_grab"]
@@ -116,6 +122,10 @@ name = "omni_search"
 harness = false
 [[bench]]
 name = "todo_widget_filtering"
+harness = false
+
+[[bench]]
+name = "radial_runtime"
 harness = false
 
 # Group only side-effect-free cases; Cargo auto-discovers every top-level tests/*.rs target.

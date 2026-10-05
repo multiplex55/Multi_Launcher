@@ -571,7 +571,232 @@ pub struct Settings {
     pub query_results_layout: QueryResultsLayoutSettings,
     #[serde(default)]
     pub multi_manager: MultiManagerSettings,
+    #[serde(default = "legacy_radial_feature_settings")]
+    pub radial: crate::radial::model::RadialFeatureSettings,
+    /// Local-only presentation state for the independent Radial Designer.
+    /// This never participates in portable radial documents or authoring
+    /// history and is intentionally tolerant of deleted entity IDs.
+    #[serde(default)]
+    pub radial_designer: RadialDesignerPreferences,
+    /// Internal durable marker for the one-time radial submenu conversion.
+    /// It deliberately lives outside the authorable RadialDocument so imports
+    /// and authoring undo cannot erase migration recovery state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radial_submenu_migration: Option<SubmenuPresentationMigrationReceipt>,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RadialDesignerMode {
+    #[default]
+    Design,
+    PreviewTest,
+}
+
+fn legacy_radial_designer_layout_version() -> u16 {
+    0
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RadialDesignerPreferences {
+    /// Version of the presentation-only Designer layout.  The field-level
+    /// default intentionally identifies settings written before the visual
+    /// workspace was introduced, while `Default` below represents the new
+    /// untouched workspace.
+    #[serde(default = "legacy_radial_designer_layout_version")]
+    pub layout_version: u16,
+    pub window_size: (f32, f32),
+    pub window_position: Option<(f32, f32)>,
+    /// The child viewport's logical-points-to-physical-pixels scale at the
+    /// time `window_position` was recorded.  It is required to map a saved
+    /// egui position back into the Win32 virtual desktop during restoration.
+    #[serde(default)]
+    pub window_scale_factor: Option<f32>,
+    pub tree_width: f32,
+    pub inspector_width: f32,
+    pub tree_visible: bool,
+    pub inspector_visible: bool,
+    pub show_skins: bool,
+    pub active_mode: RadialDesignerMode,
+    pub zoom: f32,
+    pub pan: (f32, f32),
+    pub expanded_sections: std::collections::BTreeMap<String, bool>,
+}
+
+impl Default for RadialDesignerPreferences {
+    fn default() -> Self {
+        Self {
+            layout_version: Self::CURRENT_LAYOUT_VERSION,
+            window_size: (900.0, 650.0),
+            window_position: None,
+            window_scale_factor: None,
+            tree_width: 180.0,
+            inspector_width: 300.0,
+            tree_visible: false,
+            inspector_visible: false,
+            show_skins: false,
+            active_mode: RadialDesignerMode::Design,
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+            expanded_sections: std::collections::BTreeMap::new(),
+        }
+    }
+}
+
+impl RadialDesignerPreferences {
+    pub const CURRENT_LAYOUT_VERSION: u16 = 1;
+    pub const MAX_EXPANDED_SECTIONS: usize = 128;
+    pub const MIN_WINDOW_SCALE_FACTOR: f32 = 0.5;
+    pub const MAX_WINDOW_SCALE_FACTOR: f32 = 8.0;
+
+    /// Upgrade only the untouched legacy presentation.  A legacy settings
+    /// object with an explicit pane choice is preserved; once observed, the
+    /// version marker prevents a later startup from treating that choice as a
+    /// default.  This is deliberately UI-only and never touches radial data.
+    pub fn migrate_layout(mut self) -> Self {
+        if self.layout_version < Self::CURRENT_LAYOUT_VERSION {
+            if self.is_untouched_legacy_layout() {
+                self.tree_visible = false;
+                self.inspector_visible = false;
+                self.show_skins = false;
+                self.active_mode = RadialDesignerMode::Design;
+                self.zoom = 1.0;
+                self.pan = (0.0, 0.0);
+                self.expanded_sections.clear();
+            }
+            self.layout_version = Self::CURRENT_LAYOUT_VERSION;
+        }
+        self.normalized()
+    }
+
+    fn is_untouched_legacy_layout(&self) -> bool {
+        self.layout_version == 0
+            && self.window_size == (900.0, 650.0)
+            && self.window_position.is_none()
+            && self.window_scale_factor.is_none()
+            && self.tree_width == 180.0
+            && self.inspector_width == 300.0
+            && self.tree_visible
+            && self.inspector_visible
+            && !self.show_skins
+            && self.active_mode == RadialDesignerMode::Design
+            && self.zoom == 1.0
+            && self.pan == (0.0, 0.0)
+            && self.expanded_sections.is_empty()
+    }
+
+    pub fn normalized(mut self) -> Self {
+        if !self.window_size.0.is_finite() || !self.window_size.1.is_finite() {
+            self.window_size = Self::default().window_size;
+        }
+        self.window_size.0 = self.window_size.0.clamp(520.0, 2400.0);
+        self.window_size.1 = self.window_size.1.clamp(380.0, 1800.0);
+        if self
+            .window_position
+            .is_some_and(|position| !position.0.is_finite() || !position.1.is_finite())
+        {
+            self.window_position = None;
+        } else if let Some(position) = self.window_position.as_mut() {
+            position.0 = position.0.clamp(-100_000.0, 100_000.0);
+            position.1 = position.1.clamp(-100_000.0, 100_000.0);
+        }
+        if self.window_scale_factor.is_none_or(|scale| {
+            !scale.is_finite()
+                || !(Self::MIN_WINDOW_SCALE_FACTOR..=Self::MAX_WINDOW_SCALE_FACTOR).contains(&scale)
+        }) {
+            // Without the child viewport's own scale, an old logical point
+            // cannot be converted to a reliable virtual-screen coordinate.
+            // Let the OS place legacy/invalid geometry instead of guessing.
+            self.window_scale_factor = None;
+            self.window_position = None;
+        }
+        self.tree_width = if self.tree_width.is_finite() {
+            self.tree_width.clamp(120.0, 420.0)
+        } else {
+            180.0
+        };
+        self.inspector_width = if self.inspector_width.is_finite() {
+            self.inspector_width.clamp(220.0, 560.0)
+        } else {
+            300.0
+        };
+        self.zoom = if self.zoom.is_finite() {
+            self.zoom.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+        if !self.pan.0.is_finite() || !self.pan.1.is_finite() {
+            self.pan = (0.0, 0.0);
+        }
+        self.pan.0 = self.pan.0.clamp(-10_000.0, 10_000.0);
+        self.pan.1 = self.pan.1.clamp(-10_000.0, 10_000.0);
+        while self.expanded_sections.len() > Self::MAX_EXPANDED_SECTIONS {
+            if let Some(first) = self.expanded_sections.keys().next().cloned() {
+                self.expanded_sections.remove(&first);
+            }
+        }
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmenuMigrationState {
+    Prepared,
+    Applied,
+    UndoPrepared,
+    Undone,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmenuMigrationMenuChange {
+    pub menu_id: crate::radial::model::MenuId,
+    pub previous: crate::radial::model::SubmenuPresentation,
+    pub entity_fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmenuPresentationMigrationReceipt {
+    pub migration_id: String,
+    pub version: u32,
+    pub state: SubmenuMigrationState,
+    pub source_settings_sha256: String,
+    pub source_radial_sha256: String,
+    pub settings_backup_path: String,
+    pub settings_backup_sha256: String,
+    pub settings_source_existed: bool,
+    pub radial_backup_path: String,
+    pub radial_backup_sha256: String,
+    pub settings_default_before: crate::radial::model::SubmenuPresentation,
+    pub settings_default_target: crate::radial::model::SubmenuPresentation,
+    pub changed_menus: Vec<SubmenuMigrationMenuChange>,
+    pub target_radial_revision: u64,
+    pub target_radial_sha256: String,
+    /// Canonical hash of settings with the receipt omitted. This avoids a
+    /// self-hash cycle and ignores unordered collection iteration order while
+    /// still giving startup recovery an exact logical target.
+    pub target_settings_content_sha256: String,
+    #[serde(default)]
+    pub undo_restored_menu_ids: Vec<crate::radial::model::MenuId>,
+    pub undo_source_radial_sha256: Option<String>,
+    pub undo_target_radial_revision: Option<u64>,
+    pub undo_target_radial_sha256: Option<String>,
+    pub undo_source_settings_content_sha256: Option<String>,
+    pub undo_target_settings_content_sha256: Option<String>,
+    #[serde(default)]
+    pub undo_settings_default_source: Option<crate::radial::model::SubmenuPresentation>,
+    pub undo_restores_settings_default: bool,
+    pub failure: Option<String>,
+}
+
+fn legacy_radial_feature_settings() -> crate::radial::model::RadialFeatureSettings {
+    let mut settings = crate::radial::model::RadialFeatureSettings::default();
+    settings.default_submenu_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+    settings
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -641,6 +866,9 @@ impl Default for Settings {
             note_graph: NoteGraphSettings::default(),
             query_results_layout: QueryResultsLayoutSettings::default(),
             multi_manager: MultiManagerSettings::default(),
+            radial: crate::radial::model::RadialFeatureSettings::default(),
+            radial_designer: RadialDesignerPreferences::default(),
+            radial_submenu_migration: None,
         }
     }
 }
@@ -660,6 +888,7 @@ impl Settings {
             ctrl: false,
             shift: false,
             alt: false,
+            alt_gr: false,
             win: false,
         }
     }
@@ -701,15 +930,189 @@ mod tests {
     use super::{
         MultiManagerSettings, NoteSettings, NoteViewMode, QueryResultsLayoutSettings, Settings,
     };
+    use crate::radial::model::RadialFeatureSettings;
 
     #[test]
     fn empty_settings_deserializes_with_note_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(parsed.note, NoteSettings::default());
+        let mut legacy_radial = RadialFeatureSettings::default();
+        legacy_radial.default_submenu_presentation =
+            crate::radial::model::SubmenuPresentation::Cascade;
+        assert_eq!(parsed.radial, legacy_radial);
+        assert_eq!(
+            parsed.radial.tooltip_scope,
+            crate::radial::model::TooltipScope::AllCells
+        );
+        assert_eq!(parsed.radial.tooltip_delay_ms, 300);
+        assert!(!parsed.radial.show_expected_layout_diagnostics);
         assert_eq!(
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
         );
+    }
+
+    #[test]
+    fn radial_designer_preferences_are_compatible_and_bounded() {
+        let parsed: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            parsed.radial_designer,
+            super::RadialDesignerPreferences::default()
+        );
+
+        let preferences = super::RadialDesignerPreferences {
+            layout_version: 0,
+            window_size: (f32::NAN, 10.0),
+            window_position: Some((f32::INFINITY, -200_000.0)),
+            window_scale_factor: Some(f32::NAN),
+            tree_width: -1.0,
+            inspector_width: 2_000.0,
+            tree_visible: true,
+            inspector_visible: true,
+            show_skins: true,
+            active_mode: super::RadialDesignerMode::PreviewTest,
+            zoom: 100.0,
+            pan: (50_000.0, -50_000.0),
+            expanded_sections: (0..=super::RadialDesignerPreferences::MAX_EXPANDED_SECTIONS)
+                .map(|index| (format!("section-{index}"), true))
+                .collect(),
+        }
+        .normalized();
+        assert_eq!(preferences.window_size, (900.0, 650.0));
+        assert_eq!(preferences.window_position, None);
+        assert_eq!(preferences.window_scale_factor, None);
+        assert_eq!(preferences.tree_width, 120.0);
+        assert_eq!(preferences.inspector_width, 560.0);
+        assert_eq!(preferences.zoom, 4.0);
+        assert_eq!(preferences.pan, (10_000.0, -10_000.0));
+        assert_eq!(
+            preferences.expanded_sections.len(),
+            super::RadialDesignerPreferences::MAX_EXPANDED_SECTIONS
+        );
+
+        let legacy = super::RadialDesignerPreferences {
+            layout_version: 0,
+            window_position: Some((1_280.0, 100.0)),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(legacy.window_position, None);
+        assert_eq!(legacy.window_scale_factor, None);
+    }
+
+    #[test]
+    fn radial_designer_visual_defaults_migrate_only_untouched_legacy_layout() {
+        let untouched: super::RadialDesignerPreferences = serde_json::from_str(
+            r#"{
+                "window_size":[900.0,650.0],
+                "window_position":null,
+                "window_scale_factor":null,
+                "tree_width":180.0,
+                "inspector_width":300.0,
+                "tree_visible":true,
+                "inspector_visible":true,
+                "show_skins":false,
+                "active_mode":"design",
+                "zoom":1.0,
+                "pan":[0.0,0.0],
+                "expanded_sections":{}
+            }"#,
+        )
+        .expect("legacy Designer preferences should deserialize");
+        let migrated = untouched.migrate_layout();
+        assert_eq!(
+            migrated.layout_version,
+            super::RadialDesignerPreferences::CURRENT_LAYOUT_VERSION
+        );
+        assert!(!migrated.tree_visible);
+        assert!(!migrated.inspector_visible);
+
+        let mut explicit = migrated.clone();
+        explicit.layout_version = 0;
+        explicit.tree_visible = true;
+        explicit.inspector_visible = false;
+        let preserved = explicit.migrate_layout();
+        assert!(preserved.tree_visible);
+        assert!(!preserved.inspector_visible);
+        assert_eq!(
+            preserved.layout_version,
+            super::RadialDesignerPreferences::CURRENT_LAYOUT_VERSION
+        );
+    }
+
+    #[test]
+    fn radial_explicit_disable_and_zero_threshold_are_preserved() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{"radial":{"enabled":false,"shared_tap_hold":false,"hold_threshold_ms":0}}"#,
+        )
+        .unwrap();
+        assert!(!parsed.radial.enabled);
+        assert!(!parsed.radial.shared_tap_hold);
+        assert_eq!(parsed.radial.hold_threshold_ms, 0);
+        assert!(!parsed.radial.global_item_inputs);
+        assert_eq!(parsed.radial.default_menu_id, None);
+        assert_eq!(
+            parsed.radial.default_interaction,
+            crate::radial::model::InteractionMode::StickyClick
+        );
+        assert_eq!(
+            parsed.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        assert_eq!(
+            parsed.radial.safety_policy,
+            crate::radial::model::RadialSafetyPolicy::InheritLauncher
+        );
+        assert_eq!(
+            parsed.radial.default_item_input_scope,
+            crate::radial::model::TriggerScope::MenuLocal
+        );
+        let restored: Settings =
+            serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+        assert!(!restored.radial.enabled);
+        assert_eq!(restored.radial.hold_threshold_ms, 0);
+    }
+
+    #[test]
+    fn legacy_radial_settings_default_is_cascade_when_radial_is_missing_or_empty() {
+        assert_eq!(
+            Settings::default().radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::SameCenter
+        );
+        let missing: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            missing.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        let empty: Settings = serde_json::from_str(r#"{"radial":{}}"#).unwrap();
+        assert_eq!(
+            empty.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        let parsed: Settings = serde_json::from_str(r#"{"radial":{"enabled":false}}"#).unwrap();
+        assert_eq!(
+            parsed.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        let partial: Settings = serde_json::from_str(
+            r#"{"radial":{"tooltip_scope":"truncated_only","tooltip_delay_ms":725,"show_expected_layout_diagnostics":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            partial.radial.tooltip_scope,
+            crate::radial::model::TooltipScope::TruncatedOnly
+        );
+        assert_eq!(partial.radial.tooltip_delay_ms, 725);
+        assert!(partial.radial.show_expected_layout_diagnostics);
+        assert_eq!(
+            partial.radial.default_submenu_presentation,
+            crate::radial::model::SubmenuPresentation::Cascade
+        );
+        let restored: Settings = serde_json::from_str(
+            &serde_json::to_string(&partial).expect("tooltip settings serialize"),
+        )
+        .expect("tooltip settings deserialize");
+        assert_eq!(restored.radial, partial.radial);
     }
 
     #[test]

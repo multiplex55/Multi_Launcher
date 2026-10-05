@@ -330,8 +330,12 @@ fn run_intent<C: Cancellation + ?Sized>(
 pub struct ImmediateRequestMetadata {
     pub action: Action,
     pub query: String,
+    /// Optional invocation-time history text. Ordinary callers fall back to
+    /// `query`, while radial callers keep their captured launcher query.
+    pub history_query: Option<String>,
     pub source: ActivationSource,
     pub hide_launcher_on_success: bool,
+    pub root_policy: crate::universal_actions::RootLauncherPolicy,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredClipboardModifyError {
@@ -620,13 +624,15 @@ mod tests {
                 ImmediateRequestMetadata {
                     action: action(),
                     query: "cm upper".into(),
+                    history_query: None,
                     source: ActivationSource::Enter,
                     hide_launcher_on_success: true,
+                    root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 },
             )
             .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        let (metadata, ev) = ic.drain_completions().pop().unwrap();
+        assert!(ic.pending_metadata(id).is_some());
+        let (metadata, ev) = wait_one_with_metadata(&mut ic);
         assert_eq!(metadata.action, action());
         assert_eq!(metadata.query, "cm upper");
         assert_eq!(metadata.source, ActivationSource::Enter);
@@ -636,11 +642,30 @@ mod tests {
         assert_eq!(ev.line_count, 2);
         assert!(ev.undo_available);
         assert!(ev.result.is_ok());
+        assert!(!ic.has_pending());
+        assert!(ic.pending_metadata(id).is_none());
+        assert_eq!(
+            ic.diagnostics(),
+            &ImmediateDiagnostics {
+                started: 1,
+                completed: 1,
+                ..Default::default()
+            }
+        );
     }
     #[test]
     fn immediate_cancel_pending_rejects_stale_completion() {
         let svc = Arc::new(ClipboardService::new(FakeClipboardBackend::with_text("x")));
         let mut ic = ImmediateExecutionCoordinator::new(svc);
+        let (completion_tx, completion_rx) = mpsc::channel();
+        ic.set_repaint_callback(Arc::new(move || {
+            completion_tx.send(()).unwrap();
+        }));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = calls.clone();
+        ic.set_success_hook(Arc::new(move |_, _| {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+        }));
         let id = ic
             .start(
                 ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
@@ -648,15 +673,28 @@ mod tests {
                 ImmediateRequestMetadata {
                     action: action(),
                     query: "q".into(),
+                    history_query: None,
                     source: ActivationSource::Enter,
                     hide_launcher_on_success: true,
+                    root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 },
             )
             .unwrap();
         assert!(ic.pending_metadata(id).is_some());
+        let diagnostics = ic.diagnostics().clone();
         ic.cancel_pending();
-        std::thread::sleep(Duration::from_millis(50));
+        assert!(!ic.has_pending());
+        assert!(ic.pending_metadata(id).is_none());
+        // The production worker publishes its completion before requesting repaint.
+        completion_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("worker did not publish completion and repaint within 10 seconds");
         assert!(ic.drain_completions().is_empty());
+        assert!(matches!(ic.rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(!ic.has_pending());
+        assert!(ic.pending_metadata(id).is_none());
+        assert_eq!(ic.diagnostics(), &diagnostics);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[derive(Clone, Copy)]
@@ -694,25 +732,35 @@ mod tests {
         ImmediateRequestMetadata {
             action: action(),
             query: query.into(),
+            history_query: None,
             source: ActivationSource::Enter,
             hide_launcher_on_success: true,
+            root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
+        }
+    }
+
+    fn wait_one_with_metadata<S: ClipboardCommit>(
+        ic: &mut ImmediateExecutionCoordinator<S>,
+    ) -> (ImmediateRequestMetadata, ImmediateCompletionEvent) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(completion) = ic.drain_completions().pop() {
+                return completion;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "completion not received within 10 seconds: pending={}, diagnostics={:?}",
+                ic.has_pending(),
+                ic.diagnostics()
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
     fn wait_one<S: ClipboardCommit>(
         ic: &mut ImmediateExecutionCoordinator<S>,
     ) -> ImmediateCompletionEvent {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some((_, ev)) = ic.drain_completions().pop() {
-                return ev;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "completion not received within 10 seconds"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_one_with_metadata(ic).1
     }
 
     #[test]
@@ -871,20 +919,34 @@ mod tests {
         ic.set_success_hook(Arc::new(move |_, _| {
             c.fetch_add(1, Ordering::SeqCst);
         }));
-        ic.start(
-            ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
-            Arc::new(default_catalog()),
-            ImmediateRequestMetadata {
-                action: action(),
-                query: "q".into(),
-                source: ActivationSource::Click,
-                hide_launcher_on_success: true,
-            },
-        )
-        .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        let (_, ev) = ic.drain_completions().pop().unwrap();
+        let id = ic
+            .start(
+                ClipboardModifyIntent::Stages(vec![stage(OpId::Uppercase)]),
+                Arc::new(default_catalog()),
+                ImmediateRequestMetadata {
+                    action: action(),
+                    query: "q".into(),
+                    history_query: None,
+                    source: ActivationSource::Click,
+                    hide_launcher_on_success: true,
+                    root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
+                },
+            )
+            .unwrap();
+        assert!(ic.pending_metadata(id).is_some());
+        let ev = wait_one(&mut ic);
+        assert_eq!(ev.request_id, id);
         assert!(ev.result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!ic.has_pending());
+        assert!(ic.pending_metadata(id).is_none());
+        assert_eq!(
+            ic.diagnostics(),
+            &ImmediateDiagnostics {
+                started: 1,
+                failed: 1,
+                ..Default::default()
+            }
+        );
     }
 }

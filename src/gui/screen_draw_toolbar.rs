@@ -2,6 +2,12 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::radial::acceptance_trace::{
+    self, ScreenDrawLauncherObservation, ScreenDrawParkingObservation, ScreenDrawParkingState,
+    ScreenDrawRootIdentity, ScreenDrawToolbarMode, ScreenDrawToolbarObservation,
+    ScreenDrawToolbarRole, ScreenDrawToolbarTarget, ScreenDrawToolbarWidget,
+};
+
 use crate::hotkey::Key as HotkeyKey;
 use crate::screen_draw::hotkeys::{
     LocalShortcutAction, LocalShortcutInput, LocalShortcutKey, LocalShortcutModifiers,
@@ -22,9 +28,395 @@ const SETTINGS_KEY: &str = "screen_draw";
 const VERTICAL_TOOLBAR_SIZE_POINTS: egui::Vec2 = egui::vec2(264.0, 700.0);
 const HORIZONTAL_TOOLBAR_SIZE_POINTS: egui::Vec2 = egui::vec2(700.0, 264.0);
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(750);
+const OBSERVATION_REFRESH: Duration = Duration::from_millis(500);
+static NEXT_OBSERVATION_LIFETIME: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+/// The caller holds the visibility ordering gate. Parking is owned by this GUI
+/// turn; reading it never advances the lazy restoration publication scope.
+fn launcher_observation_at_current_gate(
+    visibility: &crate::visibility::VisibilityRevision,
+    visible: &std::sync::atomic::AtomicBool,
+    root_bridge: &crate::visibility::RootWindowBridge,
+    parking: Option<&crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
+) -> ScreenDrawLauncherObservation {
+    let (hwnd, generation) = root_bridge.identity();
+    ScreenDrawLauncherObservation {
+        visibility_revision: visibility.current(),
+        invocation_id: visibility.invocation_id(),
+        focus_intent: visibility.focus_intent(),
+        visible: visible.load(std::sync::atomic::Ordering::SeqCst),
+        root: (hwnd != 0 && generation != 0).then_some(ScreenDrawRootIdentity {
+            hwnd: hwnd as u64,
+            process_id: std::process::id(),
+            generation,
+        }),
+        parking: parking.map(|parking| ScreenDrawParkingObservation {
+            hwnd: parking.original_snapshot().hwnd() as u64,
+            generation: parking.generation().get(),
+            cycle: parking.cycle(),
+            state: match parking.state() {
+                crate::screen_draw::launcher_parking::LauncherParkingState::Active => {
+                    ScreenDrawParkingState::Active
+                }
+                crate::screen_draw::launcher_parking::LauncherParkingState::Committed => {
+                    ScreenDrawParkingState::Committed
+                }
+                crate::screen_draw::launcher_parking::LauncherParkingState::Restored => {
+                    ScreenDrawParkingState::Restored
+                }
+            },
+        }),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ToolbarRenderedObservation {
+    lifetime: u64,
+    generation: u64,
+    frame_nr: u64,
+    state: ScreenDrawToolbarMode,
+    runtime_mode: ScreenDrawToolbarMode,
+    client_size: [i32; 2],
+    label: Option<ScreenDrawToolbarWidget>,
+    resume: Option<ScreenDrawToolbarWidget>,
+}
+
+fn observed_mode(mode: ScreenDrawMode) -> ScreenDrawToolbarMode {
+    match mode {
+        ScreenDrawMode::Drawing => ScreenDrawToolbarMode::Drawing,
+        ScreenDrawMode::Ghost => ScreenDrawToolbarMode::Ghost,
+        ScreenDrawMode::Finish => ScreenDrawToolbarMode::Finish,
+        _ => ScreenDrawToolbarMode::Other,
+    }
+}
+
+fn observed_state(state: &ScreenDrawState) -> ScreenDrawToolbarMode {
+    match state {
+        ScreenDrawState::Drawing { .. } => ScreenDrawToolbarMode::Drawing,
+        ScreenDrawState::Ghost { .. } => ScreenDrawToolbarMode::Ghost,
+        ScreenDrawState::Finish { .. } => ScreenDrawToolbarMode::Finish,
+        _ => ScreenDrawToolbarMode::Other,
+    }
+}
+
+fn observation_client_size(size: egui::Vec2, scale: f32) -> Option<[i32; 2]> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let dimension = |logical: f32| {
+        if !logical.is_finite() || logical <= 0.0 {
+            return None;
+        }
+        // inner_rect has already gone from native pixels to logical f32.
+        // Reconstruct the nearest pixel; outward exclusion rounding adds a
+        // spurious pixel at scales such as 1.2 and is not its inverse.
+        let physical = (f64::from(logical) * f64::from(scale)).round();
+        if physical.is_finite() && physical >= 1.0 && physical <= f64::from(i32::MAX) {
+            Some(physical as i32)
+        } else {
+            None
+        }
+    };
+    Some([dimension(size.x)?, dimension(size.y)?])
+}
+
+fn observation_rect(rect: egui::Rect, scale: f32) -> Option<[i32; 4]> {
+    let rect = desktop_rect_from_logical_edges(
+        rect.left(),
+        rect.top(),
+        rect.right(),
+        rect.bottom(),
+        scale,
+    )?;
+    Some([
+        rect.x,
+        rect.y,
+        rect.x.checked_add(i32::try_from(rect.width).ok()?)?,
+        rect.y.checked_add(i32::try_from(rect.height).ok()?)?,
+    ])
+}
+
+fn observation_clip(rect: egui::Rect, scale: f32, client: [i32; 2]) -> Option<[i32; 4]> {
+    let outward = observation_rect(rect, scale)?;
+    let clip = [
+        outward[0].max(0),
+        outward[1].max(0),
+        outward[2].min(client[0]),
+        outward[3].min(client[1]),
+    ];
+    (clip[2] > clip[0] && clip[3] > clip[1]).then_some(clip)
+}
+
+fn observe_toolbar_response(
+    observation: &mut Option<ToolbarRenderedObservation>,
+    ui: &egui::Ui,
+    response: &egui::Response,
+    target: ScreenDrawToolbarTarget,
+    role: ScreenDrawToolbarRole,
+) {
+    let Some(observation) = observation else {
+        return;
+    };
+    let scale = ui.ctx().pixels_per_point();
+    let Some(bounds) = observation_rect(response.rect, scale) else {
+        return;
+    };
+    let logical_clip = ui.clip_rect().intersect(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::vec2(
+            observation.client_size[0] as f32 / scale,
+            observation.client_size[1] as f32 / scale,
+        ),
+    ));
+    let Some(clip) = observation_clip(logical_clip, scale, observation.client_size) else {
+        return;
+    };
+    let intersection = [
+        bounds[0].max(clip[0]),
+        bounds[1].max(clip[1]),
+        bounds[2].min(clip[2]),
+        bounds[3].min(clip[3]),
+    ];
+    let visible_bounds = if intersection[2] > intersection[0] && intersection[3] > intersection[1] {
+        intersection
+    } else {
+        [0; 4]
+    };
+    let widget = ScreenDrawToolbarWidget {
+        target,
+        role,
+        widget_id: response.id.value(),
+        enabled: response.enabled(),
+        bounds,
+        clip,
+        visible_bounds,
+        fully_visible: logical_clip.contains_rect(response.rect) && visible_bounds == bounds,
+    };
+    match target {
+        ScreenDrawToolbarTarget::StateLabel => observation.label = Some(widget),
+        ScreenDrawToolbarTarget::ResumeDrawing => observation.resume = Some(widget),
+    }
+}
+
+#[derive(Default)]
+struct ToolbarObservationPublisher {
+    lifetime: u64,
+    previous: Option<(
+        ToolbarRenderedObservation,
+        ScreenDrawLauncherObservation,
+        Instant,
+    )>,
+}
+
+impl ToolbarObservationPublisher {
+    fn begin(&mut self, enabled: bool) {
+        self.previous = None;
+        self.lifetime = if enabled {
+            NEXT_OBSERVATION_LIFETIME
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |id| id.checked_add(1),
+                )
+                .unwrap_or(0)
+        } else {
+            0
+        };
+    }
+
+    fn close(&mut self) {
+        self.lifetime = 0;
+        self.previous = None;
+    }
+
+    fn publish_current(
+        &mut self,
+        rendered: Option<ToolbarRenderedObservation>,
+        state: &ScreenDrawState,
+        runtime: Option<crate::screen_draw::NativeRuntimeState>,
+        open: bool,
+        owner: ScreenDrawLauncherObservation,
+        now: Instant,
+        native_identity: impl FnOnce(
+            u64,
+        ) -> Option<
+            crate::screen_draw::window_layers::ToolbarObservationIdentity,
+        >,
+        publish: impl FnOnce(ScreenDrawToolbarObservation) -> bool,
+    ) {
+        let Some(rendered) = rendered else {
+            return;
+        };
+        if self.lifetime == 0
+            || rendered.lifetime != self.lifetime
+            || !open
+            || rendered.generation == 0
+            || rendered.frame_nr == 0
+            || state.generation().map(|generation| generation.get()) != Some(rendered.generation)
+            || observed_state(state) != rendered.state
+            || runtime.map(|runtime| observed_mode(runtime.mode)) != Some(rendered.runtime_mode)
+        {
+            return;
+        }
+        if self.previous.is_some_and(|(mut old, previous_owner, at)| {
+            if rendered.frame_nr <= old.frame_nr {
+                return true;
+            }
+            old.frame_nr = rendered.frame_nr;
+            old == rendered
+                && previous_owner == owner
+                && now.saturating_duration_since(at) < OBSERVATION_REFRESH
+        }) {
+            return;
+        }
+        let Some(identity) = native_identity(rendered.generation) else {
+            return;
+        };
+        if identity.hwnd == 0
+            || identity.process_id == 0
+            || identity.client_size != rendered.client_size
+        {
+            return;
+        }
+        let Some(label) = rendered.label else {
+            return;
+        };
+        if publish(ScreenDrawToolbarObservation {
+            hwnd: identity.hwnd,
+            process_id: identity.process_id,
+            generation: rendered.generation,
+            lifetime: self.lifetime,
+            frame_nr: rendered.frame_nr,
+            state: rendered.state,
+            runtime_mode: rendered.runtime_mode,
+            client_size: rendered.client_size,
+            launcher: owner,
+            label,
+            resume: rendered.resume,
+        }) {
+            self.previous = Some((rendered, owner, now));
+        }
+    }
+
+    fn publish_at_current_owner(
+        &mut self,
+        rendered: Option<ToolbarRenderedObservation>,
+        state: &ScreenDrawState,
+        runtime: Option<crate::screen_draw::NativeRuntimeState>,
+        open: bool,
+        now: Instant,
+        visibility: &crate::visibility::VisibilityRevision,
+        visible: &std::sync::atomic::AtomicBool,
+        root_bridge: &crate::visibility::RootWindowBridge,
+        parking: Option<&crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
+        native_identity: impl FnOnce(
+            u64,
+        ) -> Option<
+            crate::screen_draw::window_layers::ToolbarObservationIdentity,
+        >,
+        publish: impl FnOnce(ScreenDrawToolbarObservation),
+    ) {
+        let owner = visibility
+            .inspect(|| {
+                launcher_observation_at_current_gate(visibility, visible, root_bridge, parking)
+            })
+            .1;
+        self.publish_current(
+            rendered,
+            state,
+            runtime,
+            open,
+            owner,
+            now,
+            native_identity,
+            |observation| {
+                visibility
+                    .with_current(
+                        owner.visibility_revision,
+                        || {
+                            launcher_observation_at_current_gate(
+                                visibility,
+                                visible,
+                                root_bridge,
+                                parking,
+                            ) == owner
+                        },
+                        || publish(observation),
+                    )
+                    .is_some()
+            },
+        );
+    }
+}
 
 pub(crate) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("screen_draw_toolbar")
+}
+
+#[cfg(test)]
+pub(super) fn retained_current_launcher_observation_for_test(
+    app: &mut super::LauncherApp,
+    identity: crate::screen_draw::window_layers::ToolbarObservationIdentity,
+) -> Option<ScreenDrawToolbarObservation> {
+    let ctx = egui::Context::default();
+    let size = egui::vec2(
+        identity.client_size[0] as f32,
+        identity.client_size[1] as f32,
+    );
+    let mut input = egui::RawInput {
+        viewport_id: viewport_id(),
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        ..Default::default()
+    };
+    input.viewports.insert(
+        viewport_id(),
+        egui::ViewportInfo {
+            parent: Some(egui::ViewportId::ROOT),
+            native_pixels_per_point: Some(1.0),
+            inner_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        },
+    );
+    app.screen_draw_toolbar.observation.begin(true);
+    let lifetime = app.screen_draw_toolbar.observation.lifetime;
+    let settings = app.screen_draw_controller.settings().clone();
+    let mut rendered = None;
+    let mut actions = Vec::new();
+    let _ = ctx.run(input, |ctx| {
+        rendered = render_toolbar(
+            ctx,
+            app.screen_draw_controller.state(),
+            app.screen_draw_controller.runtime_state(),
+            &settings,
+            None,
+            false,
+            &mut app.screen_draw_toolbar.export_background,
+            &mut actions,
+            Some(lifetime),
+        );
+    });
+    assert!(
+        actions.is_empty(),
+        "observation fixture must not drive tool actions"
+    );
+    let mut observed = None;
+    app.screen_draw_toolbar
+        .observation
+        .publish_at_current_owner(
+            rendered,
+            app.screen_draw_controller.state(),
+            app.screen_draw_controller.runtime_state(),
+            app.screen_draw_controller.toolbar_open(),
+            Instant::now(),
+            &app.visibility_revision,
+            &app.visible_flag,
+            &app.root_window_bridge,
+            app.screen_draw_launcher_parking.as_ref(),
+            |_| Some(identity),
+            |frame| observed = Some(frame),
+        );
+    observed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -112,6 +504,7 @@ pub(crate) struct ScreenDrawToolbarUi {
     last_observed_mode: Option<ScreenDrawMode>,
     settings_dirty_since: Option<Instant>,
     export_background: ExportBackground,
+    observation: ToolbarObservationPublisher,
     #[cfg(test)]
     pub(super) focus_request_count: usize,
 }
@@ -119,6 +512,7 @@ pub(crate) struct ScreenDrawToolbarUi {
 impl ScreenDrawToolbarUi {
     fn begin_open(&mut self, settings: &ScreenDrawSettings, pixels_per_point: f32) {
         self.native_bridge.begin_viewport();
+        self.observation.begin(acceptance_trace::enabled());
         self.last_observed_mode = None;
         self.last_physical_bounds = None;
         self.known_monitors = current_monitor_rects();
@@ -179,7 +573,7 @@ impl super::LauncherApp {
             | ScreenDrawState::Ghost { .. }
             | ScreenDrawState::Finish { .. }
             | ScreenDrawState::DisplayChanged { .. } => {
-                self.focus_screen_draw_toolbar();
+                self.focus_screen_draw_toolbar()?;
                 Ok(false)
             }
             ScreenDrawState::AwaitingLauncherParking { .. }
@@ -189,7 +583,10 @@ impl super::LauncherApp {
         }
     }
 
-    pub(super) fn focus_screen_draw_toolbar(&mut self) {
+    pub(super) fn focus_screen_draw_toolbar(&mut self) -> Result<(), String> {
+        if !self.screen_draw_controller.toolbar_open() {
+            self.screen_draw_restore_publication.advance()?;
+        }
         self.screen_draw_controller.open_toolbar();
         #[cfg(test)]
         {
@@ -198,6 +595,7 @@ impl super::LauncherApp {
         self.egui_ctx
             .send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
         self.egui_ctx.request_repaint();
+        Ok(())
     }
 
     pub(super) fn request_new_screen_draw_capture(&mut self) -> Result<(), String> {
@@ -208,7 +606,10 @@ impl super::LauncherApp {
             .map_err(|error| error.to_string())?;
         // Native teardown is requested before the launcher is restored. The
         // replacement generation cannot capture until SessionClosed arrives.
-        self.restore_screen_draw_launcher_exact()?;
+        self.restore_screen_draw_launcher_exact(
+            crate::screen_draw::ScreenDrawRestoreCause::NewCapture,
+            None,
+        )?;
         self.egui_ctx
             .send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
         self.screen_draw_toolbar.was_open = false;
@@ -222,6 +623,8 @@ impl super::LauncherApp {
             }
             state => return Err(format!("cannot resume Screen Draw while in {state:?}")),
         };
+        self.screen_draw_restore_publication.advance()?;
+        self.screen_draw_controller.begin_launcher_repark()?;
         let virtual_desktop = self
             .screen_draw_controller
             .session_snapshot()
@@ -257,7 +660,10 @@ impl super::LauncherApp {
             .map(|transaction| self.screen_draw_launcher_parking = Some(transaction))
         };
         if let Err(error) = parking_result {
-            let _ = self.restore_screen_draw_launcher_exact();
+            let _ = self.restore_screen_draw_launcher_exact(
+                crate::screen_draw::ScreenDrawRestoreCause::ResumeFailure,
+                None,
+            );
             return Err(error);
         }
         match self
@@ -268,11 +674,17 @@ impl super::LauncherApp {
         {
             Ok(true) => {}
             Ok(false) => {
-                let _ = self.restore_screen_draw_launcher_exact();
+                let _ = self.restore_screen_draw_launcher_exact(
+                    crate::screen_draw::ScreenDrawRestoreCause::ResumeFailure,
+                    None,
+                );
                 return Err("launcher did not reach a capture-safe position for resume".into());
             }
             Err(error) => {
-                let _ = self.restore_screen_draw_launcher_exact();
+                let _ = self.restore_screen_draw_launcher_exact(
+                    crate::screen_draw::ScreenDrawRestoreCause::ResumeFailure,
+                    None,
+                );
                 return Err(error);
             }
         }
@@ -291,11 +703,17 @@ impl super::LauncherApp {
                 &SystemToolbarWindowBackend,
             );
         if let Err(error) = self.screen_draw_controller.set_toolbar_window(toolbar) {
-            let _ = self.restore_screen_draw_launcher_exact();
+            let _ = self.restore_screen_draw_launcher_exact(
+                crate::screen_draw::ScreenDrawRestoreCause::ResumeFailure,
+                None,
+            );
             return Err(error.to_string());
         }
         if let Err(error) = self.screen_draw_controller.resume_drawing() {
-            let _ = self.restore_screen_draw_launcher_exact();
+            let _ = self.restore_screen_draw_launcher_exact(
+                crate::screen_draw::ScreenDrawRestoreCause::ResumeFailure,
+                None,
+            );
             return Err(error.to_string());
         }
         self.screen_draw_launcher_parking
@@ -310,7 +728,10 @@ impl super::LauncherApp {
         self.clear_screen_draw_toolbar_native_bridge();
         // Controller close disarms native input before launcher restoration.
         self.screen_draw_controller.close();
-        self.restore_screen_draw_launcher_exact()?;
+        self.restore_screen_draw_launcher_exact(
+            crate::screen_draw::ScreenDrawRestoreCause::SessionClose,
+            None,
+        )?;
         self.egui_ctx
             .send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
         self.screen_draw_toolbar.was_open = false;
@@ -381,6 +802,9 @@ impl super::LauncherApp {
         let mut observed_outer_rect = None;
         let mut observed_pixels_per_point = None;
         let mut escape_pressed = false;
+        let mut rendered_observation = None;
+        let observation_lifetime =
+            acceptance_trace::enabled().then_some(self.screen_draw_toolbar.observation.lifetime);
 
         let toolbar_size = toolbar_size_points(settings.toolbar_orientation);
         let builder = toolbar_viewport_builder(toolbar_size, initial_position);
@@ -395,7 +819,7 @@ impl super::LauncherApp {
                 shortcut_actions,
                 thickness,
             ));
-            render_toolbar(
+            rendered_observation = render_toolbar(
                 child,
                 &state,
                 runtime,
@@ -404,6 +828,7 @@ impl super::LauncherApp {
                 export_in_flight,
                 &mut export_background,
                 &mut actions,
+                observation_lifetime,
             );
             child.input(|input| {
                 let viewport = input.viewport();
@@ -480,6 +905,35 @@ impl super::LauncherApp {
         if preferences_changed {
             self.screen_draw_toolbar.mark_dirty();
         }
+        if acceptance_trace::enabled() {
+            let bridge = &self.screen_draw_toolbar.native_bridge;
+            let visibility = &self.visibility_revision;
+            let visible = &self.visible_flag;
+            let root_bridge = &self.root_window_bridge;
+            let parking = self.screen_draw_launcher_parking.as_ref();
+            self.screen_draw_toolbar
+                .observation
+                .publish_at_current_owner(
+                    rendered_observation,
+                    self.screen_draw_controller.state(),
+                    self.screen_draw_controller.runtime_state(),
+                    !should_close_viewport && self.screen_draw_controller.toolbar_open(),
+                    Instant::now(),
+                    visibility,
+                    visible,
+                    root_bridge,
+                    parking,
+                    |generation| {
+                        SystemToolbarWindowBackend
+                            .observation_identity(bridge.observation_handle(generation)?)
+                    },
+                    |observation| {
+                        acceptance_trace::emit(acceptance_trace::Event::ScreenDrawToolbar {
+                            observation,
+                        })
+                    },
+                );
+        }
         if should_close_viewport || !self.screen_draw_controller.toolbar_open() {
             // Lifecycle actions perform their launcher work before requesting
             // this viewport-only close.
@@ -523,6 +977,7 @@ impl super::LauncherApp {
     }
 
     fn clear_screen_draw_toolbar_native_bridge(&mut self) {
+        self.screen_draw_toolbar.observation.close();
         if self.screen_draw_toolbar.native_bridge.close_viewport() {
             if let Err(error) = self.screen_draw_controller.set_toolbar_window(None) {
                 tracing::warn!(%error, "failed to clear Screen Draw toolbar native bridge");
@@ -920,7 +1375,32 @@ fn render_toolbar(
     export_in_flight: bool,
     export_background: &mut ExportBackground,
     actions: &mut Vec<ToolbarAction>,
-) {
+    observation_lifetime: Option<u64>,
+) -> Option<ToolbarRenderedObservation> {
+    // inner_rect is desktop-positioned; widget and clip rectangles are already
+    // client-local. Only its size participates in this conversion.
+    let mut observation =
+        if let Some(lifetime) = observation_lifetime.filter(|lifetime| *lifetime != 0) {
+            (|| {
+                if ctx.viewport_id() != viewport_id() {
+                    return None;
+                }
+                let size = ctx.input(|input| input.viewport().inner_rect)?.size();
+                let client_size = observation_client_size(size, ctx.pixels_per_point())?;
+                Some(ToolbarRenderedObservation {
+                    lifetime,
+                    generation: state.generation()?.get(),
+                    frame_nr: ctx.frame_nr().checked_add(1)?,
+                    state: observed_state(state),
+                    runtime_mode: observed_mode(runtime?.mode),
+                    client_size,
+                    label: None,
+                    resume: None,
+                })
+            })()
+        } else {
+            None
+        };
     egui::CentralPanel::default().show(ctx, |ui| {
         let mut contents = |ui: &mut egui::Ui| {
             render_toolbar_contents(
@@ -932,6 +1412,7 @@ fn render_toolbar(
                 export_in_flight,
                 export_background,
                 actions,
+                &mut observation,
             )
         };
         match settings.toolbar_orientation {
@@ -945,6 +1426,7 @@ fn render_toolbar(
             }
         }
     });
+    observation
 }
 
 fn render_toolbar_contents(
@@ -956,6 +1438,7 @@ fn render_toolbar_contents(
     export_in_flight: bool,
     export_background: &mut ExportBackground,
     actions: &mut Vec<ToolbarAction>,
+    observation: &mut Option<ToolbarRenderedObservation>,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
@@ -968,7 +1451,14 @@ fn render_toolbar_contents(
                 actions.push(ToolbarAction::ToggleOrientation);
             }
         });
-        ui.small(state_label(state));
+        let label = ui.small(state_label(state));
+        observe_toolbar_response(
+            observation,
+            ui,
+            &label,
+            ScreenDrawToolbarTarget::StateLabel,
+            ScreenDrawToolbarRole::Label,
+        );
     });
     ui.separator();
 
@@ -997,7 +1487,15 @@ fn render_toolbar_contents(
             session_controls(ui, actions);
         }
         ScreenDrawState::Ghost { .. } => {
-            if ui.button("Resume Drawing").clicked() {
+            let resume = ui.button("Resume Drawing");
+            observe_toolbar_response(
+                observation,
+                ui,
+                &resume,
+                ScreenDrawToolbarTarget::ResumeDrawing,
+                ScreenDrawToolbarRole::Button,
+            );
+            if resume.clicked() {
                 actions.push(ToolbarAction::Lifecycle(LifecycleAction::Resume));
             }
             history_controls(ui, actions);
@@ -1012,7 +1510,15 @@ fn render_toolbar_contents(
             session_controls(ui, actions);
         }
         ScreenDrawState::Finish { .. } => {
-            if ui.button("Resume Drawing").clicked() {
+            let resume = ui.button("Resume Drawing");
+            observe_toolbar_response(
+                observation,
+                ui,
+                &resume,
+                ScreenDrawToolbarTarget::ResumeDrawing,
+                ScreenDrawToolbarRole::Button,
+            );
+            if resume.clicked() {
                 actions.push(ToolbarAction::Lifecycle(LifecycleAction::Resume));
             }
             visibility_controls(ui, runtime, actions);
@@ -1514,6 +2020,907 @@ fn current_monitor_rects() -> Vec<DesktopRect> {
 mod tests {
     use super::*;
     use crate::screen_draw::ScreenDrawGeneration;
+
+    fn observation_owner(state: &ScreenDrawState) -> ScreenDrawLauncherObservation {
+        ScreenDrawLauncherObservation {
+            visibility_revision: 115,
+            invocation_id: None,
+            focus_intent: crate::visibility::RootFocusIntent::ActivateRoot,
+            visible: matches!(state, ScreenDrawState::Ghost { .. }),
+            root: Some(ScreenDrawRootIdentity {
+                hwnd: 42,
+                process_id: 7,
+                generation: 3,
+            }),
+            parking: Some(ScreenDrawParkingObservation {
+                hwnd: 42,
+                generation: state.generation().unwrap().get(),
+                cycle: 1,
+                state: if matches!(state, ScreenDrawState::Ghost { .. }) {
+                    ScreenDrawParkingState::Restored
+                } else {
+                    ScreenDrawParkingState::Committed
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn toolbar_observation_current_owner_changes_bypass_only_unchanged_frame_refresh() {
+        let ctx = egui::Context::default();
+        let generation = ScreenDrawGeneration::from_raw(7);
+        let state = ScreenDrawState::Drawing { generation };
+        let visible = std::sync::atomic::AtomicBool::new(false);
+        let visibility = crate::visibility::VisibilityRevision::default();
+        let root = crate::visibility::RootWindowBridge::default();
+        root.set_identity_for_test(42);
+        visibility.request_with_focus_intent_and_invocation(
+            crate::visibility::RootFocusIntent::ActivateRoot,
+            Some(124),
+            || {},
+        );
+        let (mut parking, _) = crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+            generation,
+            crate::screen_draw::launcher_parking::LauncherWindowRect {
+                left: 100,
+                top: 100,
+                right: 600,
+                bottom: 500,
+            },
+            crate::mkmacro::screen::ScreenRect::new(-1920, -1080, 5760, 3240),
+        );
+        parking.commit_hidden();
+        let mut publisher = ToolbarObservationPublisher::default();
+        publisher.begin(true);
+        let now = Instant::now();
+        let mut published = Vec::new();
+        for step in 0..6 {
+            match step {
+                2 => {
+                    visibility.request(|| {});
+                }
+                3 => {
+                    root.set_identity_for_test(43);
+                }
+                4 => {
+                    parking.restore().unwrap();
+                    parking.repark_after_stale_restore(|| Ok(())).unwrap();
+                    parking.commit_hidden();
+                }
+                5 => {
+                    visibility.request_with_focus_intent(
+                        crate::visibility::RootFocusIntent::PreserveForeground,
+                        || {},
+                    );
+                }
+                _ => {}
+            }
+            let rendered = retained_toolbar_frame_with_lifetime(
+                &ctx,
+                &state,
+                ScreenDrawMode::Drawing,
+                egui::vec2(264.0, 700.0),
+                1.0,
+                Some(publisher.lifetime),
+            );
+            publisher.publish_at_current_owner(
+                rendered,
+                &state,
+                Some(observation_runtime(ScreenDrawMode::Drawing)),
+                true,
+                now + Duration::from_millis(step * 10),
+                &visibility,
+                &visible,
+                &root,
+                Some(&parking),
+                |_| {
+                    Some(
+                        crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                            hwnd: 51,
+                            process_id: std::process::id(),
+                            client_size: [264, 700],
+                        },
+                    )
+                },
+                |frame| published.push(frame),
+            );
+            assert_eq!(published.len(), if step == 0 { 1 } else { step as usize });
+        }
+        assert_eq!(published[0].launcher.invocation_id, Some(124));
+        assert_eq!(published[1].launcher.invocation_id, None);
+        assert!(
+            published[1].launcher.visibility_revision > published[0].launcher.visibility_revision
+        );
+        assert!(
+            published[2].launcher.root.unwrap().generation
+                > published[1].launcher.root.unwrap().generation
+        );
+        assert_eq!(published[2].launcher.root.unwrap().hwnd, 43);
+        assert!(
+            published[3].launcher.parking.unwrap().cycle
+                > published[2].launcher.parking.unwrap().cycle
+        );
+        assert_eq!(
+            published[4].launcher.focus_intent,
+            crate::visibility::RootFocusIntent::PreserveForeground
+        );
+        assert!(
+            published
+                .windows(2)
+                .all(|frames| frames[1].frame_nr > frames[0].frame_nr)
+        );
+        assert!(
+            published
+                .iter()
+                .all(|frame| frame.has_visible_controls_for_mode(ScreenDrawToolbarMode::Drawing))
+        );
+    }
+
+    #[test]
+    fn toolbar_observation_revalidates_owner_after_native_inspection_without_caching_stale_frame() {
+        let ctx = egui::Context::default();
+        let state = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(7),
+        };
+        let visibility = crate::visibility::VisibilityRevision::default();
+        let visible = std::sync::atomic::AtomicBool::new(false);
+        let root = crate::visibility::RootWindowBridge::default();
+        root.set_identity_for_test(42);
+        visibility.request(|| {});
+        let mut publisher = ToolbarObservationPublisher::default();
+        publisher.begin(true);
+        for change_root in [false, true] {
+            let rendered = retained_toolbar_frame_with_lifetime(
+                &ctx,
+                &state,
+                ScreenDrawMode::Drawing,
+                egui::vec2(264.0, 700.0),
+                1.0,
+                Some(publisher.lifetime),
+            );
+            let mut inspected = 0;
+            publisher.publish_at_current_owner(
+                rendered,
+                &state,
+                Some(observation_runtime(ScreenDrawMode::Drawing)),
+                true,
+                Instant::now(),
+                &visibility,
+                &visible,
+                &root,
+                None,
+                |_| {
+                    inspected += 1;
+                    if change_root {
+                        root.set_identity_for_test(43);
+                    } else {
+                        visibility.request(|| {});
+                    }
+                    Some(
+                        crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                            hwnd: 51,
+                            process_id: std::process::id(),
+                            client_size: [264, 700],
+                        },
+                    )
+                },
+                |_| panic!("changed actual owner must not publish"),
+            );
+            assert_eq!(inspected, 1);
+            assert!(publisher.previous.is_none());
+        }
+        let rendered = retained_toolbar_frame_with_lifetime(
+            &ctx,
+            &state,
+            ScreenDrawMode::Drawing,
+            egui::vec2(264.0, 700.0),
+            1.0,
+            Some(publisher.lifetime),
+        );
+        let mut current = None;
+        publisher.publish_at_current_owner(
+            rendered,
+            &state,
+            Some(observation_runtime(ScreenDrawMode::Drawing)),
+            true,
+            Instant::now(),
+            &visibility,
+            &visible,
+            &root,
+            None,
+            |_| {
+                Some(
+                    crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                        hwnd: 51,
+                        process_id: std::process::id(),
+                        client_size: [264, 700],
+                    },
+                )
+            },
+            |frame| current = Some(frame),
+        );
+        assert_eq!(
+            current.unwrap().launcher.visibility_revision,
+            visibility.current()
+        );
+        assert_eq!(current.unwrap().launcher.root.unwrap().hwnd, 43);
+        assert!(publisher.previous.is_some());
+        assert!(root.take_simulated_wake_observations_for_test().is_empty());
+    }
+
+    fn observation_runtime(mode: ScreenDrawMode) -> crate::screen_draw::NativeRuntimeState {
+        let settings = ScreenDrawSettings::default();
+        crate::screen_draw::NativeRuntimeState {
+            mode,
+            tool: settings.default_tool,
+            color: settings.default_color,
+            thickness: settings.default_thickness,
+            annotations_visible: true,
+            background: settings.default_background,
+        }
+    }
+
+    fn observation_input(size: egui::Vec2, scale: f32) -> egui::RawInput {
+        let mut input = egui::RawInput {
+            viewport_id: viewport_id(),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        input.viewports.insert(
+            viewport_id(),
+            egui::ViewportInfo {
+                parent: Some(egui::ViewportId::ROOT),
+                native_pixels_per_point: Some(scale),
+                inner_rect: Some(egui::Rect::from_min_size(egui::pos2(-600.0, 120.0), size)),
+                ..Default::default()
+            },
+        );
+        input
+    }
+
+    fn retained_toolbar_frame(
+        ctx: &egui::Context,
+        state: &ScreenDrawState,
+        mode: ScreenDrawMode,
+        size: egui::Vec2,
+        scale: f32,
+        observe: bool,
+    ) -> Option<ToolbarRenderedObservation> {
+        retained_toolbar_frame_with_lifetime(ctx, state, mode, size, scale, observe.then_some(1))
+    }
+
+    fn retained_toolbar_frame_with_lifetime(
+        ctx: &egui::Context,
+        state: &ScreenDrawState,
+        mode: ScreenDrawMode,
+        size: egui::Vec2,
+        scale: f32,
+        lifetime: Option<u64>,
+    ) -> Option<ToolbarRenderedObservation> {
+        let mut measured = None;
+        let mut actions = Vec::new();
+        let _ = ctx.run(observation_input(size, scale), |ctx| {
+            measured = render_toolbar(
+                ctx,
+                state,
+                Some(observation_runtime(mode)),
+                &ScreenDrawSettings::default(),
+                None,
+                false,
+                &mut ExportBackground::default(),
+                &mut actions,
+                lifetime,
+            );
+        });
+        assert!(
+            actions.is_empty(),
+            "observation must not activate toolbar actions"
+        );
+        measured
+    }
+
+    #[test]
+    fn toolbar_observation_client_round_trips_neighboring_pixels_and_rejects_invalid_dimensions() {
+        for scale in [1.0_f32, 1.2, 1.25, 1.5, 1.75] {
+            for width in [316, 317, 318, 330, 331, 332] {
+                for height in [839, 840, 841] {
+                    let logical = egui::vec2(width as f32 / scale, height as f32 / scale);
+                    assert_eq!(
+                        observation_client_size(logical, scale),
+                        Some([width, height]),
+                        "physical {width}x{height} at {scale}"
+                    );
+                }
+            }
+        }
+        let logical = egui::vec2(317.0 / 1.2, 840.0 / 1.2);
+        assert_eq!(observation_client_size(logical, 1.2), Some([317, 840]));
+        assert_eq!(
+            observation_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, logical), 1.2),
+            Some([0, 0, 318, 841]),
+            "widget/exclusion bounds must keep their conservative outward rule"
+        );
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(observation_client_size(egui::vec2(10.0, 20.0), scale).is_none());
+        }
+        for dimension in [
+            0.0,
+            -1.0,
+            0.1,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            i32::MAX as f32,
+            f32::MAX,
+        ] {
+            assert!(observation_client_size(egui::vec2(dimension, 20.0), 1.0).is_none());
+            assert!(observation_client_size(egui::vec2(10.0, dimension), 1.0).is_none());
+        }
+        assert!(observation_client_size(egui::vec2(1.0, 1.0), f32::MAX).is_none());
+        assert_eq!(
+            observation_client_size(egui::vec2(2_147_483_520.0, 1.0), 1.0),
+            Some([2_147_483_520, 1])
+        );
+    }
+
+    #[test]
+    fn toolbar_observation_nonbinary_native_round_trip_publishes_real_shared_control_proof() {
+        let ctx = egui::Context::default();
+        let scale = 1.2_f32;
+        let native_client = [317, 840];
+        let logical = egui::vec2(
+            native_client[0] as f32 / scale,
+            native_client[1] as f32 / scale,
+        );
+        let generation = ScreenDrawGeneration::from_raw(7);
+        let mut publisher = ToolbarObservationPublisher::default();
+        publisher.begin(true);
+        let mut published = Vec::new();
+        let now = Instant::now();
+        for (index, state, mode, expected) in [
+            (
+                0,
+                ScreenDrawState::Drawing { generation },
+                ScreenDrawMode::Drawing,
+                ScreenDrawToolbarMode::Drawing,
+            ),
+            (
+                1,
+                ScreenDrawState::Ghost { generation },
+                ScreenDrawMode::Ghost,
+                ScreenDrawToolbarMode::Ghost,
+            ),
+        ] {
+            let rendered = retained_toolbar_frame_with_lifetime(
+                &ctx,
+                &state,
+                mode,
+                logical,
+                scale,
+                Some(publisher.lifetime),
+            )
+            .unwrap();
+            assert_eq!(rendered.client_size, native_client);
+            assert_eq!(
+                ctx.input_for(viewport_id(), |input| input.pixels_per_point),
+                scale
+            );
+            let mut inspections = 0;
+            publisher.publish_current(
+                Some(rendered),
+                &state,
+                Some(observation_runtime(mode)),
+                true,
+                observation_owner(&state),
+                now + Duration::from_millis(index),
+                |measured_generation| {
+                    inspections += 1;
+                    assert_eq!(measured_generation, generation.get());
+                    Some(
+                        crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                            hwnd: 51,
+                            process_id: 7,
+                            client_size: native_client,
+                        },
+                    )
+                },
+                |frame| {
+                    published.push(frame);
+                    true
+                },
+            );
+            assert_eq!(inspections, 1);
+            assert_eq!(published.len(), index as usize + 1);
+            let frame = *published.last().unwrap();
+            assert_eq!(frame.client_size, native_client);
+            assert_eq!(frame.state, expected);
+            assert_eq!(frame.runtime_mode, expected);
+            assert_eq!(frame.hwnd, 51);
+            assert_eq!(frame.process_id, 7);
+            assert_eq!(frame.lifetime, publisher.lifetime);
+            // This is the exact control predicate used by both runner paths,
+            // applied to the real Responses after independent native pairing.
+            assert!(frame.has_visible_controls_for_mode(expected));
+            for widget in std::iter::once(frame.label).chain(frame.resume) {
+                assert!(widget.clip[0] >= 0 && widget.clip[1] >= 0);
+                assert!(widget.clip[2] <= 317 && widget.clip[3] <= 840);
+                assert_eq!(
+                    widget.visible_bounds,
+                    [
+                        widget.bounds[0].max(widget.clip[0]),
+                        widget.bounds[1].max(widget.clip[1]),
+                        widget.bounds[2].min(widget.clip[2]),
+                        widget.bounds[3].min(widget.clip[3]),
+                    ]
+                );
+                assert_eq!(widget.visible_bounds, widget.bounds);
+                assert!(widget.enabled && widget.fully_visible);
+            }
+            let persisted: ScreenDrawToolbarObservation =
+                serde_json::from_slice(&serde_json::to_vec(&frame).unwrap()).unwrap();
+            assert_eq!(persisted, frame);
+            assert!(persisted.has_visible_controls_for_mode(expected));
+        }
+        assert_eq!(published.len(), 2);
+        assert!(published[1].frame_nr > published[0].frame_nr);
+        assert_eq!(published[0].label.widget_id, published[1].label.widget_id);
+        let ghost = ScreenDrawState::Ghost { generation };
+        let rendered = retained_toolbar_frame_with_lifetime(
+            &ctx,
+            &ghost,
+            ScreenDrawMode::Ghost,
+            logical,
+            scale,
+            Some(publisher.lifetime),
+        );
+        let mut rejected_inspections = 0;
+        for mismatched_client in [[318, 840], [317, 841]] {
+            publisher.publish_current(
+                rendered,
+                &ghost,
+                Some(observation_runtime(ScreenDrawMode::Ghost)),
+                true,
+                observation_owner(&ghost),
+                now + OBSERVATION_REFRESH + Duration::from_millis(1),
+                |_| {
+                    rejected_inspections += 1;
+                    Some(
+                        crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                            hwnd: 51,
+                            process_id: 7,
+                            client_size: mismatched_client,
+                        },
+                    )
+                },
+                |_| panic!("neighboring native pixels must not be tolerated"),
+            );
+        }
+        assert_eq!(rejected_inspections, 2);
+        assert_eq!(published.len(), 2);
+    }
+
+    #[test]
+    fn toolbar_observation_fractional_clip_keeps_logical_and_outward_widget_clipping_strict() {
+        let ctx = egui::Context::default();
+        let scale = 1.2_f32;
+        let logical = egui::vec2(317.0 / scale, 840.0 / scale);
+        let state = ScreenDrawState::Ghost {
+            generation: ScreenDrawGeneration::from_raw(3),
+        };
+        let base =
+            retained_toolbar_frame(&ctx, &state, ScreenDrawMode::Ghost, logical, scale, true)
+                .unwrap();
+        let mut measured = Some(base);
+        let _ = ctx.run(observation_input(logical, scale), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let logical_client = egui::Rect::from_min_size(egui::Pos2::ZERO, logical);
+                let response = ui.small("Ghost");
+                ui.set_clip_rect(logical_client);
+                observe_toolbar_response(
+                    &mut measured,
+                    ui,
+                    &response,
+                    ScreenDrawToolbarTarget::StateLabel,
+                    ScreenDrawToolbarRole::Label,
+                );
+                let full = measured.unwrap().label.unwrap();
+                assert_eq!(full.clip, [0, 0, 317, 840]);
+                assert!(full.fully_visible);
+                assert_eq!(full.bounds, observation_rect(response.rect, scale).unwrap());
+
+                // A subpixel logical clip can round to the same physical edge;
+                // full visibility still requires the actual logical containment.
+                let mut logical_clip = logical_client;
+                logical_clip.max.x = response.rect.right() - 0.01;
+                ui.set_clip_rect(logical_clip);
+                observe_toolbar_response(
+                    &mut measured,
+                    ui,
+                    &response,
+                    ScreenDrawToolbarTarget::StateLabel,
+                    ScreenDrawToolbarRole::Label,
+                );
+                let clipped = measured.unwrap().label.unwrap();
+                assert!(!clipped.fully_visible);
+                assert!(!logical_clip.contains_rect(response.rect));
+
+                ui.set_clip_rect(logical_client);
+                let edge_response = ui.allocate_rect(
+                    egui::Rect::from_min_max(
+                        egui::pos2(logical.x - 0.25, 50.0),
+                        egui::pos2(logical.x + 0.25, 65.0),
+                    ),
+                    egui::Sense::hover(),
+                );
+                observe_toolbar_response(
+                    &mut measured,
+                    ui,
+                    &edge_response,
+                    ScreenDrawToolbarTarget::StateLabel,
+                    ScreenDrawToolbarRole::Label,
+                );
+                let edge = measured.unwrap().label.unwrap();
+                assert_eq!(edge.clip, [0, 0, 317, 840]);
+                assert!(edge.bounds[2] > 317, "widget bounds must not be clamped");
+                assert_eq!(edge.visible_bounds[2], 317);
+                assert_ne!(edge.visible_bounds, edge.bounds);
+                assert!(!edge.fully_visible);
+            });
+        });
+    }
+
+    #[test]
+    fn toolbar_observation_retains_real_drawing_ghost_finish_responses_and_child_frames() {
+        let ctx = egui::Context::default();
+        let generation = ScreenDrawGeneration::from_raw(7);
+        let size = egui::vec2(264.0, 700.0);
+        let drawing = retained_toolbar_frame(
+            &ctx,
+            &ScreenDrawState::Drawing { generation },
+            ScreenDrawMode::Drawing,
+            size,
+            1.0,
+            true,
+        )
+        .unwrap();
+        let ghost = retained_toolbar_frame(
+            &ctx,
+            &ScreenDrawState::Ghost { generation },
+            ScreenDrawMode::Ghost,
+            size,
+            1.0,
+            true,
+        )
+        .unwrap();
+        let finish = retained_toolbar_frame(
+            &ctx,
+            &ScreenDrawState::Finish { generation },
+            ScreenDrawMode::Finish,
+            size,
+            1.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(drawing.state, ScreenDrawToolbarMode::Drawing);
+        assert_eq!(ghost.state, ScreenDrawToolbarMode::Ghost);
+        assert_eq!(finish.state, ScreenDrawToolbarMode::Finish);
+        assert!(
+            drawing.resume.is_none(),
+            "Drawing's Ghost button is not the Ghost state label/Resume"
+        );
+        assert!(
+            finish.resume.is_some(),
+            "Finish also renders Resume, so the state is mandatory"
+        );
+        assert!(
+            drawing.frame_nr > 0
+                && ghost.frame_nr > drawing.frame_nr
+                && finish.frame_nr > ghost.frame_nr
+        );
+        for frame in [drawing, ghost, finish] {
+            assert_eq!(frame.generation, 7);
+            assert_eq!(frame.client_size, [264, 700]);
+            let label = frame.label.unwrap();
+            assert_eq!(label.target, ScreenDrawToolbarTarget::StateLabel);
+            assert_eq!(label.role, ScreenDrawToolbarRole::Label);
+            assert!(label.widget_id != 0 && label.enabled && label.fully_visible);
+            assert_eq!(label.visible_bounds, label.bounds);
+            assert!(
+                label.bounds[0] >= 0 && label.bounds[1] >= 0,
+                "desktop origin must not be subtracted"
+            );
+            assert_eq!(label.widget_id, drawing.label.unwrap().widget_id);
+        }
+        let resume = ghost.resume.unwrap();
+        assert_eq!(resume.target, ScreenDrawToolbarTarget::ResumeDrawing);
+        assert_eq!(resume.role, ScreenDrawToolbarRole::Button);
+        assert!(
+            resume.enabled
+                && resume.fully_visible
+                && resume.widget_id != ghost.label.unwrap().widget_id
+        );
+    }
+
+    #[test]
+    fn toolbar_observation_real_client_clipping_and_disabled_responses_are_unusable() {
+        let ctx = egui::Context::default();
+        let state = ScreenDrawState::Ghost {
+            generation: ScreenDrawGeneration::from_raw(3),
+        };
+        let clipped = retained_toolbar_frame(
+            &ctx,
+            &state,
+            ScreenDrawMode::Ghost,
+            egui::vec2(264.0, 45.0),
+            1.0,
+            true,
+        )
+        .unwrap();
+        assert!(!clipped.resume.is_some_and(|resume| resume.fully_visible));
+        let full = retained_toolbar_frame(
+            &ctx,
+            &state,
+            ScreenDrawMode::Ghost,
+            egui::vec2(264.0, 700.0),
+            1.0,
+            true,
+        )
+        .unwrap();
+        assert!(full.label.unwrap().fully_visible && full.resume.unwrap().fully_visible);
+        let mut measured = Some(full);
+        measured.as_mut().unwrap().label = None;
+        measured.as_mut().unwrap().resume = None;
+        let mut actions = Vec::new();
+        let _ = ctx.run(observation_input(egui::vec2(264.0, 700.0), 1.0), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add_enabled_ui(false, |ui| {
+                    render_toolbar_contents(
+                        ui,
+                        &state,
+                        Some(observation_runtime(ScreenDrawMode::Ghost)),
+                        &ScreenDrawSettings::default(),
+                        None,
+                        false,
+                        &mut ExportBackground::default(),
+                        &mut actions,
+                        &mut measured,
+                    );
+                });
+            });
+        });
+        assert!(!measured.unwrap().label.unwrap().enabled);
+        assert!(!measured.unwrap().resume.unwrap().enabled);
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn toolbar_observation_retained_fractional_client_conversion_is_checked() {
+        let ctx = egui::Context::default();
+        let state = ScreenDrawState::Ghost {
+            generation: ScreenDrawGeneration::from_raw(2),
+        };
+        let frame = retained_toolbar_frame(
+            &ctx,
+            &state,
+            ScreenDrawMode::Ghost,
+            egui::vec2(264.0, 700.0),
+            1.25,
+            true,
+        )
+        .unwrap();
+        assert_eq!(frame.client_size, [330, 875]);
+        assert!(frame.label.unwrap().fully_visible && frame.resume.unwrap().fully_visible);
+        assert!(observation_rect(egui::Rect::EVERYTHING, 1.0).is_none());
+        assert!(
+            observation_rect(
+                egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(20.0, 10.0)),
+                f32::NAN
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn toolbar_observation_disabled_trace_performs_no_collection_or_native_inspection() {
+        let ctx = egui::Context::default();
+        let state = ScreenDrawState::Ghost {
+            generation: ScreenDrawGeneration::from_raw(2),
+        };
+        let measured = retained_toolbar_frame(
+            &ctx,
+            &state,
+            ScreenDrawMode::Ghost,
+            egui::vec2(264.0, 700.0),
+            1.0,
+            false,
+        );
+        assert!(measured.is_none());
+        let mut publisher = ToolbarObservationPublisher::default();
+        publisher.begin(false);
+        publisher.publish_current(
+            measured,
+            &state,
+            Some(observation_runtime(ScreenDrawMode::Ghost)),
+            true,
+            observation_owner(&state),
+            Instant::now(),
+            |_| panic!("disabled tracing inspected native identity"),
+            |_| panic!("disabled tracing published"),
+        );
+        assert_eq!(publisher.lifetime, 0);
+        assert!(publisher.previous.is_none());
+    }
+
+    #[test]
+    fn toolbar_observation_publisher_rejects_queued_transition_and_unresolved_or_mismatched_client()
+    {
+        let ctx = egui::Context::default();
+        let generation = ScreenDrawGeneration::from_raw(5);
+        let drawing = ScreenDrawState::Drawing { generation };
+        let ghost = ScreenDrawState::Ghost { generation };
+        let next_generation = ScreenDrawState::Drawing {
+            generation: ScreenDrawGeneration::from_raw(6),
+        };
+        let mut publisher = ToolbarObservationPublisher::default();
+        publisher.begin(true);
+        let frame = retained_toolbar_frame_with_lifetime(
+            &ctx,
+            &drawing,
+            ScreenDrawMode::Drawing,
+            egui::vec2(264.0, 700.0),
+            1.0,
+            Some(publisher.lifetime),
+        );
+        let now = Instant::now();
+        for (state, mode, open) in [
+            (&ghost, ScreenDrawMode::Ghost, true),
+            (&drawing, ScreenDrawMode::Ghost, true),
+            (&drawing, ScreenDrawMode::Drawing, false),
+            (&next_generation, ScreenDrawMode::Drawing, true),
+        ] {
+            publisher.publish_current(
+                frame,
+                state,
+                Some(observation_runtime(mode)),
+                open,
+                observation_owner(&state),
+                now,
+                |_| panic!("stale rendered frame must be rejected before inspecting"),
+                |_| panic!("stale frame published"),
+            );
+        }
+        for identity in [
+            None,
+            Some(
+                crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                    hwnd: 1,
+                    process_id: 7,
+                    client_size: [263, 700],
+                },
+            ),
+            Some(
+                crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                    hwnd: 0,
+                    process_id: 7,
+                    client_size: [264, 700],
+                },
+            ),
+        ] {
+            publisher.publish_current(
+                frame,
+                &drawing,
+                Some(observation_runtime(ScreenDrawMode::Drawing)),
+                true,
+                observation_owner(&drawing),
+                now,
+                |_| identity,
+                |_| panic!("unresolved or mismatched identity published"),
+            );
+        }
+        assert!(publisher.previous.is_none());
+    }
+
+    #[test]
+    fn toolbar_observation_publisher_bounds_refresh_and_invalidates_close_reopen_lifetime() {
+        let ctx = egui::Context::default();
+        let state = ScreenDrawState::Ghost {
+            generation: ScreenDrawGeneration::from_raw(6),
+        };
+        let runtime = Some(observation_runtime(ScreenDrawMode::Ghost));
+        let mut publisher = ToolbarObservationPublisher::default();
+        publisher.begin(true);
+        let first_lifetime = publisher.lifetime;
+        let now = Instant::now();
+        let emitted = std::cell::RefCell::new(Vec::new());
+        for offset in [0, 100, 499, 500] {
+            let frame = retained_toolbar_frame_with_lifetime(
+                &ctx,
+                &state,
+                ScreenDrawMode::Ghost,
+                egui::vec2(264.0, 700.0),
+                1.0,
+                Some(publisher.lifetime),
+            );
+            publisher.publish_current(
+                frame,
+                &state,
+                runtime,
+                true,
+                observation_owner(&state),
+                now + Duration::from_millis(offset),
+                |_| {
+                    Some(
+                        crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                            hwnd: 51,
+                            process_id: 7,
+                            client_size: [264, 700],
+                        },
+                    )
+                },
+                |observation| {
+                    emitted.borrow_mut().push(observation);
+                    true
+                },
+            );
+        }
+        assert_eq!(emitted.borrow().len(), 2);
+        assert!(emitted.borrow()[1].frame_nr > emitted.borrow()[0].frame_nr);
+        let old_frame = retained_toolbar_frame_with_lifetime(
+            &ctx,
+            &state,
+            ScreenDrawMode::Ghost,
+            egui::vec2(264.0, 700.0),
+            1.0,
+            Some(publisher.lifetime),
+        );
+        publisher.close();
+        assert_eq!(publisher.lifetime, 0);
+        assert!(publisher.previous.is_none());
+        publisher.begin(true);
+        assert!(publisher.lifetime > first_lifetime);
+        publisher.publish_current(
+            old_frame,
+            &state,
+            runtime,
+            true,
+            observation_owner(&state),
+            now + Duration::from_millis(501),
+            |_| panic!("retired render cannot inspect a reopened toolbar"),
+            |_| panic!("retired render acquired new lifetime"),
+        );
+        let frame = retained_toolbar_frame_with_lifetime(
+            &ctx,
+            &state,
+            ScreenDrawMode::Ghost,
+            egui::vec2(264.0, 700.0),
+            1.0,
+            Some(publisher.lifetime),
+        );
+        publisher.publish_current(
+            frame,
+            &state,
+            runtime,
+            true,
+            observation_owner(&state),
+            now + Duration::from_millis(501),
+            |_| {
+                Some(
+                    crate::screen_draw::window_layers::ToolbarObservationIdentity {
+                        hwnd: 52,
+                        process_id: 7,
+                        client_size: [264, 700],
+                    },
+                )
+            },
+            |observation| {
+                emitted.borrow_mut().push(observation);
+                true
+            },
+        );
+        assert_eq!(emitted.borrow().len(), 3);
+        assert!(emitted.borrow()[2].lifetime > first_lifetime);
+        assert_eq!(emitted.borrow()[2].hwnd, 52);
+    }
 
     fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key {

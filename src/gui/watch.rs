@@ -7,6 +7,15 @@ pub(super) fn watch_file(
     event: WatchEvent,
     repaint: egui::Context,
 ) -> notify::Result<RecommendedWatcher> {
+    watch_file_with_wake(path, tx, event, ViewportWake::root(&repaint))
+}
+
+pub(super) fn watch_file_with_wake(
+    path: &Path,
+    tx: Sender<WatchEvent>,
+    event: WatchEvent,
+    wake: ViewportWake,
+) -> notify::Result<RecommendedWatcher> {
     let target = path.to_path_buf();
     let target_is_directory = path.is_dir();
     let mut watcher = RecommendedWatcher::new(
@@ -21,7 +30,7 @@ pub(super) fn watch_file(
                     target_is_directory,
                 ) {
                     if tx.send(event.clone()).is_ok() {
-                        repaint.request_repaint();
+                        wake.wake();
                     }
                 }
             }
@@ -41,7 +50,109 @@ pub(super) fn watch_file(
 impl LauncherApp {
     pub fn process_watch_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
+            self.event_sink.event_consumed();
             match ev {
+                WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
+                WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),
+                WatchEvent::RadialResolveDeferred(envelope) => {
+                    self.resolve_deferred_radial(envelope)
+                }
+                WatchEvent::RadialDeferredSearchReady { envelope, result } => {
+                    self.complete_deferred_radial_search(envelope, result)
+                }
+                WatchEvent::RadialAuthoringSearchReady { request, result } => {
+                    self.complete_authoring_provider_search(request, result)
+                }
+                WatchEvent::RadialAuthoringSearchFailed { request, reason } => {
+                    self.fail_authoring_provider_search_from_provider(request, reason)
+                }
+                WatchEvent::AuthoringProviderCapacityAvailable => {
+                    if !self.radial_provider_search_capacity.is_occupied() {
+                        self.retire_capacity_deferred_authoring_catalog();
+                        self.resume_capacity_deferred_search();
+                    }
+                    self.start_next_authoring_provider_search();
+                }
+                WatchEvent::RadialInvalidate => {
+                    if let Ok(mut editor) = self.radial_editor.lock() {
+                        editor.invalidate_appearance_resources();
+                    }
+                    self.radial_expected_diagnostics.clear();
+                    self.invalidate_radial_leases();
+                }
+                WatchEvent::RadialConfigDiagnostic(diagnostic) => {
+                    if let Some(diagnostic) = diagnostic {
+                        self.report_error_message(
+                            "radial.reload",
+                            format!("Radial menu configuration was not reloaded: {diagnostic}"),
+                        );
+                    }
+                }
+                WatchEvent::RadialRuntimeDiagnostic(diagnostic) => {
+                    self.report_error_message("radial.runtime", diagnostic);
+                }
+                WatchEvent::RadialDiagnostic(diagnostic) => {
+                    if diagnostic.is_expected_layout() {
+                        if !self
+                            .radial_expected_diagnostics
+                            .iter()
+                            .any(|retained| retained.fingerprint == diagnostic.fingerprint)
+                        {
+                            if self.radial_expected_diagnostics.len()
+                                == crate::radial::diagnostics::MAX_EXPECTED_LAYOUT_DIAGNOSTICS
+                            {
+                                self.radial_expected_diagnostics.pop_front();
+                            }
+                            self.radial_expected_diagnostics.push_back(diagnostic);
+                        }
+                        self.egui_ctx.request_repaint();
+                    } else if diagnostic.severity
+                        != crate::radial::diagnostics::RadialDiagnosticSeverity::Info
+                    {
+                        self.report_error_message("radial.resource", diagnostic.message);
+                    } else {
+                        tracing::info!(message = %diagnostic.message, "radial diagnostic");
+                    }
+                }
+                WatchEvent::RadialSubmenuPlacementFailure(notice) => {
+                    self.radial_placement_viewport.request(notice);
+                    self.egui_ctx.request_repaint();
+                    self.egui_ctx
+                        .request_repaint_of(super::radial_placement_viewport_id());
+                }
+                WatchEvent::RadialPlacementActionResult {
+                    session_id,
+                    parent_frame_id,
+                    result,
+                } => {
+                    if self.radial_placement_viewport.apply_action_result(
+                        &session_id,
+                        parent_frame_id,
+                        result,
+                    ) {
+                        self.egui_ctx.request_repaint();
+                        self.egui_ctx
+                            .request_repaint_of(super::radial_placement_viewport_id());
+                    }
+                }
+                WatchEvent::RadialMigrationNotice(notice) => {
+                    self.add_toast(Toast {
+                        text: notice.into(),
+                        kind: ToastKind::Info,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    });
+                }
+                WatchEvent::RadialMigrationState {
+                    receipt,
+                    default_submenu_presentation,
+                } => {
+                    self.radial_migration_receipt = receipt;
+                    self.radial_feature_settings.default_submenu_presentation =
+                        default_submenu_presentation;
+                    self.settings_editor.radial_default_submenu_presentation =
+                        default_submenu_presentation;
+                }
                 WatchEvent::Actions => {
                     let _transaction = crate::actions::transaction_guard();
                     let custom = match load_actions_typed(&self.actions_path) {
@@ -207,11 +318,11 @@ impl LauncherApp {
                     }
                     self.screen_draw_controller.reconcile_recovery_publication();
                 }
-                WatchEvent::ScreenDrawRecover => {
-                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::LauncherToggle);
+                WatchEvent::ScreenDrawRecover(intent) => {
+                    self.recover_screen_draw(intent);
                 }
-                WatchEvent::ScreenDrawEmergency => {
-                    self.recover_screen_draw(super::ScreenDrawRecoveryRequest::Emergency);
+                WatchEvent::ScreenDrawEmergency(intent) => {
+                    self.recover_screen_draw(intent);
                 }
                 WatchEvent::ClipboardModify(ev) => {
                     self.handle_clipboard_modify_gui_event(ev);
@@ -219,17 +330,24 @@ impl LauncherApp {
                 WatchEvent::VirtualDesktop(mut completion) => {
                     let interaction_is_current = self.virtual_desktop_interaction_token
                         == completion.interaction_token
-                        && self.query == completion.expected_query
-                        && self.visible_flag.load(Ordering::SeqCst) == completion.expected_visible;
+                        && (completion.root_policy
+                            == crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState
+                            || (self.query == completion.expected_query
+                                && self.visible_flag.load(Ordering::SeqCst)
+                                    == completion.expected_visible));
+                    let preserved_root = (completion.root_policy
+                        == crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState)
+                        .then(|| super::universal_action_executor::RadialRootState::capture(self));
                     match completion.result {
                         Ok(()) => {
                             if !interaction_is_current {
                                 completion.completion_outcome.toasts.clear();
                             }
-                            self.apply_command_outcome_with_history_query(
+                            self.apply_command_outcome_with_root_policy(
                                 completion.completion_outcome,
                                 &completion.invocation,
                                 Some(&completion.history_query),
+                                completion.root_policy,
                             );
                         }
                         Err(error) if interaction_is_current => {
@@ -240,6 +358,9 @@ impl LauncherApp {
                             error,
                             "suppressed stale virtual desktop completion error"
                         ),
+                    }
+                    if let Some(root) = preserved_root {
+                        root.restore(self);
                     }
                 }
             }
@@ -253,7 +374,11 @@ mod tests {
     use super::*;
     use crate::{plugin::PluginManager, settings::Settings};
     use eframe::egui;
-    use std::sync::{Arc, atomic::AtomicBool, mpsc::channel};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::channel,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -297,6 +422,17 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn placement_notice() -> RadialPlacementFailureNotice {
+        RadialPlacementFailureNotice {
+            session_id: crate::radial::model::SessionId::new("designer-session"),
+            parent_frame_id: crate::radial::session::FrameId(11),
+            parent_menu_id: crate::radial::model::MenuId::new("parent"),
+            child_menu_id: crate::radial::model::MenuId::new("child"),
+            parent_presentation: crate::radial::model::SubmenuPresentation::SameCenter,
+            message: "fixed center does not fit".into(),
+        }
     }
 
     #[test]
@@ -355,6 +491,7 @@ mod tests {
                 interaction_token: 0,
                 expected_query: String::new(),
                 expected_visible: false,
+                root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 result: Err("injected desktop failure".into()),
             }))
             .unwrap();
@@ -399,6 +536,7 @@ mod tests {
                 interaction_token: 1,
                 expected_query: String::new(),
                 expected_visible: false,
+                root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
                 result: Ok(()),
             }))
             .unwrap();
@@ -408,6 +546,134 @@ mod tests {
         assert_eq!(app.usage.get("vd:create"), Some(&1));
         assert_eq!(app.test_recorded_history_queries, ["vd create"]);
         assert!(app.test_toast_messages.is_empty());
+    }
+
+    #[test]
+    fn radial_async_completion_applies_history_once_without_mutating_root_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let action = Action {
+            label: "Create Virtual Desktop".into(),
+            desc: "Virtual Desktop".into(),
+            action: "vd:create".into(),
+            args: None,
+        };
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::Create,
+            ),
+            original_action: action,
+            query_override: None,
+            source: ActivationSource::RadialRelease,
+        };
+        app.virtual_desktop_interaction_token = 7;
+        app.query = "untouched root".into();
+        app.pending_query = Some("pending root".into());
+        app.results = vec![Action {
+            label: "Existing result".into(),
+            desc: "Existing result".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        app.selected = Some(0);
+        app.last_search_query = "old search".into();
+        app.last_results_valid = true;
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.focus_query = false;
+        app.move_cursor_end = false;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.event_tx
+            .send(WatchEvent::VirtualDesktop(VirtualDesktopGuiCompletion {
+                invocation,
+                completion_outcome: crate::commands::CommandOutcome {
+                    query: crate::commands::QueryPolicy::Set("changed".into()),
+                    pending_query: crate::commands::PendingQueryPolicy::Set("changed".into()),
+                    search: true,
+                    invalidate_results: true,
+                    results: crate::commands::ResultsPolicy::Replace(Vec::new()),
+                    visibility: crate::commands::VisibilityPolicy::Hide,
+                    restore: true,
+                    focus: true,
+                    move_cursor_end: true,
+                    history: crate::commands::HistoryPolicy::Record,
+                    ..crate::commands::CommandOutcome::default()
+                },
+                history_query: "captured radial query".into(),
+                interaction_token: 7,
+                expected_query: "transient command state".into(),
+                expected_visible: false,
+                root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                result: Ok(()),
+            }))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.query, "untouched root");
+        assert_eq!(app.pending_query.as_deref(), Some("pending root"));
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.last_search_query, "old search");
+        assert!(app.last_results_valid);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.focus_query);
+        assert!(!app.move_cursor_end);
+        assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
+    }
+
+    #[test]
+    fn delayed_preserved_completion_cannot_overwrite_a_newer_launcher_visibility_request() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let invocation = crate::commands::CommandInvocation {
+            command: crate::commands::Command::VirtualDesktop(
+                crate::commands::VirtualDesktopCommand::Create,
+            ),
+            original_action: Action {
+                label: "Create Virtual Desktop".into(),
+                desc: "Virtual Desktop".into(),
+                action: "vd:create".into(),
+                args: None,
+            },
+            query_override: None,
+            source: ActivationSource::RadialRelease,
+        };
+        app.virtual_desktop_interaction_token = 3;
+        app.query = "newer hotkey query".into();
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+
+        // Model a newer hotkey decision committed while the virtual desktop
+        // operation was still running.
+        app.request_launcher_state(Some(true), Some(true));
+        let newer_revision = app.visibility_revision.current();
+        app.event_tx
+            .send(WatchEvent::VirtualDesktop(VirtualDesktopGuiCompletion {
+                invocation,
+                completion_outcome: crate::commands::CommandOutcome {
+                    query: crate::commands::QueryPolicy::Set("stale completion".into()),
+                    visibility: crate::commands::VisibilityPolicy::Hide,
+                    restore: false,
+                    history: crate::commands::HistoryPolicy::Record,
+                    ..crate::commands::CommandOutcome::default()
+                },
+                history_query: "captured radial query".into(),
+                interaction_token: 3,
+                expected_query: "old query".into(),
+                expected_visible: true,
+                root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                result: Ok(()),
+            }))
+            .unwrap();
+
+        app.process_watch_events();
+
+        assert_eq!(app.visibility_revision.current(), newer_revision);
+        assert_eq!(app.query, "newer hotkey query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
+        assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
     }
 
     #[test]
@@ -426,6 +692,221 @@ mod tests {
                 "bad".into()
             ))
         );
+    }
+
+    #[test]
+    fn radial_runtime_diagnostic_is_visible_without_mutating_launcher_state() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.query = "keep query".into();
+        app.selected = Some(3);
+        app.show_inline_errors = true;
+        app.event_tx
+            .send(WatchEvent::RadialRuntimeDiagnostic(
+                "missing managed radial asset".into(),
+            ))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.query, "keep query");
+        assert_eq!(app.selected, Some(3));
+        assert_eq!(app.error.as_deref(), Some("missing managed radial asset"));
+    }
+
+    #[test]
+    fn tooltip_view_limit_routes_as_actionable_radial_diagnostic() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.show_inline_errors = true;
+        let diagnostic = crate::radial::diagnostics::RadialDiagnostic::from_font(
+            &crate::radial::model::MenuId::new("menu"),
+            &crate::radial::model::CellId::new("cell"),
+            "a long tooltip",
+            (13_000_u32, 240_000_u32),
+            &crate::radial::font_cache::FontDiagnostic::TooltipViewLimited,
+        );
+        assert!(!diagnostic.is_expected_layout());
+        app.event_tx
+            .send(WatchEvent::RadialDiagnostic(diagnostic.clone()))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.error.as_deref(), Some(diagnostic.message.as_str()));
+        assert!(app.radial_expected_diagnostics.is_empty());
+    }
+
+    #[test]
+    fn hidden_launcher_radial_notice_requests_one_stable_viewport_and_correlated_actions() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let notice = RadialPlacementFailureNotice {
+            session_id: crate::radial::model::SessionId::new("radial-session"),
+            parent_frame_id: crate::radial::session::FrameId(3),
+            parent_menu_id: crate::radial::model::MenuId::new("favorites"),
+            child_menu_id: crate::radial::model::MenuId::new("applications"),
+            parent_presentation: crate::radial::model::SubmenuPresentation::SameCenter,
+            message: "fixed center placement does not fit".into(),
+        };
+        assert!(notice.can_switch_parent_to_cascade());
+        let mut already_cascade = notice.clone();
+        already_cascade.parent_presentation = crate::radial::model::SubmenuPresentation::Cascade;
+        assert!(!already_cascade.can_switch_parent_to_cascade());
+
+        app.event_tx
+            .send(WatchEvent::RadialSubmenuPlacementFailure(notice.clone()))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.radial_placement_viewport.notice(), Some(&notice));
+        assert!(app.radial_placement_viewport.present_requested());
+        let recovery_viewport = super::super::radial_placement_viewport_id();
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.radial_placement_viewport.take_focus_request());
+        assert!(!app.radial_placement_viewport.take_focus_request());
+
+        app.event_tx
+            .send(WatchEvent::RadialSubmenuPlacementFailure(notice.clone()))
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(
+            super::super::radial_placement_viewport_id(),
+            recovery_viewport
+        );
+        assert!(app.radial_placement_viewport.take_focus_request());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+
+        app.event_tx
+            .send(WatchEvent::RadialPlacementActionResult {
+                session_id: crate::radial::model::SessionId::new("stale-session"),
+                parent_frame_id: notice.parent_frame_id,
+                result: Ok(()),
+            })
+            .unwrap();
+        app.process_watch_events();
+        assert_eq!(app.radial_placement_viewport.notice(), Some(&notice));
+
+        app.event_tx
+            .send(WatchEvent::RadialPlacementActionResult {
+                session_id: notice.session_id.clone(),
+                parent_frame_id: notice.parent_frame_id,
+                result: Err("revision conflict".into()),
+            })
+            .unwrap();
+        app.process_watch_events();
+        assert!(
+            app.radial_placement_viewport
+                .notice()
+                .is_some_and(|active| {
+                    active.session_id == notice.session_id
+                        && active.parent_frame_id == notice.parent_frame_id
+                        && active.message.contains("revision conflict")
+                })
+        );
+        assert!(app.radial_placement_viewport.present_requested());
+
+        app.event_tx
+            .send(WatchEvent::RadialPlacementActionResult {
+                session_id: notice.session_id.clone(),
+                parent_frame_id: notice.parent_frame_id,
+                result: Ok(()),
+            })
+            .unwrap();
+        app.process_watch_events();
+        assert!(app.radial_placement_viewport.notice().is_none());
+        assert!(app.radial_placement_viewport.present_requested());
+        app.radial_placement_viewport.mark_viewport_closed();
+        assert!(!app.radial_placement_viewport.present_requested());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn placement_designer_action_opens_editor_without_showing_launcher() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let notice = placement_notice();
+        app.radial_placement_viewport.request(notice.clone());
+
+        assert!(app.open_radial_designer_from_placement(&notice, &ctx));
+
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(app.is_panel_open(crate::gui::Panel::RadialEditor));
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&crate::gui::Panel::RadialEditor)
+        );
+        assert!(!app.radial_placement_viewport.present_requested());
+        assert!(app.radial_placement_viewport.notice().is_none());
+        assert!(app.test_activation_trace.is_empty());
+    }
+
+    #[test]
+    fn placement_dismiss_and_cascade_leave_hidden_launcher_unchanged() {
+        let ctx = egui::Context::default();
+        let notice = placement_notice();
+        let mut dismissed_app = new_app(&ctx);
+        dismissed_app.visible_flag.store(false, Ordering::SeqCst);
+        dismissed_app.restore_flag.store(false, Ordering::SeqCst);
+        dismissed_app
+            .radial_placement_viewport
+            .request(notice.clone());
+
+        assert!(dismissed_app.dismiss_radial_placement_notice(&notice));
+        assert!(!dismissed_app.visible_flag.load(Ordering::SeqCst));
+        assert!(!dismissed_app.restore_flag.load(Ordering::SeqCst));
+        assert!(!dismissed_app.radial_placement_viewport.present_requested());
+        assert!(dismissed_app.test_activation_trace.is_empty());
+
+        let mut cascade_app = new_app(&ctx);
+        cascade_app.visible_flag.store(false, Ordering::SeqCst);
+        cascade_app.restore_flag.store(false, Ordering::SeqCst);
+        cascade_app
+            .radial_placement_viewport
+            .request(notice.clone());
+        let (client, endpoint) =
+            crate::radial::control::radial_control_service_with_wake(true, None);
+
+        assert!(
+            cascade_app
+                .request_radial_placement_cascade(&notice, &client)
+                .unwrap()
+        );
+        assert_eq!(
+            endpoint.request_rx.try_recv().unwrap(),
+            crate::radial::control::RadialControlRequest::SetActiveParentSubmenuCascade {
+                session_id: notice.session_id,
+                parent_frame_id: notice.parent_frame_id,
+                parent_menu_id: notice.parent_menu_id,
+            }
+        );
+        assert!(!cascade_app.visible_flag.load(Ordering::SeqCst));
+        assert!(!cascade_app.restore_flag.load(Ordering::SeqCst));
+        assert!(cascade_app.radial_placement_viewport.present_requested());
+        assert!(cascade_app.test_activation_trace.is_empty());
+    }
+
+    #[test]
+    fn stale_placement_designer_action_cannot_show_launcher_or_change_panel() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let active_notice = placement_notice();
+        app.radial_placement_viewport.request(active_notice.clone());
+        let mut stale_notice = active_notice;
+        stale_notice.parent_frame_id = crate::radial::session::FrameId(12);
+
+        assert!(!app.open_radial_designer_from_placement(&stale_notice, &ctx));
+
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.is_panel_open(crate::gui::Panel::RadialEditor));
+        assert!(app.radial_placement_viewport.present_requested());
+        assert!(app.test_activation_trace.is_empty());
     }
 
     #[test]
@@ -576,13 +1057,24 @@ mod tests {
             )),
             TestWatchEvent::Actions
         );
+        let bridge = crate::screen_draw::ScreenDrawRecoveryBridge::default();
+        bridge.stage_start();
+        let recover = bridge
+            .admit(
+                crate::screen_draw::ScreenDrawRecoveryKind::LauncherToggle,
+                None,
+            )
+            .unwrap();
+        let emergency = bridge
+            .admit(crate::screen_draw::ScreenDrawRecoveryKind::Emergency, None)
+            .unwrap();
         assert_eq!(
-            TestWatchEvent::from(WatchEvent::ScreenDrawRecover),
-            TestWatchEvent::ScreenDrawRecover
+            TestWatchEvent::from(WatchEvent::ScreenDrawRecover(recover)),
+            TestWatchEvent::ScreenDrawRecover(recover)
         );
         assert_eq!(
-            TestWatchEvent::from(WatchEvent::ScreenDrawEmergency),
-            TestWatchEvent::ScreenDrawEmergency
+            TestWatchEvent::from(WatchEvent::ScreenDrawEmergency(emergency)),
+            TestWatchEvent::ScreenDrawEmergency(emergency)
         );
 
         let (tx, rx) = channel();

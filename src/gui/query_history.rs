@@ -10,7 +10,7 @@ pub(crate) enum QueryHistoryDirection {
 ///
 /// The persisted history remains owned by `history`; this type takes one lazy
 /// snapshot when traversal starts and holds it only for that traversal.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct QueryHistoryNavigator {
     entries: Vec<String>,
     cursor: Option<usize>,
@@ -19,6 +19,31 @@ pub(crate) struct QueryHistoryNavigator {
 }
 
 impl QueryHistoryNavigator {
+    pub(crate) fn acceptance_digest(&self) -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        let mut feed = |bytes: &[u8]| {
+            for byte in bytes.iter().copied().chain([0xff]) {
+                hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+        };
+        for entry in &self.entries {
+            feed(entry.as_bytes());
+        }
+        feed(
+            &self
+                .cursor
+                .map_or(u64::MAX, |value| value as u64)
+                .to_le_bytes(),
+        );
+        feed(self.draft.as_bytes());
+        if let Some(expected) = &self.expected_query {
+            feed(expected.as_bytes());
+        } else {
+            feed(&[]);
+        }
+        hash
+    }
+
     pub(crate) fn synchronize(&mut self, actual_query: &str) {
         if self
             .expected_query

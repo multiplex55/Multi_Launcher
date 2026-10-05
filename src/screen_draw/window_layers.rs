@@ -46,6 +46,50 @@ pub(crate) trait ToolbarWindowBackend {
 #[derive(Debug, Default)]
 pub(crate) struct SystemToolbarWindowBackend;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ToolbarObservationIdentity {
+    pub(crate) hwnd: u64,
+    pub(crate) process_id: u32,
+    pub(crate) client_size: [i32; 2],
+}
+
+impl SystemToolbarWindowBackend {
+    /// Acceptance-only read: validate the cached owner and measure its client.
+    /// This never resolves, raises, activates, or changes a session window.
+    pub(crate) fn observation_identity(
+        &self,
+        handle: NativeWindowHandle,
+    ) -> Option<ToolbarObservationIdentity> {
+        #[cfg(windows)]
+        {
+            windows_toolbar::inspect(handle, TOOLBAR_WINDOW_TITLE)?;
+            let mut client = windows::Win32::Foundation::RECT::default();
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetClientRect(
+                    handle.as_hwnd(),
+                    &mut client,
+                )
+            }
+            .ok()?;
+            let width = client.right.checked_sub(client.left)?;
+            let height = client.bottom.checked_sub(client.top)?;
+            if client.left != 0 || client.top != 0 || width <= 0 || height <= 0 {
+                return None;
+            }
+            Some(ToolbarObservationIdentity {
+                hwnd: u64::try_from(handle.0).ok()?,
+                process_id: std::process::id(),
+                client_size: [width, height],
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = handle;
+            None
+        }
+    }
+}
+
 #[cfg(windows)]
 impl ToolbarWindowBackend for SystemToolbarWindowBackend {
     fn resolve_current_thread(&self, exact_title: &str) -> Option<ToolbarWindowInfo> {
@@ -127,6 +171,21 @@ pub(crate) fn desktop_rect_from_logical_edges(
 pub(crate) const TOOLBAR_WINDOW_TITLE: &str = "Screen Draw — Multi Launcher";
 const TOOLBAR_RESOLUTION_ATTEMPTS: u8 = 8;
 
+fn toolbar_identity_matches(
+    actual_process: u32,
+    actual_thread: u32,
+    actual_title: &str,
+    expected_process: u32,
+    expected_thread: u32,
+    exact_title: &str,
+) -> bool {
+    actual_process != 0
+        && actual_thread != 0
+        && actual_process == expected_process
+        && actual_thread == expected_thread
+        && actual_title == exact_title
+}
+
 /// Event-driven state machine for one egui toolbar child viewport.
 ///
 /// Cached handles are revalidated on geometry/session lifecycle triggers, while
@@ -146,6 +205,17 @@ pub(crate) struct ScreenDrawToolbarNativeBridge {
 }
 
 impl ScreenDrawToolbarNativeBridge {
+    /// Only an already resolved, synchronized generation can supply identity.
+    /// Fallback bounds and closed/recreated viewports cannot become receipts.
+    pub(crate) fn observation_handle(&self, generation: u64) -> Option<NativeWindowHandle> {
+        let (sent_generation, sent) = self.last_sent?;
+        let handle = self.cached_handle?;
+        (generation != 0
+            && sent_generation == generation
+            && sent == self.current
+            && self.current?.handle == Some(handle))
+        .then_some(handle)
+    }
     pub(crate) fn begin_viewport(&mut self) {
         self.cached_handle = None;
         self.current = None;
@@ -420,7 +490,14 @@ mod windows_toolbar {
         let title_len = usize::try_from(unsafe { GetWindowTextLengthW(hwnd) }).ok()?;
         let mut title = vec![0_u16; title_len.checked_add(1)?];
         let copied = usize::try_from(unsafe { GetWindowTextW(hwnd, &mut title) }).ok()?;
-        if String::from_utf16_lossy(&title[..copied]) != exact_title {
+        if !super::toolbar_identity_matches(
+            process_id,
+            thread_id,
+            &String::from_utf16_lossy(&title[..copied]),
+            expected_process_id,
+            expected_thread_id,
+            exact_title,
+        ) {
             return None;
         }
         let mut rect = RECT::default();
@@ -612,6 +689,77 @@ mod tests {
         inspect_calls: RefCell<Vec<(NativeWindowHandle, String)>>,
         topmost_calls: RefCell<Vec<NativeWindowHandle>>,
         topmost_results: RefCell<VecDeque<bool>>,
+    }
+
+    #[test]
+    fn toolbar_observation_accessor_is_read_only_and_requires_resolved_current_generation() {
+        let backend = FakeToolbarBackend::default();
+        let mut bridge = ScreenDrawToolbarNativeBridge::default();
+        let fallback = DesktopRect::new(-400, 20, 264, 700);
+        bridge.begin_viewport();
+        assert!(bridge.observation_handle(7).is_none());
+        bridge.synchronize(Some(7), Some(fallback), &backend);
+        assert!(
+            bridge.observation_handle(7).is_none(),
+            "fallback is not native identity"
+        );
+        let native = toolbar_info(91, fallback);
+        backend.queue_resolution(Some(native));
+        bridge.synchronize(Some(7), Some(fallback), &backend);
+        assert_eq!(bridge.observation_handle(7), Some(handle(91)));
+        let calls = (
+            backend.resolve_calls.borrow().len(),
+            backend.inspect_calls.borrow().len(),
+            backend.topmost_calls.borrow().len(),
+        );
+        for _ in 0..20 {
+            assert_eq!(bridge.observation_handle(7), Some(handle(91)));
+        }
+        assert!(bridge.observation_handle(0).is_none());
+        assert!(bridge.observation_handle(8).is_none());
+        assert_eq!(
+            calls,
+            (
+                backend.resolve_calls.borrow().len(),
+                backend.inspect_calls.borrow().len(),
+                backend.topmost_calls.borrow().len()
+            )
+        );
+        bridge.close_viewport();
+        assert!(bridge.observation_handle(7).is_none());
+        bridge.begin_viewport();
+        assert!(bridge.observation_handle(7).is_none());
+        bridge.synchronize(Some(8), Some(fallback), &backend);
+        assert!(bridge.observation_handle(7).is_none());
+    }
+
+    #[test]
+    fn toolbar_observation_native_inspection_requires_exact_title_process_and_gui_thread() {
+        assert!(toolbar_identity_matches(
+            7,
+            9,
+            TOOLBAR_WINDOW_TITLE,
+            7,
+            9,
+            TOOLBAR_WINDOW_TITLE
+        ));
+        for (pid, thread, title) in [
+            (0, 9, TOOLBAR_WINDOW_TITLE),
+            (8, 9, TOOLBAR_WINDOW_TITLE),
+            (7, 0, TOOLBAR_WINDOW_TITLE),
+            (7, 10, TOOLBAR_WINDOW_TITLE),
+            (7, 9, "Screen Draw"),
+            (7, 9, "Screen Draw — Multi Launcher extra"),
+        ] {
+            assert!(!toolbar_identity_matches(
+                pid,
+                thread,
+                title,
+                7,
+                9,
+                TOOLBAR_WINDOW_TITLE
+            ));
+        }
     }
 
     impl FakeToolbarBackend {

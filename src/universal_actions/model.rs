@@ -112,6 +112,37 @@ pub enum ActionSurface {
     Gesture,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootLauncherPolicy {
+    Legacy,
+    PreserveOrdinaryState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniversalActionInvocationContext {
+    pub surface: ActionSurface,
+    pub source: crate::commands::ActivationSource,
+    pub stable_request: Option<super::PersistedUniversalActionRef>,
+    pub history_query: String,
+    pub root_policy: RootLauncherPolicy,
+    /// A selected radial primary uses the ordinary command/history contract.
+    /// Secondary Universal Action commands retain their normalization policy.
+    pub primary_invocation: bool,
+}
+
+impl UniversalActionInvocationContext {
+    pub fn legacy(surface: ActionSurface, source: crate::commands::ActivationSource) -> Self {
+        Self {
+            surface,
+            source,
+            stable_request: None,
+            history_query: String::new(),
+            root_policy: RootLauncherPolicy::Legacy,
+            primary_invocation: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActionGroup {
     Primary,

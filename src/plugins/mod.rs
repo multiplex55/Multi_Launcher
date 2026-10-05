@@ -36,6 +36,7 @@ pub mod network;
 pub mod note;
 pub mod omni_search;
 pub mod processes;
+pub mod radial;
 pub mod random;
 pub mod recycle;
 pub mod reddit;

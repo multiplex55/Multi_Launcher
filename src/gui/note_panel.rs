@@ -1419,6 +1419,23 @@ impl NotePanel {
         &self.note.content
     }
 
+    pub(super) fn note_close_observation(&self) -> super::query_observation::NoteCloseSoleNote {
+        use super::query_observation::{NoteCloseSoleNote, Q11_NOTE_MARKER, Q11_NOTE_SLUG};
+        NoteCloseSoleNote {
+            slug_digest: self
+                .note
+                .slug
+                .bytes()
+                .fold(0xcbf29ce484222325, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+                }),
+            fixture_slug: self.note.slug == Q11_NOTE_SLUG,
+            fixture_marker: self.note.content.contains(Q11_NOTE_MARKER),
+            pending_discard: self.discard_unsaved_prompt,
+            rendered_discard: None,
+        }
+    }
+
     pub(crate) fn note_content_clone_for_mutation(&self) -> Note {
         self.note.clone()
     }
@@ -1576,6 +1593,17 @@ impl NotePanel {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        self.ui_with_note_close_observation(ctx, app, None);
+    }
+
+    pub(super) fn ui_with_note_close_observation(
+        &mut self,
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        mut observed_discard: Option<
+            &mut Option<super::query_observation::NoteCloseRenderedDiscard>,
+        >,
+    ) {
         if !self.open {
             return;
         }
@@ -1779,7 +1807,15 @@ impl NotePanel {
                 .show(ctx, |ui| {
                     ui.label("This note has changes that have not been saved.");
                     ui.horizontal(|ui| {
-                        discard = ui.button("Discard Changes").clicked();
+                        let response = ui.button("Discard Changes");
+                        if let Some(observed) = observed_discard.as_deref_mut() {
+                            *observed = super::query_observation::observe_note_discard_response(
+                                ui,
+                                &response,
+                                &self.note.slug,
+                            );
+                        }
+                        discard = response.clicked();
                         keep_editing = ui.button("Keep Editing").clicked();
                     });
                 });
@@ -2691,6 +2727,10 @@ impl NotePanel {
                 ui.set_min_width(available_size.x);
                 ui.set_max_width(available_size.x);
                 let editor_id = ui.make_persistent_id(text_id_source);
+                if self.focus_textedit_next_frame && ui.is_enabled() {
+                    // Focus before processing this frame's keyboard/clipboard events.
+                    ctx.memory_mut(|memory| memory.request_focus(editor_id));
+                }
                 self.intercept_clipboard_image_paste_with(
                     ctx,
                     app,
@@ -3206,7 +3246,12 @@ impl NotePanel {
             pending_state.store(ctx, resp.id);
             self.pending_cursor_position = None;
         }
-        if self.focus_textedit_next_frame || (request_initial_focus && first_edit_frame) {
+        if request_initial_focus && first_edit_frame {
+            self.focus_textedit_next_frame = true;
+        }
+        // egui lays out a new Window invisibly with disabled widgets first.
+        // Keep the focus request until the editor can actually receive input.
+        if self.focus_textedit_next_frame && resp.enabled() {
             resp.request_focus();
             self.focus_textedit_next_frame = false;
         }
@@ -4592,6 +4637,165 @@ mod tests {
     }
 
     #[test]
+    fn note_close_observation_uses_real_discard_response_and_counts_unrendered_preview_notes() {
+        use super::super::query_observation::{
+            NoteCloseRenderFrame, NoteCloseWidgetRole, Q11_NOTE_SLUG,
+        };
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = new_app(&ctx);
+        app.query = "preserved ordinary query".into();
+        app.note_save_on_close = false;
+        app.note_confirm_discard_unsaved_changes = true;
+        let mut note = empty_note("# radial acceptance q11");
+        note.slug = Q11_NOTE_SLUG.into();
+        note.title = "Owned Q11".into();
+        let mut panel = NotePanel::from_note(note);
+        panel.replace_content_from_mutation(
+            "# radial acceptance q11\nunsaved owned text".into(),
+            1.0,
+        );
+        panel.request_close(&mut app);
+        let before = panel.note_close_observation();
+        assert!(before.fixture_slug && before.fixture_marker && before.pending_discard);
+        assert!(
+            before.rendered_discard.is_none(),
+            "pending state is not a rendered widget receipt"
+        );
+        let original_content = panel.note_content().to_owned();
+        let mut other = NotePanel::from_note(empty_note("# radial acceptance q11\nother note"));
+        other.note.slug = "another-note".into();
+        other.view_mode = NoteViewMode::Preview;
+        assert!(!other.note_close_observation().fixture_slug);
+        let mut observed = None;
+        for _ in 0..4 {
+            observed = None;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 650.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    panel.ui_with_note_close_observation(ctx, &mut app, Some(&mut observed));
+                    let mut frame = NoteCloseRenderFrame::new(ctx);
+                    frame.observe_panel(&panel, observed.clone());
+                    let snapshot = frame.snapshot(std::slice::from_ref(&panel)).unwrap();
+                    assert_eq!(snapshot.client_size, [900, 650]);
+                    assert_eq!(snapshot.open_note_count, 1);
+                    assert_eq!(snapshot.sole_note.unwrap().rendered_discard, observed);
+                    let unrendered = NoteCloseRenderFrame::new(ctx)
+                        .snapshot(std::slice::from_ref(&panel))
+                        .unwrap();
+                    assert!(unrendered.sole_note.unwrap().rendered_discard.is_none());
+                },
+            );
+            if let Some(widget) = &observed {
+                let nodes = &output
+                    .platform_output
+                    .accesskit_update
+                    .as_ref()
+                    .unwrap()
+                    .nodes;
+                let (_, node) = nodes
+                    .iter()
+                    .find(|(id, _)| *id == egui::accesskit::NodeId(widget.widget_id))
+                    .unwrap();
+                assert_eq!(node.role(), egui::accesskit::Role::Button);
+                assert_eq!(node.name(), Some("Discard Changes"));
+                let bounds = node.bounds().unwrap();
+                assert_eq!(
+                    widget.bounds,
+                    [
+                        bounds.x0.floor() as i32,
+                        bounds.y0.floor() as i32,
+                        bounds.x1.ceil() as i32,
+                        bounds.y1.ceil() as i32
+                    ]
+                );
+                assert_eq!(widget.role, NoteCloseWidgetRole::DiscardChanges);
+                assert_eq!(widget.owner_slug_digest, before.slug_digest);
+            }
+        }
+        let widget = observed.expect("the actual normal confirmation must render");
+        assert!(widget.widget_id != 0 && widget.enabled && widget.visible && widget.fully_visible);
+        assert!(widget.bounds[0] >= widget.clip[0] && widget.bounds[1] >= widget.clip[1]);
+        assert!(widget.bounds[2] <= widget.clip[2] && widget.bounds[3] <= widget.clip[3]);
+        assert_eq!(panel.note_close_observation(), before);
+        assert_eq!(panel.note_content(), original_content);
+        assert!(panel.open && panel.has_unsaved_changes());
+        assert_eq!(app.query, "preserved ordinary query");
+        assert!(!app.note_save_on_close && app.note_confirm_discard_unsaved_changes);
+        let mut panels = [panel, other];
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 650.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                let mut frame = NoteCloseRenderFrame::new(ctx);
+                frame.observe_panel(&panels[0], Some(widget.clone()));
+                let ambiguous = frame.snapshot(&panels).unwrap();
+                assert_eq!(
+                    ambiguous.open_note_count, 2,
+                    "preview/unrendered bodies still count as open panels"
+                );
+                assert!(ambiguous.sole_note.is_none());
+                panels[1].open = false;
+                let current = NoteCloseRenderFrame::new(ctx).snapshot(&panels).unwrap();
+                assert_eq!(current.open_note_count, 1);
+                assert!(
+                    current.sole_note.unwrap().rendered_discard.is_none(),
+                    "a prior-frame widget cannot be reused"
+                );
+                let mut replaced = NoteCloseRenderFrame::new(ctx);
+                replaced.observe_panel(&panels[0], Some(widget.clone()));
+                let mut replacement = empty_note("# radial acceptance q11");
+                replacement.slug = "replacement-note".into();
+                panels[0] = NotePanel::from_note(replacement);
+                let snapshot = replaced.snapshot(&panels).unwrap();
+                let sole = snapshot.sole_note.unwrap();
+                assert!(!sole.fixture_slug && sole.fixture_marker);
+                assert!(
+                    sole.rendered_discard.is_none(),
+                    "replacement must not inherit the prior panel's Response"
+                );
+                panels[0].open = false;
+                let empty = NoteCloseRenderFrame::new(ctx).snapshot(&panels).unwrap();
+                assert_eq!(empty.open_note_count, 0);
+                assert!(empty.sole_note.is_none());
+                for panel in &mut panels {
+                    let mut note = empty_note("# radial acceptance q11");
+                    note.slug = Q11_NOTE_SLUG.into();
+                    *panel = NotePanel::from_note(note);
+                }
+                let duplicates = NoteCloseRenderFrame::new(ctx).snapshot(&panels).unwrap();
+                assert_eq!(
+                    duplicates.open_note_count, 2,
+                    "duplicate canonical notes are still ambiguous"
+                );
+                assert!(duplicates.sole_note.is_none());
+                panels[1].open = false;
+                panels[0].replace_content_from_mutation(
+                    "other content without the Q11 marker".into(),
+                    2.0,
+                );
+                let sole = NoteCloseRenderFrame::new(ctx)
+                    .snapshot(&panels)
+                    .unwrap()
+                    .sole_note
+                    .unwrap();
+                assert!(sole.fixture_slug && !sole.fixture_marker);
+            },
+        );
+    }
+
+    #[test]
     fn render_editor_uses_the_supplied_explicit_id() {
         let ctx = egui::Context::default();
         let app = new_app(&ctx);
@@ -4606,6 +4810,44 @@ mod tests {
         });
 
         assert_eq!(response_id, Some(editor_id));
+    }
+
+    #[test]
+    fn note_window_initial_focus_survives_invisible_layout_without_stealing_later_focus() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("# Focus fixture"));
+        panel.view_mode = NoteViewMode::Edit;
+        let query_id = egui::Id::new("focus-fixture-query");
+        let mut query = String::new();
+        for frame in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let response = ui.add(egui::TextEdit::singleline(&mut query).id(query_id));
+                    // ROOT's initial show may focus its query after the note's sizing pass.
+                    if frame != 2 {
+                        response.request_focus();
+                    }
+                });
+                panel.ui(ctx, &mut app);
+            });
+            if frame == 0 {
+                assert!(panel.focus_textedit_next_frame);
+            } else if frame < 3 {
+                let editor = panel.last_textedit_id.expect("note editor rendered");
+                assert!(ctx.memory(|memory| memory.has_focus(editor)));
+                assert!(!panel.focus_textedit_next_frame);
+            } else {
+                assert!(ctx.memory(|memory| memory.has_focus(query_id)));
+            }
+        }
     }
 
     #[test]

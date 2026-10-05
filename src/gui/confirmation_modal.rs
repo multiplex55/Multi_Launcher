@@ -104,6 +104,27 @@ impl DestructiveAction {
             _ => None,
         }
     }
+
+    /// Resolve confirmation metadata for a radial operation that may have
+    /// arrived through a generic primary result rather than a curated action
+    /// id. Keep this fallback radial-only so legacy primary activation retains
+    /// its established confirmation path.
+    pub fn from_radial_operation(
+        action: &crate::universal_actions::UniversalAction,
+    ) -> Option<Self> {
+        Self::from_universal_action(action).or_else(|| {
+            let command = match &action.operation {
+                crate::universal_actions::UniversalActionOperation::Command { command, .. } => {
+                    return Self::from_command(command);
+                }
+                crate::universal_actions::UniversalActionOperation::InvokePrimary(primary) => {
+                    crate::commands::parse_action(primary).ok()?
+                }
+                crate::universal_actions::UniversalActionOperation::UiIntent(_) => return None,
+            };
+            Self::from_command(&command)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +250,9 @@ impl Default for ConfirmationModal {
 }
 
 impl ConfirmationModal {
+    pub(crate) fn close(&mut self) {
+        self.open = false;
+    }
     pub(crate) fn is_open(&self) -> bool {
         self.open
     }

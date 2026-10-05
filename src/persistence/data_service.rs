@@ -667,6 +667,30 @@ mod tests {
     }
 
     #[test]
+    fn radial_group_target_is_preserved_through_data_service_boundary() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut service = DataService::start_with_backend(
+            TestBackend {
+                behavior: Behavior::Immediate,
+                calls: Arc::clone(&calls),
+            },
+            || {},
+        )
+        .unwrap();
+        let request = DataServiceRequest::StageRecovery(StagedRecoveryAction::Restore {
+            target: super::super::RecoveryTarget::Group(super::super::RecoveryGroupId::Radial),
+            snapshot_id: "snapshot".into(),
+        });
+
+        service.submit(request.clone()).unwrap();
+        let completion = wait_for_results(&service, 1);
+
+        assert_eq!(completion[0].request, request);
+        assert_eq!(calls.lock().unwrap().as_slice(), &[request]);
+        service.shutdown();
+    }
+
+    #[test]
     fn pending_slot_is_capacity_one_and_reports_replacement() {
         let (started_tx, started_rx) = channel();
         let (release_tx, release_rx) = channel();

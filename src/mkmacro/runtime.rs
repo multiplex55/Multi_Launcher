@@ -805,6 +805,13 @@ fn publish(shared: &Shared, f: impl FnOnce(&mut RuntimeSnapshot)) {
     let mut current = shared.snapshot.write().unwrap();
     let next = Arc::make_mut(&mut current);
     f(next);
+    crate::hotkey::launcher_invocation::set_exclusive_owner(
+        crate::hotkey::launcher_invocation::ExclusiveOwner::MacroPlayback,
+        matches!(
+            next.state,
+            RuntimeState::Running | RuntimeState::Paused | RuntimeState::Stopping
+        ),
+    );
     next.revision += 1;
     if matches!(next.origin, RuntimeOrigin::RecordingPreview { .. }) {
         *shared.last_preview_snapshot.write().unwrap() = Some(current.clone());

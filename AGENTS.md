@@ -14,10 +14,13 @@ When operating in this repository, act as a careful senior software engineer wor
 6. Backward compatibility
 7. Minimal unnecessary complexity
 8. Efficient implementation and verification
+9. Scope discipline
 
 Do not optimize merely for producing the smallest diff or completing a task as quickly as possible.
 
 A slightly larger change that establishes the correct architectural boundary is preferable to a localized workaround that increases long-term complexity.
+
+At the same time, do not turn a focused task into a broad refactor, regression campaign, or validation initiative without a concrete technical reason.
 
 ---
 
@@ -27,11 +30,13 @@ Multi Launcher is primarily a Rust desktop application.
 
 The repository contains multiple features and plugins that may interact with shared launcher, GUI, command-processing, configuration, Windows-integration, and utility infrastructure.
 
-Changes to one subsystem must account for its interactions with the rest of the application.
+Changes to one subsystem must account for relevant interactions with the rest of the application.
 
 Before changing an established subsystem, inspect its callers, tests, data structures, and adjacent abstractions sufficiently to understand the existing architecture.
 
 Do not assume that the file named in a task is the only file that should change.
+
+Do not assume that every neighboring subsystem needs to be revalidated merely because it shares infrastructure.
 
 ---
 
@@ -59,6 +64,26 @@ Prefer the interpretation that preserves the requested behavior while fitting th
 
 ---
 
+# Current Task Authority
+
+The current user request, current implementation goal, and current milestone instructions define the active scope.
+
+Historical plans, milestone documents, acceptance matrices, reports, logs, test methodologies, candidate procedures, and prior initiative-specific instructions are reference material only unless the current task explicitly adopts them.
+
+Do not automatically inherit verification procedures from an older feature branch or previous remediation effort.
+
+In particular:
+
+* a historical full-regression requirement does not automatically apply to a new focused task;
+* a historical acceptance harness does not automatically become a required gate;
+* previous candidate-cycle procedures do not automatically apply;
+* previous native/manual test matrices do not automatically apply;
+* old milestone terminology does not override the current task.
+
+If a current task explicitly defines a testing or verification budget, that budget is authoritative unless following it would make meaningful verification impossible. If broader verification becomes genuinely necessary, explain the concrete reason rather than silently expanding scope.
+
+---
+
 # General Engineering Rules
 
 ## Understand Before Editing
@@ -76,6 +101,12 @@ First establish:
 
 Repository exploration is part of implementation, not optional overhead.
 
+However, exploration must remain proportional to the task.
+
+Stop expanding investigation once the relevant architecture, ownership boundary, and implementation path are sufficiently understood.
+
+Do not inspect unrelated subsystems merely to make the investigation appear more comprehensive.
+
 ---
 
 ## Prefer Root-Cause Changes
@@ -91,9 +122,12 @@ Avoid:
 * stringly typed APIs when a meaningful type can represent the concept;
 * UI code owning domain behavior that belongs elsewhere;
 * business logic duplicated between UI paths;
-* patches that bypass an existing abstraction rather than correcting it.
+* patches that bypass an existing abstraction rather than correcting it;
+* downstream workarounds for failures whose owner is known upstream.
 
 When performing a refactor, migrate ownership deliberately rather than merely adding another path beside the old one.
+
+For bug fixes, identify the first responsible boundary that fails and fix the defect there whenever practical.
 
 ---
 
@@ -115,7 +149,9 @@ Pay particular attention to:
 * public/internal APIs used by multiple modules;
 * existing tests representing legitimate behavior.
 
-If existing behavior must change to satisfy the task, make that change explicit and cover it with tests.
+If existing behavior must change to satisfy the task, make that change explicit and cover the changed behavior appropriately.
+
+Preserving behavior does not require retesting every unrelated feature in the repository.
 
 ---
 
@@ -136,24 +172,41 @@ Do not opportunistically refactor unrelated systems merely because they could be
 
 If you discover unrelated problems, report them separately rather than expanding the current milestone.
 
+Do not convert a surgical bug fix into a general reliability initiative.
+
+Do not convert a narrow feature into an application-wide architecture cleanup.
+
+Do not create additional milestones merely because more work could theoretically be done.
+
 ---
 
-# Long-Running Implementation Workflow
+# Implementation Workflow
 
-Large tasks should be treated as an ordered engineering pipeline rather than as one undifferentiated change.
+Use a workflow proportional to the size of the task.
 
-The expected lifecycle is:
+A typical substantial task should follow:
 
-1. Investigate
-2. Plan
-3. Implement one milestone
-4. Verify
-5. Commit
-6. Repeat
-7. Perform full verification
-8. Perform independent review
-9. Resolve findings
-10. Perform final verification
+1. Investigate relevant code
+2. Establish a bounded plan
+3. Implement a coherent milestone
+4. Run targeted verification
+5. Inspect the diff
+6. Review when appropriate
+7. Commit when required
+8. Continue to the next milestone if one exists
+
+A small task may require only one implementation milestone.
+
+Do not automatically add:
+
+* exhaustive final qualification;
+* candidate cycles;
+* repeated validation rounds;
+* repository-wide testing;
+* repeated independent reviews;
+* native/manual acceptance campaigns;
+
+unless the current task actually requires them.
 
 ---
 
@@ -161,7 +214,7 @@ The expected lifecycle is:
 
 For a substantial feature or refactor, create or obtain an explicit implementation plan before making broad source changes.
 
-A good plan must contain bounded milestones.
+A good plan contains bounded milestones.
 
 Each milestone should specify:
 
@@ -172,13 +225,65 @@ Each milestone should specify:
 * dependencies on earlier milestones;
 * required behavior;
 * invariants that must remain true;
-* test changes;
+* test changes where needed;
 * acceptance criteria;
 * verification steps.
 
 Milestones should be ordered so foundational abstractions are established before dependent code is migrated.
 
-Prefer milestones that can each be implemented, tested, and committed independently.
+Use the fewest milestones that preserve clear ownership and make progress independently understandable.
+
+Do not split straightforward work into excessive planning stages.
+
+---
+
+## Planner-to-Implementer Handoff Standard
+
+The planner should optimize for implementation clarity, not for maximizing planning work.
+
+Inspect enough repository state to identify:
+
+* the real architectural owner;
+* relevant callers;
+* dependencies;
+* invariants;
+* migration boundaries;
+* directly relevant tests.
+
+Stop expanding the planning investigation once the implementer can execute the milestone confidently.
+
+Do not:
+
+* pre-implement the milestone;
+* debug hypothetical compiler failures;
+* exhaustively inspect unrelated subsystems;
+* run broad builds or test suites merely to create a more detailed plan;
+* produce large speculative test matrices.
+
+Planning should normally use read-only source and test inspection.
+
+Execute tooling during planning only when genuinely needed to resolve a concrete ambiguity.
+
+Each milestone handed to an implementation agent should be explicit about:
+
+* **Objective** — the concrete end state to create;
+* **Architectural ownership** — which component owns the behavior and why;
+* **Relevant current state** — only facts the implementer would otherwise have to rediscover;
+* **Scope** — concrete modules, types, functions, call sites, or data flows when known;
+* **Required changes** — ordered behavior and integration steps;
+* **Invariants** — existing behavior and compatibility that must remain true;
+* **Non-goals** — nearby work intentionally outside the milestone;
+* **Dependencies** — earlier milestones or assumptions that must already hold;
+* **Tests** — behavior that genuinely needs testing or existing tests that need migration;
+* **Verification** — the narrowest useful commands or checks;
+* **Done criteria** — an objective completion checklist;
+* **Genuine uncertainties** — only facts the implementer truly needs to confirm.
+
+The planner should use exact paths and symbol names when supported by inspection, but must not invent them.
+
+Short signatures or pseudocode are appropriate only when they clarify an important interface or state transition.
+
+Ordinary helper naming, local Rust ownership choices, compiler-driven adjustments, and equivalent low-level implementation details belong to the implementation agent.
 
 Avoid milestones such as:
 
@@ -192,28 +297,30 @@ Prefer concrete milestones such as:
 
 # Persistent Plan State
 
-For long-running work, do not rely solely on conversation history to remember progress.
+For genuinely long-running work, do not rely solely on conversation history to remember progress.
 
-When an implementation plan is persisted in the repository or workspace, treat it as the execution ledger.
+When an implementation plan is persisted in the repository or workspace, it may serve as the execution ledger.
 
-Use clear milestone states such as:
+Useful milestone states include:
 
 * `pending`
 * `in_progress`
 * `complete`
 * `blocked`
 
-Update the plan after completing meaningful milestones when the orchestration workflow expects persistent progress tracking.
+Update persistent plan state when the active workflow benefits from it.
+
+Do not create or maintain a persistent execution ledger for a small task that does not need one.
 
 Do not mark a milestone complete merely because code was written.
 
-It is complete only after its acceptance criteria and required verification have succeeded.
+It is complete when its acceptance criteria and required scoped verification have succeeded.
 
 ---
 
 # Sequential Write Rule
 
-Write-heavy implementation milestones that affect the same repository state must execute sequentially.
+Write-heavy implementation milestones affecting the same repository state must execute sequentially.
 
 Only one implementation agent should own source modifications for a shared milestone at a time.
 
@@ -225,17 +332,18 @@ Do not run multiple agents concurrently that may:
 * update the same tests;
 * depend on uncommitted shared changes.
 
-Parallel agents are appropriate for read-only work such as:
+Parallel agents are appropriate for bounded read-only work such as:
 
 * repository exploration;
 * locating call sites;
 * architecture analysis;
-* test analysis;
+* targeted test analysis;
 * researching an unfamiliar internal subsystem;
-* reviewing completed changes;
-* identifying potential regressions.
+* reviewing completed changes.
 
-Parallel investigation must converge back to a single writer before source changes are applied.
+Parallel investigation must converge back to a single writer before overlapping source changes are applied.
+
+Do not use multiple agents merely because they are available.
 
 ---
 
@@ -251,7 +359,7 @@ Understand:
 * dependencies;
 * acceptance criteria;
 * architectural purpose;
-* required tests.
+* required tests and verification scope.
 
 Do not implement only the literal wording while ignoring the architectural goal.
 
@@ -262,29 +370,53 @@ Do not implement only the literal wording while ignoring the architectural goal.
 Before modifying source:
 
 * locate the current implementation;
-* identify callers;
+* identify relevant callers;
 * inspect relevant types;
-* inspect existing tests;
-* identify any legacy path that will need migration;
+* inspect directly relevant tests;
+* identify legacy paths that genuinely require migration;
 * identify assumptions that could be invalidated.
+
+Do not turn this step into an exhaustive repository audit.
 
 ---
 
 ## 3. Implement the Smallest Complete Architectural Change
 
-Make the milestone complete without unnecessarily implementing later milestones.
+Make the milestone complete without unnecessarily implementing later or unrelated work.
 
-Do not leave knowingly broken intermediate states unless the plan explicitly requires a temporary state and the repository still compiles and tests appropriately.
+Prefer reuse of existing abstractions when they already model the required behavior.
 
-Prefer explicit types, narrow interfaces, and clear ownership.
+Do not create a parallel subsystem merely because changing the existing one requires understanding it.
+
+Avoid knowingly broken intermediate states unless the plan explicitly requires one.
+
+Prefer:
+
+* explicit types;
+* narrow interfaces;
+* clear ownership;
+* direct control flow;
+* minimal duplicated state.
 
 ---
 
-## 4. Update Tests
+## 4. Update Tests Where They Add Value
 
-Tests are part of implementation.
+Tests are part of implementation, but test scope must match change scope.
 
-Add tests for new behavior and update existing tests when an intentional architectural change invalidates implementation-specific assumptions.
+Add or modify tests when they provide meaningful protection for:
+
+* new behavior;
+* a reproduced bug;
+* a changed invariant;
+* a changed architectural boundary;
+* an intentional behavior migration.
+
+Do not add tests merely to increase test count.
+
+Do not duplicate existing coverage without a reason.
+
+Do not create an exhaustive matrix for a narrow change unless the behavior itself genuinely requires one.
 
 Do not:
 
@@ -294,13 +426,13 @@ Do not:
 * replace behavioral tests with trivial existence tests;
 * hide failures.
 
-If a test represents obsolete implementation details but valid behavior still needs protection, rewrite the test around the intended behavior.
+If an existing test represents obsolete implementation details but valid behavior still needs protection, rewrite the test around the intended behavior.
 
 ---
 
 ## 5. Verify the Milestone
 
-Run the narrowest useful validation first.
+Run the narrowest useful validation that gives meaningful evidence for the code that changed.
 
 Examples include:
 
@@ -308,20 +440,23 @@ Examples include:
 cargo nextest run <filter>
 cargo test <target>
 cargo check
+cargo check -p <package>
 cargo build
 ```
 
-Use targeted verification during implementation for fast feedback.
+Prefer exact test-name, target, package, or module filters when practical.
 
-Before considering the milestone complete, ensure the relevant affected tests pass.
+During iteration, rerun only the smallest command needed to validate the latest correction.
 
-Fix failures introduced by the milestone before proceeding.
+Before considering the milestone complete, ensure the tests and checks relevant to its acceptance criteria pass.
+
+Do not automatically broaden verification after targeted verification succeeds.
 
 ---
 
 ## 6. Inspect the Diff
 
-Before committing, inspect the actual resulting diff.
+Before considering the milestone complete or committing, inspect the actual resulting diff.
 
 Check for:
 
@@ -330,7 +465,7 @@ Check for:
 * temporary logging;
 * commented-out old implementations;
 * duplicated behavior;
-* stale compatibility paths;
+* stale compatibility paths created by the change;
 * accidental formatting churn;
 * unrelated modifications;
 * incomplete migrations.
@@ -339,13 +474,15 @@ Do not assume that a successful build means the change is correct.
 
 ---
 
-## 7. Commit the Milestone
+## 7. Commit When Required
 
-Once the milestone is complete and verified, commit it before starting the next milestone.
+If the workflow calls for commits, commit a coherent completed milestone before beginning a dependent milestone.
 
-Each milestone should normally correspond to one coherent commit.
+Each meaningful milestone should normally correspond to a coherent commit.
 
-Do not combine several unrelated architectural milestones into one giant commit when they can reasonably stand independently.
+Do not artificially split tiny changes into many commits merely to match a process template.
+
+Do not combine unrelated architectural work into one commit.
 
 ---
 
@@ -372,9 +509,9 @@ Never discard work that you did not create.
 
 ## Working Tree Safety
 
-Before significant implementation and before commits, inspect Git state.
+Before significant implementation and before commits, inspect Git state as appropriate.
 
-At minimum, understand:
+Useful commands include:
 
 ```text
 git status
@@ -401,7 +538,7 @@ fix(crop): preserve selection bounds during resize
 test(commands): migrate dispatcher coverage
 ```
 
-The commit body should be included when the architectural purpose is not obvious from the subject.
+Include a commit body when the architectural purpose is not obvious from the subject.
 
 A useful commit message explains:
 
@@ -421,8 +558,6 @@ boundaries.
 Migrate existing command handlers and their tests while preserving current
 launcher command behavior.
 ```
-
-Avoid commit messages that are merely lists of filenames.
 
 Avoid vague subjects such as:
 
@@ -486,7 +621,7 @@ Avoid adding `unsafe` unless required by FFI, Windows APIs, or another legitimat
 
 Keep unsafe regions as narrow as practical.
 
-Document the safety assumptions when they are not immediately obvious.
+Document safety assumptions when they are not immediately obvious.
 
 ---
 
@@ -496,7 +631,7 @@ Do not add a new production dependency merely for convenience when the requireme
 
 * the standard library;
 * an existing dependency;
-* or existing project infrastructure.
+* existing project infrastructure.
 
 When a new dependency is genuinely justified:
 
@@ -522,6 +657,10 @@ When modifying egui/eframe code:
 
 Do not solve architectural problems by moving more unrelated logic into the primary application struct.
 
+Do not introduce pixel-level or screenshot-level automated validation unless visual precision is an explicit requirement of the task.
+
+For ordinary GUI changes, behavioral/state-level verification is preferred.
+
 ---
 
 # Windows-Specific Code
@@ -540,23 +679,27 @@ When modifying Windows integration:
 
 Do not assume primary-monitor-only behavior unless the feature explicitly requires it.
 
+When debugging Windows input, hooks, focus, window activation, or message handling, fix failures at their actual ownership boundary.
+
+Do not add duplicate hooks, polling systems, synthetic input, arbitrary delays, or focus workarounds merely to compensate for an unresolved underlying bug.
+
 ---
 
 # Compatibility and Migration Rules
 
 When replacing an existing subsystem:
 
-1. identify all callers;
+1. identify relevant callers;
 2. introduce the replacement;
-3. migrate callers;
-4. migrate tests;
-5. verify behavioral parity;
+3. migrate affected callers;
+4. migrate directly affected tests;
+5. verify required behavioral parity;
 6. remove obsolete paths when safe;
 7. search for stale references afterward.
 
 Do not leave two competing implementations indefinitely unless compatibility explicitly requires both.
 
-After migration, search for references to:
+After migration, search where relevant for:
 
 * old types;
 * old functions;
@@ -564,34 +707,103 @@ After migration, search for references to:
 * duplicated handlers;
 * temporary adapters.
 
-A refactor is not complete while normal execution can unexpectedly bypass the new architecture.
+A refactor is not complete while normal execution can unexpectedly bypass the intended architecture.
+
+The size of the migration determines the size of the verification effort. A migration does not automatically require repository-wide regression testing.
 
 ---
 
 # Testing Standard
 
-Cargo Nextest is the primary Rust test runner for this repository.
+Cargo Nextest is the preferred Rust test runner for this repository.
 
-Prefer:
+Use targeted Nextest invocations whenever they provide meaningful coverage of the code being changed.
+
+Examples:
+
+```text
+cargo nextest run <filter>
+cargo nextest run -p <package> <filter>
+```
+
+The default verification philosophy is:
+
+> Test the behavior being changed and the directly affected invariants.
+
+Verification should be **scope-proportionate**, not automatically progressive from narrow tests to the entire repository.
+
+A typical focused change may require only:
+
+1. the directly affected unit/module test;
+2. one relevant subsystem/integration test if the behavior crosses that boundary;
+3. an appropriate compile/check command if needed.
+
+Stop when the task's acceptance criteria have meaningful evidence.
+
+---
+
+## Full-Suite Testing Is Not Automatic
+
+A complete:
 
 ```text
 cargo nextest run
 ```
 
-for the final Rust test suite.
+is **not** automatically required merely because a change is substantial.
 
-During development, targeted Nextest filters are encouraged when they provide faster feedback.
+Run a full or broad suite when one of the following is true:
 
-Testing should proceed from narrow to broad:
+1. the user explicitly requests it;
+2. the current task or milestone explicitly requires it;
+3. the change genuinely affects a broad shared subsystem whose consumers cannot reasonably be covered through focused tests;
+4. targeted verification exposes evidence of collateral failures;
+5. there is a concrete technical reason that correctness cannot be established at a narrower scope.
 
-1. affected unit/module tests;
-2. affected subsystem tests;
-3. broader regression tests;
-4. complete `cargo nextest run`.
+When broadening beyond the requested verification scope, state the concrete reason.
 
-Do not repeatedly run the entire suite after every trivial edit when a targeted test provides equivalent feedback.
+Do not silently transform targeted verification into repository-wide regression testing.
 
-However, targeted tests do not replace final full-suite verification for substantial changes.
+---
+
+## User-Defined Verification Budgets
+
+When a task explicitly limits testing or specifies a verification budget, follow that instruction.
+
+For example, if a task says to test only touched behavior:
+
+* do not run unrelated plugin tests;
+* do not run unrelated GUI tests;
+* do not run unrelated acceptance suites;
+* do not run historical regression matrices;
+* do not perform pixel-level validation;
+* do not automatically run the entire repository.
+
+The existence of additional tests does not make them mandatory.
+
+Historical plan documents do not override the current verification budget unless explicitly incorporated into the current task.
+
+---
+
+## Avoid Redundant Validation
+
+Do not run several layers of tests that prove the same narrow invariant unless there is a concrete reason.
+
+For example, do not automatically require all of:
+
+```text
+unit test
+module suite
+subsystem suite
+application suite
+native acceptance suite
+full repository suite
+manual regression matrix
+```
+
+for a small behavior change.
+
+Choose the lowest-cost combination that meaningfully establishes correctness.
 
 ---
 
@@ -605,9 +817,11 @@ When compilation fails:
 2. determine whether later errors are cascading;
 3. fix the root cause;
 4. rerun the smallest useful command;
-5. continue until compilation succeeds.
+5. continue until the relevant target compiles.
 
 Do not stop and ask the user what to do merely because code does not compile on the first attempt.
+
+Do not repeatedly rebuild unrelated targets while fixing a local compile error.
 
 ---
 
@@ -626,6 +840,32 @@ Determine whether the failure represents:
 Fix the appropriate layer.
 
 Never modify expected values simply to match incorrect new behavior.
+
+A failing unrelated test discovered incidentally should be reported and investigated only as far as necessary to determine whether the current change caused it.
+
+Do not absorb an unrelated existing failure into the current task without justification.
+
+---
+
+# Manual Validation
+
+Manual validation is appropriate when behavior depends on real operating-system interaction that cannot be represented economically by an automated test.
+
+Examples may include:
+
+* global keyboard hooks;
+* mouse hooks;
+* focus transitions;
+* window activation;
+* native dialogs;
+* firmware-generated keyboard macros;
+* multi-monitor interaction.
+
+Use the smallest manual smoke test that establishes the required real-world behavior.
+
+Do not create large manual acceptance matrices unless the current task explicitly requires one.
+
+Do not attempt to automate every pixel, click, focus transition, or native interaction solely to eliminate a small manual smoke check.
 
 ---
 
@@ -653,7 +893,7 @@ Examples of decisions that should usually be made autonomously:
 * straightforward error propagation;
 * minor UI layout details consistent with existing patterns.
 
-When several approaches are viable, prefer the approach that best matches the repository.
+When several approaches are viable, prefer the approach that best matches the repository while introducing the least unnecessary new architecture.
 
 ---
 
@@ -671,99 +911,118 @@ Examples:
 
 Do not stop for routine implementation difficulty.
 
+Do not ask the user to decide ordinary engineering details the codebase already makes reasonably inferable.
+
 ---
 
 # No Premature Completion
 
-Do not declare a task complete because:
+Do not declare a task complete merely because:
 
 * the primary file was modified;
 * compilation succeeds;
-* one happy-path test passes;
-* the requested UI appears;
+* one irrelevant or insufficient test passes;
+* the requested UI appears without the requested behavior working;
 * most milestones are complete.
 
-Completion requires satisfying the actual acceptance criteria.
+Completion requires satisfying the actual acceptance criteria within the defined scope.
 
-For large tasks, every planned milestone must either be:
+For a multi-milestone task, each required milestone must either be:
 
 * complete; or
 * explicitly documented as blocked for a genuine external reason.
 
+This requirement does not imply broad regression testing outside the task scope.
+
 ---
 
-# Full Pipeline Verification
+# Scope-Proportionate Final Verification
 
-After all implementation milestones are complete:
+After implementation is complete:
 
 1. inspect the cumulative diff;
-2. search for obsolete or duplicate implementation paths;
-3. verify migrations are complete;
-4. verify relevant configuration/serialization compatibility;
-5. run the complete required Rust test suite;
+2. confirm the intended architecture/path is being used;
+3. search for obsolete or duplicate paths introduced or made obsolete by this change where relevant;
+4. verify compatibility concerns directly affected by the task;
+5. run the targeted tests/checks required by the task;
 6. resolve failures introduced by the change;
 7. inspect Git status;
 8. ensure only intentional changes remain.
 
-At minimum, substantial Rust work should finish with:
+Do not automatically run the complete repository test suite at this stage.
 
-```text
-cargo nextest run
-```
+Final verification means:
 
-Run additional compilation, formatting, or lint verification when appropriate for the scope of the change or when required by repository tooling.
+> enough verification to establish the requested behavior and directly affected invariants with reasonable confidence.
+
+It does not mean:
+
+> run every available test because implementation has ended.
+
+Additional compilation, formatting, linting, testing, or manual checks should be proportional to the change or explicitly required by repository tooling or the active task.
 
 ---
 
 # Independent Review Phase
 
-Large features and architectural refactors should receive an independent review after implementation.
+Independent review is useful for:
 
-The reviewer should inspect:
+* substantial features;
+* architectural changes;
+* difficult bug fixes;
+* changes involving shared infrastructure;
+* changes where the current task explicitly requests review.
 
-* the original request;
-* implementation plan;
-* cumulative diff;
-* relevant surrounding source;
-* tests.
+The reviewer should inspect only enough surrounding source to understand the affected architecture.
 
 Review for:
 
 * correctness defects;
 * incomplete requirements;
-* regressions;
 * ownership problems;
 * duplicate architecture;
-* stale legacy paths;
+* stale paths created by the change;
 * unnecessary complexity;
 * weak abstractions;
-* missing tests;
-* tests that no longer prove intended behavior;
-* error paths;
-* concurrency/lifecycle problems where relevant.
+* directly relevant missing tests;
+* tests that no longer prove the intended behavior;
+* relevant error paths;
+* concurrency/lifecycle problems where applicable.
 
 Prioritize concrete findings over stylistic preferences.
 
-If substantive findings are identified, resolve them before final completion and rerun affected tests.
+The reviewer should not automatically:
+
+* redesign working code;
+* broaden the feature;
+* initiate a repository-wide audit;
+* run an exhaustive regression campaign;
+* revive historical acceptance procedures;
+* demand additional tests solely for completeness.
+
+If substantive findings are identified, resolve them and rerun the affected targeted verification.
 
 ---
 
 # Completion Criteria
 
-A task is complete only when all applicable conditions are true:
+A task is complete when all applicable conditions are true:
 
 * requested behavior is implemented;
 * architectural goals are satisfied;
-* affected existing behavior remains correct;
+* directly affected existing behavior remains correct;
 * implementation is integrated through the intended path;
-* obsolete paths have been removed when appropriate;
-* tests were added or migrated where needed;
-* targeted verification passes;
-* full required verification passes;
-* review findings are resolved;
+* obsolete paths made unnecessary by the change are removed where appropriate;
+* meaningful tests were added or migrated where needed;
+* required targeted verification passes;
+* any explicitly requested broader verification passes;
+* relevant review findings are resolved;
 * Git diff contains no accidental changes;
-* intended changes are committed when the workflow requires commits;
-* working tree is clean at the expected completion point.
+* intended changes are committed when the workflow requires commits.
+
+A clean entire-repository test suite is not an implicit completion requirement unless the active task requires it.
+
+Do not continue adding validation after these criteria are satisfied merely because more tests or checks exist.
 
 ---
 
@@ -785,17 +1044,23 @@ List meaningful tests added, migrated, or updated.
 
 ## Verification
 
-Report the actual commands run and whether they passed.
+Report the actual commands and manual checks performed and whether they passed.
 
-Do not claim a command passed unless it was actually executed successfully.
+Do not claim a command or check passed unless it was actually executed successfully.
+
+Clearly distinguish:
+
+* targeted tests that were run;
+* broader tests that were intentionally not required;
+* manual validation that still requires the user, if any.
 
 ## Commits
 
-When the workflow includes commits, report the created commit subjects and hashes if available.
+When the workflow includes commits, report created commit subjects and hashes if available.
 
 ## Remaining Issues
 
-Report genuine known limitations, follow-up work, or unresolved risks.
+Report genuine known limitations, follow-up work, or unresolved risks within or directly adjacent to the implemented scope.
 
 Do not manufacture follow-up work merely to fill this section.
 
@@ -807,30 +1072,84 @@ If none remain, state that no known issues remain within the implemented scope.
 
 When operating as the parent/orchestration agent:
 
-* use specialized planning, implementation, and review agents when available;
-* keep the parent focused on project state, milestone coordination, verification, and Git boundaries;
-* delegate repository-heavy investigation where useful;
-* execute write-heavy milestones sequentially;
+* use specialized planning, implementation, and review agents when they materially improve the task;
+* do not create extra agents or stages merely because the capability exists;
+* hand each implementation agent one explicit milestone packet containing its objective, scope, required changes, invariants, non-goals, tests, verification, and done criteria;
+* do not make the implementation agent reconstruct the planner's intent from a broad project narrative;
+* preserve the planner's scope boundaries when delegating;
+* add clarification only when current repository state materially differs from the plan;
+* keep the parent focused on project state, milestone coordination, scope, and Git boundaries;
+* delegate bounded repository investigation where useful;
+* execute overlapping write-heavy work sequentially;
 * do not allow multiple agents to make overlapping source changes concurrently;
-* verify each milestone before committing it;
-* commit completed milestones before beginning dependent milestones;
-* continue automatically to the next milestone after successful verification;
-* run an independent review after the implementation pipeline completes.
+* use targeted milestone verification;
+* commit completed milestones when the workflow requires it;
+* continue to the next milestone after successful scoped verification;
+* use independent review when risk, architecture, or the current goal warrants it.
+
+Do not automatically create:
+
+* candidate cycles;
+* qualification rounds;
+* repeated review loops;
+* broad regression gates;
+* repeated native acceptance passes.
+
+Those workflows are appropriate only when explicitly required by the current task.
+
+---
+
+## Planner Agent
+
+When operating as a planner:
+
+* inspect only enough code to identify the real implementation path;
+* give the implementer explicit and well-scoped instructions;
+* identify architectural ownership clearly;
+* identify directly relevant invariants and tests;
+* state important non-goals;
+* specify narrow verification;
+* avoid speculative implementation detail;
+* avoid unnecessary repository-wide investigation;
+* avoid turning straightforward changes into many milestones.
+
+The planner's job is to reduce ambiguity for the implementer, not to maximize planning volume.
+
+---
+
+## Implementation Agent
 
 When operating as a child implementation agent:
 
+* treat the assigned milestone packet as the executable scope contract;
 * implement only the assigned milestone;
-* inspect necessary surrounding code;
-* do not independently expand the overall project plan;
+* inspect necessary surrounding code to validate and execute that scope;
+* do not re-plan the overall initiative unless the assigned assumptions are materially wrong;
+* do not independently expand project scope;
 * do not begin later milestones;
-* report completed changes and verification back to the parent.
+* reuse existing architecture where appropriate;
+* fix root causes rather than layering workarounds;
+* run only the required scoped verification;
+* report completed changes and actual verification back to the parent.
+
+If broader work appears necessary, report why rather than silently absorbing it.
+
+---
+
+## Review Agent
 
 When operating as a review agent:
 
 * prefer read-only inspection;
+* understand the active task and its non-goals;
+* inspect the diff and directly relevant surrounding code;
 * report concrete findings;
 * do not redesign working code based solely on stylistic preference;
-* prioritize correctness, regressions, architecture, and test coverage.
+* prioritize correctness, ownership, integration, and directly affected behavior;
+* respect the task's verification budget;
+* do not initiate unrelated testing or refactoring.
+
+A review should improve confidence in the submitted change, not create a new project.
 
 ---
 
@@ -852,9 +1171,17 @@ Read focused regions of large files rather than repeatedly dumping entire files 
 
 Use compiler and test feedback diagnostically.
 
-Avoid repeated full-suite executions while actively iterating on a narrowly scoped failure.
+Avoid repeated full-suite executions while iterating on a narrowly scoped failure.
 
-Do not sacrifice correctness for token, context, or runtime efficiency, but avoid unnecessary investigation once the relevant architecture is sufficiently understood.
+Avoid rebuilding unchanged expensive targets when a smaller command answers the current question.
+
+Do not repeatedly re-investigate architecture that has already been established unless new evidence invalidates the earlier understanding.
+
+Do not create artificial waiting or polling cycles around long-running commands.
+
+Prefer completion/failure notifications or direct process completion when tooling supports them.
+
+Do not sacrifice correctness for token, context, or runtime efficiency, but avoid unnecessary investigation and validation once sufficient evidence exists.
 
 ---
 
@@ -879,6 +1206,8 @@ Avoid comments that merely restate what the code obviously does.
 
 Update user-facing or developer documentation when the task materially changes documented behavior or workflow.
 
+Do not update unrelated documentation merely to increase task completeness.
+
 ---
 
 # Prohibited Shortcuts
@@ -892,11 +1221,15 @@ Do not:
 * duplicate an existing subsystem instead of integrating with it;
 * leave dead code as a permanent fallback without justification;
 * introduce arbitrary sleeps to hide synchronization bugs;
+* create synthetic focus/input workarounds instead of fixing known ownership bugs;
 * silently discard user changes;
 * commit unrelated modifications;
 * claim tests were run when they were not;
-* claim requirements are complete without verifying them;
-* bypass established architecture solely because doing so produces a smaller diff.
+* claim requirements are complete without meaningful verification;
+* bypass established architecture solely because doing so produces a smaller diff;
+* expand a task into unrelated cleanup without authorization;
+* run expensive broad validation solely because an older plan required it;
+* treat historical acceptance procedures as automatically binding.
 
 ---
 
@@ -911,3 +1244,17 @@ The objective is not simply:
 The objective is:
 
 > make the requested behavior work through an architecture that remains understandable, testable, maintainable, and difficult to misuse.
+
+But engineering rigor must remain proportional to the task.
+
+The companion principle is:
+
+> perform enough investigation, implementation, review, and verification to establish correctness — then stop.
+
+A focused task should remain focused.
+
+A targeted bug fix should not become a regression initiative.
+
+A feature that can reuse an existing abstraction should not create a parallel system.
+
+Tests should prove the behavior being changed, not serve as an excuse to revalidate the entire application.

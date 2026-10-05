@@ -6,16 +6,103 @@ use crate::commands::{
     CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
     FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
     LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    PendingQueryPolicy, QueryPolicy, ResultsPolicy, ScreenDrawCommandHost, ScreenshotCommandHost,
-    ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy,
-    TodoCommandHost, VisibilityPolicy,
+    PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
+    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup,
+    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
-use super::{LauncherApp, Toast, ToastKind, ToastOptions, push_toast};
+use super::{LauncherApp, Toast, ToastKind, ToastOptions};
 
 impl LauncherCommandHost for LauncherApp {
     fn launcher_is_visible(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst)
+    }
+}
+
+fn split_virtual_desktop_outcome(
+    mut completion_outcome: CommandOutcome,
+) -> (CommandOutcome, CommandOutcome) {
+    let immediate_outcome = CommandOutcome {
+        query: std::mem::replace(&mut completion_outcome.query, QueryPolicy::Keep),
+        pending_query: std::mem::replace(
+            &mut completion_outcome.pending_query,
+            PendingQueryPolicy::Keep,
+        ),
+        search: std::mem::take(&mut completion_outcome.search),
+        invalidate_results: std::mem::take(&mut completion_outcome.invalidate_results),
+        results: std::mem::replace(&mut completion_outcome.results, ResultsPolicy::Keep),
+        visibility: std::mem::replace(&mut completion_outcome.visibility, VisibilityPolicy::Keep),
+        restore: std::mem::take(&mut completion_outcome.restore),
+        focus: std::mem::take(&mut completion_outcome.focus),
+        move_cursor_end: std::mem::take(&mut completion_outcome.move_cursor_end),
+        activate_first_result: completion_outcome.activate_first_result.take(),
+        ..CommandOutcome::default()
+    };
+    (immediate_outcome, completion_outcome)
+}
+
+fn normalize_outcome_for_root_policy(
+    outcome: CommandOutcome,
+    root_policy: crate::universal_actions::RootLauncherPolicy,
+) -> CommandOutcome {
+    if root_policy == crate::universal_actions::RootLauncherPolicy::Legacy {
+        return outcome;
+    }
+
+    // These policies all mutate the ordinary launcher surface. Preserve the
+    // non-ROOT completion effects while leaving query, results, focus, and
+    // visibility decisions to their existing owners.
+    CommandOutcome {
+        history: outcome.history,
+        toasts: outcome.toasts,
+        favorite_log: outcome.favorite_log,
+        ..CommandOutcome::default()
+    }
+}
+
+impl RadialCommandHost for LauncherApp {
+    fn radial_is_enabled(&self) -> bool {
+        super::radial_control_client().is_some_and(|client| client.is_enabled())
+    }
+
+    fn request_radial_control(
+        &mut self,
+        request: crate::radial::control::RadialControlRequest,
+    ) -> Result<(), String> {
+        super::radial_control_client()
+            .ok_or_else(|| "radial runtime service is unavailable".to_owned())?
+            .send(request)
+            .map_err(|error| error.to_string())
+    }
+
+    fn open_radial_editor(&mut self, skins: bool) {
+        crate::radial::acceptance_trace::emit(
+            crate::radial::acceptance_trace::Event::RadialAction {
+                stage: crate::radial::acceptance_trace::RadialActionStage::HostEntered,
+                skins,
+                editor_open: None,
+                skins_selected: None,
+                panel_registered: None,
+            },
+        );
+        self.focus_panel(super::Panel::RadialEditor);
+        if let Ok(mut editor) = self.radial_editor.lock() {
+            if skins {
+                editor.open_skins();
+            } else {
+                editor.open_menus();
+            }
+        }
+        self.panel_states.radial_editor = true;
+        crate::radial::acceptance_trace::emit(
+            crate::radial::acceptance_trace::Event::RadialAction {
+                stage: crate::radial::acceptance_trace::RadialActionStage::HostCompleted,
+                skins,
+                editor_open: None,
+                skins_selected: None,
+                panel_registered: Some(self.panel_states.radial_editor),
+            },
+        );
     }
 }
 
@@ -28,10 +115,7 @@ impl ScreenDrawCommandHost for LauncherApp {
 
         match command {
             ScreenDrawCommand::Start => self.start_or_focus_screen_draw().map(|_| ()),
-            ScreenDrawCommand::OpenToolbar => {
-                self.focus_screen_draw_toolbar();
-                Ok(())
-            }
+            ScreenDrawCommand::OpenToolbar => self.focus_screen_draw_toolbar(),
             ScreenDrawCommand::NewCapture => self.request_new_screen_draw_capture(),
             ScreenDrawCommand::Ghost => self
                 .screen_draw_controller
@@ -411,8 +495,9 @@ impl ClipboardModifyCommandHost for LauncherApp {
     fn start_clipboard_modify(
         &mut self,
         intent: crate::clipboard_modify::parser::ClipboardModifyIntent,
-        metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
+        mut metadata: crate::clipboard_modify::coordinator::ImmediateRequestMetadata,
     ) -> Result<(), String> {
+        metadata.root_policy = self.command_root_policy;
         self.clipboard_modify_immediate
             .start(
                 intent,
@@ -523,9 +608,15 @@ impl HeadlessCommandHost for LauncherApp {
         });
     }
 
-    fn spawn_virtual_desktop_command(
+    fn spawn_virtual_desktop_command(&mut self, invocation: crate::commands::CommandInvocation) {
+        let history_query = self.query.clone();
+        self.spawn_virtual_desktop_command_with_history_query(invocation, history_query);
+    }
+
+    fn spawn_virtual_desktop_command_with_history_query(
         &mut self,
         mut invocation: crate::commands::CommandInvocation,
+        history_query: String,
     ) {
         match &invocation.command {
             crate::commands::Command::VirtualDesktop(
@@ -549,7 +640,11 @@ impl HeadlessCommandHost for LauncherApp {
                 match result {
                     Ok(()) => {
                         let outcome = crate::commands::handlers::success_outcome(self, &invocation);
-                        self.apply_command_outcome(outcome, &invocation);
+                        self.apply_command_outcome_with_history_query(
+                            outcome,
+                            &invocation,
+                            Some(&history_query),
+                        );
                         self.add_success_toast("Bound MultiManager workspace to desktop");
                     }
                     Err(error) => self.report_error_message("virtual_desktop", error),
@@ -561,7 +656,11 @@ impl HeadlessCommandHost for LauncherApp {
             ) => {
                 if self.multi_manager.unbind_virtual_desktop(workspace_id) {
                     let outcome = crate::commands::handlers::success_outcome(self, &invocation);
-                    self.apply_command_outcome(outcome, &invocation);
+                    self.apply_command_outcome_with_history_query(
+                        outcome,
+                        &invocation,
+                        Some(&history_query),
+                    );
                     self.add_success_toast("Cleared MultiManager desktop binding");
                 } else {
                     self.report_error_message(
@@ -573,7 +672,6 @@ impl HeadlessCommandHost for LauncherApp {
             }
             _ => {}
         }
-        let history_query = self.query.clone();
         if let crate::commands::Command::VirtualDesktop(
             crate::commands::VirtualDesktopCommand::MoveActiveWindow { target, follow },
         ) = &invocation.command
@@ -598,6 +696,7 @@ impl HeadlessCommandHost for LauncherApp {
                             interaction_token: self.virtual_desktop_interaction_token,
                             expected_query: self.query.clone(),
                             expected_visible: self.visible_flag.load(Ordering::SeqCst),
+                            root_policy: self.command_root_policy,
                             result: Err(error),
                         },
                     ));
@@ -606,36 +705,34 @@ impl HeadlessCommandHost for LauncherApp {
                 }
             }
         }
-        let mut completion_outcome = crate::commands::handlers::success_outcome(self, &invocation);
-        let immediate_outcome = crate::commands::CommandOutcome {
-            query: std::mem::replace(
-                &mut completion_outcome.query,
-                crate::commands::QueryPolicy::Keep,
-            ),
-            pending_query: std::mem::replace(
-                &mut completion_outcome.pending_query,
-                crate::commands::PendingQueryPolicy::Keep,
-            ),
-            search: std::mem::take(&mut completion_outcome.search),
-            invalidate_results: std::mem::take(&mut completion_outcome.invalidate_results),
-            results: std::mem::replace(
-                &mut completion_outcome.results,
-                crate::commands::ResultsPolicy::Keep,
-            ),
-            visibility: std::mem::replace(
-                &mut completion_outcome.visibility,
-                crate::commands::VisibilityPolicy::Keep,
-            ),
-            restore: std::mem::take(&mut completion_outcome.restore),
-            focus: std::mem::take(&mut completion_outcome.focus),
-            move_cursor_end: std::mem::take(&mut completion_outcome.move_cursor_end),
-            activate_first_result: completion_outcome.activate_first_result.take(),
-            ..crate::commands::CommandOutcome::default()
-        };
+        let (immediate_outcome, completion_outcome) = split_virtual_desktop_outcome(
+            crate::commands::handlers::success_outcome(self, &invocation),
+        );
         self.apply_command_outcome(immediate_outcome, &invocation);
         let interaction_token = self.virtual_desktop_interaction_token;
         let expected_query = self.query.clone();
         let expected_visible = self.visible_flag.load(Ordering::SeqCst);
+        let root_policy = self.command_root_policy;
+
+        #[cfg(test)]
+        if self.test_defer_virtual_desktop_completion {
+            self.test_defer_virtual_desktop_completion = false;
+            let _ = self.event_tx.send(crate::gui::WatchEvent::VirtualDesktop(
+                crate::gui::VirtualDesktopGuiCompletion {
+                    invocation,
+                    completion_outcome,
+                    history_query,
+                    interaction_token,
+                    expected_query,
+                    expected_visible,
+                    root_policy,
+                    result: Ok(()),
+                },
+            ));
+            self.egui_ctx.request_repaint();
+            return;
+        }
+
         let catalog = std::sync::Arc::clone(&self.plugins.internal_services().window_catalog);
         let tx = self.event_tx.clone();
         let ctx = self.egui_ctx.clone();
@@ -657,6 +754,7 @@ impl HeadlessCommandHost for LauncherApp {
                     interaction_token,
                     expected_query,
                     expected_visible,
+                    root_policy,
                     result,
                 },
             ));
@@ -688,12 +786,23 @@ impl HeadlessCommandHost for LauncherApp {
 fn command_accepts_query_override(command: &Command) -> bool {
     !matches!(
         command,
-        Command::ClipboardModify(_) | Command::FileSearch(_) | Command::Diff(_)
+        Command::Radial(_)
+            | Command::ClipboardModify(_)
+            | Command::FileSearch(_)
+            | Command::Diff(_)
     )
 }
 
 impl LauncherApp {
     pub(crate) fn dispatch_command_invocation(&mut self, invocation: CommandInvocation) {
+        self.dispatch_command_invocation_with_history(invocation, None);
+    }
+
+    pub(crate) fn dispatch_command_invocation_with_history(
+        &mut self,
+        invocation: CommandInvocation,
+        captured_history_query: Option<&str>,
+    ) {
         self.virtual_desktop_interaction_token = self
             .virtual_desktop_interaction_token
             .wrapping_add(1)
@@ -712,8 +821,30 @@ impl LauncherApp {
         }
 
         let bus = std::sync::Arc::clone(&self.command_bus);
-        match bus.dispatch(&invocation, self) {
-            Ok(outcome) => self.apply_command_outcome(outcome, &invocation),
+        if let Command::Radial(command) = &invocation.command {
+            let skins = match command {
+                crate::commands::RadialCommand::Edit => Some(false),
+                crate::commands::RadialCommand::Skins => Some(true),
+                _ => None,
+            };
+            if let Some(skins) = skins {
+                crate::radial::acceptance_trace::emit(
+                    crate::radial::acceptance_trace::Event::RadialAction {
+                        stage: crate::radial::acceptance_trace::RadialActionStage::Dispatched,
+                        skins,
+                        editor_open: None,
+                        skins_selected: None,
+                        panel_registered: None,
+                    },
+                );
+            }
+        }
+        match bus.dispatch_with_history_query(&invocation, self, captured_history_query) {
+            Ok(outcome) => self.apply_command_outcome_with_history_query(
+                outcome,
+                &invocation,
+                captured_history_query,
+            ),
             Err(error) => {
                 if let Some(favorite) = error.favorite.as_ref() {
                     tracing::error!(fav = %favorite, error = %error.message, "failed to run favorite");
@@ -749,6 +880,23 @@ impl LauncherApp {
         invocation: &CommandInvocation,
         captured_history_query: Option<&str>,
     ) {
+        let root_policy = self.command_root_policy;
+        self.apply_command_outcome_with_root_policy(
+            outcome,
+            invocation,
+            captured_history_query,
+            root_policy,
+        );
+    }
+
+    pub(crate) fn apply_command_outcome_with_root_policy(
+        &mut self,
+        outcome: CommandOutcome,
+        invocation: &CommandInvocation,
+        captured_history_query: Option<&str>,
+        root_policy: crate::universal_actions::RootLauncherPolicy,
+    ) {
+        let outcome = normalize_outcome_for_root_policy(outcome, root_policy);
         let history_query = captured_history_query
             .map(str::to_owned)
             .unwrap_or_else(|| self.query.clone());
@@ -766,6 +914,7 @@ impl LauncherApp {
             self.selected = None;
             self.last_search_query = self.query.clone();
             self.last_results_valid = true;
+            self.last_search_provider_deferral = super::search::ProviderSearchDeferral::None;
             self.update_suggestions();
         }
         if outcome.invalidate_results {
@@ -777,20 +926,29 @@ impl LauncherApp {
         if let Some(source) = outcome.activate_first_result
             && let Some(action) = self.results.first().cloned()
         {
-            self.activate_action(action, None, source);
-        }
-
-        match outcome.visibility {
-            VisibilityPolicy::Keep => {}
-            VisibilityPolicy::Show => self.visible_flag.store(true, Ordering::SeqCst),
-            VisibilityPolicy::Hide => self.visible_flag.store(false, Ordering::SeqCst),
-            VisibilityPolicy::Toggle => {
-                let next = !self.visible_flag.load(Ordering::SeqCst);
-                self.visible_flag.store(next, Ordering::SeqCst);
+            if allow_radial_queryexec_activation(&mut self.radial_queryexec_depth, &action) {
+                self.activate_action(action, None, source);
+            } else {
+                self.report_error_message(
+                    "radial_query",
+                    "Nested queryexec stopped at the radial recursion limit",
+                );
             }
         }
-        if outcome.restore {
-            self.restore_flag.store(true, Ordering::SeqCst);
+
+        if outcome.visibility != VisibilityPolicy::Keep || outcome.restore {
+            self.visibility_revision.request(|| {
+                let visible = match outcome.visibility {
+                    VisibilityPolicy::Keep => self.visible_flag.load(Ordering::SeqCst),
+                    VisibilityPolicy::Show => true,
+                    VisibilityPolicy::Hide => false,
+                    VisibilityPolicy::Toggle => !self.visible_flag.load(Ordering::SeqCst),
+                };
+                self.visible_flag.store(visible, Ordering::SeqCst);
+                if outcome.restore {
+                    self.restore_flag.store(true, Ordering::SeqCst);
+                }
+            });
         }
         if outcome.move_cursor_end {
             self.move_cursor_end = true;
@@ -816,15 +974,12 @@ impl LauncherApp {
                     ToastPolicy::Success(message) => (message, ToastKind::Success),
                     ToastPolicy::Error(_) => unreachable!(),
                 };
-                push_toast(
-                    &mut self.toasts,
-                    Toast {
-                        text: text.into(),
-                        kind,
-                        options: ToastOptions::default()
-                            .duration_in_seconds(self.toast_duration as f64),
-                    },
-                );
+                self.add_toast(Toast {
+                    text: text.into(),
+                    kind,
+                    options: ToastOptions::default()
+                        .duration_in_seconds(self.toast_duration as f64),
+                });
             }
         }
         if outcome.history == HistoryPolicy::Record {
@@ -836,6 +991,31 @@ impl LauncherApp {
         }
     }
 }
+
+fn allow_radial_queryexec_activation(
+    depth: &mut Option<u8>,
+    action: &crate::actions::Action,
+) -> bool {
+    let is_queryexec = matches!(
+        crate::commands::parse_action(action),
+        Ok(Command::Query(
+            crate::commands::QueryCommand::ExecuteFirst { .. }
+        ))
+    );
+    if !is_queryexec {
+        return true;
+    }
+    let Some(depth) = depth else {
+        // Ordinary launcher callers keep their legacy recursive behavior.
+        return true;
+    };
+    if *depth >= 1 {
+        return false;
+    }
+    *depth += 1;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,6 +1041,294 @@ mod tests {
         )
     }
 
+    fn with_isolated_root_restore_fixture<T>(
+        app: &mut LauncherApp,
+        run: impl FnOnce(&mut LauncherApp) -> T,
+    ) -> T {
+        #[cfg(windows)]
+        {
+            use crate::radial::acceptance_trace::{
+                self, Event, NativeActivationEdge, RootCommandKind,
+            };
+
+            assert!(
+                !unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::IsWindow(
+                        windows::Win32::Foundation::HWND(42 as *mut _),
+                    )
+                }
+                .as_bool(),
+                "the isolated ROOT fixture must not name a live OS window"
+            );
+            app.launcher_hwnd = Some(42);
+            app.root_window_bridge.set_identity_for_test(42);
+            let identity = app
+                .root_window_bridge
+                .qualify_simulated_wake_for_test()
+                .unwrap();
+            assert_eq!(identity, app.root_window_bridge.identity());
+            let revision = app.visibility_revision.current();
+            let (result, queued) =
+                crate::window_manager::with_launcher_restore_queue_for_test(|| run(app));
+            assert_eq!(app.visibility_revision.current(), revision + 1);
+            assert_eq!(queued, [(revision + 1, 42)]);
+
+            let events = acceptance_trace::take_root_activation_test_events();
+            let focus = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::RootCommand {
+                        command: RootCommandKind::Focus,
+                        correlation,
+                    } => Some(*correlation),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let native = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::NativeActivation {
+                        edge: NativeActivationEdge::RestoreRequested,
+                        hwnd,
+                        correlation,
+                    } => Some((*hwnd as usize, *correlation)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(focus.len(), 1);
+            assert_eq!(native.len(), 1);
+            assert_eq!(native[0].0, 42);
+            assert_eq!(focus[0].visibility_revision, revision + 1);
+            assert_eq!(native[0].1.visibility_revision, revision + 1);
+            assert_eq!(focus[0].invocation_id, native[0].1.invocation_id);
+            assert!(focus[0].request_id > 0 && focus[0].request_id < native[0].1.request_id);
+            assert!(!focus[0].terminal && !native[0].1.terminal);
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                Event::NativeActivation {
+                    edge: NativeActivationEdge::RestoreCompleted,
+                    ..
+                }
+            )));
+            return result;
+        }
+        #[cfg(not(windows))]
+        run(app)
+    }
+
+    fn action(raw: &str) -> crate::actions::Action {
+        crate::actions::Action {
+            label: raw.into(),
+            desc: "Radial menu".into(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn radial_queryexec_recursion_is_bounded_without_changing_legacy_activation() {
+        let queryexec = action("queryexec:queryexec:again");
+        let ordinary = action("https://example.test/");
+
+        let mut radial_depth = Some(0);
+        assert!(allow_radial_queryexec_activation(
+            &mut radial_depth,
+            &queryexec
+        ));
+        assert_eq!(radial_depth, Some(1));
+        assert!(!allow_radial_queryexec_activation(
+            &mut radial_depth,
+            &queryexec
+        ));
+        assert!(allow_radial_queryexec_activation(
+            &mut radial_depth,
+            &ordinary
+        ));
+
+        let mut legacy_depth = None;
+        assert!(allow_radial_queryexec_activation(
+            &mut legacy_depth,
+            &queryexec
+        ));
+    }
+
+    fn virtual_desktop_create_invocation() -> CommandInvocation {
+        CommandInvocation {
+            command: Command::VirtualDesktop(crate::commands::VirtualDesktopCommand::Create),
+            original_action: action("vd:create"),
+            query_override: None,
+            source: crate::commands::ActivationSource::RadialRelease,
+        }
+    }
+
+    #[test]
+    fn immediate_virtual_desktop_hide_does_not_mutate_preserved_launcher_root() {
+        let mut app = test_app();
+        app.hide_after_run = true;
+        app.clear_query_after_run = true;
+        app.command_root_policy =
+            crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState;
+        app.query = "keep root query".into();
+        app.results = vec![action("help:show")];
+        app.selected = Some(0);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.focus_query = false;
+
+        let invocation = virtual_desktop_create_invocation();
+        let success = crate::commands::handlers::success_outcome(&app, &invocation);
+        assert_eq!(success.visibility, VisibilityPolicy::Hide);
+        let (immediate, completion) = split_virtual_desktop_outcome(success);
+        assert_eq!(immediate.visibility, VisibilityPolicy::Hide);
+        assert_eq!(immediate.query, QueryPolicy::Set(String::new()));
+        assert_eq!(completion.history, HistoryPolicy::Record);
+
+        app.apply_command_outcome(immediate, &invocation);
+
+        assert_eq!(app.query, "keep root query");
+        assert_eq!(app.results, vec![action("help:show")]);
+        assert_eq!(app.selected, Some(0));
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.focus_query);
+        assert!(app.test_recorded_history_queries.is_empty());
+    }
+
+    #[test]
+    fn legacy_command_outcome_still_applies_query_and_hide() {
+        let mut app = test_app();
+        app.query = "before".into();
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        let invocation = virtual_desktop_create_invocation();
+
+        app.apply_command_outcome(
+            CommandOutcome {
+                query: QueryPolicy::Set("after".into()),
+                visibility: VisibilityPolicy::Hide,
+                ..CommandOutcome::default()
+            },
+            &invocation,
+        );
+
+        assert_eq!(app.query, "after");
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn radial_virtual_desktop_dispatch_records_captured_query_after_deferred_completion_once() {
+        let mut app = test_app();
+        app.query = "ROOT query".into();
+        app.hide_after_run = true;
+        app.clear_query_after_run = true;
+        app.command_root_policy =
+            crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.test_defer_virtual_desktop_completion = true;
+
+        app.dispatch_command_invocation_with_history(
+            virtual_desktop_create_invocation(),
+            Some("captured radial query"),
+        );
+
+        // The event is queued after the real command bus and host dispatch,
+        // then reduced separately to model an asynchronous completion.
+        assert_eq!(app.query, "ROOT query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert_eq!(app.usage.get("vd:create"), None);
+
+        app.query = "newer ROOT query".into();
+        app.request_launcher_state(Some(false), Some(false));
+        app.process_watch_events();
+
+        assert_eq!(app.query, "newer ROOT query");
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
+
+        app.process_watch_events();
+        assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
+    }
+
+    #[test]
+    fn ordinary_virtual_desktop_dispatch_captures_root_query_before_async_completion() {
+        let mut app = test_app();
+        app.query = "ordinary ROOT query".into();
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+        app.test_defer_virtual_desktop_completion = true;
+
+        app.dispatch_command_invocation(virtual_desktop_create_invocation());
+        app.query = "ROOT changed while command ran".into();
+        app.process_watch_events();
+
+        assert_eq!(app.query, "ROOT changed while command ran");
+        assert_eq!(app.test_recorded_history_queries, ["ordinary ROOT query"]);
+        assert_eq!(app.usage.get("vd:create"), Some(&1));
+    }
+
+    #[test]
+    fn radial_show_preserves_launcher_root_and_enqueues_once_with_one_history_record() {
+        let (client, endpoint) =
+            crate::radial::control::radial_control_service_with_wake(true, None);
+        super::super::install_radial_control_client(client);
+        let mut app = test_app();
+        app.query = "keep query".into();
+        app.results = vec![action("help:show")];
+        app.selected = Some(0);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.focus_query = false;
+        app.activate_action(
+            action("radial show Work Menu"),
+            None,
+            crate::commands::ActivationSource::Enter,
+        );
+        assert_eq!(app.query, "keep query");
+        assert_eq!(app.results[0].action, "help:show");
+        assert_eq!(app.selected, Some(0));
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.focus_query);
+        assert_eq!(app.test_recorded_history_queries, ["keep query"]);
+        assert_eq!(
+            endpoint.request_rx.try_recv().unwrap(),
+            crate::radial::control::RadialControlRequest::Show(
+                crate::radial::control::RadialMenuSelector::IdOrName("Work Menu".into())
+            )
+        );
+        assert!(endpoint.request_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn radial_editor_commands_open_the_stable_panel_and_skins_section() {
+        let mut app = test_app();
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.activate_action(
+            action("radial edit"),
+            None,
+            crate::commands::ActivationSource::Click,
+        );
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(!app.radial_editor.lock().unwrap().is_showing_resources());
+        assert!(!app.radial_editor.lock().unwrap().is_dirty());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        app.activate_action(
+            action("radial skins"),
+            None,
+            crate::commands::ActivationSource::Click,
+        );
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(app.radial_editor.lock().unwrap().is_showing_resources());
+        assert!(!app.radial_editor.lock().unwrap().is_dirty());
+        app.activate_action(
+            action("radial edit"),
+            None,
+            crate::commands::ActivationSource::Click,
+        );
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(!app.radial_editor.lock().unwrap().is_showing_resources());
+    }
+
     #[test]
     fn launcher_host_routes_screen_draw_commands_only_through_the_controller() {
         let mut app = test_app();
@@ -883,11 +1351,13 @@ mod tests {
         assert_eq!(app.screen_draw_controller.state().generation(), generation);
         assert!(!app.screen_draw_controller.toolbar_open());
 
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut app,
-            crate::commands::ScreenDrawCommand::Close,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut app, |app| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                app,
+                crate::commands::ScreenDrawCommand::Close,
+            )
+            .unwrap();
+        });
         ScreenDrawCommandHost::execute_screen_draw_command(
             &mut app,
             crate::commands::ScreenDrawCommand::OpenToolbar,
@@ -976,11 +1446,13 @@ mod tests {
         parking.commit_hidden();
         app.screen_draw_launcher_parking = Some(parking);
 
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut app,
-            crate::commands::ScreenDrawCommand::NewCapture,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut app, |app| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                app,
+                crate::commands::ScreenDrawCommand::NewCapture,
+            )
+            .unwrap();
+        });
         let replacement = app.screen_draw_controller.state().generation().unwrap();
         assert_ne!(first, replacement);
         assert!(matches!(
@@ -1033,11 +1505,13 @@ mod tests {
         parking.restore().unwrap();
         app.screen_draw_launcher_parking = Some(parking);
 
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut app,
-            crate::commands::ScreenDrawCommand::NewCapture,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut app, |app| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                app,
+                crate::commands::ScreenDrawCommand::NewCapture,
+            )
+            .unwrap();
+        });
 
         assert!(matches!(
             app.screen_draw_controller.state(),
@@ -1077,11 +1551,13 @@ mod tests {
             parking.commit_hidden();
             app.screen_draw_launcher_parking = Some(parking);
 
-            ScreenDrawCommandHost::execute_screen_draw_command(
-                &mut app,
-                crate::commands::ScreenDrawCommand::Close,
-            )
-            .unwrap();
+            with_isolated_root_restore_fixture(&mut app, |app| {
+                ScreenDrawCommandHost::execute_screen_draw_command(
+                    app,
+                    crate::commands::ScreenDrawCommand::Close,
+                )
+                .unwrap();
+            });
 
             assert_eq!(
                 app.screen_draw_controller.state(),
@@ -1096,11 +1572,13 @@ mod tests {
         }
 
         let mut idle = test_app();
-        ScreenDrawCommandHost::execute_screen_draw_command(
-            &mut idle,
-            crate::commands::ScreenDrawCommand::Close,
-        )
-        .unwrap();
+        with_isolated_root_restore_fixture(&mut idle, |idle| {
+            ScreenDrawCommandHost::execute_screen_draw_command(
+                idle,
+                crate::commands::ScreenDrawCommand::Close,
+            )
+            .unwrap();
+        });
         assert_eq!(
             idle.screen_draw_controller.state(),
             &crate::screen_draw::ScreenDrawState::NoSession
@@ -1114,6 +1592,13 @@ mod tests {
             crate::commands::ClipboardModifyCommand::Open {
                 section: crate::clipboard_modify::actions::ClipboardModifySectionPayload::Modify,
             },
+        )));
+    }
+
+    #[test]
+    fn radial_commands_reject_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::Radial(
+            crate::commands::RadialCommand::ShowDefault,
         )));
     }
 

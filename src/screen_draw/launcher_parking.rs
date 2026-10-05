@@ -95,6 +95,7 @@ pub(crate) struct LauncherParkingTransaction {
     parked_rect: LauncherWindowRect,
     virtual_desktop: ScreenRect,
     state: LauncherParkingState,
+    cycle: u64,
     window_api: Arc<dyn LauncherWindowApi>,
 }
 
@@ -148,6 +149,7 @@ impl LauncherParkingTransaction {
             parked_rect,
             virtual_desktop,
             state: LauncherParkingState::Active,
+            cycle: 1,
             window_api,
         })
     }
@@ -166,6 +168,18 @@ impl LauncherParkingTransaction {
 
     pub(crate) const fn state(&self) -> LauncherParkingState {
         self.state
+    }
+
+    pub(crate) const fn cycle(&self) -> u64 {
+        self.cycle
+    }
+
+    fn advance_cycle(&mut self) -> Result<(), String> {
+        self.cycle = self
+            .cycle
+            .checked_add(1)
+            .ok_or_else(|| "Screen Draw parking cycle identity exhausted".to_string())?;
+        Ok(())
     }
 
     /// A committed transaction deliberately leaves the launcher parked when
@@ -193,6 +207,49 @@ impl LauncherParkingTransaction {
         Ok(())
     }
 
+    /// Return to the transaction-owned capture-safe rectangle when a newer
+    /// visibility request wins while any native activation/restore is in
+    /// flight. The native effect may have moved the window even if this
+    /// transaction had not begun its own exact restore yet.
+    pub(crate) fn repark_after_stale_restore(
+        &mut self,
+        before_repark: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let must_repark = self.state == LauncherParkingState::Restored
+            || !self
+                .window_api
+                .is_capture_safe(self.original_snapshot.hwnd, self.virtual_desktop)?;
+        if !must_repark {
+            return Ok(());
+        }
+        // The controller retires undelivered recovery admissions before this
+        // fresh native attempt, including a failed park and its fallback.
+        // An already safe no-op keeps the current operation lifetime.
+        before_repark()?;
+        self.advance_cycle()?;
+        let previous_state = self.state;
+        self.window_api.park(
+            self.original_snapshot.hwnd,
+            (self.parked_rect.left, self.parked_rect.top),
+        )?;
+        self.state = if previous_state == LauncherParkingState::Committed {
+            LauncherParkingState::Committed
+        } else {
+            LauncherParkingState::Active
+        };
+        Ok(())
+    }
+
+    /// Keep the exact restore point owned by this transaction when the caller
+    /// had to queue an ordinary offscreen fallback after a failed native park.
+    pub(crate) fn retain_restore_point_after_fallback_park(&mut self) {
+        if self.state == LauncherParkingState::Restored {
+            // The fallible repark already advanced this cycle before the
+            // fallback. Retain that new restore point without another token.
+            self.state = LauncherParkingState::Active;
+        }
+    }
+
     /// Snapshots the launcher's current native rectangle and begins a fresh
     /// parking attempt. This is used when resuming after the launcher was
     /// restored and may have been moved or resized by the user.
@@ -202,6 +259,7 @@ impl LauncherParkingTransaction {
     ) -> Result<(), String> {
         let snapshot = self.window_api.snapshot(self.original_snapshot.hwnd)?;
         let (width, height) = snapshot.rect.dimensions()?;
+        self.advance_cycle()?;
         // Publish the fresh restore point before any fallible parking work so
         // recovery can never fall back to geometry captured before the user
         // moved or resized the restored launcher.
@@ -236,6 +294,9 @@ pub(crate) struct LauncherParkingTestObserver {
     restores: Arc<std::sync::Mutex<Vec<LauncherWindowSnapshot>>>,
     current: Arc<std::sync::Mutex<LauncherWindowSnapshot>>,
     fail_next_park: Arc<std::sync::atomic::AtomicBool>,
+    fail_next_restore: Arc<std::sync::atomic::AtomicBool>,
+    before_next_park: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    before_next_restore: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 #[cfg(test)]
@@ -262,6 +323,19 @@ impl LauncherParkingTestObserver {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
+    pub(crate) fn fail_next_restore(&self) {
+        self.fail_next_restore
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn before_next_restore(&self, callback: impl FnOnce() + Send + 'static) {
+        *self.before_next_restore.lock().unwrap() = Some(Box::new(callback));
+    }
+
+    pub(crate) fn before_next_park(&self, callback: impl FnOnce() + Send + 'static) {
+        *self.before_next_park.lock().unwrap() = Some(Box::new(callback));
+    }
+
     pub(crate) fn begin_transaction(
         &self,
         generation: ScreenDrawGeneration,
@@ -275,6 +349,9 @@ impl LauncherParkingTestObserver {
                 current: Arc::clone(&self.current),
                 restores: Arc::clone(&self.restores),
                 fail_next_park: Arc::clone(&self.fail_next_park),
+                fail_next_restore: Arc::clone(&self.fail_next_restore),
+                before_next_park: Arc::clone(&self.before_next_park),
+                before_next_restore: Arc::clone(&self.before_next_restore),
             }),
         )
         .expect("GUI parking fixture has valid geometry")
@@ -286,6 +363,9 @@ struct GuiTestLauncherWindowApi {
     current: Arc<std::sync::Mutex<LauncherWindowSnapshot>>,
     restores: Arc<std::sync::Mutex<Vec<LauncherWindowSnapshot>>>,
     fail_next_park: Arc<std::sync::atomic::AtomicBool>,
+    fail_next_restore: Arc<std::sync::atomic::AtomicBool>,
+    before_next_park: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    before_next_restore: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 #[cfg(test)]
@@ -295,6 +375,9 @@ impl LauncherWindowApi for GuiTestLauncherWindowApi {
     }
 
     fn park(&self, _hwnd: usize, position: (i32, i32)) -> Result<(), String> {
+        if let Some(callback) = self.before_next_park.lock().unwrap().take() {
+            callback();
+        }
         if self
             .fail_next_park
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -308,13 +391,23 @@ impl LauncherWindowApi for GuiTestLauncherWindowApi {
     }
 
     fn restore(&self, snapshot: LauncherWindowSnapshot) -> Result<(), String> {
+        if let Some(callback) = self.before_next_restore.lock().unwrap().take() {
+            callback();
+        }
+        if self
+            .fail_next_restore
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err("fixture launcher restore failed".into());
+        }
         self.restores.lock().unwrap().push(snapshot);
         *self.current.lock().unwrap() = snapshot;
         Ok(())
     }
 
-    fn is_capture_safe(&self, _hwnd: usize, _desktop: ScreenRect) -> Result<bool, String> {
-        Ok(true)
+    fn is_capture_safe(&self, _hwnd: usize, desktop: ScreenRect) -> Result<bool, String> {
+        let rect = self.current.lock().unwrap().rect;
+        Ok(!signed_rectangles_intersect(desktop, rect))
     }
 }
 
@@ -330,10 +423,16 @@ pub(crate) fn launcher_parking_test_fixture(
         rect,
     }));
     let fail_next_park = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail_next_restore = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let before_next_park = Arc::new(std::sync::Mutex::new(None));
+    let before_next_restore = Arc::new(std::sync::Mutex::new(None));
     let api = Arc::new(GuiTestLauncherWindowApi {
         current: Arc::clone(&current),
         restores: Arc::clone(&restores),
         fail_next_park: Arc::clone(&fail_next_park),
+        fail_next_restore: Arc::clone(&fail_next_restore),
+        before_next_park: Arc::clone(&before_next_park),
+        before_next_restore: Arc::clone(&before_next_restore),
     });
     let transaction =
         LauncherParkingTransaction::begin_with_api(generation, 42, virtual_desktop, api)
@@ -344,6 +443,9 @@ pub(crate) fn launcher_parking_test_fixture(
             restores,
             current,
             fail_next_park,
+            fail_next_restore,
+            before_next_park,
+            before_next_restore,
         },
     )
 }
@@ -691,6 +793,51 @@ mod tests {
     }
 
     #[test]
+    fn stale_activation_reparks_screen_draw_geometry_even_before_exact_restore() {
+        let original = rect(200, 150, 420, 260);
+        let desktop = ScreenRect::new(0, 0, 1920, 1080);
+        let (mut transaction, observer) =
+            launcher_parking_test_fixture(ScreenDrawGeneration::from_raw(7), original, desktop);
+        let parked = transaction.parked_rect();
+
+        // A stale ROOT activation can restore the pre-parking onscreen rect
+        // while the Screen Draw transaction still believes it owns parking.
+        observer.set_current_rect(original);
+        assert!(!transaction.verify().unwrap());
+
+        transaction.repark_after_stale_restore(|| Ok(())).unwrap();
+
+        assert_eq!(
+            observer.current_rect(),
+            rect(
+                parked.left,
+                parked.top,
+                original.right - original.left,
+                original.bottom - original.top
+            )
+        );
+        assert!(transaction.verify().unwrap());
+        assert_eq!(transaction.state(), LauncherParkingState::Active);
+    }
+
+    #[test]
+    fn failed_stale_repark_keeps_exact_restore_point_for_later_cleanup() {
+        let original = rect(200, 150, 420, 260);
+        let desktop = ScreenRect::new(0, 0, 1920, 1080);
+        let (mut transaction, observer) =
+            launcher_parking_test_fixture(ScreenDrawGeneration::from_raw(8), original, desktop);
+        transaction.restore().unwrap();
+        observer.fail_next_park();
+
+        assert!(transaction.repark_after_stale_restore(|| Ok(())).is_err());
+        transaction.retain_restore_point_after_fallback_park();
+        assert_eq!(transaction.state(), LauncherParkingState::Active);
+        transaction.restore().unwrap();
+
+        assert_eq!(observer.restored_rects(), [original, original]);
+    }
+
+    #[test]
     fn active_transaction_restores_exact_snapshot_on_drop() {
         let api = Arc::new(FakeWindowApi::at(rect(10, 20, 300, 200)));
         {
@@ -738,9 +885,11 @@ mod tests {
             api.clone(),
         )
         .unwrap();
+        let cycle = transaction.cycle();
         transaction.restore().unwrap();
         transaction.restore().unwrap();
         assert_eq!(api.restores.lock().unwrap().len(), 1);
+        assert_eq!(transaction.cycle(), cycle);
     }
 
     #[test]
@@ -753,6 +902,7 @@ mod tests {
             api.clone(),
         )
         .unwrap();
+        let cycle = transaction.cycle();
         transaction.restore().unwrap();
         *api.snapshot.lock().unwrap() = Some(LauncherWindowSnapshot {
             hwnd: 42,
@@ -763,6 +913,7 @@ mod tests {
             .unwrap();
         transaction.restore().unwrap();
 
+        assert_eq!(transaction.cycle(), cycle + 1);
         let restores = api.restores.lock().unwrap();
         assert_eq!(restores.len(), 2);
         assert_eq!(restores[1].rect, rect(500, 600, 400, 250));

@@ -35,7 +35,11 @@ mod note_panel;
 mod notes_dialog;
 mod numpad_navigation;
 mod query_history;
+mod query_observation;
+mod radial_actions;
+mod radial_editor;
 mod render;
+mod screen_draw_restore;
 mod screen_draw_toolbar;
 mod screenshot_editor;
 mod search;
@@ -49,11 +53,20 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
 pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
+
+pub(crate) use radial_editor::{
+    AuthoringBindingEditorIdentity, BindingEditorScope, BindingEditorSlot, BindingEditorSurface,
+};
+pub(crate) use state::AuthoringProviderSearchPurpose;
+pub use state::AuthoringProviderSearchRequest;
+
+pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
 
 pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
@@ -111,12 +124,6 @@ struct ScreenDrawRegionOperation {
     operation_id: mkmacro_dialog::visual_overlay::OperationId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScreenDrawRecoveryRequest {
-    LauncherToggle,
-    Emergency,
-}
-
 use crate::actions::folders;
 use crate::actions::{Action, load_actions_typed};
 use crate::actions_editor::ActionsEditor;
@@ -147,7 +154,10 @@ use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSett
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
 use crate::usage::{self, USAGE_FILE};
-use crate::visibility::{VisiblePlacementPolicy, apply_visibility};
+use crate::visibility::{
+    RootFocusIntent, RootViewportCtx, RootWindowBridge, ViewportCtx, ViewportWake,
+    VisiblePlacementPolicy, apply_visibility, apply_visibility_with_focus_intent,
+};
 use action_sheet::ActionSheetState;
 use chrono::NaiveDate;
 use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
@@ -166,27 +176,38 @@ use query_history::{QueryHistoryDirection, QueryHistoryNavigator};
 #[cfg(test)]
 use search::{COMPLETION_REBUILD_DEBOUNCE, NOTE_SEARCH_DEBOUNCE};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 use url::Url;
 use watch::watch_file;
 
 pub use crate::commands::ActivationSource;
-pub use state::{ClipboardModifyGuiEvent, TestWatchEvent, VirtualDesktopGuiCompletion, WatchEvent};
-pub(crate) use state::{PendingConfirmCommand, PendingUniversalActionInvocation, UiErrorEvent};
+pub use crate::radial::authoring::RadialAuthoringSession;
+pub(crate) use state::{
+    AuthoringActionRevalidation, PendingConfirmCommand, PendingUniversalActionInvocation,
+    UiErrorEvent,
+};
+pub use state::{
+    ClipboardModifyGuiEvent, RadialPlacementFailureNotice, TestWatchEvent,
+    VirtualDesktopGuiCompletion, WatchEvent,
+};
 
 const SUBCOMMANDS: &[&str] = &[
     "add", "rm", "list", "clear", "open", "new", "alias", "set", "pause", "resume", "cancel",
     "edit", "ma",
 ];
+
+pub(super) fn radial_placement_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("radial-submenu-placement-recovery")
+}
 
 /// Prefix used to search user saved applications.
 pub const APP_PREFIX: &str = "app";
@@ -224,17 +245,196 @@ fn normalize_static_window_config(
     }
 }
 
-static APP_EVENT_TXS: Lazy<Mutex<Vec<Sender<WatchEvent>>>> = Lazy::new(|| Mutex::new(Vec::new()));
+struct AppEventSink {
+    id: u64,
+    sender: Sender<WatchEvent>,
+    wake: Option<ViewportWake>,
+    queued: Arc<AtomicUsize>,
+}
 
-pub fn register_event_sender(tx: Sender<WatchEvent>) {
-    if let Ok(mut guard) = APP_EVENT_TXS.lock() {
-        guard.push(tx);
+const APP_EVENT_PENDING_CAPACITY: usize = 256;
+
+struct AppEventRegistry {
+    sinks: Vec<AppEventSink>,
+    /// Events emitted before the first GUI owner registers. Once an owner has
+    /// existed, a disposed owner must not cause stale work to leak into a
+    /// future viewport.
+    pending_before_owner: VecDeque<WatchEvent>,
+    owner_registered: bool,
+}
+
+static APP_EVENT_REGISTRY: Lazy<Mutex<AppEventRegistry>> = Lazy::new(|| {
+    Mutex::new(AppEventRegistry {
+        sinks: Vec::new(),
+        pending_before_owner: VecDeque::new(),
+        owner_registered: false,
+    })
+});
+static NEXT_APP_EVENT_SINK_ID: AtomicU64 = AtomicU64::new(1);
+static RADIAL_AUTHORING_CLIENT: Lazy<Mutex<Option<crate::radial::authoring::AuthoringClient>>> =
+    Lazy::new(|| Mutex::new(None));
+static RADIAL_CONTROL_CLIENT: Lazy<Mutex<Option<crate::radial::control::RadialControlClient>>> =
+    Lazy::new(|| Mutex::new(None));
+static RADIAL_PUBLISHED_DOCUMENT: Lazy<Mutex<Arc<crate::radial::model::RadialDocument>>> =
+    Lazy::new(|| Mutex::new(Arc::new(crate::radial::model::RadialDocument::starter())));
+
+/// Installs the GUI side of the main-owned radial authoring service. Editors
+/// clone this narrow client; they never construct or write a `RadialStore`.
+pub fn install_radial_authoring_client(client: crate::radial::authoring::AuthoringClient) {
+    if let Ok(mut slot) = RADIAL_AUTHORING_CLIENT.lock() {
+        *slot = Some(client);
     }
 }
 
+pub fn radial_authoring_client() -> Option<crate::radial::authoring::AuthoringClient> {
+    RADIAL_AUTHORING_CLIENT.lock().ok()?.clone()
+}
+
+/// Installs the GUI side of the main-owned radial runtime control service.
+pub fn install_radial_control_client(client: crate::radial::control::RadialControlClient) {
+    if let Ok(mut slot) = RADIAL_CONTROL_CLIENT.lock() {
+        *slot = Some(client);
+    }
+}
+
+fn radial_control_client() -> Option<crate::radial::control::RadialControlClient> {
+    RADIAL_CONTROL_CLIENT.lock().ok()?.clone()
+}
+
+/// Publishes the immutable settings/diagnostic view; process main remains the
+/// sole store and runtime owner.
+pub fn install_radial_published_document(document: Arc<crate::radial::model::RadialDocument>) {
+    if let Ok(mut slot) = RADIAL_PUBLISHED_DOCUMENT.lock() {
+        *slot = document;
+    }
+}
+
+pub(crate) fn radial_published_document() -> Arc<crate::radial::model::RadialDocument> {
+    RADIAL_PUBLISHED_DOCUMENT
+        .lock()
+        .map(|document| Arc::clone(&document))
+        .unwrap_or_else(|_| Arc::new(crate::radial::model::RadialDocument::starter()))
+}
+
+/// Owns one GUI event sink registration. Dropping it removes the sink from
+/// the process-wide fan-out, so a closed launcher viewport cannot remain in
+/// the registry indefinitely.
+pub struct EventSinkRegistration {
+    id: u64,
+    queued: Arc<AtomicUsize>,
+}
+
+impl EventSinkRegistration {
+    /// Attach the viewport wake after registration. If events arrived before
+    /// attachment, wake once after releasing the registry lock so the queued
+    /// work is not stranded.
+    pub fn attach_wake(&self, wake: ViewportWake) {
+        let wake_now = APP_EVENT_REGISTRY.lock().ok().and_then(|mut registry| {
+            let sink = registry.sinks.iter_mut().find(|sink| sink.id == self.id)?;
+            sink.wake = Some(wake.clone());
+            (sink.queued.load(Ordering::Acquire) > 0).then_some(wake)
+        });
+        if let Some(wake) = wake_now {
+            wake.wake();
+        }
+    }
+
+    pub(crate) fn event_consumed(&self) {
+        let _ = self
+            .queued
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_sub(1))
+            });
+    }
+}
+
+impl Drop for EventSinkRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = APP_EVENT_REGISTRY.lock() {
+            registry.sinks.retain(|sink| sink.id != self.id);
+        }
+    }
+}
+
+fn register_event_sink(
+    tx: Sender<WatchEvent>,
+    wake: Option<ViewportWake>,
+) -> EventSinkRegistration {
+    let registration = EventSinkRegistration {
+        id: NEXT_APP_EVENT_SINK_ID.fetch_add(1, Ordering::Relaxed),
+        queued: Arc::new(AtomicUsize::new(0)),
+    };
+    let mut wake_now = None;
+    if let Ok(mut registry) = APP_EVENT_REGISTRY.lock() {
+        let first_owner = !registry.owner_registered;
+        registry.owner_registered = true;
+        let sink = AppEventSink {
+            id: registration.id,
+            sender: tx,
+            wake,
+            queued: Arc::clone(&registration.queued),
+        };
+        if first_owner {
+            let pending = registry.pending_before_owner.drain(..).collect::<Vec<_>>();
+            for event in pending {
+                if sink.sender.send(event).is_err() {
+                    return registration;
+                }
+                sink.queued.fetch_add(1, Ordering::Release);
+            }
+        }
+        if sink.queued.load(Ordering::Acquire) > 0 {
+            wake_now = sink.wake.clone();
+        }
+        registry.sinks.push(sink);
+    }
+    if let Some(wake) = wake_now {
+        wake.wake();
+    }
+    registration
+}
+
+/// Register a GUI event sink with the viewport that owns its work queue.
+pub fn register_event_sender_with_wake(
+    tx: Sender<WatchEvent>,
+    wake: ViewportWake,
+) -> EventSinkRegistration {
+    register_event_sink(tx, Some(wake))
+}
+
+pub fn register_event_sender(tx: Sender<WatchEvent>) -> EventSinkRegistration {
+    register_event_sink(tx, None)
+}
+
 pub fn send_event(ev: WatchEvent) {
-    if let Ok(mut guard) = APP_EVENT_TXS.lock() {
-        guard.retain(|tx| tx.send(ev.clone()).is_ok());
+    let wakes = APP_EVENT_REGISTRY
+        .lock()
+        .map(|mut registry| {
+            if registry.sinks.is_empty() {
+                if !registry.owner_registered {
+                    if registry.pending_before_owner.len() == APP_EVENT_PENDING_CAPACITY {
+                        registry.pending_before_owner.pop_front();
+                    }
+                    registry.pending_before_owner.push_back(ev);
+                }
+                return Vec::new();
+            }
+            let mut wakes = Vec::new();
+            registry.sinks.retain_mut(|sink| {
+                if sink.sender.send(ev.clone()).is_err() {
+                    return false;
+                }
+                sink.queued.fetch_add(1, Ordering::Release);
+                if let Some(wake) = &sink.wake {
+                    wakes.push(wake.clone());
+                }
+                true
+            });
+            wakes
+        })
+        .unwrap_or_default();
+    for wake in wakes {
+        wake.wake();
     }
 }
 
@@ -376,6 +576,7 @@ pub enum Panel {
     Plugins,
     MultiManagerDialog,
     MultiManagerSettingsDialog,
+    RadialEditor,
 }
 
 #[derive(Default)]
@@ -423,6 +624,7 @@ struct PanelStates {
     plugins: bool,
     multi_manager_dialog: bool,
     multi_manager_settings_dialog: bool,
+    radial_editor: bool,
 }
 
 /// Primary GUI state for Multi Launcher.
@@ -473,6 +675,7 @@ pub struct LauncherApp {
     screen_draw_launcher_parking:
         Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
+    screen_draw_restore_publication: screen_draw_restore::ScreenDrawRestorePublication,
     pub selected: Option<usize>,
     action_sheet: ActionSheetState,
     /// Test seam for verifying that command dispatch used normal activation,
@@ -504,6 +707,7 @@ pub struct LauncherApp {
     pub launcher_hwnd: Option<usize>,
     pub multi_manager_dialog: MultiManagerDialog,
     pub multi_manager_settings_dialog: MultiManagerSettingsDialog,
+    radial_editor: Arc<Mutex<radial_editor::RadialEditorState>>,
     /// Hold watchers so the `RecommendedWatcher` instances remain active.
     #[allow(dead_code)] // required to keep watchers alive
     watchers: Vec<RecommendedWatcher>,
@@ -520,9 +724,22 @@ pub struct LauncherApp {
     pub dashboard_editor: DashboardEditorDialog,
     pub show_dashboard_editor: bool,
     rx: Receiver<WatchEvent>,
+    event_sink: EventSinkRegistration,
     event_tx: Sender<WatchEvent>,
+    /// Bounds deferred radial provider work to one in-flight invocation. A
+    /// cancelled provider call keeps this slot until the call actually exits.
+    pub(crate) radial_provider_search_capacity:
+        crate::radial::handoff::DeferredProviderSearchCapacity,
+    /// Temporarily disables provider lookup while a failed deferred query is
+    /// handed back to the ordinary query UI. This is scoped to that one
+    /// synchronous command outcome so it cannot re-enter the provider that
+    /// just timed out, even if its worker releases capacity at that boundary.
+    pub(crate) radial_suppressed_provider_query: Option<String>,
+    pub(crate) radial_queryexec_depth: Option<u8>,
+    pub(crate) radial_query_observation: crate::gui::query_observation::QueryObservationMailbox,
     egui_ctx: egui::Context,
     virtual_desktop_interaction_token: u64,
+    command_root_policy: crate::universal_actions::RootLauncherPolicy,
     folder_aliases: HashMap<String, Option<String>>,
     folder_aliases_lc: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
@@ -532,8 +749,13 @@ pub struct LauncherApp {
     max_indexed_items: Option<usize>,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
+    root_window_bridge: RootWindowBridge,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
+    visibility_revision: crate::visibility::VisibilityRevision,
+    authoring_catalog_cache: Mutex<universal_action_catalog::AuthoringCatalogCache>,
+    #[cfg(test)]
+    authoring_catalog_build_count: AtomicUsize,
     last_visible: bool,
     offscreen_pos: (f32, f32),
     pub window_size: (i32, i32),
@@ -545,6 +767,10 @@ pub struct LauncherApp {
     pub test_toast_messages: Vec<String>,
     #[cfg(test)]
     pub(crate) test_recorded_history_queries: Vec<String>,
+    #[cfg(test)]
+    pub(crate) test_skip_history_persistence: bool,
+    #[cfg(test)]
+    pub(crate) test_defer_virtual_desktop_completion: bool,
     pub enable_toasts: bool,
     pub show_inline_errors: bool,
     pub show_error_toasts: bool,
@@ -652,6 +878,11 @@ pub struct LauncherApp {
     pub preserve_command: bool,
     pub clear_query_after_run: bool,
     pub require_confirm_destructive: bool,
+    pub(crate) radial_feature_settings: crate::radial::model::RadialFeatureSettings,
+    pub(crate) radial_expected_diagnostics: VecDeque<crate::radial::diagnostics::RadialDiagnostic>,
+    pub(crate) radial_migration_receipt:
+        Option<crate::settings::SubmenuPresentationMigrationReceipt>,
+    radial_placement_viewport: state::RadialPlacementViewportState,
     pub query_autocomplete: bool,
     pub net_refresh: f32,
     pub net_unit: crate::settings::NetUnit,
@@ -669,6 +900,7 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    last_search_provider_deferral: search::ProviderSearchDeferral,
     last_plugin_search_generation: u64,
     last_timer_query: bool,
     last_stopwatch_query: bool,
@@ -677,6 +909,19 @@ pub struct LauncherApp {
     confirm_modal: ConfirmationModal,
     pending_confirm: Option<PendingConfirmCommand>,
     pending_universal_confirm: Option<PendingUniversalActionInvocation>,
+    radial_preparations: HashMap<
+        crate::radial::model::InvocationId,
+        (
+            crate::radial::bindings::PreparationGeneration,
+            crate::radial::model::ConfigRevision,
+        ),
+    >,
+    radial_consumed_dispatches: VecDeque<crate::radial::handoff::RadialDispatchIdentity>,
+    radial_current_preparation: Option<(
+        crate::radial::model::InvocationId,
+        crate::radial::bindings::PreparationGeneration,
+        crate::radial::model::ConfigRevision,
+    )>,
     pending_data_recovery: Option<PendingRecoveryIntent>,
     pub vim_mode: bool,
     pub file_search_window_open: bool,
@@ -796,6 +1041,203 @@ impl LauncherApp {
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
             });
         }
+    }
+
+    pub(crate) fn request_radial_submenu_migration_restore(&mut self) {
+        let Some(client) = radial_control_client() else {
+            self.report_error_message(
+                "radial.migration.restore",
+                "Radial migration service is unavailable.",
+            );
+            return;
+        };
+        if let Err(error) = client
+            .send(crate::radial::control::RadialControlRequest::RestoreSubmenuPresentationMigration)
+        {
+            self.report_error_message("radial.migration.restore", error.to_string());
+        }
+    }
+
+    fn show_radial_placement_failure(&mut self, ctx: &egui::Context) {
+        if !self.radial_placement_viewport.present_requested() {
+            return;
+        }
+        let notice = self.radial_placement_viewport.notice().cloned();
+        let close_because_resolved = notice.is_none();
+        let focus_requested = self.radial_placement_viewport.take_focus_request();
+        #[derive(Clone, Copy)]
+        enum Choice {
+            Designer,
+            Cascade,
+            Dismiss,
+        }
+        let mut choice = None;
+        let mut native_close_requested = false;
+        let viewport_id = radial_placement_viewport_id();
+        let viewport_builder = egui::ViewportBuilder::default()
+            .with_title("Radial submenu placement")
+            .with_inner_size([440.0, 170.0])
+            .with_min_inner_size([360.0, 130.0])
+            .with_resizable(false)
+            .with_visible(true)
+            .with_always_on_top();
+        ctx.show_viewport_immediate(viewport_id, viewport_builder, |child, class| {
+            let independent_viewport = class == egui::ViewportClass::Immediate;
+            if independent_viewport && focus_requested {
+                child.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            if close_because_resolved {
+                if independent_viewport {
+                    child.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                return;
+            }
+            if independent_viewport && child.input(|input| input.viewport().close_requested()) {
+                native_close_requested = true;
+                child.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+
+            let Some(notice) = notice.as_ref() else {
+                return;
+            };
+            egui::CentralPanel::default().show(child, |ui| {
+                ui.heading("Radial submenu could not fit");
+                ui.label(format!(
+                    "{} could not be opened from {}.",
+                    notice.child_menu_id, notice.parent_menu_id
+                ));
+                ui.label(&notice.message);
+                ui.small(
+                    "You can edit the menu in Designer or deliberately switch this parent to Cascade.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Open Designer").clicked() {
+                        choice = Some(Choice::Designer);
+                    }
+                    if notice.can_switch_parent_to_cascade()
+                        && ui.button("Switch this parent to Cascade").clicked()
+                    {
+                        choice = Some(Choice::Cascade);
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        choice = Some(Choice::Dismiss);
+                    }
+                });
+            });
+            if independent_viewport
+                && matches!(choice, Some(Choice::Designer | Choice::Dismiss))
+            {
+                child.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+        if close_because_resolved || native_close_requested {
+            self.radial_placement_viewport.mark_viewport_closed();
+        }
+        match choice {
+            Some(Choice::Designer) => {
+                if let Some(notice) = notice.as_ref() {
+                    self.open_radial_designer_from_placement(notice, ctx);
+                }
+            }
+            Some(Choice::Cascade) => {
+                let Some(notice) = notice else {
+                    return;
+                };
+                let Some(client) = radial_control_client() else {
+                    self.radial_placement_viewport.update_message(
+                        "Could not switch this parent to Cascade: radial control service is unavailable.",
+                    );
+                    self.report_error_message(
+                        "radial.placement",
+                        "Radial control service is unavailable.",
+                    );
+                    return;
+                };
+                match self.request_radial_placement_cascade(&notice, &client) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        self.radial_placement_viewport.update_message(format!(
+                            "Could not switch {} to Cascade: {error}",
+                            notice.parent_menu_id
+                        ));
+                        self.report_error_message("radial.placement", error.to_string());
+                    }
+                }
+                ctx.request_repaint();
+            }
+            Some(Choice::Dismiss) => {
+                if let Some(notice) = notice.as_ref() {
+                    self.dismiss_radial_placement_notice(notice);
+                }
+                ctx.request_repaint();
+            }
+            None => {}
+        }
+    }
+
+    fn radial_placement_notice_is_current(
+        &self,
+        notice: &state::RadialPlacementFailureNotice,
+    ) -> bool {
+        self.radial_placement_viewport
+            .notice()
+            .is_some_and(|active| {
+                active.session_id == notice.session_id
+                    && active.parent_frame_id == notice.parent_frame_id
+                    && active.parent_menu_id == notice.parent_menu_id
+                    && active.child_menu_id == notice.child_menu_id
+            })
+    }
+
+    fn open_radial_designer_from_placement(
+        &mut self,
+        notice: &state::RadialPlacementFailureNotice,
+        ctx: &egui::Context,
+    ) -> bool {
+        if !self.radial_placement_notice_is_current(notice) {
+            return false;
+        }
+        self.radial_placement_viewport.mark_viewport_closed();
+        // The Designer is an independent deferred viewport. Opening it from
+        // placement recovery must not show or move the launcher's root grid.
+        self.focus_panel(Panel::RadialEditor);
+        ctx.request_repaint();
+        true
+    }
+
+    fn dismiss_radial_placement_notice(
+        &mut self,
+        notice: &state::RadialPlacementFailureNotice,
+    ) -> bool {
+        if !self.radial_placement_notice_is_current(notice) {
+            return false;
+        }
+        self.radial_placement_viewport.dismiss_notice();
+        self.radial_placement_viewport.mark_viewport_closed();
+        true
+    }
+
+    fn request_radial_placement_cascade(
+        &self,
+        notice: &state::RadialPlacementFailureNotice,
+        client: &crate::radial::control::RadialControlClient,
+    ) -> Result<bool, crate::radial::control::RadialControlError> {
+        if !notice.can_switch_parent_to_cascade()
+            || !self.radial_placement_notice_is_current(notice)
+        {
+            return Ok(false);
+        }
+        client
+            .send(
+                crate::radial::control::RadialControlRequest::SetActiveParentSubmenuCascade {
+                    session_id: notice.session_id.clone(),
+                    parent_frame_id: notice.parent_frame_id,
+                    parent_menu_id: notice.parent_menu_id.clone(),
+                },
+            )
+            .map(|()| true)
     }
 
     fn set_inline_error(&mut self, msg: String) {
@@ -1228,7 +1670,7 @@ impl LauncherApp {
     ) -> Self {
         crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
         let (tx, rx) = channel();
-        register_event_sender(tx.clone());
+        let event_sink = register_event_sender_with_wake(tx.clone(), ViewportWake::root(ctx));
         let mut watchers = Vec::new();
         let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
@@ -1604,6 +2046,8 @@ impl LauncherApp {
             },
             screen_draw_recovery_bridge,
             screen_draw_launcher_parking: None,
+            screen_draw_restore_publication:
+                screen_draw_restore::ScreenDrawRestorePublication::default(),
             screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi::default(),
             selected: None,
             action_sheet: ActionSheetState::default(),
@@ -1629,6 +2073,11 @@ impl LauncherApp {
             launcher_hwnd: None,
             multi_manager_dialog: MultiManagerDialog::default(),
             multi_manager_settings_dialog: MultiManagerSettingsDialog::default(),
+            radial_editor: {
+                let mut editor = radial_editor::RadialEditorState::default();
+                editor.set_preferences(settings.radial_designer.clone());
+                Arc::new(Mutex::new(editor))
+            },
             watchers,
             dashboard,
             dashboard_runtime,
@@ -1643,9 +2092,18 @@ impl LauncherApp {
             dashboard_editor: DashboardEditorDialog::default(),
             show_dashboard_editor: false,
             rx,
+            event_sink,
             event_tx: tx,
+            radial_provider_search_capacity: Default::default(),
+            radial_suppressed_provider_query: None,
+            radial_queryexec_depth: None,
+            radial_query_observation:
+                crate::gui::query_observation::QueryObservationMailbox::from_environment(
+                    crate::radial::acceptance_trace::enabled(),
+                ),
             egui_ctx: ctx.clone(),
             virtual_desktop_interaction_token: 0,
+            command_root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
             folder_aliases,
             folder_aliases_lc,
             bookmark_aliases,
@@ -1655,8 +2113,13 @@ impl LauncherApp {
             max_indexed_items: settings.max_indexed_items,
             enabled_plugins,
             enabled_capabilities,
+            root_window_bridge: RootWindowBridge::default(),
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
+            visibility_revision: crate::visibility::VisibilityRevision::default(),
+            authoring_catalog_cache: Mutex::new(None),
+            #[cfg(test)]
+            authoring_catalog_build_count: AtomicUsize::new(0),
             last_visible: initial_visible,
             offscreen_pos,
             window_size: win_size,
@@ -1668,6 +2131,10 @@ impl LauncherApp {
             test_toast_messages: Vec::new(),
             #[cfg(test)]
             test_recorded_history_queries: Vec::new(),
+            #[cfg(test)]
+            test_skip_history_persistence: false,
+            #[cfg(test)]
+            test_defer_virtual_desktop_completion: false,
             enable_toasts,
             show_inline_errors,
             show_error_toasts,
@@ -1785,6 +2252,10 @@ impl LauncherApp {
             preserve_command: settings.preserve_command,
             clear_query_after_run: settings.clear_query_after_run,
             require_confirm_destructive: settings.require_confirm_destructive,
+            radial_feature_settings: settings.radial.clone(),
+            radial_expected_diagnostics: VecDeque::new(),
+            radial_migration_receipt: settings.radial_submenu_migration.clone(),
+            radial_placement_viewport: state::RadialPlacementViewportState::default(),
             query_autocomplete: settings.query_autocomplete,
             net_refresh: settings.net_refresh,
             net_unit: settings.net_unit,
@@ -1802,6 +2273,7 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            last_search_provider_deferral: Default::default(),
             last_plugin_search_generation: 0,
             last_timer_query: false,
             last_stopwatch_query: false,
@@ -1810,6 +2282,9 @@ impl LauncherApp {
             confirm_modal: ConfirmationModal::default(),
             pending_confirm: None,
             pending_universal_confirm: None,
+            radial_preparations: HashMap::new(),
+            radial_consumed_dispatches: VecDeque::new(),
+            radial_current_preparation: None,
             pending_data_recovery: None,
             action_cache: Vec::new(),
             action_filter_metadata: Vec::new(),
@@ -1834,7 +2309,7 @@ impl LauncherApp {
         apply_visibility(
             initial_visible,
             VisiblePlacementPolicy::ApplyConfiguredPlacement,
-            ctx,
+            &RootViewportCtx::with_window_bridge(ctx, app.root_window_bridge.clone()),
             offscreen_pos,
             follow_mouse,
             static_enabled,
@@ -1842,6 +2317,11 @@ impl LauncherApp {
             static_size.map(|(w, h)| (w as f32, h as f32)),
             (win_size.0 as f32, win_size.1 as f32),
         );
+        // Creation precedes the first native frame. Preserve its activation
+        // through the existing current visibility/restore request owner.
+        if initial_visible {
+            restore_flag.store(true, Ordering::SeqCst);
+        }
 
         app.enforce_pinned();
         app.update_panel_stack();
@@ -2285,6 +2765,46 @@ impl LauncherApp {
         self.restore_flag.load(Ordering::SeqCst)
     }
 
+    pub fn install_visibility_revision(&mut self, revision: crate::visibility::VisibilityRevision) {
+        self.visibility_revision = revision;
+    }
+
+    pub(crate) fn request_launcher_visibility(&self, visible: bool) -> u64 {
+        self.request_launcher_state(Some(visible), None)
+    }
+
+    pub(crate) fn request_launcher_state(
+        &self,
+        visible: Option<bool>,
+        restore: Option<bool>,
+    ) -> u64 {
+        let revision = self
+            .visibility_revision
+            .request(|| {
+                if let Some(visible) = visible {
+                    self.visible_flag.store(visible, Ordering::SeqCst);
+                }
+                if let Some(restore) = restore {
+                    self.restore_flag.store(restore, Ordering::SeqCst);
+                } else if visible == Some(true) {
+                    self.restore_flag.store(true, Ordering::SeqCst);
+                }
+            })
+            .0;
+        self.egui_ctx.request_repaint_of(egui::ViewportId::ROOT);
+        revision
+    }
+
+    pub(crate) fn toggle_launcher_visibility(&self) -> bool {
+        self.visibility_revision
+            .request(|| {
+                let next = !self.visible_flag.load(Ordering::SeqCst);
+                self.visible_flag.store(next, Ordering::SeqCst);
+                next
+            })
+            .1
+    }
+
     pub fn should_show_dashboard(&self, trimmed: &str) -> bool {
         self.dashboard_enabled && self.dashboard_show_when_empty && trimmed.trim().is_empty()
     }
@@ -2293,7 +2813,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 43] = [
+    const TRACKED_PANELS: [Panel; 44] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2337,6 +2857,7 @@ impl LauncherApp {
         Panel::Plugins,
         Panel::MultiManagerDialog,
         Panel::MultiManagerSettingsDialog,
+        Panel::RadialEditor,
     ];
 
     fn is_panel_open(&self, panel: Panel) -> bool {
@@ -2384,6 +2905,11 @@ impl LauncherApp {
             Panel::Plugins => self.show_plugins,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open,
+            Panel::RadialEditor => self
+                .radial_editor
+                .lock()
+                .map(|editor| editor.open)
+                .unwrap_or(false),
         }
     }
 
@@ -2622,6 +3148,19 @@ impl LauncherApp {
                 self.multi_manager_settings_dialog.open = false;
                 self.panel_states.multi_manager_settings_dialog = false;
             }
+            Panel::RadialEditor => {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.request_close();
+                }
+                self.panel_states.radial_editor = self
+                    .radial_editor
+                    .lock()
+                    .map(|editor| editor.open)
+                    .unwrap_or(false);
+                if self.panel_states.radial_editor {
+                    self.panel_stack.push(Panel::RadialEditor);
+                }
+            }
         }
         true
     }
@@ -2811,6 +3350,12 @@ impl LauncherApp {
                 self.multi_manager_settings_dialog.open = false;
                 self.panel_states.multi_manager_settings_dialog = false;
             }
+            Panel::RadialEditor => {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.force_close();
+                }
+                self.panel_states.radial_editor = false;
+            }
         }
         self.panel_stack.retain(|p| *p != panel);
     }
@@ -2866,6 +3411,11 @@ impl LauncherApp {
             Panel::Plugins => self.show_plugins = true,
             Panel::MultiManagerDialog => self.multi_manager_dialog.open = true,
             Panel::MultiManagerSettingsDialog => self.multi_manager_settings_dialog.open = true,
+            Panel::RadialEditor => {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.open();
+                }
+            }
         }
         if !self.panel_stack.contains(&panel) {
             self.panel_stack.push(panel);
@@ -2881,14 +3431,40 @@ impl LauncherApp {
     fn enforce_pinned(&mut self) {
         let pinned = self.pinned_panels.clone();
         for panel in pinned {
-            self.ensure_open(panel);
+            if panel == Panel::RadialEditor {
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.ensure_open();
+                }
+                if !self.panel_stack.contains(&panel) {
+                    self.panel_stack.push(panel);
+                }
+            } else {
+                self.ensure_open(panel);
+            }
         }
     }
 
     fn toggle_pin(&mut self, panel: Panel) {
         if self.pinned_panels.contains(&panel) {
             self.pinned_panels.retain(|p| *p != panel);
-            self.force_close_panel(panel);
+            if panel == Panel::RadialEditor {
+                // Unpinning is a user close request, not authority to discard
+                // an authoring draft. Dirty state must pass through the
+                // editor's explicit save/discard/keep-editing prompt.
+                if let Ok(mut editor) = self.radial_editor.lock() {
+                    editor.request_close();
+                }
+                self.panel_states.radial_editor = self
+                    .radial_editor
+                    .lock()
+                    .map(|editor| editor.open)
+                    .unwrap_or(false);
+                if self.panel_states.radial_editor && !self.panel_stack.contains(&panel) {
+                    self.panel_stack.push(panel);
+                }
+            } else {
+                self.force_close_panel(panel);
+            }
         } else {
             self.pinned_panels.push(panel);
             self.focus_panel(panel);
@@ -2970,10 +3546,15 @@ impl LauncherApp {
             multi_manager_settings_dialog,
             Panel::MultiManagerSettingsDialog
         );
+        check!(radial_editor, Panel::RadialEditor);
     }
 }
 
 impl LauncherApp {
+    pub fn install_root_window_bridge(&mut self, bridge: RootWindowBridge) {
+        self.root_window_bridge = bridge;
+    }
+
     pub fn install_screen_draw_recovery_bridge(
         &mut self,
         bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
@@ -3303,10 +3884,25 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
             | WatchEvent::Favorites
             | WatchEvent::Gestures
             | WatchEvent::ExecuteAction(_)
+            | WatchEvent::RadialDispatch(_)
+            | WatchEvent::RadialPrepare(_)
+            | WatchEvent::RadialResolveDeferred(_)
+            | WatchEvent::RadialDeferredSearchReady { .. }
+            | WatchEvent::RadialAuthoringSearchReady { .. }
+            | WatchEvent::RadialAuthoringSearchFailed { .. }
+            | WatchEvent::AuthoringProviderCapacityAvailable
+            | WatchEvent::RadialInvalidate
+            | WatchEvent::RadialConfigDiagnostic(_)
+            | WatchEvent::RadialRuntimeDiagnostic(_)
+            | WatchEvent::RadialDiagnostic(_)
+            | WatchEvent::RadialSubmenuPlacementFailure(_)
+            | WatchEvent::RadialPlacementActionResult { .. }
+            | WatchEvent::RadialMigrationNotice(_)
+            | WatchEvent::RadialMigrationState { .. }
             | WatchEvent::ScreenDrawStart => {
                 continue;
             }
-            WatchEvent::ScreenDrawRecover | WatchEvent::ScreenDrawEmergency => {
+            WatchEvent::ScreenDrawRecover(_) | WatchEvent::ScreenDrawEmergency(_) => {
                 return Some(ev.into());
             }
             WatchEvent::ClipboardModify(_) => return Some(ev.into()),
@@ -3329,8 +3925,8 @@ pub fn recv_test_event_timeout(
             WatchEvent::Actions
             | WatchEvent::Folders
             | WatchEvent::Bookmarks
-            | WatchEvent::ScreenDrawRecover
-            | WatchEvent::ScreenDrawEmergency => {
+            | WatchEvent::ScreenDrawRecover(_)
+            | WatchEvent::ScreenDrawEmergency(_) => {
                 return Some(event.into());
             }
             _ if Instant::now() < deadline => {}
@@ -3368,6 +3964,13 @@ mod tests {
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+    fn reset_event_registry_for_test() {
+        let mut registry = super::APP_EVENT_REGISTRY.lock().unwrap();
+        registry.sinks.clear();
+        registry.pending_before_owner.clear();
+        registry.owner_registered = false;
+    }
+
     fn new_app(ctx: &egui::Context) -> LauncherApp {
         LauncherApp::new(
             ctx,
@@ -3385,6 +3988,154 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn deferred_child_input(viewport_id: egui::ViewportId) -> egui::RawInput {
+        let mut input = egui::RawInput {
+            viewport_id,
+            ..Default::default()
+        };
+        input.viewports.insert(
+            viewport_id,
+            egui::ViewportInfo {
+                parent: Some(egui::ViewportId::ROOT),
+                ..Default::default()
+            },
+        );
+        input
+    }
+
+    fn focus_commands(output: &egui::FullOutput, viewport_id: egui::ViewportId) -> usize {
+        output
+            .viewport_output
+            .get(&viewport_id)
+            .map(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .filter(|command| matches!(command, egui::ViewportCommand::Focus))
+                    .count()
+            })
+            .unwrap_or_default()
+    }
+
+    fn register_radial_deferred_callback(
+        ctx: &egui::Context,
+        app: &LauncherApp,
+    ) -> (egui::FullOutput, Arc<egui::DeferredViewportUiCallback>) {
+        ctx.set_embed_viewports(false);
+        let output = ctx.run(egui::RawInput::default(), |root| {
+            radial_editor::RadialEditorState::show_deferred(&app.radial_editor, root, app);
+        });
+        let callback = output
+            .viewport_output
+            .get(&radial_editor::radial_designer_viewport_id())
+            .and_then(|viewport| viewport.viewport_ui_cb.clone())
+            .expect("radial deferred callback registered");
+        (output, callback)
+    }
+
+    #[test]
+    fn event_sink_attaches_wake_to_work_already_in_queue() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        let (tx, rx) = channel();
+        let registration = register_event_sender(tx);
+        send_event(WatchEvent::Actions);
+        assert!(rx.try_recv().is_ok());
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake_count_for_callback = Arc::clone(&wake_count);
+        registration.attach_wake(ViewportWake::from_callback(
+            egui::ViewportId::ROOT,
+            move |_| {
+                wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        registration.event_consumed();
+    }
+
+    #[test]
+    fn event_sink_enqueues_before_waking_and_handles_bursts() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        let (tx, rx) = channel();
+        let rx = Arc::new(Mutex::new(rx));
+        let saw_events = Arc::new(Mutex::new(Vec::new()));
+        let rx_for_callback = Arc::clone(&rx);
+        let saw_events_for_callback = Arc::clone(&saw_events);
+        let registration = register_event_sender_with_wake(
+            tx,
+            ViewportWake::from_callback(egui::ViewportId::ROOT, move |_| {
+                let event = rx_for_callback
+                    .lock()
+                    .unwrap()
+                    .try_recv()
+                    .expect("wake must follow enqueue");
+                saw_events_for_callback.lock().unwrap().push(event);
+            }),
+        );
+
+        send_event(WatchEvent::Actions);
+        send_event(WatchEvent::Folders);
+        send_event(WatchEvent::Bookmarks);
+
+        let events = saw_events.lock().unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                WatchEvent::Actions,
+                WatchEvent::Folders,
+                WatchEvent::Bookmarks
+            ]
+        ));
+        drop(events);
+        registration.event_consumed();
+        registration.event_consumed();
+        registration.event_consumed();
+    }
+
+    #[test]
+    fn disposed_or_dead_event_sinks_are_not_called_again() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        let (tx, rx) = channel();
+        let registration = register_event_sender(tx);
+        drop(registration);
+        send_event(WatchEvent::Actions);
+        assert!(rx.try_recv().is_err());
+
+        let (dead_tx, dead_rx) = channel();
+        let _dead_registration = register_event_sender(dead_tx);
+        drop(dead_rx);
+        send_event(WatchEvent::Actions);
+    }
+
+    #[test]
+    fn event_sink_delivers_work_emitted_before_first_owner_registers() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        send_event(WatchEvent::Actions);
+
+        let (tx, rx) = channel();
+        let registration = register_event_sender(tx);
+        assert!(matches!(rx.try_recv(), Ok(WatchEvent::Actions)));
+        assert!(
+            rx.try_recv().is_err(),
+            "pre-registration work delivered once"
+        );
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake_count_for_callback = Arc::clone(&wake_count);
+        registration.attach_wake(ViewportWake::from_callback(
+            egui::ViewportId::ROOT,
+            move |_| {
+                wake_count_for_callback.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        registration.event_consumed();
     }
 
     fn custom_action(label: &str) -> Action {
@@ -4628,6 +5379,78 @@ mod tests {
         app.update_panel_stack();
         assert!(app.close_front_dialog());
         assert!(!app.clipboard_dialog.open);
+    }
+
+    #[test]
+    fn unpinning_dirty_radial_editor_requires_explicit_close_confirmation() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.radial_editor.lock().unwrap().open_test_snapshot();
+        app.radial_editor.lock().unwrap().make_dirty_for_test();
+        app.pinned_panels.push(Panel::RadialEditor);
+        app.panel_stack.push(Panel::RadialEditor);
+
+        app.toggle_pin(Panel::RadialEditor);
+
+        assert!(!app.pinned_panels.contains(&Panel::RadialEditor));
+        assert!(app.radial_editor.lock().unwrap().open);
+        assert!(app.radial_editor.lock().unwrap().is_dirty());
+        assert!(app.radial_editor.lock().unwrap().has_close_prompt());
+        assert!(app.panel_stack.contains(&Panel::RadialEditor));
+    }
+
+    #[test]
+    fn root_rearms_retained_radial_deferred_viewport_focus_once() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.focus_panel(Panel::RadialEditor);
+        let viewport_id = radial_editor::radial_designer_viewport_id();
+        let (root_output, callback) = register_radial_deferred_callback(&ctx, &app);
+        assert_eq!(focus_commands(&root_output, viewport_id), 1);
+        assert!(ctx.has_requested_repaint_for(&viewport_id));
+
+        let first = ctx.run(deferred_child_input(viewport_id), |child| {
+            callback(child);
+        });
+        let second = ctx.run(deferred_child_input(viewport_id), |child| {
+            callback(child);
+        });
+
+        assert_eq!(focus_commands(&first, viewport_id), 0);
+        assert_eq!(focus_commands(&second, viewport_id), 0);
+    }
+
+    #[test]
+    fn pinned_radial_maintenance_is_idempotent_but_explicit_focus_rearms() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.pinned_panels.push(Panel::RadialEditor);
+        app.enforce_pinned();
+        let viewport_id = radial_editor::radial_designer_viewport_id();
+        let (initial, callback) = register_radial_deferred_callback(&ctx, &app);
+        assert_eq!(focus_commands(&initial, viewport_id), 1);
+
+        let initial_child = ctx.run(deferred_child_input(viewport_id), |child| {
+            callback(child);
+        });
+        assert_eq!(focus_commands(&initial_child, viewport_id), 0);
+
+        app.enforce_pinned();
+        app.enforce_pinned();
+        let (maintained, maintained_callback) = register_radial_deferred_callback(&ctx, &app);
+        assert_eq!(focus_commands(&maintained, viewport_id), 0);
+        let maintained_child = ctx.run(deferred_child_input(viewport_id), |child| {
+            maintained_callback(child);
+        });
+        assert_eq!(focus_commands(&maintained_child, viewport_id), 0);
+
+        app.focus_panel(Panel::RadialEditor);
+        let (explicit, explicit_callback) = register_radial_deferred_callback(&ctx, &app);
+        assert_eq!(focus_commands(&explicit, viewport_id), 1);
+        let explicit_child = ctx.run(deferred_child_input(viewport_id), |child| {
+            explicit_callback(child);
+        });
+        assert_eq!(focus_commands(&explicit_child, viewport_id), 0);
     }
 
     #[test]

@@ -46,6 +46,20 @@ struct OverlayServiceState {
     terminal_shutdown: bool,
 }
 impl SharedVisualOverlayController {
+    fn set_active_id(&self, id: OperationId) {
+        self.0.active_id.store(id, Ordering::Release);
+        crate::hotkey::launcher_invocation::set_exclusive_owner(
+            crate::hotkey::launcher_invocation::ExclusiveOwner::VisualSelection,
+            id != 0,
+        );
+    }
+
+    fn sync_exclusive_owner(&self) {
+        crate::hotkey::launcher_invocation::set_exclusive_owner(
+            crate::hotkey::launcher_invocation::ExclusiveOwner::VisualSelection,
+            self.0.active_id.load(Ordering::Acquire) != 0,
+        );
+    }
     /// Creates the production owner.  This is deliberately visible only to the
     /// containing dialog module so action/condition editors cannot accidentally
     /// grow their own native worker.
@@ -105,7 +119,7 @@ impl SharedVisualOverlayController {
     pub(crate) fn terminal_shutdown_for_test(&self) {
         let mut state = self.0.service.lock().unwrap();
         state.terminal_shutdown = true;
-        self.0.active_id.store(0, Ordering::Release);
+        self.set_active_id(0);
         if let Some(mut service) = state.service.take() {
             service.shutdown_and_join();
         }
@@ -171,7 +185,7 @@ impl SharedVisualOverlayController {
                 if dead {
                     let mut retired = state.service.take().unwrap();
                     buffered.extend(retired.cleanup_finished());
-                    self.0.active_id.store(0, Ordering::Release);
+                    self.set_active_id(0);
                 }
                 if state.service.is_none() {
                     match (self.0.factory)() {
@@ -203,14 +217,14 @@ impl SharedVisualOverlayController {
                         })
                         .is_ok();
                 if replacement_sent && service.commands.send(command.clone()).is_ok() {
-                    self.0.active_id.store(id, Ordering::Release);
+                    self.set_active_id(id);
                     None
                 } else {
                     // The receiver can close between is_finished and send. Retire
                     // that generation and retry this same request (and id) once.
                     let mut retired = state.service.take().unwrap();
                     retired.shutdown_and_join();
-                    self.0.active_id.store(0, Ordering::Release);
+                    self.set_active_id(0);
                     match (self.0.factory)() {
                         Err(error) => Some(format!(
                             "Visual overlay worker terminated and could not be restarted: {error}"
@@ -225,7 +239,7 @@ impl SharedVisualOverlayController {
                                 .send(command)
                                 .is_ok()
                             {
-                                self.0.active_id.store(id, Ordering::Release);
+                                self.set_active_id(id);
                                 None
                             } else {
                                 let mut rejected = state.service.take().unwrap();
@@ -264,6 +278,7 @@ impl SharedVisualOverlayController {
                 self.0.editor_events.lock().unwrap().push_back(event);
             }
         }
+        self.sync_exclusive_owner();
         id
     }
     pub fn begin_rectangle_pick(
@@ -391,6 +406,7 @@ impl SharedVisualOverlayController {
                     expected_operation_id: Some(expected_operation_id),
                 });
             }
+            self.sync_exclusive_owner();
         }
     }
     pub fn cancel_screen_draw_operation(&self, expected_operation_id: OperationId) {
@@ -428,6 +444,7 @@ impl SharedVisualOverlayController {
                 .active_id
                 .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
         }
+        self.sync_exclusive_owner();
         let screen_draw_id = self.0.screen_draw_id.load(Ordering::Acquire);
         let mut editor = self.0.editor_events.lock().unwrap();
         let mut screen_draw = self.0.screen_draw_events.lock().unwrap();

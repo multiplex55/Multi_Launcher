@@ -7,12 +7,13 @@ pub enum EventType {
     KeyRelease(Key),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hotkey {
     pub key: Key,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+    pub alt_gr: bool,
     pub win: bool,
 }
 
@@ -23,6 +24,7 @@ impl Default for Hotkey {
             ctrl: false,
             shift: false,
             alt: false,
+            alt_gr: false,
             win: false,
         }
     }
@@ -33,6 +35,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
     let mut ctrl = false;
     let mut shift = false;
     let mut alt = false;
+    let mut alt_gr = false;
     let mut win = false;
     let mut key: Option<Key> = None;
 
@@ -42,6 +45,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
             "CTRL" | "CONTROL" => ctrl = true,
             "SHIFT" => shift = true,
             "ALT" => alt = true,
+            "ALTGR" | "ALT-GR" => alt_gr = true,
             "WIN" | "SUPER" => win = true,
             "" => {}
             _ => {
@@ -59,6 +63,7 @@ pub fn parse_hotkey(s: &str) -> Option<Hotkey> {
         ctrl,
         shift,
         alt,
+        alt_gr,
         win,
     })
 }

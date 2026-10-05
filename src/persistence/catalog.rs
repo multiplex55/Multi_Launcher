@@ -14,6 +14,7 @@ use crate::plugins::macros::MacroEntry;
 use crate::plugins::shell::ShellCmdEntry;
 use crate::plugins::snippets::SnippetEntry;
 use crate::plugins::todo::TodoEntry;
+use crate::radial::model::RadialDocument;
 use crate::settings::Settings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -56,10 +57,12 @@ pub enum PersistentStoreId {
     Alarms,
     LauncherLog,
     ToastLog,
+    RadialDocument,
+    RadialAssets,
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 37] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -95,6 +98,8 @@ impl PersistentStoreId {
         Self::Alarms,
         Self::LauncherLog,
         Self::ToastLog,
+        Self::RadialDocument,
+        Self::RadialAssets,
     ];
 }
 
@@ -672,6 +677,24 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             false,
             ProbeKind::OpaqueFile,
         ),
+        Id::RadialDocument => s(
+            "Radial menu configuration",
+            File,
+            Critical,
+            Sensitive,
+            Low,
+            true,
+            ProbeKind::Json(probe_radial),
+        ),
+        Id::RadialAssets => s(
+            "Radial menu assets",
+            Directory,
+            Critical,
+            UserContent,
+            Low,
+            false,
+            ProbeKind::AssetsDirectory,
+        ),
     }
 }
 
@@ -792,6 +815,12 @@ fn descriptor_for(
             (absolute_from(current_dir, &path), configured)
         }
         Id::ToastLog => cwd(current_dir, crate::toast_log::TOAST_LOG_FILE),
+        Id::RadialDocument => (root.path().join(crate::radial::model::RADIAL_FILE), false),
+        Id::RadialAssets => (
+            root.path()
+                .join(crate::radial::model::RADIAL_ASSETS_DIRECTORY),
+            false,
+        ),
     };
     let path = lexical_absolute(path, current_dir);
     let ownership = if path_is_within(root.path(), &path) {
@@ -945,6 +974,20 @@ fn probe_json<T: DeserializeOwned>(_: &Path, bytes: &[u8]) -> ProbeResult {
     serde_json::from_slice::<T>(bytes)
         .map(|_| ProbeResult::Healthy)
         .unwrap_or(ProbeResult::Malformed)
+}
+
+fn probe_radial(_: &Path, bytes: &[u8]) -> ProbeResult {
+    match crate::radial::migration::decode_document(bytes) {
+        Ok(_) => ProbeResult::Healthy,
+        Err(crate::radial::migration::DocumentDecodeError::UnsupportedNewerVersion {
+            found,
+            ..
+        }) => ProbeResult::UnsupportedSchema(found.to_string()),
+        Err(
+            crate::radial::migration::DocumentDecodeError::Malformed(_)
+            | crate::radial::migration::DocumentDecodeError::Validation(_),
+        ) => ProbeResult::Malformed,
+    }
 }
 
 fn probe_bookmarks(_: &Path, bytes: &[u8]) -> ProbeResult {
@@ -1173,6 +1216,62 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<PersistentStoreId>(r#""NotesAssets""#).unwrap(),
             PersistentStoreId::NotesAssets
+        );
+    }
+
+    #[test]
+    fn radial_stores_are_application_owned_and_domain_probed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = root(directory.path());
+        let catalog = PersistenceCatalog::new(&root, &Settings::default());
+        let document = catalog.get(PersistentStoreId::RadialDocument);
+        let assets = catalog.get(PersistentStoreId::RadialAssets);
+        assert_eq!(
+            document.path,
+            directory.path().join(crate::radial::model::RADIAL_FILE)
+        );
+        assert_eq!(document.backup_policy, BackupPolicy::Include);
+        assert_eq!(document.privacy, StorePrivacy::Sensitive);
+        assert_eq!(assets.kind, StoreKind::Directory);
+        assert_eq!(assets.privacy, StorePrivacy::UserContent);
+        crate::common::persistence::save_json_atomic(&document.path, &RadialDocument::starter())
+            .unwrap();
+        assert_eq!(document.probe(), StoreHealth::Healthy);
+        let mut legacy = serde_json::to_value(RadialDocument::starter()).unwrap();
+        legacy["schema_version"] = 1.into();
+        let legacy_document = legacy.as_object_mut().unwrap();
+        legacy_document.remove("user_style_defaults");
+        legacy_document.remove("media_search_roots");
+        legacy_document.remove("assets");
+        for menu in legacy_document["menus"].as_array_mut().unwrap() {
+            menu.as_object_mut().unwrap().remove("style");
+            for ring in menu["rings"].as_array_mut().unwrap() {
+                ring.as_object_mut().unwrap().remove("style");
+                for cell in ring["cells"].as_array_mut().unwrap() {
+                    let cell = cell.as_object_mut().unwrap();
+                    cell.remove("tooltip");
+                    cell.remove("style");
+                    cell.remove("shortcuts");
+                    cell.remove("hotstrings");
+                }
+            }
+        }
+        for skin in legacy["skins"].as_array_mut().unwrap() {
+            skin.as_object_mut().unwrap().remove("style");
+            skin["scale"] = 1.0.into();
+            skin["enable_glow"] = serde_json::json!({ "Value": true });
+            skin["center_image"] = serde_json::json!("Clear");
+        }
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&document.path, &legacy_bytes).unwrap();
+        assert_eq!(document.probe(), StoreHealth::Healthy);
+        assert_eq!(std::fs::read(&document.path).unwrap(), legacy_bytes);
+        std::fs::write(&document.path, r#"{"schema_version":999}"#).unwrap();
+        assert_eq!(
+            document.probe(),
+            StoreHealth::UnsupportedSchema {
+                version: "999".into()
+            }
         );
     }
 
