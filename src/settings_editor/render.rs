@@ -127,7 +127,12 @@ impl SettingsEditor {
                             set_all_settings_sections_open(ui, open);
                         }
 
-                        self.render_hotkey_section(ui);
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Hotkeys,
+                            top_level_expand_request,
+                            |ui| self.render_hotkey_section(ui),
+                        );
                         self.render_radial_section(ui, app);
                         self.render_general_section(ui, app);
                         self.render_layout_section(ui, app);
