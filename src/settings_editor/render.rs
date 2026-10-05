@@ -133,9 +133,15 @@ impl SettingsEditor {
                             top_level_expand_request,
                             |ui| self.render_hotkey_section(ui),
                         );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::LauncherWindow,
+                            top_level_expand_request,
+                            |ui| self.render_launcher_window_section(ui, app),
+                        );
                         self.render_radial_section(ui, app);
-                        self.render_general_section(ui, app);
-                        self.render_layout_section(ui, app);
+                        self.render_general_section(ui);
+                        self.render_layout_section(ui);
                         self.render_dashboard_section(ui, app);
                         self.render_plugin_sections(ui, app);
                         self.expand_request = None;
@@ -438,7 +444,7 @@ impl SettingsEditor {
         }
     }
 
-    fn render_general_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+    fn render_general_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             egui::ComboBox::from_label("Debug logging")
                 .selected_text(if self.debug_logging {
@@ -469,7 +475,6 @@ impl SettingsEditor {
                 "Require confirm for destructive actions",
             );
         });
-        ui.checkbox(&mut self.always_on_top, "Always on top");
         ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
         ui.checkbox(
             &mut self.disable_timer_updates,
@@ -485,17 +490,6 @@ impl SettingsEditor {
                 );
             });
         });
-        ui.horizontal(|ui| {
-            ui.label("Query scale");
-            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""));
-        });
-        ui.horizontal(|ui| {
-            ui.label("List scale");
-            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
-        });
-        if ui.button("Open Theme Settings...").clicked() {
-            app.open_theme_settings_dialog();
-        }
         ui.horizontal(|ui| {
             ui.label("Fuzzy weight");
             ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
@@ -515,37 +509,8 @@ impl SettingsEditor {
         });
     }
 
-    fn render_layout_section(&mut self, ui: &mut egui::Ui, app: &LauncherApp) {
-        ui.checkbox(
-            &mut self.query_results_layout_enabled,
-            "Display results in grid layout",
-        );
-        ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Grid rows");
-                ui.add(
-                    egui::DragValue::new(&mut self.query_results_layout_rows)
-                        .clamp_range(1..=100)
-                        .speed(1),
-                );
-                ui.label("Columns");
-                ui.add(
-                    egui::DragValue::new(&mut self.query_results_layout_cols)
-                        .clamp_range(1..=100)
-                        .speed(1),
-                );
-            });
-            self.query_results_layout_rows = self.query_results_layout_rows.max(1);
-            self.query_results_layout_cols = self.query_results_layout_cols.max(1);
-            ui.checkbox(
-                &mut self.query_results_layout_respect_plugin_capability,
-                "Respect plugin list/grid capability",
-            );
-            ui.horizontal(|ui| {
-                ui.label("Force list for plugins (comma separated)");
-                ui.text_edit_singleline(&mut self.query_results_layout_plugin_opt_out);
-            });
-        });
+    fn render_launcher_window_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+        ui.checkbox(&mut self.always_on_top, "Always on top");
         ui.horizontal(|ui| {
             ui.label("Off-screen X");
             ui.add(egui::DragValue::new(&mut self.offscreen_x));
@@ -577,6 +542,50 @@ impl SettingsEditor {
                 }
             });
         }
+        ui.horizontal(|ui| {
+            ui.label("Query scale");
+            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""));
+        });
+        ui.horizontal(|ui| {
+            ui.label("List scale");
+            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
+        });
+        if ui.button("Open Theme Settings...").clicked() {
+            app.open_theme_settings_dialog();
+        }
+    }
+
+    fn render_layout_section(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(
+            &mut self.query_results_layout_enabled,
+            "Display results in grid layout",
+        );
+        ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Grid rows");
+                ui.add(
+                    egui::DragValue::new(&mut self.query_results_layout_rows)
+                        .clamp_range(1..=100)
+                        .speed(1),
+                );
+                ui.label("Columns");
+                ui.add(
+                    egui::DragValue::new(&mut self.query_results_layout_cols)
+                        .clamp_range(1..=100)
+                        .speed(1),
+                );
+            });
+            self.query_results_layout_rows = self.query_results_layout_rows.max(1);
+            self.query_results_layout_cols = self.query_results_layout_cols.max(1);
+            ui.checkbox(
+                &mut self.query_results_layout_respect_plugin_capability,
+                "Respect plugin list/grid capability",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Force list for plugins (comma separated)");
+                ui.text_edit_singleline(&mut self.query_results_layout_plugin_opt_out);
+            });
+        });
     }
 
     fn render_dashboard_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {

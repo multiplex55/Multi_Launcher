@@ -2058,8 +2058,8 @@ Initial state:
 - M0 Focused reconnaissance — complete
 - M1-A complete — `cd44fb95` refactor(settings): [M1-A] add top-level collapsible section framework
 - M1-B complete — `5d8210b6` feat(settings): [M1-B] add top-level expand and collapse controls
-- Next checkpoint: M2-A Hotkeys
-- M2-A Hotkeys — pending
+- M2-A complete — `153e8a67` refactor(settings): [M2-A] move hotkey controls into their settings section
+- Next checkpoint: M2-B Launcher Window & Appearance
 - M2-B Launcher Window & Appearance — pending
 - M2-C Search & Results — pending
 - M2-D Actions, Safety & Feedback — pending
