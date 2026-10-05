@@ -2059,8 +2059,8 @@ Initial state:
 - M1-A complete — `cd44fb95` refactor(settings): [M1-A] add top-level collapsible section framework
 - M1-B complete — `5d8210b6` feat(settings): [M1-B] add top-level expand and collapse controls
 - M2-A complete — `153e8a67` refactor(settings): [M2-A] move hotkey controls into their settings section
-- Next checkpoint: M2-B Launcher Window & Appearance
-- M2-B Launcher Window & Appearance — pending
+- M2-B complete — `b0e0d1d7` refactor(settings): [M2-B] organize launcher window and appearance controls
+- Next checkpoint: M2-C Search & Results
 - M2-C Search & Results — pending
 - M2-D Actions, Safety & Feedback — pending
 - M2-E Dashboard — pending

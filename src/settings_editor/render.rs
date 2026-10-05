@@ -139,9 +139,14 @@ impl SettingsEditor {
                             top_level_expand_request,
                             |ui| self.render_launcher_window_section(ui, app),
                         );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::SearchResults,
+                            top_level_expand_request,
+                            |ui| self.render_search_results_section(ui),
+                        );
                         self.render_radial_section(ui, app);
                         self.render_general_section(ui);
-                        self.render_layout_section(ui);
                         self.render_dashboard_section(ui, app);
                         self.render_plugin_sections(ui, app);
                         self.expand_request = None;
@@ -475,7 +480,6 @@ impl SettingsEditor {
                 "Require confirm for destructive actions",
             );
         });
-        ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
         ui.checkbox(
             &mut self.disable_timer_updates,
             "Disable timer auto refresh",
@@ -489,23 +493,6 @@ impl SettingsEditor {
                         .speed(0.1),
                 );
             });
-        });
-        ui.horizontal(|ui| {
-            ui.label("Fuzzy weight");
-            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Usage weight");
-            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
-        });
-        ui.checkbox(&mut self.match_exact, "Match exact");
-        ui.horizontal(|ui| {
-            ui.label("Page jump");
-            ui.add(
-                egui::DragValue::new(&mut self.page_jump)
-                    .clamp_range(1..=100)
-                    .speed(1),
-            );
         });
     }
 
@@ -555,7 +542,25 @@ impl SettingsEditor {
         }
     }
 
-    fn render_layout_section(&mut self, ui: &mut egui::Ui) {
+    fn render_search_results_section(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
+        ui.horizontal(|ui| {
+            ui.label("Fuzzy weight");
+            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Usage weight");
+            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
+        });
+        ui.checkbox(&mut self.match_exact, "Match exact");
+        ui.horizontal(|ui| {
+            ui.label("Page jump");
+            ui.add(
+                egui::DragValue::new(&mut self.page_jump)
+                    .clamp_range(1..=100)
+                    .speed(1),
+            );
+        });
         ui.checkbox(
             &mut self.query_results_layout_enabled,
             "Display results in grid layout",
