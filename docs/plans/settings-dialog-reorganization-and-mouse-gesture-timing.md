@@ -2061,8 +2061,8 @@ Initial state:
 - M2-A complete — `153e8a67` refactor(settings): [M2-A] move hotkey controls into their settings section
 - M2-B complete — `b0e0d1d7` refactor(settings): [M2-B] organize launcher window and appearance controls
 - M2-C complete — `59c9beea` refactor(settings): [M2-C] organize search and result layout settings
-- Next checkpoint: M2-D Actions, Safety & Feedback
-- M2-D Actions, Safety & Feedback — pending
+- M2-D complete — `00895e0e` refactor(settings): [M2-D] group action safety and feedback settings
+- Next checkpoint: M2-E Dashboard
 - M2-E Dashboard — pending
 - M2-F Radial Menus — pending
 - M2-G Plugin Settings — pending

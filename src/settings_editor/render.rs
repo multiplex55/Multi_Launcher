@@ -152,7 +152,12 @@ impl SettingsEditor {
                             |ui| self.render_actions_safety_feedback_section(ui),
                         );
                         self.render_radial_section(ui, app);
-                        self.render_dashboard_section(ui, app);
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Dashboard,
+                            top_level_expand_request,
+                            |ui| self.render_dashboard_section(ui, app),
+                        );
                         self.render_plugin_sections(ui, app);
                         self.expand_request = None;
                     });
@@ -608,8 +613,6 @@ impl SettingsEditor {
     }
 
     fn render_dashboard_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
-        ui.separator();
-        ui.heading("Dashboard");
         ui.checkbox(
             &mut self.dashboard_enabled,
             "Enable dashboard when query is empty",
