@@ -151,12 +151,17 @@ impl SettingsEditor {
                             top_level_expand_request,
                             |ui| self.render_actions_safety_feedback_section(ui),
                         );
-                        self.render_radial_section(ui, app);
                         show_settings_section(
                             ui,
                             TopLevelSettingsSection::Dashboard,
                             top_level_expand_request,
                             |ui| self.render_dashboard_section(ui, app),
+                        );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Radial,
+                            top_level_expand_request,
+                            |ui| self.render_radial_section(ui, app),
                         );
                         self.render_plugin_sections(ui, app);
                         self.expand_request = None;
@@ -194,8 +199,6 @@ impl SettingsEditor {
             InteractionMode, RadialSafetyPolicy, SubmenuPresentation, TooltipScope, TriggerScope,
         };
 
-        ui.separator();
-        ui.heading("Radial menus");
         ui.checkbox(&mut self.radial_enabled, "Enable radial menus");
         ui.add_enabled_ui(self.radial_enabled, |ui| {
             ui.checkbox(
