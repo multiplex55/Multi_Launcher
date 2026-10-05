@@ -290,6 +290,9 @@ mod tests {
         fn crop_image(&mut self) {}
         fn crop_screenshot(&mut self) {}
     }
+    impl crate::commands::JsonUtilityCommandHost for Host {
+        fn open_json_utility(&mut self, _: crate::commands::JsonUtilityIntent) {}
+    }
     impl DialogCommandHost for Host {
         fn open_help_dialog(&mut self) {}
         fn open_timer_dialog(&mut self) {}

@@ -2123,6 +2123,7 @@ impl LauncherApp {
             Some(&self.clipboard_modify_runtime.store),
         );
         self.clipboard_modify_dialog = cm_dlg;
+        self.json_utility_dialog.show(ctx);
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
         conv_panel.ui(ctx, self);
         self.convert_panel = conv_panel;

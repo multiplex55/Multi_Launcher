@@ -15,9 +15,9 @@ pub use error::CommandError;
 pub use host::{
     CalendarCommandHost, ClipboardModifyCommandHost, CommandHost, CropCommandHost, DataCommandHost,
     DialogCommandHost, DiffCommandHost, FileSearchCommandHost, HeadlessCommandHost,
-    LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult,
-    TodoCommandHost,
+    JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
+    NoteCommandHost, RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost,
+    ScreenshotCommandResult, TodoCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

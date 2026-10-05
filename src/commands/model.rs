@@ -81,6 +81,7 @@ pub enum Command {
     Layout(LayoutCommand),
     Macro(MacroCommand),
     Crop(CropCommand),
+    JsonUtility(JsonUtilityCommand),
     Data(DataCommand),
     VirtualDesktop(VirtualDesktopCommand),
     External(ExternalCommand),
@@ -115,6 +116,7 @@ impl Command {
             Self::Layout(_) => "layout",
             Self::Macro(_) => "macro",
             Self::Crop(_) => "crop",
+            Self::JsonUtility(_) => "json_utility",
             Self::Data(_) => "data",
             Self::VirtualDesktop(_) => "virtual_desktop",
             Self::External(_) => "external",
@@ -148,6 +150,7 @@ impl Command {
             Self::Layout(v) => v.kind_name(),
             Self::Macro(v) => v.kind_name(),
             Self::Crop(v) => v.kind_name(),
+            Self::JsonUtility(v) => v.kind_name(),
             Self::Data(v) => v.kind_name(),
             Self::VirtualDesktop(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
@@ -682,6 +685,30 @@ pub enum CropCommand {
     Screenshot,
 }
 kinds!(CropCommand, Self::Image => "image", Self::Screenshot => "screenshot");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonUtilityIntent {
+    General,
+    Format,
+    Minify,
+}
+
+impl JsonUtilityIntent {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "Format or Minify",
+            Self::Format => "Format",
+            Self::Minify => "Minify",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonUtilityCommand {
+    Open { intent: JsonUtilityIntent },
+}
+
+kinds!(JsonUtilityCommand, Self::Open { .. } => "open");
 
 /// User-facing data maintenance commands.
 ///

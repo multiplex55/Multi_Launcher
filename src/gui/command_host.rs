@@ -5,10 +5,10 @@ use crate::commands::{
     CalendarCommandHost, ClipboardModifyCommandHost, Command, CommandError, CommandInvocation,
     CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
     FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
-    LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
-    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup,
-    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
+    JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
+    NoteCommandHost, PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy,
+    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination,
+    ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -417,6 +417,14 @@ impl CropCommandHost for LauncherApp {
         self.begin_crop_screenshot();
     }
 }
+
+impl JsonUtilityCommandHost for LauncherApp {
+    fn open_json_utility(&mut self, intent: crate::commands::JsonUtilityIntent) {
+        self.json_utility_dialog.open(intent);
+        self.focus_panel(super::Panel::JsonUtilityDialog);
+    }
+}
+
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
@@ -788,6 +796,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
         command,
         Command::Radial(_)
             | Command::ClipboardModify(_)
+            | Command::JsonUtility(_)
             | Command::FileSearch(_)
             | Command::Diff(_)
     )
@@ -1591,6 +1600,15 @@ mod tests {
         assert!(!command_accepts_query_override(&Command::ClipboardModify(
             crate::commands::ClipboardModifyCommand::Open {
                 section: crate::clipboard_modify::actions::ClipboardModifySectionPayload::Modify,
+            },
+        )));
+    }
+
+    #[test]
+    fn json_utility_commands_reject_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::JsonUtility(
+            crate::commands::JsonUtilityCommand::Open {
+                intent: crate::commands::JsonUtilityIntent::Format,
             },
         )));
     }
