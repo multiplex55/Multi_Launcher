@@ -7,6 +7,72 @@ use eframe::egui;
 const RADIAL_TAP_HOLD_EXPLANATION: &str = "Release before the threshold to toggle the launcher. Crossing the threshold opens the radial menu; releasing afterward never also toggles the launcher.";
 const RADIAL_LEGACY_TIMING_EXPLANATION: &str = "Legacy timing: the launcher hotkey toggles immediately; named radial commands and configured direct triggers remain available.";
 
+#[derive(Clone, Copy)]
+enum TopLevelSettingsSection {
+    Hotkeys,
+    LauncherWindow,
+    SearchResults,
+    ActionsFeedback,
+    Dashboard,
+    Radial,
+    Plugins,
+}
+
+impl TopLevelSettingsSection {
+    const fn persistent_id(self) -> &'static str {
+        match self {
+            Self::Hotkeys => "settings_section_hotkeys",
+            Self::LauncherWindow => "settings_section_launcher_window",
+            Self::SearchResults => "settings_section_search_results",
+            Self::ActionsFeedback => "settings_section_actions_feedback",
+            Self::Dashboard => "settings_section_dashboard",
+            Self::Radial => "settings_section_radial",
+            Self::Plugins => "settings_section_plugins",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Hotkeys => "Hotkeys",
+            Self::LauncherWindow => "Launcher Window & Appearance",
+            Self::SearchResults => "Search & Results",
+            Self::ActionsFeedback => "Actions, Safety & Feedback",
+            Self::Dashboard => "Dashboard",
+            Self::Radial => "Radial Menus",
+            Self::Plugins => "Plugin Settings",
+        }
+    }
+
+    const fn default_open(self) -> bool {
+        matches!(
+            self,
+            Self::Hotkeys | Self::LauncherWindow | Self::SearchResults
+        )
+    }
+}
+
+fn show_settings_section(
+    ui: &mut egui::Ui,
+    section: TopLevelSettingsSection,
+    forced_open: Option<bool>,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let id = ui.make_persistent_id(section.persistent_id());
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        ui.ctx(),
+        id,
+        section.default_open(),
+    );
+    if let Some(open) = forced_open {
+        state.set_open(open);
+    }
+    state
+        .show_header(ui, |ui| {
+            ui.heading(section.title());
+        })
+        .body(add_contents);
+}
+
 impl SettingsEditor {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_settings;
