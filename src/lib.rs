@@ -22,6 +22,7 @@ pub mod active_window;
 pub mod annotation;
 
 pub mod clipboard_modify;
+pub mod color;
 pub mod commands;
 pub mod common;
 pub mod completion;
