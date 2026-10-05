@@ -2060,8 +2060,8 @@ Initial state:
 - M1-B complete — `5d8210b6` feat(settings): [M1-B] add top-level expand and collapse controls
 - M2-A complete — `153e8a67` refactor(settings): [M2-A] move hotkey controls into their settings section
 - M2-B complete — `b0e0d1d7` refactor(settings): [M2-B] organize launcher window and appearance controls
-- Next checkpoint: M2-C Search & Results
-- M2-C Search & Results — pending
+- M2-C complete — `59c9beea` refactor(settings): [M2-C] organize search and result layout settings
+- Next checkpoint: M2-D Actions, Safety & Feedback
 - M2-D Actions, Safety & Feedback — pending
 - M2-E Dashboard — pending
 - M2-F Radial Menus — pending

@@ -145,8 +145,13 @@ impl SettingsEditor {
                             top_level_expand_request,
                             |ui| self.render_search_results_section(ui),
                         );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::ActionsFeedback,
+                            top_level_expand_request,
+                            |ui| self.render_actions_safety_feedback_section(ui),
+                        );
                         self.render_radial_section(ui, app);
-                        self.render_general_section(ui);
                         self.render_dashboard_section(ui, app);
                         self.render_plugin_sections(ui, app);
                         self.expand_request = None;
@@ -449,7 +454,34 @@ impl SettingsEditor {
         }
     }
 
-    fn render_general_section(&mut self, ui: &mut egui::Ui) {
+    fn render_actions_safety_feedback_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("After running an action").strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
+            ui.checkbox(&mut self.preserve_command, "Preserve command after run");
+            ui.checkbox(&mut self.clear_query_after_run, "Clear query after run");
+        });
+
+        ui.label(egui::RichText::new("Safety").strong());
+        ui.checkbox(
+            &mut self.require_confirm_destructive,
+            "Require confirm for destructive actions",
+        );
+
+        ui.label(egui::RichText::new("Notifications and errors").strong());
+        ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+        if self.show_toasts {
+            ui.horizontal(|ui| {
+                ui.label("Toast duration (s)");
+                ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""));
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.show_inline_errors, "Show inline errors");
+            ui.checkbox(&mut self.show_error_toasts, "Show error toasts");
+        });
+
+        ui.label(egui::RichText::new("Diagnostics and refresh").strong());
         ui.horizontal(|ui| {
             egui::ComboBox::from_label("Debug logging")
                 .selected_text(if self.debug_logging {
@@ -461,24 +493,6 @@ impl SettingsEditor {
                     ui.selectable_value(&mut self.debug_logging, false, "Disabled");
                     ui.selectable_value(&mut self.debug_logging, true, "Enabled");
                 });
-        });
-        ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
-        ui.checkbox(&mut self.show_inline_errors, "Show inline errors");
-        ui.checkbox(&mut self.show_error_toasts, "Show error toasts");
-        if self.show_toasts {
-            ui.horizontal(|ui| {
-                ui.label("Toast duration (s)");
-                ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""));
-            });
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
-            ui.checkbox(&mut self.preserve_command, "Preserve command after run");
-            ui.checkbox(&mut self.clear_query_after_run, "Clear query after run");
-            ui.checkbox(
-                &mut self.require_confirm_destructive,
-                "Require confirm for destructive actions",
-            );
         });
         ui.checkbox(
             &mut self.disable_timer_updates,
