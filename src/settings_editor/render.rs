@@ -163,7 +163,12 @@ impl SettingsEditor {
                             top_level_expand_request,
                             |ui| self.render_radial_section(ui, app),
                         );
-                        self.render_plugin_sections(ui, app);
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Plugins,
+                            top_level_expand_request,
+                            |ui| self.render_plugin_sections(ui, app),
+                        );
                         self.expand_request = None;
                     });
 
