@@ -1203,8 +1203,6 @@ struct HoldReleaseHandoff {
 struct DesignerEntry {
     window: WindowSnapshot,
     session_id: u64,
-    root_recovery: Option<String>,
-    root_menu_resolution: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -2898,7 +2896,8 @@ struct AuthoringObservationFileResponse {
     request_id: u64,
     phase: String,
     status: String,
-    error: Option<String>,
+    #[serde(rename = "error")]
+    _error: Option<String>,
     baseline_request_id: Option<u64>,
     observed_frame_ordinal: u64,
     before: Option<AuthoringObservationEvidence>,
@@ -5186,6 +5185,7 @@ fn gate_c_cleanup_close_receipt_from_line(line: &str) -> Result<GateCCleanupClos
     )
 }
 
+#[cfg(test)]
 fn gate_c_cleanup_prompt_matches(
     receipt: GateCCleanupCloseReceipt,
     expected_session_id: u64,
@@ -11709,9 +11709,6 @@ struct GateCDestinationIds {
     menu_id: String,
     ring_id: String,
     cell_id: String,
-    menu_label: String,
-    ring_label: String,
-    cell_label: String,
     cell_index: usize,
 }
 
@@ -11893,35 +11890,7 @@ fn gate_c_wait_visible_text_containing(
     result
 }
 
-fn gate_c_wait_exact_edit(
-    case_id: &str,
-    diagnostic_tag: &str,
-    child: &NativeChild,
-    uia: &UiAutomation,
-    hwnd: HWND,
-    expected_pid: u32,
-    fragment: &str,
-    expected_value: &str,
-    timeout: Duration,
-) -> Result<SemanticControl, String> {
-    let result = gate_c_wait_exact_edit_with(
-        fragment,
-        expected_value,
-        timeout,
-        || {
-            child
-                .validate_window(hwnd)
-                .map_err(VisibleTextLookupError::Other)?;
-            uia.find_edit_with_value_fragment_classified(hwnd, expected_pid, fragment)
-        },
-        |control, value| uia.edit_value_matches_classified(control, value),
-    );
-    if result.is_err() {
-        save_gate_c_private_uia_diagnostic(case_id, diagnostic_tag, child, uia, hwnd, expected_pid);
-    }
-    result
-}
-
+#[cfg(test)]
 fn gate_c_wait_exact_edit_with<T>(
     fragment: &str,
     expected_value: &str,
@@ -12642,19 +12611,6 @@ fn gate_c_destination_ids(
         menu_id: menu.id.to_string(),
         ring_id: ring.id.to_string(),
         cell_id: cell.id.to_string(),
-        menu_label: menu.name.clone(),
-        ring_label: format!("{} · {} slots", ring.id, ring.cells.len()),
-        cell_label: format!(
-            "{} · {}",
-            cell.label,
-            match &cell.content {
-                CellContent::Spacer => "Spacer",
-                CellContent::Action { .. } => "Action",
-                CellContent::Submenu { .. } => "Submenu",
-                CellContent::Dynamic { .. } => "Dynamic",
-                CellContent::Control { .. } => "Control",
-            }
-        ),
         cell_index,
     })
 }
@@ -12686,38 +12642,6 @@ fn gate_c_spacer_destination_ids(
         ));
     }
     Ok(destination)
-}
-
-fn gate_c_occupied_destination_ids(
-    document: &RadialDocument,
-) -> Result<GateCDestinationIds, String> {
-    let menu = document
-        .menus
-        .iter()
-        .find(|menu| menu.id == document.default_menu_id && menu.name == "Starter")
-        .ok_or_else(|| "typed radial document has no Gate C Starter menu".to_string())?;
-    let ring = menu
-        .rings
-        .first()
-        .ok_or_else(|| "typed Gate C Starter menu has no destination ring".to_string())?;
-    let (cell_index, cell) = ring
-        .cells
-        .iter()
-        .enumerate()
-        .find(|(_, cell)| {
-            matches!(&cell.content, CellContent::Action { .. })
-                && cell.after_action == AfterActionPolicy::CloseTree
-        })
-        .ok_or_else(|| "Gate C fixture has no occupied CloseTree destination cell".to_string())?;
-    Ok(GateCDestinationIds {
-        menu_id: menu.id.to_string(),
-        ring_id: ring.id.to_string(),
-        cell_id: cell.id.to_string(),
-        menu_label: menu.name.clone(),
-        ring_label: format!("{} · {} slots", ring.id, ring.cells.len()),
-        cell_label: format!("{} · Action", cell.label),
-        cell_index,
-    })
 }
 
 fn gate_c_distinct_occupied_destination_ids(
@@ -12753,9 +12677,6 @@ fn gate_c_distinct_occupied_destination_ids(
         menu_id: menu.id.to_string(),
         ring_id: ring.id.to_string(),
         cell_id: cell.id.to_string(),
-        menu_label: menu.name.clone(),
-        ring_label: format!("{} · {} slots", ring.id, ring.cells.len()),
-        cell_label: format!("{} · Action", cell.label),
         cell_index,
     })
 }
@@ -21243,35 +21164,6 @@ fn qualify_query_case_result<R: IntoQueryInvocations>(
     (result, evidence)
 }
 
-fn append_query_case_result(
-    report: &mut AcceptanceReport,
-    id: &str,
-    started: Instant,
-    result: Result<String, CaseFailure>,
-    evidence: Option<QueryCaseEvidence>,
-    child: Option<&NativeChild>,
-    output: &Path,
-    trace_path: &Path,
-    marker_path: &Path,
-    hotkey: AcceptanceHotkey,
-    hold_threshold_ms: u64,
-) {
-    append_query_case_result_with_diagnostics(
-        report,
-        id,
-        started,
-        result,
-        evidence,
-        child,
-        output,
-        trace_path,
-        marker_path,
-        hotkey,
-        hold_threshold_ms,
-        None,
-    );
-}
-
 fn append_query_case_result_with_diagnostics(
     report: &mut AcceptanceReport,
     id: &str,
@@ -28225,13 +28117,6 @@ fn run_readable_hotkey_transitions(
     Ok(trace_fences)
 }
 
-fn hotkey_key_names(hotkey: AcceptanceHotkey) -> &'static str {
-    match hotkey {
-        AcceptanceHotkey::F11 => "F11",
-        AcceptanceHotkey::ShiftAltWinEnd => "LeftShift+LeftAlt+LeftWin+End",
-    }
-}
-
 fn expected_hotkey_edges(hotkey: AcceptanceHotkey, taps: usize) -> Vec<(u32, bool)> {
     let tap_edges = super::super::expected_setup_hotkey_edges(hotkey);
     let mut expected = Vec::with_capacity(tap_edges.len().saturating_mul(taps));
@@ -30342,8 +30227,6 @@ fn run_designer_entry(
     Ok(DesignerEntry {
         window: current,
         session_id,
-        root_recovery: restored,
-        root_menu_resolution: closed_apps_menu,
     })
 }
 
@@ -34628,35 +34511,6 @@ fn verify_no_leaf_side_effects(
     Ok(format!(
         "full trace from the pre-A3 baseline through this point contains no radial_action event; all {dispatch_samples} native preview dispatch samples are zero and history is byte-identical"
     ))
-}
-
-fn append_blocked_continued_designer_cases(
-    report: &mut AcceptanceReport,
-    cause: &CaseFailure,
-    child: Option<&NativeChild>,
-    output: &Path,
-    trace_path: &Path,
-) {
-    if !report.cases.iter().any(|case| case.id == "A3") {
-        append_case(
-            report,
-            "A3",
-            expected("A3"),
-            started_now(),
-            Err(cause.clone()),
-            child,
-            output,
-            trace_path,
-        );
-    }
-    append_blocked_ids(
-        report,
-        &["A4", "A5", "A6", "A7", "A8", "D3", "D6", "D7"],
-        cause,
-        output,
-        trace_path,
-        "A3 post-geometry Designer entry failed",
-    );
 }
 
 fn append_blocked_lifecycle_cases(report: &mut AcceptanceReport, output: &Path, trace_path: &Path) {
@@ -46853,7 +46707,7 @@ mod tests {
                     request_id: 91,
                     phase: "terminal".into(),
                     status: "captured".into(),
-                    error: Some("private title and path".into()),
+                    _error: Some("private title and path".into()),
                     baseline_request_id: Some(90),
                     observed_frame_ordinal: 7,
                     before: Some(rejected),
@@ -53177,7 +53031,7 @@ mod tests {
             request_id: 10,
             phase: "baseline".into(),
             status: "captured".into(),
-            error: None,
+            _error: None,
             baseline_request_id: None,
             observed_frame_ordinal: 5,
             before: Some(before.clone()),
@@ -53212,7 +53066,7 @@ mod tests {
             request_id: 10,
             phase: "baseline".into(),
             status: "captured".into(),
-            error: Some("Shared Acceptance Note C:\\private\\notes".into()),
+            _error: Some("Shared Acceptance Note C:\\private\\notes".into()),
             baseline_request_id: None,
             observed_frame_ordinal: 5,
             before: Some(rejected_state),
@@ -53282,7 +53136,7 @@ mod tests {
             request_id: 10,
             phase: "baseline".into(),
             status: "captured".into(),
-            error: None,
+            _error: None,
             baseline_request_id: None,
             observed_frame_ordinal: 5,
             before: Some(baseline),
@@ -53311,7 +53165,7 @@ mod tests {
             request_id: 10,
             phase: "baseline".into(),
             status: "captured".into(),
-            error: None,
+            _error: None,
             baseline_request_id: None,
             observed_frame_ordinal: 6,
             before: Some(fresh_editor.clone()),
@@ -53333,7 +53187,7 @@ mod tests {
             request_id: 10,
             phase: "baseline".into(),
             status: "captured".into(),
-            error: None,
+            _error: None,
             baseline_request_id: None,
             observed_frame_ordinal: 7,
             before: Some(browsing_editor),
@@ -53352,7 +53206,7 @@ mod tests {
             request_id: 11,
             phase: "snapshot".into(),
             status: "captured".into(),
-            error: None,
+            _error: None,
             baseline_request_id: None,
             observed_frame_ordinal: 6,
             before: Some(authoring_observation_evidence(6, 82)),
@@ -53389,7 +53243,7 @@ mod tests {
             request_id: 11,
             phase: "terminal".into(),
             status: "captured".into(),
-            error: None,
+            _error: None,
             baseline_request_id: Some(10),
             observed_frame_ordinal: 6,
             before: Some(authoring_observation_evidence(5, 80)),
