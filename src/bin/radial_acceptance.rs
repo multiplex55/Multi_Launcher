@@ -1280,6 +1280,7 @@ fn hotkey_expected_state(case_id: &str) -> Option<HotkeyExpectedState> {
     })
 }
 
+#[cfg(test)]
 fn validate_hotkey_evidence_packet(packet: &HotkeyCaseEvidence) -> Result<(), String> {
     validate_hotkey_evidence_packet_with_context(packet, AcceptanceHotkey::F11, 350)
 }
@@ -6173,6 +6174,7 @@ fn gate_c_persisted_binding_identity_matches(binding: &GateCBindingEvidence) -> 
     note_match || custom_action_match
 }
 
+#[cfg(test)]
 fn gate_c_apply_note_row_identity(row: &mut GateCResultRowEvidence, slug: &str) {
     row.target_digest = gate_c_note_semantic_target_digest(slug);
     row.action_digest = gate_c_note_action_digest();
@@ -6186,6 +6188,7 @@ fn gate_c_apply_note_row_identity(row: &mut GateCResultRowEvidence, slug: &str) 
     }
 }
 
+#[cfg(test)]
 fn gate_c_apply_note_control_identity(control: &mut GateCControlEvidence, slug: &str) {
     control.target_digest = gate_c_note_semantic_target_digest(slug);
     control.action_digest = gate_c_note_action_digest();
@@ -7973,6 +7976,7 @@ fn gate_c_fixture_displayed_label_matches(row: &GateCResultRowEvidence) -> bool 
         .is_some_and(|(_, _, _, expected)| expected == row.displayed_text_digest)
 }
 
+#[cfg(test)]
 fn gate_c_expected_fixture_label_digest(target_digest: u64, action_digest: u64) -> Option<u64> {
     gate_c_expected_fixture_label_digests(target_digest, action_digest)
         .map(|(_, _, _, digest)| digest)
@@ -17827,6 +17831,7 @@ fn prepare_output_directory(arguments: &Arguments) -> Result<PathBuf, String> {
     Ok(output)
 }
 
+#[cfg(test)]
 fn deterministic_fixture(
     log_path: &Path,
     mouse_gesture_mode: MouseGestureMode,

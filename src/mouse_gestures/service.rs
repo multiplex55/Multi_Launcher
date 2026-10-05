@@ -17,6 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub(crate) const DEFAULT_TRAIL_INTERVAL_MS: u64 = 16;
+pub(crate) const DEFAULT_RECOGNITION_INTERVAL_MS: u64 = 40;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MouseGestureConfig {
     pub enabled: bool,
@@ -47,8 +50,8 @@ impl Default for MouseGestureConfig {
         Self {
             enabled: false,
             debug_logging: false,
-            trail_interval_ms: 16,
-            recognition_interval_ms: 40,
+            trail_interval_ms: DEFAULT_TRAIL_INTERVAL_MS,
+            recognition_interval_ms: DEFAULT_RECOGNITION_INTERVAL_MS,
             deadzone_px: 12.0,
             trail_start_move_px: 8.0,
             show_trail: true,

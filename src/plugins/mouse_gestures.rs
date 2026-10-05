@@ -6,8 +6,8 @@ use crate::mouse_gestures::db::{
     format_search_result_label, load_gestures,
 };
 use crate::mouse_gestures::service::{
-    CancelBehavior, MouseGestureConfig, NoMatchBehavior, WheelCycleGate,
-    with_service as with_gesture_service,
+    CancelBehavior, DEFAULT_RECOGNITION_INTERVAL_MS, DEFAULT_TRAIL_INTERVAL_MS, MouseGestureConfig,
+    NoMatchBehavior, WheelCycleGate, with_service as with_gesture_service,
 };
 use crate::plugin::Plugin;
 use eframe::egui;
@@ -34,6 +34,10 @@ pub struct MouseGestureSettings {
     pub trail_width: f32,
     #[serde(default = "default_trail_start_move_px")]
     pub trail_start_move_px: f32,
+    #[serde(default = "default_trail_interval_ms")]
+    pub trail_interval_ms: u64,
+    #[serde(default = "default_recognition_interval_ms")]
+    pub recognition_interval_ms: u64,
     #[serde(default = "default_show_hint")]
     pub show_hint: bool,
     #[serde(default = "default_hint_offset")]
@@ -59,6 +63,8 @@ impl Default for MouseGestureSettings {
             trail_color: default_trail_color(),
             trail_width: default_trail_width(),
             trail_start_move_px: default_trail_start_move_px(),
+            trail_interval_ms: default_trail_interval_ms(),
+            recognition_interval_ms: default_recognition_interval_ms(),
             show_hint: default_show_hint(),
             hint_offset: default_hint_offset(),
             cancel_behavior: default_cancel_behavior(),
@@ -92,6 +98,14 @@ fn default_trail_width() -> f32 {
 
 fn default_trail_start_move_px() -> f32 {
     8.0
+}
+
+fn default_trail_interval_ms() -> u64 {
+    DEFAULT_TRAIL_INTERVAL_MS
+}
+
+fn default_recognition_interval_ms() -> u64 {
+    DEFAULT_RECOGNITION_INTERVAL_MS
 }
 
 fn default_show_hint() -> bool {
@@ -260,25 +274,32 @@ impl MouseGestureRuntime {
     }
 
     fn apply(&self) {
-        let mut config = MouseGestureConfig::default();
-        config.enabled = self.settings.enabled && self.plugin_enabled;
-        config.debug_logging = self.settings.debug_logging;
-        config.trail_start_move_px = self.settings.trail_start_move_px;
-        config.show_trail = self.settings.show_trail;
-        config.trail_color = self.settings.trail_color;
-        config.trail_width = self.settings.trail_width;
-        config.show_hint = self.settings.show_hint;
-        config.hint_offset = self.settings.hint_offset;
-        config.cancel_behavior = self.settings.cancel_behavior;
-        config.no_match_behavior = self.settings.no_match_behavior;
-        config.wheel_cycle_gate = self.settings.wheel_cycle_gate;
-        config.practice_mode = self.settings.practice_mode;
-        config.ignore_window_titles = self.settings.ignore_window_titles.clone();
+        let config = settings_to_config(&self.settings, self.plugin_enabled);
         with_gesture_service(|svc| {
             svc.update_config(config);
             svc.update_db(Some(self.db.clone()));
         });
     }
+}
+
+fn settings_to_config(settings: &MouseGestureSettings, plugin_enabled: bool) -> MouseGestureConfig {
+    let mut config = MouseGestureConfig::default();
+    config.enabled = settings.enabled && plugin_enabled;
+    config.debug_logging = settings.debug_logging;
+    config.trail_start_move_px = settings.trail_start_move_px;
+    config.trail_interval_ms = settings.trail_interval_ms;
+    config.recognition_interval_ms = settings.recognition_interval_ms;
+    config.show_trail = settings.show_trail;
+    config.trail_color = settings.trail_color;
+    config.trail_width = settings.trail_width;
+    config.show_hint = settings.show_hint;
+    config.hint_offset = settings.hint_offset;
+    config.cancel_behavior = settings.cancel_behavior;
+    config.no_match_behavior = settings.no_match_behavior;
+    config.wheel_cycle_gate = settings.wheel_cycle_gate;
+    config.practice_mode = settings.practice_mode;
+    config.ignore_window_titles = settings.ignore_window_titles.clone();
+    config
 }
 
 static SERVICE: OnceCell<Mutex<MouseGestureRuntime>> = OnceCell::new();
@@ -814,6 +835,54 @@ mod persistence_tests {
                 bindings: Vec::new(),
             }],
         }
+    }
+
+    #[test]
+    fn mouse_gesture_timing_defaults_and_round_trip() {
+        let old_settings: MouseGestureSettings = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "show_trail": true,
+        }))
+        .unwrap();
+
+        assert_eq!(old_settings.trail_interval_ms, 16);
+        assert_eq!(old_settings.recognition_interval_ms, 40);
+
+        let default_config = MouseGestureConfig::default();
+        assert_eq!(default_config.trail_interval_ms, 16);
+        assert_eq!(default_config.recognition_interval_ms, 40);
+
+        let mut custom_settings = old_settings;
+        custom_settings.trail_interval_ms = 8;
+        custom_settings.recognition_interval_ms = 20;
+        let round_trip: MouseGestureSettings =
+            serde_json::from_value(serde_json::to_value(&custom_settings).unwrap()).unwrap();
+
+        assert_eq!(round_trip, custom_settings);
+        assert_eq!(round_trip.trail_interval_ms, 8);
+        assert_eq!(round_trip.recognition_interval_ms, 20);
+    }
+
+    #[test]
+    fn mouse_gesture_timing_runtime_mapping() {
+        let mut settings = MouseGestureSettings::default();
+        settings.trail_interval_ms = 8;
+        settings.recognition_interval_ms = 20;
+
+        let mapped = settings_to_config(&settings, true);
+        assert!(mapped.enabled);
+        assert_eq!(mapped.trail_interval_ms, 8);
+        assert_eq!(mapped.recognition_interval_ms, 20);
+
+        settings.trail_interval_ms = 40;
+        settings.recognition_interval_ms = 8;
+        let reversed = settings_to_config(&settings, true);
+        assert_eq!(reversed.trail_interval_ms, 40);
+        assert_eq!(reversed.recognition_interval_ms, 8);
+
+        assert!(!settings_to_config(&settings, false).enabled);
+        settings.enabled = false;
+        assert!(!settings_to_config(&settings, true).enabled);
     }
 
     #[test]

@@ -7,6 +7,97 @@ use eframe::egui;
 const RADIAL_TAP_HOLD_EXPLANATION: &str = "Release before the threshold to toggle the launcher. Crossing the threshold opens the radial menu; releasing afterward never also toggles the launcher.";
 const RADIAL_LEGACY_TIMING_EXPLANATION: &str = "Legacy timing: the launcher hotkey toggles immediately; named radial commands and configured direct triggers remain available.";
 
+#[derive(Clone, Copy)]
+enum TopLevelSettingsSection {
+    Hotkeys,
+    LauncherWindow,
+    SearchResults,
+    ActionsFeedback,
+    Dashboard,
+    Radial,
+    Plugins,
+}
+
+impl TopLevelSettingsSection {
+    const ALL: [Self; 7] = [
+        Self::Hotkeys,
+        Self::LauncherWindow,
+        Self::SearchResults,
+        Self::ActionsFeedback,
+        Self::Dashboard,
+        Self::Radial,
+        Self::Plugins,
+    ];
+
+    const fn persistent_id(self) -> &'static str {
+        match self {
+            Self::Hotkeys => "settings_section_hotkeys",
+            Self::LauncherWindow => "settings_section_launcher_window",
+            Self::SearchResults => "settings_section_search_results",
+            Self::ActionsFeedback => "settings_section_actions_feedback",
+            Self::Dashboard => "settings_section_dashboard",
+            Self::Radial => "settings_section_radial",
+            Self::Plugins => "settings_section_plugins",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Hotkeys => "Hotkeys",
+            Self::LauncherWindow => "Launcher Window & Appearance",
+            Self::SearchResults => "Search & Results",
+            Self::ActionsFeedback => "Actions, Safety & Feedback",
+            Self::Dashboard => "Dashboard",
+            Self::Radial => "Radial Menus",
+            Self::Plugins => "Plugin Settings",
+        }
+    }
+
+    const fn default_open(self) -> bool {
+        matches!(
+            self,
+            Self::Hotkeys | Self::LauncherWindow | Self::SearchResults
+        )
+    }
+
+    fn egui_id(self, ui: &egui::Ui) -> egui::Id {
+        ui.make_persistent_id(self.persistent_id())
+    }
+}
+
+fn show_settings_section(
+    ui: &mut egui::Ui,
+    section: TopLevelSettingsSection,
+    forced_open: Option<bool>,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        ui.ctx(),
+        section.egui_id(ui),
+        section.default_open(),
+    );
+    if let Some(open) = forced_open {
+        state.set_open(open);
+    }
+    state
+        .show_header(ui, |ui| {
+            ui.heading(section.title());
+        })
+        .body(add_contents);
+}
+
+fn set_all_settings_sections_open(ui: &egui::Ui, open: bool) {
+    for section in TopLevelSettingsSection::ALL {
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+            ui.ctx(),
+            section.egui_id(ui),
+            section.default_open(),
+        );
+        state.set_open(open);
+        state.store(ui.ctx());
+    }
+}
+
 impl SettingsEditor {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_settings;
@@ -20,12 +111,64 @@ impl SettingsEditor {
                 egui::ScrollArea::vertical()
                     .max_height(settings_content_height)
                     .show(ui, |ui| {
-                        self.render_hotkey_section(ui);
-                        self.render_radial_section(ui, app);
-                        self.render_general_section(ui, app);
-                        self.render_layout_section(ui, app);
-                        self.render_dashboard_section(ui, app);
-                        self.render_plugin_sections(ui, app);
+                        let top_level_expand_request = ui
+                            .horizontal(|ui| {
+                                let mut request = None;
+                                if ui.button("Expand all").clicked() {
+                                    request = Some(true);
+                                }
+                                if ui.button("Collapse all").clicked() {
+                                    request = Some(false);
+                                }
+                                request
+                            })
+                            .inner;
+                        if let Some(open) = top_level_expand_request {
+                            set_all_settings_sections_open(ui, open);
+                        }
+
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Hotkeys,
+                            top_level_expand_request,
+                            |ui| self.render_hotkey_section(ui),
+                        );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::LauncherWindow,
+                            top_level_expand_request,
+                            |ui| self.render_launcher_window_section(ui, app),
+                        );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::SearchResults,
+                            top_level_expand_request,
+                            |ui| self.render_search_results_section(ui),
+                        );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::ActionsFeedback,
+                            top_level_expand_request,
+                            |ui| self.render_actions_safety_feedback_section(ui),
+                        );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Dashboard,
+                            top_level_expand_request,
+                            |ui| self.render_dashboard_section(ui, app),
+                        );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Radial,
+                            top_level_expand_request,
+                            |ui| self.render_radial_section(ui, app),
+                        );
+                        show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::Plugins,
+                            top_level_expand_request,
+                            |ui| self.render_plugin_sections(ui, app),
+                        );
                         self.expand_request = None;
                     });
 
@@ -61,8 +204,6 @@ impl SettingsEditor {
             InteractionMode, RadialSafetyPolicy, SubmenuPresentation, TooltipScope, TriggerScope,
         };
 
-        ui.separator();
-        ui.heading("Radial menus");
         ui.checkbox(&mut self.radial_enabled, "Enable radial menus");
         ui.add_enabled_ui(self.radial_enabled, |ui| {
             ui.checkbox(
@@ -326,7 +467,34 @@ impl SettingsEditor {
         }
     }
 
-    fn render_general_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+    fn render_actions_safety_feedback_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("After running an action").strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
+            ui.checkbox(&mut self.preserve_command, "Preserve command after run");
+            ui.checkbox(&mut self.clear_query_after_run, "Clear query after run");
+        });
+
+        ui.label(egui::RichText::new("Safety").strong());
+        ui.checkbox(
+            &mut self.require_confirm_destructive,
+            "Require confirm for destructive actions",
+        );
+
+        ui.label(egui::RichText::new("Notifications and errors").strong());
+        ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
+        if self.show_toasts {
+            ui.horizontal(|ui| {
+                ui.label("Toast duration (s)");
+                ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""));
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.show_inline_errors, "Show inline errors");
+            ui.checkbox(&mut self.show_error_toasts, "Show error toasts");
+        });
+
+        ui.label(egui::RichText::new("Diagnostics and refresh").strong());
         ui.horizontal(|ui| {
             egui::ComboBox::from_label("Debug logging")
                 .selected_text(if self.debug_logging {
@@ -339,26 +507,6 @@ impl SettingsEditor {
                     ui.selectable_value(&mut self.debug_logging, true, "Enabled");
                 });
         });
-        ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
-        ui.checkbox(&mut self.show_inline_errors, "Show inline errors");
-        ui.checkbox(&mut self.show_error_toasts, "Show error toasts");
-        if self.show_toasts {
-            ui.horizontal(|ui| {
-                ui.label("Toast duration (s)");
-                ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""));
-            });
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.hide_after_run, "Hide window after running action");
-            ui.checkbox(&mut self.preserve_command, "Preserve command after run");
-            ui.checkbox(&mut self.clear_query_after_run, "Clear query after run");
-            ui.checkbox(
-                &mut self.require_confirm_destructive,
-                "Require confirm for destructive actions",
-            );
-        });
-        ui.checkbox(&mut self.always_on_top, "Always on top");
-        ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
         ui.checkbox(
             &mut self.disable_timer_updates,
             "Disable timer auto refresh",
@@ -373,67 +521,10 @@ impl SettingsEditor {
                 );
             });
         });
-        ui.horizontal(|ui| {
-            ui.label("Query scale");
-            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""));
-        });
-        ui.horizontal(|ui| {
-            ui.label("List scale");
-            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
-        });
-        if ui.button("Open Theme Settings...").clicked() {
-            app.open_theme_settings_dialog();
-        }
-        ui.horizontal(|ui| {
-            ui.label("Fuzzy weight");
-            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Usage weight");
-            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
-        });
-        ui.checkbox(&mut self.match_exact, "Match exact");
-        ui.horizontal(|ui| {
-            ui.label("Page jump");
-            ui.add(
-                egui::DragValue::new(&mut self.page_jump)
-                    .clamp_range(1..=100)
-                    .speed(1),
-            );
-        });
     }
 
-    fn render_layout_section(&mut self, ui: &mut egui::Ui, app: &LauncherApp) {
-        ui.checkbox(
-            &mut self.query_results_layout_enabled,
-            "Display results in grid layout",
-        );
-        ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Grid rows");
-                ui.add(
-                    egui::DragValue::new(&mut self.query_results_layout_rows)
-                        .clamp_range(1..=100)
-                        .speed(1),
-                );
-                ui.label("Columns");
-                ui.add(
-                    egui::DragValue::new(&mut self.query_results_layout_cols)
-                        .clamp_range(1..=100)
-                        .speed(1),
-                );
-            });
-            self.query_results_layout_rows = self.query_results_layout_rows.max(1);
-            self.query_results_layout_cols = self.query_results_layout_cols.max(1);
-            ui.checkbox(
-                &mut self.query_results_layout_respect_plugin_capability,
-                "Respect plugin list/grid capability",
-            );
-            ui.horizontal(|ui| {
-                ui.label("Force list for plugins (comma separated)");
-                ui.text_edit_singleline(&mut self.query_results_layout_plugin_opt_out);
-            });
-        });
+    fn render_launcher_window_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
+        ui.checkbox(&mut self.always_on_top, "Always on top");
         ui.horizontal(|ui| {
             ui.label("Off-screen X");
             ui.add(egui::DragValue::new(&mut self.offscreen_x));
@@ -465,11 +556,71 @@ impl SettingsEditor {
                 }
             });
         }
+        ui.horizontal(|ui| {
+            ui.label("Query scale");
+            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""));
+        });
+        ui.horizontal(|ui| {
+            ui.label("List scale");
+            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
+        });
+        if ui.button("Open Theme Settings...").clicked() {
+            app.open_theme_settings_dialog();
+        }
+    }
+
+    fn render_search_results_section(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
+        ui.horizontal(|ui| {
+            ui.label("Fuzzy weight");
+            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Usage weight");
+            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
+        });
+        ui.checkbox(&mut self.match_exact, "Match exact");
+        ui.horizontal(|ui| {
+            ui.label("Page jump");
+            ui.add(
+                egui::DragValue::new(&mut self.page_jump)
+                    .clamp_range(1..=100)
+                    .speed(1),
+            );
+        });
+        ui.checkbox(
+            &mut self.query_results_layout_enabled,
+            "Display results in grid layout",
+        );
+        ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Grid rows");
+                ui.add(
+                    egui::DragValue::new(&mut self.query_results_layout_rows)
+                        .clamp_range(1..=100)
+                        .speed(1),
+                );
+                ui.label("Columns");
+                ui.add(
+                    egui::DragValue::new(&mut self.query_results_layout_cols)
+                        .clamp_range(1..=100)
+                        .speed(1),
+                );
+            });
+            self.query_results_layout_rows = self.query_results_layout_rows.max(1);
+            self.query_results_layout_cols = self.query_results_layout_cols.max(1);
+            ui.checkbox(
+                &mut self.query_results_layout_respect_plugin_capability,
+                "Respect plugin list/grid capability",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Force list for plugins (comma separated)");
+                ui.text_edit_singleline(&mut self.query_results_layout_plugin_opt_out);
+            });
+        });
     }
 
     fn render_dashboard_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
-        ui.separator();
-        ui.heading("Dashboard");
         ui.checkbox(
             &mut self.dashboard_enabled,
             "Enable dashboard when query is empty",

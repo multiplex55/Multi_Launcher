@@ -45,11 +45,9 @@ use windows::Win32::System::Threading::{
     STARTUPINFOW, THREAD_QUERY_LIMITED_INFORMATION, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern,
-    IUIAutomationTogglePattern, IUIAutomationTreeWalker, IUIAutomationValuePattern, ToggleState,
-    TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_CONTROLTYPE_ID, UIA_ComboBoxControlTypeId,
-    UIA_EditControlTypeId, UIA_ListItemControlTypeId, UIA_NamePropertyId,
-    UIA_SelectionItemPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
+    CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
+    IUIAutomationValuePattern, TreeScope_Descendants, UIA_ButtonControlTypeId, UIA_CONTROLTYPE_ID,
+    UIA_EditControlTypeId, UIA_NamePropertyId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
@@ -786,41 +784,6 @@ impl RunnerHookObserver {
                     return Err("runner hook observer disconnected during quiet preflight".into());
                 }
             }
-        }
-    }
-
-    pub fn wait_for_chord(&mut self, vks: &[u32], timeout: Duration) -> RunnerHookObservation {
-        let deadline = Instant::now() + timeout;
-        let mut observed = std::collections::BTreeMap::<u32, [bool; 4]>::new();
-        for vk in vks {
-            observed.insert(*vk, [false; 4]);
-        }
-        while observed.values().any(|edges| !(edges[0] && edges[1])) {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            match self
-                .events
-                .recv_timeout(deadline.saturating_duration_since(now))
-            {
-                Ok(edge) => {
-                    if let Some(edges) = observed.get_mut(&edge.vk) {
-                        let (seen_index, injected_index) = if edge.down { (0, 2) } else { (1, 3) };
-                        edges[seen_index] = true;
-                        edges[injected_index] |= edge.injected;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        let complete = !observed.is_empty() && observed.values().all(|edges| edges[0] && edges[1]);
-        RunnerHookObservation {
-            desktop: self.desktop.clone(),
-            down_seen: complete,
-            up_seen: complete,
-            down_injected: complete && observed.values().all(|edges| edges[2]),
-            up_injected: complete && observed.values().all(|edges| edges[3]),
         }
     }
 
@@ -6027,51 +5990,6 @@ impl UiAutomation {
         self.find_visible_named_containing_classified(hwnd, expected_pid, name_fragment, None)
     }
 
-    /// Return one current, visible Button whose name contains the requested
-    /// fixture label. This is intended for unique fixture rows and never picks
-    /// one of several separately rendered matching buttons.
-    pub fn find_visible_button_containing(
-        &self,
-        hwnd: HWND,
-        expected_pid: u32,
-        name_fragment: &str,
-    ) -> Result<Option<SemanticControl>, String> {
-        self.find_visible_named_containing(
-            hwnd,
-            expected_pid,
-            name_fragment,
-            Some(UIA_ButtonControlTypeId),
-        )
-    }
-
-    pub fn find_visible_combo_box_containing(
-        &self,
-        hwnd: HWND,
-        expected_pid: u32,
-        name_fragment: &str,
-    ) -> Result<Option<SemanticControl>, String> {
-        self.find_visible_named_containing(
-            hwnd,
-            expected_pid,
-            name_fragment,
-            Some(UIA_ComboBoxControlTypeId),
-        )
-    }
-
-    pub fn find_visible_list_item_containing(
-        &self,
-        hwnd: HWND,
-        expected_pid: u32,
-        name_fragment: &str,
-    ) -> Result<Option<SemanticControl>, String> {
-        self.find_visible_named_containing(
-            hwnd,
-            expected_pid,
-            name_fragment,
-            Some(UIA_ListItemControlTypeId),
-        )
-    }
-
     pub fn wait_visible_button_containing(
         &self,
         hwnd: HWND,
@@ -6084,38 +6002,6 @@ impl UiAutomation {
             expected_pid,
             name_fragment,
             Some(UIA_ButtonControlTypeId),
-            timeout,
-        )
-    }
-
-    pub fn wait_visible_combo_box_containing(
-        &self,
-        hwnd: HWND,
-        expected_pid: u32,
-        name_fragment: &str,
-        timeout: Duration,
-    ) -> Result<SemanticControl, String> {
-        self.wait_visible_named_containing_type(
-            hwnd,
-            expected_pid,
-            name_fragment,
-            Some(UIA_ComboBoxControlTypeId),
-            timeout,
-        )
-    }
-
-    pub fn wait_visible_list_item_containing(
-        &self,
-        hwnd: HWND,
-        expected_pid: u32,
-        name_fragment: &str,
-        timeout: Duration,
-    ) -> Result<SemanticControl, String> {
-        self.wait_visible_named_containing_type(
-            hwnd,
-            expected_pid,
-            name_fragment,
-            Some(UIA_ListItemControlTypeId),
             timeout,
         )
     }
@@ -6137,22 +6023,6 @@ impl UiAutomation {
                 control_type,
             )
         })
-    }
-
-    fn find_visible_named_containing(
-        &self,
-        hwnd: HWND,
-        expected_pid: u32,
-        name_fragment: &str,
-        required_control_type: Option<UIA_CONTROLTYPE_ID>,
-    ) -> Result<Option<SemanticControl>, String> {
-        self.find_visible_named_containing_classified(
-            hwnd,
-            expected_pid,
-            name_fragment,
-            required_control_type,
-        )
-        .map_err(VisibleTextLookupError::into_message)
     }
 
     fn find_visible_named_containing_classified(
@@ -6781,63 +6651,8 @@ impl UiAutomation {
             .map_err(|error| format!("focus semantic UIA control: {error}"))
     }
 
-    pub fn focused_element(&self) -> Result<IUIAutomationElement, String> {
-        unsafe { self.automation.GetFocusedElement() }
-            .map_err(|error| format!("read UIA keyboard focus: {error}"))
-    }
-
-    pub fn element_process_id(&self, element: &IUIAutomationElement) -> Option<u32> {
-        unsafe { element.CurrentProcessId() }
-            .ok()
-            .and_then(|pid| u32::try_from(pid).ok())
-    }
-
-    pub fn same_element(
-        &self,
-        left: &IUIAutomationElement,
-        right: &IUIAutomationElement,
-    ) -> Result<bool, String> {
-        unsafe { self.automation.CompareElements(left, right) }
-            .map(|same| same.as_bool())
-            .map_err(|error| format!("compare focused UIA elements: {error}"))
-    }
-
-    pub fn element_name(&self, element: &IUIAutomationElement) -> Option<String> {
-        unsafe { element.CurrentName() }
-            .ok()
-            .map(|name| name.to_string())
-    }
-
-    pub fn element_focusable(&self, element: &IUIAutomationElement) -> bool {
-        unsafe { element.CurrentIsKeyboardFocusable() }.is_ok_and(|value| value.as_bool())
-    }
-
     pub fn element_has_focus(&self, element: &IUIAutomationElement) -> bool {
         unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(|value| value.as_bool())
-    }
-
-    pub fn selection_state(&self, control: &SemanticControl) -> Option<bool> {
-        let pattern = unsafe {
-            control
-                .element
-                .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                    UIA_SelectionItemPatternId,
-                )
-        }
-        .ok()?;
-        unsafe { pattern.CurrentIsSelected() }
-            .ok()
-            .map(|value| value.as_bool())
-    }
-
-    pub fn toggle_state(&self, control: &SemanticControl) -> Option<ToggleState> {
-        let pattern = unsafe {
-            control
-                .element
-                .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-        }
-        .ok()?;
-        unsafe { pattern.CurrentToggleState() }.ok()
     }
 }
 
@@ -7080,47 +6895,6 @@ pub(super) fn click_semantic_control_secondary(
     trace_path: &Path,
 ) -> Result<PointerClickEvidence, String> {
     click_semantic_control_with_button(child, target, control, trace_path, PointerButton::Right)
-}
-
-pub(super) fn click_designer_semantic_control(
-    child: &NativeChild,
-    target: &WindowSnapshot,
-    control: &SemanticControl,
-    trace_path: &Path,
-) -> Result<PointerClickEvidence, String> {
-    let bounds = designer_semantic_client_bounds(child, target, control)?;
-    click_designer_client_bounds(child, target, bounds, trace_path)
-}
-
-pub(super) fn designer_semantic_client_bounds(
-    child: &NativeChild,
-    target: &WindowSnapshot,
-    control: &SemanticControl,
-) -> Result<[i32; 4], String> {
-    child.validate_window(target.hwnd)?;
-    if target.role != WindowRole::Designer
-        || target.process_id != child.process_id()
-        || control.process_id != child.process_id()
-        || !control.enabled
-        || control.bounds[2] <= control.bounds[0]
-        || control.bounds[3] <= control.bounds[1]
-    {
-        return Err("refused Designer click for a disabled, invalid, or foreign control".into());
-    }
-    let mut top_left = POINT {
-        x: control.bounds[0],
-        y: control.bounds[1],
-    };
-    let mut bottom_right = POINT {
-        x: control.bounds[2],
-        y: control.bounds[3],
-    };
-    if !unsafe { ScreenToClient(target.hwnd, &mut top_left) }.as_bool()
-        || !unsafe { ScreenToClient(target.hwnd, &mut bottom_right) }.as_bool()
-    {
-        return Err("could not convert Designer UIA screen bounds to client coordinates".into());
-    }
-    Ok([top_left.x, top_left.y, bottom_right.x, bottom_right.y])
 }
 
 fn click_semantic_control_with_button(

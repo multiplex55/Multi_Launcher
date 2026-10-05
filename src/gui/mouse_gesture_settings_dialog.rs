@@ -154,6 +154,30 @@ impl MouseGestureSettingsDialog {
                 });
 
                 ui.separator();
+                ui.heading("Timing / Performance");
+                ui.horizontal(|ui| {
+                    ui.label("Trail refresh interval (ms)");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.settings.trail_interval_ms)
+                                .speed(1)
+                                .clamp_range(4..=250),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Recognition interval (ms)");
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.settings.recognition_interval_ms)
+                                .speed(1)
+                                .clamp_range(4..=500),
+                        )
+                        .changed();
+                });
+                ui.small("Lower intervals update more frequently but may use more CPU.");
+
+                ui.separator();
 
                 changed |= ui.checkbox(&mut self.settings.show_hint, "Show hint overlay").changed();
                 ui.horizontal(|ui| {
