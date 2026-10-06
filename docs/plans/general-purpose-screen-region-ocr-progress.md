@@ -42,7 +42,7 @@ Status: complete. Depends on M0. Commit: `refactor(ocr): [M1-A] establish shared
 
 ## M1-B — English policy
 
-Status: pending. Depends on M1-A. Commit: `feat(ocr): [M1-B] add English-only general OCR language policy`.
+Status: complete. Depends on M1-A. Commit: `feat(ocr): [M1-B] add English-only general OCR language policy`.
 
 Owner/scope: shared OCR service language resolution, not the Windows backend's global policy. Enumerate supported languages on explicit work, select English deterministically using the M0 preference, pass an explicit tag, and provide actionable local missing-English/query-failure errors. Preserve all MkMacro language inputs. Test one/multiple English variants, mixed languages, case handling, reordered input, no English/empty lists, and enumeration failure using fakes. Verify the new language/service module with targeted Nextest. Done when general API cannot silently use Auto/non-English, every supported English variant can be used as fallback, and MkMacro semantics remain unchanged. No new selector/settings/profile API required.
 
@@ -133,8 +133,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | Stage | State | Commit | Verification/evidence |
 |---|---|---|---|
 | M0 | complete | none | Read-only current source/tests and complete approved plan inspected at 112cb87f; no build/test executed. |
-| M1-A | complete | see checkpoint history | `cargo fmt --all`; `cargo test --lib ocr::tests`: 23 passed; diff inspected. |
-| M1-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M1-A | complete | `24ef239a` | `cargo fmt --all`; `cargo test --lib ocr::tests`: 23 passed; diff inspected. |
+| M1-B | complete | see checkpoint history | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
+| M2-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
