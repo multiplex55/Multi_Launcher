@@ -114,8 +114,8 @@ fn kph_to_mph() {
     let plugin = UnitConvertPlugin;
     let results = plugin.search("conv 100 kph to mph");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].label, "100 kph = 62.1373 mph");
-    assert_eq!(results[0].action, "clipboard:62.1373");
+    assert_eq!(results[0].label, "100 kph = 62.1371 mph");
+    assert_eq!(results[0].action, "clipboard:62.1371");
 }
 
 #[test]

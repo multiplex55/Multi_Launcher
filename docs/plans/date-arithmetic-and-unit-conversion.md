@@ -5286,8 +5286,8 @@ Current branch: `date-and-unit`. Initial working tree: clean.
 | Checkpoint | Status | Verification / notes |
 |---|---|---|
 | M1-A | complete | Domain 18/18; legacy unit plugin 16/16; diff inspected; checkpoint committed |
-| M1-B | in_progress | Expanded catalog and semantics |
-| M1-C | pending | Flexible parser and shared formatting |
+| M1-B | complete | Domain 27/27; unit plugin 16/16; exact customary factors and aliases verified; checkpoint committed |
+| M1-C | in_progress | Flexible parser and shared formatting |
 | M2-A | pending | Inline output and routing |
 | M2-B | pending | Panel integration and conversion review |
 | M3-A | pending | Deterministic date anchors |
