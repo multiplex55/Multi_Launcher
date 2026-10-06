@@ -11,6 +11,16 @@ fn fixed_reference() -> NaiveDateTime {
 }
 
 #[test]
+fn thirty_days_from_today_uses_the_fixed_reference() {
+    let actions =
+        DateArithmeticPlugin.search_with_reference("date 30 days from today", fixed_reference());
+    assert_eq!(actions.len(), 1);
+    assert!(!actions[0].label.is_empty());
+    assert_eq!(actions[0].desc, "Date Arithmetic");
+    assert_eq!(actions[0].action, "clipboard:2026-11-04");
+}
+
+#[test]
 fn calendar_arithmetic_uses_domain_presentation_and_clipboard() {
     let actions =
         DateArithmeticPlugin.search_with_reference("date 2026-10-05 + 30 days", fixed_reference());
