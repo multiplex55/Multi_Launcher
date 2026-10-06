@@ -12,6 +12,7 @@ pub mod config_files;
 pub mod entity_ref;
 pub mod json_watch;
 pub mod lru;
+pub mod number_format;
 pub mod persistence;
 pub mod query;
 pub mod slug;

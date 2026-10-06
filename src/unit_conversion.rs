@@ -235,7 +235,7 @@ pub struct UnitDefinition {
     pub category: Category,
     /// Stable short identifier used for compact display and persisted queries.
     pub symbol: &'static str,
-    /// Case-insensitive names recognized by the current simple parser.
+    /// Case-insensitive aliases recognized by the shared unit parser.
     pub aliases: &'static [&'static str],
     /// Conventional spellings whose case carries meaning, checked before the
     /// legacy case-insensitive aliases.
@@ -1607,8 +1607,15 @@ fn definition(unit: Unit) -> &'static UnitDefinition {
         .expect("every Unit variant must have a catalog definition")
 }
 
+fn is_linear_unit(unit: Unit) -> bool {
+    matches!(definition(unit).strategy, Strategy::Linear(_))
+}
+
 /// Converts between two catalog units, rejecting incompatible categories.
 pub fn convert(value: f64, from: Unit, to: Unit) -> Option<f64> {
+    if from == to {
+        return Some(value);
+    }
     let from_definition = definition(from);
     let to_definition = definition(to);
     if from_definition.category != to_definition.category {
@@ -1625,6 +1632,570 @@ pub fn convert(value: f64, from: Unit, to: Unit) -> Option<f64> {
         (Strategy::FuelEconomy(from_scale), Strategy::FuelEconomy(to_scale)) => {
             Some(to_scale.from_kilometers_per_liter(from_scale.to_kilometers_per_liter(value)))
         }
+        _ => None,
+    }
+}
+
+/// One source quantity in a conversion expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantityComponent {
+    pub value: f64,
+    pub unit: Unit,
+}
+
+/// Parsed conversion request. The source can contain multiple additive
+/// components, while the destination is always a single catalog unit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversionRequest {
+    pub source_expression: String,
+    pub destination_expression: String,
+    pub components: Vec<QuantityComponent>,
+    pub destination: Unit,
+}
+
+/// Evaluated conversion and any approximate duration assumptions it used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversionOutcome {
+    pub request: ConversionRequest,
+    pub value: f64,
+    pub approximations: Vec<Approximation>,
+}
+
+impl ConversionOutcome {
+    pub fn is_approximate(&self) -> bool {
+        !self.approximations.is_empty()
+    }
+}
+
+/// Structured conversion failures for callers that need to present specific
+/// feedback or route other `conv` commands to a different domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversionError {
+    InvalidExpression { expression: String },
+    InvalidNumber { expression: String },
+    UnknownUnit { expression: String },
+    IncompatibleUnits { source: Unit, target: Unit },
+    NonlinearCompound { unit: Unit },
+    OutOfRange { expression: String },
+}
+
+impl std::fmt::Display for ConversionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidExpression { expression } => {
+                write!(formatter, "invalid conversion expression: {expression}")
+            }
+            Self::InvalidNumber { expression } => {
+                write!(formatter, "invalid numeric value: {expression}")
+            }
+            Self::UnknownUnit { expression } => {
+                write!(formatter, "unknown unit: {expression}")
+            }
+            Self::IncompatibleUnits { source, target } => write!(
+                formatter,
+                "incompatible units: {} and {}",
+                source.symbol(),
+                target.symbol()
+            ),
+            Self::NonlinearCompound { unit } => write!(
+                formatter,
+                "compound quantities are not supported for {}",
+                unit.symbol()
+            ),
+            Self::OutOfRange { expression } => {
+                write!(
+                    formatter,
+                    "value is outside the supported range: {expression}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConversionError {}
+
+/// Parses a bounded expression such as `6 ft 2 in to cm` using only catalog
+/// aliases. The destination must resolve to exactly one unit.
+pub fn parse_conversion(input: &str) -> Result<ConversionRequest, ConversionError> {
+    let (source_expression, destination_expression) = split_conversion_expression(input)?;
+    let source_expression = source_expression.trim();
+    let destination_expression = destination_expression.trim();
+    if source_expression.is_empty() || destination_expression.is_empty() {
+        return Err(ConversionError::InvalidExpression {
+            expression: input.trim().to_owned(),
+        });
+    }
+
+    let destination = match_unit_prefix(destination_expression)
+        .filter(|(_, consumed)| *consumed == destination_expression.len())
+        .map(|(unit, _)| unit)
+        .ok_or_else(|| ConversionError::UnknownUnit {
+            expression: destination_expression.to_owned(),
+        })?;
+
+    let mut components = Vec::new();
+    let mut offset = 0;
+    while offset < source_expression.len() {
+        offset = skip_whitespace(source_expression, offset);
+        if offset == source_expression.len() {
+            break;
+        }
+
+        let remainder = &source_expression[offset..];
+        let (value, number_length) = parse_number_prefix(remainder)?;
+        offset += number_length;
+        offset = skip_whitespace(source_expression, offset);
+
+        let remainder = &source_expression[offset..];
+        let Some((unit, unit_length)) = match_unit_prefix(remainder) else {
+            if remainder.starts_with('/') {
+                return Err(ConversionError::InvalidNumber {
+                    expression: remainder.trim().to_owned(),
+                });
+            }
+            return Err(ConversionError::UnknownUnit {
+                expression: remainder.trim().to_owned(),
+            });
+        };
+        components.push(QuantityComponent { value, unit });
+        offset += unit_length;
+
+        if offset < source_expression.len() {
+            let next = source_expression[offset..].chars().next().unwrap();
+            if !next.is_whitespace() && !starts_number(next) {
+                return Err(ConversionError::UnknownUnit {
+                    expression: source_expression[offset..].trim().to_owned(),
+                });
+            }
+        }
+    }
+
+    if components.is_empty() {
+        return Err(ConversionError::InvalidExpression {
+            expression: input.trim().to_owned(),
+        });
+    }
+
+    Ok(ConversionRequest {
+        source_expression: source_expression.to_owned(),
+        destination_expression: destination_expression.to_owned(),
+        components,
+        destination,
+    })
+}
+
+/// Parses and evaluates a bounded unit-conversion expression.
+pub fn evaluate_conversion(input: &str) -> Result<ConversionOutcome, ConversionError> {
+    let request = parse_conversion(input)?;
+    evaluate_request(request)
+}
+
+/// Evaluates a previously parsed request.
+pub fn evaluate_request(request: ConversionRequest) -> Result<ConversionOutcome, ConversionError> {
+    let first = request
+        .components
+        .first()
+        .ok_or_else(|| ConversionError::InvalidExpression {
+            expression: request.source_expression.clone(),
+        })?;
+    let source_unit = first.unit;
+    let category = source_unit.category();
+
+    for component in request.components.iter().skip(1) {
+        if component.unit.category() != category {
+            return Err(ConversionError::IncompatibleUnits {
+                source: source_unit,
+                target: component.unit,
+            });
+        }
+    }
+    if request.destination.category() != category {
+        return Err(ConversionError::IncompatibleUnits {
+            source: source_unit,
+            target: request.destination,
+        });
+    }
+
+    if request.components.len() > 1 {
+        for component in &request.components {
+            if !matches!(definition(component.unit).strategy, Strategy::Linear(_)) {
+                return Err(ConversionError::NonlinearCompound {
+                    unit: component.unit,
+                });
+            }
+        }
+    }
+
+    let source_value = if request.components.len() == 1 {
+        first.value
+    } else {
+        let mut sum = 0.0;
+        for component in &request.components {
+            let normalized = convert(component.value, component.unit, source_unit).ok_or(
+                ConversionError::IncompatibleUnits {
+                    source: source_unit,
+                    target: component.unit,
+                },
+            )?;
+            if !normalized.is_finite()
+                || (normalized == 0.0
+                    && component.value != 0.0
+                    && is_linear_unit(component.unit)
+                    && is_linear_unit(source_unit))
+            {
+                return Err(ConversionError::OutOfRange {
+                    expression: request.source_expression.clone(),
+                });
+            }
+            sum += normalized;
+            if !sum.is_finite() {
+                return Err(ConversionError::OutOfRange {
+                    expression: request.source_expression.clone(),
+                });
+            }
+        }
+        sum
+    };
+
+    let value = convert(source_value, source_unit, request.destination).ok_or(
+        ConversionError::IncompatibleUnits {
+            source: source_unit,
+            target: request.destination,
+        },
+    )?;
+    if !value.is_finite()
+        || (value == 0.0
+            && source_value != 0.0
+            && is_linear_unit(source_unit)
+            && is_linear_unit(request.destination))
+    {
+        return Err(ConversionError::OutOfRange {
+            expression: request.source_expression.clone(),
+        });
+    }
+
+    let mut approximations = Vec::new();
+    for unit in request
+        .components
+        .iter()
+        .map(|component| component.unit)
+        .chain(std::iter::once(request.destination))
+    {
+        if let Some(approximation) = definition(unit).approximation
+            && !approximations.contains(&approximation)
+        {
+            approximations.push(approximation);
+        }
+    }
+
+    Ok(ConversionOutcome {
+        request,
+        value,
+        approximations,
+    })
+}
+
+fn split_conversion_expression(input: &str) -> Result<(&str, &str), ConversionError> {
+    let mut separator = None;
+    for (index, _) in input.char_indices() {
+        let tail = &input[index..];
+        if !tail
+            .as_bytes()
+            .get(..2)
+            .is_some_and(|separator| separator.eq_ignore_ascii_case(b"to"))
+        {
+            continue;
+        }
+        let previous = input[..index].chars().next_back();
+        let next = tail[2..].chars().next();
+        if previous.is_some_and(is_word_character) || next.is_some_and(is_word_character) {
+            continue;
+        }
+        if separator.replace((index, index + 2)).is_some() {
+            return Err(ConversionError::InvalidExpression {
+                expression: input.trim().to_owned(),
+            });
+        }
+    }
+
+    let Some((start, end)) = separator else {
+        return Err(ConversionError::InvalidExpression {
+            expression: input.trim().to_owned(),
+        });
+    };
+    Ok((&input[..start], &input[end..]))
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn skip_whitespace(input: &str, mut offset: usize) -> usize {
+    while let Some(character) = input[offset..].chars().next()
+        && character.is_whitespace()
+    {
+        offset += character.len_utf8();
+    }
+    offset
+}
+
+fn starts_number(character: char) -> bool {
+    character.is_ascii_digit()
+        || matches!(character, '+' | '-' | '.')
+        || unicode_fraction(character).is_some()
+}
+
+fn match_unit_prefix(input: &str) -> Option<(Unit, usize)> {
+    let mut best = None;
+
+    for definition in UNIT_CATALOG {
+        for alias in definition.case_sensitive_aliases {
+            if let Some(consumed) = match_alias_prefix(input, alias, true)
+                && unit_alias_boundary(input, consumed)
+            {
+                update_alias_match(&mut best, definition.unit, consumed, true);
+            }
+        }
+        for alias in definition.aliases {
+            if let Some(consumed) = match_alias_prefix(input, alias, false)
+                && unit_alias_boundary(input, consumed)
+            {
+                update_alias_match(&mut best, definition.unit, consumed, false);
+            }
+        }
+    }
+
+    best.map(|(unit, consumed, _)| (unit, consumed))
+}
+
+fn update_alias_match(
+    best: &mut Option<(Unit, usize, bool)>,
+    unit: Unit,
+    consumed: usize,
+    exact: bool,
+) {
+    if best.is_none_or(|(_, best_length, best_exact)| {
+        consumed > best_length || (consumed == best_length && exact && !best_exact)
+    }) {
+        *best = Some((unit, consumed, exact));
+    }
+}
+
+fn match_alias_prefix(input: &str, alias: &str, case_sensitive: bool) -> Option<usize> {
+    let mut input_offset = 0;
+    let mut alias_characters = alias.chars().peekable();
+    while let Some(alias_character) = alias_characters.next() {
+        if alias_character.is_whitespace() {
+            let mut found_whitespace = false;
+            while let Some(character) = input[input_offset..].chars().next()
+                && character.is_whitespace()
+            {
+                found_whitespace = true;
+                input_offset += character.len_utf8();
+            }
+            if !found_whitespace {
+                return None;
+            }
+            continue;
+        }
+
+        let character = input[input_offset..].chars().next()?;
+        let matches = if case_sensitive {
+            character == alias_character
+        } else {
+            character.eq_ignore_ascii_case(&alias_character)
+        };
+        if !matches {
+            return None;
+        }
+        input_offset += character.len_utf8();
+    }
+
+    Some(input_offset)
+}
+
+fn unit_alias_boundary(input: &str, consumed: usize) -> bool {
+    match input[consumed..].chars().next() {
+        None => true,
+        Some(character) => character.is_whitespace() || starts_number(character),
+    }
+}
+
+fn parse_number_prefix(input: &str) -> Result<(f64, usize), ConversionError> {
+    let invalid = || ConversionError::InvalidNumber {
+        expression: input.trim().to_owned(),
+    };
+    let out_of_range = || ConversionError::OutOfRange {
+        expression: input.trim().to_owned(),
+    };
+
+    let mut offset = 0;
+    let negative = input.starts_with('-');
+    if input.starts_with('+') || input.starts_with('-') {
+        offset += 1;
+    }
+
+    if let Some(character) = input[offset..].chars().next()
+        && let Some(fraction) = unicode_fraction(character)
+    {
+        let value = if negative { -fraction } else { fraction };
+        offset += character.len_utf8();
+        if !value.is_finite() {
+            return Err(out_of_range());
+        }
+        return Ok((value, offset));
+    }
+
+    let bytes = input.as_bytes();
+    let integer_start = offset;
+    while offset < bytes.len() && bytes[offset].is_ascii_digit() {
+        offset += 1;
+    }
+    let has_integer_digits = offset > integer_start;
+    let mut has_decimal = false;
+    if bytes.get(offset) == Some(&b'.') {
+        has_decimal = true;
+        offset += 1;
+        let decimal_start = offset;
+        while offset < bytes.len() && bytes[offset].is_ascii_digit() {
+            offset += 1;
+        }
+        if !has_integer_digits && decimal_start == offset {
+            return Err(invalid());
+        }
+    } else if !has_integer_digits {
+        return Err(invalid());
+    }
+
+    let mut has_exponent = false;
+    if matches!(bytes.get(offset), Some(b'e' | b'E')) {
+        let mut exponent_end = offset + 1;
+        if matches!(bytes.get(exponent_end), Some(b'+' | b'-')) {
+            exponent_end += 1;
+        }
+        let exponent_start = exponent_end;
+        while exponent_end < bytes.len() && bytes[exponent_end].is_ascii_digit() {
+            exponent_end += 1;
+        }
+        if exponent_end > exponent_start {
+            offset = exponent_end;
+            has_exponent = true;
+        }
+    }
+
+    let integer_only = !has_decimal && !has_exponent;
+    if integer_only && bytes.get(offset) == Some(&b'/') {
+        let numerator: f64 = input[..offset].parse().map_err(|_| out_of_range())?;
+        offset += 1;
+        let denominator_start = offset;
+        while offset < bytes.len() && bytes[offset].is_ascii_digit() {
+            offset += 1;
+        }
+        if denominator_start == offset {
+            return Err(invalid());
+        }
+        let denominator: f64 = input[denominator_start..offset]
+            .parse()
+            .map_err(|_| out_of_range())?;
+        if !numerator.is_finite() || !denominator.is_finite() {
+            return Err(out_of_range());
+        }
+        if denominator == 0.0 {
+            return Err(invalid());
+        }
+        let value = numerator / denominator;
+        if !value.is_finite() || (value == 0.0 && numerator != 0.0) {
+            return Err(out_of_range());
+        }
+        return Ok((value, offset));
+    }
+
+    let mut value: f64 = input[..offset].parse().map_err(|_| out_of_range())?;
+    if !value.is_finite()
+        || (value == 0.0
+            && contains_nonzero_digit(input[..offset].split(['e', 'E']).next().unwrap_or("")))
+    {
+        return Err(out_of_range());
+    }
+
+    if integer_only {
+        let unsigned_whole = value.abs();
+        let mut fraction_offset = offset;
+        let mut had_space = false;
+        while let Some(character) = input[fraction_offset..].chars().next()
+            && character.is_whitespace()
+        {
+            had_space = true;
+            fraction_offset += character.len_utf8();
+        }
+        let fraction_start = if had_space { fraction_offset } else { offset };
+        if let Some(character) = input[fraction_start..].chars().next()
+            && let Some(fraction) = unicode_fraction(character)
+        {
+            value = (if negative { -1.0 } else { 1.0 }) * (unsigned_whole + fraction);
+            offset = fraction_start + character.len_utf8();
+            if !value.is_finite() {
+                return Err(out_of_range());
+            }
+            return Ok((value, offset));
+        }
+
+        if had_space
+            && input
+                .as_bytes()
+                .get(fraction_start)
+                .is_some_and(u8::is_ascii_digit)
+        {
+            let mut whole_fraction_end = fraction_start;
+            while whole_fraction_end < bytes.len() && bytes[whole_fraction_end].is_ascii_digit() {
+                whole_fraction_end += 1;
+            }
+            if bytes.get(whole_fraction_end) == Some(&b'/') {
+                let numerator_start = fraction_start;
+                let mut denominator_start = whole_fraction_end + 1;
+                while denominator_start < bytes.len() && bytes[denominator_start].is_ascii_digit() {
+                    denominator_start += 1;
+                }
+                if denominator_start == whole_fraction_end + 1 {
+                    return Err(invalid());
+                }
+                let numerator: f64 = input[numerator_start..whole_fraction_end]
+                    .parse()
+                    .map_err(|_| out_of_range())?;
+                let denominator: f64 = input[whole_fraction_end + 1..denominator_start]
+                    .parse()
+                    .map_err(|_| out_of_range())?;
+                if !numerator.is_finite() || !denominator.is_finite() {
+                    return Err(out_of_range());
+                }
+                if denominator == 0.0 {
+                    return Err(invalid());
+                }
+                let magnitude = unsigned_whole + numerator / denominator;
+                value = if negative { -magnitude } else { magnitude };
+                offset = denominator_start;
+                if !value.is_finite() || (value == 0.0 && magnitude != 0.0) {
+                    return Err(out_of_range());
+                }
+                return Ok((value, offset));
+            }
+        }
+    }
+
+    Ok((value, offset))
+}
+
+fn contains_nonzero_digit(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| matches!(character, '1'..='9'))
+}
+
+fn unicode_fraction(character: char) -> Option<f64> {
+    match character {
+        '½' => Some(0.5),
+        '¼' => Some(0.25),
+        '¾' => Some(0.75),
         _ => None,
     }
 }
@@ -1670,7 +2241,8 @@ impl FuelEconomyScale {
 #[cfg(test)]
 mod tests {
     use super::{
-        Approximation, Category, MeasurementSystem, Unit, catalog, convert, unit_by_alias,
+        Approximation, Category, ConversionError, MeasurementSystem, Unit, catalog, convert,
+        evaluate_conversion, unit_by_alias,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -2084,6 +2656,163 @@ mod tests {
         assert_eq!(unit_by_alias("lb-ft"), Some(Unit::PoundFootTorque));
         assert_eq!(unit_by_alias("ft-lb"), Some(Unit::FootPound));
         assert_ne!(Unit::PoundFootTorque.category(), Unit::FootPound.category());
+    }
+
+    #[test]
+    fn parses_simple_signed_decimal_and_case_insensitive_to() {
+        let outcome = evaluate_conversion("  10   kilometers   TO   mi  ").unwrap();
+        assert_close(outcome.value, 6.213_711_922_373_339);
+        assert_eq!(outcome.request.destination, Unit::Mile);
+        assert_eq!(outcome.request.source_expression, "10   kilometers");
+
+        let temperature = evaluate_conversion("-40 C to F").unwrap();
+        assert_close(temperature.value, -40.0);
+        assert_close(evaluate_conversion("32 F to C").unwrap().value, 0.0);
+        assert_close(evaluate_conversion("273.15 K to C").unwrap().value, 0.0);
+        assert_close(
+            evaluate_conversion("1.234e2 m to cm").unwrap().value,
+            12_340.0,
+        );
+    }
+
+    #[test]
+    fn resolves_plural_multiword_and_square_aliases_from_the_catalog() {
+        assert_close(
+            evaluate_conversion("1   kilometers to meter")
+                .unwrap()
+                .value,
+            1000.0,
+        );
+        assert_close(
+            evaluate_conversion("1   us    fluid   ounce to ml")
+                .unwrap()
+                .value,
+            29.573_529_562_5,
+        );
+        assert_close(evaluate_conversion("1 m2 to m^2").unwrap().value, 1.0);
+        assert_close(evaluate_conversion("1 m^2 to m²").unwrap().value, 1.0);
+        assert_close(
+            evaluate_conversion("1 m² to square meters").unwrap().value,
+            1.0,
+        );
+
+        assert_close(
+            evaluate_conversion("1 MB to bit").unwrap().value,
+            8_000_000.0,
+        );
+        assert_close(
+            evaluate_conversion("1 Mb to bit").unwrap().value,
+            1_000_000.0,
+        );
+        assert_eq!(
+            evaluate_conversion("1 MB to byte").unwrap().value,
+            1_000_000.0
+        );
+    }
+
+    #[test]
+    fn parses_simple_mixed_and_unicode_fractions() {
+        assert_close(
+            evaluate_conversion("1/2 cup to ml").unwrap().value,
+            118.294_118_25,
+        );
+        assert_close(
+            evaluate_conversion("1 1/2 cups to ml").unwrap().value,
+            354.882_354_75,
+        );
+        assert_close(evaluate_conversion("-1 1/2 m to cm").unwrap().value, -150.0);
+        assert_close(
+            evaluate_conversion("½ cup to ml").unwrap().value,
+            118.294_118_25,
+        );
+        assert_close(
+            evaluate_conversion("1½ cup to ml").unwrap().value,
+            354.882_354_75,
+        );
+        assert_close(
+            evaluate_conversion("1 ½ cup to ml").unwrap().value,
+            354.882_354_75,
+        );
+        assert_close(evaluate_conversion("¾ in to mm").unwrap().value, 19.05);
+    }
+
+    #[test]
+    fn adds_compatible_linear_compound_quantities() {
+        assert_close(
+            evaluate_conversion("6 ft 2 in to cm").unwrap().value,
+            187.96,
+        );
+        assert_close(
+            evaluate_conversion("5 lb 8 oz to kg").unwrap().value,
+            2.494_758_035,
+        );
+        assert_close(
+            evaluate_conversion("1 cup 2 tbsp to ml").unwrap().value,
+            266.161_766_062_5,
+        );
+        assert_close(evaluate_conversion("6ft2in to cm").unwrap().value, 187.96);
+    }
+
+    #[test]
+    fn reports_structured_parser_and_evaluation_failures() {
+        assert!(matches!(
+            evaluate_conversion("1/0 cup to ml"),
+            Err(ConversionError::InvalidNumber { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1/2/3 cup to ml"),
+            Err(ConversionError::InvalidNumber { .. })
+        ));
+        let oversized_denominator = "9".repeat(400);
+        let overflowing_fraction = format!("0/{oversized_denominator} m to cm");
+        assert!(matches!(
+            evaluate_conversion(&overflowing_fraction),
+            Err(ConversionError::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1 ft 1 kg to cm"),
+            Err(ConversionError::IncompatibleUnits { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1 C 1 F to K"),
+            Err(ConversionError::NonlinearCompound { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1 unknown to cm"),
+            Err(ConversionError::UnknownUnit { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1 m to unknown"),
+            Err(ConversionError::UnknownUnit { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1 m cm"),
+            Err(ConversionError::InvalidExpression { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1 m trailing to cm"),
+            Err(ConversionError::InvalidNumber { .. } | ConversionError::UnknownUnit { .. })
+        ));
+        assert!(matches!(
+            evaluate_conversion("1e308 GB to bit"),
+            Err(ConversionError::OutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn carries_approximation_metadata_for_month_and_year_conversions() {
+        let month = evaluate_conversion("1 month to day").unwrap();
+        assert_eq!(month.value, 30.0);
+        assert!(month.is_approximate());
+        assert_eq!(month.approximations, vec![Approximation::ThirtyDayMonth]);
+
+        let year = evaluate_conversion("1 year to day").unwrap();
+        assert_eq!(year.value, 365.0);
+        assert!(year.is_approximate());
+        assert_eq!(
+            year.approximations,
+            vec![Approximation::ThreeHundredSixtyFiveDayYear]
+        );
     }
 
     const PI_FOR_TEST: f64 = 3.141592653589793;
