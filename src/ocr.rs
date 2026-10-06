@@ -182,12 +182,7 @@ fn recognize_captured_screen_region_with_language(
 
 #[cfg(windows)]
 fn profile_language_tags() -> ExecResult<Vec<String>> {
-    use windows::{
-        Foundation::Collections::IVectorView,
-        System::UserProfile::{GlobalizationPreferences, IGlobalizationPreferencesStatics},
-        Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
-        core::{HSTRING, Interface, Type, factory},
-    };
+    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
 
     struct WinRtGuard;
     impl Drop for WinRtGuard {
@@ -201,19 +196,8 @@ fn profile_language_tags() -> ExecResult<Vec<String>> {
     unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
         .map_err(|error| profile_language_error("initialize WinRT", error))?;
     let _winrt = WinRtGuard;
-    let preferences = factory::<GlobalizationPreferences, IGlobalizationPreferencesStatics>()
-        .map_err(|error| profile_language_error("activate profile preferences", error))?;
-    // Keep this factory scoped to the initialized apartment rather than using
-    // the projection's process-static activation factory cache.
-    // SAFETY: preferences is a live IGlobalizationPreferencesStatics interface;
-    // its Languages ABI initializes an owned IVectorView pointer on success.
-    // Type::from_abi validates/transfers that pointer to the projected owner.
-    let languages: IVectorView<HSTRING> = unsafe {
-        let mut result = std::ptr::null_mut();
-        (preferences.vtable().Languages)(preferences.as_raw(), &mut result)
-            .and_then(|| Type::from_abi(result))
-    }
-    .map_err(|error| profile_language_error("read profile languages", error))?;
+    let languages = crate::mkmacro::ocr::windows_profile_languages()
+        .map_err(|error| profile_language_error(error.operation(), error))?;
     let count = languages
         .Size()
         .map_err(|error| profile_language_error("count profile languages", error))?;

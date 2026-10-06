@@ -10,6 +10,11 @@ use image::{RgbaImage, imageops};
 use regex::{Regex, RegexBuilder};
 use std::{cmp::Ordering, fmt, ops::Range};
 
+#[cfg(windows)]
+mod native_factories;
+#[cfg(windows)]
+pub(crate) use native_factories::profile_languages as windows_profile_languages;
+
 /// Tile overlap reduces the chance that a word crossing an engine input edge
 /// is truncated. Effective overlap is reduced for unusually small backends so
 /// every tile step remains nonzero.
@@ -805,14 +810,12 @@ fn record_auto_profile_resolution(
 
 #[cfg(windows)]
 mod windows_backend {
+    use super::native_factories as native;
     use super::*;
     use std::{collections::VecDeque, sync::Mutex};
     use windows::{
-        Globalization::Language,
-        Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap},
+        Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat},
         Media::Ocr::{OcrEngine, OcrResult},
-        Security::Cryptography::CryptographicBuffer,
-        System::UserProfile::GlobalizationPreferences,
         Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
         core::HSTRING,
     };
@@ -920,10 +923,9 @@ mod windows_backend {
                     {
                         return Ok(cached);
                     }
-                    let engine =
-                        OcrEngine::TryCreateFromUserProfileLanguages().map_err(|error| {
-                            diagnostic("resolve user-profile language", language, error)
-                        })?;
+                    let engine = native::profile_engine().map_err(|error| {
+                        diagnostic("resolve user-profile language", language, error)
+                    })?;
                     let resolved_tag = engine
                         .RecognizerLanguage()
                         .and_then(|resolved| resolved.LanguageTag())
@@ -951,9 +953,9 @@ mod windows_backend {
                     Ok(engine)
                 }
                 MkOcrLanguage::LanguageTag(tag) => {
-                    let language_value = Language::CreateLanguage(&HSTRING::from(tag))
+                    let language_value = native::language(&HSTRING::from(tag))
                         .map_err(|error| diagnostic("parse language tag", language, error))?;
-                    let supported = OcrEngine::IsLanguageSupported(&language_value)
+                    let supported = native::language_supported(&language_value)
                         .map_err(|error| diagnostic("check language support", language, error))?;
                     if !supported {
                         return Err(ExecutionDiagnostic::new(
@@ -978,7 +980,7 @@ mod windows_backend {
                     if let Some(cached) = self.cached_engine(&key, language)? {
                         return Ok(cached);
                     }
-                    let engine = OcrEngine::TryCreateFromLanguage(&language_value)
+                    let engine = native::language_engine(&language_value)
                         .map_err(|error| diagnostic("create language engine", language, error))?;
                     self.cache_engine(key, engine, language)
                 }
@@ -987,7 +989,7 @@ mod windows_backend {
     }
 
     fn user_profile_language_signature(language: &MkOcrLanguage) -> ExecResult<String> {
-        let languages = GlobalizationPreferences::Languages()
+        let languages = native::profile_languages()
             .map_err(|error| diagnostic("read profile languages", language, error))?;
         let count = languages
             .Size()
@@ -1007,7 +1009,7 @@ mod windows_backend {
     impl OcrBackend for WindowsOcrBackend {
         fn available_languages(&self) -> ExecResult<Vec<OcrLanguageInfo>> {
             let _winrt = initialize_winrt(&MkOcrLanguage::Auto, "enumerate languages")?;
-            let languages = OcrEngine::AvailableRecognizerLanguages()
+            let languages = native::available_languages()
                 .map_err(|error| diagnostic("enumerate languages", &MkOcrLanguage::Auto, error))?;
             let language_count = languages
                 .Size()
@@ -1044,7 +1046,7 @@ mod windows_backend {
 
         fn max_image_dimension(&self) -> ExecResult<u32> {
             let _winrt = initialize_winrt(&MkOcrLanguage::Auto, "maximum image dimension")?;
-            OcrEngine::MaxImageDimension()
+            native::max_image_dimension()
                 .map_err(|error| diagnostic("maximum image dimension", &MkOcrLanguage::Auto, error))
         }
 
@@ -1087,9 +1089,9 @@ mod windows_backend {
                     "OCR BGRA buffer exceeds the WinRT buffer length limit",
                 )
             })?;
-            let buffer = CryptographicBuffer::CreateFromByteArray(&pixels)
+            let buffer = native::pixel_buffer(&pixels)
                 .map_err(|error| diagnostic("create pixel buffer", language, error))?;
-            let bitmap = SoftwareBitmap::CreateCopyWithAlphaFromBuffer(
+            let bitmap = native::bitmap(
                 &buffer,
                 BitmapPixelFormat::Bgra8,
                 width,
@@ -1232,6 +1234,55 @@ pub use windows_backend::WindowsOcrBackend;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires installed Windows English OCR language pack and user-profile OCR support"]
+    fn windows_ocr_repeated_operations_survive_worker_and_backend_teardown() {
+        // Reproduce the actual per-call WinRT teardown boundary, including
+        // cached engine reuse on fresh threads and release of the backend.
+        for _ in 0..2 {
+            let backend = Arc::new(WindowsOcrBackend::new());
+            for auto in [false, true, false, true] {
+                let backend = backend.clone();
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let result = (|| {
+                        backend.available_languages()?;
+                        assert!(backend.max_image_dimension()? > 0);
+                        let frame = CapturedRegion {
+                            image: RgbaImage::from_pixel(32, 32, Rgba([255, 255, 255, 255])),
+                            origin: (-10, -20),
+                        };
+                        if auto {
+                            recognize_captured_region(
+                                &frame,
+                                backend.as_ref(),
+                                &MkOcrLanguage::Auto,
+                                &|| false,
+                            )
+                            .map(|document| document.recognized_text())
+                        } else {
+                            crate::ocr::recognize_captured_screen_region(
+                                backend.as_ref(),
+                                frame,
+                                &|| false,
+                            )
+                        }
+                    })();
+                    let _ = sender.send(result);
+                });
+                let result = receiver.recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("Windows OCR worker stalled during native runtime teardown/reinitialization");
+                let text = result.expect("Native OCR regression requires an installed English language pack and available Windows OCR");
+                assert!(
+                    text.trim().is_empty(),
+                    "blank source frame must remain empty"
+                );
+                worker.join().unwrap();
+            }
+            drop(backend);
+        }
+    }
     use image::Rgba;
     use std::{
         collections::VecDeque,
