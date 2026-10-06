@@ -5288,8 +5288,8 @@ Current branch: `date-and-unit`. Initial working tree: clean.
 | M1-A | complete | Domain 18/18; legacy unit plugin 16/16; diff inspected; checkpoint committed |
 | M1-B | complete | Domain 27/27; unit plugin 16/16; exact customary factors and aliases verified; checkpoint committed |
 | M1-C | complete | Conversion and number-format filter 36/36; Unicode and zero-temperature regressions covered; checkpoint committed |
-| M2-A | in_progress | Inline output and routing; documented Base numeric-to-decimal gap |
-| M2-B | pending | Panel integration and conversion review |
+| M2-A | complete | Unit/Base plugin filter 37/37; copied units, routing, documented numeric-to-decimal gap verified; checkpoint committed |
+| M2-B | in_progress | Panel integration and conversion review |
 | M3-A | pending | Deterministic date anchors |
 | M3-B | pending | Calendar arithmetic |
 | M3-C | pending | Differences and presentation |

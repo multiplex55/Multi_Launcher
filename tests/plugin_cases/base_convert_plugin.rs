@@ -56,6 +56,33 @@ fn hex_to_bin() {
 }
 
 #[test]
+fn hex_to_dec() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv ff hex to dec");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "ff hex = 255 dec");
+    assert_eq!(results[0].action, "clipboard:255");
+}
+
+#[test]
+fn bin_to_dec() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv 1010 bin to dec");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "1010 bin = 10 dec");
+    assert_eq!(results[0].action, "clipboard:10");
+}
+
+#[test]
+fn oct_to_dec() {
+    let plugin = BaseConvertPlugin;
+    let results = plugin.search("conv 17 oct to dec");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].label, "17 oct = 15 dec");
+    assert_eq!(results[0].action, "clipboard:15");
+}
+
+#[test]
 fn dec_to_bin() {
     let plugin = BaseConvertPlugin;
     let results = plugin.search("conv 10 dec to bin");
@@ -94,4 +121,11 @@ fn handles_invalid_tokens() {
     let plugin = BaseConvertPlugin;
     let results = plugin.search("conv 123 bin hex");
     assert!(results.is_empty());
+}
+
+#[test]
+fn arbitrary_unicode_queries_do_not_panic_during_prefix_matching() {
+    let plugin = BaseConvertPlugin;
+    assert!(plugin.search("½").is_empty());
+    assert!(plugin.search("½conv ff hex to dec").is_empty());
 }

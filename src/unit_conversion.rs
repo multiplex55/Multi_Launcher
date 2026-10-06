@@ -1581,6 +1581,22 @@ pub fn unit_by_alias(alias: &str) -> Option<Unit> {
         .map(|definition| definition.unit)
 }
 
+/// Returns whether a catalog unit alias appears as a bounded token in an
+/// expression. This lets adapters distinguish likely physical-unit intent
+/// without carrying a second alias list.
+pub fn contains_unit_alias(input: &str) -> bool {
+    input.char_indices().any(|(index, _)| {
+        if input[..index]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphabetic)
+        {
+            return false;
+        }
+        match_unit_prefix(&input[index..]).is_some()
+    })
+}
+
 /// Iterates over the units in one physical category.
 pub fn units_in_category(category: Category) -> impl Iterator<Item = &'static UnitDefinition> {
     UNIT_CATALOG
