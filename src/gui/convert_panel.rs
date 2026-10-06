@@ -1,33 +1,102 @@
 use crate::gui::LauncherApp;
+use crate::unit_conversion::{self, Category, Unit};
 use eframe::egui;
 
-struct Category {
-    name: &'static str,
-    units: &'static [&'static str],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelCategory {
+    Physical(Category),
+    Base,
 }
 
-const CATEGORIES: &[Category] = &[
-    Category {
-        name: "Distance",
-        units: &["m", "km", "cm", "mm", "mi", "ft", "in", "yd", "nm"],
-    },
-    Category {
-        name: "Mass",
-        units: &["kg", "g", "lb", "oz"],
-    },
-    Category {
-        name: "Temperature",
-        units: &["c", "f", "k"],
-    },
-    Category {
-        name: "Volume",
-        units: &["l", "ml", "gal"],
-    },
-    Category {
-        name: "Base",
-        units: &["dec", "hex", "bin", "oct"],
-    },
-];
+impl PanelCategory {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Physical(Category::Length) => "Distance",
+            Self::Physical(category) => category.display_name(),
+            Self::Base => "Base",
+        }
+    }
+}
+
+fn category_options() -> impl Iterator<Item = PanelCategory> {
+    Category::ALL
+        .iter()
+        .copied()
+        .map(PanelCategory::Physical)
+        .chain(std::iter::once(PanelCategory::Base))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseUnit {
+    Decimal,
+    Hexadecimal,
+    Binary,
+    Octal,
+}
+
+impl BaseUnit {
+    const ALL: &'static [Self] = &[Self::Decimal, Self::Hexadecimal, Self::Binary, Self::Octal];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Decimal => "dec",
+            Self::Hexadecimal => "hex",
+            Self::Binary => "bin",
+            Self::Octal => "oct",
+        }
+    }
+
+    fn radix(self) -> u32 {
+        match self {
+            Self::Decimal => 10,
+            Self::Hexadecimal => 16,
+            Self::Binary => 2,
+            Self::Octal => 8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelUnit {
+    Physical(Unit),
+    Base(BaseUnit),
+}
+
+impl PanelUnit {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Physical(unit) => unit.symbol(),
+            Self::Base(unit) => unit.label(),
+        }
+    }
+
+    fn matches_filter(self, filter: &str) -> bool {
+        if filter.is_empty() {
+            return true;
+        }
+        match self {
+            Self::Physical(unit) => unit_conversion::catalog()
+                .iter()
+                .find(|definition| definition.unit == unit)
+                .is_some_and(|definition| {
+                    std::iter::once(definition.symbol)
+                        .chain(definition.aliases.iter().copied())
+                        .chain(definition.case_sensitive_aliases.iter().copied())
+                        .any(|candidate| candidate.to_lowercase().contains(filter))
+                }),
+            Self::Base(unit) => unit.label().to_lowercase().contains(filter),
+        }
+    }
+}
+
+fn category_units(category: PanelCategory) -> Vec<PanelUnit> {
+    match category {
+        PanelCategory::Physical(category) => unit_conversion::units_in_category(category)
+            .map(|definition| PanelUnit::Physical(definition.unit))
+            .collect(),
+        PanelCategory::Base => BaseUnit::ALL.iter().copied().map(PanelUnit::Base).collect(),
+    }
+}
 
 /// Simple conversion panel with an input box and two combo boxes.
 pub struct ConvertPanel {
@@ -35,9 +104,9 @@ pub struct ConvertPanel {
     input: String,
     result: String,
     filter: String,
-    category: String,
-    from: String,
-    to: String,
+    category: PanelCategory,
+    from: Option<PanelUnit>,
+    to: Option<PanelUnit>,
     focus_input: bool,
 }
 
@@ -48,9 +117,9 @@ impl Default for ConvertPanel {
             input: String::new(),
             result: String::new(),
             filter: String::new(),
-            category: CATEGORIES[0].name.to_string(),
-            from: String::new(),
-            to: String::new(),
+            category: PanelCategory::Physical(Category::Length),
+            from: None,
+            to: None,
             focus_input: false,
         }
     }
@@ -70,22 +139,6 @@ impl ConvertPanel {
             return;
         }
         let mut open = self.open;
-        let units = CATEGORIES
-            .iter()
-            .find(|c| c.name == self.category)
-            .map(|c| c.units)
-            .unwrap_or_default();
-        let filtered: Vec<&str> = units
-            .iter()
-            .copied()
-            .filter(|u| self.filter.is_empty() || u.contains(&self.filter))
-            .collect();
-        if (self.from.is_empty() || !units.contains(&self.from.as_str())) && !filtered.is_empty() {
-            self.from = filtered[0].to_string();
-        }
-        if (self.to.is_empty() || !units.contains(&self.to.as_str())) && !filtered.is_empty() {
-            self.to = filtered[0].to_string();
-        }
         egui::Window::new("Convert")
             .open(&mut open)
             .resizable(false)
@@ -96,46 +149,44 @@ impl ConvertPanel {
                     val_edit.request_focus();
                     self.focus_input = false;
                 }
+
                 self.compute_result();
                 ui.label("Result");
                 ui.add_enabled(false, egui::TextEdit::singleline(&mut self.result));
+
                 ui.label("Type");
-                let mut cat_changed = false;
+                let mut selected_category = self.category;
                 egui::ComboBox::from_id_source("convert_category")
-                    .selected_text(&self.category)
+                    .selected_text(self.category.label())
                     .show_ui(ui, |ui| {
-                        for cat in CATEGORIES {
-                            if ui
-                                .selectable_value(
-                                    &mut self.category,
-                                    cat.name.to_string(),
-                                    cat.name,
-                                )
-                                .changed()
-                            {
-                                cat_changed = true;
-                            }
+                        for category in category_options() {
+                            ui.selectable_value(&mut selected_category, category, category.label());
                         }
                     });
-                if cat_changed {
-                    self.from.clear();
-                    self.to.clear();
+                if selected_category != self.category {
+                    self.select_category(selected_category);
                 }
+
                 ui.label("Filter");
                 ui.text_edit_singleline(&mut self.filter);
+
+                // Build options after the category and filter controls so a
+                // category change is reflected in both combos this frame.
+                let filtered = self.filtered_units();
+                self.reconcile_selections(&filtered);
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_label("From")
-                        .selected_text(&self.from)
+                        .selected_text(self.from.map_or("Select unit", PanelUnit::label))
                         .show_ui(ui, |ui| {
-                            for opt in &filtered {
-                                ui.selectable_value(&mut self.from, (*opt).to_string(), *opt);
+                            for option in &filtered {
+                                ui.selectable_value(&mut self.from, Some(*option), option.label());
                             }
                         });
                     egui::ComboBox::from_label("To")
-                        .selected_text(&self.to)
+                        .selected_text(self.to.map_or("Select unit", PanelUnit::label))
                         .show_ui(ui, |ui| {
-                            for opt in &filtered {
-                                ui.selectable_value(&mut self.to, (*opt).to_string(), *opt);
+                            for option in &filtered {
+                                ui.selectable_value(&mut self.to, Some(*option), option.label());
                             }
                         });
                 });
@@ -143,138 +194,250 @@ impl ConvertPanel {
         self.compute_result();
         self.open = open;
     }
-}
 
-fn distance_factor(unit: &str) -> Option<f64> {
-    Some(match unit {
-        "m" => 1.0,
-        "km" => 1000.0,
-        "cm" => 0.01,
-        "mm" => 0.001,
-        "mi" => 1609.344,
-        "ft" => 0.3048,
-        "in" => 0.0254,
-        "yd" => 0.9144,
-        "nm" => 1852.0,
-        _ => return None,
-    })
-}
-
-fn mass_factor(unit: &str) -> Option<f64> {
-    Some(match unit {
-        "kg" => 1000.0,
-        "g" => 1.0,
-        "lb" => 453.59237,
-        "oz" => 28.349523125,
-        _ => return None,
-    })
-}
-
-fn volume_factor(unit: &str) -> Option<f64> {
-    Some(match unit {
-        "l" => 1.0,
-        "ml" => 0.001,
-        "gal" => 3.785411784,
-        _ => return None,
-    })
-}
-
-fn to_celsius(val: f64, unit: &str) -> Option<f64> {
-    Some(match unit {
-        "c" => val,
-        "f" => (val - 32.0) * 5.0 / 9.0,
-        "k" => val - 273.15,
-        _ => return None,
-    })
-}
-
-fn from_celsius(val: f64, unit: &str) -> Option<f64> {
-    Some(match unit {
-        "c" => val,
-        "f" => val * 9.0 / 5.0 + 32.0,
-        "k" => val + 273.15,
-        _ => return None,
-    })
-}
-
-fn base_radix(unit: &str) -> Option<u32> {
-    match unit {
-        "dec" => Some(10),
-        "hex" => Some(16),
-        "bin" => Some(2),
-        "oct" => Some(8),
-        _ => None,
+    fn select_category(&mut self, category: PanelCategory) {
+        self.category = category;
+        self.from = None;
+        self.to = None;
+        let filtered = self.filtered_units();
+        self.reconcile_selections(&filtered);
     }
-}
 
-fn convert_base(input: &str, from: &str, to: &str) -> Option<String> {
-    let from_radix = base_radix(from)?;
-    let to_radix = base_radix(to)?;
-    let trimmed = input.trim();
-    let (neg, digits) = if let Some(rest) = trimmed.strip_prefix('-') {
-        (true, rest)
-    } else {
-        (false, trimmed)
-    };
-    let value = i64::from_str_radix(digits, from_radix).ok()?;
-    let value = if neg { -value } else { value };
-    let res = match to_radix {
-        10 => value.to_string(),
-        16 => format!("{:x}", value),
-        2 => format!("{:b}", value),
-        8 => format!("{:o}", value),
-        _ => return None,
-    };
-    Some(res)
-}
+    fn filtered_units(&self) -> Vec<PanelUnit> {
+        let filter = self.filter.trim().to_lowercase();
+        category_units(self.category)
+            .into_iter()
+            .filter(|unit| unit.matches_filter(&filter))
+            .collect()
+    }
 
-impl ConvertPanel {
+    fn reconcile_selections(&mut self, options: &[PanelUnit]) {
+        let valid_options = category_units(self.category);
+        let fallback = options
+            .first()
+            .copied()
+            .or_else(|| valid_options.first().copied());
+        if !self
+            .from
+            .is_some_and(|selected| valid_options.contains(&selected))
+        {
+            self.from = fallback;
+        }
+        if !self
+            .to
+            .is_some_and(|selected| valid_options.contains(&selected))
+        {
+            self.to = fallback;
+        }
+    }
+
     fn compute_result(&mut self) {
         self.result.clear();
         if self.input.trim().is_empty() {
             return;
         }
-        match self.category.as_str() {
-            "Distance" => {
-                if let Ok(v) = self.input.trim().parse::<f64>()
-                    && let (Some(ff), Some(tf)) =
-                        (distance_factor(&self.from), distance_factor(&self.to))
+
+        match (self.category, self.from, self.to) {
+            (
+                PanelCategory::Physical(category),
+                Some(PanelUnit::Physical(from)),
+                Some(PanelUnit::Physical(to)),
+            ) if from.category() == category && to.category() == category => {
+                let expression =
+                    format!("{} {} to {}", self.input.trim(), from.symbol(), to.symbol());
+                if let Ok(outcome) = unit_conversion::evaluate_conversion(&expression)
+                    && let Some(formatted) =
+                        crate::common::number_format::format_number(outcome.value)
                 {
-                    let res = v * ff / tf;
-                    self.result = res.to_string();
+                    self.result = formatted;
                 }
             }
-            "Mass" => {
-                if let Ok(v) = self.input.trim().parse::<f64>()
-                    && let (Some(ff), Some(tf)) = (mass_factor(&self.from), mass_factor(&self.to))
-                {
-                    let res = v * ff / tf;
-                    self.result = res.to_string();
-                }
-            }
-            "Volume" => {
-                if let Ok(v) = self.input.trim().parse::<f64>()
-                    && let (Some(ff), Some(tf)) =
-                        (volume_factor(&self.from), volume_factor(&self.to))
-                {
-                    let res = v * ff / tf;
-                    self.result = res.to_string();
-                }
-            }
-            "Temperature" => {
-                if let Ok(v) = self.input.trim().parse::<f64>()
-                    && let Some(c) = to_celsius(v, &self.from)
-                    && let Some(res) = from_celsius(c, &self.to)
-                {
-                    self.result = res.to_string();
-                }
-            }
-            "Base" => {
-                if let Some(res) = convert_base(&self.input, &self.from, &self.to) {
-                    self.result = res;
+            (PanelCategory::Base, Some(PanelUnit::Base(from)), Some(PanelUnit::Base(to))) => {
+                if let Some(result) = convert_base(&self.input, from, to) {
+                    self.result = result;
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn convert_base(input: &str, from: BaseUnit, to: BaseUnit) -> Option<String> {
+    let trimmed = input.trim();
+    let (negative, digits) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, trimmed)
+    };
+    let value = i64::from_str_radix(digits, from.radix()).ok()?;
+    let value = if negative { -value } else { value };
+    Some(match to {
+        BaseUnit::Decimal => value.to_string(),
+        BaseUnit::Hexadecimal => format!("{value:x}"),
+        BaseUnit::Binary => format!("{value:b}"),
+        BaseUnit::Octal => format!("{value:o}"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BaseUnit, ConvertPanel, PanelCategory, PanelUnit, category_options, category_units,
+    };
+    use crate::unit_conversion::{self, Category, Unit};
+
+    #[test]
+    fn exposes_every_shared_physical_category_and_unit() {
+        let categories: Vec<_> = category_options().collect();
+        assert_eq!(categories.len(), Category::ALL.len() + 1);
+        assert!(categories.contains(&PanelCategory::Base));
+
+        for category in Category::ALL {
+            let panel_category = PanelCategory::Physical(*category);
+            let choices = category_units(panel_category);
+            let expected: Vec<_> = unit_conversion::units_in_category(*category)
+                .map(|definition| PanelUnit::Physical(definition.unit))
+                .collect();
+            assert_eq!(choices, expected, "category {}", category.display_name());
+            assert!(!choices.is_empty(), "category {}", category.display_name());
+        }
+    }
+
+    #[test]
+    fn category_changes_reset_choices_from_the_new_filtered_category() {
+        let mut panel = ConvertPanel {
+            from: Some(PanelUnit::Physical(Unit::Kilometer)),
+            to: Some(PanelUnit::Physical(Unit::Mile)),
+            filter: "oz".to_owned(),
+            ..ConvertPanel::default()
+        };
+
+        panel.select_category(PanelCategory::Physical(Category::Mass));
+        let filtered = panel.filtered_units();
+        assert_eq!(filtered, vec![PanelUnit::Physical(Unit::Ounce)]);
+        assert_eq!(panel.from, Some(PanelUnit::Physical(Unit::Ounce)));
+        assert_eq!(panel.to, Some(PanelUnit::Physical(Unit::Ounce)));
+    }
+
+    #[test]
+    fn filtering_uses_case_insensitive_symbols_and_catalog_aliases_without_collapsing_units() {
+        let mut panel = ConvertPanel {
+            category: PanelCategory::Physical(Category::Data),
+            filter: "mB".to_owned(),
+            ..ConvertPanel::default()
+        };
+        let matching = panel.filtered_units();
+        assert!(matching.contains(&PanelUnit::Physical(Unit::Megabyte)));
+        assert!(matching.contains(&PanelUnit::Physical(Unit::Megabit)));
+        assert_ne!(Unit::Megabyte, Unit::Megabit);
+
+        panel.filter = "MEGABIT".to_owned();
+        assert_eq!(
+            panel.filtered_units(),
+            vec![PanelUnit::Physical(Unit::Megabit)]
+        );
+
+        panel.category = PanelCategory::Physical(Category::Volume);
+        panel.filter = "imperial gallon".to_owned();
+        assert_eq!(
+            panel.filtered_units(),
+            vec![PanelUnit::Physical(Unit::ImperialGallon)]
+        );
+    }
+
+    #[test]
+    fn filtering_does_not_discard_valid_category_selections() {
+        let mut panel = ConvertPanel {
+            from: Some(PanelUnit::Physical(Unit::Kilometer)),
+            to: Some(PanelUnit::Physical(Unit::Mile)),
+            filter: "mi".to_owned(),
+            ..ConvertPanel::default()
+        };
+
+        let filtered = panel.filtered_units();
+        panel.reconcile_selections(&filtered);
+        assert_eq!(panel.from, Some(PanelUnit::Physical(Unit::Kilometer)));
+        assert_eq!(panel.to, Some(PanelUnit::Physical(Unit::Mile)));
+
+        panel.filter = "no such unit".to_owned();
+        let filtered = panel.filtered_units();
+        assert!(filtered.is_empty());
+        panel.reconcile_selections(&filtered);
+        assert_eq!(panel.from, Some(PanelUnit::Physical(Unit::Kilometer)));
+        assert_eq!(panel.to, Some(PanelUnit::Physical(Unit::Mile)));
+    }
+
+    #[test]
+    fn physical_panel_calculation_matches_inline_domain_and_smart_formatting() {
+        let mut panel = ConvertPanel {
+            input: "1/2".to_owned(),
+            category: PanelCategory::Physical(Category::Length),
+            from: Some(PanelUnit::Physical(Unit::Kilometer)),
+            to: Some(PanelUnit::Physical(Unit::Mile)),
+            ..ConvertPanel::default()
+        };
+        panel.compute_result();
+
+        let inline = unit_conversion::evaluate_conversion("1/2 km to mi").unwrap();
+        let expected = crate::common::number_format::format_number(inline.value).unwrap();
+        assert_eq!(panel.result, expected);
+    }
+
+    #[test]
+    fn physical_panel_canonical_symbols_resolve_through_the_domain_catalog() {
+        let cases = [
+            ("1", Category::Mass, Unit::UsShortTon, Unit::Pound, "2000"),
+            (
+                "1",
+                Category::Volume,
+                Unit::UsFluidOunce,
+                Unit::Milliliter,
+                "29.5735",
+            ),
+            (
+                "10",
+                Category::FuelEconomy,
+                Unit::LiterPer100Kilometers,
+                Unit::KilometerPerLiter,
+                "10",
+            ),
+        ];
+
+        for (input, category, from, to, expected) in cases {
+            let mut panel = ConvertPanel {
+                input: input.to_owned(),
+                category: PanelCategory::Physical(category),
+                from: Some(PanelUnit::Physical(from)),
+                to: Some(PanelUnit::Physical(to)),
+                ..ConvertPanel::default()
+            };
+            panel.compute_result();
+            assert_eq!(
+                panel.result,
+                expected,
+                "{} to {}",
+                from.symbol(),
+                to.symbol()
+            );
+        }
+    }
+
+    #[test]
+    fn base_category_keeps_its_existing_radix_conversion_behavior() {
+        let mut panel = ConvertPanel {
+            input: "ff".to_owned(),
+            category: PanelCategory::Base,
+            from: Some(PanelUnit::Base(BaseUnit::Hexadecimal)),
+            to: Some(PanelUnit::Base(BaseUnit::Decimal)),
+            ..ConvertPanel::default()
+        };
+        panel.compute_result();
+        assert_eq!(panel.result, "255");
+
+        panel.input = "-10".to_owned();
+        panel.from = Some(PanelUnit::Base(BaseUnit::Decimal));
+        panel.to = Some(PanelUnit::Base(BaseUnit::Binary));
+        panel.compute_result();
+        assert_eq!(panel.result, format!("{:b}", -10_i64));
     }
 }

@@ -82,6 +82,9 @@ mod text_case_plugin;
 #[path = "../plugin_cases/timestamp_plugin.rs"]
 mod timestamp_plugin;
 
+#[path = "../plugin_cases/date_arithmetic_plugin.rs"]
+mod date_arithmetic_plugin;
+
 #[path = "../plugin_cases/unit_convert_plugin.rs"]
 mod unit_convert_plugin;
 

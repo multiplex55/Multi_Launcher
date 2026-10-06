@@ -13,6 +13,7 @@ use crate::plugins::color_picker::ColorPickerPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
 use crate::plugins::crop::CropPlugin;
 use crate::plugins::data::DataPlugin;
+use crate::plugins::date_arithmetic::DateArithmeticPlugin;
 use crate::plugins::diff::DiffPlugin;
 use crate::plugins::dropcalc::DropCalcPlugin;
 use crate::plugins::emoji::EmojiPlugin;
@@ -806,6 +807,7 @@ impl PluginManager {
         self.register_with_settings(CropPlugin, plugin_settings);
         self.register_with_settings(DataPlugin, plugin_settings);
         self.register_with_settings(TimestampPlugin, plugin_settings);
+        self.register_with_settings(DateArithmeticPlugin, plugin_settings);
         self.register_with_settings(
             IpPlugin::with_updates(Arc::clone(&self.services.search_updates)),
             plugin_settings,
@@ -1115,7 +1117,59 @@ fn plugin_matches_search(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn date_arithmetic_search_obeys_plugin_capability_and_prefix_filters() {
+        let plugin = DateArithmeticPlugin;
+        let enabled_plugins = HashSet::from(["date_arithmetic".to_owned()]);
+        let disabled_plugins = HashSet::new();
+        let enabled_search =
+            HashMap::from([("date_arithmetic".to_owned(), vec!["search".to_owned()])]);
+        let disabled_search = HashMap::from([("date_arithmetic".to_owned(), Vec::new())]);
+
+        assert!(!plugin_matches_search(
+            &plugin,
+            Some("date"),
+            Some(&disabled_plugins),
+            None,
+        ));
+        assert!(!plugin_matches_search(
+            &plugin,
+            Some("date"),
+            Some(&enabled_plugins),
+            Some(&disabled_search),
+        ));
+        assert!(!plugin_matches_search(
+            &plugin,
+            Some("ts"),
+            Some(&enabled_plugins),
+            Some(&enabled_search),
+        ));
+        assert!(plugin_matches_search(
+            &plugin,
+            Some("date"),
+            Some(&enabled_plugins),
+            Some(&enabled_search),
+        ));
+
+        let routed = search_filtered_plugins(
+            [&plugin as &dyn Plugin],
+            "DATE 2026-10-05",
+            Some(&enabled_plugins),
+            Some(&enabled_search),
+        );
+        assert_eq!(routed.len(), 1);
+        assert!(
+            search_filtered_plugins(
+                [&plugin as &dyn Plugin],
+                "datefoo 2026-10-05",
+                Some(&enabled_plugins),
+                Some(&enabled_search),
+            )
+            .is_empty()
+        );
+    }
 
     struct BlockingPlugin {
         started: std::sync::mpsc::Sender<()>,

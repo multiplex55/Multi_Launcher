@@ -30,6 +30,32 @@ fn parse_query(query: &str) -> Option<(String, String, String)> {
     Some((value, from, to))
 }
 
+pub(crate) fn recognizes_conversion(query: &str) -> bool {
+    parse_query(query).is_some()
+}
+
+fn conversion_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim_start();
+    let split = trimmed.find(char::is_whitespace)?;
+    let (prefix, rest) = trimmed.split_at(split);
+    if !prefix.eq_ignore_ascii_case("conv") && !prefix.eq_ignore_ascii_case("convert") {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+fn hex_to_dec(s: &str) -> Option<String> {
+    u128::from_str_radix(s, 16).ok().map(|n| n.to_string())
+}
+
+fn bin_to_dec(s: &str) -> Option<String> {
+    u128::from_str_radix(s, 2).ok().map(|n| n.to_string())
+}
+
+fn oct_to_dec(s: &str) -> Option<String> {
+    u128::from_str_radix(s, 8).ok().map(|n| n.to_string())
+}
+
 fn bin_to_hex(s: &str) -> Option<String> {
     u128::from_str_radix(s, 2).ok().map(|n| format!("{:x}", n))
 }
@@ -103,6 +129,9 @@ fn convert(value: &str, from: &str, to: &str) -> Option<String> {
         ("dec", "bin") => dec_to_bin(value),
         ("dec", "hex") => dec_to_hex(value),
         ("dec", "oct") => dec_to_oct(value),
+        ("bin", "dec") => bin_to_dec(value),
+        ("hex", "dec") => hex_to_dec(value),
+        ("oct", "dec") => oct_to_dec(value),
         ("hex", "text") => hex_to_text(value),
         ("text", "hex") => text_to_hex(value),
         ("text", "bin") => text_to_bin(value),
@@ -113,14 +142,7 @@ fn convert(value: &str, from: &str, to: &str) -> Option<String> {
 
 impl Plugin for BaseConvertPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        const CONV_PREFIX: &str = "conv ";
-        const CONVERT_PREFIX: &str = "convert ";
-        let rest = if let Some(r) = crate::common::strip_prefix_ci(query.trim_start(), CONV_PREFIX)
-        {
-            r
-        } else if let Some(r) = crate::common::strip_prefix_ci(query.trim_start(), CONVERT_PREFIX) {
-            r
-        } else {
+        let Some(rest) = conversion_query(query) else {
             return Vec::new();
         };
         if let Some((value, from, to)) = parse_query(rest)
