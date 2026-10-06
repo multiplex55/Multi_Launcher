@@ -23,6 +23,7 @@ It’s designed to be “one hotkey away” from:
 - [Cookbook examples](#cookbook-examples)
 - [File-search plugin](#file-search-plugin)
 - [Clipboard Modify](#clipboard-modify)
+- [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [Dashboard](#dashboard)
 - [Mouse gestures](#mouse-gestures)
 - [MkMacro authoring and reuse](#mkmacro-authoring-and-reuse)
@@ -88,6 +89,8 @@ Multi Launcher is centered around a **single query box**:
 | `f` | Saved folders | `f downloads` |
 | `cb` | Clipboard history | `cb list` / `cb clear` |
 | `cm` | Clipboard Modify operations, templates, pipelines, and undo | `cm trim | uppercase` / `cm template prompt-context` |
+| `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
+| `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
@@ -383,6 +386,27 @@ Common examples:
 - `cm template prompt-context` applies a configured template immediately.
 - `cm apply clean-lines` runs a saved pipeline immediately.
 - `cm undo` restores the clipboard text captured before the last Clipboard Modify write.
+
+## JSON and screen color utilities
+
+`json` opens a compact, local JSON editor. `json format` and `json pretty` prefer
+two-space formatting; `json minify` prefers compact output. Each open initializes
+from the clipboard only when it contains valid strict JSON. Use **Paste from
+Clipboard** to load clipboard text explicitly, then edit, **Format** or
+**Minify**, and **Copy Result** when ready. Formatting preserves object key order.
+Invalid input remains editable and reports the parser's line and column.
+Formatting and minifying do not write the clipboard. Objects, arrays, and primitive
+JSON values are supported; comments and trailing commas are rejected.
+`cm json-pretty` and `cm json-minify` continue using the same JSON transformation
+implementation, including in saved Clipboard Modify pipelines.
+
+`color pick` parks the launcher and freezes the Windows virtual desktop. Move the
+pointer to inspect pixels in the magnifier; its center marker identifies the exact
+pixel. Left-click selects that pixel, and Escape cancels. The launcher returns
+with the usual `color #rrggbb` HEX/RGB/HSL results after selection. Choose a result
+to copy it; selecting a pixel alone leaves the clipboard unchanged. The picker
+supports signed desktop coordinates, including monitors to the left or above the
+primary monitor, and samples the frozen image throughout the session.
 
 ## Dashboard
 
