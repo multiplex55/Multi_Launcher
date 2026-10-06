@@ -1,6 +1,8 @@
 //! Transient selection transitions. Native parking and overlay effects belong to
 //! the GUI adapter; generation identity is independent of native operation IDs.
+use super::job::{OcrJobEvent, OcrJobEventKind};
 use crate::mkmacro::ScreenRect;
+use crate::mkmacro::{DiagnosticKind, ExecResult, ExecutionDiagnostic};
 use std::time::{Duration, Instant};
 
 const PARK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -12,9 +14,18 @@ pub(crate) struct OcrGeneration(u64);
 pub(crate) enum SelectionOutcome {
     Cancelled,
     Failed(String),
+    Continue,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub(crate) enum OcrPresentation {
+    Recognizing,
+    Result(String),
+    NoText,
+    Error(ExecutionDiagnostic),
+}
+
+#[derive(Clone, Debug)]
 enum Phase {
     PendingParking,
     ApplyingParking,
@@ -23,6 +34,14 @@ enum Phase {
     Selecting(u64),
     Cancelling(u64),
     Confirmed(ScreenRect),
+    Capturing {
+        cancelled: bool,
+    },
+    RestoringJob {
+        cancelled: bool,
+        presentation: OcrPresentation,
+    },
+    Presented(OcrPresentation),
     Restoring(SelectionOutcome),
 }
 
@@ -87,7 +106,7 @@ impl OcrSelectionController {
     ) {
         if let Some((current, _, phase)) = &mut self.session
             && *current == generation
-            && *phase == Phase::ApplyingParking
+            && matches!(phase, Phase::ApplyingParking)
         {
             *phase = match result {
                 Ok(()) => Phase::VerifyParking,
@@ -106,7 +125,7 @@ impl OcrSelectionController {
     ) -> bool {
         if let Some((current, _, phase)) = &mut self.session
             && *current == generation
-            && *phase == Phase::VerifyingParking
+            && matches!(phase, Phase::VerifyingParking)
         {
             match result {
                 Ok(true) => return true,
@@ -128,7 +147,7 @@ impl OcrSelectionController {
     ) {
         if let Some((current, _, phase)) = &mut self.session
             && *current == generation
-            && *phase == Phase::VerifyingParking
+            && matches!(phase, Phase::VerifyingParking)
         {
             *phase = match result {
                 Ok(id) => Phase::Selecting(id),
@@ -150,10 +169,19 @@ impl OcrSelectionController {
     /// acknowledgement. A racing confirmation can only acknowledge cancellation.
     pub(crate) fn cancel(&mut self) -> Option<u64> {
         let (_, _, phase) = self.session.as_mut()?;
-        match *phase {
+        match phase {
             Phase::Selecting(id) => {
+                let id = *id;
                 *phase = Phase::Cancelling(id);
                 Some(id)
+            }
+            Phase::Capturing { cancelled } | Phase::RestoringJob { cancelled, .. } => {
+                *cancelled = true;
+                None
+            }
+            Phase::Presented(_) => {
+                self.release();
+                None
             }
             Phase::Cancelling(_) | Phase::Restoring(_) => None,
             _ => {
@@ -191,6 +219,10 @@ impl OcrSelectionController {
     pub(crate) fn restore_outcome(&self) -> Option<&SelectionOutcome> {
         self.session.as_ref().and_then(|(_, _, phase)| match phase {
             Phase::Restoring(outcome) => Some(outcome),
+            Phase::RestoringJob {
+                cancelled: true, ..
+            } => Some(&SelectionOutcome::Cancelled),
+            Phase::RestoringJob { .. } => Some(&SelectionOutcome::Continue),
             _ => None,
         })
     }
@@ -204,6 +236,85 @@ impl OcrSelectionController {
     }
     pub(crate) fn release(&mut self) {
         self.session = None;
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// Consumes confirmation exactly once, before the GUI starts a worker.
+    pub(crate) fn take_capture(&mut self) -> Option<(OcrGeneration, ScreenRect)> {
+        let (generation, rect) = self.confirmed()?;
+        self.session.as_mut()?.2 = Phase::Capturing { cancelled: false };
+        Some((generation, rect))
+    }
+
+    pub(crate) fn worker_event(&mut self, event: OcrJobEvent) {
+        let Some((generation, _, phase)) = &mut self.session else {
+            return;
+        };
+        if *generation != event.generation {
+            return;
+        }
+        let presentation = |result: ExecResult<String>| match result {
+            Ok(text) if text.trim().is_empty() => OcrPresentation::NoText,
+            Ok(text) => OcrPresentation::Result(text),
+            Err(error) => OcrPresentation::Error(error),
+        };
+        match (phase.clone(), event.kind) {
+            (Phase::Capturing { cancelled }, OcrJobEventKind::Captured) => {
+                *phase = Phase::RestoringJob {
+                    cancelled,
+                    presentation: OcrPresentation::Recognizing,
+                };
+            }
+            (Phase::Capturing { cancelled }, OcrJobEventKind::Finished(result))
+            | (Phase::RestoringJob { cancelled, .. }, OcrJobEventKind::Finished(result)) => {
+                let cancelled = cancelled
+                    || result
+                        .as_ref()
+                        .is_err_and(|error| error.kind == DiagnosticKind::Cancelled);
+                *phase = Phase::RestoringJob {
+                    cancelled,
+                    presentation: presentation(result),
+                };
+            }
+            (Phase::Presented(OcrPresentation::Recognizing), OcrJobEventKind::Finished(result)) => {
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.kind == DiagnosticKind::Cancelled)
+                {
+                    self.release();
+                } else {
+                    *phase = Phase::Presented(presentation(result));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn restored(&mut self) {
+        if let Some((
+            _,
+            _,
+            Phase::RestoringJob {
+                cancelled: false,
+                presentation,
+            },
+        )) = &self.session
+        {
+            let presentation = presentation.clone();
+            self.session.as_mut().unwrap().2 = Phase::Presented(presentation);
+        } else {
+            self.release();
+        }
+    }
+
+    pub(crate) fn presentation(&self) -> Option<&OcrPresentation> {
+        match &self.session.as_ref()?.2 {
+            Phase::Presented(state) => Some(state),
+            _ => None,
+        }
     }
 }
 
@@ -266,5 +377,64 @@ mod tests {
             controller.restore_outcome(),
             Some(SelectionOutcome::Failed(_))
         ));
+    }
+
+    #[test]
+    fn ocr_workflow_capture_is_once_and_fast_completion_waits_for_restore() {
+        let (mut controller, generation) = selecting();
+        let rect = ScreenRect::new(-100, -30, 230, 300);
+        controller.terminal(generation, 77, Ok(Some(rect)));
+        assert_eq!(controller.take_capture(), Some((generation, rect)));
+        assert!(controller.take_capture().is_none());
+        assert!(controller.restore_outcome().is_none());
+        controller.worker_event(OcrJobEvent {
+            generation,
+            kind: OcrJobEventKind::Captured,
+        });
+        controller.worker_event(OcrJobEvent {
+            generation,
+            kind: OcrJobEventKind::Finished(Ok("exact\ntext".into())),
+        });
+        assert_eq!(
+            controller.restore_outcome(),
+            Some(&SelectionOutcome::Continue)
+        );
+        assert!(controller.presentation().is_none());
+        controller.restored();
+        assert!(
+            matches!(controller.presentation(),Some(OcrPresentation::Result(text)) if text=="exact\ntext")
+        );
+        assert!(controller.request(Instant::now()).unwrap().is_none());
+    }
+
+    #[test]
+    fn ocr_workflow_cancel_capture_retains_owner_and_old_generation_cannot_publish() {
+        let (mut controller, generation) = selecting();
+        controller.terminal(generation, 77, Ok(Some(ScreenRect::new(-10, -20, 30, 40))));
+        controller.take_capture();
+        controller.cancel();
+        assert!(controller.is_active());
+        assert!(controller.restore_outcome().is_none());
+        controller.worker_event(OcrJobEvent {
+            generation,
+            kind: OcrJobEventKind::Captured,
+        });
+        controller.worker_event(OcrJobEvent {
+            generation,
+            kind: OcrJobEventKind::Finished(Ok("cancelled text".into())),
+        });
+        assert_eq!(
+            controller.restore_outcome(),
+            Some(&SelectionOutcome::Cancelled)
+        );
+        controller.restored();
+        assert!(!controller.is_active());
+        controller.request(Instant::now()).unwrap();
+        controller.worker_event(OcrJobEvent {
+            generation,
+            kind: OcrJobEventKind::Finished(Ok("old text".into())),
+        });
+        assert!(controller.presentation().is_none());
+        assert!(controller.restore_outcome().is_none());
     }
 }

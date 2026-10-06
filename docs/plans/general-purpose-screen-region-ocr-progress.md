@@ -78,7 +78,7 @@ Owner/scope: shared OCR service/controller and GUI capture lifecycle seam. On cu
 
 ## M4-B — asynchronous recognition and publication
 
-Status: in_progress. Depends on M4-A/M1-B. Commit: `feat(ocr): [M4-B] run OCR recognition asynchronously with stale-result guards`.
+Status: complete (M4-B1 and M4-B2). Depends on M4-A/M1-B. Commits split at the worker and launcher integration boundaries below.
 
 Owner/scope: OCR job/controller + focused GUI polling/repaint. Run capture/recognition away from egui as appropriate; local language discovery also must not block a frame. Use thread/mpsc/atomic cancellation precedent from `ocr_test_job.rs`, but carry general generation, not draft identity. Publish only current completion; restore launcher after capture and expose Recognizing status, then Result/NoText/Error. Closing/new invocation/re-capture invalidate outstanding jobs; completed workers never resurrect UI. Extract text and drop image/document before publishing a text-only result. Test worker-thread execution, success/failure, cancellation, two attempts, late completion after close/replacement, repaint, and resource release. Verify targeted OCR job/controller tests and compile. No permanent OCR polling/capture thread or fake percentage.
 
@@ -143,8 +143,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M3-A | complete | `2c3e3ecd` | 6 command/plugin/host lib tests and 3 selected integration tests passed; fmt/diff checks passed. Normal typed action and disabled routing verified. |
 | M3-B | complete | `6e8f77fc` | Latest-source 16 OCR lifecycle tests passed, including real Enter/Click/Dashboard/radial activation, hidden/no-flash cancel, duplicate/history and newer show; fmt/diff checks passed. |
 | M4-A | complete | `a02d1260` | Nextest general/MkMacro OCR filter: 53 passed (includes substring-matched GUI OCR/handler tests); successful lib-test compile, fmt/diff checks passed. Shared borrowed frame pipeline, no GUI changes. |
-| M4-B1 | complete | recorded in checkpoint history | One-shot background worker, ordered capture/text terminal events, cancellation and spawn/disconnect/panic paths. Latest tracked compile passed; 5 worker tests passed, including bounded nonjoining drop assertion; fmt/diff checks passed. |
-| M4-B2 through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M4-B1 | complete | `3bc5988d` | One-shot background worker, ordered capture/text terminal events, cancellation and spawn/disconnect/panic paths. Latest tracked compile passed; 5 worker tests passed, including bounded nonjoining drop assertion; fmt/diff checks passed. |
+| M4-B2 | complete | this checkpoint | Latest owned compile passed; GUI OCR 22 passed, job/controller 10 passed, directly affected Color Pick geometry 2 passed. Formatting/diff checks passed. Capture terminal authorizes restore, completion stays staged across retries, and newer intent cancels publication. |
+| M5-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -176,6 +177,8 @@ M3-B implemented hidden-origin admission/cancel. M4 success must intentionally p
 - M4-B1: independently functioning one-shot async worker, ordered generation-tagged capture-complete/text/error events, cancellation/repaint and spawn/disconnect/panic handling, fake worker tests. No GUI/controller migration yet. Commit: feat(ocr): [M4-B1] add cancellable asynchronous OCR worker.
 - M4-B2: evolve current controller and integrate GUI root capture/restoration boundary and stale completion guards, migrating directly affected lifecycle tests. Commit: feat(ocr): [M4-B2] integrate asynchronous OCR with launcher lifecycle. M4-B overall stays pending until both sections and scoped checks complete.
 - M4-B1 verified after native remediation: compile PID 3592, worker tests PID 20996 (5 passed), formatting PID 17304, all exit 0 with recorded identities absent. Evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M4B1-drop-{compile,tests,fmt}-20261006/`. Parent review strengthened the nonjoining-drop test to require return while the recognizer gate remains closed, preventing its timeout from hiding a joining regression. Pixels remain worker-owned; completion carries generation and text/error only. Profile-provider injection keeps fake worker tests independent of Windows preferences while production uses the shared native policy. GUI/controller are unchanged at B1; B2 integration remains required.
+
+- M4-B2 verified: compile PID 10216, GUI OCR PID 17704 (22 passed), job/controller PID 16152 (10 passed), affected Color Pick PID 15612 (2 passed), formatting PID 20748; all exit 0, recorded identities absent. Evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M4B2-{compile4,gui-final,domain-final,root-final,fmt-final}-20261006/`. Ordinary assertion failures during iteration were preserved and traced to constructor mouse-placement commands queued before the measured frame; the unchanged Color Pick cases reproduced separately. Both test fixtures now settle constructor commands before observing workflow effects, retaining all geometry assertions and production placement behavior. No native crash reproduced in B2. Known generated clipboard test artifact was preserved in Temp and removed from the repository. Physical parking ownership ends independently of active presentation; close during capture retains parking until terminal, close during recognition detaches without joining, and current generation/query/selection/visibility gates publication. Result UI remains M5.
 
 ### Active native reliability remediation (user directive)
 

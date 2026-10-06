@@ -1,5 +1,5 @@
-//! GUI effects for transient Screen Region OCR selection. No pixels are captured
-//! here: confirmation retains its signed rectangle and parking for the capture stage.
+//! GUI parking and publication effects for the transient OCR workflow.
+//! Captured pixels and recognition mechanics stay on the one-shot worker.
 use eframe::egui;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::{Duration, Instant};
@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 use super::LauncherApp;
 use super::mkmacro_dialog::visual_overlay::{RectanglePurpose, VisualOverlayEvent};
 use crate::launcher_parking::LauncherParkingTransaction;
+use crate::mkmacro::ocr::OcrBackend;
 #[cfg(windows)]
 use crate::mkmacro::screen::WindowsScreenCaptureBackend;
 use crate::mkmacro::screen::{ScreenCaptureBackend, ScreenRect};
+use crate::ocr::job::{OcrJob, OcrJobEvent, OcrJobEventKind};
 use crate::ocr::selection::{
     OcrGeneration, OcrSelectionController, SelectionEffect, SelectionOutcome,
 };
@@ -23,6 +25,10 @@ pub(super) struct OcrLifecycle {
     session: Option<LauncherSession>,
     pub(super) parking: Option<LauncherParkingTransaction<OcrGeneration>>,
     desktop: Arc<dyn ScreenCaptureBackend>,
+    recognizer: Arc<dyn OcrBackend>,
+    job: Option<OcrJob>,
+    #[cfg(test)]
+    profile_provider: Option<fn() -> crate::mkmacro::ExecResult<Vec<String>>>,
     restore_error: Option<String>,
 }
 
@@ -32,11 +38,19 @@ impl Default for OcrLifecycle {
         let desktop = Arc::new(WindowsScreenCaptureBackend::system());
         #[cfg(not(windows))]
         let desktop = crate::mkmacro::Backends::unsupported().screenshot_capture;
+        #[cfg(windows)]
+        let recognizer = Arc::new(crate::mkmacro::ocr::WindowsOcrBackend::new());
+        #[cfg(not(windows))]
+        let recognizer = crate::mkmacro::Backends::unsupported().ocr;
         Self {
             controller: OcrSelectionController::default(),
             session: None,
             parking: None,
             desktop,
+            recognizer,
+            job: None,
+            #[cfg(test)]
+            profile_provider: None,
             restore_error: None,
         }
     }
@@ -51,11 +65,31 @@ struct LauncherSession {
     query_superseded: bool,
     published: bool,
     desktop: Option<ScreenRect>,
+    root_restored: bool,
 }
 
 impl LauncherApp {
+    /// Result/progress admission is separate from physical parking ownership.
+    /// M5 can route input to this transient surface without a persisted Panel.
+    pub(super) fn ocr_surface_visible(&self) -> bool {
+        self.visible_flag.load(Ordering::SeqCst)
+            && self.ocr.controller.presentation().is_some()
+            && self.ocr.session.as_ref().is_some_and(|session| {
+                session.root_restored
+                    && !session.superseded
+                    && !session.query_superseded
+                    && self.visibility_revision.current() == session.owned_revision
+                    && self.query == session.query
+                    && self.selected == session.selected
+            })
+    }
+
     pub(super) fn ocr_owns_root(&self) -> bool {
-        self.ocr.session.is_some() || self.ocr.parking.is_some()
+        self.ocr
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.root_restored)
+            || self.ocr.parking.is_some()
     }
 
     fn ensure_ocr_selection_admitted(&self) -> Result<(), String> {
@@ -85,7 +119,7 @@ impl LauncherApp {
     /// Both ordinary launcher and assigned actions stage the same workflow.
     /// A hidden ROOT can be parked directly; it is never shown before selection.
     pub(super) fn begin_ocr_selection(&mut self) -> Result<bool, String> {
-        if self.ocr_owns_root() {
+        if self.ocr.controller.is_active() {
             return Ok(false);
         }
         self.ensure_ocr_selection_admitted()?;
@@ -105,12 +139,16 @@ impl LauncherApp {
             query_superseded: false,
             published: false,
             desktop: None,
+            root_restored: false,
         });
         self.egui_ctx.request_repaint();
         Ok(true)
     }
 
     pub(super) fn cancel_ocr_selection(&mut self) {
+        if let Some(job) = &self.ocr.job {
+            job.cancel();
+        }
         if let Some(id) = self.ocr.controller.cancel() {
             self.mkmacro_dialog
                 .visual_overlay_controller()
@@ -120,11 +158,8 @@ impl LauncherApp {
     }
 
     pub(super) fn poll_ocr_selection(&mut self, ctx: &egui::Context) {
-        if !self.ocr_owns_root() {
+        if self.ocr.session.is_none() {
             return;
-        }
-        if ctx.input_mut(|input| input.consume_key(input.modifiers, egui::Key::Escape)) {
-            self.cancel_ocr_selection();
         }
         let mut lifecycle = std::mem::take(&mut self.ocr);
         let overlay = self.mkmacro_dialog.visual_overlay_controller();
@@ -132,10 +167,13 @@ impl LauncherApp {
             session.superseded |= self.visibility_revision.current() != session.owned_revision;
             session.query_superseded |=
                 self.query != session.query || self.selected != session.selected;
-            if (session.superseded || session.query_superseded)
-                && let Some(id) = lifecycle.controller.cancel()
-            {
-                overlay.cancel_general_ocr_operation(id);
+            if session.superseded || session.query_superseded {
+                if let Some(job) = &lifecycle.job {
+                    job.cancel();
+                }
+                if let Some(id) = lifecycle.controller.cancel() {
+                    overlay.cancel_general_ocr_operation(id);
+                }
             }
         }
         if let Some((generation, id)) = lifecycle.controller.operation()
@@ -203,12 +241,60 @@ impl LauncherApp {
             }
             None => {}
         }
+        if let Some((generation, rect)) = lifecycle.controller.take_capture() {
+            let repaint_ctx = ctx.clone();
+            let repaint: Arc<dyn Fn() + Send + Sync> =
+                Arc::new(move || repaint_ctx.request_repaint());
+            #[cfg(test)]
+            let job = if let Some(provider) = lifecycle.profile_provider {
+                OcrJob::start_with_profile_provider(
+                    generation,
+                    rect,
+                    lifecycle.desktop.clone(),
+                    lifecycle.recognizer.clone(),
+                    repaint,
+                    provider,
+                )
+            } else {
+                OcrJob::start(
+                    generation,
+                    rect,
+                    lifecycle.desktop.clone(),
+                    lifecycle.recognizer.clone(),
+                    repaint,
+                )
+            };
+            #[cfg(not(test))]
+            let job = OcrJob::start(
+                generation,
+                rect,
+                lifecycle.desktop.clone(),
+                lifecycle.recognizer.clone(),
+                repaint,
+            );
+            match job {
+                Ok(job) => lifecycle.job = Some(job),
+                Err(error) => lifecycle.controller.worker_event(OcrJobEvent {
+                    generation,
+                    kind: OcrJobEventKind::Finished(Err(error)),
+                }),
+            }
+        }
+        if let Some(job) = &mut lifecycle.job {
+            while let Some(event) = job.poll() {
+                lifecycle.controller.worker_event(event);
+            }
+        }
         if lifecycle.controller.restore_outcome().is_some() {
             match self.restore_ocr_selection(&mut lifecycle) {
                 Ok(true) => {
-                    if let Some(saved) = lifecycle.session.take() {
+                    let continuation = matches!(
+                        lifecycle.controller.restore_outcome(),
+                        Some(SelectionOutcome::Continue)
+                    );
+                    if let Some(saved) = lifecycle.session.as_mut() {
                         if !saved.superseded && !saved.query_superseded {
-                            self.query = saved.query;
+                            self.query = saved.query.clone();
                             self.selected = saved.selected;
                         }
                         if let Some(SelectionOutcome::Failed(error)) =
@@ -220,8 +306,13 @@ impl LauncherApp {
                         if self.visible_flag.load(Ordering::SeqCst) {
                             self.focus_input();
                         }
+                        saved.root_restored = true;
                     }
-                    lifecycle.controller.release();
+                    lifecycle.controller.restored();
+                    if !continuation {
+                        lifecycle.session = None;
+                        lifecycle.job = None;
+                    }
                     lifecycle.restore_error = None;
                 }
                 Ok(false) => {}
@@ -233,7 +324,11 @@ impl LauncherApp {
                 }
             }
         }
-        if lifecycle.session.is_some() && lifecycle.controller.confirmed().is_none() {
+        if !lifecycle.controller.is_active() && lifecycle.parking.is_none() {
+            lifecycle.session = None;
+            lifecycle.job = None;
+        }
+        if lifecycle.session.is_some() && lifecycle.controller.presentation().is_none() {
             ctx.request_repaint_after(if lifecycle.restore_error.is_some() {
                 Duration::from_millis(250)
             } else {
@@ -301,6 +396,10 @@ impl LauncherApp {
     /// Exact native calls stay outside the ordering gate. Publication below
     /// revalidates newer requests before any presentation/activation effect.
     fn restore_ocr_selection(&mut self, lifecycle: &mut OcrLifecycle) -> Result<bool, String> {
+        let continuing = matches!(
+            lifecycle.controller.restore_outcome(),
+            Some(SelectionOutcome::Continue)
+        );
         let Some(session) = lifecycle.session.as_mut() else {
             return Ok(true);
         };
@@ -314,7 +413,7 @@ impl LauncherApp {
         // A hidden intent can still have an on-screen native snapshot while its
         // original hide is in flight. Keep the capture-safe parking on ordinary
         // cancellation rather than briefly restoring that rectangle.
-        let retain_hidden_parking = !session.prior_visible && !session.superseded;
+        let retain_hidden_parking = !continuing && !session.prior_visible && !session.superseded;
         if !retain_hidden_parking && let Some(parking) = &mut lifecycle.parking {
             parking.restore()?;
         }
@@ -327,7 +426,7 @@ impl LauncherApp {
                     invocation,
                     || {
                         self.visible_flag
-                            .store(session.prior_visible, Ordering::SeqCst);
+                            .store(continuing || session.prior_visible, Ordering::SeqCst);
                         self.restore_flag.store(false, Ordering::SeqCst);
                     },
                 )
@@ -345,6 +444,12 @@ impl LauncherApp {
             )
         });
         session.superseded |= revision != session.owned_revision;
+        if session.superseded || session.query_superseded {
+            if let Some(job) = &lifecycle.job {
+                job.cancel();
+            }
+            lifecycle.controller.cancel();
+        }
         if !visible && let Some(parking) = &mut lifecycle.parking {
             parking.repark_after_stale_restore(|| Ok(()))?;
         }
@@ -418,6 +523,7 @@ impl LauncherApp {
             parking.commit_hidden();
         }
         self.ocr.parking = None;
+        self.ocr.job = None;
         self.ocr.session = None;
         self.ocr.controller.release();
         self.ocr.restore_error = None;
@@ -437,10 +543,143 @@ mod tests {
         ExecResult, MkPoint,
         screen::{CapturedRegion, SearchRegion},
     };
+    use crate::ocr::selection::OcrPresentation;
     use crate::plugin::PluginManager;
     use crate::settings::Settings;
     use crate::visibility::RootFocusIntent;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{Condvar, Mutex};
+
+    struct Gate {
+        open: Mutex<bool>,
+        changed: Condvar,
+    }
+    impl Gate {
+        fn new(open: bool) -> Self {
+            Self {
+                open: Mutex::new(open),
+                changed: Condvar::new(),
+            }
+        }
+        fn wait(&self) {
+            let (_guard, timeout) = self
+                .changed
+                .wait_timeout_while(self.open.lock().unwrap(), Duration::from_secs(5), |open| {
+                    !*open
+                })
+                .unwrap();
+            assert!(!timeout.timed_out(), "OCR integration gate stalled");
+        }
+        fn release(&self) {
+            *self.open.lock().unwrap() = true;
+            self.changed.notify_all();
+        }
+    }
+    struct AsyncBackend {
+        capture_gate: Gate,
+        recognition_gate: Gate,
+        rectangles: Mutex<Vec<ScreenRect>>,
+        recognition_started: AtomicBool,
+        fail_capture: bool,
+        text: String,
+    }
+    impl ScreenCaptureBackend for AsyncBackend {
+        fn virtual_desktop(&self) -> ExecResult<ScreenRect> {
+            Ok(desktop())
+        }
+        fn region_bounds(&self, _: &SearchRegion) -> ExecResult<ScreenRect> {
+            panic!("exact capture only")
+        }
+        fn capture_rect(
+            &self,
+            _: ScreenRect,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<image::RgbaImage> {
+            panic!("exact capture only")
+        }
+        fn capture(
+            &self,
+            region: &SearchRegion,
+            cancelled: &dyn Fn() -> bool,
+        ) -> ExecResult<CapturedRegion> {
+            let SearchRegion::Rectangle { rect } = region else {
+                panic!("rectangle required")
+            };
+            self.rectangles.lock().unwrap().push(*rect);
+            self.capture_gate.wait();
+            if cancelled() {
+                return Err(crate::mkmacro::cancelled_error());
+            }
+            if self.fail_capture {
+                return Err(crate::mkmacro::ExecutionDiagnostic::new(
+                    crate::mkmacro::DiagnosticKind::Backend,
+                    "fixture capture failed",
+                ));
+            }
+            Ok(CapturedRegion {
+                image: image::RgbaImage::new(rect.width, rect.height),
+                origin: (rect.x, rect.y),
+            })
+        }
+    }
+    impl OcrBackend for AsyncBackend {
+        fn available_languages(&self) -> ExecResult<Vec<crate::mkmacro::ocr::OcrLanguageInfo>> {
+            Ok(vec![crate::mkmacro::ocr::OcrLanguageInfo {
+                tag: "en-US".into(),
+                display_name: "English".into(),
+            }])
+        }
+        fn max_image_dimension(&self) -> ExecResult<u32> {
+            Ok(1000)
+        }
+        fn recognize(
+            &self,
+            _: &image::RgbaImage,
+            language: &crate::mkmacro::MkOcrLanguage,
+            _: &dyn Fn() -> bool,
+        ) -> ExecResult<crate::mkmacro::ocr::OcrDocument> {
+            assert_eq!(
+                language,
+                &crate::mkmacro::MkOcrLanguage::LanguageTag("en-US".into())
+            );
+            self.recognition_started.store(true, Ordering::SeqCst);
+            self.recognition_gate.wait();
+            Ok(crate::mkmacro::ocr::OcrDocument {
+                lines: vec![crate::mkmacro::ocr::OcrLine {
+                    text: self.text.clone(),
+                    words: vec![],
+                }],
+                ..Default::default()
+            })
+        }
+    }
+    fn async_backend(
+        app: &mut LauncherApp,
+        capture_open: bool,
+        recognition_open: bool,
+        text: &str,
+        fail_capture: bool,
+    ) -> Arc<AsyncBackend> {
+        let backend = Arc::new(AsyncBackend {
+            capture_gate: Gate::new(capture_open),
+            recognition_gate: Gate::new(recognition_open),
+            rectangles: Mutex::new(vec![]),
+            recognition_started: AtomicBool::new(false),
+            text: text.into(),
+            fail_capture,
+        });
+        app.ocr.desktop = backend.clone();
+        app.ocr.recognizer = backend.clone();
+        app.ocr.profile_provider = Some(|| Ok(vec![]));
+        backend
+    }
+    fn confirm(fixture: &TestOverlayServiceFixture, id: u64) {
+        fixture.observer.confirm_rectangle(
+            id,
+            MkPoint { x: -90, y: -40 },
+            MkPoint { x: 100, y: 80 },
+        );
+    }
 
     struct Desktop(Arc<AtomicUsize>);
     impl ScreenCaptureBackend for Desktop {
@@ -494,6 +733,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        // Settle constructor placement before observing this workflow's effects.
+        // The native mouse position can otherwise queue startup geometry into
+        // the first frame measured by a direct test executable.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
         app.last_visible = true;
         app.visibility_revision
             .request_with_focus_intent(RootFocusIntent::PreserveForeground, || {});
@@ -802,6 +1045,7 @@ mod tests {
     #[test]
     fn ocr_confirm_holds_signed_rectangle_and_parking_until_capture_stage_or_close() {
         let mut app = app();
+        let backend = async_backend(&mut app, false, false, "text", false);
         let (fixture, observer, id) = start(&mut app);
         let parked = observer.current_rect();
         fixture.observer.confirm_rectangle(
@@ -809,10 +1053,10 @@ mod tests {
             MkPoint { x: -90, y: -40 },
             MkPoint { x: 100, y: 80 },
         );
-        wait(&mut app, |app| app.ocr.controller.confirmed().is_some());
+        wait(&mut app, |_| !backend.rectangles.lock().unwrap().is_empty());
         assert_eq!(
-            app.ocr.controller.confirmed().unwrap().1,
-            ScreenRect::new(-90, -40, 190, 120)
+            *backend.rectangles.lock().unwrap(),
+            vec![ScreenRect::new(-90, -40, 190, 120)]
         );
         assert!(app.ocr_owns_root());
         assert_eq!(observer.current_rect(), parked);
@@ -820,6 +1064,10 @@ mod tests {
         assert!(fixture.controller.operation_id().is_none());
         assert!(!app.begin_ocr_selection().unwrap());
         app.cancel_ocr_selection();
+        poll(&mut app);
+        assert!(app.ocr_owns_root()); // cancellation waits for capture to stop
+        assert_eq!(observer.current_rect(), parked);
+        backend.capture_gate.release();
         wait(&mut app, |app| !app.ocr_owns_root());
         assert_eq!(observer.current_rect(), original());
         assert_eq!(app.query, "original search");
@@ -994,13 +1242,14 @@ mod tests {
     #[test]
     fn ocr_confirmed_root_suppresses_generic_placement_and_reconciles_native_parking() {
         let mut app = app();
+        let backend = async_backend(&mut app, false, false, "text", false);
         let (fixture, observer, id) = start(&mut app);
         fixture.observer.confirm_rectangle(
             id,
             MkPoint { x: -90, y: -40 },
             MkPoint { x: 100, y: 80 },
         );
-        wait(&mut app, |app| app.ocr.controller.confirmed().is_some());
+        wait(&mut app, |_| !backend.rectangles.lock().unwrap().is_empty());
         let parked = observer.current_rect();
         app.static_location_enabled = true;
         app.static_pos = Some((240, 180));
@@ -1013,16 +1262,16 @@ mod tests {
         });
         assert!(app.ocr_owns_root());
         assert_eq!(observer.current_rect(), parked);
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
         assert!(
-            !output.viewport_output[&egui::ViewportId::ROOT]
-                .commands
-                .iter()
-                .any(|command| matches!(
-                    command,
-                    egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
-                ))
+            !commands.iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )),
+            "OCR parking emitted geometry commands: {commands:?}"
         );
         app.cancel_ocr_selection();
+        backend.capture_gate.release();
         wait(&mut app, |app| !app.ocr_owns_root());
     }
     #[cfg(windows)]
@@ -1048,14 +1297,230 @@ mod tests {
         let output = ctx.end_frame();
         assert_eq!(queued, [(app.visibility_revision.current(), 42)]);
         assert_eq!(observer.current_rect(), original());
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
         assert!(
-            !output.viewport_output[&egui::ViewportId::ROOT]
-                .commands
-                .iter()
-                .any(|command| matches!(
-                    command,
-                    egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
-                ))
+            !commands.iter().any(|command| matches!(
+                command,
+                egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
+            )),
+            "OCR exact restore emitted geometry commands: {commands:?}"
         );
+    }
+
+    #[test]
+    fn ocr_capture_restores_before_recognition_and_close_detaches_old_generation() {
+        let mut app = app();
+        let backend = async_backend(&mut app, false, false, "late old text", false);
+        let (fixture, observer, id) = start(&mut app);
+        let generation = app.ocr.session.as_ref().unwrap().id;
+        confirm(&fixture, id);
+        wait(&mut app, |_| !backend.rectangles.lock().unwrap().is_empty());
+        for _ in 0..3 {
+            poll(&mut app);
+        }
+        assert!(app.ocr_owns_root());
+        assert!(!backend.recognition_started.load(Ordering::SeqCst));
+        assert_eq!(
+            *backend.rectangles.lock().unwrap(),
+            vec![ScreenRect::new(-90, -40, 190, 120)]
+        );
+        backend.capture_gate.release();
+        wait(&mut app, |app| {
+            backend.recognition_started.load(Ordering::SeqCst)
+                && matches!(
+                    app.ocr.controller.presentation(),
+                    Some(OcrPresentation::Recognizing)
+                )
+        });
+        assert!(!app.ocr_owns_root());
+        assert!(app.ocr_surface_visible());
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(observer.current_rect(), original());
+        assert!(!app.begin_ocr_selection().unwrap());
+        let closed = Instant::now();
+        app.cancel_ocr_selection();
+        poll(&mut app);
+        assert!(closed.elapsed() < Duration::from_secs(1));
+        assert!(app.ocr.session.is_none());
+        let (_next_fixture, _next_observer, _next_id) = start(&mut app);
+        let next_generation = app.ocr.session.as_ref().unwrap().id;
+        assert_ne!(generation, next_generation);
+        backend.recognition_gate.release();
+        for _ in 0..5 {
+            poll(&mut app);
+        }
+        assert_eq!(app.ocr.session.as_ref().unwrap().id, next_generation);
+        assert!(app.ocr.controller.presentation().is_none());
+        app.shutdown_ocr_selection();
+    }
+
+    #[test]
+    fn ocr_fast_text_empty_and_capture_error_survive_restoration_retry() {
+        for (text, fail_capture) in [("fast text", false), (" \n ", false), ("", true)] {
+            let mut app = app();
+            let backend = async_backend(&mut app, true, true, text, fail_capture);
+            let (fixture, observer, id) = start(&mut app);
+            observer.fail_next_restore();
+            confirm(&fixture, id);
+            wait(&mut app, |app| app.ocr.restore_error.is_some());
+            assert!(app.ocr_owns_root());
+            assert!(app.ocr.parking.is_some());
+            assert!(app.ocr.controller.presentation().is_none());
+            wait(&mut app, |app| {
+                matches!(
+                    app.ocr.controller.presentation(),
+                    Some(
+                        OcrPresentation::Result(_)
+                            | OcrPresentation::NoText
+                            | OcrPresentation::Error(_)
+                    )
+                )
+            });
+            match app.ocr.controller.presentation().unwrap() {
+                OcrPresentation::Result(actual) => assert_eq!(actual, text),
+                OcrPresentation::NoText => assert!(text.trim().is_empty() && !fail_capture),
+                OcrPresentation::Error(error) => {
+                    assert!(fail_capture && error.to_string().contains("fixture capture failed"))
+                }
+                _ => panic!("terminal expected"),
+            }
+            assert_eq!(backend.rectangles.lock().unwrap().len(), 1);
+            assert_eq!(observer.current_rect(), original());
+            assert!(app.visible_flag.load(Ordering::SeqCst));
+            assert!(!app.ocr_owns_root());
+        }
+    }
+
+    #[test]
+    fn ocr_hidden_capture_success_publishes_configured_visible_placement() {
+        let (_root, mut app) = activation_app(true);
+        let backend = async_backend(&mut app, true, false, "text", false);
+        let fixture = SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        app.begin_ocr_selection().unwrap();
+        let observer = install_activation_parking(&mut app, original());
+        let (_, id) = app.ocr.controller.operation().unwrap();
+        fixture.observer.wait_for_commands(1);
+        app.static_location_enabled = true;
+        app.static_pos = Some((240, 180));
+        app.static_size = Some((900, 650));
+        confirm(&fixture, id);
+        let ctx = app.egui_ctx.clone();
+        ctx.begin_frame(egui::RawInput::default());
+        wait(&mut app, |app| {
+            matches!(
+                app.ocr.controller.presentation(),
+                Some(OcrPresentation::Recognizing)
+            )
+        });
+        let output = ctx.end_frame();
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.ocr_owns_root());
+        assert_eq!(observer.current_rect(), original());
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(
+            commands.contains(&egui::ViewportCommand::OuterPosition(egui::pos2(
+                240., 180.
+            )))
+        );
+        assert!(commands.contains(&egui::ViewportCommand::InnerSize(egui::vec2(900., 650.))));
+        app.cancel_ocr_selection();
+        backend.recognition_gate.release();
+        poll(&mut app);
+    }
+
+    #[test]
+    fn ocr_new_query_or_visibility_during_capture_and_recognition_invalidates_completion() {
+        for during_capture in [true, false] {
+            for new_visibility in [true, false] {
+                let mut app = app();
+                let backend = async_backend(&mut app, false, false, "stale", false);
+                let (fixture, observer, id) = start(&mut app);
+                confirm(&fixture, id);
+                wait(&mut app, |_| !backend.rectangles.lock().unwrap().is_empty());
+                if !during_capture {
+                    backend.capture_gate.release();
+                    wait(&mut app, |app| {
+                        matches!(
+                            app.ocr.controller.presentation(),
+                            Some(OcrPresentation::Recognizing)
+                        )
+                    });
+                }
+                app.query = "new query".into();
+                app.selected = Some(1);
+                if new_visibility {
+                    visibility(&app, false);
+                }
+                let revision = app.visibility_revision.current();
+                poll(&mut app);
+                if during_capture {
+                    assert!(app.ocr_owns_root());
+                }
+                backend.capture_gate.release();
+                backend.recognition_gate.release();
+                wait(&mut app, |app| app.ocr.session.is_none());
+                assert_eq!(app.query, "new query");
+                assert_eq!(app.selected, Some(1));
+                if new_visibility {
+                    assert_eq!(app.visibility_revision.current(), revision);
+                    assert!(!app.visible_flag.load(Ordering::SeqCst));
+                } else {
+                    assert!(app.visible_flag.load(Ordering::SeqCst));
+                    assert_eq!(observer.current_rect(), original());
+                }
+                assert!(app.ocr.controller.presentation().is_none());
+                assert!(app.error.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn ocr_success_restore_racing_new_hidden_intent_never_publishes_result() {
+        let mut app = app();
+        let backend = async_backend(&mut app, true, true, "obsolete", false);
+        let (fixture, observer, id) = start(&mut app);
+        let parked = observer.current_rect();
+        let revision = app.visibility_revision.clone();
+        let visible = app.visible_flag.clone();
+        observer.before_next_restore(move || {
+            revision.request_with_focus_intent(RootFocusIntent::PreserveForeground, || {
+                visible.store(false, Ordering::SeqCst)
+            });
+        });
+        confirm(&fixture, id);
+        wait(&mut app, |app| app.ocr.session.is_none());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(observer.current_rect(), parked);
+        assert!(app.ocr.controller.presentation().is_none());
+        assert_eq!(backend.rectangles.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ocr_superseded_session_leaves_escape_for_newer_ui() {
+        for newer_visibility in [true, false] {
+            let mut app = app();
+            let (_fixture, _observer, _id) = start(&mut app);
+            if newer_visibility {
+                visibility(&app, true);
+            } else {
+                app.query = "newer UI".into();
+            }
+            let ctx = app.egui_ctx.clone();
+            ctx.begin_frame(egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            });
+            poll(&mut app);
+            assert!(ctx.input(|input| input.key_pressed(egui::Key::Escape)));
+            let _ = ctx.end_frame();
+            wait(&mut app, |app| !app.ocr_owns_root());
+        }
     }
 }

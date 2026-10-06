@@ -464,6 +464,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        // Observe picker effects independently of constructor mouse placement.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
         app.last_visible = true;
         app.visibility_revision
             .request_with_focus_intent(RootFocusIntent::PreserveForeground, || {});
