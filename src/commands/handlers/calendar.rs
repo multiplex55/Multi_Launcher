@@ -295,6 +295,11 @@ mod tests {
             Ok(true)
         }
     }
+    impl crate::commands::OcrCommandHost for Host {
+        fn start_ocr_selection(&mut self) -> Result<bool, String> {
+            unreachable!()
+        }
+    }
     impl crate::commands::JsonUtilityCommandHost for Host {
         fn open_json_utility(&mut self, _: crate::commands::JsonUtilityIntent) {}
     }

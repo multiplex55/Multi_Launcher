@@ -36,6 +36,7 @@ pub mod mouse_gestures;
 pub mod multi_manager;
 pub mod network;
 pub mod note;
+pub mod ocr;
 pub mod omni_search;
 pub mod processes;
 pub mod radial;

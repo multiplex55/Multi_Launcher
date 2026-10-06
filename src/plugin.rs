@@ -36,6 +36,7 @@ use crate::plugins::mouse_gestures::MouseGesturesPlugin;
 use crate::plugins::multi_manager::MultiManagerPlugin;
 use crate::plugins::network::NetworkPlugin;
 use crate::plugins::note::NotePlugin;
+use crate::plugins::ocr::OcrPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::radial::RadialPlugin;
@@ -818,6 +819,7 @@ impl PluginManager {
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
+        self.register_with_settings(OcrPlugin, plugin_settings);
         self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
         self.register_with_settings(BrightnessPlugin, plugin_settings);
         self.register_with_settings(TaskManagerPlugin, plugin_settings);

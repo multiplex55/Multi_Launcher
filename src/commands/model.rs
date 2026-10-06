@@ -83,6 +83,7 @@ pub enum Command {
     Crop(CropCommand),
     JsonUtility(JsonUtilityCommand),
     ColorPick(ColorPickCommand),
+    Ocr(OcrCommand),
     Data(DataCommand),
     VirtualDesktop(VirtualDesktopCommand),
     External(ExternalCommand),
@@ -119,6 +120,7 @@ impl Command {
             Self::Crop(_) => "crop",
             Self::JsonUtility(_) => "json_utility",
             Self::ColorPick(_) => "color_pick",
+            Self::Ocr(_) => "ocr",
             Self::Data(_) => "data",
             Self::VirtualDesktop(_) => "virtual_desktop",
             Self::External(_) => "external",
@@ -154,6 +156,7 @@ impl Command {
             Self::Crop(v) => v.kind_name(),
             Self::JsonUtility(v) => v.kind_name(),
             Self::ColorPick(v) => v.kind_name(),
+            Self::Ocr(v) => v.kind_name(),
             Self::Data(v) => v.kind_name(),
             Self::VirtualDesktop(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
@@ -801,3 +804,9 @@ pub enum ColorPickCommand {
     Pick,
 }
 kinds!(ColorPickCommand, Self::Pick => "pick");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OcrCommand {
+    Start,
+}
+kinds!(OcrCommand, Self::Start => "start");

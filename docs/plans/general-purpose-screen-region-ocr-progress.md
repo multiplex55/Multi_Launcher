@@ -60,7 +60,7 @@ Owner/scope: OCR controller/state and `src/gui/ocr.rs`, `src/gui/{mod,render}.rs
 
 ## M3-A — first-class command/plugin
 
-Status: pending. Depends on M2. Commit: `feat(ocr): [M3-A] register first-class screen OCR launcher command`.
+Status: complete. Depends on M2. Commit: `feat(ocr): [M3-A] register first-class screen OCR launcher command`.
 
 Owner/scope: new `src/plugins/ocr.rs`, `src/plugins/mod.rs`, `src/plugin.rs`, command model/parser/host/bus/handler exports and `headless.rs`. Emit one stable normal action for exact `ocr` query/prefix; register through normal enablement/inventory. Use a typed OCR Start command and narrow host method; no GUI magic string. Keep every command match compiling with an explicit GUI-only headless policy; never external-launch OCR. At this checkpoint typed handler can use a test host, but public action must have a coherent host adapter in M3-B before task completion. Test exact query boundaries/case, disabled routing, inventory, parser, bus/handler, headless behavior; refactor FakeHost implementations only as required. Verify command/module tests and `--test plugin_commands`, `--test plugin_routing`, `--test plugin_exact_match` with focused filters. No alternate hotkey or radial implementation.
 
@@ -136,8 +136,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M1-A | complete | `24ef239a` | `cargo fmt --all`; `cargo test --lib ocr::tests`: 23 passed; diff inspected. |
 | M1-B | complete | `911a6cc8` | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
 | M2-A | complete | `cd54bc99` | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
-| M2-B | complete | see checkpoint history | Latest-source Nextest controller/GUI OCR/ColorPick: 23 passed; fmt/diff check passed. Typed selection, parking verification on separate polls, terminal ack, exact/newer-intent restore and retry. |
-| M3-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M2-B | complete | `cd6dc40d` | Latest-source Nextest controller/GUI OCR/ColorPick: 23 passed; fmt/diff check passed. Typed selection, parking verification on separate polls, terminal ack, exact/newer-intent restore and retry. |
+| M3-A | complete | see checkpoint history | 6 command/plugin/host lib tests and 3 selected integration tests passed; fmt/diff checks passed. Normal typed action and disabled routing verified. |
+| M3-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -153,3 +154,11 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 - Root hooks: poll after HWND discovery; reconcile parking; suppress generic placement while OCR owns root; exit cancels only OCR and commits hidden without reopening. Color Pick/Screen Draw admission checks must reject OCR ownership.
 
 M3-B integration reminder: actual radial/action invocation can occur while ROOT is hidden; current M2-B visible-root admission must be validated/adapted through real activation tests, preserving hidden state on cancellation and showing OCR result on success. Do not equate parsing/assignment tests with invocation evidence.
+
+### M4 focused planning refinement
+
+- M4-A extracts only existing post-capture recognize_region body into one borrowed CapturedRegion -> OcrDocument helper; preserve original recognize_region API/result and diagnostics, tiling/translation/reconstruction. General facade adds exact-region capture and captured-frame English recognition; no duplicate tiling.
+- M4-B evolves existing selection controller into capturing/recognizing/result/empty/error, consumes Confirmed exactly once, uses generation-tagged ordered worker events: capture completed (no pixels), then text/error; failures before capture also end capture ownership.
+- Restore only after capture stops; continuation differs: success restores/shows recognition surface, cancel restores prior state. Keep transaction/retry, stage completion while restore fails. Root parking ownership must end independently from active generation/intent guards after restore.
+- Newer query/visibility during capture/restore/recognition invalidates publication; update saved owned revision for OCR's own restore. Close during capture waits capture terminal; during recognition cancels/invalidate and can return idle without awaiting WinRT, worker keeps/releases pixels.
+- Handle thread-spawn/disconnected/panicked worker terminal failure. Tests block fake capture/OCR to prove parking boundary/background execution, capture once, staged completion on retry, stale close/new generation and error cleanup. M5 adds UI, no pixels in UI/completions.

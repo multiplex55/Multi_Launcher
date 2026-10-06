@@ -423,6 +423,11 @@ impl ColorPickCommandHost for LauncherApp {
         self.begin_color_pick()
     }
 }
+impl crate::commands::OcrCommandHost for LauncherApp {
+    fn start_ocr_selection(&mut self) -> Result<bool, String> {
+        self.begin_ocr_selection()
+    }
+}
 
 impl JsonUtilityCommandHost for LauncherApp {
     fn open_json_utility(&mut self, intent: crate::commands::JsonUtilityIntent) {
@@ -804,6 +809,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
             | Command::ColorPick(_)
+            | Command::Ocr(_)
             | Command::FileSearch(_)
             | Command::Diff(_)
     )
@@ -1055,6 +1061,34 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
+    }
+    #[test]
+    fn ocr_host_dispatch_stages_selection_only_and_rejects_query_override() {
+        let mut app = test_app();
+        app.last_visible = true;
+        app.query = "ocr".into();
+        app.selected = Some(0);
+        let revision = app.visibility_revision.current();
+        let invocation = crate::commands::parse_command(
+            action("ocr:start"),
+            Some("unrelated override".into()),
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+        assert!(!command_accepts_query_override(&invocation.command));
+        let outcome = crate::commands::CommandBus
+            .dispatch(&invocation, &mut app)
+            .unwrap();
+        assert!(app.ocr_owns_root());
+        assert!(app.ocr.controller.operation().is_none());
+        assert!(app.ocr.controller.confirmed().is_none());
+        assert!(app.ocr.parking.is_none());
+        assert!(!app.any_panel_open());
+        assert_eq!(app.query, "ocr");
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.visibility_revision.current(), revision);
+        assert_eq!(outcome.visibility, crate::commands::VisibilityPolicy::Keep);
+        app.shutdown_ocr_selection();
     }
 
     fn with_isolated_root_restore_fixture<T>(

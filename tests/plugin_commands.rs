@@ -201,6 +201,7 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
         "omni_search",
         "data",
         "screen_draw",
+        "ocr",
         "radial",
     ] {
         assert!(plugin_names.contains(name), "missing plugin {name}");
@@ -230,6 +231,11 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
             "data:folder",
         ),
         ("Screen Draw", "Screen Draw", "screen_draw:start"),
+        (
+            "OCR Screen Region",
+            "Select a screen region and recognize English text locally",
+            "ocr:start",
+        ),
         ("Show default radial menu", "Radial menu", "radial"),
         ("Close radial menu", "Radial menu", "radial close"),
         ("Edit radial menus", "Radial menu", "radial edit"),

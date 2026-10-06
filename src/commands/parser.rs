@@ -64,6 +64,43 @@ mod screen_draw_parser_tests {
 }
 
 #[cfg(test)]
+mod ocr_parser_tests {
+    use super::*;
+    #[test]
+    fn ocr_start_is_exact_typed_action_with_invocation_metadata() {
+        let action = |raw: &str| Action {
+            label: "OCR Screen Region".into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: None,
+        };
+        let invocation = parse_command(
+            action("ocr:start"),
+            Some("saved query".into()),
+            ActivationSource::Dashboard,
+        )
+        .unwrap();
+        assert_eq!(invocation.command, Command::Ocr(OcrCommand::Start));
+        assert_eq!(invocation.command.domain(), "ocr");
+        assert_eq!(invocation.command.kind_name(), "start");
+        assert_eq!(invocation.source, ActivationSource::Dashboard);
+        assert_eq!(invocation.query_override.as_deref(), Some("saved query"));
+        for raw in [
+            "ocr",
+            "ocr:future",
+            "ocr:start:extra",
+            "OCR:start",
+            "ocr: start",
+        ] {
+            assert!(
+                !matches!(parse_action(&action(raw)).unwrap(), Command::Ocr(_)),
+                "{raw}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod json_utility_parser_tests {
     use super::*;
 
@@ -219,6 +256,9 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
 
     if let Some(command) = parse_screen_draw(s) {
         return Ok(Command::ScreenDraw(command));
+    }
+    if s == "ocr:start" {
+        return Ok(Command::Ocr(OcrCommand::Start));
     }
 
     if s == "color:pick" {

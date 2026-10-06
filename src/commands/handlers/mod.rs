@@ -1,5 +1,7 @@
 mod color_pick;
+mod ocr;
 pub(crate) use color_pick::handle_color_pick;
+pub(crate) use ocr::handle_ocr;
 mod calendar;
 mod clipboard_modify;
 mod data;

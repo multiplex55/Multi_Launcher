@@ -59,6 +59,10 @@ pub trait ColorPickCommandHost {
     fn start_color_pick(&mut self) -> Result<bool, String>;
 }
 
+pub trait OcrCommandHost {
+    fn start_ocr_selection(&mut self) -> Result<bool, String>;
+}
+
 pub trait JsonUtilityCommandHost {
     fn open_json_utility(&mut self, intent: super::JsonUtilityIntent);
 }
@@ -197,6 +201,7 @@ pub trait CommandHost:
     + CropCommandHost
     + JsonUtilityCommandHost
     + ColorPickCommandHost
+    + OcrCommandHost
     + CalendarCommandHost
     + NoteCommandHost
     + TodoCommandHost
@@ -219,6 +224,7 @@ impl<T> CommandHost for T where
         + CropCommandHost
         + JsonUtilityCommandHost
         + ColorPickCommandHost
+        + OcrCommandHost
         + CalendarCommandHost
         + NoteCommandHost
         + TodoCommandHost

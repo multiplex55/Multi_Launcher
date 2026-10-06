@@ -255,6 +255,41 @@ fn data_prefix_routes_only_when_the_builtin_plugin_is_enabled() {
 }
 
 #[test]
+fn ocr_prefix_and_inventory_respect_plugin_and_search_capability_enablement() {
+    use multi_launcher::plugins::ocr::OcrPlugin;
+    use std::collections::{HashMap, HashSet};
+    let mut plugins = PluginManager::new();
+    plugins.register(Box::new(OcrPlugin));
+    assert_eq!(
+        plugins.search_filtered("OCR", None, None)[0].action,
+        "ocr:start"
+    );
+    let disabled = HashSet::from(["screen_draw".to_string()]);
+    assert!(
+        plugins
+            .search_filtered("ocr", Some(&disabled), None)
+            .is_empty()
+    );
+    assert!(plugins.commands_filtered(Some(&disabled)).is_empty());
+    let enabled = HashSet::from(["ocr".to_string()]);
+    assert_eq!(
+        plugins.search_filtered("ocr", Some(&enabled), None).len(),
+        1
+    );
+    assert_eq!(
+        plugins.commands_filtered(Some(&enabled))[0].action,
+        "ocr:start"
+    );
+    let caps = HashMap::from([("ocr".to_string(), vec!["commands".to_string()])]);
+    assert!(
+        plugins
+            .search_filtered("ocr", Some(&enabled), Some(&caps))
+            .is_empty()
+    );
+    assert!(plugins.search_filtered("ocrstart", None, None).is_empty());
+}
+
+#[test]
 fn diff_prefix_routes_only_to_diff_among_native_file_plugins() {
     use multi_launcher::plugins::diff::DiffPlugin;
     use multi_launcher::plugins::file_search::FileSearchPlugin;

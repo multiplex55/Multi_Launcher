@@ -131,6 +131,43 @@ fn date_results_remain_visible_through_launcher_search_in_all_match_modes() {
 }
 
 #[test]
+fn ocr_result_is_discoverable_in_all_match_modes_and_hidden_when_disabled() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let dir = tempdir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = new_app(&ctx, Settings::default());
+    for (exact, weight) in [
+        (false, Settings::default().fuzzy_weight),
+        (true, 1.0),
+        (false, 0.0),
+    ] {
+        app.match_exact = exact;
+        app.fuzzy_weight = weight;
+        for query in ["ocr", "OCR", " ocr "] {
+            app.query = query.into();
+            app.search();
+            assert!(
+                app.results
+                    .iter()
+                    .any(|action| action.action == "ocr:start"),
+                "{query:?}, exact={exact}, weight={weight}"
+            );
+        }
+    }
+    let enabled = HashSet::from(["screen_draw".to_string()]);
+    let mut disabled = new_app_with_filters(&ctx, Settings::default(), Some(enabled), None);
+    disabled.query = "ocr".into();
+    disabled.search();
+    assert!(
+        !disabled
+            .results
+            .iter()
+            .any(|action| action.action == "ocr:start")
+    );
+}
+
+#[test]
 fn date_manager_and_launcher_respect_plugin_and_search_capability_enablement() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();

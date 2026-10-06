@@ -78,6 +78,9 @@ fn execute_with_external(
         Command::ColorPick(_) => {
             anyhow::bail!("screen color picking requires the launcher interface")
         }
+        Command::Ocr(_) => {
+            anyhow::bail!("screen region OCR requires the launcher interface")
+        }
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
@@ -766,6 +769,22 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "screen color picking requires the launcher interface"
+        );
+        assert!(!called);
+    }
+    #[test]
+    fn ocr_headless_requires_ui_without_external_launch() {
+        let original = action("ocr:start");
+        let command = crate::commands::parse_action(&original).unwrap();
+        let mut called = false;
+        let error = execute_with_external(command, &original, &mut |_, _| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "screen region OCR requires the launcher interface"
         );
         assert!(!called);
     }
