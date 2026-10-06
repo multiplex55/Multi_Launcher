@@ -417,7 +417,13 @@ impl LauncherApp {
         if !retain_hidden_parking && let Some(parking) = &mut lifecycle.parking {
             parking.restore()?;
         }
-        if !session.superseded && !session.published {
+        let desired_visible = continuing || session.prior_visible;
+        // A retry may change disposition after our own earlier publication
+        // (for example, cancellation after activation failed). Revalidate the
+        // same revision before replacing that publication with prior intent.
+        if !session.superseded
+            && (!session.published || self.visible_flag.load(Ordering::SeqCst) != desired_visible)
+        {
             if let Some((revision, ())) = self
                 .visibility_revision
                 .request_if_current_with_focus_intent_and_invocation(
@@ -425,8 +431,7 @@ impl LauncherApp {
                     focus,
                     invocation,
                     || {
-                        self.visible_flag
-                            .store(continuing || session.prior_visible, Ordering::SeqCst);
+                        self.visible_flag.store(desired_visible, Ordering::SeqCst);
                         self.restore_flag.store(false, Ordering::SeqCst);
                     },
                 )
@@ -1522,5 +1527,38 @@ mod tests {
             let _ = ctx.end_frame();
             wait(&mut app, |app| !app.ocr_owns_root());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ocr_hidden_origin_cancel_after_published_restore_retry_reinstates_hidden_intent() {
+        let (_root, mut app) = activation_app(true);
+        // Without a ROOT identity, ordered activation fails only after the
+        // native snapshot and visible publication have been restored.
+        app.visibility_revision
+            .request_with_focus_intent(RootFocusIntent::ActivateRoot, || {});
+        let backend = async_backend(&mut app, true, false, "obsolete", false);
+        let fixture = SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        assert!(app.begin_ocr_selection().unwrap());
+        let observer = install_activation_parking(&mut app, original());
+        let parked = observer.current_rect();
+        let (_, id) = app.ocr.controller.operation().unwrap();
+        fixture.observer.wait_for_commands(1);
+        confirm(&fixture, id);
+        wait(&mut app, |app| app.ocr.restore_error.is_some());
+        assert!(app.ocr.session.as_ref().unwrap().published);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.ocr.parking.is_some());
+        assert_eq!(observer.current_rect(), original());
+        app.cancel_ocr_selection();
+        wait(&mut app, |app| !app.ocr_owns_root());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        assert_eq!(observer.current_rect(), parked);
+        assert_eq!(app.query, "original search");
+        assert!(app.ocr.session.is_none());
+        assert!(app.ocr.controller.presentation().is_none());
+        backend.recognition_gate.release();
     }
 }
