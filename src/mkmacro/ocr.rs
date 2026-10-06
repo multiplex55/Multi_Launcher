@@ -89,6 +89,18 @@ pub fn recognize_region(
     let capture = capture_backend
         .capture(region, cancelled)
         .map_err(|error| error.context("ocr_pipeline_operation", "capture region"))?;
+    let document = recognize_captured_region(&capture, ocr_backend, language, cancelled)?;
+    Ok(OcrRegionDocument { capture, document })
+}
+
+/// Recognizes immutable source pixels without another desktop capture. Word
+/// geometry is translated to the frame's signed virtual-desktop origin.
+pub fn recognize_captured_region(
+    capture: &CapturedRegion,
+    ocr_backend: &dyn OcrBackend,
+    language: &MkOcrLanguage,
+    cancelled: &dyn Fn() -> bool,
+) -> ExecResult<OcrDocument> {
     check_cancelled(cancelled)?;
     let max_dimension = ocr_backend.max_image_dimension().map_err(|error| {
         error
@@ -151,7 +163,7 @@ pub fn recognize_region(
         )?
     };
     check_cancelled(cancelled)?;
-    Ok(OcrRegionDocument { capture, document })
+    Ok(document)
 }
 
 fn check_cancelled(cancelled: &dyn Fn() -> bool) -> ExecResult {
@@ -1583,6 +1595,45 @@ mod tests {
                 words,
             }],
         }
+    }
+
+    #[test]
+    fn supplied_capture_tiling_preserves_pixels_and_translates_document() {
+        let capture = CapturedRegion {
+            image: RgbaImage::from_fn(175, 30, |x, y| Rgba([x as u8, y as u8, 3, 255])),
+            origin: (-200, -50),
+        };
+        let original = capture.image.clone();
+        let backend = FakeOcr {
+            maximum: 100,
+            documents: Mutex::new(VecDeque::from([
+                tile_document(100, vec![word("Left", 10, 5, 30), word("Same", 80, 5, 15)]),
+                tile_document(100, vec![word("Same", 5, 5, 15), word("Right", 70, 5, 20)]),
+            ])),
+            calls: Mutex::new(vec![]),
+            cancel_after_recognition: None,
+        };
+        let document =
+            recognize_captured_region(&capture, &backend, &MkOcrLanguage::Auto, &|| false).unwrap();
+        assert_eq!(capture.image, original);
+        assert_eq!(capture.origin, (-200, -50));
+        assert_eq!(document.recognized_text(), "Left Same Right");
+        assert_eq!((document.image_width, document.image_height), (175, 30));
+        assert_eq!(
+            document.lines[0]
+                .words
+                .iter()
+                .map(|word| (word.bounds.x, word.bounds.y))
+                .collect::<Vec<_>>(),
+            vec![(-190, -45), (-120, -45), (-55, -45)]
+        );
+        assert_eq!(
+            *backend.calls.lock().unwrap(),
+            vec![
+                ((100, 30), MkOcrLanguage::Auto),
+                ((100, 30), MkOcrLanguage::Auto)
+            ]
+        );
     }
 
     #[test]

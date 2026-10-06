@@ -8,9 +8,9 @@
 pub(crate) mod selection;
 
 use crate::mkmacro::{
-    DiagnosticKind, ExecResult, ExecutionDiagnostic, MkOcrLanguage, ScreenCaptureBackend,
-    ScreenRect, SearchRegion, cancelled_error,
-    ocr::{OcrBackend, OcrLanguageInfo, recognize_region},
+    CapturedRegion, DiagnosticKind, ExecResult, ExecutionDiagnostic, MkOcrLanguage,
+    ScreenCaptureBackend, ScreenRect, SearchRegion, cancelled_error,
+    ocr::{OcrBackend, OcrLanguageInfo, recognize_captured_region},
 };
 
 /// Captures and recognizes a selected virtual-desktop rectangle using an
@@ -42,6 +42,38 @@ pub fn recognize_screen_region(
     )
 }
 
+/// Captures the exact selected physical-pixel rectangle once. Recognition can
+/// run later on these immutable pixels after the launcher has been restored.
+pub fn capture_screen_region(
+    capture_backend: &dyn ScreenCaptureBackend,
+    rect: ScreenRect,
+    cancelled: &dyn Fn() -> bool,
+) -> ExecResult<CapturedRegion> {
+    capture_backend
+        .capture(&SearchRegion::Rectangle { rect }, cancelled)
+        .map_err(|error| error.context("ocr_pipeline_operation", "capture region"))
+}
+
+/// Consumes a captured frame and returns only text using installed English OCR.
+/// This entry point cannot request Auto or a non-English language and never
+/// captures the desktop. Pixels and document are discarded before returning.
+pub fn recognize_captured_screen_region(
+    ocr_backend: &dyn OcrBackend,
+    capture: CapturedRegion,
+    cancelled: &dyn Fn() -> bool,
+) -> ExecResult<String> {
+    if cancelled() {
+        return Err(cancelled_error());
+    }
+    let profile_languages = profile_language_tags().unwrap_or_default();
+    recognize_captured_screen_region_with_profile_languages(
+        ocr_backend,
+        capture,
+        &profile_languages,
+        cancelled,
+    )
+}
+
 fn recognize_screen_region_with_profile_languages(
     capture_backend: &dyn ScreenCaptureBackend,
     ocr_backend: &dyn OcrBackend,
@@ -49,14 +81,33 @@ fn recognize_screen_region_with_profile_languages(
     profile_languages: &[String],
     cancelled: &dyn Fn() -> bool,
 ) -> ExecResult<String> {
+    let language = resolve_english_language(ocr_backend, profile_languages, cancelled)?;
+    let capture = capture_screen_region(capture_backend, rect, cancelled)?;
+    recognize_captured_screen_region_with_language(ocr_backend, capture, &language, cancelled)
+}
+
+fn resolve_english_language(
+    ocr_backend: &dyn OcrBackend,
+    profile_languages: &[String],
+    cancelled: &dyn Fn() -> bool,
+) -> ExecResult<MkOcrLanguage> {
     if cancelled() {
         return Err(cancelled_error());
     }
     let installed_languages = ocr_backend.available_languages().map_err(|error| {
         error.context("ocr_policy_operation", "enumerate installed OCR languages")
     })?;
-    let language = select_english_language(&installed_languages, profile_languages)?;
-    recognize_screen_region_with_language(capture_backend, ocr_backend, rect, &language, cancelled)
+    select_english_language(&installed_languages, profile_languages)
+}
+
+fn recognize_captured_screen_region_with_profile_languages(
+    ocr_backend: &dyn OcrBackend,
+    capture: CapturedRegion,
+    profile_languages: &[String],
+    cancelled: &dyn Fn() -> bool,
+) -> ExecResult<String> {
+    let language = resolve_english_language(ocr_backend, profile_languages, cancelled)?;
+    recognize_captured_screen_region_with_language(ocr_backend, capture, &language, cancelled)
 }
 
 fn select_english_language(
@@ -119,16 +170,14 @@ fn normalized_language_tag(tag: &str) -> String {
     tag.trim().to_ascii_lowercase()
 }
 
-fn recognize_screen_region_with_language(
-    capture_backend: &dyn ScreenCaptureBackend,
+fn recognize_captured_screen_region_with_language(
     ocr_backend: &dyn OcrBackend,
-    rect: ScreenRect,
+    capture: CapturedRegion,
     language: &MkOcrLanguage,
     cancelled: &dyn Fn() -> bool,
 ) -> ExecResult<String> {
-    let region = SearchRegion::Rectangle { rect };
-    let recognized = recognize_region(capture_backend, ocr_backend, &region, language, cancelled)?;
-    Ok(recognized.document.recognized_text())
+    let document = recognize_captured_region(&capture, ocr_backend, language, cancelled)?;
+    Ok(document.recognized_text())
 }
 
 #[cfg(windows)]
@@ -327,6 +376,103 @@ mod tests {
 
     fn languages(tags: &[&str]) -> Vec<OcrLanguageInfo> {
         tags.iter().map(|tag| language_info(tag)).collect()
+    }
+
+    #[test]
+    fn standalone_capture_preserves_signed_cross_monitor_geometry() {
+        let backend = FakeCapture::new(test_desktop());
+        let rect = ScreenRect::new(-1600, -300, 2200, 600);
+        let frame = capture_screen_region(&backend, rect, &|| false).unwrap();
+        assert_eq!(frame.rect(), rect);
+        assert_eq!(*backend.capture_rects.lock().unwrap(), vec![rect]);
+        assert_eq!(
+            *backend.regions.lock().unwrap(),
+            vec![SearchRegion::Rectangle { rect }]
+        );
+    }
+
+    #[test]
+    fn standalone_capture_rejects_invalid_geometry_before_pixels() {
+        let backend = FakeCapture::new(test_desktop());
+        for rect in [
+            ScreenRect::new(0, 0, 0, 10),
+            ScreenRect::new(-1921, 0, 10, 10),
+            ScreenRect::new(i32::MAX, 0, u32::MAX, 10),
+        ] {
+            let error = capture_screen_region(&backend, rect, &|| false).unwrap_err();
+            assert_eq!(error.kind, DiagnosticKind::InvalidTarget);
+            assert_eq!(
+                error.context.get("ocr_pipeline_operation").unwrap(),
+                "capture region"
+            );
+        }
+        assert!(backend.capture_rects.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn standalone_capture_propagates_cancellation_and_backend_failure() {
+        let mut backend = FakeCapture::new(test_desktop());
+        let rect = ScreenRect::new(-20, -10, 10, 10);
+        assert_eq!(
+            capture_screen_region(&backend, rect, &|| true)
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::Cancelled
+        );
+        assert!(backend.regions.lock().unwrap().is_empty());
+        backend.capture_error = Some(ExecutionDiagnostic::new(
+            DiagnosticKind::Backend,
+            "capture failed",
+        ));
+        let error = capture_screen_region(&backend, rect, &|| false).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Backend);
+        assert_eq!(
+            error.context.get("ocr_pipeline_operation").unwrap(),
+            "capture region"
+        );
+        backend.capture_error = None;
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        backend.cancel_on_capture = Some(cancelled.clone());
+        assert_eq!(
+            capture_screen_region(&backend, rect, &|| cancelled.load(Ordering::SeqCst))
+                .unwrap_err()
+                .kind,
+            DiagnosticKind::Cancelled
+        );
+    }
+
+    #[test]
+    fn supplied_frame_recognition_uses_english_policy_without_capture() {
+        let backend = FakeCapture::new(test_desktop());
+        let rect = ScreenRect::new(-1600, -300, 240, 120);
+        let frame = capture_screen_region(&backend, rect, &|| false).unwrap();
+        let mut ocr = FakeOcr::new(multiline_document());
+        ocr.installed_languages = languages(&["fr-FR", "en-GB"]);
+        let text = recognize_captured_screen_region_with_profile_languages(
+            &ocr,
+            frame.clone(),
+            &["fr-FR".into()],
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(text, "First recognized line\nSecond recognized line");
+        assert_eq!(
+            *ocr.recognition_languages.lock().unwrap(),
+            vec![MkOcrLanguage::LanguageTag("en-GB".into())]
+        );
+        ocr.installed_languages = languages(&["fr-FR"]);
+        let error = recognize_captured_screen_region_with_profile_languages(
+            &ocr,
+            frame.clone(),
+            &[],
+            &|| false,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::UnsupportedOperation);
+        let error = recognize_captured_screen_region(&ocr, frame, &|| true).unwrap_err();
+        assert_eq!(error.kind, DiagnosticKind::Cancelled);
+        assert_eq!(ocr.recognition_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*backend.capture_rects.lock().unwrap(), vec![rect]);
     }
 
     #[test]

@@ -72,7 +72,7 @@ Owner/scope: `src/gui/command_host.rs`, OCR lifecycle admission, relevant activa
 
 ## M4-A — exact selected-region capture
 
-Status: pending. Depends on M3/M1. Commit: `feat(ocr): [M4-A] capture selected OCR region through shared backend`.
+Status: complete. Depends on M3/M1. Commit: `feat(ocr): [M4-A] capture selected OCR region through shared backend`.
 
 Owner/scope: shared OCR service/controller and GUI capture lifecycle seam. On current confirmation (native overlay already closed), capture exactly once using `SearchRegion::Rectangle` and exact signed geometry while launcher remains capture-safe. Stage immutable pixels with operation identity; signal capture completion/failure so restoration can proceed before long recognition. Do not re-capture tiles or use screenshot save/history paths. If needed, extract captured-region recognition from existing `recognize_region`, leaving it as capture + shared helper for MkMacro. Test negative/cross-monitor rectangles/dimensions, one capture, empty/outside/overflow geometry, backend failures and cancellation. Verify service/controller and relevant `mkmacro::screen` tests. Done when selected pixels flow once to the shared pipeline with no persistence, and launcher restore cannot contaminate capture. No copied recognition implementation.
 
@@ -138,8 +138,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M2-A | complete | `cd54bc99` | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
 | M2-B | complete | `cd6dc40d` | Latest-source Nextest controller/GUI OCR/ColorPick: 23 passed; fmt/diff check passed. Typed selection, parking verification on separate polls, terminal ack, exact/newer-intent restore and retry. |
 | M3-A | complete | `2c3e3ecd` | 6 command/plugin/host lib tests and 3 selected integration tests passed; fmt/diff checks passed. Normal typed action and disabled routing verified. |
-| M3-B | complete | see checkpoint history | Latest-source 16 OCR lifecycle tests passed, including real Enter/Click/Dashboard/radial activation, hidden/no-flash cancel, duplicate/history and newer show; fmt/diff checks passed. |
-| M4-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M3-B | complete | `6e8f77fc` | Latest-source 16 OCR lifecycle tests passed, including real Enter/Click/Dashboard/radial activation, hidden/no-flash cancel, duplicate/history and newer show; fmt/diff checks passed. |
+| M4-A | complete | see checkpoint history | Nextest general/MkMacro OCR filter: 53 passed (includes substring-matched GUI OCR/handler tests); successful lib-test compile, fmt/diff checks passed. Shared borrowed frame pipeline, no GUI changes. |
+| M4-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
