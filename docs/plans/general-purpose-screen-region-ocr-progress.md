@@ -78,7 +78,7 @@ Owner/scope: shared OCR service/controller and GUI capture lifecycle seam. On cu
 
 ## M4-B — asynchronous recognition and publication
 
-Status: pending. Depends on M4-A/M1-B. Commit: `feat(ocr): [M4-B] run OCR recognition asynchronously with stale-result guards`.
+Status: in_progress. Depends on M4-A/M1-B. Commit: `feat(ocr): [M4-B] run OCR recognition asynchronously with stale-result guards`.
 
 Owner/scope: OCR job/controller + focused GUI polling/repaint. Run capture/recognition away from egui as appropriate; local language discovery also must not block a frame. Use thread/mpsc/atomic cancellation precedent from `ocr_test_job.rs`, but carry general generation, not draft identity. Publish only current completion; restore launcher after capture and expose Recognizing status, then Result/NoText/Error. Closing/new invocation/re-capture invalidate outstanding jobs; completed workers never resurrect UI. Extract text and drop image/document before publishing a text-only result. Test worker-thread execution, success/failure, cancellation, two attempts, late completion after close/replacement, repaint, and resource release. Verify targeted OCR job/controller tests and compile. No permanent OCR polling/capture thread or fake percentage.
 
@@ -135,11 +135,12 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M0 | complete | none | Read-only current source/tests and complete approved plan inspected at 112cb87f; no build/test executed. |
 | M1-A | complete | `24ef239a` | `cargo fmt --all`; `cargo test --lib ocr::tests`: 23 passed; diff inspected. |
 | M1-B | complete | `911a6cc8` | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
+| M1-R1 | complete | recorded in checkpoint history | Native repeated preference lookup remediation: tracked compile PID 17168 passed; direct test PID 16412 passed three successive fresh workers; PID 7700 passed seven English policy tests. Exit 0 and no matching Windows crash events; fmt/diff checks passed. |
 | M2-A | complete | `cd54bc99` | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
 | M2-B | complete | `cd6dc40d` | Latest-source Nextest controller/GUI OCR/ColorPick: 23 passed; fmt/diff check passed. Typed selection, parking verification on separate polls, terminal ack, exact/newer-intent restore and retry. |
 | M3-A | complete | `2c3e3ecd` | 6 command/plugin/host lib tests and 3 selected integration tests passed; fmt/diff checks passed. Normal typed action and disabled routing verified. |
 | M3-B | complete | `6e8f77fc` | Latest-source 16 OCR lifecycle tests passed, including real Enter/Click/Dashboard/radial activation, hidden/no-flash cancel, duplicate/history and newer show; fmt/diff checks passed. |
-| M4-A | complete | see checkpoint history | Nextest general/MkMacro OCR filter: 53 passed (includes substring-matched GUI OCR/handler tests); successful lib-test compile, fmt/diff checks passed. Shared borrowed frame pipeline, no GUI changes. |
+| M4-A | complete | `a02d1260` | Nextest general/MkMacro OCR filter: 53 passed (includes substring-matched GUI OCR/handler tests); successful lib-test compile, fmt/diff checks passed. Shared borrowed frame pipeline, no GUI changes. |
 | M4-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
@@ -166,3 +167,17 @@ M3-B integration reminder: actual radial/action invocation can occur while ROOT 
 - Handle thread-spawn/disconnected/panicked worker terminal failure. Tests block fake capture/OCR to prove parking boundary/background execution, capture once, staged completion on retry, stale close/new generation and error cleanup. M5 adds UI, no pixels in UI/completions.
 
 M3-B implemented hidden-origin admission/cancel. M4 success must intentionally publish visible recognition/result; choose ApplyConfiguredPlacement when prior_visible=false, retaining exact PreserveCurrentGeometry for visible-origin restore. Cancel prior-hidden retains committed capture-safe parking to avoid flashing an onscreen snapshot when original hide is in flight.
+
+### M4-B natural checkpoint split
+
+- M4-B1: independently functioning one-shot async worker, ordered generation-tagged capture-complete/text/error events, cancellation/repaint and spawn/disconnect/panic handling, fake worker tests. No GUI/controller migration yet. Commit: feat(ocr): [M4-B1] add cancellable asynchronous OCR worker.
+- M4-B2: evolve current controller and integrate GUI root capture/restoration boundary and stale completion guards, migrating directly affected lifecycle tests. Commit: feat(ocr): [M4-B2] integrate asynchronous OCR with launcher lifecycle. M4-B overall stays pending until both sections and scoped checks complete.
+
+### Active native reliability remediation (user directive)
+
+- Forward feature integration is paused until the reproduced native boundary is understood and stable. Every executable/test/preview/manual run must record exact spawned PID and owned descendants, enforce a bounded timeout, preserve stdout/stderr/exit status and available crash diagnostics, and terminate only that invocation's process tree on crash, hang, modal crash dialog, or timeout. Cleanup is a failed run; never kill by launcher process name.
+- M4-B1 deterministic fake-worker tests passed (5). Native sequential profile lookup probe failed (session 17331, exit 1): first thread completed RoInitialize, GlobalizationPreferences::Languages, Size/GetAt and RoUninitialize; second completed RoInitialize then stalled inside GlobalizationPreferences::Languages. The bounded test timed out. This is native failure evidence, not successful verification.
+- Retrospective elevated process inventories found no remaining matching runner/test or Windows crash reporter; no process was terminated. The earlier launch PID was not recorded, so it cannot be reconstructed or claimed. A recent Application log query returned no matching launcher crash event. The stall's lifetime cause remains under investigation; no access violation has been independently reproduced yet.
+- Original probe output is preserved at `C:/Users/Jay/AppData/Local/Temp/ocr-native-probe-17331-evidence.txt`. Remove temporary tracing before checkpoint. Introduce owned-PID containment before further reproductions. Any fix to a previously committed boundary gets a separate remediation commit with reproduction, ownership/lifetime change, and focused verification evidence.
+- Contained comparison succeeded: runner PID 20160, exit 0, run ID 9239cb03; two consecutive native preference workers completed in 20 ms after acquiring a fresh scoped activation factory instead of the generated process-static factory cache. Both completed WinRT teardown. This establishes the remedy for the reproduced lookup stall; it does not establish the cause of the user's reported access violations. Evidence: `$env:TEMP/ocr-fresh-factory-contained-20261006/` (stdout/stderr, process tree, result, Windows events). Final source tracing removal and focused regression verification remain pending before a separate M1-R1 remediation checkpoint.
+- M1-R1 final source verified: factory and language-vector ownership are scoped within the initialized apartment and dropped before balanced RoUninitialize. The regression exercises three fresh worker lifetimes with bounded acknowledgement. Temporary tracing and B1 worker export/provider seam were excluded from the remediation. Direct executable runs record exact test PIDs; all eight selected tests passed with exit 0 and no matching Windows events. Detailed evidence directories: `C:/Users/Jay/AppData/Local/Temp/ocr-M1R1-compile-20261006`, `ocr-M1R1-native-20261006`, and `ocr-M1R1-policy-20261006` under the same Temp root. Containment wrapper: `C:/Users/Jay/AppData/Local/Temp/RunOwnedOcrTest.ps1`.

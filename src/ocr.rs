@@ -183,8 +183,10 @@ fn recognize_captured_screen_region_with_language(
 #[cfg(windows)]
 fn profile_language_tags() -> ExecResult<Vec<String>> {
     use windows::{
-        System::UserProfile::GlobalizationPreferences,
+        Foundation::Collections::IVectorView,
+        System::UserProfile::{GlobalizationPreferences, IGlobalizationPreferencesStatics},
         Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
+        core::{HSTRING, Interface, Type, factory},
     };
 
     struct WinRtGuard;
@@ -199,8 +201,19 @@ fn profile_language_tags() -> ExecResult<Vec<String>> {
     unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
         .map_err(|error| profile_language_error("initialize WinRT", error))?;
     let _winrt = WinRtGuard;
-    let languages = GlobalizationPreferences::Languages()
-        .map_err(|error| profile_language_error("read profile languages", error))?;
+    let preferences = factory::<GlobalizationPreferences, IGlobalizationPreferencesStatics>()
+        .map_err(|error| profile_language_error("activate profile preferences", error))?;
+    // Keep this factory scoped to the initialized apartment rather than using
+    // the projection's process-static activation factory cache.
+    // SAFETY: preferences is a live IGlobalizationPreferencesStatics interface;
+    // its Languages ABI initializes an owned IVectorView pointer on success.
+    // Type::from_abi validates/transfers that pointer to the projected owner.
+    let languages: IVectorView<HSTRING> = unsafe {
+        let mut result = std::ptr::null_mut();
+        (preferences.vtable().Languages)(preferences.as_raw(), &mut result)
+            .and_then(|| Type::from_abi(result))
+    }
+    .map_err(|error| profile_language_error("read profile languages", error))?;
     let count = languages
         .Size()
         .map_err(|error| profile_language_error("count profile languages", error))?;
@@ -235,6 +248,22 @@ fn profile_language_tags() -> ExecResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(windows)]
+    fn general_ocr_profile_lookup_repeats_on_fresh_workers() {
+        for _ in 0..3 {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = profile_language_tags();
+                let _ = sender.send(result.map(|tags| tags.len()));
+            });
+            let result = receiver
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("native profile stalled");
+            assert!(result.is_ok(), "native profile failed: {result:?}");
+            worker.join().unwrap();
+        }
+    }
     use crate::mkmacro::{
         DiagnosticKind, ExecutionDiagnostic, OcrDocument, OcrLanguageInfo, OcrLine,
     };
