@@ -77,6 +77,34 @@ mod json_utility_parser_tests {
     }
 
     #[test]
+    fn color_pick_parser_exact_family_and_metadata() {
+        let invocation = parse_command(
+            action("color:pick"),
+            Some("saved query".into()),
+            ActivationSource::Dashboard,
+        )
+        .unwrap();
+        assert_eq!(
+            invocation.command,
+            Command::ColorPick(ColorPickCommand::Pick)
+        );
+        assert_eq!(invocation.query_override.as_deref(), Some("saved query"));
+        assert_eq!(invocation.command.domain(), "color_pick");
+        assert_eq!(invocation.command.kind_name(), "pick");
+        for raw in [
+            "color:picker",
+            "color:pick:extra",
+            "colorpick",
+            "color:#ff0000",
+        ] {
+            assert!(!matches!(
+                parse_action(&action(raw)).unwrap(),
+                Command::ColorPick(_)
+            ));
+        }
+    }
+
+    #[test]
     fn json_utility_actions_parse_to_typed_open_intents() {
         for (wire, intent) in [
             ("json_utility:open", JsonUtilityIntent::General),
@@ -193,6 +221,9 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         return Ok(Command::ScreenDraw(command));
     }
 
+    if s == "color:pick" {
+        return Ok(Command::ColorPick(ColorPickCommand::Pick));
+    }
     if let Some(command) = parse_json_utility(s) {
         return Ok(Command::JsonUtility(command));
     }

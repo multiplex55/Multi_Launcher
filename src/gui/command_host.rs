@@ -2,9 +2,9 @@ use crate::dashboard::DashboardRefreshRequest;
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    CalendarCommandHost, ClipboardModifyCommandHost, Command, CommandError, CommandInvocation,
-    CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
-    FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
+    CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost, Command, CommandError,
+    CommandInvocation, CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost,
+    DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
     JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
     NoteCommandHost, PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy,
     ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination,
@@ -418,6 +418,12 @@ impl CropCommandHost for LauncherApp {
     }
 }
 
+impl ColorPickCommandHost for LauncherApp {
+    fn start_color_pick(&mut self) -> Result<bool, String> {
+        self.begin_color_pick()
+    }
+}
+
 impl JsonUtilityCommandHost for LauncherApp {
     fn open_json_utility(&mut self, intent: crate::commands::JsonUtilityIntent) {
         self.json_utility_dialog.open(intent);
@@ -797,6 +803,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
         Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
+            | Command::ColorPick(_)
             | Command::FileSearch(_)
             | Command::Diff(_)
     )
@@ -1644,5 +1651,11 @@ mod tests {
         ] {
             assert!(command_accepts_query_override(&command));
         }
+    }
+    #[test]
+    fn color_pick_rejects_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::ColorPick(
+            crate::commands::ColorPickCommand::Pick
+        )));
     }
 }

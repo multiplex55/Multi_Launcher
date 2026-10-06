@@ -10,6 +10,7 @@ mod calendar_event_editor;
 mod calendar_popover;
 mod clipboard_dialog;
 mod clipboard_modify_dialog;
+mod color_pick;
 mod command_host;
 mod confirmation_modal;
 mod convert_panel;
@@ -676,6 +677,7 @@ pub struct LauncherApp {
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
     screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
+    color_pick: color_pick::ColorPickLifecycle,
     screen_draw_launcher_parking: Option<
         crate::launcher_parking::LauncherParkingTransaction<
             crate::screen_draw::ScreenDrawGeneration,
@@ -2053,6 +2055,7 @@ impl LauncherApp {
                 controller
             },
             screen_draw_recovery_bridge,
+            color_pick: color_pick::ColorPickLifecycle::default(),
             screen_draw_launcher_parking: None,
             screen_draw_restore_publication:
                 screen_draw_restore::ScreenDrawRestorePublication::default(),

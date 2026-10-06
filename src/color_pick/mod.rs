@@ -1,4 +1,4 @@
-mod native;
+pub(crate) mod native;
 mod runtime;
 
 pub use runtime::{ColorPickController, ColorPickEvent, ColorPickSessionId};

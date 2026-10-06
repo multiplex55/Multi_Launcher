@@ -82,6 +82,7 @@ pub enum Command {
     Macro(MacroCommand),
     Crop(CropCommand),
     JsonUtility(JsonUtilityCommand),
+    ColorPick(ColorPickCommand),
     Data(DataCommand),
     VirtualDesktop(VirtualDesktopCommand),
     External(ExternalCommand),
@@ -117,6 +118,7 @@ impl Command {
             Self::Macro(_) => "macro",
             Self::Crop(_) => "crop",
             Self::JsonUtility(_) => "json_utility",
+            Self::ColorPick(_) => "color_pick",
             Self::Data(_) => "data",
             Self::VirtualDesktop(_) => "virtual_desktop",
             Self::External(_) => "external",
@@ -151,6 +153,7 @@ impl Command {
             Self::Macro(v) => v.kind_name(),
             Self::Crop(v) => v.kind_name(),
             Self::JsonUtility(v) => v.kind_name(),
+            Self::ColorPick(v) => v.kind_name(),
             Self::Data(v) => v.kind_name(),
             Self::VirtualDesktop(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
@@ -792,3 +795,9 @@ pub struct ExternalCommand {
     pub namespace: Option<ExternalNamespace>,
 }
 kinds!(ExternalCommand, Self { .. } => "launch");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorPickCommand {
+    Pick,
+}
+kinds!(ColorPickCommand, Self::Pick => "pick");

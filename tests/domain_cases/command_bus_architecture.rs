@@ -35,6 +35,8 @@ fn typed_bus_has_no_legacy_or_wildcard_fallback() {
         "Layout",
         "Macro",
         "Crop",
+        "JsonUtility",
+        "ColorPick",
         "Data",
         "External",
     ] {

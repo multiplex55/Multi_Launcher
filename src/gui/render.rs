@@ -1114,6 +1114,7 @@ impl LauncherApp {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.cancel_screen_draw_startup_on_escape(ctx);
+        self.poll_color_pick(ctx);
         self.poll_screen_draw_capture(ctx);
         self.show_screen_draw_toolbar(ctx);
         self.multi_manager_drain_runtime_events();
@@ -1221,6 +1222,9 @@ impl LauncherApp {
                     .take_presentation_reconcile_request(),
             )
         });
+        if reconcile_native_presentation && self.color_pick_owns_root() {
+            self.reconcile_color_pick_parking();
+        }
         let screen_draw_repark_result = if reconcile_native_presentation && !should_be_visible {
             let controller = &self.screen_draw_controller;
             self.screen_draw_launcher_parking
@@ -1242,10 +1246,12 @@ impl LauncherApp {
         let mut just_became_visible = false;
         let mut native_restore_target = None;
         let mut native_activation_requested = false;
+        let color_pick_owns_root = self.color_pick_owns_root();
         let _ = self.visibility_revision.with_current(
             visibility_request,
             || self.visible_flag.load(Ordering::SeqCst) == should_be_visible,
             || {
+                if color_pick_owns_root { return; }
                 just_became_visible = !self.last_visible && should_be_visible;
                 let visibility_changed = self.last_visible != should_be_visible;
                 if do_restore && should_be_visible {
@@ -2246,6 +2252,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown_color_pick();
         self.root_window_bridge.clear();
         self.close_screen_draw_for_exit();
         self.macro_parameter_prompt.shutdown();
@@ -2487,6 +2494,7 @@ impl LauncherApp {
         &mut self,
         request: crate::screen_draw::ScreenDrawParkingRequest,
     ) -> Result<(), String> {
+        self.ensure_color_pick_does_not_own_root()?;
         if self.screen_draw_controller.state().generation() != Some(request.generation)
             || !matches!(
                 self.screen_draw_controller.state(),

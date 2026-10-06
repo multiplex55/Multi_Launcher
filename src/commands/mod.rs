@@ -13,11 +13,11 @@ pub mod handlers;
 pub use bus::CommandBus;
 pub use error::CommandError;
 pub use host::{
-    CalendarCommandHost, ClipboardModifyCommandHost, CommandHost, CropCommandHost, DataCommandHost,
-    DialogCommandHost, DiffCommandHost, FileSearchCommandHost, HeadlessCommandHost,
-    JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
-    NoteCommandHost, RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost,
-    ScreenshotCommandResult, TodoCommandHost,
+    CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost, CommandHost,
+    CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost, FileSearchCommandHost,
+    HeadlessCommandHost, JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost,
+    MultiManagerCommandHost, NoteCommandHost, RadialCommandHost, ScreenDrawCommandHost,
+    ScreenshotCommandHost, ScreenshotCommandResult, TodoCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

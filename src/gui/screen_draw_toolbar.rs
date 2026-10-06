@@ -569,6 +569,7 @@ impl ScreenDrawToolbarUi {
 
 impl super::LauncherApp {
     pub(super) fn start_or_focus_screen_draw(&mut self) -> Result<bool, String> {
+        self.ensure_color_pick_does_not_own_root()?;
         match self.screen_draw_controller.state() {
             ScreenDrawState::NoSession | ScreenDrawState::Failed { .. } => {
                 self.screen_draw_controller
@@ -607,6 +608,7 @@ impl super::LauncherApp {
     }
 
     pub(super) fn request_new_screen_draw_capture(&mut self) -> Result<(), String> {
+        self.ensure_color_pick_does_not_own_root()?;
         self.cancel_screen_draw_region_picker();
         self.clear_screen_draw_toolbar_native_bridge();
         self.screen_draw_controller
@@ -625,6 +627,7 @@ impl super::LauncherApp {
     }
 
     pub(super) fn resume_screen_draw(&mut self) -> Result<(), String> {
+        self.ensure_color_pick_does_not_own_root()?;
         let generation = match self.screen_draw_controller.state() {
             ScreenDrawState::Ghost { generation } | ScreenDrawState::Finish { generation } => {
                 *generation

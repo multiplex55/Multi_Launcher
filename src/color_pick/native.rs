@@ -596,7 +596,7 @@ mod windows_picker {
             CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                 class_name,
-                PCWSTR::null(),
+                w!("Multi Launcher Color Picker"),
                 WS_POPUP,
                 bounds.x,
                 bounds.y,

@@ -1,3 +1,5 @@
+mod color_pick;
+pub(crate) use color_pick::handle_color_pick;
 mod calendar;
 mod clipboard_modify;
 mod data;

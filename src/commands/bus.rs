@@ -1,10 +1,10 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_clipboard_modify_with_history_query, handle_crop, handle_data,
-    handle_diff, handle_file_search, handle_headless_gui_with_history_query, handle_json_utility,
-    handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager, handle_note,
-    handle_query, handle_radial, handle_screen_draw, handle_screenshot, handle_simple_dialog,
-    handle_todo,
+    handle_calendar, handle_clipboard_modify_with_history_query, handle_color_pick, handle_crop,
+    handle_data, handle_diff, handle_file_search, handle_headless_gui_with_history_query,
+    handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
+    handle_note, handle_query, handle_radial, handle_screen_draw, handle_screenshot,
+    handle_simple_dialog, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -40,6 +40,7 @@ impl CommandBus {
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
+            Command::ColorPick(command) => handle_color_pick(host, command),
             Command::Calendar(command) => Ok(handle_calendar(host, command)),
             Command::Note(command) => handle_note(host, command, invocation),
             Command::Link(command) => handle_link(host, command),
@@ -107,6 +108,7 @@ mod tests {
         clipboard_modify_metadata:
             Option<crate::clipboard_modify::coordinator::ImmediateRequestMetadata>,
         data_calls: Vec<&'static str>,
+        color_pick_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
         radial_calls: usize,
     }
@@ -316,6 +318,12 @@ mod tests {
         ) -> Result<(), String> {
             self.screen_draw_calls.push(command);
             Ok(())
+        }
+    }
+    impl crate::commands::ColorPickCommandHost for FakeHost {
+        fn start_color_pick(&mut self) -> Result<bool, String> {
+            self.color_pick_requests += 1;
+            Ok(true)
         }
     }
     impl crate::commands::JsonUtilityCommandHost for FakeHost {
@@ -667,5 +675,16 @@ mod tests {
             metadata.root_policy,
             crate::universal_actions::RootLauncherPolicy::Legacy
         );
+    }
+    #[test]
+    fn color_pick_dispatch_routes_once_without_clipboard_or_visibility_effects() {
+        let mut host = FakeHost::default();
+        let request = invocation(Command::ColorPick(crate::commands::ColorPickCommand::Pick));
+        let outcome = CommandBus.dispatch(&request, &mut host).unwrap();
+        assert_eq!(host.color_pick_requests, 1);
+        assert_eq!(host.clipboard_modify_calls, 0);
+        assert_eq!(outcome.query, QueryPolicy::Keep);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
+        assert_eq!(outcome.history, HistoryPolicy::Record);
     }
 }
