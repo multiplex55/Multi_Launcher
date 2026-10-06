@@ -137,13 +137,14 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M1-B | complete | `911a6cc8` | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
 | M1-R1 | complete | `08c3c476` | Native repeated preference lookup remediation: tracked compile PID 17168 passed; direct test PID 16412 passed three successive fresh workers; PID 7700 passed seven English policy tests. Exit 0 and no matching Windows crash events; fmt/diff checks passed. |
 | M1-R2 | complete | `415d435b` | Reproduced native access violation at maximum image lookup; scoped all factories in the actual OCR path. Latest tracked compile passed; explicit native regression 1 passed (8 English/Auto operations and backend teardown), deterministic backend 20 passed, policy/profile 8 passed. Exit 0, no matching crash events, fmt/diff checks passed; independent read-only remediation review found no substantive defects. |
-| OCR-R1 | complete | recorded in checkpoint history | Durable owned-process watchdog, README, and controlled self-test. Final fixture session 95974 exit 0: timeout parent/child cleanup, exit 7 preservation, and inventory-failure handle cleanup passed; parser/diff checks passed. |
+| OCR-R1 | complete | `d4ab8167` | Durable owned-process watchdog, README, and controlled self-test. Final fixture session 95974 exit 0: timeout parent/child cleanup, exit 7 preservation, and inventory-failure handle cleanup passed; parser/diff checks passed. |
 | M2-A | complete | `cd54bc99` | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
 | M2-B | complete | `cd6dc40d` | Latest-source Nextest controller/GUI OCR/ColorPick: 23 passed; fmt/diff check passed. Typed selection, parking verification on separate polls, terminal ack, exact/newer-intent restore and retry. |
 | M3-A | complete | `2c3e3ecd` | 6 command/plugin/host lib tests and 3 selected integration tests passed; fmt/diff checks passed. Normal typed action and disabled routing verified. |
 | M3-B | complete | `6e8f77fc` | Latest-source 16 OCR lifecycle tests passed, including real Enter/Click/Dashboard/radial activation, hidden/no-flash cancel, duplicate/history and newer show; fmt/diff checks passed. |
 | M4-A | complete | `a02d1260` | Nextest general/MkMacro OCR filter: 53 passed (includes substring-matched GUI OCR/handler tests); successful lib-test compile, fmt/diff checks passed. Shared borrowed frame pipeline, no GUI changes. |
-| M4-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M4-B1 | complete | recorded in checkpoint history | One-shot background worker, ordered capture/text terminal events, cancellation and spawn/disconnect/panic paths. Latest tracked compile passed; 5 worker tests passed, including bounded nonjoining drop assertion; fmt/diff checks passed. |
+| M4-B2 through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -174,6 +175,7 @@ M3-B implemented hidden-origin admission/cancel. M4 success must intentionally p
 
 - M4-B1: independently functioning one-shot async worker, ordered generation-tagged capture-complete/text/error events, cancellation/repaint and spawn/disconnect/panic handling, fake worker tests. No GUI/controller migration yet. Commit: feat(ocr): [M4-B1] add cancellable asynchronous OCR worker.
 - M4-B2: evolve current controller and integrate GUI root capture/restoration boundary and stale completion guards, migrating directly affected lifecycle tests. Commit: feat(ocr): [M4-B2] integrate asynchronous OCR with launcher lifecycle. M4-B overall stays pending until both sections and scoped checks complete.
+- M4-B1 verified after native remediation: compile PID 3592, worker tests PID 20996 (5 passed), formatting PID 17304, all exit 0 with recorded identities absent. Evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M4B1-drop-{compile,tests,fmt}-20261006/`. Parent review strengthened the nonjoining-drop test to require return while the recognizer gate remains closed, preventing its timeout from hiding a joining regression. Pixels remain worker-owned; completion carries generation and text/error only. Profile-provider injection keeps fake worker tests independent of Windows preferences while production uses the shared native policy. GUI/controller are unchanged at B1; B2 integration remains required.
 
 ### Active native reliability remediation (user directive)
 

@@ -5,6 +5,7 @@
 //! launcher features plain text for a selected rectangle without retaining the
 //! captured pixels or exposing recognizer-specific APIs to their UI.
 
+pub(crate) mod job;
 pub(crate) mod selection;
 
 use crate::mkmacro::{
@@ -62,10 +63,24 @@ pub fn recognize_captured_screen_region(
     capture: CapturedRegion,
     cancelled: &dyn Fn() -> bool,
 ) -> ExecResult<String> {
+    recognize_captured_screen_region_with_profile_provider(
+        ocr_backend,
+        capture,
+        cancelled,
+        profile_language_tags,
+    )
+}
+
+fn recognize_captured_screen_region_with_profile_provider(
+    ocr_backend: &dyn OcrBackend,
+    capture: CapturedRegion,
+    cancelled: &dyn Fn() -> bool,
+    profile_languages: fn() -> ExecResult<Vec<String>>,
+) -> ExecResult<String> {
     if cancelled() {
         return Err(cancelled_error());
     }
-    let profile_languages = profile_language_tags().unwrap_or_default();
+    let profile_languages = profile_languages().unwrap_or_default();
     recognize_captured_screen_region_with_profile_languages(
         ocr_backend,
         capture,
