@@ -22,6 +22,7 @@ use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::ip::IpPlugin;
+use crate::plugins::json_utility::JsonUtilityPlugin;
 use crate::plugins::keys::KeysPlugin;
 use crate::plugins::layout::LayoutPlugin;
 use crate::plugins::link::LinkPlugin;
@@ -813,6 +814,7 @@ impl PluginManager {
         self.register_with_settings(RadialPlugin, plugin_settings);
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
+        self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
         self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
         self.register_with_settings(BrightnessPlugin, plugin_settings);
@@ -1500,6 +1502,17 @@ mod tests {
             &handle,
             &manager.internal_services().clipboard_modifier_catalog
         ));
+
+        let json_actions = manager.search_filtered("json pretty", None, None);
+        assert!(json_actions.iter().any(|action| {
+            action.action == "json_utility:format" && action.label == "Format JSON"
+        }));
+        let unrelated_actions = manager.search_filtered("jsonfoo", None, None);
+        assert!(
+            !unrelated_actions
+                .iter()
+                .any(|action| action.action.starts_with("json_utility:"))
+        );
     }
 
     #[test]

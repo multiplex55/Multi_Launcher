@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::launcher_parking::system_launcher_is_capture_safe;
+use crate::launcher_parking::system_launcher_is_capture_safe;
 use crate::mkmacro::screen::{
     CapturedRegion, ScreenCaptureBackend, ScreenRect, SearchRegion, WindowsScreenCaptureBackend,
 };

@@ -255,6 +255,10 @@ mod tests {
             "\"json-pretty\""
         );
         assert_eq!(
+            serde_json::to_string(&OperationId::JsonMinify).unwrap(),
+            "\"json-minify\""
+        );
+        assert_eq!(
             serde_json::to_string(&OperationId::Base64Decode).unwrap(),
             "\"base64-decode\""
         );

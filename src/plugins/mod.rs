@@ -20,6 +20,7 @@ pub mod folders;
 pub mod help;
 pub mod history;
 pub mod ip;
+pub mod json_utility;
 pub mod keys;
 pub mod layout;
 pub mod layouts_storage;

@@ -64,6 +64,87 @@ mod screen_draw_parser_tests {
 }
 
 #[cfg(test)]
+mod json_utility_parser_tests {
+    use super::*;
+
+    fn action(raw: &str) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn color_pick_parser_exact_family_and_metadata() {
+        let invocation = parse_command(
+            action("color:pick"),
+            Some("saved query".into()),
+            ActivationSource::Dashboard,
+        )
+        .unwrap();
+        assert_eq!(
+            invocation.command,
+            Command::ColorPick(ColorPickCommand::Pick)
+        );
+        assert_eq!(invocation.query_override.as_deref(), Some("saved query"));
+        assert_eq!(invocation.command.domain(), "color_pick");
+        assert_eq!(invocation.command.kind_name(), "pick");
+        for raw in [
+            "color:picker",
+            "color:pick:extra",
+            "colorpick",
+            "color:#ff0000",
+        ] {
+            assert!(!matches!(
+                parse_action(&action(raw)).unwrap(),
+                Command::ColorPick(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn json_utility_actions_parse_to_typed_open_intents() {
+        for (wire, intent) in [
+            ("json_utility:open", JsonUtilityIntent::General),
+            ("json_utility:format", JsonUtilityIntent::Format),
+            ("json_utility:minify", JsonUtilityIntent::Minify),
+        ] {
+            let command = parse_action(&action(wire)).unwrap();
+            assert_eq!(
+                command,
+                Command::JsonUtility(JsonUtilityCommand::Open { intent })
+            );
+            assert_eq!(command.domain(), "json_utility");
+            assert_eq!(command.kind_name(), "open");
+        }
+    }
+
+    #[test]
+    fn json_utility_invocation_retains_query_metadata() {
+        let invocation = parse_command(
+            action("json_utility:format"),
+            Some("saved launcher query".into()),
+            ActivationSource::Dashboard,
+        )
+        .unwrap();
+
+        assert_eq!(
+            invocation.command,
+            Command::JsonUtility(JsonUtilityCommand::Open {
+                intent: JsonUtilityIntent::Format
+            })
+        );
+        assert_eq!(
+            invocation.query_override.as_deref(),
+            Some("saved launcher query")
+        );
+        assert_eq!(invocation.source, ActivationSource::Dashboard);
+    }
+}
+
+#[cfg(test)]
 mod radial_parser_tests {
     use super::*;
 
@@ -138,6 +219,13 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
 
     if let Some(command) = parse_screen_draw(s) {
         return Ok(Command::ScreenDraw(command));
+    }
+
+    if s == "color:pick" {
+        return Ok(Command::ColorPick(ColorPickCommand::Pick));
+    }
+    if let Some(command) = parse_json_utility(s) {
+        return Ok(Command::JsonUtility(command));
     }
 
     // These protocols bypass query-override application in the existing activation path.
@@ -269,6 +357,16 @@ fn parse_screen_draw(action: &str) -> Option<ScreenDrawCommand> {
         "screen_draw:close" => ScreenDrawCommand::Close,
         _ => return None,
     })
+}
+
+fn parse_json_utility(action: &str) -> Option<JsonUtilityCommand> {
+    let intent = match action {
+        "json_utility:open" => JsonUtilityIntent::General,
+        "json_utility:format" => JsonUtilityIntent::Format,
+        "json_utility:minify" => JsonUtilityIntent::Minify,
+        _ => return None,
+    };
+    Some(JsonUtilityCommand::Open { intent })
 }
 
 fn parse_virtual_desktop(action: &Action) -> VirtualDesktopCommand {

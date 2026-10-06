@@ -10,6 +10,7 @@ mod calendar_event_editor;
 mod calendar_popover;
 mod clipboard_dialog;
 mod clipboard_modify_dialog;
+mod color_pick;
 mod command_host;
 mod confirmation_modal;
 mod convert_panel;
@@ -23,6 +24,7 @@ mod file_search_dialog;
 pub mod file_search_preview_dialog;
 pub mod image_crop_editor;
 mod image_panel;
+mod json_utility_dialog;
 mod macro_dialog;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
@@ -92,6 +94,7 @@ pub use file_search_dialog::{
 };
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
 pub use image_panel::ImagePanel;
+pub use json_utility_dialog::JsonUtilityDialogState;
 pub use macro_dialog::MacroDialog;
 pub use mkmacro_dialog::MkMacroDialog;
 pub use mouse_gesture_settings_dialog::MouseGestureSettingsDialog;
@@ -562,6 +565,7 @@ pub enum Panel {
     TodoViewDialog,
     ClipboardDialog,
     ClipboardModifyDialog,
+    JsonUtilityDialog,
     ConvertPanel,
     VolumeDialog,
     BrightnessDialog,
@@ -610,6 +614,7 @@ struct PanelStates {
     todo_view_dialog: bool,
     clipboard_dialog: bool,
     clipboard_modify_dialog: bool,
+    json_utility_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
     brightness_dialog: bool,
@@ -672,8 +677,12 @@ pub struct LauncherApp {
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
     screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
-    screen_draw_launcher_parking:
-        Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
+    color_pick: color_pick::ColorPickLifecycle,
+    screen_draw_launcher_parking: Option<
+        crate::launcher_parking::LauncherParkingTransaction<
+            crate::screen_draw::ScreenDrawGeneration,
+        >,
+    >,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
     screen_draw_restore_publication: screen_draw_restore::ScreenDrawRestorePublication,
     pub selected: Option<usize>,
@@ -822,6 +831,7 @@ pub struct LauncherApp {
     clipboard_dialog: ClipboardDialog,
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
+    pub json_utility_dialog: JsonUtilityDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
     pub(crate) clipboard_modify_hide_launcher_after_apply: bool,
@@ -2045,6 +2055,7 @@ impl LauncherApp {
                 controller
             },
             screen_draw_recovery_bridge,
+            color_pick: color_pick::ColorPickLifecycle::default(),
             screen_draw_launcher_parking: None,
             screen_draw_restore_publication:
                 screen_draw_restore::ScreenDrawRestorePublication::default(),
@@ -2198,6 +2209,7 @@ impl LauncherApp {
                 clipboard_modify_settings.dialog_width,
                 clipboard_modify_settings.dialog_height,
             ),
+            json_utility_dialog: JsonUtilityDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
             clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
@@ -2813,7 +2825,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 44] = [
+    const TRACKED_PANELS: [Panel; 45] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2843,6 +2855,7 @@ impl LauncherApp {
         Panel::TodoViewDialog,
         Panel::ClipboardDialog,
         Panel::ClipboardModifyDialog,
+        Panel::JsonUtilityDialog,
         Panel::ConvertPanel,
         Panel::VolumeDialog,
         Panel::BrightnessDialog,
@@ -2891,6 +2904,7 @@ impl LauncherApp {
             Panel::TodoViewDialog => self.todo_view_dialog.open,
             Panel::ClipboardDialog => self.clipboard_dialog.open,
             Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
+            Panel::JsonUtilityDialog => self.json_utility_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
             Panel::BrightnessDialog => self.brightness_dialog.open,
@@ -3091,6 +3105,10 @@ impl LauncherApp {
                 self.clipboard_modify_dialog.open = false;
                 self.clipboard_modify_dialog.cleanup_after_close();
                 self.panel_states.clipboard_modify_dialog = false;
+            }
+            Panel::JsonUtilityDialog => {
+                self.json_utility_dialog.open = false;
+                self.panel_states.json_utility_dialog = false;
             }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
@@ -3294,6 +3312,10 @@ impl LauncherApp {
                 self.clipboard_modify_dialog.cleanup_after_close();
                 self.panel_states.clipboard_modify_dialog = false;
             }
+            Panel::JsonUtilityDialog => {
+                self.json_utility_dialog.open = false;
+                self.panel_states.json_utility_dialog = false;
+            }
             Panel::ConvertPanel => {
                 self.convert_panel.open = false;
                 self.panel_states.convert_panel = false;
@@ -3393,6 +3415,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self
                 .clipboard_modify_dialog
                 .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
+            Panel::JsonUtilityDialog => self.json_utility_dialog.open = true,
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.open = true,
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
@@ -3529,6 +3552,7 @@ impl LauncherApp {
         check!(todo_view_dialog, Panel::TodoViewDialog);
         check!(clipboard_dialog, Panel::ClipboardDialog);
         check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
+        check!(json_utility_dialog, Panel::JsonUtilityDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);
         check!(brightness_dialog, Panel::BrightnessDialog);

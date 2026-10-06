@@ -182,19 +182,21 @@ fn transform<C: Cancellation + ?Sized>(
             v.into_iter().map(str::trim).collect::<Vec<_>>().join("\n")
         }),
         JsonPretty => {
-            let v: serde_json::Value = serde_json::from_str(input)
+            let document = crate::json_transform::JsonDocument::parse(input)
                 .map_err(|e| ClipboardModifyError::Transform(e.to_string()))?;
             cancelled(c)?;
-            let s = serde_json::to_string_pretty(&v)
+            let s = document
+                .pretty()
                 .map_err(|e| ClipboardModifyError::Transform(e.to_string()))?;
             cancelled(c)?;
             Ok(s)
         }
         JsonMinify => {
-            let v: serde_json::Value = serde_json::from_str(input)
+            let document = crate::json_transform::JsonDocument::parse(input)
                 .map_err(|e| ClipboardModifyError::Transform(e.to_string()))?;
             cancelled(c)?;
-            let s = serde_json::to_string(&v)
+            let s = document
+                .minify()
                 .map_err(|e| ClipboardModifyError::Transform(e.to_string()))?;
             cancelled(c)?;
             Ok(s)
@@ -583,6 +585,35 @@ mod comprehensive_transform_regressions {
         assert!(run("not base64!", st(OperationId::Base64Decode)).is_err());
         assert!(run("//8=", st(OperationId::Base64Decode)).is_err());
         assert_eq!(run("✓", st(OperationId::Base64Encode)).unwrap(), "4pyT");
+    }
+
+    #[test]
+    fn json_operations_match_shared_transform_and_keep_stage_diagnostics() {
+        let input = r#"{"z":{"second":2,"first":1},"a":[true,null]}"#;
+        let document = crate::json_transform::JsonDocument::parse(input).unwrap();
+
+        assert_eq!(
+            run(input, st(OperationId::JsonPretty)).unwrap(),
+            document.pretty().unwrap()
+        );
+        assert_eq!(
+            run(input, st(OperationId::JsonMinify)).unwrap(),
+            document.minify().unwrap()
+        );
+
+        let error = run("{\n  \"value\": }", st(OperationId::JsonPretty)).unwrap_err();
+        match error {
+            ExecuteError::Stage(stage) => {
+                assert_eq!(stage.operation, "json-pretty");
+                assert!(stage.reason.contains("line 2 column"));
+                assert!(
+                    stage
+                        .to_string()
+                        .starts_with("Stage 1 (json-pretty) failed:")
+                );
+            }
+            other => panic!("expected a wrapped JSON stage failure, got {other:?}"),
+        }
     }
 
     #[test]

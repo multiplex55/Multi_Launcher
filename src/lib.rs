@@ -22,6 +22,8 @@ pub mod active_window;
 pub mod annotation;
 
 pub mod clipboard_modify;
+pub mod color;
+pub mod color_pick;
 pub mod commands;
 pub mod common;
 pub mod completion;
@@ -33,7 +35,9 @@ pub mod history;
 pub mod hotkey;
 pub mod image_crop;
 pub mod indexer;
+pub mod json_transform;
 pub mod launcher;
+pub(crate) mod launcher_parking;
 pub mod linking;
 pub mod logging;
 pub mod mkmacro;

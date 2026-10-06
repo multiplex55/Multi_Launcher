@@ -2,13 +2,13 @@ use crate::dashboard::DashboardRefreshRequest;
 use std::sync::atomic::Ordering;
 
 use crate::commands::{
-    CalendarCommandHost, ClipboardModifyCommandHost, Command, CommandError, CommandInvocation,
-    CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
-    FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
-    LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
-    PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
-    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup,
-    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
+    CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost, Command, CommandError,
+    CommandInvocation, CommandOutcome, CropCommandHost, DataCommandHost, DialogCommandHost,
+    DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost, HeadlessCommandHost, HistoryPolicy,
+    JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost,
+    NoteCommandHost, PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy,
+    ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination,
+    ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -417,6 +417,20 @@ impl CropCommandHost for LauncherApp {
         self.begin_crop_screenshot();
     }
 }
+
+impl ColorPickCommandHost for LauncherApp {
+    fn start_color_pick(&mut self) -> Result<bool, String> {
+        self.begin_color_pick()
+    }
+}
+
+impl JsonUtilityCommandHost for LauncherApp {
+    fn open_json_utility(&mut self, intent: crate::commands::JsonUtilityIntent) {
+        self.json_utility_dialog.open(intent);
+        self.focus_panel(super::Panel::JsonUtilityDialog);
+    }
+}
+
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
@@ -788,6 +802,8 @@ fn command_accepts_query_override(command: &Command) -> bool {
         command,
         Command::Radial(_)
             | Command::ClipboardModify(_)
+            | Command::JsonUtility(_)
+            | Command::ColorPick(_)
             | Command::FileSearch(_)
             | Command::Diff(_)
     )
@@ -1431,18 +1447,17 @@ mod tests {
         app.screen_draw_controller.launcher_parked(first).unwrap();
         app.screen_draw_controller.capture_succeeded(first).unwrap();
         let (commands, events) = app.screen_draw_controller.install_test_native_worker();
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: 15,
             top: 25,
             right: 415,
             bottom: 245,
         };
-        let (mut parking, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                first,
-                original,
-                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-            );
+        let (mut parking, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            first,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
         parking.commit_hidden();
         app.screen_draw_launcher_parking = Some(parking);
 
@@ -1489,18 +1504,17 @@ mod tests {
         app.screen_draw_controller
             .capture_succeeded(generation)
             .unwrap();
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: -500,
             top: 80,
             right: -100,
             bottom: 300,
         };
-        let (mut parking, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                generation,
-                original,
-                crate::mkmacro::screen::ScreenRect::new(-1920, 0, 1920, 1080),
-            );
+        let (mut parking, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            generation,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(-1920, 0, 1920, 1080),
+        );
         parking.commit_hidden();
         parking.restore().unwrap();
         app.screen_draw_launcher_parking = Some(parking);
@@ -1536,18 +1550,17 @@ mod tests {
             if ghost {
                 app.screen_draw_controller.enter_ghost().unwrap();
             }
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 40,
                 top: 50,
                 right: 440,
                 bottom: 270,
             };
-            let (mut parking, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    generation,
-                    original,
-                    crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-                );
+            let (mut parking, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                generation,
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
             parking.commit_hidden();
             app.screen_draw_launcher_parking = Some(parking);
 
@@ -1596,6 +1609,15 @@ mod tests {
     }
 
     #[test]
+    fn json_utility_commands_reject_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::JsonUtility(
+            crate::commands::JsonUtilityCommand::Open {
+                intent: crate::commands::JsonUtilityIntent::Format,
+            },
+        )));
+    }
+
+    #[test]
     fn radial_commands_reject_query_override_reclassification() {
         assert!(!command_accepts_query_override(&Command::Radial(
             crate::commands::RadialCommand::ShowDefault,
@@ -1629,5 +1651,11 @@ mod tests {
         ] {
             assert!(command_accepts_query_override(&command));
         }
+    }
+    #[test]
+    fn color_pick_rejects_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::ColorPick(
+            crate::commands::ColorPickCommand::Pick
+        )));
     }
 }

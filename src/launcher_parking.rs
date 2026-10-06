@@ -3,8 +3,6 @@ use std::sync::Arc;
 
 use crate::mkmacro::screen::ScreenRect;
 
-use super::ScreenDrawGeneration;
-
 /// Extra physical pixels kept between the virtual desktop and the parked
 /// launcher. This protects capture exclusion from small platform adjustments.
 pub(crate) const CAPTURE_PARKING_MARGIN: i64 = 96;
@@ -89,8 +87,8 @@ impl LauncherWindowApi for SystemLauncherWindowApi {
 /// Owns one launcher parking attempt. Dropping an uncommitted transaction
 /// restores its exact pre-parking native rectangle, including during early
 /// returns and unwinding.
-pub(crate) struct LauncherParkingTransaction {
-    generation: ScreenDrawGeneration,
+pub(crate) struct LauncherParkingTransaction<G: Copy> {
+    generation: G,
     original_snapshot: LauncherWindowSnapshot,
     parked_rect: LauncherWindowRect,
     virtual_desktop: ScreenRect,
@@ -99,7 +97,7 @@ pub(crate) struct LauncherParkingTransaction {
     window_api: Arc<dyn LauncherWindowApi>,
 }
 
-impl fmt::Debug for LauncherParkingTransaction {
+impl<G: Copy + fmt::Debug> fmt::Debug for LauncherParkingTransaction<G> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LauncherParkingTransaction")
@@ -112,9 +110,9 @@ impl fmt::Debug for LauncherParkingTransaction {
     }
 }
 
-impl LauncherParkingTransaction {
+impl<G: Copy> LauncherParkingTransaction<G> {
     pub(crate) fn begin(
-        generation: ScreenDrawGeneration,
+        generation: G,
         hwnd: usize,
         virtual_desktop: ScreenRect,
     ) -> Result<Self, String> {
@@ -127,7 +125,7 @@ impl LauncherParkingTransaction {
     }
 
     fn begin_with_api(
-        generation: ScreenDrawGeneration,
+        generation: G,
         hwnd: usize,
         virtual_desktop: ScreenRect,
         window_api: Arc<dyn LauncherWindowApi>,
@@ -154,7 +152,7 @@ impl LauncherParkingTransaction {
         })
     }
 
-    pub(crate) const fn generation(&self) -> ScreenDrawGeneration {
+    pub(crate) const fn generation(&self) -> G {
         self.generation
     }
 
@@ -178,7 +176,7 @@ impl LauncherParkingTransaction {
         self.cycle = self
             .cycle
             .checked_add(1)
-            .ok_or_else(|| "Screen Draw parking cycle identity exhausted".to_string())?;
+            .ok_or_else(|| "launcher parking cycle identity exhausted".to_string())?;
         Ok(())
     }
 
@@ -280,7 +278,7 @@ impl LauncherParkingTransaction {
     }
 }
 
-impl Drop for LauncherParkingTransaction {
+impl<G: Copy> Drop for LauncherParkingTransaction<G> {
     fn drop(&mut self) {
         if self.state == LauncherParkingState::Active {
             let _ = self.restore();
@@ -336,11 +334,11 @@ impl LauncherParkingTestObserver {
         *self.before_next_park.lock().unwrap() = Some(Box::new(callback));
     }
 
-    pub(crate) fn begin_transaction(
+    pub(crate) fn begin_transaction<G: Copy>(
         &self,
-        generation: ScreenDrawGeneration,
+        generation: G,
         virtual_desktop: ScreenRect,
-    ) -> LauncherParkingTransaction {
+    ) -> LauncherParkingTransaction<G> {
         LauncherParkingTransaction::begin_with_api(
             generation,
             42,
@@ -412,11 +410,11 @@ impl LauncherWindowApi for GuiTestLauncherWindowApi {
 }
 
 #[cfg(test)]
-pub(crate) fn launcher_parking_test_fixture(
-    generation: ScreenDrawGeneration,
+pub(crate) fn launcher_parking_test_fixture<G: Copy>(
+    generation: G,
     rect: LauncherWindowRect,
     virtual_desktop: ScreenRect,
-) -> (LauncherParkingTransaction, LauncherParkingTestObserver) {
+) -> (LauncherParkingTransaction<G>, LauncherParkingTestObserver) {
     let restores = Arc::new(std::sync::Mutex::new(Vec::new()));
     let current = Arc::new(std::sync::Mutex::new(LauncherWindowSnapshot {
         hwnd: 42,
@@ -667,6 +665,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::screen_draw::ScreenDrawGeneration;
 
     #[derive(Default)]
     struct FakeWindowApi {

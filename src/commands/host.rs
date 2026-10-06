@@ -55,6 +55,14 @@ pub trait CropCommandHost {
     fn crop_screenshot(&mut self);
 }
 
+pub trait ColorPickCommandHost {
+    fn start_color_pick(&mut self) -> Result<bool, String>;
+}
+
+pub trait JsonUtilityCommandHost {
+    fn open_json_utility(&mut self, intent: super::JsonUtilityIntent);
+}
+
 pub trait CalendarCommandHost {
     fn calendar_dashboard_enabled(&self) -> bool;
     fn calendar_preserve_command(&self) -> bool;
@@ -187,6 +195,8 @@ pub trait CommandHost:
     + RadialCommandHost
     + DialogCommandHost
     + CropCommandHost
+    + JsonUtilityCommandHost
+    + ColorPickCommandHost
     + CalendarCommandHost
     + NoteCommandHost
     + TodoCommandHost
@@ -207,6 +217,8 @@ impl<T> CommandHost for T where
         + RadialCommandHost
         + DialogCommandHost
         + CropCommandHost
+        + JsonUtilityCommandHost
+        + ColorPickCommandHost
         + CalendarCommandHost
         + NoteCommandHost
         + TodoCommandHost

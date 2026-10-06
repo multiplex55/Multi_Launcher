@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::color::RgbColor;
 use crate::plugin::Plugin;
 use eframe::egui::{self, Color32};
 use serde::{Deserialize, Serialize};
@@ -22,47 +23,28 @@ struct ColorPickerSettings {
 
 impl Plugin for ColorPickerPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
-        const PREFIX: &str = "color";
-        let trimmed = query.trim();
-        let Some(rest) = crate::common::strip_prefix_ci(trimmed, PREFIX) else {
+        let mut parts = query.split_whitespace();
+        if !parts
+            .next()
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("color"))
+        {
             return Vec::new();
-        };
-        let arg = rest.trim();
-
-        let mut color = self.color;
-        if !arg.is_empty() {
-            if let Some(c) = parse_hex(arg) {
-                color = c;
-            } else {
-                return Vec::new();
-            }
         }
-
-        let hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-        let rgb = format!("rgb({}, {}, {})", color.r(), color.g(), color.b());
-        let (h, s, l) = rgb_to_hsl(color.r(), color.g(), color.b());
-        let hsl = format!("hsl({h:.0}, {s:.0}%, {l:.0}%)");
-
-        vec![
-            Action {
-                label: hex.clone(),
-                desc: "Color hex".into(),
-                action: format!("clipboard:{hex}"),
-                args: None,
+        let arg = parts.next();
+        if parts.next().is_some() {
+            return Vec::new();
+        }
+        if arg.is_some_and(|arg| arg.eq_ignore_ascii_case("pick")) {
+            return vec![pick_action()];
+        }
+        let color = match arg {
+            Some(arg) => match RgbColor::parse_hex(arg) {
+                Some(color) => color,
+                None => return Vec::new(),
             },
-            Action {
-                label: rgb.clone(),
-                desc: "Color rgb".into(),
-                action: format!("clipboard:{rgb}"),
-                args: None,
-            },
-            Action {
-                label: hsl.clone(),
-                desc: "Color hsl".into(),
-                action: format!("clipboard:{hsl}"),
-                args: None,
-            },
-        ]
+            None => RgbColor::new(self.color.r(), self.color.g(), self.color.b()),
+        };
+        color_actions(color)
     }
 
     fn name(&self) -> &str {
@@ -77,6 +59,10 @@ impl Plugin for ColorPickerPlugin {
         &["search"]
     }
 
+    fn query_prefixes(&self) -> &[&str] {
+        &["color"]
+    }
+
     fn commands(&self) -> Vec<Action> {
         vec![
             Action {
@@ -89,6 +75,12 @@ impl Plugin for ColorPickerPlugin {
                 label: "color #ff0000".into(),
                 desc: "Color picker".into(),
                 action: "query:color #ff0000".into(),
+                args: None,
+            },
+            Action {
+                label: "color pick".into(),
+                desc: "Pick a screen color".into(),
+                action: "query:color pick".into(),
                 args: None,
             },
         ]
@@ -139,47 +131,114 @@ impl Plugin for ColorPickerPlugin {
     }
 }
 
-fn parse_hex(input: &str) -> Option<Color32> {
-    let s = input.trim().trim_start_matches('#');
-    let bytes = match s.len() {
-        6 => (
-            u8::from_str_radix(&s[0..2], 16).ok()?,
-            u8::from_str_radix(&s[2..4], 16).ok()?,
-            u8::from_str_radix(&s[4..6], 16).ok()?,
-        ),
-        3 => (
-            u8::from_str_radix(&s[0..1], 16).ok()? * 17,
-            u8::from_str_radix(&s[1..2], 16).ok()? * 17,
-            u8::from_str_radix(&s[2..3], 16).ok()? * 17,
-        ),
-        _ => return None,
-    };
-    Some(Color32::from_rgb(bytes.0, bytes.1, bytes.2))
+fn pick_action() -> Action {
+    Action {
+        label: "Pick Screen Color".into(),
+        desc: "Choose a color from the screen".into(),
+        action: "color:pick".into(),
+        args: None,
+    }
 }
 
-fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    let r = r as f32 / 255.0;
-    let g = g as f32 / 255.0;
-    let b = b as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    if (max - min).abs() < f32::EPSILON {
-        (0.0, 0.0, l * 100.0)
-    } else {
-        let d = max - min;
-        let s = if l > 0.5 {
-            d / (2.0 - max - min)
-        } else {
-            d / (max + min)
-        };
-        let h = if (max - r).abs() < f32::EPSILON {
-            (g - b) / d + if g < b { 6.0 } else { 0.0 }
-        } else if (max - g).abs() < f32::EPSILON {
-            (b - r) / d + 2.0
-        } else {
-            (r - g) / d + 4.0
-        };
-        (h / 6.0 * 360.0, s * 100.0, l * 100.0)
+/// The existing result path for both manually parsed colors and picked pixels.
+pub fn color_actions(color: RgbColor) -> Vec<Action> {
+    [
+        (color.hex(), "Color hex"),
+        (color.rgb(), "Color rgb"),
+        (color.hsl(), "Color hsl"),
+    ]
+    .into_iter()
+    .map(|(output, description)| Action {
+        label: output.clone(),
+        desc: description.into(),
+        action: format!("clipboard:{output}"),
+        args: None,
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_and_typed_color_queries_preserve_existing_three_results() {
+        let plugin = ColorPickerPlugin::default();
+        for query in ["color", "color #ff0000", " COLOR #F00 "] {
+            let actions = plugin.search(query);
+            assert_eq!(actions.len(), 3);
+            for (action, output, description) in [
+                (&actions[0], "#ff0000", "Color hex"),
+                (&actions[1], "rgb(255, 0, 0)", "Color rgb"),
+                (&actions[2], "hsl(0, 100%, 50%)", "Color hsl"),
+            ] {
+                assert_eq!(action.label, output);
+                assert_eq!(action.desc, description);
+                assert_eq!(action.action, format!("clipboard:{output}"));
+                assert!(action.args.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn settings_keep_existing_rgba_shape_and_color32_channel_behavior() {
+        let mut plugin = ColorPickerPlugin::default();
+        assert_eq!(
+            plugin.default_settings().unwrap(),
+            serde_json::json!({"color": [255, 0, 0, 255]})
+        );
+        let settings = serde_json::json!({"color": [40, 80, 120, 128]});
+        plugin.apply_settings(&settings);
+        let expected = Color32::from_rgba_unmultiplied(40, 80, 120, 128);
+        assert_eq!(
+            plugin.default_settings().unwrap(),
+            serde_json::json!({"color": [expected.r(), expected.g(), expected.b(), expected.a()]})
+        );
+        assert_eq!(
+            plugin.search("color")[0].label,
+            RgbColor::new(expected.r(), expected.g(), expected.b()).hex()
+        );
+        plugin.apply_settings(&serde_json::json!({"invalid": true}));
+        assert_eq!(
+            plugin.search("color")[0].label,
+            RgbColor::new(expected.r(), expected.g(), expected.b()).hex()
+        );
+    }
+
+    #[test]
+    fn screen_pixel_and_typed_hex_use_identical_results() {
+        let pixel = RgbColor::new(12, 34, 56);
+        let picked = color_actions(pixel);
+        let typed = ColorPickerPlugin::default().search(&format!("color {}", pixel.hex()));
+        for (picked, typed) in picked.iter().zip(&typed) {
+            assert_eq!(picked.label, typed.label);
+            assert_eq!(picked.action, typed.action);
+        }
+    }
+
+    #[test]
+    fn pick_is_distinct_and_discoverable_without_prefix_collisions() {
+        let plugin = ColorPickerPlugin::default();
+        assert!(
+            plugin
+                .commands()
+                .iter()
+                .any(|action| action.label == "color pick" && action.action == "query:color pick")
+        );
+        for query in ["color pick", " COLOR PICK "] {
+            let actions = plugin.search(query);
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].action, "color:pick");
+        }
+        for query in [
+            "colorpick",
+            "colorabc",
+            "color pick extra",
+            "colors pick",
+            "color éa",
+            "color aéabc",
+        ] {
+            assert!(plugin.search(query).is_empty(), "query {query:?}");
+        }
     }
 }

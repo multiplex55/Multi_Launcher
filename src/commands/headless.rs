@@ -75,6 +75,12 @@ fn execute_with_external(
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
+        Command::ColorPick(_) => {
+            anyhow::bail!("screen color picking requires the launcher interface")
+        }
+        Command::JsonUtility(_) => {
+            anyhow::bail!("JSON utility commands require the launcher interface")
+        }
         Command::Radial(_) => anyhow::bail!("radial commands require the launcher interface"),
         Command::ScreenDraw(_) => {
             anyhow::bail!("screen draw commands require the launcher interface")
@@ -96,6 +102,36 @@ fn execute_with_external(
         | Command::FileSearch(_)
         | Command::Diff(_)
         | Command::Crop(_) => external(&original_action.action, original_action.args.as_deref()),
+    }
+}
+
+#[cfg(test)]
+mod json_utility_headless_tests {
+    use super::*;
+
+    #[test]
+    fn json_utility_reports_that_a_launcher_interface_is_required() {
+        let original = Action {
+            label: "Format JSON".into(),
+            desc: String::new(),
+            action: "json_utility:format".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::JsonUtility(JsonUtilityCommand::Open {
+                intent: JsonUtilityIntent::Format,
+            }),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("require the launcher interface"));
+        assert!(external_calls.is_empty());
     }
 }
 
@@ -716,5 +752,21 @@ mod tests {
                 ..
             }) if raw == "cm upper"
         ));
+    }
+    #[test]
+    fn color_pick_headless_requires_ui_without_external_side_effect() {
+        let original = action("color:pick");
+        let command = crate::commands::parse_action(&original).unwrap();
+        let mut called = false;
+        let error = execute_with_external(command, &original, &mut |_, _| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "screen color picking requires the launcher interface"
+        );
+        assert!(!called);
     }
 }
