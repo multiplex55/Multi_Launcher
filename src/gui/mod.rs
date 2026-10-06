@@ -36,6 +36,7 @@ pub(crate) mod note_mutation;
 mod note_panel;
 mod notes_dialog;
 mod numpad_navigation;
+mod ocr;
 mod query_history;
 mod query_observation;
 mod radial_actions;
@@ -678,6 +679,7 @@ pub struct LauncherApp {
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
     screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
     color_pick: color_pick::ColorPickLifecycle,
+    ocr: ocr::OcrLifecycle,
     screen_draw_launcher_parking: Option<
         crate::launcher_parking::LauncherParkingTransaction<
             crate::screen_draw::ScreenDrawGeneration,
@@ -2056,6 +2058,7 @@ impl LauncherApp {
             },
             screen_draw_recovery_bridge,
             color_pick: color_pick::ColorPickLifecycle::default(),
+            ocr: ocr::OcrLifecycle::default(),
             screen_draw_launcher_parking: None,
             screen_draw_restore_publication:
                 screen_draw_restore::ScreenDrawRestorePublication::default(),

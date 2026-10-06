@@ -5,6 +5,8 @@
 //! launcher features plain text for a selected rectangle without retaining the
 //! captured pixels or exposing recognizer-specific APIs to their UI.
 
+pub(crate) mod selection;
+
 use crate::mkmacro::{
     DiagnosticKind, ExecResult, ExecutionDiagnostic, MkOcrLanguage, ScreenCaptureBackend,
     ScreenRect, SearchRegion, cancelled_error,

@@ -54,7 +54,7 @@ Owner/scope: `src/gui/mkmacro_dialog/{visual_overlay,visual_capture_workflow}.rs
 
 ## M2-B — transient selection lifecycle and parking
 
-Status: pending. Depends on M2-A. Commit: `feat(ocr): [M2-B] integrate OCR region selection with launcher lifecycle`.
+Status: complete. Depends on M2-A. Commit: `feat(ocr): [M2-B] integrate OCR region selection with launcher lifecycle`.
 
 Owner/scope: OCR controller/state and `src/gui/ocr.rs`, `src/gui/{mod,render}.rs`; reuse `launcher_parking.rs` and visibility ordering. Capture pre-invocation presentation/query/selection as needed; obtain current desktop, park/verify exact native geometry, then start the selector and record generation + operation ID. Keep confirmed geometry staged until M4 consumes it. Cancellation/error retire selection and restore; errors are useful, ordinary cancel is silent. Newer visibility requests win over stale restore/result publication; failed restore retains ownership for retry. Coordinate conflict admission with Color Pick/Screen Draw and suppress root geometry changes while OCR owns parking. Repeated starts supersede the prior OCR generation with cleanup before fresh selection; never two selectors. Keep module/controller hooks available without user entry until M3. Tests use injected overlays/window APIs: begin, confirm, cancel, error, stale/replaced event, newer visibility and restore failure. Verify new OCR lifecycle tests plus directly changed parking tests and compilation. Done when selection can be exercised without GUI-driving, root ownership is released on all terminal paths, and no OCR/capture runs prematurely. No recognition/result rendering yet.
 
@@ -135,8 +135,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M0 | complete | none | Read-only current source/tests and complete approved plan inspected at 112cb87f; no build/test executed. |
 | M1-A | complete | `24ef239a` | `cargo fmt --all`; `cargo test --lib ocr::tests`: 23 passed; diff inspected. |
 | M1-B | complete | `911a6cc8` | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
-| M2-A | complete | see checkpoint history | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
-| M2-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M2-A | complete | `cd54bc99` | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
+| M2-B | complete | see checkpoint history | Latest-source Nextest controller/GUI OCR/ColorPick: 23 passed; fmt/diff check passed. Typed selection, parking verification on separate polls, terminal ack, exact/newer-intent restore and retry. |
+| M3-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -150,3 +151,5 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 - Stage parking and verify on separate frame polls after HWND discovery; reject active Color Pick/Screen Draw/unrelated overlay before mutation. Preserve exact geometry/newer visibility requests and restore-retry ownership.
 - M2-B confirmation retains signed geometry and parking for M4 capture; capture/recognition/clipboard must remain unused at M2-B. Duplicate invocation while selection/restoration owns root may be a no-op, matching Color Pick.
 - Root hooks: poll after HWND discovery; reconcile parking; suppress generic placement while OCR owns root; exit cancels only OCR and commits hidden without reopening. Color Pick/Screen Draw admission checks must reject OCR ownership.
+
+M3-B integration reminder: actual radial/action invocation can occur while ROOT is hidden; current M2-B visible-root admission must be validated/adapted through real activation tests, preserving hidden state on cancellation and showing OCR result on success. Do not equate parsing/assignment tests with invocation evidence.

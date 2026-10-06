@@ -38,6 +38,8 @@ impl LauncherApp {
     pub(super) fn ensure_color_pick_does_not_own_root(&self) -> Result<(), String> {
         if self.color_pick_owns_root() {
             Err("Finish or cancel the screen color picker before starting Screen Draw".into())
+        } else if self.ocr_owns_root() {
+            Err("Finish or cancel Screen Region OCR before starting Screen Draw".into())
         } else {
             Ok(())
         }
@@ -46,6 +48,9 @@ impl LauncherApp {
     pub(super) fn begin_color_pick(&mut self) -> Result<bool, String> {
         if self.color_pick_owns_root() || self.color_pick.controller.is_active() {
             return Ok(false);
+        }
+        if self.ocr_owns_root() {
+            return Err("Finish or cancel Screen Region OCR before picking a screen color".into());
         }
         if self.screen_draw_launcher_parking.is_some()
             || !matches!(
@@ -184,6 +189,9 @@ impl LauncherApp {
             .as_mut()
             .filter(|session| session.id == id)
             .ok_or("Color picker parking request has no current session")?;
+        if self.ocr_owns_root() {
+            return Err("Screen Region OCR owns the launcher capture lifecycle".into());
+        }
         if self.screen_draw_launcher_parking.is_some()
             || !matches!(
                 self.screen_draw_controller.state(),
