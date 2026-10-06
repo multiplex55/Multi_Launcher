@@ -82,15 +82,16 @@ impl LauncherApp {
         Ok(())
     }
 
-    /// Internal entry until the normal typed command is connected in M3.
+    /// Both ordinary launcher and assigned actions stage the same workflow.
+    /// A hidden ROOT can be parked directly; it is never shown before selection.
     pub(super) fn begin_ocr_selection(&mut self) -> Result<bool, String> {
         if self.ocr_owns_root() {
             return Ok(false);
         }
         self.ensure_ocr_selection_admitted()?;
-        if !self.visible_flag.load(Ordering::SeqCst) || !self.last_visible {
-            return Err("Show the launcher before starting OCR".into());
-        }
+        let (owned_revision, prior_visible) = self
+            .visibility_revision
+            .inspect(|| self.visible_flag.load(Ordering::SeqCst));
         let Some(id) = self.ocr.controller.request(Instant::now())? else {
             return Ok(false);
         };
@@ -98,8 +99,8 @@ impl LauncherApp {
             id,
             query: self.query.clone(),
             selected: self.selected,
-            prior_visible: self.visible_flag.load(Ordering::SeqCst),
-            owned_revision: self.visibility_revision.current(),
+            prior_visible,
+            owned_revision,
             superseded: false,
             query_superseded: false,
             published: false,
@@ -310,7 +311,11 @@ impl LauncherApp {
             )
         });
         session.superseded |= observed != session.owned_revision;
-        if let Some(parking) = &mut lifecycle.parking {
+        // A hidden intent can still have an on-screen native snapshot while its
+        // original hide is in flight. Keep the capture-safe parking on ordinary
+        // cancellation rather than briefly restoring that rectangle.
+        let retain_hidden_parking = !session.prior_visible && !session.superseded;
+        if !retain_hidden_parking && let Some(parking) = &mut lifecycle.parking {
             parking.restore()?;
         }
         if !session.superseded && !session.published {
@@ -352,7 +357,11 @@ impl LauncherApp {
                 let disposition = apply_visibility_with_focus_intent(
                     visible,
                     focus,
-                    VisiblePlacementPolicy::PreserveCurrentGeometry,
+                    if visible && !session.prior_visible {
+                        VisiblePlacementPolicy::ApplyConfiguredPlacement
+                    } else {
+                        VisiblePlacementPolicy::PreserveCurrentGeometry
+                    },
                     &root,
                     self.offscreen_pos,
                     self.follow_mouse,
@@ -385,7 +394,9 @@ impl LauncherApp {
             }
         }
         self.last_visible = visible;
-        if !visible && let Some(parking) = &mut lifecycle.parking {
+        if (!visible || retain_hidden_parking)
+            && let Some(parking) = &mut lifecycle.parking
+        {
             parking.commit_hidden();
         }
         lifecycle.parking = None;
@@ -463,14 +474,17 @@ mod tests {
         }
     }
     fn app() -> LauncherApp {
+        app_with_paths("actions.json".into(), "settings.json".into())
+    }
+    fn app_with_paths(actions_path: String, settings_path: String) -> LauncherApp {
         let ctx = egui::Context::default();
         let mut app = LauncherApp::new(
             &ctx,
             Arc::new(Vec::new()),
             0,
             PluginManager::new(),
-            "actions.json".into(),
-            "settings.json".into(),
+            actions_path,
+            settings_path,
             Settings::default(),
             None,
             None,
@@ -487,6 +501,43 @@ mod tests {
         app.selected = Some(2);
         app.ocr.desktop = Arc::new(Desktop(Arc::new(AtomicUsize::new(0))));
         app
+    }
+    fn activation_app(hidden: bool) -> (tempfile::TempDir, LauncherApp) {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = app_with_paths(
+            root.path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            root.path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        // Retain normal activation metadata/usage while avoiding the global
+        // history.json path; this is the existing explicit history test seam.
+        app.test_skip_history_persistence = true;
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(!hidden, Ordering::SeqCst);
+        app.last_visible = !hidden;
+        (root, app)
+    }
+    fn ocr_action() -> crate::actions::Action {
+        use crate::plugin::Plugin;
+        crate::plugins::ocr::OcrPlugin.commands().remove(0)
+    }
+    fn install_activation_parking(
+        app: &mut LauncherApp,
+        original: LauncherWindowRect,
+    ) -> LauncherParkingTestObserver {
+        let generation = app.ocr.session.as_ref().unwrap().id;
+        let (parking, observer) = launcher_parking_test_fixture(generation, original, desktop());
+        app.ocr.parking = Some(parking);
+        poll(app); // publish hidden; selection may only begin on a later poll
+        assert!(app.ocr.controller.operation().is_none());
+        poll(app);
+        observer
     }
     fn poll(app: &mut LauncherApp) {
         let ctx = app.egui_ctx.clone();
@@ -553,6 +604,200 @@ mod tests {
         assert!(fixture.controller.operation_id().is_some());
         app.cancel_ocr_selection();
         wait(&mut app, |app| !app.ocr_owns_root());
+    }
+    #[test]
+    fn ocr_real_activation_from_primary_and_assigned_surfaces_preserves_prior_visibility() {
+        use crate::commands::ActivationSource;
+        for (source, hidden, root_policy) in [
+            (
+                ActivationSource::Enter,
+                false,
+                crate::universal_actions::RootLauncherPolicy::Legacy,
+            ),
+            (
+                ActivationSource::Click,
+                false,
+                crate::universal_actions::RootLauncherPolicy::Legacy,
+            ),
+            (
+                ActivationSource::Dashboard,
+                true,
+                crate::universal_actions::RootLauncherPolicy::Legacy,
+            ),
+            (
+                ActivationSource::RadialRelease,
+                true,
+                crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+            ),
+            (
+                ActivationSource::RadialShortcut,
+                true,
+                crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+            ),
+        ] {
+            let (_root, mut app) = activation_app(hidden);
+            app.command_root_policy = root_policy;
+            let fixture = SharedVisualOverlayController::test_fixture();
+            app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+            let revision = app.visibility_revision.current();
+            let action = ocr_action();
+            app.activate_action(
+                action.clone(),
+                Some("ignored saved action query".into()),
+                source,
+            );
+            assert!(app.ocr_owns_root(), "{source:?}");
+            assert_eq!(
+                app.visibility_revision.current(),
+                revision,
+                "no pre-show for {source:?}"
+            );
+            assert_eq!(app.visible_flag.load(Ordering::SeqCst), !hidden);
+            assert!(app.ocr.controller.operation().is_none());
+            assert!(!app.any_panel_open());
+            assert_eq!(app.query, "original search");
+            assert_eq!(app.selected, Some(2));
+            assert_eq!(app.test_activation_trace, [(action.clone(), source)]);
+            assert_eq!(app.test_recorded_history_queries, ["original search"]);
+            assert_eq!(app.usage.get("ocr:start"), Some(&1));
+            let saved = if hidden {
+                LauncherWindowRect {
+                    left: -10000,
+                    top: -10000,
+                    right: -9600,
+                    bottom: -9800,
+                }
+            } else {
+                original()
+            };
+            let observer = install_activation_parking(&mut app, saved);
+            let (_, id) = app.ocr.controller.operation().unwrap();
+            fixture.observer.wait_for_commands(1);
+            assert!(!app.visible_flag.load(Ordering::SeqCst));
+            assert!(app.ocr.controller.confirmed().is_none());
+            fixture.observer.cancel_rectangle(id);
+            wait(&mut app, |app| !app.ocr_owns_root());
+            assert_eq!(app.visible_flag.load(Ordering::SeqCst), !hidden);
+            assert_eq!(app.last_visible, !hidden);
+            assert_eq!(app.query, "original search");
+            assert_eq!(app.selected, Some(2));
+            let restored = observer.current_rect();
+            assert_eq!(restored.right - restored.left, 400);
+            assert_eq!(restored.bottom - restored.top, 200);
+            if hidden {
+                assert!(
+                    observer.restored_rects().is_empty(),
+                    "hidden ROOT never restores during cancel"
+                );
+                assert_ne!(restored, original());
+            } else {
+                assert_eq!(restored, original());
+            }
+            assert!(app.error.is_none());
+        }
+    }
+    #[test]
+    fn ocr_hidden_pending_hide_activation_never_restores_onscreen_snapshot_or_focuses() {
+        let (_root, mut app) = activation_app(true);
+        app.last_visible = true; // hidden flag has arrived before native presentation
+        let fixture = SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        app.activate_action(
+            ocr_action(),
+            None,
+            crate::commands::ActivationSource::RadialShortcut,
+        );
+        let observer = install_activation_parking(&mut app, original());
+        let parked = observer.current_rect();
+        let (_, id) = app.ocr.controller.operation().unwrap();
+        fixture.observer.wait_for_commands(1);
+        fixture.observer.cancel_rectangle(id);
+        let ctx = app.egui_ctx.clone();
+        ctx.begin_frame(egui::RawInput::default());
+        wait(&mut app, |app| !app.ocr_owns_root());
+        let output = ctx.end_frame();
+        assert!(observer.restored_rects().is_empty());
+        assert_eq!(observer.current_rect(), parked);
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        assert!(
+            !output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    egui::ViewportCommand::Focus
+                        | egui::ViewportCommand::Minimized(false)
+                        | egui::ViewportCommand::Visible(true)
+                ))
+        );
+    }
+    #[test]
+    fn ocr_real_duplicate_activation_during_selecting_and_restore_retains_owner_and_history() {
+        let (_root, mut app) = activation_app(false);
+        let fixture = SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        app.activate_action(ocr_action(), None, crate::commands::ActivationSource::Enter);
+        let observer = install_activation_parking(&mut app, original());
+        let current = app.ocr.controller.operation().unwrap();
+        fixture.observer.wait_for_commands(1);
+        app.activate_action(
+            ocr_action(),
+            Some("ignored duplicate".into()),
+            crate::commands::ActivationSource::RadialRelease,
+        );
+        assert_eq!(app.ocr.controller.operation(), Some(current));
+        assert_eq!(fixture.controller.operation_id(), Some(current.1));
+        assert_eq!(app.test_recorded_history_queries, ["original search"]);
+        assert_eq!(app.usage.get("ocr:start"), Some(&1));
+        observer.fail_next_restore();
+        fixture.observer.cancel_rectangle(current.1);
+        wait(&mut app, |app| app.ocr.restore_error.is_some());
+        let generation = app.ocr.session.as_ref().unwrap().id;
+        app.activate_action(ocr_action(), None, crate::commands::ActivationSource::Click);
+        assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
+        assert!(app.ocr.parking.is_some());
+        assert!(app.ocr.controller.restore_outcome().is_some());
+        assert_eq!(app.test_recorded_history_queries, ["original search"]);
+        assert_eq!(fixture.observer.commands.lock().unwrap().iter().filter(|command|matches!(command,super::super::mkmacro_dialog::visual_overlay::VisualOverlayCommand::BeginRectanglePick { .. })).count(),1);
+        poll(&mut app);
+        assert!(!app.ocr_owns_root());
+        assert_eq!(observer.current_rect(), original());
+    }
+    #[test]
+    fn ocr_hidden_origin_new_show_uses_configured_placement() {
+        let (_root, mut app) = activation_app(true);
+        let fixture = SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        app.activate_action(
+            ocr_action(),
+            None,
+            crate::commands::ActivationSource::Dashboard,
+        );
+        let hidden = LauncherWindowRect {
+            left: -10000,
+            top: -10000,
+            right: -9600,
+            bottom: -9800,
+        };
+        let observer = install_activation_parking(&mut app, hidden);
+        app.static_location_enabled = true;
+        app.static_pos = Some((240, 180));
+        app.static_size = Some((900, 650));
+        visibility(&app, true);
+        let ctx = app.egui_ctx.clone();
+        ctx.begin_frame(egui::RawInput::default());
+        wait(&mut app, |app| !app.ocr_owns_root());
+        let output = ctx.end_frame();
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert_eq!(observer.current_rect(), hidden); // exact native restore precedes egui placement
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(
+            commands.contains(&egui::ViewportCommand::OuterPosition(egui::pos2(
+                240.0, 180.0
+            )))
+        );
+        assert!(commands.contains(&egui::ViewportCommand::InnerSize(egui::vec2(900.0, 650.0))));
     }
     #[test]
     fn ocr_confirm_holds_signed_rectangle_and_parking_until_capture_stage_or_close() {

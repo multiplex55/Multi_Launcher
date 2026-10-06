@@ -66,7 +66,7 @@ Owner/scope: new `src/plugins/ocr.rs`, `src/plugins/mod.rs`, `src/plugin.rs`, co
 
 ## M3-B — activation to lifecycle
 
-Status: pending. Depends on M3-A/M2-B. Commit: `feat(ocr): [M3-B] route OCR activation into region workflow`.
+Status: complete. Depends on M3-A/M2-B. Commit: `feat(ocr): [M3-B] route OCR activation into region workflow`.
 
 Owner/scope: `src/gui/command_host.rs`, OCR lifecycle admission, relevant activation tests. Connect typed host request to exactly one general selection operation. Use generic visibility Keep so the lifecycle owns parking; history records normal invocation metadata only, never captured text/pixels. Preserve activation-source support through the existing command bus, including a non-primary/radial source test. Confirm no MkMacro/Screenshot Editor opening and no recognition before confirmation. Verify targeted host/handler/activation tests and compilation. Done when normal plugin action actually starts the intended lifecycle and repeated invocation policy is covered; do not add OCR-specific action-assignment plumbing.
 
@@ -137,8 +137,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M1-B | complete | `911a6cc8` | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
 | M2-A | complete | `cd54bc99` | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
 | M2-B | complete | `cd6dc40d` | Latest-source Nextest controller/GUI OCR/ColorPick: 23 passed; fmt/diff check passed. Typed selection, parking verification on separate polls, terminal ack, exact/newer-intent restore and retry. |
-| M3-A | complete | see checkpoint history | 6 command/plugin/host lib tests and 3 selected integration tests passed; fmt/diff checks passed. Normal typed action and disabled routing verified. |
-| M3-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M3-A | complete | `2c3e3ecd` | 6 command/plugin/host lib tests and 3 selected integration tests passed; fmt/diff checks passed. Normal typed action and disabled routing verified. |
+| M3-B | complete | see checkpoint history | Latest-source 16 OCR lifecycle tests passed, including real Enter/Click/Dashboard/radial activation, hidden/no-flash cancel, duplicate/history and newer show; fmt/diff checks passed. |
+| M4-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -162,3 +163,5 @@ M3-B integration reminder: actual radial/action invocation can occur while ROOT 
 - Restore only after capture stops; continuation differs: success restores/shows recognition surface, cancel restores prior state. Keep transaction/retry, stage completion while restore fails. Root parking ownership must end independently from active generation/intent guards after restore.
 - Newer query/visibility during capture/restore/recognition invalidates publication; update saved owned revision for OCR's own restore. Close during capture waits capture terminal; during recognition cancels/invalidate and can return idle without awaiting WinRT, worker keeps/releases pixels.
 - Handle thread-spawn/disconnected/panicked worker terminal failure. Tests block fake capture/OCR to prove parking boundary/background execution, capture once, staged completion on retry, stale close/new generation and error cleanup. M5 adds UI, no pixels in UI/completions.
+
+M3-B implemented hidden-origin admission/cancel. M4 success must intentionally publish visible recognition/result; choose ApplyConfiguredPlacement when prior_visible=false, retaining exact PreserveCurrentGeometry for visible-origin restore. Cancel prior-hidden retains committed capture-safe parking to avoid flashing an onscreen snapshot when original hide is in flight.
