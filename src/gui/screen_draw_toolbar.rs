@@ -38,7 +38,11 @@ fn launcher_observation_at_current_gate(
     visibility: &crate::visibility::VisibilityRevision,
     visible: &std::sync::atomic::AtomicBool,
     root_bridge: &crate::visibility::RootWindowBridge,
-    parking: Option<&crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
+    parking: Option<
+        &crate::launcher_parking::LauncherParkingTransaction<
+            crate::screen_draw::ScreenDrawGeneration,
+        >,
+    >,
 ) -> ScreenDrawLauncherObservation {
     let (hwnd, generation) = root_bridge.identity();
     ScreenDrawLauncherObservation {
@@ -56,13 +60,13 @@ fn launcher_observation_at_current_gate(
             generation: parking.generation().get(),
             cycle: parking.cycle(),
             state: match parking.state() {
-                crate::screen_draw::launcher_parking::LauncherParkingState::Active => {
+                crate::launcher_parking::LauncherParkingState::Active => {
                     ScreenDrawParkingState::Active
                 }
-                crate::screen_draw::launcher_parking::LauncherParkingState::Committed => {
+                crate::launcher_parking::LauncherParkingState::Committed => {
                     ScreenDrawParkingState::Committed
                 }
-                crate::screen_draw::launcher_parking::LauncherParkingState::Restored => {
+                crate::launcher_parking::LauncherParkingState::Restored => {
                     ScreenDrawParkingState::Restored
                 }
             },
@@ -309,7 +313,11 @@ impl ToolbarObservationPublisher {
         visibility: &crate::visibility::VisibilityRevision,
         visible: &std::sync::atomic::AtomicBool,
         root_bridge: &crate::visibility::RootWindowBridge,
-        parking: Option<&crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
+        parking: Option<
+            &crate::launcher_parking::LauncherParkingTransaction<
+                crate::screen_draw::ScreenDrawGeneration,
+            >,
+        >,
         native_identity: impl FnOnce(
             u64,
         ) -> Option<
@@ -652,7 +660,7 @@ impl super::LauncherApp {
             let hwnd = self
                 .launcher_hwnd
                 .ok_or_else(|| "launcher HWND is unavailable for Screen Draw resume".to_string())?;
-            crate::screen_draw::launcher_parking::LauncherParkingTransaction::begin(
+            crate::launcher_parking::LauncherParkingTransaction::begin(
                 generation,
                 hwnd,
                 virtual_desktop,
@@ -2059,9 +2067,9 @@ mod tests {
             Some(124),
             || {},
         );
-        let (mut parking, _) = crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
+        let (mut parking, _) = crate::launcher_parking::launcher_parking_test_fixture(
             generation,
-            crate::screen_draw::launcher_parking::LauncherWindowRect {
+            crate::launcher_parking::LauncherWindowRect {
                 left: 100,
                 top: 100,
                 right: 600,

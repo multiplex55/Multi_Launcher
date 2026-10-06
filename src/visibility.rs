@@ -5,12 +5,10 @@ use std::sync::{
 };
 
 use crate::hotkey::HotkeyTrigger;
+use crate::launcher_parking::{CAPTURE_PARKING_MARGIN, compute_capture_safe_parking_position};
 use crate::mkmacro::screen::ScreenRect;
 use crate::radial::acceptance_trace::{
     self, Correlation, Event, RootCommandKind, VisibilitySource,
-};
-use crate::screen_draw::launcher_parking::{
-    CAPTURE_PARKING_MARGIN, compute_capture_safe_parking_position,
 };
 
 /// A small, explicit wake boundary for work owned by one egui viewport.

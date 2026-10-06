@@ -1440,18 +1440,17 @@ mod tests {
         app.screen_draw_controller.launcher_parked(first).unwrap();
         app.screen_draw_controller.capture_succeeded(first).unwrap();
         let (commands, events) = app.screen_draw_controller.install_test_native_worker();
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: 15,
             top: 25,
             right: 415,
             bottom: 245,
         };
-        let (mut parking, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                first,
-                original,
-                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-            );
+        let (mut parking, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            first,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
         parking.commit_hidden();
         app.screen_draw_launcher_parking = Some(parking);
 
@@ -1498,18 +1497,17 @@ mod tests {
         app.screen_draw_controller
             .capture_succeeded(generation)
             .unwrap();
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: -500,
             top: 80,
             right: -100,
             bottom: 300,
         };
-        let (mut parking, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                generation,
-                original,
-                crate::mkmacro::screen::ScreenRect::new(-1920, 0, 1920, 1080),
-            );
+        let (mut parking, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            generation,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(-1920, 0, 1920, 1080),
+        );
         parking.commit_hidden();
         parking.restore().unwrap();
         app.screen_draw_launcher_parking = Some(parking);
@@ -1545,18 +1543,17 @@ mod tests {
             if ghost {
                 app.screen_draw_controller.enter_ghost().unwrap();
             }
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 40,
                 top: 50,
                 right: 440,
                 bottom: 270,
             };
-            let (mut parking, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    generation,
-                    original,
-                    crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-                );
+            let (mut parking, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                generation,
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
             parking.commit_hidden();
             app.screen_draw_launcher_parking = Some(parking);
 

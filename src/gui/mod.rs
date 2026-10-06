@@ -676,8 +676,11 @@ pub struct LauncherApp {
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
     screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
-    screen_draw_launcher_parking:
-        Option<crate::screen_draw::launcher_parking::LauncherParkingTransaction>,
+    screen_draw_launcher_parking: Option<
+        crate::launcher_parking::LauncherParkingTransaction<
+            crate::screen_draw::ScreenDrawGeneration,
+        >,
+    >,
     screen_draw_toolbar: screen_draw_toolbar::ScreenDrawToolbarUi,
     screen_draw_restore_publication: screen_draw_restore::ScreenDrawRestorePublication,
     pub selected: Option<usize>,

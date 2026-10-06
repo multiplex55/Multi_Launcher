@@ -9,8 +9,8 @@ Implementation branch: `json-and-eye-dropper`. Initial working tree was clean.
 | M1-B JSON commands | complete | Typed intents, plugin registration, routing and tracked dialog; 13 focused tests pass. |
 | M1-C JSON utility | complete | Valid-only initialization, editable buffer, transforms, errors and explicit copy; 5 state tests pass. |
 | M2-A shared color conversion | complete | Pure RGB/HEX/HSL owner reused by plugin; 7 focused tests pass. |
-| M2-B frozen desktop picker | in_progress | [Native handoff](json-utilities-and-screen-eyedropper-native-handoff.md) reconciled capture, parking, and ROOT lifecycle. |
-| M2-C launcher integration | pending | Depends on picker runtime. |
+| M2-B frozen desktop picker | complete | Signed frozen model, native runtime, generalized parking; 21 focused tests pass. |
+| M2-C launcher integration | in_progress | Connect typed picker command and ROOT ownership using [native handoff](json-utilities-and-screen-eyedropper-native-handoff.md). |
 | M3-A qualification and documentation | pending | Targeted verification and native smoke pass. |
 | Independent review | pending | After integration and targeted verification. |
 
@@ -29,3 +29,4 @@ A full repository suite is not required by this goal.
 - M1-B: `cargo nextest run --lib json_utility` (11 passed); `cargo nextest run --lib tracked_openable_panels_count_as_any_panel_open shared_catalog_handle_preserved_across_reload` (2 passed). Formatting and diff whitespace checks passed.
 - M1-C: targeted `gui::json_utility_dialog` state tests (5 passed); formatting and diff whitespace checks passed. Shared JSON/CM transformation code unchanged.
 - M2-A: `cargo nextest run --lib -E 'test(color::tests::) | test(plugins::color_picker::tests::)'` (7 passed); formatting and scoped diff whitespace checks passed.
+- M2-B: `cargo nextest run --lib -E 'test(color_pick::) | test(launcher_parking::tests::)'` (21 passed on final source: 9 picker/runtime, 12 existing parking tests). Windows FFI compiled; formatting and diff whitespace checks passed. Capture timeout/cancel retires blocked capture without allowing stale results to open an overlay; native completion waits teardown.

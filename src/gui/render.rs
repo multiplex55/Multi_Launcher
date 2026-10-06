@@ -2523,7 +2523,7 @@ impl LauncherApp {
             .launcher_hwnd
             .ok_or_else(|| "launcher HWND is unavailable for Screen Draw parking".to_string())?;
         self.screen_draw_controller.begin_launcher_repark()?;
-        let transaction = crate::screen_draw::launcher_parking::LauncherParkingTransaction::begin(
+        let transaction = crate::launcher_parking::LauncherParkingTransaction::begin(
             request.generation,
             hwnd,
             request.virtual_desktop,
@@ -3203,7 +3203,7 @@ mod tests {
 
         assert!(app.start_or_focus_screen_draw().unwrap());
         let generation = app.screen_draw_controller.state().generation().unwrap();
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: 1371,
             top: 611,
             right: 1834,
@@ -3211,9 +3211,7 @@ mod tests {
         };
         let desktop = crate::mkmacro::screen::ScreenRect::new(-1920, -1080, 5760, 3240);
         let (transaction, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                generation, original, desktop,
-            );
+            crate::launcher_parking::launcher_parking_test_fixture(generation, original, desktop);
         app.screen_draw_launcher_parking = Some(transaction);
 
         // Reproduce the old invocation-bearing owner before normal parking.
@@ -3341,18 +3339,17 @@ mod tests {
             app.visible_flag.store(false, Ordering::SeqCst);
             app.restore_flag.store(false, Ordering::SeqCst);
             app.show_inline_errors = true;
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 1200,
                 top: 700,
                 right: 1663,
                 bottom: 987,
             };
-            let (transaction, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    crate::screen_draw::ScreenDrawGeneration::from_raw(1),
-                    original,
-                    crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-                );
+            let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(1),
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
             app.screen_draw_launcher_parking = Some(transaction);
 
             app.apply_screen_draw_capture_poll(
@@ -3387,18 +3384,17 @@ mod tests {
             app.visible_flag.store(false, Ordering::SeqCst);
             app.restore_flag.store(false, Ordering::SeqCst);
             let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([4, 5, 6, 255]));
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: -800,
                 top: 250,
                 right: -337,
                 bottom: 537,
             };
-            let (transaction, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    crate::screen_draw::ScreenDrawGeneration::from_raw(1),
-                    original,
-                    crate::mkmacro::screen::ScreenRect::new(-1920, 0, 3840, 1080),
-                );
+            let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(1),
+                original,
+                crate::mkmacro::screen::ScreenRect::new(-1920, 0, 3840, 1080),
+            );
             app.screen_draw_launcher_parking = Some(transaction);
 
             app.apply_screen_draw_capture_poll(
@@ -3435,18 +3431,17 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         let generation = app.screen_draw_controller.request_start().unwrap();
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: 20,
             top: 30,
             right: 420,
             bottom: 250,
         };
-        let (mut transaction, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                generation,
-                original,
-                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-            );
+        let (mut transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            generation,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
         transaction.commit_hidden();
         app.screen_draw_launcher_parking = Some(transaction);
         app.screen_draw_controller.close();
@@ -3476,18 +3471,17 @@ mod tests {
             app.static_location_enabled = true;
             app.static_pos = Some((640, 360));
             app.static_size = Some((520, 300));
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 20,
                 top: 30,
                 right: 420,
                 bottom: 250,
             };
-            let (transaction, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    generation,
-                    original,
-                    crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-                );
+            let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                generation,
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
             let parked = observer.current_rect();
             app.screen_draw_launcher_parking = Some(transaction);
             app.screen_draw_controller.close();
@@ -3551,17 +3545,16 @@ mod tests {
             app.static_location_enabled = true;
             app.static_pos = Some((300, 240));
             app.static_size = Some((480, 280));
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 20,
                 top: 30,
                 right: 420,
                 bottom: 250,
             };
             let desktop = crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080);
-            let (transaction, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    generation, original, desktop,
-                );
+            let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                generation, original, desktop,
+            );
             app.screen_draw_launcher_parking = Some(transaction);
             app.screen_draw_controller.close();
             app.apply_screen_draw_capture_poll(
@@ -3588,7 +3581,7 @@ mod tests {
 
             // Model the event-loop settle turn applying the configured placement
             // before the following capture poll snapshots and parks the HWND.
-            let onscreen = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let onscreen = crate::launcher_parking::LauncherWindowRect {
                 left: 300,
                 top: 240,
                 right: 780,
@@ -3615,18 +3608,17 @@ mod tests {
             app.follow_mouse = false;
             app.static_location_enabled = false;
             let generation = app.screen_draw_controller.request_start().unwrap();
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 20,
                 top: 30,
                 right: 420,
                 bottom: 250,
             };
-            let (transaction, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    generation,
-                    original,
-                    crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-                );
+            let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                generation,
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
             let parked = observer.current_rect();
             app.screen_draw_launcher_parking = Some(transaction);
             app.screen_draw_controller.close();
@@ -3684,17 +3676,16 @@ mod tests {
             app.follow_mouse = false;
             app.static_location_enabled = false;
             let generation = app.screen_draw_controller.request_start().unwrap();
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 20,
                 top: 30,
                 right: 420,
                 bottom: 250,
             };
             let desktop = crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080);
-            let (transaction, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    generation, original, desktop,
-                );
+            let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                generation, original, desktop,
+            );
             app.screen_draw_launcher_parking = Some(transaction);
             app.screen_draw_controller.close();
             app.apply_screen_draw_capture_poll(
@@ -3719,7 +3710,7 @@ mod tests {
                     if *position == egui::pos2(0.0, 0.0)
             )));
 
-            let onscreen = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let onscreen = crate::launcher_parking::LauncherWindowRect {
                 left: 0,
                 top: 0,
                 right: 400,
@@ -3751,18 +3742,17 @@ mod tests {
             app.visible_flag.store(false, Ordering::SeqCst);
             app.last_visible = false;
             app.restore_flag.store(true, Ordering::SeqCst);
-            let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let original = crate::launcher_parking::LauncherWindowRect {
                 left: 21,
                 top: 34,
                 right: 421,
                 bottom: 234,
             };
-            let (transaction, observer) =
-                crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                    crate::screen_draw::ScreenDrawGeneration::from_raw(11),
-                    original,
-                    crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-                );
+            let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+                crate::screen_draw::ScreenDrawGeneration::from_raw(11),
+                original,
+                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+            );
             app.screen_draw_launcher_parking = Some(transaction);
 
             ctx.begin_frame(egui::RawInput::default());
@@ -3910,17 +3900,16 @@ mod tests {
         app.visible_flag.store(false, Ordering::SeqCst);
         app.last_visible = false;
         app.restore_flag.store(true, Ordering::SeqCst);
-        let (transaction, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                crate::screen_draw::ScreenDrawGeneration::from_raw(12),
-                crate::screen_draw::launcher_parking::LauncherWindowRect {
-                    left: 21,
-                    top: 34,
-                    right: 421,
-                    bottom: 234,
-                },
-                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-            );
+        let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            crate::screen_draw::ScreenDrawGeneration::from_raw(12),
+            crate::launcher_parking::LauncherWindowRect {
+                left: 21,
+                top: 34,
+                right: 421,
+                bottom: 234,
+            },
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
         app.screen_draw_launcher_parking = Some(transaction);
         observer.fail_next_restore();
         let revision = app.visibility_revision.current();
@@ -3963,18 +3952,17 @@ mod tests {
         app.visible_flag.store(true, Ordering::SeqCst);
         app.last_visible = true;
         app.restore_flag.store(true, Ordering::SeqCst);
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: 21,
             top: 34,
             right: 421,
             bottom: 234,
         };
-        let (transaction, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                crate::screen_draw::ScreenDrawGeneration::from_raw(13),
-                original,
-                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-            );
+        let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            crate::screen_draw::ScreenDrawGeneration::from_raw(13),
+            original,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
         app.screen_draw_launcher_parking = Some(transaction);
         let revision = app.visibility_revision.clone();
         let visible = Arc::clone(&app.visible_flag);
@@ -4097,7 +4085,7 @@ mod tests {
             );
             assert_eq!(
                 app.screen_draw_launcher_parking.as_ref().unwrap().state(),
-                crate::screen_draw::launcher_parking::LauncherParkingState::Active
+                crate::launcher_parking::LauncherParkingState::Active
             );
         });
         #[cfg(windows)]
@@ -4159,21 +4147,20 @@ mod tests {
         app: &mut LauncherApp,
         generation: crate::screen_draw::ScreenDrawGeneration,
     ) -> (
-        crate::screen_draw::launcher_parking::LauncherParkingTestObserver,
-        crate::screen_draw::launcher_parking::LauncherWindowRect,
+        crate::launcher_parking::LauncherParkingTestObserver,
+        crate::launcher_parking::LauncherWindowRect,
     ) {
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: 31,
             top: 47,
             right: 431,
             bottom: 267,
         };
-        let (transaction, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                generation,
-                original,
-                crate::mkmacro::screen::ScreenRect::new(-1920, 0, 3840, 1080),
-            );
+        let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            generation,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(-1920, 0, 3840, 1080),
+        );
         app.screen_draw_launcher_parking = Some(transaction);
         app.visible_flag.store(false, Ordering::SeqCst);
         app.last_visible = false;
@@ -5072,7 +5059,7 @@ mod tests {
         let old = hook_recovery_notice(&app.screen_draw_recovery_bridge)
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
             .unwrap();
-        let moved = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let moved = crate::launcher_parking::LauncherWindowRect {
             left: 600,
             top: 320,
             right: 1050,
@@ -5598,7 +5585,7 @@ mod tests {
         );
         assert_eq!(
             app.screen_draw_launcher_parking.as_ref().unwrap().state(),
-            crate::screen_draw::launcher_parking::LauncherParkingState::Active
+            crate::launcher_parking::LauncherParkingState::Active
         );
         assert_eq!(
             observer.current_rect(),
@@ -6361,7 +6348,7 @@ mod tests {
             app.recover_screen_draw(intent);
             let original_intent = intent;
             let prior_cycle = app.screen_draw_launcher_parking.as_ref().unwrap().cycle();
-            let moved = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let moved = crate::launcher_parking::LauncherWindowRect {
                 left: 410,
                 top: 260,
                 right: 910,
@@ -6451,7 +6438,7 @@ mod tests {
                 )
                 .unwrap();
             app.recover_screen_draw(intent);
-            let moved = crate::screen_draw::launcher_parking::LauncherWindowRect {
+            let moved = crate::launcher_parking::LauncherWindowRect {
                 left: 600,
                 top: 320,
                 right: 1050,
@@ -6573,18 +6560,17 @@ mod tests {
         ctx.begin_frame(egui::RawInput::default());
         let _ = ctx.end_frame();
         let generation = app.screen_draw_controller.request_start().unwrap();
-        let original = crate::screen_draw::launcher_parking::LauncherWindowRect {
+        let original = crate::launcher_parking::LauncherWindowRect {
             left: 25,
             top: 40,
             right: 425,
             bottom: 240,
         };
-        let (transaction, observer) =
-            crate::screen_draw::launcher_parking::launcher_parking_test_fixture(
-                generation,
-                original,
-                crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
-            );
+        let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            generation,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
         app.screen_draw_launcher_parking = Some(transaction);
         app.visible_flag.store(true, Ordering::SeqCst);
         app.last_visible = true;
