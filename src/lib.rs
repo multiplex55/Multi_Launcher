@@ -28,6 +28,7 @@ pub mod commands;
 pub mod common;
 pub mod completion;
 pub mod dashboard;
+pub mod date_arithmetic;
 pub mod diff;
 pub mod file_search;
 pub mod help_window;
