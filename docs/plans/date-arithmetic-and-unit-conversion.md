@@ -5292,7 +5292,7 @@ Current branch: `date-and-unit`. Initial working tree: clean.
 | M2-B | complete | Conversion/panel 41/41; plugin_queries 121/121; independent findings resolved; checkpoint committed |
 | M3-A | complete | Deterministic date anchors 7/7; bounded grammar; checkpoint committed |
 | M3-B | complete | Date domain 11/11; calendar clamping and checked offsets verified; checkpoint committed |
-| M3-C | in_progress | Differences and presentation |
+| M3-C | complete | Date domain 15/15; signed differences, typed outcomes and clipboard formatting verified; checkpoint committed |
 | M4-A | pending | Date plugin integration |
 | M4-B | pending | Compatibility coverage if needed |
 | M5-A | pending | User documentation |

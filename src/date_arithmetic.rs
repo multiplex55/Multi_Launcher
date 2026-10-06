@@ -3,7 +3,7 @@
 //! Parsing receives its reference local date/time explicitly. This module
 //! never reads the system clock or interprets time zones.
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Weekday};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Weekday};
 
 /// An anchor retains whether its input represented a calendar date or a local
 /// date-time so later arithmetic can apply the correct rules.
@@ -46,6 +46,8 @@ pub enum DateArithmeticError {
     InvalidSyntax { expression: String },
     UnknownUnit { unit: String, expression: String },
     TimeRequired { unit: String, expression: String },
+    UnsupportedDifferenceUnit { unit: String, expression: String },
+    IncompatibleDifferenceKinds { expression: String },
     OutOfRange { expression: String },
 }
 
@@ -69,6 +71,13 @@ impl std::fmt::Display for DateArithmeticError {
                 formatter,
                 "a date-time anchor is required for {unit}: {expression}"
             ),
+            Self::UnsupportedDifferenceUnit { unit, expression } => {
+                write!(formatter, "differences do not support {unit}: {expression}")
+            }
+            Self::IncompatibleDifferenceKinds { expression } => write!(
+                formatter,
+                "difference operands must both be dates or both be date-times: {expression}"
+            ),
             Self::OutOfRange { expression } => {
                 write!(
                     formatter,
@@ -84,6 +93,89 @@ impl std::error::Error for DateArithmeticError {}
 impl From<DateAnchorError> for DateArithmeticError {
     fn from(error: DateAnchorError) -> Self {
         Self::Anchor(error)
+    }
+}
+
+/// Unit reported by a supported `between` expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateDifferenceUnit {
+    Days,
+    Weeks,
+}
+
+impl DateDifferenceUnit {
+    fn label(self, value: f64) -> &'static str {
+        match (self, value.abs() == 1.0) {
+            (Self::Days, true) => "day",
+            (Self::Days, false) => "days",
+            (Self::Weeks, true) => "week",
+            (Self::Weeks, false) => "weeks",
+        }
+    }
+}
+
+/// A typed date-domain result, separate from its human-readable and copied
+/// representations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DateResult {
+    Date(NaiveDate),
+    DateTime(NaiveDateTime),
+    Difference {
+        value: f64,
+        unit: DateDifferenceUnit,
+    },
+}
+
+/// Evaluation output ready for a launcher to display and copy without
+/// re-parsing presentation strings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DateEvaluationOutcome {
+    pub result: DateResult,
+    pub display_label: String,
+    pub clipboard_payload: String,
+}
+
+impl DateEvaluationOutcome {
+    fn new(result: DateResult, expression: &str) -> Result<Self, DateArithmeticError> {
+        let (display_label, clipboard_payload) = match &result {
+            DateResult::Date(date) => {
+                let iso = date.format("%Y-%m-%d").to_string();
+                (format!("{} — {iso}", date.format("%A, %B %-d, %Y")), iso)
+            }
+            DateResult::DateTime(date_time) => {
+                let iso = format!(
+                    "{} {}",
+                    date_time.date().format("%Y-%m-%d"),
+                    format_local_time(date_time.time())
+                );
+                let display = format!(
+                    "{} {} — {iso}",
+                    date_time.date().format("%A, %B %-d, %Y"),
+                    format_local_time(date_time.time())
+                );
+                (display, iso)
+            }
+            DateResult::Difference { value, unit } => {
+                let number = crate::common::number_format::format_number(*value)
+                    .ok_or_else(|| out_of_range(expression))?;
+                let text = format!("{number} {}", unit.label(*value));
+                (text.clone(), text)
+            }
+        };
+
+        Ok(Self {
+            result,
+            display_label,
+            clipboard_payload,
+        })
+    }
+}
+
+fn format_local_time(time: NaiveTime) -> String {
+    if time.second() == 0 && time.nanosecond() == 0 {
+        time.format("%H:%M").to_string()
+    } else {
+        time.format("%H:%M:%S%.f").to_string()
     }
 }
 
@@ -152,13 +244,130 @@ pub fn parse_anchor(
 pub fn evaluate_expression(
     expression: &str,
     reference_now: NaiveDateTime,
-) -> Result<DateValue, DateArithmeticError> {
-    let Some(relative) = parse_relative_expression(expression) else {
-        return parse_anchor(expression, reference_now).map_err(Into::into);
+) -> Result<DateEvaluationOutcome, DateArithmeticError> {
+    if let Some(difference) = parse_difference_expression(expression) {
+        let difference = difference?;
+        let first = parse_anchor(&difference.first, reference_now)?;
+        let second = parse_anchor(&difference.second, reference_now)?;
+        let days = difference_days(first, second, expression)?;
+        let value = match difference.unit {
+            DateDifferenceUnit::Days => days,
+            DateDifferenceUnit::Weeks => days / 7.0,
+        };
+        if !value.is_finite() {
+            return Err(out_of_range(expression));
+        }
+        return DateEvaluationOutcome::new(
+            DateResult::Difference {
+                value,
+                unit: difference.unit,
+            },
+            expression,
+        );
+    }
+
+    let result = match parse_relative_expression(expression) {
+        Some(relative) => {
+            let relative = relative?;
+            let anchor = parse_anchor(&relative.anchor, reference_now)?;
+            apply_offset(anchor, relative.amount, relative.unit, expression)?
+        }
+        None => parse_anchor(expression, reference_now)?,
     };
-    let relative = relative?;
-    let anchor = parse_anchor(&relative.anchor, reference_now)?;
-    apply_offset(anchor, relative.amount, relative.unit, expression)
+    let result = match result {
+        DateValue::Date(date) => DateResult::Date(date),
+        DateValue::DateTime(date_time) => DateResult::DateTime(date_time),
+    };
+    DateEvaluationOutcome::new(result, expression)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DifferenceExpression {
+    first: String,
+    second: String,
+    unit: DateDifferenceUnit,
+}
+
+fn parse_difference_expression(
+    expression: &str,
+) -> Option<Result<DifferenceExpression, DateArithmeticError>> {
+    let words: Vec<_> = expression.split_whitespace().collect();
+    let between_positions: Vec<_> = words
+        .iter()
+        .enumerate()
+        .filter(|(_, word)| word.eq_ignore_ascii_case("between"))
+        .map(|(index, _)| index)
+        .collect();
+    if between_positions.is_empty() {
+        return None;
+    }
+
+    Some((|| {
+        if between_positions.len() != 1 || between_positions[0] != 1 || words.len() < 5 {
+            return Err(invalid_syntax(expression));
+        }
+        let unit = match words[0].to_lowercase().as_str() {
+            "day" | "days" => DateDifferenceUnit::Days,
+            "week" | "weeks" => DateDifferenceUnit::Weeks,
+            unsupported @ ("month" | "months" | "year" | "years") => {
+                return Err(DateArithmeticError::UnsupportedDifferenceUnit {
+                    unit: unsupported.to_owned(),
+                    expression: expression.trim().to_owned(),
+                });
+            }
+            unsupported => {
+                return Err(DateArithmeticError::UnsupportedDifferenceUnit {
+                    unit: unsupported.to_owned(),
+                    expression: expression.trim().to_owned(),
+                });
+            }
+        };
+
+        let and_positions: Vec<_> = words
+            .iter()
+            .enumerate()
+            .skip(2)
+            .filter(|(_, word)| word.eq_ignore_ascii_case("and"))
+            .map(|(index, _)| index)
+            .collect();
+        if and_positions.len() != 1 {
+            return Err(invalid_syntax(expression));
+        }
+        let and_index = and_positions[0];
+        if and_index == 2 || and_index + 1 == words.len() {
+            return Err(invalid_syntax(expression));
+        }
+
+        Ok(DifferenceExpression {
+            first: words[2..and_index].join(" "),
+            second: words[and_index + 1..].join(" "),
+            unit,
+        })
+    })())
+}
+
+fn difference_days(
+    first: DateValue,
+    second: DateValue,
+    expression: &str,
+) -> Result<f64, DateArithmeticError> {
+    match (first, second) {
+        (DateValue::Date(first), DateValue::Date(second)) => {
+            Ok(second.signed_duration_since(first).num_days() as f64)
+        }
+        (DateValue::DateTime(first), DateValue::DateTime(second)) => {
+            let calendar_days = second.date().signed_duration_since(first.date()).num_days() as f64;
+            let first_seconds = i64::from(first.time().num_seconds_from_midnight());
+            let second_seconds = i64::from(second.time().num_seconds_from_midnight());
+            let seconds = (second_seconds - first_seconds) as f64;
+            let nanoseconds = (i64::from(second.time().nanosecond())
+                - i64::from(first.time().nanosecond())) as f64;
+            Ok(calendar_days + (seconds + nanoseconds / 1_000_000_000.0) / 86_400.0)
+        }
+        _ => Err(DateArithmeticError::IncompatibleDifferenceKinds {
+            expression: expression.trim().to_owned(),
+        }),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,6 +598,8 @@ fn parse_local_date_time(input: &str) -> Option<NaiveDateTime> {
     [
         "%Y-%m-%d %H:%M",
         "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%dT%H:%M:%S",
     ]
@@ -603,7 +814,8 @@ fn parse_named_date(
 #[cfg(test)]
 mod tests {
     use super::{
-        DateAnchorError, DateArithmeticError, DateValue, evaluate_expression, parse_anchor,
+        DateAnchorError, DateArithmeticError, DateDifferenceUnit, DateResult, DateValue,
+        evaluate_expression, parse_anchor,
     };
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 
@@ -616,6 +828,17 @@ mod tests {
 
     fn date(year: i32, month: u32, day: u32) -> DateValue {
         DateValue::Date(NaiveDate::from_ymd_opt(year, month, day).unwrap())
+    }
+
+    fn result_date(year: i32, month: u32, day: u32) -> DateResult {
+        DateResult::Date(NaiveDate::from_ymd_opt(year, month, day).unwrap())
+    }
+
+    fn evaluated_result(
+        expression: &str,
+        reference: NaiveDateTime,
+    ) -> Result<DateResult, DateArithmeticError> {
+        evaluate_expression(expression, reference).map(|outcome| outcome.result)
     }
 
     #[test]
@@ -752,25 +975,25 @@ mod tests {
     fn evaluates_word_and_operator_offset_forms_from_a_fixed_reference() {
         let reference = fixed_reference();
         for (expression, expected) in [
-            ("30 days from today", date(2026, 11, 4)),
-            ("2 WEEKS from TOMORROW", date(2026, 10, 20)),
-            ("3 months after 2026-10-05", date(2027, 1, 5)),
-            ("10 days before Christmas", date(2026, 12, 15)),
-            ("today + 10 days", date(2026, 10, 15)),
-            ("Friday - 3 weeks", date(2026, 9, 18)),
-            ("1 day from today", date(2026, 10, 6)),
-            ("-3 days from today", date(2026, 10, 2)),
+            ("30 days from today", result_date(2026, 11, 4)),
+            ("2 WEEKS from TOMORROW", result_date(2026, 10, 20)),
+            ("3 months after 2026-10-05", result_date(2027, 1, 5)),
+            ("10 days before Christmas", result_date(2026, 12, 15)),
+            ("today + 10 days", result_date(2026, 10, 15)),
+            ("Friday - 3 weeks", result_date(2026, 9, 18)),
+            ("1 day from today", result_date(2026, 10, 6)),
+            ("-3 days from today", result_date(2026, 10, 2)),
         ] {
             assert_eq!(
-                evaluate_expression(expression, reference),
+                evaluated_result(expression, reference),
                 Ok(expected),
                 "{expression}"
             );
         }
 
         assert_eq!(
-            evaluate_expression("2026-10-05", reference),
-            Ok(date(2026, 10, 5)),
+            evaluated_result("2026-10-05", reference),
+            Ok(result_date(2026, 10, 5)),
             "hyphens inside an ISO anchor are not offset operators"
         );
     }
@@ -779,16 +1002,16 @@ mod tests {
     fn applies_calendar_month_and_year_offsets_with_clamping() {
         let reference = fixed_reference();
         for (expression, expected) in [
-            ("1 month after 2025-01-31", date(2025, 2, 28)),
-            ("1 month after 2024-01-31", date(2024, 2, 29)),
-            ("2024-02-29 + 1 year", date(2025, 2, 28)),
-            ("2024-02-29 - 1 year", date(2023, 2, 28)),
-            ("3 months before 2026-10-05", date(2026, 7, 5)),
-            ("2026-10-05 - 1 year", date(2025, 10, 5)),
-            ("1 month after 2026-12-31", date(2027, 1, 31)),
+            ("1 month after 2025-01-31", result_date(2025, 2, 28)),
+            ("1 month after 2024-01-31", result_date(2024, 2, 29)),
+            ("2024-02-29 + 1 year", result_date(2025, 2, 28)),
+            ("2024-02-29 - 1 year", result_date(2023, 2, 28)),
+            ("3 months before 2026-10-05", result_date(2026, 7, 5)),
+            ("2026-10-05 - 1 year", result_date(2025, 10, 5)),
+            ("1 month after 2026-12-31", result_date(2027, 1, 31)),
         ] {
             assert_eq!(
-                evaluate_expression(expression, reference),
+                evaluated_result(expression, reference),
                 Ok(expected),
                 "{expression}"
             );
@@ -798,45 +1021,45 @@ mod tests {
     #[test]
     fn subday_offsets_require_and_preserve_a_date_time_anchor() {
         let reference = fixed_reference();
-        let expected_from_now = DateValue::DateTime(
+        let expected_from_now = DateResult::DateTime(
             NaiveDate::from_ymd_opt(2026, 10, 5)
                 .unwrap()
                 .and_hms_opt(17, 30, 0)
                 .unwrap(),
         );
-        let expected_explicit = DateValue::DateTime(
+        let expected_explicit = DateResult::DateTime(
             NaiveDate::from_ymd_opt(2026, 10, 5)
                 .unwrap()
                 .and_hms_opt(16, 0, 0)
                 .unwrap(),
         );
         assert_eq!(
-            evaluate_expression("3 hours from now", reference),
+            evaluated_result("3 hours from now", reference),
             Ok(expected_from_now)
         );
         assert_eq!(
-            evaluate_expression("90 minutes after 2026-10-05 14:30", reference),
+            evaluated_result("90 minutes after 2026-10-05 14:30", reference),
             Ok(expected_explicit)
         );
 
-        let expected_day_shift = DateValue::DateTime(
+        let expected_day_shift = DateResult::DateTime(
             NaiveDate::from_ymd_opt(2026, 10, 6)
                 .unwrap()
                 .and_hms_opt(14, 30, 0)
                 .unwrap(),
         );
-        let expected_month_shift = DateValue::DateTime(
+        let expected_month_shift = DateResult::DateTime(
             NaiveDate::from_ymd_opt(2025, 2, 28)
                 .unwrap()
                 .and_hms_opt(14, 30, 0)
                 .unwrap(),
         );
         assert_eq!(
-            evaluate_expression("1 day after 2026-10-05 14:30", reference),
+            evaluated_result("1 day after 2026-10-05 14:30", reference),
             Ok(expected_day_shift)
         );
         assert_eq!(
-            evaluate_expression("1 month after 2025-01-31 14:30", reference),
+            evaluated_result("1 month after 2025-01-31 14:30", reference),
             Ok(expected_month_shift)
         );
         assert!(matches!(
@@ -869,5 +1092,127 @@ mod tests {
             evaluate_expression("two days from today", reference),
             Err(DateArithmeticError::InvalidSyntax { .. })
         ));
+    }
+
+    #[test]
+    fn calculates_signed_day_and_week_differences_from_written_anchors() {
+        let reference = fixed_reference();
+        for (expression, expected) in [
+            (
+                "days between October 5 2026 and Christmas",
+                DateResult::Difference {
+                    value: 81.0,
+                    unit: DateDifferenceUnit::Days,
+                },
+            ),
+            (
+                "DAYS BETWEEN Christmas and Oct 5 2026",
+                DateResult::Difference {
+                    value: -81.0,
+                    unit: DateDifferenceUnit::Days,
+                },
+            ),
+            (
+                "weeks between 2026-10-05 and 2026-10-19",
+                DateResult::Difference {
+                    value: 2.0,
+                    unit: DateDifferenceUnit::Weeks,
+                },
+            ),
+            (
+                "weeks between Oct 5 2026 and Jan 1 2027",
+                DateResult::Difference {
+                    value: 88.0 / 7.0,
+                    unit: DateDifferenceUnit::Weeks,
+                },
+            ),
+        ] {
+            assert_eq!(
+                evaluated_result(expression, reference),
+                Ok(expected),
+                "{expression}"
+            );
+        }
+
+        let fractional_weeks =
+            evaluate_expression("weeks between Oct 5 2026 and Jan 1 2027", reference).unwrap();
+        assert_eq!(fractional_weeks.display_label, "12.5714 weeks");
+        assert_eq!(fractional_weeks.clipboard_payload, "12.5714 weeks");
+    }
+
+    #[test]
+    fn date_time_differences_preserve_fractional_days_and_reject_mixed_kinds() {
+        let reference = fixed_reference();
+        assert_eq!(
+            evaluated_result(
+                "days between 2026-10-05 14:30 and 2026-10-07 02:30",
+                reference,
+            ),
+            Ok(DateResult::Difference {
+                value: 1.5,
+                unit: DateDifferenceUnit::Days,
+            })
+        );
+        assert!(matches!(
+            evaluate_expression("days between today and now", reference),
+            Err(DateArithmeticError::IncompatibleDifferenceKinds { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_between_expressions_and_unsupported_difference_units() {
+        let reference = fixed_reference();
+        for expression in [
+            "days between today",
+            "days between today tomorrow",
+            "days between today and",
+            "days between and tomorrow",
+            "days between today and tomorrow and Friday",
+            "days between today and tomorrow and",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_expression(expression, reference),
+                    Err(DateArithmeticError::InvalidSyntax { .. })
+                ),
+                "{expression}"
+            );
+        }
+        assert!(matches!(
+            evaluate_expression("months between today and Christmas", reference),
+            Err(DateArithmeticError::UnsupportedDifferenceUnit { .. })
+        ));
+    }
+
+    #[test]
+    fn date_results_have_human_iso_display_and_separate_clipboard_payloads() {
+        let reference = fixed_reference();
+        let date_outcome = evaluate_expression("30 days from today", reference).unwrap();
+        assert_eq!(date_outcome.result, result_date(2026, 11, 4));
+        assert_eq!(
+            date_outcome.display_label,
+            "Wednesday, November 4, 2026 — 2026-11-04"
+        );
+        assert_eq!(date_outcome.clipboard_payload, "2026-11-04");
+
+        let minute_outcome = evaluate_expression("3 hours from now", reference).unwrap();
+        assert_eq!(
+            minute_outcome.display_label,
+            "Monday, October 5, 2026 17:30 — 2026-10-05 17:30"
+        );
+        assert_eq!(minute_outcome.clipboard_payload, "2026-10-05 17:30");
+
+        let seconds_outcome = evaluate_expression("2026-10-05T14:30:12.345600", reference).unwrap();
+        assert_eq!(
+            seconds_outcome.display_label,
+            "Monday, October 5, 2026 14:30:12.3456 — 2026-10-05 14:30:12.3456"
+        );
+        assert_eq!(
+            seconds_outcome.clipboard_payload,
+            "2026-10-05 14:30:12.3456"
+        );
+
+        let leap_second_outcome = evaluate_expression("2026-10-05T14:30:60", reference).unwrap();
+        assert_eq!(leap_second_outcome.clipboard_payload, "2026-10-05 14:30:60");
     }
 }
