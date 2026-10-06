@@ -11,6 +11,7 @@ pub mod color_picker;
 pub mod convert_panel;
 pub mod crop;
 pub mod data;
+pub mod date_arithmetic;
 pub mod diff;
 pub mod dropcalc;
 pub mod emoji;
