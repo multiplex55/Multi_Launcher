@@ -48,7 +48,7 @@ Owner/scope: shared OCR service language resolution, not the Windows backend's g
 
 ## M2-A — selector purpose and isolated event ownership
 
-Status: pending. Depends on M1. Commit: `feat(ocr): [M2-A] add general OCR rectangle capture purpose`.
+Status: complete. Depends on M1. Commit: `feat(ocr): [M2-A] add general OCR rectangle capture purpose`.
 
 Owner/scope: `src/gui/mkmacro_dialog/{visual_overlay,visual_capture_workflow}.rs` and exhaustive purpose matches/tests in `action_editor.rs`. Add `GeneralOcrCapture`; reuse existing native interaction with a narrow controller adapter. Isolate OCR completion/cancellation/error events from editor and Screen Draw drains, retain ID ownership through replacement and queued events, and cancel/retire only the requested operation. Preserve worker recovery and terminal shutdown. No native overlay fork or authoring asset workflow. Tests: purpose round-trip, signed coordinates, held-release/Esc behavior, editor polling isolation, startup failure, replacement/stale cancel. Verify `cargo nextest run --lib -E 'test(visual_overlay::) | test(visual_capture_workflow::)'`. Done when one service supplies OCR selection and all unrelated owners retain their own events.
 
@@ -134,9 +134,19 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 |---|---|---|---|
 | M0 | complete | none | Read-only current source/tests and complete approved plan inspected at 112cb87f; no build/test executed. |
 | M1-A | complete | `24ef239a` | `cargo fmt --all`; `cargo test --lib ocr::tests`: 23 passed; diff inspected. |
-| M1-B | complete | see checkpoint history | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
-| M2-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M1-B | complete | `911a6cc8` | Targeted Nextest `general_ocr_english_*`: 7 passed; installed profile preference/common variants/sorted fallback; diff inspected. |
+| M2-A | complete | see checkpoint history | Nextest overlay/capture-workflow modules: 66 passed; formatting and diff check passed; owner-aware OCR queue, cancellation ack retained. |
+| M2-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
 | Windows manual smoke | pending | — | — |
+
+
+### M2 lifecycle refinement from focused planning
+
+- Treat native terminal events as teardown acknowledgement: shared cancel_operation clears active_id immediately, so a missing active ID alone must never authorize restoration.
+- Keep explicit cancel/close owner until terminal acknowledgement; invalidate successful confirmation first. A racing confirmation may acknowledge teardown but cannot stage capture.
+- Stage parking and verify on separate frame polls after HWND discovery; reject active Color Pick/Screen Draw/unrelated overlay before mutation. Preserve exact geometry/newer visibility requests and restore-retry ownership.
+- M2-B confirmation retains signed geometry and parking for M4 capture; capture/recognition/clipboard must remain unused at M2-B. Duplicate invocation while selection/restoration owns root may be a no-op, matching Color Pick.
+- Root hooks: poll after HWND discovery; reconcile parking; suppress generic placement while OCR owns root; exit cancels only OCR and commits hidden without reopening. Color Pick/Screen Draw admission checks must reject OCR ownership.

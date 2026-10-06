@@ -10523,6 +10523,9 @@ mod tests {
                     RectanglePurpose::CropScreenshot => {
                         panic!("CropScreenshot is owned by the standalone crop workflow")
                     }
+                    RectanglePurpose::GeneralOcrCapture => {
+                        panic!("GeneralOcrCapture is owned by the OCR workflow")
+                    }
                     RectanglePurpose::ScreenDrawExport => {
                         panic!("ScreenDrawExport is owned by the Screen Draw workflow")
                     }

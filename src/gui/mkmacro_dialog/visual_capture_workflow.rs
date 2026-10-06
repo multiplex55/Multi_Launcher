@@ -16,6 +16,7 @@ use crate::mkmacro::{
 };
 use image::RgbaImage;
 use std::collections::{HashSet, VecDeque};
+use std::fmt;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -40,7 +41,47 @@ struct SharedOverlayClient {
     screen_draw_id: AtomicU64,
     screen_draw_events: Mutex<VecDeque<VisualOverlayEvent>>,
     discarded_screen_draw_ids: Mutex<HashSet<OperationId>>,
+    general_ocr_control: Mutex<()>,
+    general_ocr_events: Mutex<GeneralOcrEventOwner>,
 }
+#[derive(Default)]
+struct GeneralOcrEventOwner {
+    current_id: Option<OperationId>,
+    retired_id: Option<OperationId>,
+    events: VecDeque<VisualOverlayEvent>,
+}
+impl GeneralOcrEventOwner {
+    fn owns(&self, id: OperationId) -> bool {
+        self.current_id == Some(id) || self.retired_id == Some(id)
+    }
+
+    fn retire(&mut self, id: OperationId) {
+        if self.current_id == Some(id) {
+            self.current_id = None;
+        } else if self.retired_id == Some(id) {
+            self.retired_id = None;
+        }
+        self.events.retain(|event| event_operation_id(event) != id);
+    }
+}
+
+/// A prior OCR operation is still retired and must be polled before another
+/// replacement can exceed the bounded pair of current/retired identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GeneralOcrSelectionBusy {
+    pub operation_id: OperationId,
+}
+impl fmt::Display for GeneralOcrSelectionBusy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "OCR selection {} still has an unconsumed terminal event",
+            self.operation_id
+        )
+    }
+}
+impl std::error::Error for GeneralOcrSelectionBusy {}
+
 struct OverlayServiceState {
     service: Option<NativeVisualOverlayService>,
     terminal_shutdown: bool,
@@ -94,6 +135,8 @@ impl SharedVisualOverlayController {
             screen_draw_id: AtomicU64::new(0),
             screen_draw_events: Mutex::new(VecDeque::new()),
             discarded_screen_draw_ids: Mutex::new(HashSet::new()),
+            general_ocr_control: Mutex::new(()),
+            general_ocr_events: Mutex::new(GeneralOcrEventOwner::default()),
         }))
     }
 
@@ -259,7 +302,9 @@ impl SharedVisualOverlayController {
         buffered: Vec<VisualOverlayEvent>,
         failure: Option<String>,
     ) -> OperationId {
-        self.0.editor_events.lock().unwrap().extend(buffered);
+        for event in buffered {
+            self.route_event(event);
+        }
         if let Some(message) = failure {
             let _ = self
                 .0
@@ -272,11 +317,7 @@ impl SharedVisualOverlayController {
                     message,
                 },
             };
-            if self.0.screen_draw_id.load(Ordering::Acquire) == id {
-                self.0.screen_draw_events.lock().unwrap().push_back(event);
-            } else {
-                self.0.editor_events.lock().unwrap().push_back(event);
-            }
+            self.route_event(event);
         }
         self.sync_exclusive_owner();
         id
@@ -298,6 +339,35 @@ impl SharedVisualOverlayController {
                 virtual_desktop,
             },
         )
+    }
+
+    /// Starts a general-purpose OCR selection and registers its identity before
+    /// dispatch so startup/recovery errors use the OCR-owned event queue too.
+    /// One replaced operation may remain retired until its terminal event is
+    /// consumed; refusing a third identity keeps this owner bounded.
+    pub(crate) fn begin_general_ocr_rectangle_pick(
+        &self,
+        virtual_desktop: ScreenRect,
+    ) -> Result<OperationId, GeneralOcrSelectionBusy> {
+        let _control = self.0.general_ocr_control.lock().unwrap();
+        let id = {
+            let mut owner = self.0.general_ocr_events.lock().unwrap();
+            if let Some(operation_id) = owner.retired_id {
+                return Err(GeneralOcrSelectionBusy { operation_id });
+            }
+            let id = self.allocate();
+            owner.retired_id = owner.current_id.take();
+            owner.current_id = Some(id);
+            id
+        };
+        Ok(self.send_with_recovery(
+            id,
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::GeneralOcrCapture,
+                virtual_desktop,
+            },
+        ))
     }
     pub fn begin_point_pick(
         &self,
@@ -419,6 +489,22 @@ impl SharedVisualOverlayController {
         }
         self.cancel_operation(expected_operation_id);
     }
+
+    /// Cancels only an identity currently owned by the general OCR selector.
+    /// The owner slot remains until `poll_general_ocr_rectangle_event` consumes
+    /// the native terminal acknowledgement emitted after overlay cleanup.
+    pub(crate) fn cancel_general_ocr_operation(&self, expected_operation_id: OperationId) {
+        let _control = self.0.general_ocr_control.lock().unwrap();
+        if self
+            .0
+            .general_ocr_events
+            .lock()
+            .unwrap()
+            .owns(expected_operation_id)
+        {
+            self.cancel_operation(expected_operation_id);
+        }
+    }
     /// Cancels the operation which is current at the instant this method is called.
     /// Prefer [`Self::cancel_operation`] when an owner has retained its operation id.
     pub fn cancel(&self) {
@@ -445,30 +531,50 @@ impl SharedVisualOverlayController {
                 .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
         }
         self.sync_exclusive_owner();
-        let screen_draw_id = self.0.screen_draw_id.load(Ordering::Acquire);
-        let mut editor = self.0.editor_events.lock().unwrap();
-        let mut screen_draw = self.0.screen_draw_events.lock().unwrap();
-        let mut discarded = self.0.discarded_screen_draw_ids.lock().unwrap();
         for event in incoming {
-            let id = match &event {
-                VisualOverlayEvent::PointConfirmed { operation_id, .. }
-                | VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
-                | VisualOverlayEvent::Cancelled { operation_id }
-                | VisualOverlayEvent::Expired { operation_id }
-                | VisualOverlayEvent::Error { operation_id, .. } => *operation_id,
-            };
-            if discarded.remove(&id) {
-                let _ = self.0.screen_draw_id.compare_exchange(
-                    id,
-                    0,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
-            } else if id == screen_draw_id {
-                screen_draw.push_back(event);
-            } else {
-                editor.push_back(event);
+            self.route_event(event);
+        }
+    }
+
+    fn route_event(&self, event: VisualOverlayEvent) {
+        let id = event_operation_id(&event);
+        {
+            let mut owner = self.0.general_ocr_events.lock().unwrap();
+            if owner.owns(id) {
+                // Each OCR rectangle operation has one terminal event. Ignore
+                // duplicates so the purpose-specific queue stays bounded.
+                if !owner
+                    .events
+                    .iter()
+                    .any(|queued| event_operation_id(queued) == id)
+                {
+                    owner.events.push_back(event);
+                }
+                return;
             }
+        }
+        // Confirmation carries its purpose, allowing abandoned OCR confirms to
+        // be quarantined even after their identity has been consumed.
+        if matches!(
+            event,
+            VisualOverlayEvent::RectangleConfirmed {
+                purpose: RectanglePurpose::GeneralOcrCapture,
+                ..
+            }
+        ) {
+            return;
+        }
+
+        let mut discarded = self.0.discarded_screen_draw_ids.lock().unwrap();
+        if discarded.remove(&id) {
+            let _ =
+                self.0
+                    .screen_draw_id
+                    .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire);
+        } else if self.0.screen_draw_id.load(Ordering::Acquire) == id {
+            self.0.screen_draw_events.lock().unwrap().push_back(event);
+        } else {
+            self.0.editor_events.lock().unwrap().push_back(event);
         }
     }
     /// Drains events already produced by the native worker; it never advances native input.
@@ -478,6 +584,33 @@ impl SharedVisualOverlayController {
     }
     pub fn poll_rectangle_event(&self, expected: OperationId) -> Option<VisualOverlayEvent> {
         self.poll_rectangle(expected)
+    }
+
+    pub(crate) fn poll_general_ocr_rectangle_event(
+        &self,
+        expected: OperationId,
+    ) -> Option<VisualOverlayEvent> {
+        let _control = self.0.general_ocr_control.lock().unwrap();
+        self.receive_into_editor();
+        let mut owner = self.0.general_ocr_events.lock().unwrap();
+        if !owner.owns(expected) {
+            return None;
+        }
+        let position = owner
+            .events
+            .iter()
+            .position(|event| event_operation_id(event) == expected);
+        let event = position.and_then(|index| owner.events.remove(index));
+        if event.is_some() {
+            owner.retire(expected);
+            drop(owner);
+            let _ =
+                self.0
+                    .active_id
+                    .compare_exchange(expected, 0, Ordering::AcqRel, Ordering::Acquire);
+            self.sync_exclusive_owner();
+        }
+        event
     }
 
     fn poll_rectangle(&self, expected: OperationId) -> Option<VisualOverlayEvent> {
@@ -511,6 +644,16 @@ impl SharedVisualOverlayController {
             }
         }
         event
+    }
+}
+
+fn event_operation_id(event: &VisualOverlayEvent) -> OperationId {
+    match event {
+        VisualOverlayEvent::PointConfirmed { operation_id, .. }
+        | VisualOverlayEvent::RectangleConfirmed { operation_id, .. }
+        | VisualOverlayEvent::Cancelled { operation_id }
+        | VisualOverlayEvent::Expired { operation_id }
+        | VisualOverlayEvent::Error { operation_id, .. } => *operation_id,
     }
 }
 
@@ -1005,6 +1148,150 @@ mod tests {
         );
     }
 
+    fn wait_for_general_ocr_event(
+        controller: &SharedVisualOverlayController,
+        operation_id: OperationId,
+    ) -> VisualOverlayEvent {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            assert!(
+                controller.poll().is_empty(),
+                "macro editor polling must not steal general OCR events"
+            );
+            if let Some(event) = controller.poll_general_ocr_rectangle_event(operation_id) {
+                return event;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn general_ocr_rectangle_isolated_from_editor_poll_and_preserves_signed_geometry() {
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let desktop = ScreenRect::new(-1920, -240, 3840, 1320);
+        let operation_id = fixture
+            .controller
+            .begin_general_ocr_rectangle_pick(desktop)
+            .unwrap();
+        fixture.observer.wait_for_commands(1);
+        assert!(matches!(
+            fixture.observer.commands.lock().unwrap()[0],
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id: id,
+                purpose: RectanglePurpose::GeneralOcrCapture,
+                virtual_desktop,
+            } if id == operation_id && virtual_desktop == desktop
+        ));
+
+        fixture.observer.confirm_rectangle(
+            operation_id,
+            crate::mkmacro::MkPoint { x: -1800, y: -100 },
+            crate::mkmacro::MkPoint { x: 300, y: 700 },
+        );
+        assert_eq!(
+            wait_for_general_ocr_event(&fixture.controller, operation_id),
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose: RectanglePurpose::GeneralOcrCapture,
+                rect: ScreenRect::new(-1800, -100, 2100, 800),
+            }
+        );
+        assert_eq!(fixture.controller.operation_id(), None);
+    }
+
+    #[test]
+    fn general_ocr_cancel_keeps_owner_until_native_terminal_acknowledgement() {
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let operation_id = fixture
+            .controller
+            .begin_general_ocr_rectangle_pick(ScreenRect::new(-1920, -240, 3840, 1320))
+            .unwrap();
+        fixture.observer.wait_for_commands(1);
+        fixture
+            .controller
+            .cancel_general_ocr_operation(operation_id);
+        fixture.observer.wait_for_commands(2);
+        assert!(matches!(
+            fixture.observer.commands.lock().unwrap()[1],
+            VisualOverlayCommand::Cancel {
+                expected_operation_id: Some(id)
+            } if id == operation_id
+        ));
+        assert_eq!(
+            wait_for_general_ocr_event(&fixture.controller, operation_id),
+            VisualOverlayEvent::Cancelled { operation_id }
+        );
+        assert_eq!(fixture.controller.operation_id(), None);
+    }
+
+    #[test]
+    fn general_ocr_replacement_routes_retired_ack_and_rejects_third_owner() {
+        let fixture = SharedVisualOverlayController::test_fixture();
+        let desktop = ScreenRect::new(-1920, -240, 3840, 1320);
+        let first = fixture
+            .controller
+            .begin_general_ocr_rectangle_pick(desktop)
+            .unwrap();
+        fixture.observer.wait_for_commands(1);
+        let current = fixture
+            .controller
+            .begin_general_ocr_rectangle_pick(desktop)
+            .unwrap();
+        fixture.observer.wait_for_commands(3);
+        assert_ne!(first, current);
+        assert!(matches!(
+            fixture.observer.commands.lock().unwrap()[1],
+            VisualOverlayCommand::Cancel {
+                expected_operation_id: Some(id)
+            } if id == first
+        ));
+        assert!(matches!(
+            fixture.observer.commands.lock().unwrap()[2],
+            VisualOverlayCommand::BeginRectanglePick {
+                operation_id,
+                purpose: RectanglePurpose::GeneralOcrCapture,
+                ..
+            } if operation_id == current
+        ));
+
+        assert_eq!(
+            fixture
+                .controller
+                .begin_general_ocr_rectangle_pick(desktop)
+                .unwrap_err()
+                .operation_id,
+            first,
+            "do not replace again while an older terminal event is unconsumed"
+        );
+        fixture.controller.cancel_general_ocr_operation(first);
+        assert_eq!(
+            fixture.controller.operation_id(),
+            Some(current),
+            "a stale cancellation must not cancel the replacement"
+        );
+        assert_eq!(
+            wait_for_general_ocr_event(&fixture.controller, first),
+            VisualOverlayEvent::Cancelled {
+                operation_id: first
+            }
+        );
+
+        fixture.observer.confirm_rectangle(
+            current,
+            crate::mkmacro::MkPoint { x: -300, y: -120 },
+            crate::mkmacro::MkPoint { x: 120, y: 60 },
+        );
+        assert_eq!(
+            wait_for_general_ocr_event(&fixture.controller, current),
+            VisualOverlayEvent::RectangleConfirmed {
+                operation_id: current,
+                purpose: RectanglePurpose::GeneralOcrCapture,
+                rect: ScreenRect::new(-300, -120, 420, 180),
+            }
+        );
+    }
+
     #[test]
     fn synchronous_screen_draw_start_failure_uses_the_screen_draw_event_queue() {
         let controller = SharedVisualOverlayController::new_with_controller_factory(|| {
@@ -1019,6 +1306,23 @@ mod tests {
             controller.poll_rectangle_event(operation_id),
             Some(VisualOverlayEvent::Error { operation_id: id, error })
                 if id == operation_id && error.message.contains("fixture startup failure")
+        ));
+        assert_eq!(controller.operation_id(), None);
+    }
+
+    #[test]
+    fn synchronous_general_ocr_start_failure_uses_the_ocr_event_queue() {
+        let controller = SharedVisualOverlayController::new_with_controller_factory(|| {
+            Err(std::io::Error::other("fixture OCR startup failure"))
+        });
+        let operation_id = controller
+            .begin_general_ocr_rectangle_pick(ScreenRect::new(-1920, -240, 3840, 1320))
+            .unwrap();
+        assert!(controller.poll().is_empty());
+        assert!(matches!(
+            controller.poll_general_ocr_rectangle_event(operation_id),
+            Some(VisualOverlayEvent::Error { operation_id: id, error })
+                if id == operation_id && error.message.contains("fixture OCR startup failure")
         ));
         assert_eq!(controller.operation_id(), None);
     }

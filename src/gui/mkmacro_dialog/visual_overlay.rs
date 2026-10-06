@@ -171,6 +171,7 @@ pub enum PointInteractionPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RectanglePurpose {
     CropScreenshot,
+    GeneralOcrCapture,
     ScreenDrawExport,
     SearchRegion,
     ReferenceImageCapture,
@@ -2979,6 +2980,7 @@ mod tests {
         for purpose in [
             RectanglePurpose::SearchRegion,
             RectanglePurpose::CropScreenshot,
+            RectanglePurpose::GeneralOcrCapture,
             RectanglePurpose::ReferenceImageCapture,
         ] {
             let (mut controller, fake, _) = controller();
@@ -3056,6 +3058,7 @@ mod tests {
         for purpose in [
             RectanglePurpose::SearchRegion,
             RectanglePurpose::CropScreenshot,
+            RectanglePurpose::GeneralOcrCapture,
             RectanglePurpose::ReferenceImageCapture,
         ] {
             let (mut controller, fake, _) = controller();
@@ -3090,79 +3093,83 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
         }
-        assert_eq!(presentations.len(), 3);
+        assert_eq!(presentations.len(), 4);
         assert!(presentations.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]
     fn escape_before_and_during_drag_closes_once_and_emits_one_cancellation() {
-        for start_drag in [false, true] {
-            let (mut controller, fake, _) = controller();
-            let id = controller.begin_rectangle_pick(
-                RectanglePurpose::SearchRegion,
-                ScreenRect::new(0, 0, 100, 100),
-            );
-            let mut inputs = Vec::new();
-            if start_drag {
+        for purpose in [
+            RectanglePurpose::SearchRegion,
+            RectanglePurpose::GeneralOcrCapture,
+        ] {
+            for start_drag in [false, true] {
+                let (mut controller, fake, _) = controller();
+                let id = controller.begin_rectangle_pick(purpose, ScreenRect::new(0, 0, 100, 100));
+                let mut inputs = Vec::new();
+                if start_drag {
+                    inputs.push(OverlayInput {
+                        operation_id: id,
+                        kind: OverlayInputKind::LeftPressed(point(10, 20)),
+                    });
+                    inputs.push(OverlayInput {
+                        operation_id: id,
+                        kind: OverlayInputKind::PointerMoved(point(30, 40)),
+                    });
+                }
                 inputs.push(OverlayInput {
                     operation_id: id,
-                    kind: OverlayInputKind::LeftPressed(point(10, 20)),
+                    kind: OverlayInputKind::Escape,
                 });
-                inputs.push(OverlayInput {
-                    operation_id: id,
-                    kind: OverlayInputKind::PointerMoved(point(30, 40)),
-                });
+                fake.lock().unwrap().inputs = inputs;
+                assert_eq!(
+                    advance_and_drain(&mut controller),
+                    vec![VisualOverlayEvent::Cancelled { operation_id: id }]
+                );
+                assert!(advance_and_drain(&mut controller).is_empty());
+                assert_eq!(close_count(&fake), 1);
             }
-            inputs.push(OverlayInput {
-                operation_id: id,
-                kind: OverlayInputKind::Escape,
-            });
-            fake.lock().unwrap().inputs = inputs;
-            assert_eq!(
-                advance_and_drain(&mut controller),
-                vec![VisualOverlayEvent::Cancelled { operation_id: id }]
-            );
-            assert!(advance_and_drain(&mut controller).is_empty());
-            assert_eq!(close_count(&fake), 1);
         }
     }
 
     #[test]
     fn held_launch_click_is_consumed_before_picker_arms() {
-        let (mut c, fake, _) = controller();
-        fake.lock().unwrap().left_down = true;
-        let id = c.begin_rectangle_pick(
+        for purpose in [
             RectanglePurpose::SearchRegion,
-            ScreenRect::new(-100, -100, 200, 200),
-        );
-        assert!(matches!(
-            c.state(),
-            VisualOverlayState::PickingRectangle {
-                phase: RectangleInteractionPhase::AwaitingInitialRelease,
-                ..
-            }
-        ));
-        fake.lock().unwrap().inputs = vec![OverlayInput {
-            operation_id: id,
-            kind: OverlayInputKind::LeftReleased(point(40, 50)),
-        }];
-        assert!(advance_and_drain(&mut c).is_empty());
-        assert!(matches!(
-            c.state(),
-            VisualOverlayState::PickingRectangle {
-                phase: RectangleInteractionPhase::Armed,
-                ..
-            }
-        ));
-        queue_drag(&fake, id, point(-80, -60), point(70, 90));
-        assert_eq!(
-            advance_and_drain(&mut c),
-            vec![VisualOverlayEvent::RectangleConfirmed {
+            RectanglePurpose::GeneralOcrCapture,
+        ] {
+            let (mut c, fake, _) = controller();
+            fake.lock().unwrap().left_down = true;
+            let id = c.begin_rectangle_pick(purpose, ScreenRect::new(-100, -100, 200, 200));
+            assert!(matches!(
+                c.state(),
+                VisualOverlayState::PickingRectangle {
+                    phase: RectangleInteractionPhase::AwaitingInitialRelease,
+                    ..
+                }
+            ));
+            fake.lock().unwrap().inputs = vec![OverlayInput {
                 operation_id: id,
-                purpose: RectanglePurpose::SearchRegion,
-                rect: ScreenRect::new(-80, -60, 150, 150),
-            }]
-        );
+                kind: OverlayInputKind::LeftReleased(point(40, 50)),
+            }];
+            assert!(advance_and_drain(&mut c).is_empty());
+            assert!(matches!(
+                c.state(),
+                VisualOverlayState::PickingRectangle {
+                    phase: RectangleInteractionPhase::Armed,
+                    ..
+                }
+            ));
+            queue_drag(&fake, id, point(-80, -60), point(70, 90));
+            assert_eq!(
+                advance_and_drain(&mut c),
+                vec![VisualOverlayEvent::RectangleConfirmed {
+                    operation_id: id,
+                    purpose,
+                    rect: ScreenRect::new(-80, -60, 150, 150),
+                }]
+            );
+        }
     }
 
     #[test]
