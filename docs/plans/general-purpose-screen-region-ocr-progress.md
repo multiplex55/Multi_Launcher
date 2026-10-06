@@ -112,7 +112,7 @@ Focused current-source planner found M6-A needs verification only: existing OCR 
 
 ## M7-A — MkMacro compatibility gate
 
-Status: pending. Depends on shared changes being coherent. Optional diff commit: `test(mkmacro): [M7-A] protect shared OCR compatibility`.
+Status: complete. Depends on shared changes being coherent. Test checkpoint: `test(mkmacro): [M7-A] protect configurable OCR language forwarding`.
 
 Verify existing Find/Click/Read Text, OCR conditions/Wait Until, configurable/Auto languages, region capture/tiling/reconstruction, output/match/occurrence semantics, schema and visual authoring/debug. Use `cargo nextest run --lib -E 'test(mkmacro::ocr::) | test(ocr_execution_tests::) | test(ocr_test_job::) | test(ocr_controls::)'`, plus directly affected serialization/debug tests if their code changed. No complete unrelated MkMacro campaign. Record results without empty commit when no test/code diff is needed.
 
@@ -152,11 +152,12 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M5-B | complete | `41b68d26` | NoText/Error/Recognizing omit Copy; concise guidance uses existing diagnostic kind/context and retains originals. Compile PID 10216 passed; 9 surface/error/cancel tests PID 20752 passed; fmt PID 21936 and diff passed, all identities absent. |
 | M5-C | complete | `55ddefd2` | Two focused repeated-use/blocked-recognition regressions; latest compile PID 8584, two tests PID 21660 and fmt PID 19232 passed. Unchanged 14 surface/lifecycle cases reused from initial 16-pass run PID 20128. All identities absent; diff check passed. |
 | M6-A | complete | no source commit | Nine existing exact signed geometry/compositor/selector cases passed, PID 13592. No additional geometry matrix needed; hardware scaling remains manual. |
-| M6-B | complete | this checkpoint | Two app-level error/shutdown regressions; compile PID 15944, 4 relevant tests PID 15292, fmt PID 18692 and diff check passed. All recorded identities absent. |
-| M7-A / M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M6-B | complete | `2e77e4dd` | Two app-level error/shutdown regressions; compile PID 15944, 4 relevant tests PID 15292, fmt PID 18692 and diff check passed. All recorded identities absent. |
+| M7-A | complete | this checkpoint | Strengthened existing all-tile `el-GR` forwarding assertion; 54 relevant core/authoring/debug tests passed, 1 native prerequisite ignored. Compile/fmt/diff passed; all owned identities absent. |
+| M8-A | pending | — | README-only workflow documentation planned; current in-app metadata/help already sufficient. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
-| M9-C review | pending | — | — |
+| M9-C review | complete | through `2e77e4dd` | Independent read-only source/diff/caller review found no substantive defects. Shared mechanics, workflow/worker, overlay routing/cleanup, root/latest intent, clipboard/undo/text lifetime, policy and compatibility checked. Prior factory remediation review remains applicable. Verification/manual gates separate. |
 | Windows manual smoke | pending | — | — |
 
 
@@ -196,6 +197,8 @@ M3-B implemented hidden-origin admission/cancel. M4 success must intentionally p
 - Concrete gap: strengthen existing `recognize_region_captures_once_translates_deduplicates_and_orders` to forward `el-GR` through every tile (currently en-US); retain supplied-capture Auto coverage. This protects MkMacro's non-English behavior through the extracted helper without an unnecessary executor language matrix. All other compatibility behaviors already have meaningful tests. No M7 source/test change has yet been made.
 
 ### M4-B natural checkpoint split
+
+- M7-A evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M7A-{compile1,core1,authoring1,overlayrole1,fmtcheck}-20261006/`. Compile PID 9080 passed; core PID 21688 (39 passed/1 ignored), authoring PID 18708 (14 passed), exact overlay role PID 8720 (1 passed), fmt PID 4136. One-line test change proves configured non-English language is forwarded through the shared split; Auto and all tiling/geometry/matching/schema/action/output assertions retained. Planner's file-based overlay module name matched no test and was corrected to actual `gui::mkmacro_dialog::visual_overlay::native::tests::ocr_full_surface_role_is_nonactivating_and_hit_test_transparent`; isolated case actually passed. No production change or native/manual claim.
 
 - M6 evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M6B-{compile1,lifecycle1,fmtcheck}-20261006/` and `ocr-M6A-geometry1-20261006/`. Test-only recognition diagnostic fixture preserves original kind/message/context after restored-root failure. Shutdown tests block both capture and recognition, assert return before release, clear workflow/view/undo/focus, and wait full old-worker ownership retirement before proving newer intent cannot be undone. Four relevant lifecycle tests and nine exact existing geometry tests passed. Parent inspected test diff; no production change, native probe, manual claim, or duplicate matrix.
 

@@ -1694,7 +1694,7 @@ mod tests {
             origin: (-200, -50),
             captures: AtomicUsize::new(0),
         };
-        let language = MkOcrLanguage::LanguageTag("en-US".into());
+        let language = MkOcrLanguage::LanguageTag("el-GR".into());
         let backend = FakeOcr {
             maximum: 100,
             documents: Mutex::new(VecDeque::from([
