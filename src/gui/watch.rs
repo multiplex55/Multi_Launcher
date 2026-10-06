@@ -223,7 +223,7 @@ impl LauncherApp {
                     Ok((aliases, aliases_lc)) => {
                         self.folder_aliases = aliases;
                         self.folder_aliases_lc = aliases_lc;
-                        self.search();
+                        self.request_background_query_refresh();
                     }
                     Err(error) => self.report_error_message(
                         "folders.reload",
@@ -242,7 +242,7 @@ impl LauncherApp {
                     Ok((aliases, aliases_lc)) => {
                         self.bookmark_aliases = aliases;
                         self.bookmark_aliases_lc = aliases_lc;
-                        self.search();
+                        self.request_background_query_refresh();
                     }
                     Err(error) => self.report_error_message(
                         "bookmarks.reload",

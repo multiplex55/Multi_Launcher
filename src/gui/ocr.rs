@@ -181,6 +181,10 @@ impl LauncherApp {
             || self.ocr.parking.is_some()
     }
 
+    pub(super) fn ocr_defers_launcher_query_refresh(&self) -> bool {
+        self.ocr_owns_root() || self.ocr_surface_visible()
+    }
+
     fn ensure_ocr_selection_admitted(&self) -> Result<(), String> {
         if self.color_pick_owns_root() || self.color_pick.controller.is_active() {
             return Err("Finish or cancel the screen color picker before starting OCR".into());
@@ -2166,5 +2170,165 @@ mod tests {
             assert_eq!(observer.current_rect(), newer_rect);
             assert_eq!(backend.rectangles.lock().unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn ocr_assigned_net_query_due_refresh_preserves_recognizing_selection_until_close() {
+        let (_root, mut app) = activation_app(false);
+        app.query = "net".into();
+        app.selected = Some(2);
+        app.last_search_query = app.query.clone();
+        app.last_results_valid = true; // isolate the cached periodic refresh
+        app.last_plugin_search_generation = app.plugins.search_generation();
+        app.net_refresh = 0.;
+        let backend = async_backend(&mut app, true, false, "text", false);
+        let fixture = SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+        app.activate_action(
+            ocr_action(),
+            None,
+            crate::commands::ActivationSource::RadialShortcut,
+        );
+        install_activation_parking(&mut app, original());
+        let (_, id) = app.ocr.controller.operation().unwrap();
+        confirm(&fixture, id);
+        wait(&mut app, |app| {
+            backend.recognition_started.load(Ordering::SeqCst) && app.ocr_surface_visible()
+        });
+        let generation = app.ocr.session.as_ref().unwrap().id;
+        let ctx = app.egui_ctx.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.render_root_frame(ctx, None)
+        });
+        backend.recognition_gate.release();
+        assert_eq!(
+            app.selected,
+            Some(2),
+            "automatic cached net refresh must not supersede OCR"
+        );
+        assert!(app.ocr_surface_visible());
+        assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
+        app.close_ocr_surface();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.render_root_frame(ctx, None)
+        });
+        assert_eq!(
+            app.selected, None,
+            "ordinary net refresh resumes after Close"
+        );
+    }
+
+    #[test]
+    fn ocr_result_defers_timer_note_and_plugin_refresh_without_consuming_due_work() {
+        for query in ["timer list", "note search saved", "saved query"] {
+            let (_root, mut app) = activation_app(false);
+            app.query = query.into();
+            app.selected = Some(2);
+            app.last_search_query = app.query.clone();
+            app.last_results_valid = true;
+            app.last_plugin_search_generation = app.plugins.search_generation();
+            app.timer_refresh = 0.;
+            let note_change = Instant::now() - Duration::from_secs(2);
+            app.last_note_search_change = Some(note_change);
+            if query == "saved query" {
+                app.last_plugin_search_generation = app.plugins.search_generation().wrapping_add(1);
+            }
+            let unconsumed_generation = app.last_plugin_search_generation;
+            let timer_update = app.last_timer_update;
+            async_backend(&mut app, true, true, "result", false);
+            let fixture = SharedVisualOverlayController::test_fixture();
+            app.mkmacro_dialog.visual_overlay = fixture.controller.clone();
+            app.activate_action(
+                ocr_action(),
+                None,
+                crate::commands::ActivationSource::RadialShortcut,
+            );
+            install_activation_parking(&mut app, original());
+            let (_, id) = app.ocr.controller.operation().unwrap();
+            confirm(&fixture, id);
+            wait(&mut app, |app| {
+                matches!(
+                    app.ocr.controller.presentation(),
+                    Some(OcrPresentation::Result(_))
+                )
+            });
+            let generation = app.ocr.session.as_ref().unwrap().id;
+            let ctx = app.egui_ctx.clone();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                app.render_root_frame(ctx, None)
+            });
+            assert_eq!(app.selected, Some(2), "{query}");
+            assert_eq!(app.last_plugin_search_generation, unconsumed_generation);
+            assert_eq!(app.last_timer_update, timer_update);
+            assert_eq!(app.last_note_search_change, Some(note_change));
+            assert!(app.ocr_surface_visible());
+            assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
+            app.close_ocr_surface();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                app.render_root_frame(ctx, None)
+            });
+            assert_eq!(app.selected, None, "due refresh resumes for {query}");
+            assert_eq!(
+                app.last_plugin_search_generation,
+                app.plugins.search_generation()
+            );
+            if query == "note search saved" {
+                assert!(app.last_note_search_change.is_none());
+            }
+            if query == "timer list" {
+                assert!(app.last_timer_update > timer_update);
+            }
+        }
+    }
+
+    #[test]
+    fn ocr_background_reload_and_capacity_refresh_wait_for_parking_release() {
+        let (_root, mut app) = activation_app(false);
+        app.last_plugin_search_generation = app.plugins.search_generation();
+        let (_fixture, _, _) = start(&mut app);
+        let generation = app.ocr.session.as_ref().unwrap().id;
+        app.publish_actions(vec![ocr_action()], Vec::new());
+        assert!(app.background_query_refresh_pending);
+        assert_eq!(app.selected, Some(2));
+        app.last_results_valid = false;
+        app.last_search_query = app.query.clone();
+        app.last_search_provider_deferral = super::super::search::ProviderSearchDeferral::Capacity;
+        app.event_tx
+            .send(super::super::WatchEvent::AuthoringProviderCapacityAvailable)
+            .unwrap();
+        let ctx = app.egui_ctx.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.render_root_frame(ctx, None)
+        });
+        assert_eq!(app.selected, Some(2));
+        assert!(app.background_query_refresh_pending);
+        assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
+        assert!(app.ocr_owns_root());
+        app.close_ocr_surface();
+        wait(&mut app, |app| app.ocr.session.is_none());
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.render_root_frame(ctx, None)
+        });
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.selected, None);
+        assert!(app.last_results_valid);
+    }
+
+    #[test]
+    fn ocr_explicit_pending_query_consumes_background_demand_and_supersedes_result() {
+        let (_root, mut app) = presented_app();
+        app.request_background_query_refresh();
+        assert!(app.background_query_refresh_pending);
+        app.pending_query = Some("new explicit query".into());
+        let ctx = app.egui_ctx.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.render_root_frame(ctx, None)
+        });
+        assert_eq!(app.query, "new explicit query");
+        assert!(!app.background_query_refresh_pending);
+        assert!(!app.ocr_surface_visible());
+        poll(&mut app);
+        assert!(app.ocr.session.is_none());
+        assert_eq!(app.query, "new explicit query");
     }
 }

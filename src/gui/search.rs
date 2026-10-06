@@ -264,6 +264,9 @@ impl LauncherApp {
     }
 
     pub fn search(&mut self) {
+        // An explicit search satisfies any pending background refresh using
+        // the current query, including a newer user intent during OCR.
+        self.background_query_refresh_pending = false;
         let perf_enabled = crate::performance::enabled();
         let total_started = crate::performance::started_if(perf_enabled);
         let suppress_deferred_fallback_provider = self
@@ -313,6 +316,20 @@ impl LauncherApp {
         crate::performance::log_elapsed("search.total", total_started);
     }
 
+    pub(super) fn request_background_query_refresh(&mut self) {
+        if self.ocr_defers_launcher_query_refresh() {
+            self.background_query_refresh_pending = true;
+        } else {
+            self.search();
+        }
+    }
+
+    pub(super) fn flush_background_query_refresh(&mut self) {
+        if self.background_query_refresh_pending {
+            self.request_background_query_refresh();
+        }
+    }
+
     pub(super) fn resume_capacity_deferred_search(&mut self) {
         if std::mem::take(&mut self.last_search_provider_deferral)
             == ProviderSearchDeferral::Capacity
@@ -323,7 +340,7 @@ impl LauncherApp {
             // by the worker that released capacity. Deliberate failed-query
             // fallback has no capacity deferral and stays suppressed.
             self.last_results_valid = false;
-            self.search();
+            self.request_background_query_refresh();
         }
     }
 

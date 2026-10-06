@@ -1074,7 +1074,9 @@ impl LauncherApp {
         }
 
         let plugin_search_generation = self.plugins.search_generation();
-        if plugin_search_generation != self.last_plugin_search_generation {
+        if plugin_search_generation != self.last_plugin_search_generation
+            && !self.ocr_defers_launcher_query_refresh()
+        {
             self.last_plugin_search_generation = plugin_search_generation;
             self.last_results_valid = false;
             self.search();
@@ -1148,7 +1150,9 @@ impl LauncherApp {
             self.search();
             self.focus_input();
         }
-        self.maybe_run_note_search_debounce();
+        if !self.ocr_defers_launcher_query_refresh() {
+            self.maybe_run_note_search_debounce();
+        }
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref())
             && t.elapsed().as_secs_f32() >= 3.0
         {
@@ -1466,18 +1470,21 @@ impl LauncherApp {
         });
 
         self.process_watch_events();
+        self.flush_background_query_refresh();
         self.start_next_authoring_provider_search();
         self.show_radial_placement_failure(ctx);
 
         let trimmed = self.query.trim().to_string();
         let use_dashboard = self.should_show_dashboard(trimmed.as_str());
-        self.maybe_refresh_timer_list();
-        self.maybe_refresh_stopwatch_list();
-        if trimmed.eq_ignore_ascii_case("net")
-            && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
-        {
-            self.search();
-            self.last_net_update = Instant::now();
+        if !self.ocr_defers_launcher_query_refresh() {
+            self.maybe_refresh_timer_list();
+            self.maybe_refresh_stopwatch_list();
+            if trimmed.eq_ignore_ascii_case("net")
+                && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
+            {
+                self.search();
+                self.last_net_update = Instant::now();
+            }
         }
 
         // The Action Sheet owns keyboard input before the launcher query and

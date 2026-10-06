@@ -913,6 +913,7 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    background_query_refresh_pending: bool,
     last_search_provider_deferral: search::ProviderSearchDeferral,
     last_plugin_search_generation: u64,
     last_timer_query: bool,
@@ -1025,7 +1026,7 @@ impl LauncherApp {
         actions.extend(additional);
         self.actions = Arc::new(actions);
         self.update_action_cache();
-        self.search();
+        self.request_background_query_refresh();
     }
 
     pub fn plugin_enabled(&self, name: &str) -> bool {
@@ -2289,6 +2290,7 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            background_query_refresh_pending: false,
             last_search_provider_deferral: Default::default(),
             last_plugin_search_generation: 0,
             last_timer_query: false,
