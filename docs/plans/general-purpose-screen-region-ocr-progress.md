@@ -118,7 +118,7 @@ Verify existing Find/Click/Read Text, OCR conditions/Wait Until, configurable/Au
 
 ## M8-A — discoverability/documentation
 
-Status: pending. Depends on feature behavior being coherent. Commit: `docs(ocr): [M8-A] document local screen region OCR workflow`.
+Status: complete. Depends on feature behavior being coherent. Commit: `docs(ocr): [M8-A] document local screen region OCR workflow`.
 
 Update relevant help/plugin metadata and current user-facing docs to explain `ocr`, local English recognition, region selection, manual Copy, re-capture and close. Inspect existing help metadata conventions; do not add speculative unsupported features. Verify affected help/plugin tests and review wording. Done when documentation matches actual shipped behavior.
 
@@ -153,8 +153,8 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M5-C | complete | `55ddefd2` | Two focused repeated-use/blocked-recognition regressions; latest compile PID 8584, two tests PID 21660 and fmt PID 19232 passed. Unchanged 14 surface/lifecycle cases reused from initial 16-pass run PID 20128. All identities absent; diff check passed. |
 | M6-A | complete | no source commit | Nine existing exact signed geometry/compositor/selector cases passed, PID 13592. No additional geometry matrix needed; hardware scaling remains manual. |
 | M6-B | complete | `2e77e4dd` | Two app-level error/shutdown regressions; compile PID 15944, 4 relevant tests PID 15292, fmt PID 18692 and diff check passed. All recorded identities absent. |
-| M7-A | complete | this checkpoint | Strengthened existing all-tile `el-GR` forwarding assertion; 54 relevant core/authoring/debug tests passed, 1 native prerequisite ignored. Compile/fmt/diff passed; all owned identities absent. |
-| M8-A | pending | — | README-only workflow documentation planned; current in-app metadata/help already sufficient. |
+| M7-A | complete | `69b3815c` | Strengthened existing all-tile `el-GR` forwarding assertion; 54 relevant core/authoring/debug tests passed, 1 native prerequisite ignored. Compile/fmt/diff passed; all owned identities absent. |
+| M8-A | complete | this checkpoint | README TOC/command table/compact workflow section; actual labels, local English, explicit copy, re-capture/close and language prerequisite. Markdown/diff reviewed; no executable runs for prose. Existing metadata/help reused. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | complete | through `2e77e4dd` | Independent read-only source/diff/caller review found no substantive defects. Shared mechanics, workflow/worker, overlay routing/cleanup, root/latest intent, clipboard/undo/text lifetime, policy and compatibility checked. Prior factory remediation review remains applicable. Verification/manual gates separate. |

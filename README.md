@@ -25,6 +25,7 @@ It’s designed to be “one hotkey away” from:
 - [File-search plugin](#file-search-plugin)
 - [Clipboard Modify](#clipboard-modify)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
+- [Screen region OCR](#screen-region-ocr)
 - [Dashboard](#dashboard)
 - [Mouse gestures](#mouse-gestures)
 - [MkMacro authoring and reuse](#mkmacro-authoring-and-reuse)
@@ -92,6 +93,7 @@ Multi Launcher is centered around a **single query box**:
 | `cm` | Clipboard Modify operations, templates, pipelines, and undo | `cm trim | uppercase` / `cm template prompt-context` |
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
+| `ocr` | Local English text recognition from a screen region | `ocr` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
@@ -448,6 +450,20 @@ with the usual `color #rrggbb` HEX/RGB/HSL results after selection. Choose a res
 to copy it; selecting a pixel alone leaves the clipboard unchanged. The picker
 supports signed desktop coordinates, including monitors to the left or above the
 primary monitor, and samples the frozen image throughout the session.
+
+## Screen region OCR
+
+Type `ocr` and activate **OCR Screen Region**. The launcher moves out of the way;
+drag a rectangle over the text and release to confirm. Escape cancels selection.
+Recognition runs locally using an installed English Windows OCR language.
+
+Select or edit the multiline result, then choose **Copy All** to copy the current
+edited text, including its line breaks. Recognition leaves the clipboard
+unchanged. **Re-capture** discards the current result and selects a fresh region;
+**Close** discards the transient result.
+
+If no English OCR language is installed, install an English language pack in
+**Windows Settings > Time & language > Language & region**, then try again.
 
 ## Dashboard
 
