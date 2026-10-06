@@ -5295,8 +5295,8 @@ Current branch: `date-and-unit`. Initial working tree: clean.
 | M3-C | complete | Date domain 15/15; signed differences, typed outcomes and clipboard formatting verified; checkpoint committed |
 | M4-A | complete | Date/filter 17/17; plugin_queries 130/130; independent review clear; checkpoint committed |
 | M4-B | complete | Existing implementation tests cover Base, panel, ts/tsm and enablement; no additional test commit needed |
-| M5-A | pending | User documentation |
-| M5-B | pending | Independent review and focused final verification |
+| M5-A | complete | README examples and semantics reviewed; checkpoint committed |
+| M5-B | complete | Cumulative independent review clear after fixes; fmt, focused tests and cargo check passed |
 
 Checkpoint commits are recorded in Git with the stage identifier. No full repository test run is required.
 
@@ -5307,3 +5307,12 @@ Checkpoint commits are recorded in Git with the stage identifier. No full reposi
 - M2-B independent conversion review identified canonical-symbol lookup gaps, missing required micro-sign/spaced fuel aliases, and avoidable intermediate floating-point range failures. Parent review also identified a filter-selection regression. Remediation completed in the panel integration checkpoint; source verification found no remaining issues and focused domain/panel plus plugin query tests passed.
 
 - M3-C follow-up review found accepted leap-second differences lost Chrono accounting. Explicit M5-B remediation uses signed Chrono durations and preserves trimmed fractional output; fresh targeted rebuild passed 15/15 and reviewer confirmed the difference fix.
+
+### Final verification
+
+- `cargo fmt --check`: passed.
+- `cargo nextest run --lib -E 'test(unit_conversion) | test(number_format) | test(convert_panel) | test(date_arithmetic)'`: 61/61 passed.
+- `cargo nextest run --test plugin_queries`: 130/130 passed at completed date integration; subsequent changes are README/ledger only.
+- `cargo check`: passed.
+- Cumulative diff and stale physical-conversion paths inspected. Calculator/history and timestamp source unchanged; dependencies unchanged. Test builds emitted three existing GUI render warnings.
+- Independent final review checked ownership, migration, compatibility and documented examples. Ton/volume definitions and cookbook heading placement corrected in documentation. No unresolved findings.

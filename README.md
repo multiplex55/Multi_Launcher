@@ -21,6 +21,7 @@ It’s designed to be “one hotkey away” from:
 - [Core workflow](#core-workflow)
 - [Command prefixes cheat sheet](#command-prefixes-cheat-sheet)
 - [Cookbook examples](#cookbook-examples)
+- [Date arithmetic](#date-arithmetic)
 - [File-search plugin](#file-search-plugin)
 - [Clipboard Modify](#clipboard-modify)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
@@ -94,6 +95,7 @@ Multi Launcher is centered around a **single query box**:
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
+| `date` | Local date arithmetic and date differences | `date tomorrow` / `date days between 2026-10-05 and 2026-12-25` |
 | `case` | Text case tools | `case snake Hello World` |
 | `ts` | Timestamp helpers | `ts` / `ts 1700000000` |
 | `emoji` | Emoji search | `emoji shrug` |
@@ -150,11 +152,23 @@ Multi Launcher is centered around a **single query box**:
 - Unit conversion:
   - `conv 225 lb to kg`
   - `conv 10 km to mi`
+  - `conv 1/2 cup to ml`
+  - `conv 1 cup 2 tbsp to ml`
+  - `conv 1 us gallon to imperial gallon`
+  - `conv 1 MB to Mb` (case distinguishes megabytes from megabits)
+  - `conv 1 MB/s to Mbps`
 - Base conversion:
   - `conv ff hex to dec`
   - `conv 255 dec to hex`
 - Open the conversion panel (good for repeated conversions):
   - `conv`
+
+Physical-unit conversions run locally and copy the converted value with its
+destination unit. Month and year conversions are fixed-duration approximations:
+`conv 1 month to days` uses 30 days, while `conv 1 year to days` uses 365 days.
+`ton` means a US short ton; use `tonne` or `metric ton` for the metric tonne.
+Unqualified customary volume names such as `cup`, `fl oz`, `pint`, `quart`, and
+`gallon` use US measures; use `imperial` names for Imperial measures.
 
 ### 4) Notes (markdown files)
 - Create a new note:
@@ -247,6 +261,33 @@ Good favorites to create:
   - `tmp list`
 - Remove:
   - `tmp rm scratch`
+
+---
+
+## Date arithmetic
+
+Use `date` for calendar arithmetic and date differences. It runs locally and
+copies dates in ISO form, local date-times in ISO-like form, and differences
+with their unit. Examples:
+
+- `date tomorrow`
+- `date 30 days from today`
+- `date 1 month after 2026-01-31` → February 28, 2026
+- `date days between 2026-10-05 and 2026-12-25` → `81 days`
+
+Date arithmetic treats months as calendar months, clamping to the last valid
+day when needed; this differs from `conv 1 month to days`, which uses an
+approximate 30-day duration. Differences are calculated as the second date
+minus the first, so the result can be negative.
+
+Anchors include `today`, `tomorrow`, `yesterday`, `now`, weekdays such as
+`next Friday`, `Christmas`, `New Year's Day`, ISO dates (`YYYY-MM-DD`),
+US-style dates (`M/D/YYYY`), and written dates such as `Oct 5 2026`. Local
+date-times use `YYYY-MM-DD HH:MM` or `YYYY-MM-DDTHH:MM`, optionally with seconds
+and fractional seconds; sub-day offsets such as hours and minutes require a
+local date-time anchor. Time-zone conversion is not supported. If `settings.json`
+uses an `enabled_plugins` allowlist, include `date_arithmetic` to enable the
+plugin.
 
 ---
 
