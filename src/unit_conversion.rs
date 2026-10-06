@@ -1315,7 +1315,7 @@ pub static UNIT_CATALOG: &[UnitDefinition] = &[
         Duration,
         "us",
         Strategy::Linear(1e-6),
-        ["us", "microsecond", "microseconds", "μs"]
+        ["us", "microsecond", "microseconds", "μs", "µs"]
     ),
     unit!(
         Millisecond,
@@ -1387,7 +1387,7 @@ pub static UNIT_CATALOG: &[UnitDefinition] = &[
         FuelEconomy,
         "lp100km",
         Strategy::FuelEconomy(FuelEconomyScale::LiterPer100Kilometers),
-        ["l/100km", "lper100km"]
+        ["l/100km", "l/100 km", "lper100km"]
     ),
     unit!(
         MilesPerUsGallon,
@@ -1569,6 +1569,13 @@ pub fn unit_by_alias(alias: &str) -> Option<Unit> {
         return Some(definition.unit);
     }
 
+    if let Some(definition) = UNIT_CATALOG
+        .iter()
+        .find(|definition| definition.symbol == alias)
+    {
+        return Some(definition.unit);
+    }
+
     let normalized = alias.to_lowercase();
     UNIT_CATALOG
         .iter()
@@ -1627,6 +1634,26 @@ fn is_linear_unit(unit: Unit) -> bool {
     matches!(definition(unit).strategy, Strategy::Linear(_))
 }
 
+fn conversion_is_in_range(value: f64, source_value: f64, from: Unit, to: Unit) -> bool {
+    value.is_finite()
+        && !(value == 0.0 && source_value != 0.0 && is_linear_unit(from) && is_linear_unit(to))
+}
+
+fn sum_components_in_unit(components: &[QuantityComponent], target: Unit) -> Option<f64> {
+    let mut sum = 0.0;
+    for component in components {
+        let converted = convert(component.value, component.unit, target)?;
+        if !conversion_is_in_range(converted, component.value, component.unit, target) {
+            return None;
+        }
+        sum += converted;
+        if !sum.is_finite() {
+            return None;
+        }
+    }
+    Some(sum)
+}
+
 /// Converts between two catalog units, rejecting incompatible categories.
 pub fn convert(value: f64, from: Unit, to: Unit) -> Option<f64> {
     if from == to {
@@ -1640,7 +1667,7 @@ pub fn convert(value: f64, from: Unit, to: Unit) -> Option<f64> {
 
     match (from_definition.strategy, to_definition.strategy) {
         (Strategy::Linear(from_factor), Strategy::Linear(to_factor)) => {
-            Some(value * from_factor / to_factor)
+            Some(value * (from_factor / to_factor))
         }
         (Strategy::Temperature(from_scale), Strategy::Temperature(to_scale)) => {
             Some(to_scale.from_kelvin(from_scale.to_kelvin(value)))
@@ -1842,53 +1869,32 @@ pub fn evaluate_request(request: ConversionRequest) -> Result<ConversionOutcome,
         }
     }
 
-    let source_value = if request.components.len() == 1 {
-        first.value
-    } else {
-        let mut sum = 0.0;
-        for component in &request.components {
-            let normalized = convert(component.value, component.unit, source_unit).ok_or(
-                ConversionError::IncompatibleUnits {
-                    source: source_unit,
-                    target: component.unit,
-                },
-            )?;
-            if !normalized.is_finite()
-                || (normalized == 0.0
-                    && component.value != 0.0
-                    && is_linear_unit(component.unit)
-                    && is_linear_unit(source_unit))
-            {
-                return Err(ConversionError::OutOfRange {
-                    expression: request.source_expression.clone(),
-                });
-            }
-            sum += normalized;
-            if !sum.is_finite() {
-                return Err(ConversionError::OutOfRange {
-                    expression: request.source_expression.clone(),
-                });
-            }
+    let value = if request.components.len() == 1 {
+        let converted = convert(first.value, source_unit, request.destination).ok_or(
+            ConversionError::IncompatibleUnits {
+                source: source_unit,
+                target: request.destination,
+            },
+        )?;
+        if !conversion_is_in_range(converted, first.value, source_unit, request.destination) {
+            return Err(ConversionError::OutOfRange {
+                expression: request.source_expression.clone(),
+            });
         }
-        sum
-    };
-
-    let value = convert(source_value, source_unit, request.destination).ok_or(
-        ConversionError::IncompatibleUnits {
-            source: source_unit,
-            target: request.destination,
-        },
-    )?;
-    if !value.is_finite()
-        || (value == 0.0
-            && source_value != 0.0
-            && is_linear_unit(source_unit)
-            && is_linear_unit(request.destination))
-    {
-        return Err(ConversionError::OutOfRange {
-            expression: request.source_expression.clone(),
+        converted
+    } else {
+        let source_sum = sum_components_in_unit(&request.components, source_unit);
+        let source_result = source_sum.and_then(|source_value| {
+            let converted = convert(source_value, source_unit, request.destination)?;
+            conversion_is_in_range(converted, source_value, source_unit, request.destination)
+                .then_some(converted)
         });
-    }
+        source_result
+            .or_else(|| sum_components_in_unit(&request.components, request.destination))
+            .ok_or_else(|| ConversionError::OutOfRange {
+                expression: request.source_expression.clone(),
+            })?
+    };
 
     let mut approximations = Vec::new();
     for unit in request
@@ -1965,6 +1971,11 @@ fn match_unit_prefix(input: &str) -> Option<(Unit, usize)> {
     let mut best = None;
 
     for definition in UNIT_CATALOG {
+        if let Some(consumed) = match_alias_prefix(input, definition.symbol, true)
+            && unit_alias_boundary(input, consumed)
+        {
+            update_alias_match(&mut best, definition.unit, consumed, true);
+        }
         for alias in definition.case_sensitive_aliases {
             if let Some(consumed) = match_alias_prefix(input, alias, true)
                 && unit_alias_boundary(input, consumed)
@@ -2278,8 +2289,24 @@ mod tests {
     }
 
     #[test]
-    fn every_catalog_alias_resolves_to_its_unit() {
+    fn every_catalog_symbol_and_alias_resolves_to_its_unit() {
         for definition in catalog() {
+            assert_eq!(
+                unit_by_alias(definition.symbol),
+                Some(definition.unit),
+                "symbol {:?} should resolve to {:?}",
+                definition.symbol,
+                definition.unit
+            );
+            let (matched, consumed) = super::match_unit_prefix(definition.symbol)
+                .unwrap_or_else(|| panic!("symbol {:?} should parse", definition.symbol));
+            assert_eq!(matched, definition.unit, "symbol {:?}", definition.symbol);
+            assert_eq!(
+                consumed,
+                definition.symbol.len(),
+                "symbol {:?}",
+                definition.symbol
+            );
             for alias in definition.aliases {
                 assert_eq!(
                     unit_by_alias(alias),
@@ -2750,6 +2777,11 @@ mod tests {
             354.882_354_75,
         );
         assert_close(evaluate_conversion("¾ in to mm").unwrap().value, 19.05);
+        assert_close(evaluate_conversion("1 µs to ns").unwrap().value, 1000.0);
+        assert_close(
+            evaluate_conversion("10 L/100 km to km/L").unwrap().value,
+            10.0,
+        );
     }
 
     #[test]
@@ -2767,6 +2799,20 @@ mod tests {
             266.161_766_062_5,
         );
         assert_close(evaluate_conversion("6ft2in to cm").unwrap().value, 187.96);
+        let large_compound = evaluate_conversion("1 mm 1e308 km to mi").unwrap();
+        assert!(large_compound.value.is_finite());
+        assert!((large_compound.value / 1e308 - 1000.0 / 1609.344).abs() < 1e-12);
+
+        assert_eq!(
+            evaluate_conversion("1e308 m -1e308 m to cm").unwrap().value,
+            0.0
+        );
+        assert_eq!(
+            evaluate_conversion("1e-323 bit 1e-323 bit 1e-323 bit to byte")
+                .unwrap()
+                .value,
+            f64::from_bits(1)
+        );
     }
 
     #[test]
@@ -2813,6 +2859,17 @@ mod tests {
             evaluate_conversion("1e308 GB to bit"),
             Err(ConversionError::OutOfRange { .. })
         ));
+    }
+
+    #[test]
+    fn linear_conversions_avoid_intermediate_overflow_and_underflow() {
+        let large = evaluate_conversion("1e308 km to mi").unwrap().value;
+        assert!(large.is_finite());
+        assert!((large / 1e308 - 1000.0 / 1609.344).abs() < 1e-12);
+
+        let tiny = evaluate_conversion("1e-320 mm² to cm²").unwrap().value;
+        assert!(tiny > 0.0);
+        assert!((tiny / 1e-320 - 0.01).abs() < 0.001);
     }
 
     #[test]

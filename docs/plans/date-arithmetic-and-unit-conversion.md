@@ -5289,8 +5289,8 @@ Current branch: `date-and-unit`. Initial working tree: clean.
 | M1-B | complete | Domain 27/27; unit plugin 16/16; exact customary factors and aliases verified; checkpoint committed |
 | M1-C | complete | Conversion and number-format filter 36/36; Unicode and zero-temperature regressions covered; checkpoint committed |
 | M2-A | complete | Unit/Base plugin filter 37/37; copied units, routing, documented numeric-to-decimal gap verified; checkpoint committed |
-| M2-B | in_progress | Panel integration and conversion review |
-| M3-A | pending | Deterministic date anchors |
+| M2-B | complete | Conversion/panel 41/41; plugin_queries 121/121; independent findings resolved; checkpoint committed |
+| M3-A | in_progress | Deterministic date anchors |
 | M3-B | pending | Calendar arithmetic |
 | M3-C | pending | Differences and presentation |
 | M4-A | pending | Date plugin integration |
@@ -5299,3 +5299,9 @@ Current branch: `date-and-unit`. Initial working tree: clean.
 | M5-B | pending | Independent review and focused final verification |
 
 Checkpoint commits are recorded in Git with the stage identifier. No full repository test run is required.
+
+### Execution decisions
+
+- M1-B replaced legacy rounded customary factors with exact definitions so gallon/fluid-ounce, mile/yard and pound/ounce relations remain coherent. The prior four-decimal speed result intentionally changed from 62.1373 to 62.1371 mph.
+- M2-A added binary/hexadecimal/octal-to-decimal cases because README and plan promised `conv ff hex to dec`, while baseline Base Convert did not implement it. Base conversion remains separate.
+- M2-B independent conversion review identified canonical-symbol lookup gaps, missing required micro-sign/spaced fuel aliases, and avoidable intermediate floating-point range failures. Parent review also identified a filter-selection regression. Remediation completed in the panel integration checkpoint; source verification found no remaining issues and focused domain/panel plus plugin query tests passed.
