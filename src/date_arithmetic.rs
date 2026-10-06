@@ -978,6 +978,21 @@ mod tests {
     }
 
     #[test]
+    fn approved_launcher_examples_have_fixed_reference_outcomes() {
+        let reference = fixed_reference();
+        for (expression, expected) in [
+            ("30 days from today", "2026-11-04"),
+            ("1 month after 2026-01-31", "2026-02-28"),
+            ("days between 2026-10-05 and 2026-12-25", "81 days"),
+            ("tomorrow", "2026-10-06"),
+        ] {
+            let outcome = evaluate_expression(expression, reference).unwrap();
+            assert!(!outcome.display_label.is_empty(), "{expression}");
+            assert_eq!(outcome.clipboard_payload, expected, "{expression}");
+        }
+    }
+
+    #[test]
     fn evaluates_word_and_operator_offset_forms_from_a_fixed_reference() {
         let reference = fixed_reference();
         for (expression, expected) in [

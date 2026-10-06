@@ -132,7 +132,12 @@ impl LauncherApp {
                 || action.starts_with("clipboard_modify:open:")
                 || action.starts_with("clipboard_modify:undo:"));
 
-        note_resolved || clipboard_modify_resolved
+        // Date expressions resolve to computed values or explanatory errors,
+        // neither of which must contain the original expression's words.
+        let date_resolved =
+            head == "date" && (action.starts_with("clipboard:") || action.starts_with("noop:"));
+
+        note_resolved || clipboard_modify_resolved || date_resolved
     }
 
     pub(crate) fn has_diagnostics_widget(&self) -> bool {
@@ -1220,6 +1225,30 @@ mod tests {
 #[cfg(test)]
 mod clipboard_modify_exact_filter_tests {
     use super::*;
+
+    #[test]
+    fn date_exact_filter_preserves_resolved_values_and_errors_only() {
+        assert!(LauncherApp::should_bypass_exact_post_filter(
+            "date 30 days from today",
+            "clipboard:2026-11-04"
+        ));
+        assert!(LauncherApp::should_bypass_exact_post_filter(
+            "date 2026-02-30",
+            "noop:invalid date"
+        ));
+        assert!(!LauncherApp::should_bypass_exact_post_filter(
+            "date 30 days from today",
+            "query:date today + 7 days"
+        ));
+        assert!(!LauncherApp::should_bypass_exact_post_filter(
+            "date 30 days from today",
+            "shell:unrelated"
+        ));
+        assert!(!LauncherApp::should_bypass_exact_post_filter(
+            "other 30 days from today",
+            "clipboard:2026-11-04"
+        ));
+    }
 
     #[test]
     fn exact_match_filter_keeps_complete_clipboard_modify_actions() {
