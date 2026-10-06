@@ -677,6 +677,7 @@ mod tests {
         rectangles: Mutex<Vec<ScreenRect>>,
         recognition_started: AtomicBool,
         recognition_finished: AtomicBool,
+        recognition_error: Mutex<Option<ExecutionDiagnostic>>,
         fail_capture: bool,
         text: String,
     }
@@ -742,6 +743,9 @@ mod tests {
             self.recognition_started.store(true, Ordering::SeqCst);
             self.recognition_gate.wait();
             self.recognition_finished.store(true, Ordering::SeqCst);
+            if let Some(error) = self.recognition_error.lock().unwrap().clone() {
+                return Err(error);
+            }
             Ok(crate::mkmacro::ocr::OcrDocument {
                 lines: vec![crate::mkmacro::ocr::OcrLine {
                     text: self.text.clone(),
@@ -764,6 +768,7 @@ mod tests {
             rectangles: Mutex::new(vec![]),
             recognition_started: AtomicBool::new(false),
             recognition_finished: AtomicBool::new(false),
+            recognition_error: Mutex::new(None),
             text: text.into(),
             fail_capture,
         });
@@ -2024,5 +2029,142 @@ mod tests {
             matches!(app.ocr.controller.presentation(), Some(OcrPresentation::Result(text)) if text == "current result")
         );
         app.close_ocr_surface();
+    }
+
+    #[test]
+    fn ocr_recognition_error_after_root_restore_preserves_context_and_launcher_intent() {
+        let (_root, mut app) = activation_app(false);
+        let backend = async_backend(&mut app, true, false, "", false);
+        let error = ExecutionDiagnostic::new(DiagnosticKind::Backend, "fixture recognition failed")
+            .context("backend", "fixture OCR")
+            .context("operation", "recognize")
+            .context("language", "en-US");
+        *backend.recognition_error.lock().unwrap() = Some(error.clone());
+        let (fixture, observer, id) = start(&mut app);
+        confirm(&fixture, id);
+        wait(&mut app, |app| {
+            backend.recognition_started.load(Ordering::SeqCst) && app.ocr_surface_visible()
+        });
+        assert!(matches!(
+            app.ocr.controller.presentation(),
+            Some(OcrPresentation::Recognizing)
+        ));
+        assert!(!app.ocr_owns_root());
+        assert_eq!(observer.current_rect(), original());
+        let query = app.query.clone();
+        let selected = app.selected;
+        let revision = app.visibility_revision.current();
+        backend.recognition_gate.release();
+        wait(&mut app, |app| {
+            matches!(
+                app.ocr.controller.presentation(),
+                Some(OcrPresentation::Error(_))
+            )
+        });
+        let Some(OcrPresentation::Error(actual)) = app.ocr.controller.presentation() else {
+            unreachable!()
+        };
+        assert_eq!(actual.kind, error.kind);
+        assert_eq!(actual.message, error.message);
+        for (key, value) in error.context {
+            assert_eq!(actual.context.get(&key), Some(&value));
+        }
+        assert_eq!(
+            actual
+                .context
+                .get("ocr_pipeline_operation")
+                .map(String::as_str),
+            Some("recognize tile")
+        );
+        assert_eq!(backend.rectangles.lock().unwrap().len(), 1);
+        assert!(!app.ocr_owns_root());
+        assert_eq!(app.query, query);
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.visibility_revision.current(), revision);
+        assert_eq!(observer.current_rect(), original());
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        app.close_ocr_surface();
+    }
+
+    #[test]
+    fn ocr_shutdown_with_blocked_worker_releases_ui_without_joining_or_late_restore() {
+        for during_capture in [true, false] {
+            let (_root, mut app) = activation_app(false);
+            let backend = async_backend(
+                &mut app,
+                !during_capture,
+                false,
+                "late shutdown text",
+                false,
+            );
+            let (fixture, observer, id) = start(&mut app);
+            confirm(&fixture, id);
+            wait(&mut app, |app| {
+                if during_capture {
+                    !backend.rectangles.lock().unwrap().is_empty()
+                } else {
+                    backend.recognition_started.load(Ordering::SeqCst) && app.ocr_surface_visible()
+                }
+            });
+            let generation = app.ocr.session.as_ref().unwrap().id;
+            let editor = super::super::ocr_view::editor_id(generation);
+            let ctx = app.egui_ctx.clone();
+            if !during_capture {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+                egui::text_edit::TextEditState::default().store(&ctx, editor);
+                ctx.memory_mut(|memory| memory.request_focus(editor));
+            }
+            app.ocr.view.feedback = Some(Err("old feedback".into()));
+            let before = observer.current_rect();
+            let visible = app.visible_flag.load(Ordering::SeqCst);
+            let shutdown = Instant::now();
+            app.shutdown_ocr_selection();
+            assert!(
+                shutdown.elapsed() < Duration::from_secs(1),
+                "Shutdown must not join an active worker"
+            );
+            assert!(!backend.recognition_finished.load(Ordering::SeqCst));
+            assert!(
+                app.ocr.job.is_none() && app.ocr.session.is_none() && app.ocr.parking.is_none()
+            );
+            assert!(!app.ocr.controller.is_active());
+            assert!(app.ocr.controller.presentation().is_none());
+            assert!(!app.ocr_owns_root() && !app.ocr_surface_visible());
+            assert!(app.ocr.view.feedback.is_none());
+            assert!(egui::text_edit::TextEditState::load(&ctx, editor).is_none());
+            assert!(!ctx.memory(|memory| memory.has_focus(editor)));
+            assert_eq!(observer.current_rect(), before); // parked capture stays parked; restored recognition stays restored
+            assert_eq!(app.visible_flag.load(Ordering::SeqCst), visible);
+            if during_capture {
+                assert!(!visible);
+            } else {
+                assert_eq!(before, original());
+            }
+            // Displace every relevant intent after shutdown. The detached job
+            // must neither restore its snapshot nor republish its late text.
+            app.query = "new intent after shutdown".into();
+            app.selected = Some(1);
+            visibility(&app, false);
+            let revision = app.visibility_revision.current();
+            let newer_rect = LauncherWindowRect {
+                left: 20,
+                top: 30,
+                right: 420,
+                bottom: 230,
+            };
+            observer.set_current_rect(newer_rect);
+            async_backend(&mut app, true, true, "unused", false); // release UI's old backend references
+            backend.capture_gate.release();
+            backend.recognition_gate.release();
+            wait(&mut app, |_| Arc::strong_count(&backend) == 1);
+            poll(&mut app);
+            assert!(app.ocr.session.is_none() && app.ocr.controller.presentation().is_none());
+            assert_eq!(app.query, "new intent after shutdown");
+            assert_eq!(app.selected, Some(1));
+            assert_eq!(app.visibility_revision.current(), revision);
+            assert!(!app.visible_flag.load(Ordering::SeqCst));
+            assert_eq!(observer.current_rect(), newer_rect);
+            assert_eq!(backend.rectangles.lock().unwrap().len(), 1);
+        }
     }
 }

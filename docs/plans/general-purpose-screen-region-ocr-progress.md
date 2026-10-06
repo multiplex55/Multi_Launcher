@@ -102,7 +102,7 @@ Owner/scope: same OCR controller/lifecycle and panel close hooks. Re-capture cle
 
 ## M6-A / M6-B — focused hardening
 
-Status: pending. Depends on M5. Commits: `test(ocr): [M6-A] cover virtual desktop and capture geometry`; `test(ocr): [M6-B] harden OCR cancellation and restoration behavior`.
+Status: complete. Depends on M5. M6-A verification-only; M6-B tests checkpoint completed below.
 
 M6-A owns additional deterministic coverage genuinely needed for left/above/secondary monitors, cross-monitor rectangles, negative origins, physical dimensions, gaps, and no UI DPI conversions. Reuse existing compositor/picker tests; add OCR adapter-specific assertions. Run relevant screen/overlay/OCR geometry filters.
 
@@ -150,8 +150,10 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M4-R1 | complete | `4b8f3589` | Corrected own visibility re-publication after cancelled partial restore. Tracked compile PID 21200 passed; GUI PID 16052 passed 23 tests including hidden-origin activation-failure/cancel regression; fmt PID 6444 and diff check passed, all recorded identities absent. |
 | M5-A | complete | `2aee3335` | Compact transient editable surface and Recognizing projection; explicit guarded exact copy, close/re-capture, early input ownership. Latest compile passed; 6 surface/view, 5 controller, 6 existing root tests passed; fmt/diff passed. |
 | M5-B | complete | `41b68d26` | NoText/Error/Recognizing omit Copy; concise guidance uses existing diagnostic kind/context and retains originals. Compile PID 10216 passed; 9 surface/error/cancel tests PID 20752 passed; fmt PID 21936 and diff passed, all identities absent. |
-| M5-C | complete | this checkpoint | Two focused repeated-use/blocked-recognition regressions; latest compile PID 8584, two tests PID 21660 and fmt PID 19232 passed. Unchanged 14 surface/lifecycle cases reused from initial 16-pass run PID 20128. All identities absent; diff check passed. |
-| M6-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M5-C | complete | `55ddefd2` | Two focused repeated-use/blocked-recognition regressions; latest compile PID 8584, two tests PID 21660 and fmt PID 19232 passed. Unchanged 14 surface/lifecycle cases reused from initial 16-pass run PID 20128. All identities absent; diff check passed. |
+| M6-A | complete | no source commit | Nine existing exact signed geometry/compositor/selector cases passed, PID 13592. No additional geometry matrix needed; hardware scaling remains manual. |
+| M6-B | complete | this checkpoint | Two app-level error/shutdown regressions; compile PID 15944, 4 relevant tests PID 15292, fmt PID 18692 and diff check passed. All recorded identities absent. |
+| M7-A / M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -194,6 +196,8 @@ M3-B implemented hidden-origin admission/cancel. M4 success must intentionally p
 - Concrete gap: strengthen existing `recognize_region_captures_once_translates_deduplicates_and_orders` to forward `el-GR` through every tile (currently en-US); retain supplied-capture Auto coverage. This protects MkMacro's non-English behavior through the extracted helper without an unnecessary executor language matrix. All other compatibility behaviors already have meaningful tests. No M7 source/test change has yet been made.
 
 ### M4-B natural checkpoint split
+
+- M6 evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M6B-{compile1,lifecycle1,fmtcheck}-20261006/` and `ocr-M6A-geometry1-20261006/`. Test-only recognition diagnostic fixture preserves original kind/message/context after restored-root failure. Shutdown tests block both capture and recognition, assert return before release, clear workflow/view/undo/focus, and wait full old-worker ownership retirement before proving newer intent cannot be undone. Four relevant lifecycle tests and nine exact existing geometry tests passed. Parent inspected test diff; no production change, native probe, manual claim, or duplicate matrix.
 
 - M4-B1: independently functioning one-shot async worker, ordered generation-tagged capture-complete/text/error events, cancellation/repaint and spawn/disconnect/panic handling, fake worker tests. No GUI/controller migration yet. Commit: feat(ocr): [M4-B1] add cancellable asynchronous OCR worker.
 - M4-B2: evolve current controller and integrate GUI root capture/restoration boundary and stale completion guards, migrating directly affected lifecycle tests. Commit: feat(ocr): [M4-B2] integrate asynchronous OCR with launcher lifecycle. M4-B overall stays pending until both sections and scoped checks complete.
