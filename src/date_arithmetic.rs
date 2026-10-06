@@ -175,7 +175,16 @@ fn format_local_time(time: NaiveTime) -> String {
     if time.second() == 0 && time.nanosecond() == 0 {
         time.format("%H:%M").to_string()
     } else {
-        time.format("%H:%M:%S%.f").to_string()
+        let formatted = time.format("%H:%M:%S%.f").to_string();
+        let Some((whole_seconds, fraction)) = formatted.split_once('.') else {
+            return formatted;
+        };
+        let fraction = fraction.trim_end_matches('0');
+        if fraction.is_empty() {
+            whole_seconds.to_owned()
+        } else {
+            format!("{whole_seconds}.{fraction}")
+        }
     }
 }
 
@@ -356,13 +365,10 @@ fn difference_days(
             Ok(second.signed_duration_since(first).num_days() as f64)
         }
         (DateValue::DateTime(first), DateValue::DateTime(second)) => {
-            let calendar_days = second.date().signed_duration_since(first.date()).num_days() as f64;
-            let first_seconds = i64::from(first.time().num_seconds_from_midnight());
-            let second_seconds = i64::from(second.time().num_seconds_from_midnight());
-            let seconds = (second_seconds - first_seconds) as f64;
-            let nanoseconds = (i64::from(second.time().nanosecond())
-                - i64::from(first.time().nanosecond())) as f64;
-            Ok(calendar_days + (seconds + nanoseconds / 1_000_000_000.0) / 86_400.0)
+            let duration = second.signed_duration_since(first);
+            let seconds = duration.num_seconds() as f64
+                + f64::from(duration.subsec_nanos()) / 1_000_000_000.0;
+            Ok(seconds / 86_400.0)
         }
         _ => Err(DateArithmeticError::IncompatibleDifferenceKinds {
             expression: expression.trim().to_owned(),
@@ -1153,6 +1159,31 @@ mod tests {
                 unit: DateDifferenceUnit::Days,
             })
         );
+
+        for (expression, expected_days) in [
+            (
+                "days between 2026-10-05 14:30:60 and 2026-10-05 14:31:00",
+                1.0 / 86_400.0,
+            ),
+            (
+                "days between 2026-10-05 14:31:00 and 2026-10-05 14:30:60",
+                -1.0 / 86_400.0,
+            ),
+            (
+                "days between 2026-10-05 14:30:00.000000001 and 2026-10-05 14:30:00",
+                -1e-9 / 86_400.0,
+            ),
+        ] {
+            assert_eq!(
+                evaluated_result(expression, reference),
+                Ok(DateResult::Difference {
+                    value: expected_days,
+                    unit: DateDifferenceUnit::Days,
+                }),
+                "{expression}"
+            );
+        }
+
         assert!(matches!(
             evaluate_expression("days between today and now", reference),
             Err(DateArithmeticError::IncompatibleDifferenceKinds { .. })
