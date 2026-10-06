@@ -96,7 +96,7 @@ Owner/scope: result/controller error presentation. Whitespace-only recognition i
 
 ## M5-C — re-capture/close lifecycle
 
-Status: pending. Depends on M5-B. Commit: `feat(ocr): [M5-C] complete OCR recapture and close lifecycle`.
+Status: complete. Depends on M5-B. Tests-only checkpoint: `test(ocr): [M5-C] protect repeated recapture and close lifecycle`.
 
 Owner/scope: same OCR controller/lifecycle and panel close hooks. Re-capture clears old text/image, retires current identity, parks again, and starts one fresh selector; no nested surfaces. Close cancels/invalidate work, tears down owned overlay, restores as needed, discards text, releases lifecycle, and returns normal launcher idle behavior. Test consecutive captures, NoText retry, close in recognizing/selection/result, stale completion and repeat close. Verify targeted controller/GUI lifecycle tests. Done when all UI actions use controller transitions and resources cannot outlive the current workflow unnecessarily.
 
@@ -149,8 +149,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M4-B2 | complete | `351afa3f` | Latest owned compile passed; GUI OCR 22 passed, job/controller 10 passed, directly affected Color Pick geometry 2 passed. Formatting/diff checks passed. Capture terminal authorizes restore, completion stays staged across retries, and newer intent cancels publication. |
 | M4-R1 | complete | `4b8f3589` | Corrected own visibility re-publication after cancelled partial restore. Tracked compile PID 21200 passed; GUI PID 16052 passed 23 tests including hidden-origin activation-failure/cancel regression; fmt PID 6444 and diff check passed, all recorded identities absent. |
 | M5-A | complete | `2aee3335` | Compact transient editable surface and Recognizing projection; explicit guarded exact copy, close/re-capture, early input ownership. Latest compile passed; 6 surface/view, 5 controller, 6 existing root tests passed; fmt/diff passed. |
-| M5-B | complete | this checkpoint | NoText/Error/Recognizing omit Copy; concise guidance uses existing diagnostic kind/context and retains originals. Compile PID 10216 passed; 9 surface/error/cancel tests PID 20752 passed; fmt PID 21936 and diff passed, all identities absent. |
-| M5-C through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M5-B | complete | `41b68d26` | NoText/Error/Recognizing omit Copy; concise guidance uses existing diagnostic kind/context and retains originals. Compile PID 10216 passed; 9 surface/error/cancel tests PID 20752 passed; fmt PID 21936 and diff passed, all identities absent. |
+| M5-C | complete | this checkpoint | Two focused repeated-use/blocked-recognition regressions; latest compile PID 8584, two tests PID 21660 and fmt PID 19232 passed. Unchanged 14 surface/lifecycle cases reused from initial 16-pass run PID 20128. All identities absent; diff check passed. |
+| M6-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -184,6 +185,8 @@ M3-B implemented hidden-origin admission/cancel. M4 success must intentionally p
 - Latest compile PID 21196 passed; surface/view PID 17464 (6 passed), controller PID 15600 (5 passed), affected existing root PID 14644 (6 passed), fmt PID 13040. All exit 0 and recorded identities absent. Evidence `C:/Users/Jay/AppData/Local/Temp/ocr-M5A-{compile2,view2,controller,root,fmtcheck}-20261006/`. Parent inspected production view/lifecycle/controller/input diff. No native/backend changes; empty/error polish and repeated-use hardening remain M5-B/C.
 
 ### M7 focused compatibility mapping
+
+- M5-C tests-only evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M5C-{compile2,lifecycle2,fmtcheck2}-20261006/` (initial `lifecycle1` evidence retained). Result/NoText/Error recapture clears feedback/editor undo state, creates one fresh generation, rejects stale repeated intents during selection/restoration retry, and gives the new editor fresh focus. Close during blocked recognition returns before gate release, repeated close cannot refocus a retired owner, and complete old-worker backend release cannot replace a new current Result. Parent inspected tests; existing production lifecycle already satisfied these paths. No new workflow or source behavior added.
 
 - M5-B evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M5B-{compile1,view1,fmtcheck}-20261006/`. Rendered-label tests verify NoText/progress/unavailable/missing-English/capture/recognition projections and recovery actions; non-result explicit Copy/render cannot access clipboard; copy retry preserves exact edited text; normal cancellation remains silent. Only view projection and tests changed; no native backend/policy/controller change. Parent inspected diff and recorded exit/ownership results.
 

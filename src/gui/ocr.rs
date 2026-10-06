@@ -676,6 +676,7 @@ mod tests {
         recognition_gate: Gate,
         rectangles: Mutex<Vec<ScreenRect>>,
         recognition_started: AtomicBool,
+        recognition_finished: AtomicBool,
         fail_capture: bool,
         text: String,
     }
@@ -740,6 +741,7 @@ mod tests {
             );
             self.recognition_started.store(true, Ordering::SeqCst);
             self.recognition_gate.wait();
+            self.recognition_finished.store(true, Ordering::SeqCst);
             Ok(crate::mkmacro::ocr::OcrDocument {
                 lines: vec![crate::mkmacro::ocr::OcrLine {
                     text: self.text.clone(),
@@ -761,6 +763,7 @@ mod tests {
             recognition_gate: Gate::new(recognition_open),
             rectangles: Mutex::new(vec![]),
             recognition_started: AtomicBool::new(false),
+            recognition_finished: AtomicBool::new(false),
             text: text.into(),
             fail_capture,
         });
@@ -1893,5 +1896,133 @@ mod tests {
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.json_utility_dialog.open);
         assert!(app.focus_query);
+    }
+
+    #[test]
+    fn ocr_surface_repeated_recapture_clears_editor_metadata_and_stale_intents() {
+        for (old_text, fail_capture) in [("old result", false), ("", false), ("", true)] {
+            let (_root, mut app) = activation_app(false);
+            async_backend(&mut app, true, true, old_text, fail_capture);
+            let (fixture, _, id) = start(&mut app);
+            confirm(&fixture, id);
+            wait(&mut app, |app| {
+                app.ocr_surface_visible()
+                    && !matches!(
+                        app.ocr.controller.presentation(),
+                        Some(OcrPresentation::Recognizing)
+                    )
+            });
+            match app.ocr.controller.presentation().unwrap() {
+                OcrPresentation::Error(_) => assert!(fail_capture),
+                OcrPresentation::NoText => assert!(!fail_capture && old_text.is_empty()),
+                OcrPresentation::Result(text) => assert!(!fail_capture && text == old_text),
+                OcrPresentation::Recognizing => panic!("terminal state required"),
+            }
+            let old = event(&app, OcrViewIntent::Recapture);
+            let old_editor = super::super::ocr_view::editor_id(old.generation);
+            let ctx = app.egui_ctx.clone();
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+            }
+            if !old_text.is_empty() {
+                assert!(egui::text_edit::TextEditState::load(&ctx, old_editor).is_some());
+            }
+            app.ocr.view.feedback = Some(Err("old feedback".into()));
+            let clipboard = FakeClipboard {
+                reads: AtomicUsize::new(0),
+                writes: Mutex::new(vec![]),
+                fail: false,
+            };
+            let backend = async_backend(&mut app, true, true, "fresh result", false);
+            app.apply_ocr_view_event(old, &clipboard);
+            let generation = app.ocr.session.as_ref().unwrap().id;
+            assert_ne!(generation, old.generation);
+            assert!(app.ocr.view.feedback.is_none());
+            assert!(egui::text_edit::TextEditState::load(&ctx, old_editor).is_none());
+            assert!(
+                egui::text_edit::TextEditState::load(
+                    &ctx,
+                    super::super::ocr_view::editor_id(generation)
+                )
+                .is_none()
+            );
+            assert!(!app.focus_query);
+            app.apply_ocr_view_event(old, &clipboard); // rapid repeated click is stale
+            assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
+            let observer = install_activation_parking(&mut app, original());
+            let (_, next_id) = app.ocr.controller.operation().unwrap();
+            assert_ne!(next_id, id);
+            app.apply_ocr_view_event(old, &clipboard);
+            assert_eq!(app.ocr.controller.operation(), Some((generation, next_id)));
+            observer.fail_next_restore();
+            confirm(&fixture, next_id);
+            wait(&mut app, |app| app.ocr.restore_error.is_some());
+            app.apply_ocr_view_event(old, &clipboard);
+            assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
+            assert!(app.ocr.parking.is_some());
+            assert!(!app.ocr_surface_visible());
+            wait(
+                &mut app,
+                |app| matches!(app.ocr.controller.presentation(), Some(OcrPresentation::Result(text)) if text == "fresh result"),
+            );
+            assert_eq!(backend.rectangles.lock().unwrap().len(), 1);
+            for _ in 0..2 {
+                let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+            }
+            assert!(ctx.memory(|memory| memory.has_focus(super::super::ocr_view::editor_id(generation))));
+            assert!(app.ocr.view.feedback.is_none());
+            app.apply_ocr_view_event(event(&app, OcrViewIntent::Close), &clipboard);
+            assert!(app.ocr.session.is_none());
+        }
+    }
+
+    #[test]
+    fn ocr_surface_close_recognizing_detaches_and_old_completion_cannot_replace_new_result() {
+        let (_root, mut app) = activation_app(false);
+        let old_backend = async_backend(&mut app, true, false, "late old result", false);
+        let (fixture, _, id) = start(&mut app);
+        confirm(&fixture, id);
+        wait(&mut app, |app| {
+            old_backend.recognition_started.load(Ordering::SeqCst) && app.ocr_surface_visible()
+        });
+        let old = event(&app, OcrViewIntent::Close);
+        let clipboard = FakeClipboard {
+            reads: AtomicUsize::new(0),
+            writes: Mutex::new(vec![]),
+            fail: false,
+        };
+        let closed = Instant::now();
+        app.apply_ocr_view_event(old, &clipboard);
+        assert!(
+            closed.elapsed() < Duration::from_secs(1),
+            "Close must not join the still-blocked recognizer"
+        );
+        assert!(!old_backend.recognition_finished.load(Ordering::SeqCst));
+        assert!(app.ocr.session.is_none());
+        assert!(app.ocr.controller.presentation().is_none());
+        assert!(app.focus_query);
+        app.focus_query = false;
+        app.close_ocr_surface(); // repeated close cannot grant focus for a retired owner
+        assert!(!app.focus_query);
+        async_backend(&mut app, true, true, "current result", false);
+        let (next_fixture, _, next_id) = start(&mut app);
+        confirm(&next_fixture, next_id);
+        wait(
+            &mut app,
+            |app| matches!(app.ocr.controller.presentation(), Some(OcrPresentation::Result(text)) if text == "current result"),
+        );
+        let generation = app.ocr.session.as_ref().unwrap().id;
+        assert_ne!(generation, old.generation);
+        app.apply_ocr_view_event(old, &clipboard);
+        old_backend.recognition_gate.release();
+        wait(&mut app, |_| {
+            old_backend.recognition_finished.load(Ordering::SeqCst)
+                && Arc::strong_count(&old_backend) == 1
+        }); // Only this test retains the backend after the detached worker exits.
+        assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
+        assert!(
+            matches!(app.ocr.controller.presentation(), Some(OcrPresentation::Result(text)) if text == "current result")
+        );
+        app.close_ocr_surface();
     }
 }
