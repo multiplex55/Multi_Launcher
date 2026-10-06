@@ -63,6 +63,7 @@ pub mod startup;
 pub mod text_transform;
 pub(crate) mod thread_reaper;
 pub mod toast_log;
+pub mod unit_conversion;
 pub mod universal_actions;
 pub mod usage;
 pub mod virtual_desktop;

@@ -5278,3 +5278,24 @@ List only genuine remaining issues or deliberately deferred scope.
 
 Do not present out-of-scope items such as currency/timezones as unfinished defects.
 
+
+## Execution ledger
+
+Current branch: `date-and-unit`. Initial working tree: clean.
+
+| Checkpoint | Status | Verification / notes |
+|---|---|---|
+| M1-A | complete | Domain 18/18; legacy unit plugin 16/16; diff inspected; checkpoint committed |
+| M1-B | in_progress | Expanded catalog and semantics |
+| M1-C | pending | Flexible parser and shared formatting |
+| M2-A | pending | Inline output and routing |
+| M2-B | pending | Panel integration and conversion review |
+| M3-A | pending | Deterministic date anchors |
+| M3-B | pending | Calendar arithmetic |
+| M3-C | pending | Differences and presentation |
+| M4-A | pending | Date plugin integration |
+| M4-B | pending | Compatibility coverage if needed |
+| M5-A | pending | User documentation |
+| M5-B | pending | Independent review and focused final verification |
+
+Checkpoint commits are recorded in Git with the stage identifier. No full repository test run is required.
