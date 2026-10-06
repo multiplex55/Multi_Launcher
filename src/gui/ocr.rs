@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use super::LauncherApp;
 use super::mkmacro_dialog::visual_overlay::{RectanglePurpose, VisualOverlayEvent};
+use super::ocr_view::{OcrView, OcrViewEvent, OcrViewIntent};
+use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
 use crate::launcher_parking::LauncherParkingTransaction;
 use crate::mkmacro::ocr::OcrBackend;
 #[cfg(windows)]
@@ -27,6 +29,7 @@ pub(super) struct OcrLifecycle {
     desktop: Arc<dyn ScreenCaptureBackend>,
     recognizer: Arc<dyn OcrBackend>,
     job: Option<OcrJob>,
+    view: OcrView,
     #[cfg(test)]
     profile_provider: Option<fn() -> crate::mkmacro::ExecResult<Vec<String>>>,
     restore_error: Option<String>,
@@ -49,6 +52,7 @@ impl Default for OcrLifecycle {
             desktop,
             recognizer,
             job: None,
+            view: OcrView::default(),
             #[cfg(test)]
             profile_provider: None,
             restore_error: None,
@@ -69,6 +73,91 @@ struct LauncherSession {
 }
 
 impl LauncherApp {
+    pub(super) fn close_ocr_surface(&mut self) {
+        let return_query_focus = self.ocr_surface_visible();
+        self.cancel_ocr_selection();
+        let ctx = self.egui_ctx.clone();
+        self.poll_ocr_selection(&ctx);
+        self.ocr.view.clear(&ctx);
+        if return_query_focus && self.ocr.session.is_none() {
+            self.focus_input();
+        }
+    }
+
+    pub(super) fn route_ocr_surface_dismissal(&mut self, ctx: &egui::Context) {
+        if !self.ocr_surface_visible() {
+            return;
+        }
+        self.focus_query = false;
+        ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("query_input")));
+        let close = ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+        });
+        if close {
+            self.close_ocr_surface();
+        }
+    }
+
+    pub(super) fn show_ocr_surface(&mut self, ctx: &egui::Context) {
+        self.show_ocr_surface_with_clipboard(ctx, &ArboardClipboardBackend);
+    }
+
+    fn show_ocr_surface_with_clipboard(
+        &mut self,
+        ctx: &egui::Context,
+        clipboard: &dyn ClipboardBackend,
+    ) {
+        if !self.ocr_surface_visible() {
+            self.ocr.view.clear(ctx);
+            return;
+        }
+        let Some(generation) = self.ocr.controller.presented_generation() else {
+            return;
+        };
+        let event = self
+            .ocr
+            .controller
+            .presentation_mut()
+            .and_then(|state| self.ocr.view.show(ctx, generation, state));
+        if let Some(event) = event {
+            self.apply_ocr_view_event(event, clipboard);
+        }
+    }
+
+    fn apply_ocr_view_event(&mut self, event: OcrViewEvent, clipboard: &dyn ClipboardBackend) {
+        if !self.ocr_surface_visible()
+            || self.ocr.controller.presented_generation() != Some(event.generation)
+        {
+            return;
+        }
+        match event.intent {
+            OcrViewIntent::Close => self.close_ocr_surface(),
+            OcrViewIntent::Recapture => {
+                self.close_ocr_surface();
+                if let Err(error) = self.begin_ocr_selection() {
+                    self.report_error_message("ocr.selection", error);
+                } else {
+                    self.focus_query = false;
+                }
+            }
+            OcrViewIntent::Copy => {
+                if let Some(crate::ocr::selection::OcrPresentation::Result(text)) =
+                    self.ocr.controller.presentation()
+                {
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    self.ocr.view.feedback = Some(
+                        clipboard
+                            .write_text(text)
+                            .map(|()| "Copied to clipboard")
+                            .map_err(|error| format!("Could not copy text: {error}")),
+                    );
+                }
+            }
+        }
+    }
     /// Result/progress admission is separate from physical parking ownership.
     /// M5 can route input to this transient surface without a persisted Panel.
     pub(super) fn ocr_surface_visible(&self) -> bool {
@@ -327,6 +416,7 @@ impl LauncherApp {
         if !lifecycle.controller.is_active() && lifecycle.parking.is_none() {
             lifecycle.session = None;
             lifecycle.job = None;
+            lifecycle.view.clear(ctx);
         }
         if lifecycle.session.is_some() && lifecycle.controller.presentation().is_none() {
             ctx.request_repaint_after(if lifecycle.restore_error.is_some() {
@@ -532,6 +622,7 @@ impl LauncherApp {
         self.ocr.session = None;
         self.ocr.controller.release();
         self.ocr.restore_error = None;
+        self.ocr.view.clear(&self.egui_ctx);
     }
 }
 
@@ -1560,5 +1651,214 @@ mod tests {
         assert!(app.ocr.session.is_none());
         assert!(app.ocr.controller.presentation().is_none());
         backend.recognition_gate.release();
+    }
+
+    struct FakeClipboard {
+        reads: AtomicUsize,
+        writes: Mutex<Vec<String>>,
+        fail: bool,
+    }
+    impl ClipboardBackend for FakeClipboard {
+        fn read_text(&self) -> Result<String, crate::clipboard_modify::clipboard::ClipboardError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok("existing clipboard".into())
+        }
+        fn write_text(
+            &self,
+            text: &str,
+        ) -> Result<(), crate::clipboard_modify::clipboard::ClipboardError> {
+            if self.fail {
+                return Err(crate::clipboard_modify::clipboard::ClipboardError::Busy(
+                    "fixture".into(),
+                ));
+            }
+            self.writes.lock().unwrap().push(text.into());
+            Ok(())
+        }
+    }
+    fn presented_app() -> (tempfile::TempDir, LauncherApp) {
+        let (root, mut app) = activation_app(false);
+        async_backend(&mut app, true, true, "recognized text", false);
+        let (fixture, _observer, id) = start(&mut app);
+        confirm(&fixture, id);
+        wait(&mut app, |app| {
+            matches!(
+                app.ocr.controller.presentation(),
+                Some(OcrPresentation::Result(_))
+            )
+        });
+        (root, app)
+    }
+    fn event(app: &LauncherApp, intent: OcrViewIntent) -> OcrViewEvent {
+        OcrViewEvent {
+            generation: app.ocr.controller.presented_generation().unwrap(),
+            intent,
+        }
+    }
+    fn key_input(key: egui::Key, modifiers: egui::Modifiers) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900., 600.),
+            )),
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ocr_surface_render_never_reads_or_writes_and_explicit_copy_uses_edited_text() {
+        let (_root, mut app) = presented_app();
+        let clipboard = FakeClipboard {
+            reads: AtomicUsize::new(0),
+            writes: Mutex::new(vec![]),
+            fail: false,
+        };
+        let ctx = app.egui_ctx.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.show_ocr_surface_with_clipboard(ctx, &clipboard)
+        });
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+        assert!(clipboard.writes.lock().unwrap().is_empty());
+        let edited = "  edited\nsecond line\n ";
+        let Some(OcrPresentation::Result(text)) = app.ocr.controller.presentation_mut() else {
+            panic!("result expected")
+        };
+        *text = edited.into();
+        app.apply_ocr_view_event(event(&app, OcrViewIntent::Copy), &clipboard);
+        assert_eq!(*clipboard.writes.lock().unwrap(), vec![edited.to_owned()]);
+        assert!(app.ocr.view.feedback.as_ref().unwrap().is_ok());
+        let failing = FakeClipboard {
+            reads: AtomicUsize::new(0),
+            writes: Mutex::new(vec![]),
+            fail: true,
+        };
+        app.apply_ocr_view_event(event(&app, OcrViewIntent::Copy), &failing);
+        assert!(app.ocr.view.feedback.as_ref().unwrap().is_err());
+        assert!(
+            matches!(app.ocr.controller.presentation(),Some(OcrPresentation::Result(text)) if text==edited)
+        );
+        let Some(OcrPresentation::Result(text)) = app.ocr.controller.presentation_mut() else {
+            unreachable!()
+        };
+        *text = " \n \t ".into();
+        app.apply_ocr_view_event(event(&app, OcrViewIntent::Copy), &clipboard);
+        assert_eq!(clipboard.writes.lock().unwrap().len(), 1);
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ocr_surface_root_enter_keeps_query_history_action_sheet_and_launcher_activation_idle() {
+        let (_root, mut app) = presented_app();
+        app.results = vec![ocr_action()];
+        app.focus_query = true;
+        app.json_utility_dialog.open = true;
+        let query = app.query.clone();
+        let selected = app.selected;
+        let ctx = app.egui_ctx.clone();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_input")));
+        let _ = ctx.run(key_input(egui::Key::Enter, egui::Modifiers::NONE), |ctx| {
+            app.render_root_frame(ctx, None)
+        });
+        assert!(app.test_activation_trace.is_empty());
+        assert!(app.test_recorded_history_queries.is_empty());
+        assert!(!app.action_sheet.is_open());
+        assert_eq!(app.query, query);
+        assert_eq!(app.selected, selected);
+        assert!(!app.focus_query);
+        assert!(app.ocr_surface_visible());
+        let generation = app.ocr.controller.presented_generation().unwrap();
+        assert!(!ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        let before = match app.ocr.controller.presentation().unwrap() {
+            OcrPresentation::Result(text) => text.len(),
+            _ => unreachable!(),
+        };
+        let _ = ctx.run(key_input(egui::Key::Enter, egui::Modifiers::NONE), |ctx| {
+            app.render_root_frame(ctx, None)
+        });
+        assert!(
+            matches!(app.ocr.controller.presentation(),Some(OcrPresentation::Result(text)) if text.len()==before+1)
+        );
+        assert!(
+            ctx.memory(|memory| memory.has_focus(super::super::ocr_view::editor_id(generation)))
+        );
+        assert!(app.test_activation_trace.is_empty());
+        assert!(app.json_utility_dialog.open);
+        let _ = ctx.run(
+            key_input(egui::Key::Enter, egui::Modifiers::COMMAND),
+            |ctx| app.render_root_frame(ctx, None),
+        );
+        assert!(!app.action_sheet.is_open());
+        assert!(app.test_activation_trace.is_empty());
+        assert_eq!(app.query, query);
+    }
+
+    #[test]
+    fn ocr_surface_dismissal_keys_close_only_transient_surface_and_discard_editor_history() {
+        for (key, modifiers) in [
+            (egui::Key::Escape, egui::Modifiers::NONE),
+            (egui::Key::W, egui::Modifiers::COMMAND),
+        ] {
+            let (_root, mut app) = presented_app();
+            app.json_utility_dialog.open = true;
+            let generation = app.ocr.controller.presented_generation().unwrap();
+            let ctx = app.egui_ctx.clone();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+            assert!(app.any_panel_open());
+            let _ = ctx.run(key_input(key, modifiers), |ctx| {
+                app.render_root_frame(ctx, None)
+            });
+            assert!(app.ocr.session.is_none());
+            assert!(!app.ocr_surface_visible());
+            assert!(app.visible_flag.load(Ordering::SeqCst));
+            assert!(app.json_utility_dialog.open);
+            assert!(!ctx.input(|input| input.key_pressed(key)));
+            assert!(
+                egui::text_edit::TextEditState::load(
+                    &ctx,
+                    super::super::ocr_view::editor_id(generation)
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn ocr_surface_recapture_uses_normal_lifecycle_and_stale_view_intent_is_ignored() {
+        let (_root, mut app) = presented_app();
+        let clipboard = FakeClipboard {
+            reads: AtomicUsize::new(0),
+            writes: Mutex::new(vec![]),
+            fail: false,
+        };
+        let old = event(&app, OcrViewIntent::Close);
+        app.apply_ocr_view_event(event(&app, OcrViewIntent::Recapture), &clipboard);
+        assert!(app.ocr.controller.is_active());
+        assert!(app.ocr_owns_root());
+        assert!(app.ocr.controller.presentation().is_none());
+        assert_ne!(app.ocr.session.as_ref().unwrap().id, old.generation);
+        app.apply_ocr_view_event(old, &clipboard);
+        assert!(app.ocr.controller.is_active());
+        app.close_ocr_surface();
+        assert!(!app.ocr.controller.is_active());
+        assert!(!app.any_panel_open());
+    }
+
+    #[test]
+    fn ocr_surface_close_front_dialog_prioritizes_transient_ocr_without_closing_other_panel() {
+        let (_root, mut app) = presented_app();
+        app.json_utility_dialog.open = true;
+        assert!(app.any_panel_open());
+        assert!(app.close_front_dialog());
+        assert!(app.ocr.session.is_none());
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.json_utility_dialog.open);
+        assert!(app.focus_query);
     }
 }

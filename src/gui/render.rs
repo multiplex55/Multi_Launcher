@@ -1484,9 +1484,17 @@ impl LauncherApp {
         // navigation paths see it. Opening is also resolved before rendering,
         // so the filter can take focus in the same frame as Ctrl+Enter.
         let query_input_id = egui::Id::new("query_input");
-        let mut selected_sheet_action = self.route_action_sheet_keyboard(ctx, query_input_id);
+        // Latch ownership for this entire frame, including a dismissal frame,
+        // so input cannot fall through to the underlying query after Close.
+        let ocr_blocks_launcher_input = self.ocr_surface_visible();
+        self.route_ocr_surface_dismissal(ctx);
+        let mut selected_sheet_action = if ocr_blocks_launcher_input {
+            None
+        } else {
+            self.route_action_sheet_keyboard(ctx, query_input_id)
+        };
 
-        if self.action_sheet.is_open() {
+        if self.action_sheet.is_open() && !ocr_blocks_launcher_input {
             if let Some(action) = action_sheet::render(ctx, &mut self.action_sheet, &self.matcher) {
                 self.close_action_sheet();
                 selected_sheet_action = Some(action);
@@ -1508,6 +1516,10 @@ impl LauncherApp {
         let mut deferred_universal_action = None;
         let mut deferred_radial_authoring_add = None;
         CentralPanel::default().show(ctx, |ui| {
+            if ocr_blocks_launcher_input {
+                ui.heading("Screen Region OCR");
+                return;
+            }
             let mut deferred_activation: Option<DeferredActivation> = None;
             ui.heading("🚀 Multi Lnchr");
             if self.should_render_inline_error()
@@ -1904,6 +1916,14 @@ impl LauncherApp {
             ctx.request_repaint();
             ctx.request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
         }
+        // Preserve other dialogs' state while OCR owns this transient surface;
+        // their editors must not compete for focus or consume OCR keyboard input.
+        if ocr_blocks_launcher_input {
+            self.enforce_pinned();
+            self.update_panel_stack();
+            self.show_ocr_surface(ctx);
+            return;
+        }
         let show_editor = self.show_editor;
         if show_editor {
             let mut editor = std::mem::take(&mut self.editor);
@@ -2213,6 +2233,7 @@ impl LauncherApp {
         }
         let note_close_snapshot = note_close_frame.map(|frame| frame.snapshot(&self.note_panels));
         self.poll_radial_query_observation(ctx, note_close_snapshot);
+        self.show_ocr_surface(ctx);
     }
 }
 

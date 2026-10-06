@@ -37,6 +37,7 @@ mod note_panel;
 mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
+mod ocr_view;
 mod query_history;
 mod query_observation;
 mod radial_actions;
@@ -2931,10 +2932,11 @@ impl LauncherApp {
     }
 
     fn any_panel_open(&self) -> bool {
-        Self::TRACKED_PANELS
-            .iter()
-            .copied()
-            .any(|panel| self.is_panel_open(panel))
+        self.ocr_surface_visible()
+            || Self::TRACKED_PANELS
+                .iter()
+                .copied()
+                .any(|panel| self.is_panel_open(panel))
     }
 
     pub fn unregister_all_hotkeys(&self) {
@@ -2973,6 +2975,10 @@ impl LauncherApp {
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
     pub fn close_front_dialog(&mut self) -> bool {
+        if self.ocr_surface_visible() {
+            self.close_ocr_surface();
+            return true;
+        }
         let panel = match self.panel_stack.pop() {
             Some(p) => p,
             None => return false,

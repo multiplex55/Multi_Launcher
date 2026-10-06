@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 const PARK_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct OcrGeneration(u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,6 +312,18 @@ impl OcrSelectionController {
 
     pub(crate) fn presentation(&self) -> Option<&OcrPresentation> {
         match &self.session.as_ref()?.2 {
+            Phase::Presented(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn presented_generation(&self) -> Option<OcrGeneration> {
+        self.presentation()?;
+        Some(self.session.as_ref()?.0)
+    }
+
+    pub(crate) fn presentation_mut(&mut self) -> Option<&mut OcrPresentation> {
+        match &mut self.session.as_mut()?.2 {
             Phase::Presented(state) => Some(state),
             _ => None,
         }

@@ -84,7 +84,7 @@ Owner/scope: OCR job/controller + focused GUI polling/repaint. Run capture/recog
 
 ## M5-A — editable result and explicit copy
 
-Status: pending. Depends on M4. Commit: `feat(ocr): [M5-A] add editable multiline OCR result surface`.
+Status: complete. Depends on M4. Commit: `feat(ocr): [M5-A] add editable multiline OCR result surface`.
 
 Owner/scope: focused OCR result UI and normal panel/lifecycle hooks in `src/gui/{mod,render}.rs`. Render compact title, vertically scrolling/selectable/editable multiline text, Copy All, Re-capture, Close, and lightweight Recognizing. Initialize from `recognized_text()` only; current edited text is sole copy source. Opening/success never writes clipboard. Use existing clipboard/error conventions and stable widget identity. Test state/actions independently: initial lines, edits update explicit copy, no implicit clipboard call, close/re-capture intent. Verify result/controller tests and GUI compile. No cleanup heuristics or additional integrations.
 
@@ -145,8 +145,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M4-A | complete | `a02d1260` | Nextest general/MkMacro OCR filter: 53 passed (includes substring-matched GUI OCR/handler tests); successful lib-test compile, fmt/diff checks passed. Shared borrowed frame pipeline, no GUI changes. |
 | M4-B1 | complete | `3bc5988d` | One-shot background worker, ordered capture/text terminal events, cancellation and spawn/disconnect/panic paths. Latest tracked compile passed; 5 worker tests passed, including bounded nonjoining drop assertion; fmt/diff checks passed. |
 | M4-B2 | complete | `351afa3f` | Latest owned compile passed; GUI OCR 22 passed, job/controller 10 passed, directly affected Color Pick geometry 2 passed. Formatting/diff checks passed. Capture terminal authorizes restore, completion stays staged across retries, and newer intent cancels publication. |
-| M4-R1 | complete | this checkpoint | Corrected own visibility re-publication after cancelled partial restore. Tracked compile PID 21200 passed; GUI PID 16052 passed 23 tests including hidden-origin activation-failure/cancel regression; fmt PID 6444 and diff check passed, all recorded identities absent. |
-| M5-A through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M4-R1 | complete | `4b8f3589` | Corrected own visibility re-publication after cancelled partial restore. Tracked compile PID 21200 passed; GUI PID 16052 passed 23 tests including hidden-origin activation-failure/cancel regression; fmt PID 6444 and diff check passed, all recorded identities absent. |
+| M5-A | complete | this checkpoint | Compact transient editable surface and Recognizing projection; explicit guarded exact copy, close/re-capture, early input ownership. Latest compile passed; 6 surface/view, 5 controller, 6 existing root tests passed; fmt/diff passed. |
+| M5-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -172,6 +173,17 @@ M3-B integration reminder: actual radial/action invocation can occur while ROOT 
 - Handle thread-spawn/disconnected/panicked worker terminal failure. Tests block fake capture/OCR to prove parking boundary/background execution, capture once, staged completion on retry, stale close/new generation and error cleanup. M5 adds UI, no pixels in UI/completions.
 
 M3-B implemented hidden-origin admission/cancel. M4 success must intentionally publish visible recognition/result; choose ApplyConfiguredPlacement when prior_visible=false, retaining exact PreserveCurrentGeometry for visible-origin restore. Cancel prior-hidden retains committed capture-safe parking to avoid flashing an onscreen snapshot when original hide is in flight.
+
+### M5-A implementation evidence
+
+- One stable egui window borrows the controller's result String; metadata only tracks generation/focus/copy feedback. Copy uses existing ClipboardBackend only after explicit guarded action; blank edits cannot overwrite clipboard. Close/re-capture use cancel/poll/begin and discard editor undo/focus state. No persisted Panel or image/text duplication.
+- Root frame latches OCR input ownership, including dismissal, and defers competing dialogs without changing their saved state. First sizing frame suppresses query/Action Sheet/dispatch; first visible editor frame receives one-shot focus and Enter inserts a newline. Initial ordinary failures (PID 20652, 3 passed/2 failed) traced to installed egui 0.27.2 `containers/area.rs` invisible initial sizing (lines 245–250, 368, 450–451). Focus stays pending until visible/enabled widget acknowledges it; assertions reflect the actual rendering boundary without arbitrary delay.
+- Latest compile PID 21196 passed; surface/view PID 17464 (6 passed), controller PID 15600 (5 passed), affected existing root PID 14644 (6 passed), fmt PID 13040. All exit 0 and recorded identities absent. Evidence `C:/Users/Jay/AppData/Local/Temp/ocr-M5A-{compile2,view2,controller,root,fmtcheck}-20261006/`. Parent inspected production view/lifecycle/controller/input diff. No native/backend changes; empty/error polish and repeated-use hardening remain M5-B/C.
+
+### M7 focused compatibility mapping
+
+- Reuse existing library filters: `mkmacro::executor::ocr_execution_tests::`, `mkmacro::ocr::tests::`, `mkmacro::model::ocr_payload_tests::`, `mkmacro::validation::ocr_validation_tests::`, `mkmacro::variables::tests::ocr_built_ins_have_stable_types_and_are_read_only`, `gui::mkmacro_dialog::ocr_test_job::tests::`, `gui::mkmacro_dialog::ocr_controls::tests::`, `gui::mkmacro_dialog::action_editor::tests::ocr_`, `gui::mkmacro_dialog::visual_overlay::tests::ocr_debug_`, and `gui::mkmacro_dialog::visual_overlay_windows::tests::ocr_full_surface_role_is_nonactivating_and_hit_test_transparent`. Include three additional action-editor cases: `recursive_ocr_test_snapshot_keeps_condition_path_identity`, `direct_ocr_configuration_and_window_picker_update_are_lossless`, `completed_ocr_error_is_cleared_when_configuration_changes`. Direct owned test binaries, bounded timeouts, `--test-threads=1`; do not include ignored native prerequisites for this deterministic checkpoint.
+- Concrete gap: strengthen existing `recognize_region_captures_once_translates_deduplicates_and_orders` to forward `el-GR` through every tile (currently en-US); retain supplied-capture Auto coverage. This protects MkMacro's non-English behavior through the extracted helper without an unnecessary executor language matrix. All other compatibility behaviors already have meaningful tests. No M7 source/test change has yet been made.
 
 ### M4-B natural checkpoint split
 
