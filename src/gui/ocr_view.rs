@@ -1,4 +1,5 @@
 //! Presentation metadata only. The workflow remains the sole result-text owner.
+use crate::mkmacro::{DiagnosticKind, ExecutionDiagnostic};
 use crate::ocr::selection::{OcrGeneration, OcrPresentation};
 use eframe::egui;
 
@@ -24,6 +25,31 @@ pub(super) struct OcrView {
 
 pub(super) fn editor_id(generation: OcrGeneration) -> egui::Id {
     egui::Id::new(("screen_ocr_editor", generation))
+}
+
+fn error_guidance(error: &ExecutionDiagnostic) -> &'static str {
+    // These contexts come from the shared pipeline/policy boundaries. Keep the
+    // original diagnostic in the workflow; never classify its message text.
+    if error
+        .context
+        .get("ocr_pipeline_operation")
+        .map(String::as_str)
+        == Some("capture region")
+    {
+        "Could not capture the selected region. Re-capture the region and try again."
+    } else if error.kind == DiagnosticKind::UnsupportedOperation
+        && error.context.get("operation").map(String::as_str)
+            == Some("resolve English OCR language")
+    {
+        "No English OCR language is installed. Install an English language pack in Windows Settings > Time & language > Language & region, then try again."
+    } else if matches!(
+        error.kind,
+        DiagnosticKind::UnsupportedOperation | DiagnosticKind::RuntimeUnavailable
+    ) {
+        "Local OCR is unavailable. Check Windows OCR support, then try again."
+    } else {
+        "Could not recognize text in the selected region. Re-capture a clear, readable region and try again."
+    }
 }
 
 impl OcrView {
@@ -60,11 +86,10 @@ impl OcrView {
             .min_size((320., 220.))
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    let copyable =
-                        matches!(state,OcrPresentation::Result(text) if !text.trim().is_empty());
-                    if ui
-                        .add_enabled(copyable, egui::Button::new("Copy All"))
-                        .clicked()
+                    if let OcrPresentation::Result(text) = state
+                        && ui
+                            .add_enabled(!text.trim().is_empty(), egui::Button::new("Copy All"))
+                            .clicked()
                     {
                         intent = Some(OcrViewIntent::Copy);
                     }
@@ -122,10 +147,10 @@ impl OcrView {
                             });
                     }
                     OcrPresentation::NoText => {
-                        ui.label("No text was recognized.");
+                        ui.label("No text was recognized in the selected region.");
                     }
                     OcrPresentation::Error(error) => {
-                        ui.colored_label(ui.visuals().error_fg_color, &error.message);
+                        ui.colored_label(ui.visuals().error_fg_color, error_guidance(error));
                     }
                 }
             });
@@ -146,6 +171,95 @@ mod tests {
             .request(Instant::now())
             .unwrap()
             .unwrap()
+    }
+
+    fn rendered_text(state: &mut OcrPresentation) -> String {
+        fn append(shape: &egui::epaint::Shape, text: &mut String) {
+            match shape {
+                egui::epaint::Shape::Text(shape) => {
+                    text.push_str(shape.galley.text());
+                    text.push('\n');
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        append(shape, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut view = OcrView::default();
+        let generation = generation();
+        let mut output = String::new();
+        for _ in 0..2 {
+            let frame = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900., 600.),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    assert!(view.show(ctx, generation, state).is_none());
+                },
+            );
+            output.clear();
+            for shape in frame.shapes {
+                append(&shape.shape, &mut output);
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn ocr_view_empty_progress_and_failures_hide_copy_and_keep_recovery_actions() {
+        let cases = [
+            (
+                OcrPresentation::NoText,
+                "No text was recognized in the selected region.",
+            ),
+            (OcrPresentation::Recognizing, "Recognizing text..."),
+            (
+                OcrPresentation::Error(ExecutionDiagnostic::new(
+                    DiagnosticKind::UnsupportedOperation,
+                    "backend detail",
+                )),
+                "Local OCR is unavailable. Check Windows OCR support, then try again.",
+            ),
+            (
+                OcrPresentation::Error(
+                    ExecutionDiagnostic::new(
+                        DiagnosticKind::UnsupportedOperation,
+                        "backend detail",
+                    )
+                    .context("operation", "resolve English OCR language"),
+                ),
+                "No English OCR language is installed. Install an English language pack in Windows Settings > Time & language > Language & region, then try again.",
+            ),
+            (
+                OcrPresentation::Error(
+                    ExecutionDiagnostic::new(DiagnosticKind::Backend, "backend detail")
+                        .context("ocr_pipeline_operation", "capture region"),
+                ),
+                "Could not capture the selected region. Re-capture the region and try again.",
+            ),
+            (
+                OcrPresentation::Error(
+                    ExecutionDiagnostic::new(DiagnosticKind::Backend, "backend detail")
+                        .context("ocr_pipeline_operation", "recognize tile"),
+                ),
+                "Could not recognize text in the selected region. Re-capture a clear, readable region and try again.",
+            ),
+        ];
+        for (mut state, expected) in cases {
+            let text = rendered_text(&mut state);
+            assert!(text.contains(expected), "{text}");
+            assert!(!text.contains("Copy All"));
+            assert!(text.contains("Re-capture") && text.contains("Close"));
+            assert!(!text.contains("backend detail"));
+        }
     }
 
     #[test]

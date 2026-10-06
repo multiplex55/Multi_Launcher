@@ -90,7 +90,7 @@ Owner/scope: focused OCR result UI and normal panel/lifecycle hooks in `src/gui/
 
 ## M5-B — no-text and useful errors
 
-Status: pending. Depends on M5-A. Commit: `feat(ocr): [M5-B] add OCR empty-result and failure states`.
+Status: complete. Depends on M5-A. Commit: `feat(ocr): [M5-B] add OCR empty-result and failure states`.
 
 Owner/scope: result/controller error presentation. Whitespace-only recognition is NoText with Re-capture/Close and no Copy; an edited empty result must not overwrite clipboard. Distinguish unavailable OCR, missing English, capture failure, recognition failure. Present concise actionable text and log useful diagnostics using existing infrastructure. Normal Esc remains cancellation. Test every state/copy guard and errors; verify result/controller filters. Done when errors/empty text are understandable and clipboard unchanged except explicit nonempty copy.
 
@@ -107,6 +107,8 @@ Status: pending. Depends on M5. Commits: `test(ocr): [M6-A] cover virtual deskto
 M6-A owns additional deterministic coverage genuinely needed for left/above/secondary monitors, cross-monitor rectangles, negative origins, physical dimensions, gaps, and no UI DPI conversions. Reuse existing compositor/picker tests; add OCR adapter-specific assertions. Run relevant screen/overlay/OCR geometry filters.
 
 M6-B owns remaining lifecycle defects/coverage: Esc before/during drag, close during recognition, near-simultaneous invocations, stale result after re-capture, overlay/capture/OCR errors, exact restoration, newer visibility request and no leaked native/exclusive ownership. Run the affected state/lifecycle tests; do not duplicate already adequate coverage. Hardware scaling/multi-monitor native behavior remains part of required manual smoke. Done only when concrete integration edges have evidence; do not use these stages for broad reliability redesign.
+
+Focused current-source planner found M6-A needs verification only: existing OCR signed-cross-monitor facade test, GUI exact forwarded rectangle, isolated overlay geometry, and shared Windows compositor tests cover primary/left/above/single monitor/seams/gaps with no UI coordinate conversion. M6-B's only prospective gaps are ordinary recognition failure after successful restore and shutdown during blocked capture/recognition (late worker cannot reopen/restore). Extend the existing GUI AsyncBackend fixture narrowly; check completed M5-B/C tests first to avoid duplicates. M5-C remains owner of repeated result/no-text recapture, close routes, editor identity and stale UI intent. No new production lifecycle mechanism or redundant geometry matrix is planned.
 
 ## M7-A — MkMacro compatibility gate
 
@@ -146,8 +148,9 @@ Update relevant help/plugin metadata and current user-facing docs to explain `oc
 | M4-B1 | complete | `3bc5988d` | One-shot background worker, ordered capture/text terminal events, cancellation and spawn/disconnect/panic paths. Latest tracked compile passed; 5 worker tests passed, including bounded nonjoining drop assertion; fmt/diff checks passed. |
 | M4-B2 | complete | `351afa3f` | Latest owned compile passed; GUI OCR 22 passed, job/controller 10 passed, directly affected Color Pick geometry 2 passed. Formatting/diff checks passed. Capture terminal authorizes restore, completion stays staged across retries, and newer intent cancels publication. |
 | M4-R1 | complete | `4b8f3589` | Corrected own visibility re-publication after cancelled partial restore. Tracked compile PID 21200 passed; GUI PID 16052 passed 23 tests including hidden-origin activation-failure/cancel regression; fmt PID 6444 and diff check passed, all recorded identities absent. |
-| M5-A | complete | this checkpoint | Compact transient editable surface and Recognizing projection; explicit guarded exact copy, close/re-capture, early input ownership. Latest compile passed; 6 surface/view, 5 controller, 6 existing root tests passed; fmt/diff passed. |
-| M5-B through M8-A | pending | — | Record each checkpoint individually as it completes. |
+| M5-A | complete | `2aee3335` | Compact transient editable surface and Recognizing projection; explicit guarded exact copy, close/re-capture, early input ownership. Latest compile passed; 6 surface/view, 5 controller, 6 existing root tests passed; fmt/diff passed. |
+| M5-B | complete | this checkpoint | NoText/Error/Recognizing omit Copy; concise guidance uses existing diagnostic kind/context and retains originals. Compile PID 10216 passed; 9 surface/error/cancel tests PID 20752 passed; fmt PID 21936 and diff passed, all identities absent. |
+| M5-C through M8-A | pending | — | Record each checkpoint individually as it completes. |
 | M9-A targeted | pending | — | — |
 | M9-B broader | pending | — | — |
 | M9-C review | pending | — | — |
@@ -181,6 +184,8 @@ M3-B implemented hidden-origin admission/cancel. M4 success must intentionally p
 - Latest compile PID 21196 passed; surface/view PID 17464 (6 passed), controller PID 15600 (5 passed), affected existing root PID 14644 (6 passed), fmt PID 13040. All exit 0 and recorded identities absent. Evidence `C:/Users/Jay/AppData/Local/Temp/ocr-M5A-{compile2,view2,controller,root,fmtcheck}-20261006/`. Parent inspected production view/lifecycle/controller/input diff. No native/backend changes; empty/error polish and repeated-use hardening remain M5-B/C.
 
 ### M7 focused compatibility mapping
+
+- M5-B evidence: `C:/Users/Jay/AppData/Local/Temp/ocr-M5B-{compile1,view1,fmtcheck}-20261006/`. Rendered-label tests verify NoText/progress/unavailable/missing-English/capture/recognition projections and recovery actions; non-result explicit Copy/render cannot access clipboard; copy retry preserves exact edited text; normal cancellation remains silent. Only view projection and tests changed; no native backend/policy/controller change. Parent inspected diff and recorded exit/ownership results.
 
 - Reuse existing library filters: `mkmacro::executor::ocr_execution_tests::`, `mkmacro::ocr::tests::`, `mkmacro::model::ocr_payload_tests::`, `mkmacro::validation::ocr_validation_tests::`, `mkmacro::variables::tests::ocr_built_ins_have_stable_types_and_are_read_only`, `gui::mkmacro_dialog::ocr_test_job::tests::`, `gui::mkmacro_dialog::ocr_controls::tests::`, `gui::mkmacro_dialog::action_editor::tests::ocr_`, `gui::mkmacro_dialog::visual_overlay::tests::ocr_debug_`, and `gui::mkmacro_dialog::visual_overlay_windows::tests::ocr_full_surface_role_is_nonactivating_and_hit_test_transparent`. Include three additional action-editor cases: `recursive_ocr_test_snapshot_keeps_condition_path_identity`, `direct_ocr_configuration_and_window_picker_update_are_lossless`, `completed_ocr_error_is_cleared_when_configuration_changes`. Direct owned test binaries, bounded timeouts, `--test-threads=1`; do not include ignored native prerequisites for this deterministic checkpoint.
 - Concrete gap: strengthen existing `recognize_region_captures_once_translates_deduplicates_and_orders` to forward `el-GR` through every tile (currently en-US); retain supplied-capture Auto coverage. This protects MkMacro's non-English behavior through the extracted helper without an unnecessary executor language matrix. All other compatibility behaviors already have meaningful tests. No M7 source/test change has yet been made.

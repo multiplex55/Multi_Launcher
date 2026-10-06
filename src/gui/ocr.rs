@@ -636,7 +636,7 @@ mod tests {
         LauncherParkingTestObserver, LauncherWindowRect, launcher_parking_test_fixture,
     };
     use crate::mkmacro::{
-        ExecResult, MkPoint,
+        DiagnosticKind, ExecResult, ExecutionDiagnostic, MkPoint,
         screen::{CapturedRegion, SearchRegion},
     };
     use crate::ocr::selection::OcrPresentation;
@@ -1744,13 +1744,46 @@ mod tests {
         assert!(
             matches!(app.ocr.controller.presentation(),Some(OcrPresentation::Result(text)) if text==edited)
         );
+        app.apply_ocr_view_event(event(&app, OcrViewIntent::Copy), &clipboard);
+        assert_eq!(
+            *clipboard.writes.lock().unwrap(),
+            vec![edited.to_owned(), edited.to_owned()]
+        );
+        assert!(app.ocr.view.feedback.as_ref().unwrap().is_ok());
         let Some(OcrPresentation::Result(text)) = app.ocr.controller.presentation_mut() else {
             unreachable!()
         };
         *text = " \n \t ".into();
         app.apply_ocr_view_event(event(&app, OcrViewIntent::Copy), &clipboard);
-        assert_eq!(clipboard.writes.lock().unwrap().len(), 1);
+        assert_eq!(clipboard.writes.lock().unwrap().len(), 2);
         assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ocr_surface_non_result_states_never_read_or_write_clipboard() {
+        let (_root, mut app) = presented_app();
+        let clipboard = FakeClipboard {
+            reads: AtomicUsize::new(0),
+            writes: Mutex::new(vec![]),
+            fail: false,
+        };
+        let ctx = app.egui_ctx.clone();
+        for state in [
+            OcrPresentation::Recognizing,
+            OcrPresentation::NoText,
+            OcrPresentation::Error(
+                ExecutionDiagnostic::new(DiagnosticKind::Backend, "injected")
+                    .context("ocr_pipeline_operation", "recognize tile"),
+            ),
+        ] {
+            *app.ocr.controller.presentation_mut().unwrap() = state;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                app.show_ocr_surface_with_clipboard(ctx, &clipboard)
+            });
+            app.apply_ocr_view_event(event(&app, OcrViewIntent::Copy), &clipboard);
+        }
+        assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
+        assert!(clipboard.writes.lock().unwrap().is_empty());
     }
 
     #[test]
