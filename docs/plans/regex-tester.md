@@ -3555,8 +3555,11 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M6-A2 | complete | `1d2d805a`; 69 targeted tests, fmt/diff passed. Single draft/session, 150ms coalesced deadline, stale clearing, honest summaries, bounded text preview. |
 | M6-A3 | complete | `d44c82ed`; 9 GUI tests passed, reviewer confirmed fix. Oversized pattern preview128 bytes, explicit clear, original pattern/flags retained. Initial-paste layout hardening remains M11. |
 | M6-B | complete | `1f3d7452`; 11 GUI tests passed, independent review no findings. Bounded inline compiler feedback, stale clearing, narrow geometry. |
-| M7-A | in_progress | Editable byte-span highlighting and efficient zero-width markers; exact evaluated-source guard prevents stale painting. |
-| M7-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M7-A | complete | `aae9680c`; 75 targeted tests plus final3 highlighting tests passed, independent review no findings. Editable byte sections, distinct active theme color, clipped linear zero-width markers, exact evaluated-source guard. |
+| M7-B | complete | `513fc100`; 21 focused tests passed, independent review no findings. Domain wraparound selection, virtualized clickable rows and one-shot scroll preserve editor cursor/source. |
+| M7-C | complete | `88629df3`; 19 focused tests passed, independent review no findings. Full selected values, numbered/named/empty/unmatched captures, exact labels and explicit injectable clipboard copy. |
+| M8-A | in_progress | Cached deterministic explanations in domain session, readonly bounded sidebar. |
+| M8-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3600,3 +3603,5 @@ M6-A checkpoint split: introduce bounded pure evaluation first (`M6-A1`), then d
 M6-A1 preliminary limits: pattern/replacement4KiB, text64KiB, captures100, stored matches1000, materialized strings2MiB, replacement output1MiB. Direct regex-automata0.4.10 (already locked; alloc-only features) exposes the exact interpolation parser needed to count expansion before allocating large captures. M11 profiling/tuning remains pending. Generated default clipboard_modifiers.json test artifact verified absent before run and removed; no user file discarded.
 
 M6-A2/B review: single session scheduling and inline validation have no unresolved findings. M6-A3 explicitly remediates oversized pattern rendering; original buffer retained with bounded preview and clear recovery. All checkpoints verified before committing.
+
+M7 review: no unresolved findings in editable range rendering, zero-width markers, exact-source guards, navigation/cursor preservation, capture inspection or explicit copy isolation. Native acceptance remains pending.
