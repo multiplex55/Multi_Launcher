@@ -220,7 +220,14 @@ mod tests {
                 .unwrap()
                 .1;
             match evaluate(example.pattern, &example.flags, example.sample_text) {
-                EvaluationResult::Success { matches } => {
+                EvaluationResult::Success {
+                    matches,
+                    completeness,
+                } => {
+                    assert_eq!(
+                        completeness,
+                        crate::regex_tester::MatchCompleteness::Complete
+                    );
                     assert_eq!(
                         matches
                             .iter()
@@ -234,6 +241,7 @@ mod tests {
                 EvaluationResult::InvalidPattern(error) => {
                     panic!("{}: {}", example.id, error.message)
                 }
+                EvaluationResult::Suspended(reason) => panic!("unexpected suspension: {reason:?}"),
             }
         }
     }
@@ -268,6 +276,9 @@ mod tests {
                 }
                 SubstitutionEvaluationResult::InvalidPattern(error) => {
                     panic!("{id}: {}", error.message)
+                }
+                SubstitutionEvaluationResult::Suspended(reason) => {
+                    panic!("unexpected suspension: {reason:?}")
                 }
             }
         }

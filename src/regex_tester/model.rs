@@ -1,3 +1,4 @@
+use super::policy::{EvaluationLimit, EvaluationSuspension};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
@@ -283,8 +284,23 @@ pub struct RegexValidationError {
 /// Structured pattern evaluation state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvaluationResult {
-    Success { matches: Vec<RegexMatch> },
+    Success {
+        matches: Vec<RegexMatch>,
+        completeness: MatchCompleteness,
+    },
     InvalidPattern(RegexValidationError),
+    Suspended(EvaluationSuspension),
+}
+
+/// Whether all matches were enumerated. Truncated results contain only whole
+/// rows; `at_least` includes the first known match that could not be stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchCompleteness {
+    Complete,
+    Truncated {
+        reason: EvaluationLimit,
+        at_least: usize,
+    },
 }
 
 /// Successful local substitution output and the number of replacements made.
@@ -299,6 +315,7 @@ pub struct SubstitutionResult {
 pub enum SubstitutionEvaluationResult {
     Success(SubstitutionResult),
     InvalidPattern(RegexValidationError),
+    Suspended(EvaluationSuspension),
 }
 
 #[cfg(test)]

@@ -3277,6 +3277,7 @@ dependencies = [
  "raw-window-handle 0.6.2",
  "rdev",
  "regex",
+ "regex-automata",
  "regex-syntax",
  "reqwest",
  "rfd",
