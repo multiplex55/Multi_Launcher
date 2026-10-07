@@ -3550,8 +3550,10 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M3-B | complete | `0dce7610`; 13 persistence tests pass, typed stable IDs and atomic protected CRUD. |
 | M4-A | complete | `86ccf8d3`; plugin discovery/registration tests included in 47 passing Regex Tester tests. |
 | M4-B/M5-A | complete | `0190fa19`; typed route, full tracked lifecycle, native 960x680 child and bounded embedded fallback. 55 focused tests, final3 shell tests, bin cargo check, fmt/diff pass. |
-| M5-B | pending | Core pattern/flags/editor/collapsible information layout. |
-| M6-A–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M5-B | complete | `a1e6dce1`; 6 focused egui state/layout tests, flags and raw slash preservation, normal/narrow containment. |
+| M6-A1 | complete | `c8d8c2e9`; 63 targeted tests passed, independent review no findings. Default budgets and honest truncation/suspension; replacement preflight before expansion. |
+| M6-A2 | in_progress | Single domain-owned draft/session, coalesced nonblocking deadlines and actual result summaries. |
+| M6-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3587,3 +3589,9 @@ M3 review remediation complete: 3d9bacf9 [M3-C] rejects unknown nested flag fiel
 Geometry finding: root native viewport defaults to 400x220. A parent-constrained egui Window alone cannot deliver the requested large initial tester experience. Reuse current native child viewport API (already used by MkMacro prompts/placement recovery), with embedded fallback and tracked single logical lifecycle; no root resizing or global hotkey changes.
 
 M3-C review confirmation: reported nested flag schema issue resolved; defaults for missing known fields retained and both byte-preservation fixture tests cover misspelled/future unknown flags.
+
+M4-B/M5-A independent review of 0190fa19: no substantive findings in typed routing, query preservation, tracked lifecycle, focus requests, native child closure or embedded fallback. Root visibility/hotkey implementation unchanged.
+
+M6-A checkpoint split: introduce bounded pure evaluation first (`M6-A1`), then domain-owned debounce/session integration (`M6-A2`). Live UI evaluation must never materialize unbounded matches/captures/replacement output while waiting for M11-A. Named preliminary limits and explicit truncation/suspension metadata are foundational; M11-A will profile representative workloads, tune limits and complete rendering/large-input policy. This sequencing preserves the existing protection requirement rather than adding product scope.
+
+M6-A1 preliminary limits: pattern/replacement4KiB, text64KiB, captures100, stored matches1000, materialized strings2MiB, replacement output1MiB. Direct regex-automata0.4.10 (already locked; alloc-only features) exposes the exact interpolation parser needed to count expansion before allocating large captures. M11 profiling/tuning remains pending. Generated default clipboard_modifiers.json test artifact verified absent before run and removed; no user file discarded.
