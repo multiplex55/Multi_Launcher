@@ -3571,7 +3571,7 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M12-A | complete | `7acf8929`; all20 engine tests passed, fmt/diff passed. Exact repeated Unicode final capture and optional participation added; remaining domain categories previously covered. |
 | M12-B | complete | `8056d183`; 8 scoped tests passed, fmt/diff and root review passed. Typed production data-root constructor verifies actual profile writes, buffer privacy and reload. |
 | M12-C | complete | `4b6eb456`; all4 scoped checks passed, fmt/diff passed. Actual pointer activation, capture/summary, scroll offset/paint, cursor/draft preservation and reopen mode retention. |
-| M13-A | complete | README discovery/data files and docs/regex_tester.md guide added; independent documentation review passed after exact label and initially-unchecked wording corrections. |
+| M13-A | complete | `04bc659d`; README discovery/data files and docs/regex_tester.md guide; documentation review passed after label and initially-unchecked wording corrections. |
 | M13-B | complete | Bounded final independent source review through M12-B found no substantive defects; M12-C changes tests only. Final targeted run and native acceptance remain required. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
@@ -3643,3 +3643,7 @@ Normal warning ranges: pattern/replacement1KiB, text16KiB. Hard limits retained 
 
 M12 bounded test gaps: repeated final capture semantics (M12-A); typed data-root dialog constructor plus real nondefault-root writes, avoiding unrelated full LauncherApp startup (M12-B); actual match-row activation and substitution mode reopen assertion (M12-C). Existing tests already cover the rest of the plan's integration/state lists.
 M12-C fixture corrections preserved meaningful assertions: group arrays omit full-match capture; deterministic frame time and one subsequent paint frame verify egui scroll animation/render ordering. No production workaround or assertion weakening. Actual scroll offset and visible movement both pass.
+
+Final targeted Nextest: cargo nextest run --offline --lib --test domain -E 'test(regex_tester) | test(every_simple_dialog_routes_through_the_typed_host) | test(command_bus_architecture)' passed119/119 (4730 skipped), build3m50s/run2.332s. Three pre-existing GUI test warnings remain unrelated. Generated factory clipboard_modifiers.json was absent before run, verified after creation, and removed. Optimized production build and isolated native acceptance are pending.
+
+Production build: cargo build --offline --release --bin multi_launcher passed (4m04s). Required native acceptance remains 0/30 verified. Isolated test directory tmp/regex-acceptance-c8f94fc9-6cac-41bb-b525-5a1f17336f11 holds fresh settings (only Regex plugin, dashboard off) and synthetic data only. Owned release process23008 remains running for acceptance. Computer Use lists a launcher but screenshot capture failed with FrameArrived timed out; refreshed selection/activation retry failed with window capture timed out. No state tests are claimed as native acceptance. User asked to make the rebuilt launcher visible/approve app access or perform the manual pass; awaiting external-state recovery.
