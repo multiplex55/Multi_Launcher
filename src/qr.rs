@@ -5,7 +5,30 @@
 
 use std::fmt;
 
+use image::{Rgba, RgbaImage};
 use qrcode::{Color, EcLevel, QrCode};
+
+const QUIET_ZONE_MODULES: usize = 4;
+const RASTER_MODULE_SCALE: u32 = 8;
+
+/// Payload counts that can be displayed even when QR generation fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QrPayloadMetadata {
+    /// Unicode scalar values in the source text.
+    pub character_count: usize,
+    /// Number of UTF-8 bytes in the source text.
+    pub utf8_byte_count: usize,
+}
+
+impl QrPayloadMetadata {
+    /// Measures a source without attempting to encode it.
+    pub fn from_source(source: &str) -> Self {
+        Self {
+            character_count: source.chars().count(),
+            utf8_byte_count: source.len(),
+        }
+    }
+}
 
 /// The QR error-correction level used during generation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -68,6 +91,27 @@ impl GeneratedQr {
         }
 
         Some(self.modules[y * self.size + x])
+    }
+
+    /// Renders the module matrix as a deterministic black-and-white raster
+    /// with a four-module white quiet zone and eight pixels per module.
+    pub fn to_rgba_image(&self) -> RgbaImage {
+        let side = ((self.size + QUIET_ZONE_MODULES * 2) as u32) * RASTER_MODULE_SCALE;
+        let matrix_start = QUIET_ZONE_MODULES;
+        let matrix_end = matrix_start + self.size;
+
+        RgbaImage::from_fn(side, side, |x, y| {
+            let module_x = (x / RASTER_MODULE_SCALE) as usize;
+            let module_y = (y / RASTER_MODULE_SCALE) as usize;
+            let is_dark = module_x >= matrix_start
+                && module_x < matrix_end
+                && module_y >= matrix_start
+                && module_y < matrix_end
+                && self.modules[(module_y - matrix_start) * self.size + (module_x - matrix_start)];
+
+            let value = if is_dark { 0 } else { u8::MAX };
+            Rgba([value, value, value, u8::MAX])
+        })
     }
 }
 
@@ -164,7 +208,11 @@ fn encode_with_utf8_eci(
 
 #[cfg(test)]
 mod tests {
-    use super::{GeneratedQr, QrErrorCorrection, QrGenerationError, generate};
+    use super::{
+        GeneratedQr, QUIET_ZONE_MODULES, QrErrorCorrection, QrGenerationError, QrPayloadMetadata,
+        RASTER_MODULE_SCALE, generate,
+    };
+    use image::Rgba;
     use qrcode::{Color, EcLevel, QrCode, bits::Bits, types::Version};
 
     fn library_code(source: &str, error_correction: QrErrorCorrection) -> QrCode {
@@ -295,5 +343,104 @@ mod tests {
 
         assert!(matches!(error, QrGenerationError::CapacityExceeded));
         assert!(!rendered.contains("private payload"));
+    }
+
+    #[test]
+    fn raster_is_square_with_quiet_zone_and_integer_module_scale() {
+        let generated = generate("raster dimensions", QrErrorCorrection::Medium).unwrap();
+        let raster = generated.to_rgba_image();
+        let expected_side =
+            ((generated.size() + QUIET_ZONE_MODULES * 2) as u32) * RASTER_MODULE_SCALE;
+
+        assert_eq!(raster.width(), raster.height());
+        assert_eq!(raster.width(), expected_side);
+
+        let quiet_zone_pixels = QUIET_ZONE_MODULES as u32 * RASTER_MODULE_SCALE;
+        for y in 0..raster.height() {
+            for x in 0..raster.width() {
+                if x < quiet_zone_pixels
+                    || y < quiet_zone_pixels
+                    || x >= raster.width() - quiet_zone_pixels
+                    || y >= raster.height() - quiet_zone_pixels
+                {
+                    assert_eq!(*raster.get_pixel(x, y), Rgba([255, 255, 255, 255]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn raster_contains_only_opaque_black_and_white_pixels() {
+        let raster = generate("black and white", QrErrorCorrection::Medium)
+            .unwrap()
+            .to_rgba_image();
+
+        for pixel in raster.pixels() {
+            assert!(
+                *pixel == Rgba([0, 0, 0, 255]) || *pixel == Rgba([255, 255, 255, 255]),
+                "unexpected QR raster pixel: {pixel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raster_draws_every_module_as_a_uniform_integer_block() {
+        let generated = generate("crisp modules", QrErrorCorrection::Medium).unwrap();
+        let raster = generated.to_rgba_image();
+        let quiet_zone_pixels = QUIET_ZONE_MODULES as u32 * RASTER_MODULE_SCALE;
+
+        for module_y in 0..generated.size() {
+            for module_x in 0..generated.size() {
+                let expected_pixel = if generated.is_dark(module_x, module_y) == Some(true) {
+                    Rgba([0, 0, 0, 255])
+                } else {
+                    Rgba([255, 255, 255, 255])
+                };
+                let pixel_x = quiet_zone_pixels + module_x as u32 * RASTER_MODULE_SCALE;
+                let pixel_y = quiet_zone_pixels + module_y as u32 * RASTER_MODULE_SCALE;
+
+                for y in pixel_y..pixel_y + RASTER_MODULE_SCALE {
+                    for x in pixel_x..pixel_x + RASTER_MODULE_SCALE {
+                        assert_eq!(*raster.get_pixel(x, y), expected_pixel);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn raster_is_deterministic_for_the_same_payload_and_correction() {
+        let first = generate("same output", QrErrorCorrection::Quartile)
+            .unwrap()
+            .to_rgba_image();
+        let second = generate("same output", QrErrorCorrection::Quartile)
+            .unwrap()
+            .to_rgba_image();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn error_correction_can_change_matrix_dimensions() {
+        let source = "12345678901234567890";
+        let medium = generate(source, QrErrorCorrection::Medium).unwrap();
+        let high = generate(source, QrErrorCorrection::High).unwrap();
+
+        assert_ne!(medium.size(), high.size());
+    }
+
+    #[test]
+    fn payload_metadata_is_available_when_encoding_exceeds_capacity() {
+        let source = "🦀".repeat(3_000);
+        let metadata = QrPayloadMetadata::from_source(&source);
+
+        assert_eq!(metadata.character_count, source.chars().count());
+        assert_eq!(metadata.character_count, 3_000);
+        assert_eq!(metadata.utf8_byte_count, source.len());
+        assert_eq!(metadata.utf8_byte_count, 12_000);
+        assert_eq!(
+            generate(&source, QrErrorCorrection::Low),
+            Err(QrGenerationError::CapacityExceeded)
+        );
     }
 }

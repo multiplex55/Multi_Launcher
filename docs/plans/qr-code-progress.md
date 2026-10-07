@@ -5,7 +5,7 @@ Authority: `qr-code-plan.md` and the current QR kickstart request. Source baseli
 | Checkpoint | Scope | State |
 | --- | --- | --- |
 | M1-A | Local encoding domain, dependency, focused tests | complete |
-| M1-B | Shared crisp raster and metadata | pending |
+| M1-B | Shared crisp raster and metadata | complete |
 | M2-A | Built-in plugin, exact/payload queries, discovery | pending |
 | M2-B | Typed parser/bus/host routing, privacy/history | pending |
 | M3-A | Transient dialog and panel lifecycle | pending |
@@ -24,3 +24,4 @@ Native phone scan remains a human smoke check. Native GUI checks depend on avail
 
 M1-A: scoped Nextest passed 7/7. Independent review identified automatic Kanji-mode reinterpretation of UTF-8; corrected before checkpoint using ECI 26 + Byte mode for non-ASCII, with ascending version selection. ASCII retains encoder optimization. No source/payload storage or side effects.
 
+M1-B: scoped Nextest passed 13/13; independent raster review had no substantive findings. Shared raster uses four quiet modules, eight pixels per module, opaque black/white, and independent source counts.
