@@ -401,6 +401,53 @@ mod tests {
     }
 
     #[test]
+    fn repeated_unicode_group_retains_final_capture_and_optional_participation() {
+        // This helper also requires a complete evaluation, not truncated rows.
+        let matches = evaluate_matches(r"(?P<unit>é|β)+(z)?", &RegexFlags::default(), "éβz éβ");
+        assert_eq!(matches.len(), 2);
+        for (matched, full_text, full_span, unit_span, optional_value) in [
+            (
+                &matches[0],
+                "éβz",
+                ByteSpan::new(0, 5).unwrap(),
+                ByteSpan::new(2, 4).unwrap(),
+                CaptureValue::Matched {
+                    text: "z".to_owned(),
+                    span: ByteSpan::new(4, 5).unwrap(),
+                },
+            ),
+            (
+                &matches[1],
+                "éβ",
+                ByteSpan::new(6, 10).unwrap(),
+                ByteSpan::new(8, 10).unwrap(),
+                CaptureValue::Unmatched,
+            ),
+        ] {
+            assert_eq!(matched.text, full_text);
+            assert_eq!(matched.span, full_span);
+            assert_eq!(
+                matched.captures,
+                [
+                    CaptureGroup {
+                        group_index: 1,
+                        name: Some("unit".to_owned()),
+                        value: CaptureValue::Matched {
+                            text: "β".to_owned(),
+                            span: unit_span,
+                        },
+                    },
+                    CaptureGroup {
+                        group_index: 2,
+                        name: None,
+                        value: optional_value,
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
     fn derives_unicode_byte_spans_and_line_locations_for_lf_and_crlf() {
         let matches = evaluate_matches("é|β", &RegexFlags::default(), "Aé💡\r\nβ\né");
 
