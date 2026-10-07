@@ -1,6 +1,7 @@
 use super::{LauncherApp, push_toast};
 use crate::plugins::snippets::{
-    SNIPPETS_FILE, SnippetEntry, load_snippets, snippet_preview_text, update_snippets,
+    SNIPPETS_FILE, SnippetEntry, SnippetPreparationError, load_snippets, prepare_snippet_text,
+    snippet_preview_text, update_snippets,
 };
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -23,6 +24,13 @@ enum CommitRejection {
     StaleSnapshot,
     DuplicateAlias,
     InvalidEditorState,
+    InvalidTemplate,
+}
+
+#[derive(Debug)]
+enum EditorCandidateError {
+    InvalidState(&'static str),
+    PromptedTemplate(SnippetPreparationError),
 }
 
 #[derive(Debug)]
@@ -270,9 +278,11 @@ impl SnippetDialog {
 
     fn editor_candidate(
         &self,
-    ) -> Result<(Vec<SnippetEntry>, Vec<SnippetEntry>, AliasValidation), &'static str> {
+    ) -> Result<(Vec<SnippetEntry>, Vec<SnippetEntry>, AliasValidation), EditorCandidateError> {
         let Some(index) = self.edit_idx else {
-            return Err("No snippet is being edited.");
+            return Err(EditorCandidateError::InvalidState(
+                "No snippet is being edited.",
+            ));
         };
         let expected = self.entries.clone();
         let mut candidate = expected.clone();
@@ -288,16 +298,20 @@ impl SnippetDialog {
                 edited_index: None,
                 alias: self.alias.clone(),
             }
-        } else if let Some(entry) = candidate.get_mut(index) {
-            entry.alias = self.alias.clone();
-            entry.text = self.text.clone();
-            entry.hide_contents = self.hide_contents;
+        } else if let Some(entry) = candidate.get(index) {
+            let mut prepared = prepare_snippet_text(entry, &self.text)
+                .map_err(EditorCandidateError::PromptedTemplate)?;
+            prepared.alias = self.alias.clone();
+            prepared.hide_contents = self.hide_contents;
+            candidate[index] = prepared;
             AliasValidation {
                 edited_index: Some(index),
                 alias: self.alias.clone(),
             }
         } else {
-            return Err("The edited snippet no longer exists.");
+            return Err(EditorCandidateError::InvalidState(
+                "The edited snippet no longer exists.",
+            ));
         };
         Ok((expected, candidate, alias_validation))
     }
@@ -305,9 +319,13 @@ impl SnippetDialog {
     fn save_editor(&mut self, path: &str) -> Result<(), CommitFailure> {
         let (expected, candidate, alias_validation) = match self.editor_candidate() {
             Ok(candidate) => candidate,
-            Err(error) => {
+            Err(EditorCandidateError::InvalidState(error)) => {
                 self.inline_error = Some(error.to_owned());
                 return Err(CommitFailure::Rejected(CommitRejection::InvalidEditorState));
+            }
+            Err(EditorCandidateError::PromptedTemplate(error)) => {
+                self.inline_error = Some(error.to_string());
+                return Err(CommitFailure::Rejected(CommitRejection::InvalidTemplate));
             }
         };
         self.commit_candidate(path, &expected, candidate, Some(alias_validation))?;
@@ -356,6 +374,9 @@ impl SnippetDialog {
                     }
                     CommitRejection::InvalidEditorState => {
                         "The editor is no longer available.".to_owned()
+                    }
+                    CommitRejection::InvalidTemplate => {
+                        "The prompted snippet template is invalid.".to_owned()
                     }
                 });
                 Err(CommitFailure::Rejected(rejection))
@@ -1303,6 +1324,77 @@ mod tests {
             load_snippets(path.to_str().unwrap()).unwrap(),
             vec![expected]
         );
+    }
+
+    #[test]
+    fn prompted_editor_reconciles_fields_in_candidate_and_commits_them_only_on_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let mut original = prompted_snippet("saved", "Hello {{name}} and {{removed}}");
+        let configured_name = original.fields[0].clone();
+        original.fields.push(SnippetFieldDefinition::new("removed"));
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let version = snippets_version();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+        dialog.text = "{{new_key}} then {{name}}".into();
+
+        let (_, candidate, _) = dialog.editor_candidate().unwrap();
+
+        assert_eq!(
+            candidate[0].fields,
+            vec![SnippetFieldDefinition::new("new_key"), configured_name]
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(dialog.entries, vec![original.clone()]);
+        assert_eq!(snippets_version(), version);
+
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved[0].text, "{{new_key}} then {{name}}");
+        assert_eq!(saved[0].fields, candidate[0].fields);
+        assert_eq!(snippets_version(), version + 1);
+    }
+
+    #[test]
+    fn prompted_editor_invalid_text_keeps_inline_error_draft_and_snapshot() {
+        for (invalid_text, private_text) in [
+            ("PRIVATE {{unfinished", "PRIVATE"),
+            ("literal only", "literal only"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("snippets.json");
+            let original = prompted_snippet("saved", "Hello {{name}}");
+            save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+            let original_bytes = std::fs::read(&path).unwrap();
+            let version = snippets_version();
+            let mut dialog = SnippetDialog::default();
+            dialog.load_from(path.to_str().unwrap()).unwrap();
+            assert!(dialog.begin_existing(0));
+            dialog.alias = "draft alias".into();
+            dialog.text = invalid_text.into();
+
+            assert!(matches!(
+                dialog.save_editor(path.to_str().unwrap()),
+                Err(CommitFailure::Rejected(CommitRejection::InvalidTemplate))
+            ));
+
+            assert_eq!(dialog.alias, "draft alias");
+            assert_eq!(dialog.text, invalid_text);
+            assert_eq!(dialog.entries, vec![original.clone()]);
+            assert_eq!(dialog.edit_idx, Some(0));
+            let inline_error = dialog.inline_error.as_deref().unwrap();
+            assert!(!inline_error.contains(private_text));
+            assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+            assert_eq!(
+                load_snippets(path.to_str().unwrap()).unwrap(),
+                vec![original]
+            );
+            assert_eq!(snippets_version(), version);
+        }
     }
 
     #[test]

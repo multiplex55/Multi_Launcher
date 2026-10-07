@@ -1,3 +1,4 @@
+use super::snippet_template::{TemplateError, parse_template};
 use crate::actions::Action;
 use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
@@ -7,6 +8,8 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard,
@@ -87,6 +90,59 @@ pub(crate) fn reconcile_snippet_fields(
                 .unwrap_or_else(|| SnippetFieldDefinition::new(key.clone()))
         })
         .collect()
+}
+
+#[derive(Debug)]
+pub(crate) enum SnippetPreparationError {
+    InvalidTemplate(TemplateError),
+    NoFields,
+    DuplicateFieldDefinitions,
+}
+
+impl fmt::Display for SnippetPreparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidTemplate(error) => write!(formatter, "invalid template: {error}"),
+            Self::NoFields => {
+                formatter.write_str("prompted snippets must contain at least one valid placeholder")
+            }
+            Self::DuplicateFieldDefinitions => {
+                formatter.write_str("prompted snippet has duplicate configured field definitions")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SnippetPreparationError {}
+
+/// Build a text-edit candidate, parsing and reconciling only opted-in snippets.
+/// The returned entry is detached from the persisted snapshot until the caller commits it.
+pub(crate) fn prepare_snippet_text(
+    entry: &SnippetEntry,
+    text: &str,
+) -> Result<SnippetEntry, SnippetPreparationError> {
+    let mut candidate = entry.clone();
+    candidate.text = text.to_owned();
+    if !entry.prompt_for_fields {
+        return Ok(candidate);
+    }
+
+    let parsed = parse_template(text).map_err(SnippetPreparationError::InvalidTemplate)?;
+    if parsed.field_keys.is_empty() {
+        return Err(SnippetPreparationError::NoFields);
+    }
+
+    let mut known_keys = HashSet::new();
+    if entry
+        .fields
+        .iter()
+        .any(|field| !known_keys.insert(field.name.as_str()))
+    {
+        return Err(SnippetPreparationError::DuplicateFieldDefinitions);
+    }
+
+    candidate.fields = reconcile_snippet_fields(&entry.fields, &parsed.field_keys);
+    Ok(candidate)
 }
 
 fn readable_field_label(name: &str) -> String {
@@ -221,11 +277,12 @@ pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()>
     let alias = alias.to_owned();
     let text = text.to_owned();
     update_snippets(path, move |list| {
-        if let Some(item) = list.iter_mut().find(|entry| entry.alias == alias) {
-            if item.text == text {
+        if let Some(index) = list.iter().position(|entry| entry.alias == alias) {
+            if list[index].text == text {
                 return Ok(false);
             }
-            item.text = text;
+            let candidate = prepare_snippet_text(&list[index], &text)?;
+            list[index] = candidate;
         } else {
             list.push(SnippetEntry {
                 alias,
@@ -777,6 +834,113 @@ mod persistence_tests {
         assert_eq!(reconciled[1], configured);
         assert!(!reconciled.iter().any(|field| field.name == "removed"));
         assert_eq!(existing, vec![reconciled[1].clone(), orphan]);
+    }
+
+    #[test]
+    fn prompted_append_reconciles_fields_only_for_the_committed_text() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+        let configured_name = SnippetFieldDefinition {
+            name: "name".into(),
+            label: "Preferred name".into(),
+            default_value: "Ada".into(),
+            required: false,
+            input_kind: SnippetInputKind::Multiline,
+        };
+        let original = SnippetEntry {
+            alias: "configured".into(),
+            text: "Hello {{name}} and {{removed}}".into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![
+                configured_name.clone(),
+                SnippetFieldDefinition::new("removed"),
+            ],
+        };
+        save_snippets(path, std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(path).unwrap();
+        let version = snippets_version();
+
+        append_snippet(path, "configured", "{{new_key}} then {{name}}").unwrap();
+
+        let committed = load_snippets(path).unwrap();
+        assert_eq!(committed[0].text, "{{new_key}} then {{name}}");
+        assert!(committed[0].hide_contents);
+        assert!(committed[0].prompt_for_fields);
+        assert_eq!(
+            committed[0].fields,
+            vec![SnippetFieldDefinition::new("new_key"), configured_name]
+        );
+        assert_ne!(std::fs::read(path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version + 1);
+    }
+
+    #[test]
+    fn invalid_prompted_append_preserves_file_snapshot_and_version() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+        let original = prompted_snippet("configured", "Hello {{name}}");
+        save_snippets(path, std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(path).unwrap();
+        let version = snippets_version();
+
+        for invalid_text in ["PRIVATE {{", "literal only", "unexpected }}"] {
+            let error = append_snippet(path, "configured", invalid_text).unwrap_err();
+            assert!(!error.to_string().contains(invalid_text));
+            assert_eq!(std::fs::read(path).unwrap(), original_bytes);
+            assert_eq!(load_snippets(path).unwrap(), vec![original.clone()]);
+            assert_eq!(snippets_version(), version);
+        }
+    }
+
+    #[test]
+    fn duplicate_prompted_field_definitions_are_not_dropped_during_reconciliation() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+        let mut original = prompted_snippet("configured", "Hello {{name}}");
+        original.fields.push(SnippetFieldDefinition {
+            name: "name".into(),
+            label: "Second definition".into(),
+            default_value: "ignored".into(),
+            required: true,
+            input_kind: SnippetInputKind::SingleLine,
+        });
+        save_snippets(path, std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(path).unwrap();
+        let version = snippets_version();
+
+        assert!(append_snippet(path, "configured", "Updated {{name}}").is_err());
+
+        assert_eq!(std::fs::read(path).unwrap(), original_bytes);
+        assert_eq!(load_snippets(path).unwrap(), vec![original]);
+        assert_eq!(snippets_version(), version);
+    }
+
+    #[test]
+    fn unprompted_new_and_updated_snippets_treat_braces_as_literal_text() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+        let literal = r"{{invalid key}} }} \{{unfinished";
+
+        append_snippet(path, "plain", literal).unwrap();
+        let after_first_write = std::fs::read(path).unwrap();
+        let version = snippets_version();
+        append_snippet(path, "plain", literal).unwrap();
+
+        let saved = load_snippets(path).unwrap();
+        assert_eq!(saved, vec![snippet("plain", literal)]);
+        assert!(!saved[0].prompt_for_fields);
+        assert!(saved[0].fields.is_empty());
+        assert_eq!(std::fs::read(path).unwrap(), after_first_write);
+        assert_eq!(snippets_version(), version);
     }
 
     #[test]

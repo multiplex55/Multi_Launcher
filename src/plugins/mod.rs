@@ -50,6 +50,7 @@ pub mod screen_draw;
 pub mod screenshot;
 pub mod settings;
 pub mod shell;
+pub(crate) mod snippet_template;
 pub mod snippets;
 pub mod stopwatch;
 pub mod sysinfo;
