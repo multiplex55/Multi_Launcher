@@ -1,5 +1,7 @@
 use super::{LauncherApp, push_toast};
-use crate::plugins::snippets::{SNIPPETS_FILE, SnippetEntry, load_snippets, replace_snippets};
+use crate::plugins::snippets::{
+    SNIPPETS_FILE, SnippetEntry, load_snippets, replace_snippets, snippet_preview_text,
+};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
@@ -23,6 +25,31 @@ fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
     let lowered_filter = filter.to_lowercase();
     entry.alias.to_lowercase().contains(&lowered_filter)
         || entry.text.to_lowercase().contains(&lowered_filter)
+}
+
+fn matching_snippet_indices(entries: &[SnippetEntry], filter: &str) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| matches_snippet_filter(entry, filter).then_some(index))
+        .collect()
+}
+
+fn single_line_alias(alias: &str) -> String {
+    let mut display = String::with_capacity(alias.len());
+    let mut space_pending = false;
+    for character in alias.chars() {
+        if character.is_whitespace() || character.is_control() {
+            space_pending = !display.is_empty();
+        } else {
+            if space_pending {
+                display.push(' ');
+                space_pending = false;
+            }
+            display.push(character);
+        }
+    }
+    display
 }
 
 impl SnippetDialog {
@@ -111,6 +138,10 @@ impl SnippetDialog {
         let mut close = false;
         let mut save_candidate = None;
         egui::Window::new("Snippets")
+            .default_size((600.0, 500.0))
+            .min_width(380.0)
+            .min_height(320.0)
+            .resizable(true)
             .open(&mut self.open)
             .show(ctx, |ui| {
                 if let Some(error) = &self.load_error {
@@ -129,7 +160,19 @@ impl SnippetDialog {
                         ui.text_edit_singleline(&mut self.alias);
                     });
                     ui.label("Text");
-                    ui.text_edit_multiline(&mut self.text);
+                    let action_height = ui.spacing().interact_size.y
+                        + ui.spacing().button_padding.y * 2.0
+                        + ui.spacing().item_spacing.y;
+                    let editor_height = (ui.available_height() - action_height).max(120.0);
+                    let font_id = egui::TextStyle::Body.resolve(ui.style());
+                    let line_height = ui.fonts(|fonts| fonts.row_height(&font_id));
+                    let desired_rows =
+                        (editor_height / line_height).floor().clamp(4.0, 48.0) as usize;
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.text)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(desired_rows),
+                    );
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.alias.trim().is_empty() || self.text.trim().is_empty() {
@@ -157,37 +200,113 @@ impl SnippetDialog {
                     let mut remove: Option<usize> = None;
                     ui.horizontal(|ui| {
                         ui.label("Filter");
-                        ui.add(egui::TextEdit::singleline(&mut self.filter));
+                        let clear_filter_width = 116.0;
+                        let filter_spacing = ui.spacing().item_spacing.x;
+                        let filter_width =
+                            (ui.available_width() - clear_filter_width - filter_spacing).max(80.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .desired_width(filter_width),
+                        );
+                        if ui
+                            .add_enabled(
+                                !self.filter.is_empty(),
+                                egui::Button::new("Clear Filter").min_size(egui::vec2(
+                                    clear_filter_width,
+                                    ui.spacing().interact_size.y
+                                        + ui.spacing().button_padding.y * 2.0,
+                                )),
+                            )
+                            .clicked()
+                        {
+                            self.filter.clear();
+                        }
                     });
-                    let mut shown_count = 0usize;
-                    egui::ScrollArea::vertical()
-                        .max_height(200.0)
-                        .show(ui, |ui| {
-                            for idx in 0..self.entries.len() {
-                                let entry = self.entries[idx].clone();
-                                if !matches_snippet_filter(&entry, &self.filter) {
-                                    continue;
-                                }
-                                shown_count += 1;
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{}: {}",
-                                        entry.alias,
-                                        entry.text.replace('\n', " ")
-                                    ));
-                                    if ui.button("Edit").clicked() {
-                                        self.edit_idx = Some(idx);
-                                        self.alias = entry.alias.clone();
-                                        self.text = entry.text.clone();
-                                    }
-                                    if ui.button("Remove").clicked() {
-                                        remove = Some(idx);
-                                    }
-                                });
-                            }
-                        });
-                    if shown_count == 0 {
+                    let matching_indices = matching_snippet_indices(&self.entries, &self.filter);
+                    ui.label(format!(
+                        "{} of {} snippets",
+                        matching_indices.len(),
+                        self.entries.len()
+                    ));
+                    if matching_indices.is_empty() {
                         ui.label("No snippets match filter");
+                    } else {
+                        let footer_height = (ui.spacing().interact_size.y
+                            + ui.spacing().button_padding.y * 2.0
+                            + ui.spacing().item_spacing.y)
+                            * 2.0;
+                        let list_height = (ui.available_height() - footer_height).max(100.0);
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .max_height(list_height)
+                            .show(ui, |ui| {
+                                for idx in matching_indices {
+                                    let entry = self.entries[idx].clone();
+                                    ui.horizontal(|ui| {
+                                        let spacing = ui.spacing().item_spacing.x;
+                                        let row_height = ui.spacing().interact_size.y
+                                            + ui.spacing().button_padding.y * 2.0;
+                                        let edit_width = 48.0;
+                                        let remove_width = 68.0;
+                                        let preview_width = (ui.available_width()
+                                            - edit_width
+                                            - remove_width
+                                            - spacing * 2.0)
+                                            .max(0.0);
+                                        let preview = format!(
+                                            "{}: {}",
+                                            single_line_alias(&entry.alias),
+                                            snippet_preview_text(&entry)
+                                        );
+                                        let preview_rect = ui
+                                            .allocate_exact_size(
+                                                egui::vec2(preview_width, row_height),
+                                                egui::Sense::hover(),
+                                            )
+                                            .0;
+                                        let text_color = ui.visuals().text_color();
+                                        let mut layout_job =
+                                            egui::text::LayoutJob::simple_singleline(
+                                                preview,
+                                                egui::TextStyle::Body.resolve(ui.style()),
+                                                text_color,
+                                            );
+                                        layout_job.wrap.max_width = preview_width;
+                                        layout_job.wrap.max_rows = 1;
+                                        layout_job.wrap.break_anywhere = true;
+                                        let galley = ui.fonts(|fonts| fonts.layout_job(layout_job));
+                                        let text_position = egui::pos2(
+                                            preview_rect.left(),
+                                            preview_rect.center().y - galley.size().y / 2.0,
+                                        );
+                                        ui.painter().with_clip_rect(preview_rect).galley(
+                                            text_position,
+                                            galley,
+                                            text_color,
+                                        );
+                                        if ui
+                                            .add_sized(
+                                                egui::vec2(edit_width, row_height),
+                                                egui::Button::new("Edit"),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.edit_idx = Some(idx);
+                                            self.alias = entry.alias.clone();
+                                            self.text = entry.text.clone();
+                                        }
+                                        if ui
+                                            .add_sized(
+                                                egui::vec2(remove_width, row_height),
+                                                egui::Button::new("Remove"),
+                                            )
+                                            .clicked()
+                                        {
+                                            remove = Some(idx);
+                                        }
+                                    });
+                                }
+                            });
                     }
                     if let Some(idx) = remove {
                         let mut candidate = self.entries.clone();
@@ -219,7 +338,9 @@ impl SnippetDialog {
 
 #[cfg(test)]
 mod tests {
-    use super::{SnippetDialog, matches_snippet_filter};
+    use super::{
+        SnippetDialog, matches_snippet_filter, matching_snippet_indices, single_line_alias,
+    };
     use crate::plugins::snippets::{SnippetEntry, save_snippets};
 
     fn snippet(alias: &str, text: &str) -> SnippetEntry {
@@ -260,6 +381,26 @@ mod tests {
     fn non_match_behavior() {
         let entry = snippet("deploy", "release production");
         assert!(!matches_snippet_filter(&entry, "staging"));
+    }
+
+    #[test]
+    fn matching_count_uses_alias_and_hidden_body_filter_predicate() {
+        let mut hidden = snippet("private", "launch-token payload");
+        hidden.hide_contents = true;
+        let entries = vec![snippet("Deploy", "release"), hidden];
+
+        assert_eq!(matching_snippet_indices(&entries, "").len(), 2);
+        assert_eq!(matching_snippet_indices(&entries, "DEPLOY"), vec![0]);
+        assert_eq!(matching_snippet_indices(&entries, "launch-token"), vec![1]);
+        assert!(matching_snippet_indices(&entries, "no match").is_empty());
+    }
+
+    #[test]
+    fn alias_preview_normalizes_control_whitespace_without_changing_alias() {
+        let entry = snippet("private\nalias", "body");
+
+        assert_eq!(single_line_alias(&entry.alias), "private alias");
+        assert_eq!(entry.alias, "private\nalias");
     }
 
     #[test]
