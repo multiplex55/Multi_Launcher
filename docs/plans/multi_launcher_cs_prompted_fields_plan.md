@@ -1,6 +1,6 @@
 # Multi Launcher — Plan B: Prompted Snippet Fields
 
-**Status:** M1-A verified; remaining stages pending (checkpoint commit pending parent)\
+**Status:** M1-A complete; M1-B verified (checkpoint commit pending parent); remaining stages pending.\
 **Deliverable:** Extend the existing Clipboard Snippets (`cs`) plugin to support opt-in, user-filled template fields, without creating a new plugin.  
 **Execution baseline:** `prompt-fields` at `888a55fb793cdcf2c44202ed56f2752abe8c9da1`; the user approved the current branch HEAD in place of the ZIP requirement on 2026-10-07.\
 **Original reference snapshot:** `multi_launcher(20261007-185532).zip` (SHA-256 `0d1deb806acd61857693a0559d2cd5cc5bf7f4336e3259969e9749ce9504e7ec`); retained as historical context, not an execution prerequisite.\
@@ -9,9 +9,11 @@
 
 **Execution ledger:**
 
-- M1-A — verified; checkpoint commit pending parent.
-- Verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippets::persistence_tests)'` passed 13/13; `cargo nextest run --test snippets_plugin --test plugin_exact_match -E 'test(load_save_roundtrip) or test(snippet_edit_command_unfiltered)'` passed 2/2 before the final label-fallback-only correction.
-- Pending: M1-B, M2-A, M2-B, M3-A, M3-B, M3-C, M4-A, M4-B, M5-A, M5-B, M6-A and the M6-B review gate.
+- M1-A — complete; commit `37d3c3704c9278c78df7911fab6ed4e50925c745`.
+- M1-A verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippets::persistence_tests)'` passed 13/13; `cargo nextest run --test snippets_plugin --test plugin_exact_match -E 'test(load_save_roundtrip) or test(snippet_edit_command_unfiltered)'` passed 2/2 before the final label-fallback-only correction.
+- M1-B — verified; commit pending parent.
+- M1-B verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippets::persistence_tests) or test(gui::snippet_dialog::tests::prompted_editor_save_preserves_configuration_on_alias_and_text_changes) or test(gui::snippet_dialog::tests::prompted_editor_cancel_discards_alias_and_text_draft_without_writing) or test(gui::snippet_dialog::tests::prompted_editor_no_op_save_preserves_bytes_and_version)'` passed 19/19; `cargo nextest run --test snippets_plugin -E 'test(launch_action_add_saves_snippet) or test(command_add_and_inline_edit_preserve_prompt_metadata_and_hidden_flag)'` passed 2/2.
+- Pending: M2-A, M2-B, M3-A, M3-B, M3-C, M4-A, M4-B, M5-A, M5-B, M6-A and the M6-B review gate.
 
 > **Required directive:** Use the project's active checkpoint commit cadence and define the task-specific commit boundaries in the plan.
 

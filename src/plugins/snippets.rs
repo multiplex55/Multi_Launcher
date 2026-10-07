@@ -68,6 +68,27 @@ impl SnippetFieldDefinition {
     }
 }
 
+/// Reconcile configured fields against unique, discovery-ordered placeholder keys.
+///
+/// Existing definitions are retained by key, newly discovered keys receive
+/// standard defaults, and definitions for missing keys are omitted. This is a
+/// pure candidate-building operation; it does not mutate persisted metadata.
+pub(crate) fn reconcile_snippet_fields(
+    existing: &[SnippetFieldDefinition],
+    discovered_keys: &[String],
+) -> Vec<SnippetFieldDefinition> {
+    discovered_keys
+        .iter()
+        .map(|key| {
+            existing
+                .iter()
+                .find(|field| field.name == *key)
+                .cloned()
+                .unwrap_or_else(|| SnippetFieldDefinition::new(key.clone()))
+        })
+        .collect()
+}
+
 fn readable_field_label(name: &str) -> String {
     let label = name
         .split('_')
@@ -531,6 +552,22 @@ mod persistence_tests {
         }
     }
 
+    fn prompted_snippet(alias: &str, text: &str) -> SnippetEntry {
+        SnippetEntry {
+            alias: alias.into(),
+            text: text.into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![SnippetFieldDefinition {
+                name: "name".into(),
+                label: "Preferred name".into(),
+                default_value: "Ada".into(),
+                required: false,
+                input_kind: SnippetInputKind::Multiline,
+            }],
+        }
+    }
+
     #[test]
     fn preview_masks_hidden_body_without_changing_saved_text() {
         let entry = SnippetEntry {
@@ -722,6 +759,27 @@ mod persistence_tests {
     }
 
     #[test]
+    fn field_reconciliation_preserves_matching_options_orders_new_keys_and_omits_orphans() {
+        let configured = SnippetFieldDefinition {
+            name: "name".into(),
+            label: "Preferred name".into(),
+            default_value: "Ada".into(),
+            required: false,
+            input_kind: SnippetInputKind::Multiline,
+        };
+        let orphan = SnippetFieldDefinition::new("removed");
+        let existing = vec![configured.clone(), orphan.clone()];
+        let discovered_keys = vec!["ticket_id".to_owned(), "name".to_owned()];
+
+        let reconciled = reconcile_snippet_fields(&existing, &discovered_keys);
+
+        assert_eq!(reconciled[0], SnippetFieldDefinition::new("ticket_id"));
+        assert_eq!(reconciled[1], configured);
+        assert!(!reconciled.iter().any(|field| field.name == "removed"));
+        assert_eq!(existing, vec![reconciled[1].clone(), orphan]);
+    }
+
+    #[test]
     fn hidden_multiline_unicode_snippet_round_trips_through_save_and_load() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -771,6 +829,49 @@ mod persistence_tests {
     }
 
     #[test]
+    fn same_content_append_preserves_file_bytes_and_version() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original_bytes = br#"[ { "alias": "configured", "text": "Hello {{name}}", "hide_contents": true, "prompt_for_fields": true, "fields": [{ "name": "name", "label": "Name", "default": "Ada", "required": true, "input_kind": "single_line" }] } ]"#;
+        std::fs::write(&path, original_bytes).unwrap();
+        let path = path.to_str().unwrap();
+        let expected = load_snippets(path).unwrap();
+        let version = snippets_version();
+
+        append_snippet(path, "configured", "Hello {{name}}").unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
+        assert_eq!(load_snippets(path).unwrap(), expected);
+    }
+
+    #[test]
+    fn metadata_only_update_publishes_and_reload_does_not_double_bump() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path_text = path.to_str().unwrap();
+        let initial = vec![prompted_snippet("configured", "Hello {{name}}")];
+        std::fs::write(&path, serde_json::to_vec_pretty(&initial).unwrap()).unwrap();
+        let stale_data = Arc::new(Mutex::new(initial.clone()));
+        let plugin = SnippetsPlugin::new_for_path(path_text);
+        let mut updated = initial.clone();
+        updated[0].fields[0].label = "Display name".into();
+        let before_update = snippets_version();
+
+        save_snippets(path_text, &updated).unwrap();
+
+        let after_update = snippets_version();
+        assert_eq!(after_update, before_update + 1);
+        assert_eq!(load_snippets(path_text).unwrap(), updated);
+        assert_eq!(*plugin.data.lock().unwrap(), updated);
+        reload_snippet_snapshot(path_text, &stale_data).unwrap();
+        assert_eq!(*stale_data.lock().unwrap(), updated);
+        assert_eq!(snippets_version(), after_update);
+    }
+
+    #[test]
     fn concurrent_mutations_both_survive() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -781,6 +882,8 @@ mod persistence_tests {
                 .to_string_lossy()
                 .into_owned(),
         );
+        let configured = prompted_snippet("configured", "original");
+        save_snippets(&path, std::slice::from_ref(&configured)).unwrap();
         let barrier = Arc::new(Barrier::new(3));
         let first = {
             let path = Arc::clone(&path);
@@ -802,6 +905,7 @@ mod persistence_tests {
         first.join().unwrap();
         second.join().unwrap();
         let committed = load_snippets(&path).unwrap();
+        assert!(committed.contains(&configured));
         assert!(committed.contains(&snippet("first", "one")));
         assert!(committed.contains(&snippet("second", "two")));
     }
@@ -811,19 +915,26 @@ mod persistence_tests {
         let _guard = TEST_MUTEX.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("snippets.json");
-        let original = vec![snippet("saved", "value")];
+        let path_text = path.to_str().unwrap();
+        let original = vec![prompted_snippet("saved", "value")];
         std::fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        let plugin = SnippetsPlugin::new_for_path(path_text);
         let version = snippets_version();
         let result = update_snippets_with_save(
-            path.to_str().unwrap(),
+            path_text,
             |snippets| {
-                snippets.push(snippet("lost", "value"));
+                snippets.push(prompted_snippet("lost", "value"));
                 Ok(true)
             },
             |_path, _snippets| anyhow::bail!("deterministic replacement failure"),
         );
         assert!(result.is_err());
-        assert_eq!(load_snippets(path.to_str().unwrap()).unwrap(), original);
+        assert_eq!(
+            std::fs::read(path_text).unwrap(),
+            serde_json::to_vec_pretty(&original).unwrap()
+        );
+        assert_eq!(load_snippets(path_text).unwrap(), original);
+        assert_eq!(*plugin.data.lock().unwrap(), original);
         assert_eq!(snippets_version(), version);
     }
 
@@ -853,7 +964,15 @@ mod persistence_tests {
         assert_eq!(*data.lock().unwrap(), local);
         assert_eq!(snippets_version(), after_local);
 
-        let external = vec![snippet("external", "value")];
+        let mut external = local.clone();
+        external[0].prompt_for_fields = true;
+        external[0].fields = vec![SnippetFieldDefinition {
+            name: "external".into(),
+            label: "External edit".into(),
+            default_value: "configured default".into(),
+            required: false,
+            input_kind: SnippetInputKind::Multiline,
+        }];
         std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
         reload_snippet_snapshot(path_text, &data).unwrap();
         assert_eq!(*data.lock().unwrap(), external);

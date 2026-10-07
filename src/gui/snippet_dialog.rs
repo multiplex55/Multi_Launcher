@@ -119,6 +119,9 @@ fn update_snapshot(
             rejection = Some(CommitRejection::DuplicateAlias);
             return Ok(false);
         }
+        if current.as_slice() == candidate.as_slice() {
+            return Ok(false);
+        }
 
         *current = candidate;
         Ok(true)
@@ -735,7 +738,10 @@ mod tests {
         AliasValidation, CommitFailure, CommitRejection, SnippetDialog, body_editor_id_source,
         matches_snippet_filter, matching_snippet_indices, single_line_alias,
     };
-    use crate::plugins::snippets::{SnippetEntry, load_snippets, save_snippets};
+    use crate::plugins::snippets::{
+        SnippetEntry, SnippetFieldDefinition, SnippetInputKind, load_snippets, save_snippets,
+        snippets_version,
+    };
     use eframe::egui;
 
     fn snippet(alias: &str, text: &str) -> SnippetEntry {
@@ -745,6 +751,22 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+        }
+    }
+
+    fn prompted_snippet(alias: &str, text: &str) -> SnippetEntry {
+        SnippetEntry {
+            alias: alias.into(),
+            text: text.into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![SnippetFieldDefinition {
+                name: "name".into(),
+                label: "Preferred name".into(),
+                default_value: "Ada".into(),
+                required: false,
+                input_kind: SnippetInputKind::Multiline,
+            }],
         }
     }
 
@@ -1258,6 +1280,75 @@ mod tests {
         assert!(!saved[0].hide_contents);
         assert!(!dialog.body_revealed);
         assert!(dialog.text.is_empty());
+    }
+
+    #[test]
+    fn prompted_editor_save_preserves_configuration_on_alias_and_text_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = prompted_snippet("saved", "Hello {{name}}");
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+
+        dialog.alias = "renamed".into();
+        dialog.text = "Updated {{name}}".into();
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+
+        let mut expected = original;
+        expected.alias = "renamed".into();
+        expected.text = "Updated {{name}}".into();
+        assert_eq!(
+            load_snippets(path.to_str().unwrap()).unwrap(),
+            vec![expected]
+        );
+    }
+
+    #[test]
+    fn prompted_editor_cancel_discards_alias_and_text_draft_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = prompted_snippet("saved", "Hello {{name}}");
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+
+        dialog.alias = "unsaved alias".into();
+        dialog.text = "Unsaved {{name}}".into();
+        dialog.cancel_editor();
+
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(
+            load_snippets(path.to_str().unwrap()).unwrap(),
+            vec![original.clone()]
+        );
+        assert_eq!(dialog.entries, vec![original]);
+        assert!(dialog.edit_idx.is_none());
+    }
+
+    #[test]
+    fn prompted_editor_no_op_save_preserves_bytes_and_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = prompted_snippet("saved", "Hello {{name}}");
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let version = snippets_version();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
+        assert_eq!(
+            load_snippets(path.to_str().unwrap()).unwrap(),
+            vec![original]
+        );
     }
 
     #[test]
