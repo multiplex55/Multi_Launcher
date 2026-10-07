@@ -442,17 +442,50 @@ impl SnippetDialog {
             self.end_session();
             return;
         }
+        let (window_open, save_request, confirm_removal) = self.show_window(ctx, || {
+            app.report_error_message("ui operation", "Both fields required");
+        });
+
+        if save_request {
+            match self.save_editor(SNIPPETS_FILE) {
+                Ok(()) => Self::finish_success(app, "Saved snippet"),
+                Err(failure) => Self::report_commit_failure(app, &failure),
+            }
+        }
+        if confirm_removal {
+            match self.confirm_removal(SNIPPETS_FILE) {
+                Ok(true) => Self::finish_success(app, "Removed snippet"),
+                Ok(false) => {}
+                Err(failure) => Self::report_commit_failure(app, &failure),
+            }
+        }
+        self.apply_window_open(window_open);
+    }
+
+    fn show_window(
+        &mut self,
+        ctx: &egui::Context,
+        mut report_required_fields: impl FnMut(),
+    ) -> (bool, bool, bool) {
         let mut window_open = self.open;
         let mut close = false;
         let mut save_request = false;
         let mut confirm_removal = false;
         egui::Window::new("Snippets")
             .default_size((600.0, 500.0))
-            .min_width(380.0)
-            .min_height(320.0)
+            .min_width(160.0)
+            .min_height(160.0)
             .resizable(true)
             .open(&mut window_open)
             .show(ctx, |ui| {
+                // Resize follows content in egui. Bound both axes here so overflow
+                // scrolls inside the user's chosen size instead of enlarging it.
+                egui::ScrollArea::both()
+                    .id_source("snippet_dialog_contents")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                // Only controls set the minimum scrollable width, never the body.
+                ui.set_min_width(280.0);
                 if let Some(error) = &self.load_error {
                     ui.colored_label(
                         egui::Color32::RED,
@@ -466,7 +499,12 @@ impl SnippetDialog {
                 if self.edit_idx.is_some() {
                     ui.horizontal(|ui| {
                         ui.label("Alias");
-                        ui.text_edit_singleline(&mut self.alias);
+                        let width = ui.available_width().max(80.0);
+                        ui.add_sized(
+                            [width, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(&mut self.alias)
+                                .desired_width(f32::INFINITY),
+                        );
                     });
                     let mut hide_contents = self.hide_contents;
                     if ui
@@ -488,7 +526,8 @@ impl SnippetDialog {
                     let desired_rows =
                         (editor_height / line_height).floor().clamp(4.0, 48.0) as usize;
                     if self.body_revealed {
-                        egui::ScrollArea::vertical()
+                        egui::ScrollArea::both()
+                            .id_source("snippet_dialog_body")
                             .auto_shrink([false, false])
                             .max_height(editor_height)
                             .show(ui, |ui| {
@@ -510,7 +549,7 @@ impl SnippetDialog {
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.alias.trim().is_empty() || self.text.trim().is_empty() {
-                                app.report_error_message("ui operation", "Both fields required");
+                                report_required_fields();
                             } else {
                                 save_request = true;
                             }
@@ -530,9 +569,10 @@ impl SnippetDialog {
                         let filter_width =
                             (ui.available_width() - clear_filter_width - filter_spacing).max(80.0);
                         if ui
-                            .add(
+                            .add_sized(
+                                [filter_width, ui.spacing().interact_size.y],
                                 egui::TextEdit::singleline(&mut self.filter)
-                                    .desired_width(filter_width),
+                                    .desired_width(f32::INFINITY),
                             )
                             .changed()
                         {
@@ -570,7 +610,8 @@ impl SnippetDialog {
                             + ui.spacing().item_spacing.y)
                             * 2.0;
                         let list_height = (ui.available_height() - footer_height).max(100.0);
-                        egui::ScrollArea::vertical()
+                        egui::ScrollArea::both()
+                            .id_source("snippet_dialog_list")
                             .auto_shrink([false, false])
                             .max_height(list_height)
                             .show(ui, |ui| {
@@ -677,25 +718,12 @@ impl SnippetDialog {
                         close = true;
                     }
                 }
+                });
             });
-
-        if save_request {
-            match self.save_editor(SNIPPETS_FILE) {
-                Ok(()) => Self::finish_success(app, "Saved snippet"),
-                Err(failure) => Self::report_commit_failure(app, &failure),
-            }
-        }
-        if confirm_removal {
-            match self.confirm_removal(SNIPPETS_FILE) {
-                Ok(true) => Self::finish_success(app, "Removed snippet"),
-                Ok(false) => {}
-                Err(failure) => Self::report_commit_failure(app, &failure),
-            }
-        }
         if close {
             window_open = false;
         }
-        self.apply_window_open(window_open);
+        (window_open, save_request, confirm_removal)
     }
 }
 
@@ -714,6 +742,212 @@ mod tests {
             text: text.to_string(),
             hide_contents: false,
         }
+    }
+
+    fn dialog_frame(
+        ctx: &egui::Context,
+        dialog: &mut SnippetDialog,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 900.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                dialog.show_window(ctx, || panic!("unexpected field validation"));
+            },
+        )
+    }
+
+    fn dialog_rect(ctx: &egui::Context) -> egui::Rect {
+        ctx.memory(|memory| memory.area_rect(egui::Id::new("Snippets")).unwrap())
+    }
+
+    #[test]
+    fn snippet_dialog_size_is_independent_of_contents_and_filter() {
+        let ctx = egui::Context::default();
+        ctx.style_mut(|style| style.animation_time = 0.0);
+        let mut dialog = SnippetDialog {
+            open: true,
+            entries: vec![snippet("short", "body")],
+            ..Default::default()
+        };
+        for _ in 0..4 {
+            dialog_frame(&ctx, &mut dialog, Vec::new());
+        }
+        let size = dialog_rect(&ctx).size();
+        assert!(size.x < 650.0 && size.y < 550.0, "{size:?}");
+
+        dialog.entries = vec![snippet(&"alias".repeat(2000), &"body λ\n".repeat(2000))];
+        for _ in 0..20 {
+            let output = dialog_frame(&ctx, &mut dialog, Vec::new());
+            assert_eq!(dialog_rect(&ctx).size(), size);
+            for shape in &output.shapes {
+                if let egui::epaint::Shape::Text(text) = &shape.shape
+                    && matches!(text.galley.job.text.as_str(), "Edit" | "Remove")
+                {
+                    assert!(text.pos.x + text.galley.size().x < dialog_rect(&ctx).right());
+                }
+            }
+            assert!(output.viewport_output.values().all(|viewport| {
+                !viewport
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::InnerSize(_)))
+            }));
+        }
+        dialog.filter = "no match".into();
+        for _ in 0..4 {
+            dialog_frame(&ctx, &mut dialog, Vec::new());
+            assert_eq!(dialog_rect(&ctx).size(), size);
+        }
+        dialog.filter.clear();
+        dialog.entries[0].hide_contents = true;
+        let output = dialog_frame(&ctx, &mut dialog, Vec::new());
+        assert_eq!(dialog_rect(&ctx).size(), size);
+        assert!(output.shapes.iter().all(|shape| {
+            !matches!(&shape.shape, egui::epaint::Shape::Text(text) if text.galley.job.text.contains("body λ"))
+        }));
+        dialog.begin_existing(0);
+        for _ in 0..4 {
+            dialog_frame(&ctx, &mut dialog, Vec::new());
+            assert_eq!(dialog_rect(&ctx).size(), size);
+        }
+        dialog.reveal_contents();
+        for _ in 0..4 {
+            dialog_frame(&ctx, &mut dialog, Vec::new());
+            assert_eq!(dialog_rect(&ctx).size(), size);
+        }
+    }
+
+    #[test]
+    fn snippet_dialog_user_resize_and_scrolling_preserve_window_bounds() {
+        let ctx = egui::Context::default();
+        ctx.style_mut(|style| style.animation_time = 0.0);
+        let mut dialog = SnippetDialog {
+            open: true,
+            entries: (0..80)
+                .map(|i| snippet(&format!("row-{i}"), "body"))
+                .collect(),
+            ..Default::default()
+        };
+        for _ in 0..4 {
+            dialog_frame(&ctx, &mut dialog, Vec::new());
+        }
+        let original = dialog_rect(&ctx);
+        let corner = original.max - egui::vec2(2.0, 2.0);
+        dialog_frame(
+            &ctx,
+            &mut dialog,
+            vec![
+                egui::Event::PointerMoved(corner),
+                egui::Event::PointerButton {
+                    pos: corner,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let resized_corner = original.min + egui::vec2(240.0, 260.0);
+        dialog_frame(
+            &ctx,
+            &mut dialog,
+            vec![egui::Event::PointerMoved(resized_corner)],
+        );
+        dialog_frame(
+            &ctx,
+            &mut dialog,
+            vec![egui::Event::PointerButton {
+                pos: resized_corner,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        for _ in 0..4 {
+            dialog_frame(&ctx, &mut dialog, Vec::new());
+        }
+        let resized = dialog_rect(&ctx);
+        assert!(
+            resized.width() < 280.0 && resized.height() < 300.0,
+            "{resized:?}"
+        );
+
+        let text_position = |output: &egui::FullOutput, prefix: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.job.text.starts_with(prefix) => {
+                        Some(text.pos)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no visible text starting with {prefix}"))
+        };
+        let before = dialog_frame(&ctx, &mut dialog, Vec::new());
+        let filter = text_position(&before, "Filter");
+        let count = text_position(&before, "80 of 80 snippets");
+        dialog_frame(
+            &ctx,
+            &mut dialog,
+            vec![
+                egui::Event::PointerMoved(filter),
+                egui::Event::Scroll(egui::vec2(-100.0, 0.0)),
+            ],
+        );
+        let after = dialog_frame(&ctx, &mut dialog, Vec::new());
+        assert!(text_position(&after, "80 of 80 snippets").x < count.x);
+        assert_eq!(dialog_rect(&ctx), resized);
+
+        let before = dialog_frame(&ctx, &mut dialog, Vec::new());
+        let first_visible_row = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => text
+                        .galley
+                        .job
+                        .text
+                        .strip_prefix("row-")
+                        .and_then(|text| text.split_once(':'))
+                        .and_then(|(index, _)| index.parse::<usize>().ok()),
+                    _ => None,
+                })
+                .min()
+                .expect("at least one list row remains visible")
+        };
+        assert_eq!(first_visible_row(&before), 0);
+        let first_row_position = text_position(&before, "row-0:");
+        dialog_frame(
+            &ctx,
+            &mut dialog,
+            vec![
+                egui::Event::PointerMoved(resized.center()),
+                egui::Event::Scroll(egui::vec2(0.0, -100.0)),
+            ],
+        );
+        let after = dialog_frame(&ctx, &mut dialog, Vec::new());
+        // Smooth scrolling can move part of a row before it leaves the clip rect.
+        assert!(
+            first_visible_row(&after) > 0
+                || text_position(&after, "row-0:").y < first_row_position.y,
+            "list did not scroll vertically"
+        );
+        assert_eq!(dialog_rect(&ctx), resized);
+        dialog.end_session();
+        dialog.open = true;
+        for _ in 0..4 {
+            dialog_frame(&ctx, &mut dialog, Vec::new());
+        }
+        assert_eq!(dialog_rect(&ctx), resized);
     }
 
     #[test]
