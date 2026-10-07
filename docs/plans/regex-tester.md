@@ -3566,8 +3566,11 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M10-A | complete | `af19733c`; 19 focused tests passed, independent review no findings. Shared deadline with source/replacement ownership, preserved matching, bounded readonly result previews. |
 | M10-B | complete | `26df0ea3`; initial5 scoped tests plus corrected exact-copy fixture passed. Review no findings. Explicit one-shot import/full-current copy, honest limited rows, no idle IO. |
 | M11-A | complete | `5ef57ffc`; 16 focused tests, manual release profiling, fmt/diff passed; review no findings. Exact retained paste guards and measured normal warnings; hard caps retained. |
-| M11-B | in_progress | Local owned F3/Shift-F3 navigation and standard Tab/editing/lifecycle focus checks. |
-| M11-C–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M11-B | complete | `996877c8`; 7 scoped checks passed, fmt/diff passed; independent review no findings. Exact owned F3/Shift-F3, normal Tab traversal and retained Esc draft/substitution mode. |
+| M11-C | complete | `4dfbe33d`; all10 scoped checks passed after correcting error-state editor geometry; fmt/diff and review passed. Theme colors, readable units, monospace errors and narrow layout. |
+| M12-A | complete | `7acf8929`; all20 engine tests passed, fmt/diff passed. Exact repeated Unicode final capture and optional participation added; remaining domain categories previously covered. |
+| M12-B | in_progress | Typed production data-root constructor and real nondefault-root history/preset writes and reload. |
+| M12-C–M13-B | pending | Actual match-row pointer contract, documentation, final review and native acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
