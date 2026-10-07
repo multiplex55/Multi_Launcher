@@ -188,6 +188,14 @@ impl RegexTesterDialogState {
     }
 
     /// Explicit production storage configuration; default construction does no IO.
+    pub fn with_data_root(root: &crate::platform::app_data::AppDataRoot) -> Self {
+        Self::with_storage_paths(
+            root.path().join("regex_history.json"),
+            root.path().join("regex_presets.json"),
+        )
+    }
+
+    /// Explicit file paths also support isolated storage integration tests.
     pub fn with_storage_paths(
         history_path: impl Into<std::path::PathBuf>,
         preset_path: impl Into<std::path::PathBuf>,

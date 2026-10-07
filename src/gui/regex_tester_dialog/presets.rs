@@ -18,6 +18,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configured_data_root_writes_private_profile_stores_and_reconstructs_dialog() {
+        use crate::gui::regex_tester_dialog::RegexTesterDialogState;
+        use crate::platform::app_data::AppDataRoot;
+        use crate::regex_tester::session::EVALUATION_DEBOUNCE;
+        use std::time::Instant;
+
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profiles").join("work");
+        std::fs::create_dir_all(&profile).unwrap();
+        let root = AppDataRoot::from_settings_path(profile.join("settings.json")).unwrap();
+        assert_eq!(root.path(), profile);
+        let history_path = profile.join("regex_history.json");
+        let preset_path = profile.join("regex_presets.json");
+        let mut dialog = RegexTesterDialogState::with_data_root(&root);
+        assert!(!history_path.exists() && !preset_path.exists());
+        dialog.session.draft = RegexDraft {
+            pattern: "(?P<letter>é)".into(),
+            test_text: "private sample É".into(),
+            replacement: "private replacement ${letter}".into(),
+            ..Default::default()
+        };
+        dialog.session.draft.flags.case_insensitive = true;
+        let original = dialog.session.draft.clone();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        assert!(dialog.session.tick(now + EVALUATION_DEBOUNCE));
+        dialog.record_history();
+        let presets = dialog.presets.as_mut().unwrap();
+        presets.name = "Profile expression".into();
+        assert!(!presets.include_sample && !presets.include_replacement);
+        assert!(!presets.handle(PresetAction::Save, &mut dialog.session.draft));
+        assert!(presets.feedback.as_ref().unwrap().is_ok());
+        let id = presets.selected.unwrap();
+        assert_eq!(dialog.session.draft, original);
+        for path in [&history_path, &preset_path] {
+            let saved = std::fs::read_to_string(path).unwrap();
+            assert!(!saved.contains("private sample"));
+            assert!(!saved.contains("private replacement"));
+        }
+        assert!(!directory.path().join("regex_history.json").exists());
+        assert!(!directory.path().join("regex_presets.json").exists());
+        drop(dialog);
+
+        let restarted = RegexTesterDialogState::with_data_root(&root);
+        let history = &restarted.history.as_ref().unwrap().store;
+        assert_eq!(history.entries().len(), 1);
+        assert_eq!(history.entries()[0].pattern, original.pattern);
+        assert_eq!(history.entries()[0].flags, original.flags);
+        let presets = &restarted.presets.as_ref().unwrap().store;
+        assert_eq!(presets.entries().len(), 1);
+        let saved = presets.get(id).unwrap();
+        assert_eq!(saved.name, "Profile expression");
+        assert_eq!(saved.pattern, original.pattern);
+        assert_eq!(saved.flags, original.flags);
+        assert_eq!(saved.sample_text, None);
+        assert_eq!(saved.replacement, None);
+    }
+
+    #[test]
     fn content_update_preserves_external_rename_in_current_disk_candidate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("presets.json");

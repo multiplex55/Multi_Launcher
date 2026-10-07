@@ -1698,10 +1698,7 @@ impl LauncherApp {
         let toast_duration = settings.toast_duration;
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
-        let regex_tester_dialog = RegexTesterDialogState::with_storage_paths(
-            data_root.path().join("regex_history.json"),
-            data_root.path().join("regex_presets.json"),
-        );
+        let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
         let data_recovery_dialog = DataRecoveryDialog::new(data_root, settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
