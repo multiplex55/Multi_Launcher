@@ -341,6 +341,7 @@ pub enum QueryCommand {
 kinds!(QueryCommand, Self::Set { .. } => "set", Self::ExecuteFirst { .. } => "execute_first");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DialogCommand {
+    Qr { initial_text: Option<String> },
     RegexTester,
     Help,
     Convert,
@@ -348,7 +349,7 @@ pub enum DialogCommand {
     DashboardSettings,
     Theme,
 }
-kinds!(DialogCommand, Self::RegexTester => "regex_tester", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme");
+kinds!(DialogCommand, Self::Qr { .. } => "qr", Self::RegexTester => "regex_tester", Self::Help => "help", Self::Convert => "convert", Self::Settings => "settings", Self::DashboardSettings => "dashboard_settings", Self::Theme => "theme");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CalendarCommand {
     Open { view: String },

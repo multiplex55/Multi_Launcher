@@ -2163,6 +2163,7 @@ impl LauncherApp {
         self.clipboard_modify_dialog = cm_dlg;
         self.json_utility_dialog.show(ctx);
         self.regex_tester_dialog.show(ctx);
+        self.qr_dialog.show(ctx);
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
         conv_panel.ui(ctx, self);
         self.convert_panel = conv_panel;

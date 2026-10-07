@@ -7,8 +7,8 @@ Authority: `qr-code-plan.md` and the current QR kickstart request. Source baseli
 | M1-A | Local encoding domain, dependency, focused tests | complete |
 | M1-B | Shared crisp raster and metadata | complete |
 | M2-A | Built-in plugin, exact/payload queries, discovery | complete |
-| M2-B | Typed parser/bus/host routing, privacy/history | pending |
-| M3-A | Transient dialog and panel lifecycle | pending |
+| M2-B | Typed parser/bus/host routing, privacy/history | complete |
+| M3-A | Transient dialog and panel lifecycle | complete |
 | M3-B | Editor, cached live preview | pending |
 | M3-C | Advanced correction and capacity feedback | pending |
 | M4-A | Explicit Paste and Copy Text | pending |
@@ -27,3 +27,5 @@ M1-A: scoped Nextest passed 7/7. Independent review identified automatic Kanji-m
 M1-B: scoped Nextest passed 13/13; independent raster review had no substantive findings. Shared raster uses four quiet modules, eight pixels per module, opaque black/white, and independent source counts.
 
 M2-A: 24/24 selected Nextest tests passed across lib/plugin_commands/plugin_routing. Added literal provider query policy shared by synchronous/background routing, exact payload args, built-in registration/discovery and QR exact-search bypass. Review found unsupported filter syntax in new tests; corrected to real kind:/id: and negative tokens before checkpoint. Formatting/diff checks passed.
+
+M2-B/M3-A combined to keep real host/dialog integration coherent: exact plain Action.args through typed DialogCommand; reserved QR namespace, headless rejection, no query override or execution history. All normal panel mappings and shared close cleanup added. Independent review had no substantive findings; cargo check passed. Focused parser/bus/headless/state/panel tests added, execution pending M5 by verification budget.

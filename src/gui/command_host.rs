@@ -135,6 +135,10 @@ impl ScreenDrawCommandHost for LauncherApp {
 }
 
 impl DialogCommandHost for LauncherApp {
+    fn open_qr_dialog(&mut self, initial_text: Option<&str>) {
+        self.qr_dialog.open(initial_text);
+        self.focus_panel(super::Panel::QrDialog);
+    }
     fn open_regex_tester_dialog(&mut self) {
         self.regex_tester_dialog.open();
         self.focus_panel(super::Panel::RegexTesterDialog);
@@ -810,6 +814,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
     !matches!(
         command,
         Command::Dialog(crate::commands::DialogCommand::RegexTester)
+            | Command::Dialog(crate::commands::DialogCommand::Qr { .. })
             | Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
@@ -1067,6 +1072,36 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
     }
+    #[test]
+    fn qr_dispatch_ignores_query_override_and_resets_dialog() {
+        let mut app = test_app();
+        app.query = "keep query".into();
+        app.qr_dialog.open(Some("old"));
+        app.qr_dialog.error_correction = crate::qr::QrErrorCorrection::High;
+        let source = "  caf\u{e9}\n\u{1f512} ";
+        let invocation = crate::commands::parse_command(
+            crate::actions::Action {
+                label: "QR".into(),
+                desc: String::new(),
+                action: "qr:open".into(),
+                args: Some(source.into()),
+            },
+            Some("override".into()),
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .unwrap();
+        assert!(!command_accepts_query_override(&invocation.command));
+        app.dispatch_command_invocation(invocation);
+        assert_eq!(app.query, "keep query");
+        assert_eq!(app.qr_dialog.source, source);
+        assert_eq!(
+            app.qr_dialog.error_correction,
+            crate::qr::QrErrorCorrection::Medium
+        );
+        assert!(app.qr_dialog.open);
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::QrDialog));
+    }
+
     #[test]
     fn regex_tester_dispatch_ignores_query_override_and_retains_draft() {
         let mut app = test_app();

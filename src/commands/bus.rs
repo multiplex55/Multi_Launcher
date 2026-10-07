@@ -96,8 +96,10 @@ mod tests {
     #[derive(Default)]
     struct FakeHost {
         visible: bool,
+        refocus: bool,
         headless_calls: usize,
         dialog_calls: usize,
+        qr_calls: Vec<Option<String>>,
         crop_calls: usize,
         note_calls: usize,
         todo_calls: usize,
@@ -136,6 +138,9 @@ mod tests {
     }
 
     impl DialogCommandHost for FakeHost {
+        fn open_qr_dialog(&mut self, initial_text: Option<&str>) {
+            self.qr_calls.push(initial_text.map(str::to_owned));
+        }
         fn open_regex_tester_dialog(&mut self) {}
         fn open_help_dialog(&mut self) {
             self.dialog_calls += 1;
@@ -416,7 +421,7 @@ mod tests {
             ""
         }
         fn launcher_should_refocus(&self) -> bool {
-            false
+            self.refocus
         }
     }
 
@@ -431,6 +436,28 @@ mod tests {
             },
             query_override: None,
             source: ActivationSource::Dashboard,
+        }
+    }
+
+    #[test]
+    fn qr_bus_opens_once_with_exact_payload_and_skips_history() {
+        for visible in [false, true] {
+            let mut host = FakeHost {
+                visible,
+                refocus: visible,
+                ..FakeHost::default()
+            };
+            let source = "  caf\u{e9}\n\u{1f512} ";
+            let command = Command::Dialog(crate::commands::DialogCommand::Qr {
+                initial_text: Some(source.into()),
+            });
+            let outcome = CommandBus
+                .dispatch(&invocation(command), &mut host)
+                .unwrap();
+            assert_eq!(host.qr_calls, vec![Some(source.to_owned())]);
+            assert_eq!(host.headless_calls, 0);
+            assert_eq!(outcome.history, crate::commands::HistoryPolicy::Skip);
+            assert_eq!(outcome.focus, visible);
         }
     }
 
