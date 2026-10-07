@@ -13,7 +13,10 @@ pub(super) fn show(ui: &mut egui::Ui, result: &ExplanationResult) {
             ui.style_mut().wrap = Some(true);
             match result {
                 ExplanationResult::InvalidPattern(error) => {
-                    ui.colored_label(ui.visuals().error_fg_color, &error.message);
+                    ui.add(super::presentation::compiler_label(
+                        &error.message,
+                        ui.visuals().error_fg_color,
+                    ));
                 }
                 ExplanationResult::Success { explanations } => {
                     if explanations.is_empty() {

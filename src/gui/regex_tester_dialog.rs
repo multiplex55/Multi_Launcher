@@ -1,5 +1,5 @@
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
-use crate::regex_tester::{EvaluationLimit, EvaluationResult, MatchCompleteness, RegexSession};
+use crate::regex_tester::{EvaluationResult, MatchCompleteness, RegexSession};
 use eframe::egui;
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,6 +11,7 @@ mod highlighting;
 mod history;
 mod inspection;
 mod keyboard;
+mod presentation;
 mod presets;
 #[cfg(test)]
 mod profiling;
@@ -96,7 +97,10 @@ impl CoreLayout {
                 )),
             )
         } else {
-            let info_height = (content.height() * 0.3).min(110.0);
+            // A stacked information area needs room below its section selector.
+            // Validation already occupies extra space; retain editor room then.
+            let info_fraction = if invalid_pattern { 0.3 } else { 0.5 };
+            let info_height = (content.height() * info_fraction).min(160.0);
             let split = content.bottom() - info_height;
             (
                 egui::Rect::from_min_max(content.min, egui::pos2(content.right(), split - gap)),
@@ -839,12 +843,10 @@ impl RegexTesterDialogState {
             .max_height(ui.available_height().max(1.0))
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(message).color(ui.visuals().error_fg_color),
-                    )
-                    .wrap(true),
-                );
+                ui.add(presentation::compiler_label(
+                    message,
+                    ui.visuals().error_fg_color,
+                ));
             });
     }
 
@@ -885,16 +887,7 @@ impl RegexTesterDialogState {
             }) => format!("At least {at_least} matches; showing {}", matches.len()),
             Some(EvaluationResult::InvalidPattern(_)) => "Invalid pattern".into(),
             Some(EvaluationResult::Suspended(limit)) => {
-                let reason = match limit.limit {
-                    EvaluationLimit::PatternBytes => "pattern size",
-                    EvaluationLimit::TextBytes => "text size",
-                    EvaluationLimit::CaptureGroups => "capture group count",
-                    EvaluationLimit::StoredMatches => "stored match count",
-                    EvaluationLimit::MaterializedBytes => "result size",
-                    EvaluationLimit::ReplacementBytes => "replacement size",
-                    EvaluationLimit::ReplacementOutputBytes => "replacement output size",
-                };
-                format!("Evaluation paused: {reason} exceeds {}", limit.maximum)
+                format!("Evaluation paused: {}", presentation::suspension(limit))
             }
         }
     }
@@ -940,8 +933,11 @@ impl RegexTesterDialogState {
             {
                 self.request_match_scroll(ui);
             }
-            ui.weak(self.navigation_summary())
-                .on_hover_text(self.summary());
+            ui.add(
+                egui::Label::new(egui::RichText::new(self.navigation_summary()).weak())
+                    .truncate(true),
+            )
+            .on_hover_text(self.summary());
         });
     }
 }
@@ -949,6 +945,119 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_theme_scaled_layout_keeps_core_regions_and_source_bounded() {
+        // Representative states, not a pixel matrix: each stresses a distinct
+        // presentation path and retains the logical draft at different scales.
+        for (size, scale, light, pattern, text, section, expanded) in [
+            (
+                egui::vec2(960.0, 680.0),
+                1.0,
+                false,
+                "a{1,2}".repeat(400),
+                "a".repeat(4000),
+                InformationSection::MatchDetails,
+                true,
+            ),
+            (
+                egui::vec2(360.0, 240.0),
+                1.5,
+                true,
+                "missing".into(),
+                "é🦀".repeat(400),
+                InformationSection::Substitution,
+                true,
+            ),
+            (
+                egui::vec2(1280.0, 800.0),
+                2.0,
+                false,
+                ".".into(),
+                "a".repeat(1001),
+                InformationSection::Matches,
+                true,
+            ),
+            (
+                egui::vec2(360.0, 240.0),
+                2.0,
+                true,
+                String::new(),
+                String::new(),
+                InformationSection::Matches,
+                false,
+            ),
+            (
+                egui::vec2(360.0, 240.0),
+                1.5,
+                false,
+                "[".into(),
+                "source".into(),
+                InformationSection::Explanation,
+                true,
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(if light {
+                egui::Visuals::light()
+            } else {
+                egui::Visuals::dark()
+            });
+            ctx.set_pixels_per_point(scale);
+            let mut dialog = RegexTesterDialogState::default();
+            dialog.session.draft.pattern = pattern;
+            dialog.session.draft.test_text = text;
+            dialog.session.draft.replacement = "${name}\n$1".into();
+            dialog.information_section = section;
+            dialog.information_open = expanded;
+            let now = Instant::now();
+            dialog.session.mark_changed(now);
+            dialog.session.set_substitution_enabled(true, now);
+            dialog
+                .session
+                .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+            let draft = dialog.session.draft.clone();
+            let revision = dialog.session.revision();
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let bounds = ui.available_rect_before_wrap();
+                        let layout = dialog.body(ui);
+                        for area in [
+                            Some(layout.header),
+                            layout.validation,
+                            Some(layout.editor),
+                            layout.information,
+                            Some(layout.status),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            assert!(bounds.contains_rect(area));
+                            assert!(area.width() > 0.0 && area.height() > 0.0);
+                        }
+                        if let Some(info) = layout.information {
+                            assert!(!layout.editor.intersects(info));
+                            if size.x < 680.0 && layout.validation.is_none() {
+                                assert!(
+                                    info.height() >= 2.0 * ui.spacing().interact_size.y,
+                                    "stacked information must fit its selector and content"
+                                );
+                            }
+                        }
+                        assert!(ui.min_rect().right() <= bounds.right() + 0.1);
+                        assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+                    });
+                },
+            );
+            assert_eq!(dialog.session.draft, draft);
+            assert_eq!(dialog.session.revision(), revision);
+        }
+    }
 
     fn keyboard_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
         egui::Event::Key {

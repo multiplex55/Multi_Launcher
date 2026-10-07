@@ -120,14 +120,17 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
                         });
                 }
                 Some(SubstitutionEvaluationResult::InvalidPattern(error)) => {
-                    ui.colored_label(ui.visuals().error_fg_color, &error.message);
+                    ui.add(super::presentation::compiler_label(
+                        &error.message,
+                        ui.visuals().error_fg_color,
+                    ));
                 }
                 Some(SubstitutionEvaluationResult::Suspended(reason)) => {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
                         format!(
-                            "Replacement preview suspended: {:?} limit {} (observed at least {}).",
-                            reason.limit, reason.maximum, reason.observed
+                            "Replacement preview paused: {}",
+                            super::presentation::suspension(reason)
                         ),
                     );
                 }

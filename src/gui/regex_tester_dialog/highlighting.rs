@@ -8,6 +8,11 @@ fn colors(visuals: &egui::Visuals) -> (egui::Color32, egui::Color32) {
     )
 }
 
+fn marker_colors(visuals: &egui::Visuals) -> (egui::Color32, egui::Color32) {
+    // Thin markers need full-strength theme colors, unlike translucent areas.
+    (visuals.selection.bg_fill, visuals.selection.stroke.color)
+}
+
 pub(super) fn layout(text: &str, view: &EvaluatedText<'_>, ui: &egui::Ui, width: f32) -> LayoutJob {
     let format = egui::TextFormat {
         font_id: egui::TextStyle::Monospace.resolve(ui.style()),
@@ -21,9 +26,12 @@ pub(super) fn layout(text: &str, view: &EvaluatedText<'_>, ui: &egui::Ui, width:
     job.wrap.max_width = width;
     let (normal, active) = colors(ui.visuals());
     let mut cursor = 0;
-    let mut append = |range, background| {
+    let mut append = |range, background, selected| {
         let mut section_format = format.clone();
         section_format.background = background;
+        if selected {
+            section_format.color = ui.visuals().selection.stroke.color;
+        }
         job.sections.push(egui::text::LayoutSection {
             leading_space: 0.0,
             byte_range: range,
@@ -37,7 +45,7 @@ pub(super) fn layout(text: &str, view: &EvaluatedText<'_>, ui: &egui::Ui, width:
                 continue;
             }
             if cursor < span.start {
-                append(cursor..span.start, egui::Color32::TRANSPARENT);
+                append(cursor..span.start, egui::Color32::TRANSPARENT, false);
             }
             append(
                 span.clone(),
@@ -46,12 +54,13 @@ pub(super) fn layout(text: &str, view: &EvaluatedText<'_>, ui: &egui::Ui, width:
                 } else {
                     normal
                 },
+                view.selected_index == Some(index),
             );
             cursor = span.end;
         }
     }
     if cursor < text.len() || cursor == 0 {
-        append(cursor..text.len(), egui::Color32::TRANSPARENT);
+        append(cursor..text.len(), egui::Color32::TRANSPARENT, false);
     }
     job
 }
@@ -121,7 +130,7 @@ pub(super) fn paint_markers(
     let painter = ui
         .painter()
         .with_clip_rect(ui.clip_rect().intersect(output.text_clip_rect));
-    let (normal, active) = colors(ui.visuals());
+    let (normal, active) = marker_colors(ui.visuals());
     for (rect, selected) in marker_rects(&output.galley, &zero_width_indices(text, view)) {
         let rect = rect.translate(output.galley_pos.to_vec2());
         painter.line_segment(
@@ -163,6 +172,35 @@ mod tests {
         session.mark_changed(now);
         session.tick(now + EVALUATION_DEBOUNCE);
         session
+    }
+
+    #[test]
+    fn theme_highlights_pair_active_foreground_and_use_full_strength_markers() {
+        let mut alternate = egui::Visuals::dark();
+        alternate.selection.bg_fill = egui::Color32::from_rgb(80, 40, 120);
+        alternate.selection.stroke.color = egui::Color32::from_rgb(240, 220, 250);
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light(), alternate] {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(visuals.clone());
+            let mut session = evaluated("a", "a a");
+            let (source, view) = session.text_edit_parts();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let job = layout(source, &view, ui, 100.0);
+                    assert_eq!(job.text, "a a");
+                    assert_eq!(job.sections[0].format.background, visuals.selection.bg_fill);
+                    assert_eq!(job.sections[0].format.color, visuals.selection.stroke.color);
+                    assert_eq!(job.sections[1].format.color, visuals.text_color());
+                    assert_eq!(job.sections[2].format.color, visuals.text_color());
+                    let (normal, active) = marker_colors(&visuals);
+                    assert_eq!(normal, visuals.selection.bg_fill);
+                    assert_eq!(active, visuals.selection.stroke.color);
+                    assert_eq!(normal.a(), 255);
+                    assert_eq!(active.a(), 255);
+                    assert_ne!(normal, active);
+                });
+            });
+        }
     }
 
     #[test]
