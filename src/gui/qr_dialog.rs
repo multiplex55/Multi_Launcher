@@ -17,6 +17,7 @@ pub struct QrDialogState {
     pub error_correction: QrErrorCorrection,
     pub focus_source: bool,
     pub feedback: Option<String>,
+    advanced_open: bool,
     metadata: QrPayloadMetadata,
     generated: Option<GeneratedQr>,
     raster: Option<RgbaImage>,
@@ -34,6 +35,7 @@ impl Default for QrDialogState {
             error_correction: QrErrorCorrection::default(),
             focus_source: false,
             feedback: None,
+            advanced_open: false,
             metadata: QrPayloadMetadata::from_source(""),
             generated: None,
             raster: None,
@@ -194,6 +196,26 @@ impl QrDialogState {
                         self.metadata.character_count, self.metadata.utf8_byte_count
                     ));
                     ui.separator();
+                    let mut selected = self.error_correction;
+                    let advanced = egui::CollapsingHeader::new("Advanced")
+                        .id_source("qr_advanced")
+                        .open(Some(self.advanced_open))
+                        .show(ui, |ui| {
+                            ui.label("Higher error correction improves recovery from damage, but reduces payload capacity.");
+                            egui::ComboBox::from_id_source("qr_error_correction")
+                                .selected_text(selected.label())
+                                .show_ui(ui, |ui| {
+                                    for level in [QrErrorCorrection::Low, QrErrorCorrection::Medium,
+                                        QrErrorCorrection::Quartile, QrErrorCorrection::High] {
+                                        ui.selectable_value(&mut selected, level, level.label());
+                                    }
+                                });
+                        });
+                    if advanced.header_response.clicked() {
+                        self.advanced_open = !self.advanced_open;
+                    }
+                    self.set_error_correction(selected);
+                    ui.separator();
                     if let Some(error) = self.generation_error {
                         let message = match error {
                             QrGenerationError::CapacityExceeded => {
@@ -302,6 +324,44 @@ mod tests {
         assert!(
             state.raster.is_none() && state.texture.is_none() && state.generation_error.is_none()
         );
+    }
+
+    #[test]
+    fn qr_correction_choices_regenerate_and_capacity_changes_preserve_source() {
+        let mut state = QrDialogState::default();
+        state.open(Some("short text"));
+        for level in [
+            QrErrorCorrection::Low,
+            QrErrorCorrection::Medium,
+            QrErrorCorrection::Quartile,
+            QrErrorCorrection::High,
+        ] {
+            state.set_error_correction(level);
+            assert_eq!(state.generated.as_ref().unwrap().error_correction(), level);
+            let revision = state.revision;
+            state.set_error_correction(level);
+            assert_eq!(state.revision, revision);
+        }
+        let source = "x".repeat(1500);
+        state.open(Some(&source));
+        assert!(state.raster.is_some());
+        state.refresh_texture(&egui::Context::default());
+        state.set_error_correction(QrErrorCorrection::High);
+        assert_eq!(state.error_correction, QrErrorCorrection::High);
+        assert_eq!(state.source, source);
+        assert_eq!(
+            state.generation_error,
+            Some(QrGenerationError::CapacityExceeded)
+        );
+        assert!(state.generated.is_none() && state.raster.is_none() && state.texture.is_none());
+        state.set_error_correction(QrErrorCorrection::Low);
+        assert_eq!(state.source, source);
+        assert!(state.generated.is_some() && state.raster.is_some());
+        assert!(state.generation_error.is_none());
+        state.advanced_open = true;
+        state.open(None);
+        assert!(!state.advanced_open);
+        assert_eq!(state.error_correction, QrErrorCorrection::Medium);
     }
 
     #[test]

@@ -10,7 +10,7 @@ Authority: `qr-code-plan.md` and the current QR kickstart request. Source baseli
 | M2-B | Typed parser/bus/host routing, privacy/history | complete |
 | M3-A | Transient dialog and panel lifecycle | complete |
 | M3-B | Editor, cached live preview | complete |
-| M3-C | Advanced correction and capacity feedback | pending |
+| M3-C | Advanced correction and capacity feedback | complete |
 | M4-A | Explicit Paste and Copy Text | pending |
 | M4-B | Explicit image copy | pending |
 | M4-C | Explicit PNG save | pending |
@@ -31,3 +31,5 @@ M2-A: 24/24 selected Nextest tests passed across lib/plugin_commands/plugin_rout
 M2-B/M3-A combined to keep real host/dialog integration coherent: exact plain Action.args through typed DialogCommand; reserved QR namespace, headless rejection, no query override or execution history. All normal panel mappings and shared close cleanup added. Independent review had no substantive findings; cargo check passed. Focused parser/bus/headless/state/panel tests added, execution pending M5 by verification budget.
 
 M3-B: editable exact multiline source, independent counts, cached generation/raster/nearest texture, immediate prefilled preview, non-error empty state, capacity clearing and recovery. Native utility viewport follows existing Regex pattern (620x700) to fit editor and scan-sized preview without changing launcher geometry; bounded embedded fallback. Both cache/state and viewport reviews passed; cargo check passed after refinement. State/viewport tests added; execution pending M5.
+
+M3-C: Advanced L/M/Q/H transient controls regenerate before preview; source/selection retained on capacity failure, fresh Medium/Advanced closed. Correction/capacity/cache tests added pending M5. Independent review, cargo check, formatting/diff checks passed.
