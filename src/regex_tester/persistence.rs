@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 use super::model::RegexFlags;
 
+mod presets;
+pub use presets::{PresetId, PresetInput, PresetStore, RegexPreset};
+
 pub const MAX_RECENT_REGEXES: usize = 50;
 const HISTORY_VERSION: u32 = 1;
 
@@ -44,6 +47,7 @@ pub enum RegexStoreError {
     Persistence(PersistenceError),
     UnsupportedVersion { path: PathBuf, version: u32 },
     ReloadRequired { path: PathBuf },
+    Validation { path: PathBuf, message: String },
 }
 
 impl fmt::Display for RegexStoreError {
@@ -52,7 +56,7 @@ impl fmt::Display for RegexStoreError {
             Self::Persistence(error) => fmt::Display::fmt(error, formatter),
             Self::UnsupportedVersion { path, version } => write!(
                 formatter,
-                "unsupported regex history version {version} in {}",
+                "unsupported regex storage version {version} in {}",
                 path.display()
             ),
             Self::ReloadRequired { path } => write!(
@@ -60,6 +64,13 @@ impl fmt::Display for RegexStoreError {
                 "regex storage at {} requires a successful reload before changes can be saved",
                 path.display()
             ),
+            Self::Validation { path, message } => {
+                write!(
+                    formatter,
+                    "invalid regex storage data for {}: {message}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -79,13 +90,57 @@ impl From<PersistenceError> for RegexStoreError {
     }
 }
 
+/// Shared read-failure latch and recoverable diagnostics for domain stores.
+struct StoreHealth {
+    load_status: StoreLoadStatus,
+    diagnostic: Option<StoreDiagnostic>,
+}
+
+impl StoreHealth {
+    fn new() -> Self {
+        Self {
+            load_status: StoreLoadStatus::Missing,
+            diagnostic: None,
+        }
+    }
+
+    fn is_writable(&self) -> bool {
+        self.load_status != StoreLoadStatus::Blocked
+    }
+
+    fn ensure_writable(&self, path: &Path) -> Result<(), RegexStoreError> {
+        if self.is_writable() {
+            Ok(())
+        } else {
+            Err(RegexStoreError::ReloadRequired {
+                path: path.to_owned(),
+            })
+        }
+    }
+
+    fn publish(&mut self, status: StoreLoadStatus) {
+        self.load_status = status;
+        self.diagnostic = None;
+    }
+
+    fn report(&mut self, error: &impl fmt::Display) {
+        self.diagnostic = Some(StoreDiagnostic {
+            message: error.to_string(),
+        });
+    }
+
+    fn block(&mut self, error: &RegexStoreError) {
+        self.load_status = StoreLoadStatus::Blocked;
+        self.report(error);
+    }
+}
+
 /// Newest-first recent expressions. Failed reads latch write protection until
 /// an explicit successful reload; a reload failure preserves the last snapshot.
 pub struct HistoryStore {
     path: PathBuf,
     entries: Vec<HistoryEntry>,
-    load_status: StoreLoadStatus,
-    diagnostic: Option<StoreDiagnostic>,
+    health: StoreHealth,
 }
 
 impl HistoryStore {
@@ -95,8 +150,7 @@ impl HistoryStore {
         let mut store = Self {
             path: path.into(),
             entries: Vec::new(),
-            load_status: StoreLoadStatus::Missing,
-            diagnostic: None,
+            health: StoreHealth::new(),
         };
         let _ = store.reload();
         store
@@ -107,29 +161,28 @@ impl HistoryStore {
     }
 
     pub fn load_status(&self) -> StoreLoadStatus {
-        self.load_status
+        self.health.load_status
     }
 
     pub fn diagnostic(&self) -> Option<&StoreDiagnostic> {
-        self.diagnostic.as_ref()
+        self.health.diagnostic.as_ref()
     }
 
     /// Whether the last read permits mutation. The next record still checks
     /// disk and may fail; this is not a filesystem permission guarantee.
     pub fn is_writable(&self) -> bool {
-        self.load_status != StoreLoadStatus::Blocked
+        self.health.is_writable()
     }
 
     pub fn reload(&mut self) -> Result<(), RegexStoreError> {
         match read_history(&self.path) {
             Ok((load_status, entries)) => {
                 self.entries = entries;
-                self.load_status = load_status;
-                self.diagnostic = None;
+                self.health.publish(load_status);
                 Ok(())
             }
             Err(error) => {
-                self.block(&error);
+                self.health.block(&error);
                 Err(error)
             }
         }
@@ -138,15 +191,11 @@ impl HistoryStore {
     /// Promotes an exact pattern/flags pair. Reads the current disk snapshot
     /// before mutation, then publishes memory only after atomic save succeeds.
     pub fn record(&mut self, pattern: &str, flags: RegexFlags) -> Result<(), RegexStoreError> {
-        if !self.is_writable() {
-            return Err(RegexStoreError::ReloadRequired {
-                path: self.path.clone(),
-            });
-        }
+        self.health.ensure_writable(&self.path)?;
         let (_, mut candidate) = match read_history(&self.path) {
             Ok(loaded) => loaded,
             Err(error) => {
-                self.block(&error);
+                self.health.block(&error);
                 return Err(error);
             }
         };
@@ -164,22 +213,12 @@ impl HistoryStore {
             entries: candidate,
         };
         if let Err(error) = save_json_atomic(&self.path, &document) {
-            self.diagnostic = Some(StoreDiagnostic {
-                message: error.to_string(),
-            });
+            self.health.report(&error);
             return Err(error.into());
         }
         self.entries = document.entries;
-        self.load_status = StoreLoadStatus::Loaded;
-        self.diagnostic = None;
+        self.health.publish(StoreLoadStatus::Loaded);
         Ok(())
-    }
-
-    fn block(&mut self, error: &RegexStoreError) {
-        self.load_status = StoreLoadStatus::Blocked;
-        self.diagnostic = Some(StoreDiagnostic {
-            message: error.to_string(),
-        });
     }
 }
 

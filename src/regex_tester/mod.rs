@@ -16,8 +16,8 @@ pub use model::{
     SubstitutionResult,
 };
 pub use persistence::{
-    HistoryEntry, HistoryStore, MAX_RECENT_REGEXES, RegexStoreError, StoreDiagnostic,
-    StoreLoadStatus,
+    HistoryEntry, HistoryStore, MAX_RECENT_REGEXES, PresetId, PresetInput, PresetStore,
+    RegexPreset, RegexStoreError, StoreDiagnostic, StoreLoadStatus,
 };
 pub use reference::{
     QUICK_REFERENCE, ReferenceCategory, ReferenceEntry, ReferenceExample, ReferenceSyntaxKind,
