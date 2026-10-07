@@ -134,6 +134,21 @@ pub(super) fn paint_markers(
     }
 }
 
+pub(super) fn active_caret(
+    output: &egui::text_edit::TextEditOutput,
+    text: &str,
+    view: &EvaluatedText<'_>,
+) -> Option<egui::Rect> {
+    if !view.applies_to(text) || output.galley.job.text != text {
+        return None;
+    }
+    let matched = view.matches.get(view.selected_index?)?;
+    let character = text[..matched.span.start_byte()].chars().count();
+    marker_rects(&output.galley, &[(character, true)])
+        .first()
+        .map(|(rect, _)| rect.translate(output.galley_pos.to_vec2()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

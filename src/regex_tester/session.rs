@@ -121,6 +121,24 @@ impl RegexSession {
         self.selected_index = (count > 0).then(|| index.min(count - 1));
     }
 
+    pub fn next_match(&mut self) -> bool {
+        let count = self.matches().len();
+        if count == 0 {
+            return false;
+        }
+        self.selected_index = Some((self.selected_index().unwrap_or(0) + 1) % count);
+        true
+    }
+
+    pub fn previous_match(&mut self) -> bool {
+        let count = self.matches().len();
+        if count == 0 {
+            return false;
+        }
+        self.selected_index = Some((self.selected_index().unwrap_or(0) + count - 1) % count);
+        true
+    }
+
     pub fn text_edit_parts(&mut self) -> (&mut String, EvaluatedText<'_>) {
         let matches = match self.result.as_ref() {
             Some(EvaluationResult::Success { matches, .. }) => matches.as_slice(),
@@ -140,6 +158,35 @@ impl RegexSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_wraps_and_never_changes_source_or_pending_state() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        assert!(!session.next_match());
+        assert!(!session.previous_match());
+        session.draft.pattern = "a".into();
+        session.draft.test_text = "aaa".into();
+        session.mark_changed(now);
+        assert!(!session.next_match());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let draft = session.draft.clone();
+        assert!(session.previous_match());
+        assert_eq!(session.selected_index(), Some(2));
+        assert!(session.next_match());
+        assert_eq!(session.selected_index(), Some(0));
+        session.next_match();
+        assert_eq!(session.selected_index(), Some(1));
+        assert_eq!(session.draft, draft);
+        session.draft.pattern = "[".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(!session.previous_match());
+        session.draft.pattern = "z".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(!session.next_match());
+    }
 
     #[test]
     fn edits_coalesce_and_evaluate_latest_revision_once() {

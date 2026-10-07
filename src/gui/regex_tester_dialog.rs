@@ -98,6 +98,7 @@ pub struct RegexTesterDialogState {
     focus_pattern: bool,
     focus_viewport: bool,
     information_open: bool,
+    scroll_to_selected: bool,
 }
 
 impl Default for RegexTesterDialogState {
@@ -108,6 +109,7 @@ impl Default for RegexTesterDialogState {
             focus_pattern: false,
             focus_viewport: false,
             information_open: true,
+            scroll_to_selected: false,
         }
     }
 }
@@ -183,6 +185,7 @@ impl RegexTesterDialogState {
             self.text_area(ui)
         });
         if self.session.tick(now) {
+            self.scroll_to_selected = false;
             ui.ctx().request_repaint();
         }
         if let Some(validation) = layout.validation {
@@ -251,7 +254,7 @@ impl RegexTesterDialogState {
                     .hint_text("Regular expression"),
             );
             if pattern.changed() {
-                self.session.mark_changed(Instant::now());
+                self.mark_changed();
             }
             if self.focus_pattern {
                 pattern.request_focus();
@@ -293,7 +296,7 @@ impl RegexTesterDialogState {
         ]
         .map(|(letter, enabled, hint)| ui.checkbox(enabled, letter).on_hover_text(hint));
         if responses.iter().any(egui::Response::changed) {
-            self.session.mark_changed(Instant::now());
+            self.mark_changed();
         }
         responses
     }
@@ -313,7 +316,7 @@ impl RegexTesterDialogState {
         ));
         if ui.button("Clear pattern").clicked() {
             self.session.draft.pattern.clear();
-            self.session.mark_changed(Instant::now());
+            self.mark_changed();
             self.focus_pattern = true;
         }
     }
@@ -347,24 +350,72 @@ impl RegexTesterDialogState {
                         .hint_text("Type or paste text to test")
                         .show(ui);
                     highlighting::paint_markers(ui, &output, text, &view);
+                    if std::mem::take(&mut self.scroll_to_selected) {
+                        if let Some(caret) = highlighting::active_caret(&output, text, &view) {
+                            ui.scroll_to_rect(caret.expand(4.0), Some(egui::Align::Center));
+                        }
+                    }
                     output.response.changed()
                 };
                 if changed {
-                    self.session.mark_changed(Instant::now());
+                    self.mark_changed();
                 }
             });
     }
 
+    fn mark_changed(&mut self) {
+        self.scroll_to_selected = false;
+        self.session.mark_changed(Instant::now());
+    }
+
+    fn request_match_scroll(&mut self, ui: &egui::Ui) {
+        self.scroll_to_selected = true;
+        ui.ctx().request_repaint();
+    }
+
     fn information_area(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Matches");
+        let count = self.session.matches().len();
+        if count == 0 {
+            ui.weak(self.summary());
+            return;
+        }
+        let mut selected = None;
+        let row_height = ui.spacing().interact_size.y;
         egui::ScrollArea::vertical()
             .id_source("regex_tester_information_scroll")
             .auto_shrink([false, false])
             .max_height(ui.available_height().max(1.0))
-            .show(ui, |ui| {
-                ui.set_max_width(ui.available_width());
-                ui.strong("Match information");
-                ui.weak(self.summary());
+            .show_rows(ui, row_height, count, |ui, rows| {
+                ui.style_mut().wrap = Some(false);
+                for index in rows {
+                    let matched = &self.session.matches()[index];
+                    let preview = utf8_prefix(&matched.text, 80)
+                        .replace('\r', "␍")
+                        .replace('\n', "↵");
+                    let label = format!(
+                        "#{} · {}:{} · {}",
+                        index + 1,
+                        matched.location.line,
+                        matched.location.column,
+                        if preview.is_empty() {
+                            "(zero width)"
+                        } else {
+                            &preview
+                        }
+                    );
+                    if ui
+                        .selectable_label(self.session.selected_index() == Some(index), label)
+                        .clicked()
+                    {
+                        selected = Some(index);
+                    }
+                }
             });
+        if let Some(index) = selected {
+            self.session.select_match(index);
+            self.request_match_scroll(ui);
+        }
     }
 
     fn validation_error(&self) -> Option<&str> {
@@ -405,7 +456,7 @@ impl RegexTesterDialogState {
                 ));
                 if ui.button("Clear text to resume editing").clicked() {
                     self.session.draft.test_text.clear();
-                    self.session.mark_changed(Instant::now());
+                    self.mark_changed();
                     return;
                 }
                 ui.weak("Read-only preview: first 4096 bytes or fewer");
@@ -444,11 +495,45 @@ impl RegexTesterDialogState {
         }
     }
 
-    fn status_area(&self, ui: &mut egui::Ui) {
+    fn navigation_summary(&self) -> String {
+        let Some(index) = self.session.selected_index() else {
+            return self.summary();
+        };
+        let displayed = if matches!(
+            self.session.result(),
+            Some(EvaluationResult::Success {
+                completeness: MatchCompleteness::Truncated { .. },
+                ..
+            })
+        ) {
+            " displayed"
+        } else {
+            ""
+        };
+        format!(
+            "Match {} of {}{displayed}",
+            index + 1,
+            self.session.matches().len()
+        )
+    }
+
+    fn status_area(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.weak(self.summary());
-            ui.add_enabled(false, egui::Button::new("Previous"));
-            ui.add_enabled(false, egui::Button::new("Next"));
+            let enabled = !self.session.matches().is_empty();
+            if ui
+                .add_enabled(enabled, egui::Button::new("Previous"))
+                .clicked()
+                && self.session.previous_match()
+            {
+                self.request_match_scroll(ui);
+            }
+            if ui.add_enabled(enabled, egui::Button::new("Next")).clicked()
+                && self.session.next_match()
+            {
+                self.request_match_scroll(ui);
+            }
+            ui.weak(self.navigation_summary())
+                .on_hover_text(self.summary());
         });
     }
 }
@@ -463,6 +548,63 @@ mod tests {
         assert_eq!(builder.inner_size, Some(egui::vec2(960.0, 680.0)));
         assert_eq!(builder.min_inner_size, Some(egui::vec2(360.0, 240.0)));
         assert_eq!(builder.resizable, Some(true));
+    }
+
+    #[test]
+    fn regex_tester_navigation_scroll_is_one_shot_and_preserves_editor_cursor_and_source() {
+        let ctx = egui::Context::default();
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.pattern = "one".into();
+        dialog.session.draft.test_text = "one\n".repeat(200);
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let draft = dialog.session.draft.clone();
+        let render = |dialog: &mut RegexTesterDialogState| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+            });
+        };
+        render(&mut dialog);
+        let id = egui::Id::new("regex_tester_test_text");
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+        let selection = egui::text::CCursorRange::one(egui::text::CCursor::new(2));
+        state.cursor.set_char_range(Some(selection));
+        state.store(&ctx, id);
+        assert!(dialog.session.previous_match());
+        dialog.scroll_to_selected = true;
+        assert_eq!(dialog.navigation_summary(), "Match 200 of 200");
+        render(&mut dialog);
+        assert!(!dialog.scroll_to_selected);
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(
+            egui::TextEdit::load_state(&ctx, id)
+                .unwrap()
+                .cursor
+                .char_range(),
+            Some(selection)
+        );
+        render(&mut dialog);
+        assert!(!dialog.scroll_to_selected);
+        dialog.scroll_to_selected = true;
+        dialog.mark_changed();
+        assert!(!dialog.scroll_to_selected);
+    }
+
+    #[test]
+    fn regex_tester_navigation_summary_qualifies_truncated_rows_as_displayed() {
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.pattern = "a".into();
+        dialog.session.draft.test_text = "a".repeat(1001);
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert_eq!(dialog.navigation_summary(), "Match 1 of 1000 displayed");
+        assert_eq!(dialog.summary(), "At least 1001 matches; showing 1000");
     }
 
     #[test]
