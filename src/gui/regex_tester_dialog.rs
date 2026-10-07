@@ -3,6 +3,7 @@ use crate::regex_tester::{EvaluationLimit, EvaluationResult, MatchCompleteness, 
 use eframe::egui;
 use std::sync::Arc;
 use std::time::Instant;
+mod examples;
 mod explanation;
 mod highlighting;
 mod inspection;
@@ -114,6 +115,7 @@ enum InformationSection {
     MatchDetails,
     Explanation,
     Reference,
+    Examples,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -126,6 +128,7 @@ pub struct RegexTesterDialogState {
     scroll_to_selected: bool,
     information_section: InformationSection,
     reference: reference::ReferenceState,
+    examples: examples::ExamplesState,
     selected_capture: usize,
     clipboard: Arc<dyn ClipboardBackend>,
     copy_feedback: Option<Result<&'static str, String>>,
@@ -148,6 +151,7 @@ impl RegexTesterDialogState {
             scroll_to_selected: false,
             information_section: InformationSection::default(),
             reference: reference::ReferenceState::default(),
+            examples: examples::ExamplesState::default(),
             selected_capture: 0,
             clipboard,
             copy_feedback: None,
@@ -421,6 +425,7 @@ impl RegexTesterDialogState {
                 InformationSection::MatchDetails => "Selected match",
                 InformationSection::Explanation => "Explanation",
                 InformationSection::Reference => "Reference",
+                InformationSection::Examples => "Examples",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -442,6 +447,11 @@ impl RegexTesterDialogState {
                     &mut self.information_section,
                     InformationSection::Reference,
                     "Reference",
+                );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::Examples,
+                    "Examples",
                 );
             });
         if let Some(feedback) = &self.copy_feedback {
@@ -471,6 +481,12 @@ impl RegexTesterDialogState {
         if self.information_section == InformationSection::Reference {
             if let Some(action) = self.reference.show(ui) {
                 self.reference_action(action);
+            }
+            return;
+        }
+        if self.information_section == InformationSection::Examples {
+            if let Some(example) = self.examples.show(ui) {
+                self.load_example(example);
             }
             return;
         }
@@ -574,6 +590,11 @@ impl RegexTesterDialogState {
                 ));
             }
         }
+    }
+
+    fn load_example(&mut self, example: &crate::regex_tester::RegexExample) {
+        self.session.draft = example.to_draft();
+        self.mark_changed();
     }
 
     fn validation_error(&self) -> Option<&str> {
@@ -699,6 +720,123 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_examples_load_exact_editable_drafts_and_clear_stale_state_once() {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        let now = Instant::now();
+        dialog.session.ensure_initial_evaluation(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let unicode = crate::regex_tester::RegexExample {
+            id: "test-unicode-replacement",
+            name: "Unicode capture",
+            description: "Test complete draft assignment",
+            pattern: "(?P<letter>é)(🦀)",
+            flags: crate::regex_tester::RegexFlags::default(),
+            sample_text: "é🦀",
+            replacement: Some("$2:${letter}:$1"),
+        };
+        for example in [
+            &unicode,
+            crate::regex_tester::BUILT_IN_EXAMPLES
+                .iter()
+                .find(|entry| entry.id == "url")
+                .unwrap(),
+            crate::regex_tester::BUILT_IN_EXAMPLES
+                .iter()
+                .find(|entry| entry.id == "key-value")
+                .unwrap(),
+            crate::regex_tester::BUILT_IN_EXAMPLES
+                .iter()
+                .find(|entry| entry.id == "email-like")
+                .unwrap(),
+        ] {
+            dialog.scroll_to_selected = true;
+            dialog.copy_feedback = Some(Ok("Old feedback"));
+            let revision = dialog.session.revision();
+            dialog.load_example(example);
+            assert_eq!(dialog.session.draft, example.to_draft());
+            assert_eq!(dialog.session.revision(), revision + 1);
+            assert!(dialog.session.result().is_none());
+            assert!(dialog.session.explanation().is_none());
+            assert!(!dialog.scroll_to_selected);
+            assert!(dialog.copy_feedback.is_none());
+            dialog
+                .session
+                .tick(Instant::now() + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+            assert!(matches!(
+                dialog.session.result(),
+                Some(EvaluationResult::Success { .. })
+            ));
+        }
+        assert!(dialog.session.draft.replacement.is_empty());
+        dialog.session.draft.pattern.push_str("/é");
+        dialog.mark_changed();
+        let edited = dialog.session.draft.clone();
+        dialog.open();
+        dialog.open = false;
+        dialog.open();
+        assert_eq!(dialog.session.draft, edited);
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn regex_tester_examples_search_render_and_reopen_have_no_document_side_effects() {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        let now = Instant::now();
+        dialog.session.ensure_initial_evaluation(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.information_section = InformationSection::Examples;
+        for (query, id) in [
+            ("HTTP(S)-LIKE URL", "url"),
+            ("STANDARDS-COMPLETE", "email-like"),
+            ("(?P<key>", "key-value"),
+        ] {
+            dialog.examples.query = query.into();
+            assert!(dialog.examples.entries().any(|entry| entry.id == id));
+        }
+        dialog.examples.query = "not-a-catalog-entry".into();
+        assert_eq!(dialog.examples.entries().count(), 0);
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        let ctx = egui::Context::default();
+        for query in ["", "not-a-catalog-entry"] {
+            dialog.examples.query = query.into();
+            for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let bounds = ui.available_rect_before_wrap();
+                            dialog.body(ui);
+                            assert!(ui.min_rect().right() <= bounds.right() + 0.1);
+                            assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+                        });
+                    },
+                );
+            }
+        }
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 0);
+        dialog.examples.query = "key=value".into();
+        dialog.open();
+        dialog.open = false;
+        dialog.open();
+        assert!(dialog.information_section == InformationSection::Examples);
+        assert_eq!(dialog.examples.query, "key=value");
+    }
 
     #[test]
     fn regex_tester_reference_filters_render_and_reopen_preserve_draft_without_clipboard_io() {
