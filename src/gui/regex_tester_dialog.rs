@@ -1,7 +1,10 @@
+use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
 use crate::regex_tester::{EvaluationLimit, EvaluationResult, MatchCompleteness, RegexSession};
 use eframe::egui;
+use std::sync::Arc;
 use std::time::Instant;
 mod highlighting;
+mod inspection;
 
 fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
@@ -91,6 +94,13 @@ impl CoreLayout {
     }
 }
 
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum InformationSection {
+    #[default]
+    Matches,
+    MatchDetails,
+}
+
 /// Session-owned inputs survive closing the utility; persistence is explicit.
 pub struct RegexTesterDialogState {
     pub open: bool,
@@ -99,10 +109,20 @@ pub struct RegexTesterDialogState {
     focus_viewport: bool,
     information_open: bool,
     scroll_to_selected: bool,
+    information_section: InformationSection,
+    selected_capture: usize,
+    clipboard: Arc<dyn ClipboardBackend>,
+    copy_feedback: Option<Result<&'static str, String>>,
 }
 
 impl Default for RegexTesterDialogState {
     fn default() -> Self {
+        Self::with_clipboard(Arc::new(ArboardClipboardBackend))
+    }
+}
+
+impl RegexTesterDialogState {
+    pub fn with_clipboard(clipboard: Arc<dyn ClipboardBackend>) -> Self {
         Self {
             open: false,
             session: RegexSession::default(),
@@ -110,11 +130,13 @@ impl Default for RegexTesterDialogState {
             focus_viewport: false,
             information_open: true,
             scroll_to_selected: false,
+            information_section: InformationSection::default(),
+            selected_capture: 0,
+            clipboard,
+            copy_feedback: None,
         }
     }
-}
 
-impl RegexTesterDialogState {
     pub fn open(&mut self) {
         self.session.ensure_initial_evaluation(Instant::now());
         self.focus_viewport = true;
@@ -365,6 +387,7 @@ impl RegexTesterDialogState {
 
     fn mark_changed(&mut self) {
         self.scroll_to_selected = false;
+        self.copy_feedback = None;
         self.session.mark_changed(Instant::now());
     }
 
@@ -374,7 +397,39 @@ impl RegexTesterDialogState {
     }
 
     fn information_area(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Matches");
+        egui::ComboBox::from_id_source("regex_information_section")
+            .width(ui.available_width().min(220.0))
+            .selected_text(match self.information_section {
+                InformationSection::Matches => "Matches",
+                InformationSection::MatchDetails => "Selected match",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::Matches,
+                    "Matches",
+                );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::MatchDetails,
+                    "Selected match",
+                );
+            });
+        if let Some(feedback) = &self.copy_feedback {
+            match feedback {
+                Ok(message) => {
+                    ui.weak(*message);
+                }
+                Err(message) => {
+                    ui.colored_label(ui.visuals().error_fg_color, message);
+                }
+            }
+        }
+        if self.information_section == InformationSection::MatchDetails {
+            self.match_details_area(ui);
+            return;
+        }
+
         let count = self.session.matches().len();
         if count == 0 {
             ui.weak(self.summary());
@@ -416,6 +471,48 @@ impl RegexTesterDialogState {
             self.session.select_match(index);
             self.request_match_scroll(ui);
         }
+    }
+
+    fn match_details_area(&mut self, ui: &mut egui::Ui) {
+        let Some(index) = self.session.selected_index() else {
+            ui.weak(self.summary());
+            return;
+        };
+        let mut copy = None;
+        egui::ScrollArea::vertical()
+            .id_source("regex_match_details_scroll")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height().max(1.0))
+            .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
+                copy = inspection::show(
+                    ui,
+                    &self.session.matches()[index],
+                    &mut self.selected_capture,
+                );
+            });
+        if let Some(target) = copy {
+            self.copy_selected(target);
+        }
+    }
+
+    fn copy_selected(&mut self, target: inspection::CopyTarget) {
+        let text = self
+            .session
+            .selected_index()
+            .and_then(|index| self.session.matches().get(index))
+            .and_then(|matched| inspection::copy_text(matched, target));
+        self.copy_feedback = Some(match text {
+            Some(text) => self
+                .clipboard
+                .write_text(text)
+                .map(|()| match target {
+                    inspection::CopyTarget::Match => "Copied match",
+                    inspection::CopyTarget::Capture(_) => "Copied capture",
+                })
+                .map_err(|error| format!("Could not copy: {error}")),
+            None => Err("The selected match or capture has no matched value".into()),
+        });
     }
 
     fn validation_error(&self) -> Option<&str> {
@@ -541,6 +638,91 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clipboard_modify::clipboard::ClipboardError;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    #[derive(Default)]
+    struct FakeClipboard {
+        reads: AtomicUsize,
+        attempts: AtomicUsize,
+        writes: Mutex<Vec<String>>,
+        contents: Mutex<String>,
+        fail: AtomicBool,
+    }
+
+    impl ClipboardBackend for FakeClipboard {
+        fn read_text(&self) -> Result<String, ClipboardError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(self.contents.lock().unwrap().clone())
+        }
+        fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            if self.fail.load(Ordering::Relaxed) {
+                return Err(ClipboardError::Busy("blocked".into()));
+            }
+            self.writes.lock().unwrap().push(text.into());
+            *self.contents.lock().unwrap() = text.into();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn regex_tester_explicit_match_capture_copy_handles_unicode_empty_unmatched_and_failure() {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        dialog.session.draft.pattern = r"(?P<word>é)(🦀)(z)?()".into();
+        dialog.session.draft.test_text = "é🦀".into();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let draft = dialog.session.draft.clone();
+        dialog.copy_selected(inspection::CopyTarget::Match);
+        dialog.copy_selected(inspection::CopyTarget::Capture(0));
+        dialog.copy_selected(inspection::CopyTarget::Capture(3));
+        assert_eq!(*backend.writes.lock().unwrap(), ["é🦀", "é", ""]);
+        assert!(matches!(dialog.copy_feedback, Some(Ok("Copied capture"))));
+        dialog.copy_selected(inspection::CopyTarget::Capture(2));
+        assert_eq!(backend.attempts.load(Ordering::Relaxed), 3);
+        assert!(matches!(dialog.copy_feedback, Some(Err(_))));
+        *backend.contents.lock().unwrap() = "existing clipboard".into();
+        backend.fail.store(true, Ordering::Relaxed);
+        dialog.copy_selected(inspection::CopyTarget::Match);
+        assert_eq!(backend.attempts.load(Ordering::Relaxed), 4);
+        assert_eq!(*backend.contents.lock().unwrap(), "existing clipboard");
+        assert!(
+            dialog
+                .copy_feedback
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .contains("Could not copy")
+        );
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn regex_tester_open_render_and_inspection_never_access_clipboard_implicitly() {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        dialog.session.draft.pattern = "(a)".into();
+        dialog.session.draft.test_text = "a".into();
+        dialog.open();
+        dialog
+            .session
+            .tick(Instant::now() + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.information_section = InformationSection::MatchDetails;
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| dialog.show(ctx));
+        assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.attempts.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn regex_tester_native_geometry_is_large_and_resizable() {
