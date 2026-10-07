@@ -1,3 +1,4 @@
+use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
 use crate::qr::{self, GeneratedQr, QrErrorCorrection, QrGenerationError, QrPayloadMetadata};
 use eframe::egui;
 use image::RgbaImage;
@@ -16,7 +17,7 @@ pub struct QrDialogState {
     pub source: String,
     pub error_correction: QrErrorCorrection,
     pub focus_source: bool,
-    pub feedback: Option<String>,
+    pub feedback: Option<Result<String, String>>,
     advanced_open: bool,
     metadata: QrPayloadMetadata,
     generated: Option<GeneratedQr>,
@@ -84,6 +85,32 @@ impl QrDialogState {
             self.dirty = true;
             self.refresh_generation();
         }
+    }
+
+    fn paste(&mut self, clipboard: &impl ClipboardBackend) {
+        match clipboard.read_text() {
+            Ok(source) => {
+                self.set_source(source);
+                self.feedback = Some(Ok("Pasted clipboard text".into()));
+            }
+            Err(_) => {
+                self.feedback = Some(Err(
+                    "Could not read clipboard text. Copy text and try again.".into(),
+                ))
+            }
+        }
+    }
+
+    fn copy_text(&mut self, clipboard: &impl ClipboardBackend) {
+        if self.source.is_empty() {
+            return;
+        }
+        self.feedback = Some(
+            clipboard
+                .write_text(&self.source)
+                .map(|()| "Copied text to clipboard".into())
+                .map_err(|_| "Could not copy text to clipboard. Try again.".into()),
+        );
     }
 
     fn refresh_generation(&mut self) {
@@ -191,6 +218,20 @@ impl QrDialogState {
                         self.dirty = true;
                         self.refresh_generation();
                     }
+                    ui.horizontal(|ui| {
+                        if ui.button("Paste").clicked() {
+                            self.paste(&ArboardClipboardBackend);
+                        }
+                        if ui.add_enabled(!self.source.is_empty(), egui::Button::new("Copy Text")).clicked() {
+                            self.copy_text(&ArboardClipboardBackend);
+                        }
+                    });
+                    if let Some(feedback) = &self.feedback {
+                        match feedback {
+                            Ok(message) => { ui.label(message); }
+                            Err(message) => { ui.colored_label(ui.visuals().error_fg_color, message); }
+                        }
+                    }
                     ui.label(format!(
                         "{} characters · {} UTF-8 bytes",
                         self.metadata.character_count, self.metadata.utf8_byte_count
@@ -250,6 +291,86 @@ impl QrDialogState {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct FakeClipboard {
+        text: std::sync::Mutex<String>,
+        reads: std::sync::atomic::AtomicUsize,
+        writes: std::sync::atomic::AtomicUsize,
+        fail: std::sync::atomic::AtomicBool,
+    }
+    impl ClipboardBackend for FakeClipboard {
+        fn read_text(&self) -> Result<String, crate::clipboard_modify::clipboard::ClipboardError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(
+                    crate::clipboard_modify::clipboard::ClipboardError::Permanent("secret".into()),
+                );
+            }
+            Ok(self.text.lock().unwrap().clone())
+        }
+        fn write_text(
+            &self,
+            text: &str,
+        ) -> Result<(), crate::clipboard_modify::clipboard::ClipboardError> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(
+                    crate::clipboard_modify::clipboard::ClipboardError::Permanent("secret".into()),
+                );
+            }
+            *self.text.lock().unwrap() = text.into();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn qr_text_clipboard_actions_are_explicit_exact_and_preserve_state_on_failure() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let clipboard = FakeClipboard::default();
+        let mut state = QrDialogState::default();
+        state.open(None);
+        state.open(Some("original"));
+        state.set_source("edited".into());
+        state.set_error_correction(QrErrorCorrection::Low);
+        assert_eq!(clipboard.reads.load(SeqCst), 0);
+        assert_eq!(clipboard.writes.load(SeqCst), 0);
+        let source = "  caf\u{e9}\n\u{1f512} ";
+        *clipboard.text.lock().unwrap() = source.into();
+        state.paste(&clipboard);
+        assert_eq!(state.source, source);
+        assert!(state.raster.is_some());
+        assert_eq!(clipboard.reads.load(SeqCst), 1);
+        assert!(matches!(state.feedback, Some(Ok(_))));
+        let revision = state.revision;
+        let raster = state.raster.clone();
+        state.copy_text(&clipboard);
+        assert_eq!(*clipboard.text.lock().unwrap(), source);
+        assert_eq!(clipboard.writes.load(SeqCst), 1);
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.raster, raster);
+        clipboard.fail.store(true, SeqCst);
+        state.paste(&clipboard);
+        assert_eq!(state.source, source);
+        assert_eq!(state.raster, raster);
+        assert_eq!(state.revision, revision);
+        assert!(matches!(state.feedback, Some(Err(_))));
+        assert!(!format!("{:?}", state.feedback).contains("secret"));
+        state.copy_text(&clipboard);
+        assert_eq!(state.source, source);
+        assert_eq!(state.raster, raster);
+        assert!(matches!(state.feedback, Some(Err(_))));
+        clipboard.fail.store(false, SeqCst);
+        let oversized = "x".repeat(10000);
+        state.set_source(oversized.clone());
+        assert!(state.raster.is_none());
+        state.copy_text(&clipboard);
+        assert_eq!(*clipboard.text.lock().unwrap(), oversized);
+        state.set_source(String::new());
+        state.copy_text(&clipboard);
+        assert_eq!(clipboard.writes.load(SeqCst), 3);
+    }
+
     #[test]
     fn qr_viewport_has_scannable_size_and_embedded_escape_cleans_up() {
         let builder = viewport_builder();
@@ -259,7 +380,7 @@ mod tests {
         state.open(Some("exact source"));
         let _ = ctx.run(egui::RawInput::default(), |ctx| state.show(ctx));
         assert!(!state.focus_source);
-        state.feedback = Some("old".into());
+        state.feedback = Some(Ok("old".into()));
         let mut input = egui::RawInput::default();
         input.events.push(egui::Event::Key {
             key: egui::Key::Escape,
@@ -284,7 +405,7 @@ mod tests {
         assert!(state.raster.is_some());
         assert_eq!(state.error_correction, QrErrorCorrection::Medium);
         state.set_error_correction(QrErrorCorrection::High);
-        state.feedback = Some("Old status".into());
+        state.feedback = Some(Ok("Old status".into()));
         state.focus_source = false;
         state.open(None);
         assert!(state.source.is_empty());

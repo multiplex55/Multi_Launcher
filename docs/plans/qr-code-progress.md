@@ -11,7 +11,7 @@ Authority: `qr-code-plan.md` and the current QR kickstart request. Source baseli
 | M3-A | Transient dialog and panel lifecycle | complete |
 | M3-B | Editor, cached live preview | complete |
 | M3-C | Advanced correction and capacity feedback | complete |
-| M4-A | Explicit Paste and Copy Text | pending |
+| M4-A | Explicit Paste and Copy Text | complete |
 | M4-B | Explicit image copy | pending |
 | M4-C | Explicit PNG save | pending |
 | M5 | Remaining integration coverage, targeted verification, review | pending |
@@ -33,3 +33,5 @@ M2-B/M3-A combined to keep real host/dialog integration coherent: exact plain Ac
 M3-B: editable exact multiline source, independent counts, cached generation/raster/nearest texture, immediate prefilled preview, non-error empty state, capacity clearing and recovery. Native utility viewport follows existing Regex pattern (620x700) to fit editor and scan-sized preview without changing launcher geometry; bounded embedded fallback. Both cache/state and viewport reviews passed; cargo check passed after refinement. State/viewport tests added; execution pending M5.
 
 M3-C: Advanced L/M/Q/H transient controls regenerate before preview; source/selection retained on capacity failure, fresh Medium/Advanced closed. Correction/capacity/cache tests added pending M5. Independent review, cargo check, formatting/diff checks passed.
+
+M4-A: explicit text clipboard actions through existing backend; exact text, failure preservation, payload-free typed inline status, empty Copy disabled/oversized text copyable. Mock call-count/error/empty/capacity tests added pending M5. Independent review, cargo check and format/diff checks passed.

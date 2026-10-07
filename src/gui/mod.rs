@@ -4478,7 +4478,7 @@ mod tests {
                 .count(),
             1
         );
-        app.qr_dialog.feedback = Some("stale".into());
+        app.qr_dialog.feedback = Some(Ok("stale".into()));
         assert!(app.close_front_dialog());
         assert!(app.qr_dialog.feedback.is_none());
         assert!(!app.qr_dialog.focus_source);
