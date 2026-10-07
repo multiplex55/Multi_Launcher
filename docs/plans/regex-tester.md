@@ -3548,9 +3548,10 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M2-C | complete | `7d0df134`; 12 examples, 3 targeted Nextest tests verify every sample and both substitutions. |
 | M3-A | complete | `02e7d44a`; 8 targeted Nextest tests, cap50 and failed-load/atomic-publication protection verified. |
 | M3-B | complete | `0dce7610`; 13 persistence tests pass, typed stable IDs and atomic protected CRUD. |
-| M4-A | in_progress | Normal regex_tester plugin discovery and registration. |
-| M4-B/M5-A | pending | Combined functioning typed-open and tracked dialog lifecycle boundary. |
-| M5-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M4-A | complete | `86ccf8d3`; plugin discovery/registration tests included in 47 passing Regex Tester tests. |
+| M4-B/M5-A | complete | `0190fa19`; typed route, full tracked lifecycle, native 960x680 child and bounded embedded fallback. 55 focused tests, final3 shell tests, bin cargo check, fmt/diff pass. |
+| M5-B | pending | Core pattern/flags/editor/collapsible information layout. |
+| M6-A–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3580,3 +3581,9 @@ M3 storage contract: independent settings-relative history/preset files; typed v
 M2-B/C independent catalog review: no substantive findings; all required categories/examples and contracts are present with accurate limitations.
 
 Checkpoint adjustment: M4-B and M5-A will be combined if required by the concrete host integration. The new typed opening method needs a functioning owned dialog state and tracked lifecycle, so an inert no-op host is not an acceptable intermediate implementation. Plugin registration M4-A remains separate, and core layout M5-B follows the integrated opening shell. This is a bounded combination permitted by the commit-map guidance, not a change in product scope.
+
+M3 review remediation complete: 3d9bacf9 [M3-C] rejects unknown nested flag fields while retaining defaults for missing known fields. Extended both stores' corruption fixtures; all 13 persistence tests, formatting and diff checks passed.
+
+Geometry finding: root native viewport defaults to 400x220. A parent-constrained egui Window alone cannot deliver the requested large initial tester experience. Reuse current native child viewport API (already used by MkMacro prompts/placement recovery), with embedded fallback and tracked single logical lifecycle; no root resizing or global hotkey changes.
+
+M3-C review confirmation: reported nested flag schema issue resolved; defaults for missing known fields retained and both byte-preservation fixture tests cover misspelled/future unknown flags.
