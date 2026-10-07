@@ -3558,8 +3558,11 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M7-A | complete | `aae9680c`; 75 targeted tests plus final3 highlighting tests passed, independent review no findings. Editable byte sections, distinct active theme color, clipped linear zero-width markers, exact evaluated-source guard. |
 | M7-B | complete | `513fc100`; 21 focused tests passed, independent review no findings. Domain wraparound selection, virtualized clickable rows and one-shot scroll preserve editor cursor/source. |
 | M7-C | complete | `88629df3`; 19 focused tests passed, independent review no findings. Full selected values, numbered/named/empty/unmatched captures, exact labels and explicit injectable clipboard copy. |
-| M8-A | in_progress | Cached deterministic explanations in domain session, readonly bounded sidebar. |
-| M8-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M8-A | complete | `61dd8435`; 33 focused tests passed, independent review no findings. Session caches bounded pattern/flag analysis; readonly wrapped explanation/sidebar exposes original byte spans. |
+| M8-B | complete | `528a2f92`; initial25 tests plus final2 Reference tests passed after correcting fixture query/lifecycle assumptions. Review no findings; explicit Append/Copy and retained local filters. |
+| M8-C | complete | `d83dcec2`; 27 focused GUI/examples tests passed, independent review no findings. Local retained search and explicit complete draft loading with replacement reset. |
+| M9-A | in_progress | Settings-root history/preset store configuration, privacy-preserving recent pattern browser and controlled successful recording. |
+| M9-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3605,3 +3608,5 @@ M6-A1 preliminary limits: pattern/replacement4KiB, text64KiB, captures100, store
 M6-A2/B review: single session scheduling and inline validation have no unresolved findings. M6-A3 explicitly remediates oversized pattern rendering; original buffer retained with bounded preview and clear recovery. All checkpoints verified before committing.
 
 M7 review: no unresolved findings in editable range rendering, zero-width markers, exact-source guards, navigation/cursor preservation, capture inspection or explicit copy isolation. Native acceptance remains pending.
+
+M8 review: explanations, reference and examples have no unresolved findings. Reference fixture corrections respected description search and initial-session evaluation; no production behavior changed to satisfy tests. History/preset filenames selected as regex_history.json and regex_presets.json under the existing settings-relative AppDataRoot.
