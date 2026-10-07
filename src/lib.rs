@@ -56,6 +56,7 @@ pub mod plugin_editor;
 pub mod plugins;
 pub mod plugins_builtin;
 pub mod process;
+pub mod qr;
 pub mod radial;
 pub mod regex_tester;
 pub mod screen_draw;

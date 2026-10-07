@@ -4,7 +4,7 @@ Authority: `qr-code-plan.md` and the current QR kickstart request. Source baseli
 
 | Checkpoint | Scope | State |
 | --- | --- | --- |
-| M1-A | Local encoding domain, dependency, focused tests | pending |
+| M1-A | Local encoding domain, dependency, focused tests | complete |
 | M1-B | Shared crisp raster and metadata | pending |
 | M2-A | Built-in plugin, exact/payload queries, discovery | pending |
 | M2-B | Typed parser/bus/host routing, privacy/history | pending |
@@ -21,3 +21,6 @@ Commit boundaries follow these stages; neighboring small coherent checkpoints ma
 Verification: QR unit/state tests, directly affected plugin_commands/plugin_routing, typed commands, cargo check. Prefer scoped Nextest targets. No full-suite campaign. Review locality, privacy, exact payload transport, quiet zone/integer raster, stale-output clearing, explicit side effects, panel/Escape lifecycle, and scope.
 
 Native phone scan remains a human smoke check. Native GUI checks depend on available computer-control capabilities.
+
+M1-A: scoped Nextest passed 7/7. Independent review identified automatic Kanji-mode reinterpretation of UTF-8; corrected before checkpoint using ECI 26 + Byte mode for non-ASCII, with ascending version selection. ASCII retains encoder optimization. No source/payload storage or side effects.
+
