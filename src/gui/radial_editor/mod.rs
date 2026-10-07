@@ -11621,6 +11621,23 @@ fn acceptance_staged_properties_digest(
 mod tests {
     use super::*;
 
+    fn production_source(source: &str) -> String {
+        let normalized = source.replace("\r\n", "\n");
+        normalized
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .expect("radial editor source must contain the test-module boundary")
+            .0
+            .to_owned()
+    }
+
+    #[test]
+    fn production_source_excludes_tests_with_lf_and_crlf() {
+        let source = "production\n#[cfg(test)]\nmod tests { forbidden_test_literal }";
+        for source in [source.to_owned(), source.replace("\n", "\r\n")] {
+            assert_eq!(production_source(&source), "production");
+        }
+    }
+
     fn retained_tree_search_undo_scenario(settle_starter: bool) {
         let mut editor = RadialEditorState::default();
         editor.open_test_snapshot();
@@ -16489,7 +16506,7 @@ mod tests {
     #[test]
     fn continuous_editor_categories_use_stable_field_dispatch_and_previewed_resize() {
         let source = include_str!("mod.rs");
-        let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let production = production_source(source);
         for field in [
             "hover_dwell_ms",
             "center_radius",
@@ -16526,7 +16543,7 @@ mod tests {
     #[test]
     fn gui_uses_authoring_requests_without_store_ownership_or_local_packaging() {
         let source = include_str!("mod.rs");
-        let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let production = production_source(source);
         assert!(!production.contains("RadialStore"));
         assert!(!production.contains("NativeHost"));
         assert!(!production.contains("RADIAL_ASSETS_DIRECTORY"));
@@ -16686,7 +16703,7 @@ mod tests {
     #[test]
     fn accessibility_contract_names_blank_controls_and_restores_stable_focus() {
         let source = include_str!("mod.rs");
-        let production = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let production = production_source(source);
         let action_editor_production = include_str!("action_editor.rs");
         assert!(production.contains("WidgetInfo::selected(egui::WidgetType::Checkbox"));
         assert!(production.contains("egui::WidgetType::ColorButton"));
