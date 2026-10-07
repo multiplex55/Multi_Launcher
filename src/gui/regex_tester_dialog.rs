@@ -2161,6 +2161,132 @@ mod tests {
     }
 
     #[test]
+    fn regex_tester_pointer_row_activation_updates_selection_capture_and_scroll_without_edits() {
+        let ctx = egui::Context::default();
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.pattern = "(?P<word>one|two|three)".into();
+        dialog.session.draft.test_text =
+            format!("one\n{}two\n{}three", "\n".repeat(200), "\n".repeat(200));
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        let frame_time = std::cell::Cell::new(0.0);
+        let scroll_id = std::cell::Cell::new(None);
+        let render = |dialog: &mut RegexTesterDialogState, events| {
+            let time = frame_time.get();
+            frame_time.set(time + 1.0 / 60.0);
+            ctx.run(
+                egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(960.0, 680.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        scroll_id.set(Some(
+                            ui.id()
+                                .with("regex_tester_editor_area")
+                                .with(egui::Id::new("regex_tester_text_scroll")),
+                        ));
+                        dialog.body(ui)
+                    });
+                },
+            )
+        };
+        render(&mut dialog, Vec::new());
+        let editor_id = egui::Id::new("regex_tester_test_text");
+        ctx.memory_mut(|memory| memory.request_focus(editor_id));
+        let mut state = egui::TextEdit::load_state(&ctx, editor_id).unwrap();
+        let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(2));
+        state.cursor.set_char_range(Some(cursor));
+        state.store(&ctx, editor_id);
+        let before = render(&mut dialog, Vec::new());
+        // Locate actual rendered row geometry rather than duplicating layout or
+        // adding production response collection solely for this test.
+        let point = before
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text.starts_with("#3 ·") => {
+                    Some(text.pos + egui::vec2(3.0, text.galley.size().y * 0.5))
+                }
+                _ => None,
+            })
+            .expect("third match row must be rendered");
+        let input_y = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == draft.test_text => {
+                        Some(text.pos.y)
+                    }
+                    _ => None,
+                })
+                .expect("input galley must be rendered")
+        };
+        let initial_y = input_y(&before);
+        for pressed in [true, false] {
+            render(
+                &mut dialog,
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(dialog.session.selected_index(), Some(2));
+        assert_eq!(dialog.navigation_summary(), "Match 3 of 3");
+        let selected = &dialog.session.matches()[dialog.session.selected_index().unwrap()];
+        assert_eq!(selected.captures[0].group_index, 1);
+        assert_eq!(selected.captures[0].name.as_deref(), Some("word"));
+        assert_eq!(
+            inspection::copy_text(selected, inspection::CopyTarget::Capture(0)),
+            Some("three")
+        );
+        assert!(dialog.scroll_to_selected);
+        render(&mut dialog, Vec::new());
+        assert!(!dialog.scroll_to_selected);
+        // ScrollArea animates its target for up to 0.3s. Advance only egui's
+        // deterministic input clock, with no sleep or production delay.
+        frame_time.set(frame_time.get() + 0.5);
+        render(&mut dialog, Vec::new());
+        let scrolled = egui::scroll_area::State::load(&ctx, scroll_id.get().unwrap()).unwrap();
+        assert!(scrolled.offset.y > 0.0);
+        // egui builds content geometry before advancing the animated offset;
+        // the following frame paints at the offset that has now settled.
+        let after = render(&mut dialog, Vec::new());
+        assert!(
+            input_y(&after) < initial_y,
+            "editor must scroll towards the distant selected match: {initial_y} -> {}",
+            input_y(&after)
+        );
+        assert!(!dialog.scroll_to_selected);
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+        assert_eq!(
+            egui::TextEdit::load_state(&ctx, editor_id)
+                .unwrap()
+                .cursor
+                .char_range(),
+            Some(cursor)
+        );
+    }
+
+    #[test]
     fn regex_tester_navigation_scroll_is_one_shot_and_preserves_editor_cursor_and_source() {
         let ctx = egui::Context::default();
         let mut dialog = RegexTesterDialogState::default();
@@ -2499,6 +2625,11 @@ mod tests {
         });
         let _ = ctx.run(input, |ctx| dialog.show(ctx));
         assert!(!dialog.open);
+        assert_eq!(dialog.session.draft, draft);
+        assert!(dialog.session.substitution_enabled());
+        dialog.open();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| dialog.show(ctx));
+        assert!(dialog.open);
         assert_eq!(dialog.session.draft, draft);
         assert!(dialog.session.substitution_enabled());
     }
