@@ -6,6 +6,18 @@ use std::time::Instant;
 mod explanation;
 mod highlighting;
 mod inspection;
+mod reference;
+
+fn copy_text(
+    clipboard: &dyn ClipboardBackend,
+    text: &str,
+    success: &'static str,
+) -> Result<&'static str, String> {
+    clipboard
+        .write_text(text)
+        .map(|()| success)
+        .map_err(|error| format!("Could not copy: {error}"))
+}
 
 fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
@@ -101,6 +113,7 @@ enum InformationSection {
     Matches,
     MatchDetails,
     Explanation,
+    Reference,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -112,6 +125,7 @@ pub struct RegexTesterDialogState {
     information_open: bool,
     scroll_to_selected: bool,
     information_section: InformationSection,
+    reference: reference::ReferenceState,
     selected_capture: usize,
     clipboard: Arc<dyn ClipboardBackend>,
     copy_feedback: Option<Result<&'static str, String>>,
@@ -133,6 +147,7 @@ impl RegexTesterDialogState {
             information_open: true,
             scroll_to_selected: false,
             information_section: InformationSection::default(),
+            reference: reference::ReferenceState::default(),
             selected_capture: 0,
             clipboard,
             copy_feedback: None,
@@ -405,6 +420,7 @@ impl RegexTesterDialogState {
                 InformationSection::Matches => "Matches",
                 InformationSection::MatchDetails => "Selected match",
                 InformationSection::Explanation => "Explanation",
+                InformationSection::Reference => "Reference",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -421,6 +437,11 @@ impl RegexTesterDialogState {
                     &mut self.information_section,
                     InformationSection::Explanation,
                     "Explanation",
+                );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::Reference,
+                    "Reference",
                 );
             });
         if let Some(feedback) = &self.copy_feedback {
@@ -444,6 +465,12 @@ impl RegexTesterDialogState {
                 // Compiler validation is authoritative; pending revisions have
                 // no accessible stale analysis.
                 ui.weak(self.summary());
+            }
+            return;
+        }
+        if self.information_section == InformationSection::Reference {
+            if let Some(action) = self.reference.show(ui) {
+                self.reference_action(action);
             }
             return;
         }
@@ -521,16 +548,32 @@ impl RegexTesterDialogState {
             .and_then(|index| self.session.matches().get(index))
             .and_then(|matched| inspection::copy_text(matched, target));
         self.copy_feedback = Some(match text {
-            Some(text) => self
-                .clipboard
-                .write_text(text)
-                .map(|()| match target {
+            Some(text) => copy_text(
+                self.clipboard.as_ref(),
+                text,
+                match target {
                     inspection::CopyTarget::Match => "Copied match",
                     inspection::CopyTarget::Capture(_) => "Copied capture",
-                })
-                .map_err(|error| format!("Could not copy: {error}")),
+                },
+            ),
             None => Err("The selected match or capture has no matched value".into()),
         });
+    }
+
+    fn reference_action(&mut self, action: reference::ReferenceAction) {
+        match action {
+            reference::ReferenceAction::Append(entry) => {
+                self.session.draft.pattern.push_str(entry.syntax);
+                self.mark_changed();
+            }
+            reference::ReferenceAction::Copy(entry) => {
+                self.copy_feedback = Some(copy_text(
+                    self.clipboard.as_ref(),
+                    entry.syntax,
+                    "Copied syntax",
+                ));
+            }
+        }
     }
 
     fn validation_error(&self) -> Option<&str> {
@@ -656,6 +699,118 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_reference_filters_render_and_reopen_preserve_draft_without_clipboard_io() {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        let now = Instant::now();
+        dialog.session.ensure_initial_evaluation(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.information_section = InformationSection::Reference;
+        dialog.reference.query = "DiGiT".into();
+        dialog.reference.category = Some(crate::regex_tester::ReferenceCategory::CharacterClasses);
+        assert!(
+            dialog
+                .reference
+                .entries()
+                .any(|entry| entry.id == "class-digit")
+        );
+        dialog.reference.category = Some(crate::regex_tester::ReferenceCategory::Anchors);
+        assert!(
+            dialog
+                .reference
+                .entries()
+                .all(|entry| entry.category == crate::regex_tester::ReferenceCategory::Anchors)
+        );
+        dialog.reference.query = "not-a-catalog-entry".into();
+        assert_eq!(dialog.reference.entries().count(), 0);
+        dialog.reference.category = None;
+        dialog.reference.query.clear();
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        let ctx = egui::Context::default();
+        for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let bounds = ui.available_rect_before_wrap();
+                        dialog.body(ui);
+                        assert!(ui.min_rect().right() <= bounds.right() + 0.1);
+                        assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+                    });
+                },
+            );
+        }
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 0);
+        dialog.reference.query = "DiGiT".into();
+        dialog.reference.category = Some(crate::regex_tester::ReferenceCategory::CharacterClasses);
+        dialog.open();
+        dialog.open = false;
+        dialog.open();
+        assert!(dialog.information_section == InformationSection::Reference);
+        assert_eq!(dialog.reference.query, "DiGiT");
+        assert_eq!(
+            dialog.reference.category,
+            Some(crate::regex_tester::ReferenceCategory::CharacterClasses)
+        );
+    }
+
+    #[test]
+    fn regex_tester_reference_append_and_copy_are_exact_explicit_actions() {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        let now = Instant::now();
+        dialog.session.draft.pattern = "é/".into();
+        dialog.session.draft.test_text = "é/123".into();
+        dialog.session.draft.replacement = "$1".into();
+        dialog.session.draft.flags.case_insensitive = true;
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        let digit = crate::regex_tester::QUICK_REFERENCE
+            .iter()
+            .find(|entry| entry.id == "class-digit")
+            .unwrap();
+        dialog.reference_action(reference::ReferenceAction::Copy(digit));
+        assert_eq!(*backend.contents.lock().unwrap(), r"\d");
+        assert_eq!(dialog.copy_feedback, Some(Ok("Copied syntax")));
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+        dialog.reference_action(reference::ReferenceAction::Append(digit));
+        assert_eq!(dialog.session.draft.pattern, "é/\\d");
+        assert_eq!(dialog.session.draft.test_text, draft.test_text);
+        assert_eq!(dialog.session.draft.flags, draft.flags);
+        assert_eq!(dialog.session.draft.replacement, draft.replacement);
+        assert_eq!(dialog.session.revision(), revision + 1);
+        assert!(dialog.session.result().is_none());
+        assert!(dialog.session.explanation().is_none());
+        assert!(dialog.copy_feedback.is_none());
+        let fragment = crate::regex_tester::QUICK_REFERENCE
+            .iter()
+            .find(|entry| entry.syntax == "*")
+            .unwrap();
+        dialog.session.draft.pattern.clear();
+        dialog.reference_action(reference::ReferenceAction::Append(fragment));
+        dialog
+            .session
+            .tick(Instant::now() + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert!(dialog.validation_error().is_some());
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn regex_tester_explanation_view_tracks_invalid_pending_and_valid_state() {
