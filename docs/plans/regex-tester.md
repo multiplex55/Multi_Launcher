@@ -3530,3 +3530,27 @@ arbitrary commit count.
 
 
 
+
+# Execution ledger — Goal B
+
+Baseline: `b38c3f71` on the current task branch; working tree clean at start.
+
+The task-specific commit map above remains the active checkpoint cadence. One implementation agent owns source writes at a time. Domain, catalogs, storage, command integration, dialog UX, verification, and review proceed in that order. Checkpoints are committed separately when coherent; adjacent IDs combine only if inseparable.
+
+| Checkpoint | Status | Commit / evidence / decisions |
+| --- | --- | --- |
+| M0-A | complete | Current integration inspected. Rust regex 1.11.2, egui 0.27, regex-syntax 0.8.6 already locked. Use typed DialogCommand and normal plugin registration; shared JSON atomic helpers; settings-relative storage. Regex dialog must join Panel lifecycle (Diff alone lacks panel-stack protection). |
+| M1-A | in_progress | Pure domain models; distinguish byte spans from Unicode scalar display columns. |
+| M1-B–M13-B | pending | Execute the task-specific map; targeted Nextest at stable boundaries, final independent review and required manual acceptance. |
+
+Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
+
+## M0-A integration contract
+
+- Register `RegexTesterPlugin` with `PluginManager::reload_from_dirs`; plugin discovers exact `regex` command only.
+- Route `regex:open` to `DialogCommand::RegexTester` through `DialogCommandHost` and `handle_simple_dialog`. Reject this new GUI command explicitly in headless execution and exclude query override arguments.
+- Track `Panel::RegexTesterDialog` in the full lifecycle, using JSON utility as the panel reference and Diff as the large bounded geometry reference. Preserve session draft on repeated open and close.
+- Domain stores receive settings-relative paths via `AppDataRoot`; shared atomic JSON helpers handle I/O, while stores own validation and failed-load write protection.
+- Reuse injectable `ClipboardBackend` directly for explicit import/copy; avoid modifier transaction retry sleeps.
+- Debounce requests repaint only while work is pending. Keep bounded evaluation, source ranges, captures, explanations, catalogs and persistence outside rendering.
+- Native acceptance prerequisite: bundled Computer Use runtime initialized and `sky.list_apps()` succeeded. Real acceptance remains pending until a production build exists.
