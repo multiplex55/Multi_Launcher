@@ -2,7 +2,7 @@ use regex::{Regex, RegexBuilder};
 
 use super::model::{
     ByteSpan, CaptureGroup, CaptureValue, EvaluationResult, MatchId, RegexFlags, RegexMatch,
-    RegexValidationError, SourceIndex,
+    RegexValidationError, SourceIndex, SubstitutionEvaluationResult, SubstitutionResult,
 };
 
 /// Compiles a pattern with the tester's supported Rust-regex options.
@@ -82,6 +82,37 @@ pub fn evaluate(pattern: &str, flags: &RegexFlags, text: &str) -> EvaluationResu
     }
 
     EvaluationResult::Success { matches }
+}
+
+/// Replaces every non-overlapping match with Rust-regex capture expansion.
+///
+/// Replacement syntax is delegated to the engine, including `$1`, `$name`,
+/// `${1}` disambiguation, and `$$` for a literal dollar sign. The count is
+/// collected from the same replacement traversal, including zero-width
+/// matches. Evaluation has no clipboard, storage, or other external effects.
+pub fn evaluate_substitution(
+    pattern: &str,
+    flags: &RegexFlags,
+    text: &str,
+    replacement: &str,
+) -> SubstitutionEvaluationResult {
+    let regex = match compile_regex(pattern, flags) {
+        Ok(regex) => regex,
+        Err(error) => return SubstitutionEvaluationResult::InvalidPattern(error),
+    };
+
+    let mut replacements_made = 0;
+    let output = regex.replace_all(text, |captures: &regex::Captures<'_>| {
+        replacements_made += 1;
+        let mut expanded = String::new();
+        captures.expand(replacement, &mut expanded);
+        expanded
+    });
+
+    SubstitutionEvaluationResult::Success(SubstitutionResult {
+        output: output.into_owned(),
+        replacements_made,
+    })
 }
 
 fn byte_span(start_byte: usize, end_byte: usize) -> ByteSpan {
@@ -252,5 +283,105 @@ mod tests {
         assert_invalid_pattern("[");
         assert_invalid_pattern("(?=a)");
         assert_invalid_pattern(r"(a)\1");
+    }
+
+    fn substitute(pattern: &str, text: &str, replacement: &str) -> SubstitutionResult {
+        match evaluate_substitution(pattern, &RegexFlags::default(), text, replacement) {
+            SubstitutionEvaluationResult::Success(result) => result,
+            SubstitutionEvaluationResult::InvalidPattern(error) => {
+                panic!("expected a valid regex, got: {}", error.message)
+            }
+        }
+    }
+
+    #[test]
+    fn substitution_replaces_plain_text_and_all_matches() {
+        assert_eq!(
+            substitute("cat", "a cat", "dog"),
+            SubstitutionResult {
+                output: "a dog".to_owned(),
+                replacements_made: 1,
+            }
+        );
+        assert_eq!(
+            substitute("cat", "cat and cat", "dog"),
+            SubstitutionResult {
+                output: "dog and dog".to_owned(),
+                replacements_made: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn substitution_expands_numbered_captures_and_braced_disambiguation() {
+        assert_eq!(
+            substitute(r"(\w+)-(\d+)", "item-42", "$2/$1").output,
+            "42/item"
+        );
+        assert_eq!(substitute("(a)", "a", "${1}suffix").output, "asuffix");
+        // Unbraced names consume the longest valid name, as in Rust regex.
+        assert_eq!(substitute("(a)", "a", "$1suffix").output, "");
+    }
+
+    #[test]
+    fn substitution_expands_named_and_unmatched_optional_captures() {
+        assert_eq!(
+            substitute(r"(?P<key>\w+)=(?P<value>\d+)", "count=42", "$value:$key").output,
+            "42:count"
+        );
+        assert_eq!(substitute("(a)(b)?", "a", "$1/$2/$missing").output, "a//");
+    }
+
+    #[test]
+    fn substitution_preserves_literal_dollars_and_backslashes() {
+        assert_eq!(
+            substitute("(a)", "a", r"$$1 $$ ${1} \1").output,
+            r"$1 $ a \1"
+        );
+    }
+
+    #[test]
+    fn substitution_preserves_input_when_no_match_exists() {
+        assert_eq!(
+            substitute("z", "é abc", "$1"),
+            SubstitutionResult {
+                output: "é abc".to_owned(),
+                replacements_made: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn substitution_reports_invalid_patterns_and_reuses_flags() {
+        match evaluate_substitution("[", &RegexFlags::default(), "abc", "x") {
+            SubstitutionEvaluationResult::InvalidPattern(error) => {
+                assert!(!error.message.is_empty())
+            }
+            SubstitutionEvaluationResult::Success(_) => panic!("expected an invalid pattern"),
+        }
+        let flags = RegexFlags {
+            case_insensitive: true,
+            ..RegexFlags::default()
+        };
+        assert_eq!(
+            evaluate_substitution("a", &flags, "A", "x"),
+            SubstitutionEvaluationResult::Success(SubstitutionResult {
+                output: "x".to_owned(),
+                replacements_made: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn substitution_counts_zero_width_replacements_using_engine_iteration() {
+        for (pattern, text, expected) in [("", "é", "-é-"), ("a*", "aé", "-é-"), ("", "", "-")]
+        {
+            let result = substitute(pattern, text, "-");
+            assert_eq!(result.output, expected);
+            assert_eq!(
+                result.replacements_made,
+                evaluate_matches(pattern, &RegexFlags::default(), text).len()
+            );
+        }
     }
 }
