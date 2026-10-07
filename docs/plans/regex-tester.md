@@ -3563,8 +3563,10 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M8-C | complete | `d83dcec2`; 27 focused GUI/examples tests passed, independent review no findings. Local retained search and explicit complete draft loading with replacement reset. |
 | M9-A | complete | `5a92a048`; 16 focused tests passed, independent review no findings. Settings-root stores, successful changed-pair recording, privacy-preserving load, corruption diagnostics/reload/retry. |
 | M9-B | complete | `d3b5355e`; 11 scoped tests passed. Private stable-ID management, explicit buffer choices and protected CRUD. Review external-rename finding resolved by typed content-only store mutation; reviewer confirmed. |
-| M10-A | in_progress | Bounded substitution session/result sharing debounce while preserving current matching on replacement-only edits. |
-| M10-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M10-A | complete | `af19733c`; 19 focused tests passed, independent review no findings. Shared deadline with source/replacement ownership, preserved matching, bounded readonly result previews. |
+| M10-B | complete | `26df0ea3`; initial5 scoped tests plus corrected exact-copy fixture passed. Review no findings. Explicit one-shot import/full-current copy, honest limited rows, no idle IO. |
+| M11-A | in_progress | Same-frame oversized paste layout guards and representative workload profiling; named warning/hard policies. |
+| M11-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3614,3 +3616,7 @@ M7 review: no unresolved findings in editable range rendering, zero-width marker
 M8 review: explanations, reference and examples have no unresolved findings. Reference fixture corrections respected description search and initial-session evaluation; no production behavior changed to satisfy tests. History/preset filenames selected as regex_history.json and regex_presets.json under the existing settings-relative AppDataRoot.
 
 M9 decisions: presets omit sample/replacement by explicit unchecked defaults; loading None preserves current buffer while Some empty clears it, with UI explanation. Update keeps the latest disk name via PresetContent/update_content inside the validated atomic candidate mutation; existing full-update semantics remain intact. Independent review finding resolved before checkpoint commit.
+
+M11 preparation: local epaint0.27 source confirms max_rows=0 returns before glyph layout, while positive row limits shape all sections first. Use exact-text elided galley for oversized same-frame paste (no char_limit truncation); retain full buffer and switch to existing bounded preview next frame. Profile representative evaluation/session/frame workloads and document timings. M11-C should replace debug enum names in substitution suspension feedback with friendly labels/units.
+
+M10 review: no unresolved substitution or clipboard findings. Exact-copy fixture was corrected to respect Rust suppression of adjacent empty matches, separating Unicode values from explicit zero-width anchor values; production copying remained unchanged. M12-A read-only gap analysis found only repeated-group/final-capture assertion missing; other required domain categories already have focused coverage.
