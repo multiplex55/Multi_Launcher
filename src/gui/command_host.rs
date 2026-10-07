@@ -1071,7 +1071,7 @@ mod tests {
     fn regex_tester_dispatch_ignores_query_override_and_retains_draft() {
         let mut app = test_app();
         app.query = "keep query".into();
-        app.regex_tester_dialog.draft.pattern = "draft".into();
+        app.regex_tester_dialog.session.draft.pattern = "draft".into();
         let action = crate::actions::Action {
             label: "Regex".into(),
             desc: String::new(),
@@ -1090,7 +1090,7 @@ mod tests {
         assert!(app.regex_tester_dialog.open);
         assert!(app.any_panel_open());
         assert_eq!(app.query, "keep query");
-        assert_eq!(app.regex_tester_dialog.draft.pattern, "draft");
+        assert_eq!(app.regex_tester_dialog.session.draft.pattern, "draft");
         assert_eq!(
             app.panel_stack
                 .iter()

@@ -4444,9 +4444,9 @@ mod tests {
     fn regex_tester_panel_lifecycle_preserves_draft_and_deduplicates_stack() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        app.regex_tester_dialog.draft.pattern = "saved session".into();
-        app.regex_tester_dialog.draft.test_text = "sample".into();
-        let draft = app.regex_tester_dialog.draft.clone();
+        app.regex_tester_dialog.session.draft.pattern = "saved session".into();
+        app.regex_tester_dialog.session.draft.test_text = "sample".into();
+        let draft = app.regex_tester_dialog.session.draft.clone();
         app.ensure_open(Panel::RegexTesterDialog);
         app.update_panel_stack();
         app.ensure_open(Panel::RegexTesterDialog);
@@ -4467,7 +4467,7 @@ mod tests {
         app.force_close_panel(Panel::RegexTesterDialog);
         assert!(!app.regex_tester_dialog.open);
         assert!(!app.panel_stack.contains(&Panel::RegexTesterDialog));
-        assert_eq!(app.regex_tester_dialog.draft, draft);
+        assert_eq!(app.regex_tester_dialog.session.draft, draft);
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod model;
 pub mod persistence;
 pub mod policy;
 pub mod reference;
+pub mod session;
 
 pub use engine::{
     evaluate, evaluate_substitution, evaluate_substitution_with_policy, evaluate_with_policy,
@@ -27,3 +28,4 @@ pub use reference::{
     QUICK_REFERENCE, ReferenceCategory, ReferenceEntry, ReferenceExample, ReferenceSyntaxKind,
     search_reference,
 };
+pub use session::RegexSession;

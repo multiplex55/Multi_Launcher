@@ -1,5 +1,6 @@
-use crate::regex_tester::model::RegexDraft;
+use crate::regex_tester::{EvaluationLimit, EvaluationResult, MatchCompleteness, RegexSession};
 use eframe::egui;
+use std::time::Instant;
 
 fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
@@ -75,7 +76,7 @@ impl CoreLayout {
 /// Session-owned inputs survive closing the utility; persistence is explicit.
 pub struct RegexTesterDialogState {
     pub open: bool,
-    pub draft: RegexDraft,
+    pub session: RegexSession,
     focus_pattern: bool,
     focus_viewport: bool,
     information_open: bool,
@@ -85,7 +86,7 @@ impl Default for RegexTesterDialogState {
     fn default() -> Self {
         Self {
             open: false,
-            draft: RegexDraft::default(),
+            session: RegexSession::default(),
             focus_pattern: false,
             focus_viewport: false,
             information_open: true,
@@ -95,6 +96,7 @@ impl Default for RegexTesterDialogState {
 
 impl RegexTesterDialogState {
     pub fn open(&mut self) {
+        self.session.ensure_initial_evaluation(Instant::now());
         self.focus_viewport = true;
         if !self.open {
             self.focus_pattern = true;
@@ -149,6 +151,8 @@ impl RegexTesterDialogState {
     }
 
     fn body(&mut self, ui: &mut egui::Ui) -> CoreLayout {
+        let now = Instant::now();
+        self.session.ensure_initial_evaluation(now);
         let bounds = ui.available_rect_before_wrap();
         // Recompute after the toggle so collapsing frees editor space this frame.
         let header = CoreLayout::new(bounds, self.information_open).header;
@@ -159,12 +163,18 @@ impl RegexTesterDialogState {
         bounded_area(ui, layout.editor, "regex_tester_editor_area", |ui| {
             self.text_area(ui)
         });
+        self.session.tick(now);
         if let Some(information) = layout.information {
             bounded_area(ui, information, "regex_tester_information_area", |ui| {
                 self.information_area(ui)
             });
         }
-        bounded_area(ui, layout.status, "regex_tester_status", Self::status_area);
+        bounded_area(ui, layout.status, "regex_tester_status", |ui| {
+            self.status_area(ui)
+        });
+        if let Some(delay) = self.session.pending_delay(Instant::now()) {
+            ui.ctx().request_repaint_after(delay);
+        }
         layout
     }
 
@@ -187,7 +197,7 @@ impl RegexTesterDialogState {
         ui.horizontal(|ui| {
             ui.label("Pattern");
             ui.label(egui::RichText::new("/").monospace().size(18.0));
-            let suffix = format!("/{}", self.draft.flags.suffix());
+            let suffix = format!("/{}", self.session.draft.flags.suffix());
             let suffix_width = ui.fonts(|fonts| {
                 fonts
                     .layout_no_wrap(
@@ -202,11 +212,14 @@ impl RegexTesterDialogState {
                 (ui.available_width() - suffix_width - ui.spacing().item_spacing.x).max(1.0);
             let pattern = ui.add_sized(
                 [width, 28.0],
-                egui::TextEdit::singleline(&mut self.draft.pattern)
+                egui::TextEdit::singleline(&mut self.session.draft.pattern)
                     .id(egui::Id::new("regex_tester_pattern"))
                     .font(egui::FontId::monospace(18.0))
                     .hint_text("Regular expression"),
             );
+            if pattern.changed() {
+                self.session.mark_changed(Instant::now());
+            }
             if self.focus_pattern {
                 pattern.request_focus();
                 self.focus_pattern = false;
@@ -218,53 +231,64 @@ impl RegexTesterDialogState {
 
     fn flags_area(&mut self, ui: &mut egui::Ui) -> [egui::Response; 5] {
         ui.label("Flags");
-        [
+        let responses = [
             (
                 "i",
-                &mut self.draft.flags.case_insensitive,
+                &mut self.session.draft.flags.case_insensitive,
                 "Case insensitive",
             ),
             (
                 "m",
-                &mut self.draft.flags.multi_line,
+                &mut self.session.draft.flags.multi_line,
                 "Multiline: ^ and $ match line boundaries",
             ),
             (
                 "s",
-                &mut self.draft.flags.dot_matches_new_line,
+                &mut self.session.draft.flags.dot_matches_new_line,
                 "Dot matches newline",
             ),
             (
                 "u",
-                &mut self.draft.flags.unicode,
+                &mut self.session.draft.flags.unicode,
                 "Unicode character classes and matching",
             ),
             (
                 "x",
-                &mut self.draft.flags.ignore_whitespace,
+                &mut self.session.draft.flags.ignore_whitespace,
                 "Ignore pattern whitespace and allow comments",
             ),
         ]
-        .map(|(letter, enabled, hint)| ui.checkbox(enabled, letter).on_hover_text(hint))
+        .map(|(letter, enabled, hint)| ui.checkbox(enabled, letter).on_hover_text(hint));
+        if responses.iter().any(egui::Response::changed) {
+            self.session.mark_changed(Instant::now());
+        }
+        responses
     }
 
     fn text_area(&mut self, ui: &mut egui::Ui) {
         ui.label("Test text");
+        if self.session.draft.test_text.len() > self.session.policy().text_bytes {
+            self.oversized_text_area(ui);
+            return;
+        }
         let editor_size = ui.available_size().max(egui::vec2(1.0, 1.0));
         egui::ScrollArea::both()
             .id_source("regex_tester_text_scroll")
             .auto_shrink([false, false])
             .max_height(editor_size.y)
             .show(ui, |ui| {
-                ui.add_sized(
+                let response = ui.add_sized(
                     editor_size,
-                    egui::TextEdit::multiline(&mut self.draft.test_text)
+                    egui::TextEdit::multiline(&mut self.session.draft.test_text)
                         .id(egui::Id::new("regex_tester_test_text"))
                         .font(egui::TextStyle::Monospace)
                         .desired_rows(1)
                         .desired_width(editor_size.x)
                         .hint_text("Type or paste text to test"),
                 );
+                if response.changed() {
+                    self.session.mark_changed(Instant::now());
+                }
             });
     }
 
@@ -276,13 +300,68 @@ impl RegexTesterDialogState {
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
                 ui.strong("Match information");
-                ui.weak("No evaluated results.");
+                ui.weak(self.summary());
             });
     }
 
-    fn status_area(ui: &mut egui::Ui) {
+    fn oversized_text_area(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .id_source("regex_tester_oversized_preview_scroll")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height().max(1.0))
+            .show(ui, |ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, format!(
+                    "Text is {} bytes; live editing and evaluation pause above {} bytes. Original text is retained.",
+                    self.session.draft.test_text.len(), self.session.policy().text_bytes
+                ));
+                if ui.button("Clear text to resume editing").clicked() {
+                    self.session.draft.test_text.clear();
+                    self.session.mark_changed(Instant::now());
+                    return;
+                }
+                ui.weak("Read-only preview: first 4096 bytes or fewer");
+                ui.add(egui::Label::new(egui::RichText::new(self.preview_text()).monospace()).wrap(true));
+            });
+    }
+
+    fn preview_text(&self) -> &str {
+        let mut end = self.session.draft.test_text.len().min(4096);
+        while !self.session.draft.test_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &self.session.draft.test_text[..end]
+    }
+
+    fn summary(&self) -> String {
+        match self.session.result() {
+            None => "Waiting for edits to settle".into(),
+            Some(EvaluationResult::Success {
+                matches,
+                completeness: MatchCompleteness::Complete,
+            }) => format!("{} matches", matches.len()),
+            Some(EvaluationResult::Success {
+                matches,
+                completeness: MatchCompleteness::Truncated { at_least, .. },
+            }) => format!("At least {at_least} matches; showing {}", matches.len()),
+            Some(EvaluationResult::InvalidPattern(_)) => "Invalid pattern".into(),
+            Some(EvaluationResult::Suspended(limit)) => {
+                let reason = match limit.limit {
+                    EvaluationLimit::PatternBytes => "pattern size",
+                    EvaluationLimit::TextBytes => "text size",
+                    EvaluationLimit::CaptureGroups => "capture group count",
+                    EvaluationLimit::StoredMatches => "stored match count",
+                    EvaluationLimit::MaterializedBytes => "result size",
+                    EvaluationLimit::ReplacementBytes => "replacement size",
+                    EvaluationLimit::ReplacementOutputBytes => "replacement output size",
+                };
+                format!("Evaluation paused: {reason} exceeds {}", limit.maximum)
+            }
+        }
+    }
+
+    fn status_area(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.weak("Not evaluated");
+            ui.weak(self.summary());
             ui.add_enabled(false, egui::Button::new("Previous"));
             ui.add_enabled(false, egui::Button::new("Next"));
         });
@@ -302,15 +381,57 @@ mod tests {
     }
 
     #[test]
+    fn regex_tester_idle_frames_do_not_reschedule_and_summary_reports_truncation() {
+        let ctx = egui::Context::default();
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.pattern = "a".into();
+        dialog.session.draft.test_text = "a".repeat(1001);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+        });
+        assert!(
+            dialog
+                .session
+                .tick(Instant::now() + crate::regex_tester::session::EVALUATION_DEBOUNCE)
+        );
+        assert_eq!(dialog.summary(), "At least 1001 matches; showing 1000");
+        let revision = dialog.session.revision();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+        });
+        assert_eq!(dialog.session.revision(), revision);
+        assert!(dialog.session.pending_delay(Instant::now()).is_none());
+    }
+
+    #[test]
+    fn regex_tester_oversized_text_is_retained_with_bounded_unicode_preview() {
+        let ctx = egui::Context::default();
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.test_text = "🦀".repeat(dialog.session.policy().text_bytes);
+        let original = dialog.session.draft.test_text.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+        });
+        assert_eq!(dialog.session.draft.test_text, original);
+        assert!(dialog.preview_text().len() <= 4096);
+        assert!(original.starts_with(dialog.preview_text()));
+        assert!(matches!(
+            dialog.session.result(),
+            Some(EvaluationResult::Suspended(_))
+        ));
+        assert!(dialog.session.pending_delay(Instant::now()).is_none());
+    }
+
+    #[test]
     fn regex_tester_layout_keeps_long_inputs_within_normal_and_narrow_viewports() {
         for size in [egui::vec2(960.0, 680.0), egui::vec2(360.0, 240.0)] {
             for information_open in [true, false] {
                 let ctx = egui::Context::default();
                 let mut dialog = RegexTesterDialogState::default();
                 dialog.information_open = information_open;
-                dialog.draft.pattern = "path/to/file".repeat(100);
-                dialog.draft.test_text = "a long editable line ".repeat(1000);
-                let draft = dialog.draft.clone();
+                dialog.session.draft.pattern = "path/to/file".repeat(100);
+                dialog.session.draft.test_text = "a long editable line ".repeat(1000);
+                let draft = dialog.session.draft.clone();
                 let input = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -347,7 +468,7 @@ mod tests {
                         assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                     });
                 });
-                assert_eq!(dialog.draft, draft);
+                assert_eq!(dialog.session.draft, draft);
             }
         }
     }
@@ -371,7 +492,7 @@ mod tests {
     fn regex_tester_flag_controls_leave_slashes_in_raw_pattern() {
         let ctx = egui::Context::default();
         let mut dialog = RegexTesterDialogState::default();
-        dialog.draft.pattern = "https?://example.com/a/b".into();
+        dialog.session.draft.pattern = "https?://example.com/a/b".into();
         let mut positions = Vec::new();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -408,17 +529,17 @@ mod tests {
                 });
             });
         }
-        assert_eq!(dialog.draft.flags.suffix(), "imsx");
-        assert_eq!(dialog.draft.pattern, "https?://example.com/a/b");
+        assert_eq!(dialog.session.draft.flags.suffix(), "imsx");
+        assert_eq!(dialog.session.draft.pattern, "https?://example.com/a/b");
     }
 
     #[test]
     fn regex_tester_open_is_idempotent_and_preserves_session_draft() {
         let mut dialog = RegexTesterDialogState::default();
-        dialog.draft.pattern = "(?P<word>\\w+)".into();
-        dialog.draft.test_text = "hello".into();
-        dialog.draft.replacement = "$word".into();
-        let draft = dialog.draft.clone();
+        dialog.session.draft.pattern = "(?P<word>\\w+)".into();
+        dialog.session.draft.test_text = "hello".into();
+        dialog.session.draft.replacement = "$word".into();
+        let draft = dialog.session.draft.clone();
         dialog.open();
         assert!(dialog.focus_pattern);
         dialog.focus_pattern = false;
@@ -429,7 +550,7 @@ mod tests {
         dialog.open = false;
         dialog.open();
         assert!(dialog.focus_pattern);
-        assert_eq!(dialog.draft, draft);
+        assert_eq!(dialog.session.draft, draft);
     }
 
     #[test]
