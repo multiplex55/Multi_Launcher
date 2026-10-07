@@ -10,6 +10,14 @@ fn viewport_builder() -> egui::ViewportBuilder {
         .with_resizable(true)
 }
 
+fn utf8_prefix(text: &str, maximum_bytes: usize) -> &str {
+    let mut end = text.len().min(maximum_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// Fixed allocations stop editor scroll extents from growing the native window.
 fn bounded_area(ui: &mut egui::Ui, rect: egui::Rect, id: &str, render: impl FnOnce(&mut egui::Ui)) {
     ui.allocate_rect(rect, egui::Sense::hover());
@@ -196,6 +204,10 @@ impl RegexTesterDialogState {
         });
         ui.horizontal(|ui| {
             ui.label("Pattern");
+            if self.session.draft.pattern.len() > self.session.policy().pattern_bytes {
+                self.oversized_pattern_area(ui);
+                return;
+            }
             ui.label(egui::RichText::new("/").monospace().size(18.0));
             let suffix = format!("/{}", self.session.draft.flags.suffix());
             let suffix_width = ui.fonts(|fonts| {
@@ -265,6 +277,26 @@ impl RegexTesterDialogState {
         responses
     }
 
+    fn oversized_pattern_area(&mut self, ui: &mut egui::Ui) {
+        let width = (ui.available_width() - 100.0).max(1.0);
+        let mut preview = utf8_prefix(&self.session.draft.pattern, 128);
+        ui.add_sized(
+            [width, 28.0],
+            egui::TextEdit::singleline(&mut preview)
+                .id(egui::Id::new("regex_tester_pattern_preview"))
+                .font(egui::TextStyle::Monospace)
+                .interactive(false),
+        ).on_hover_text(format!(
+            "Read-only preview: first 128 bytes or fewer. Pattern is {} bytes; editing and evaluation pause above {} bytes. Original pattern is retained.",
+            self.session.draft.pattern.len(), self.session.policy().pattern_bytes
+        ));
+        if ui.button("Clear pattern").clicked() {
+            self.session.draft.pattern.clear();
+            self.session.mark_changed(Instant::now());
+            self.focus_pattern = true;
+        }
+    }
+
     fn text_area(&mut self, ui: &mut egui::Ui) {
         ui.label("Test text");
         if self.session.draft.test_text.len() > self.session.policy().text_bytes {
@@ -325,11 +357,7 @@ impl RegexTesterDialogState {
     }
 
     fn preview_text(&self) -> &str {
-        let mut end = self.session.draft.test_text.len().min(4096);
-        while !self.session.draft.test_text.is_char_boundary(end) {
-            end -= 1;
-        }
-        &self.session.draft.test_text[..end]
+        utf8_prefix(&self.session.draft.test_text, 4096)
     }
 
     fn summary(&self) -> String {
@@ -415,6 +443,32 @@ mod tests {
         assert_eq!(dialog.session.draft.test_text, original);
         assert!(dialog.preview_text().len() <= 4096);
         assert!(original.starts_with(dialog.preview_text()));
+        assert!(matches!(
+            dialog.session.result(),
+            Some(EvaluationResult::Suspended(_))
+        ));
+        assert!(dialog.session.pending_delay(Instant::now()).is_none());
+    }
+
+    #[test]
+    fn regex_tester_oversized_unicode_pattern_is_retained_with_bounded_preview() {
+        let ctx = egui::Context::default();
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.pattern = "文🦀".repeat(dialog.session.policy().pattern_bytes);
+        dialog.session.draft.flags.case_insensitive = true;
+        let original = dialog.session.draft.clone();
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+            });
+        }
+        assert_eq!(dialog.session.draft, original);
+        assert!(utf8_prefix(&original.pattern, 128).len() <= 128);
+        assert!(
+            original
+                .pattern
+                .starts_with(utf8_prefix(&original.pattern, 128))
+        );
         assert!(matches!(
             dialog.session.result(),
             Some(EvaluationResult::Suspended(_))
