@@ -17,14 +17,14 @@ pub(super) fn copy_text(matched: &RegexMatch, target: CopyTarget) -> Option<&str
     }
 }
 
-fn capture_label(capture: &CaptureGroup) -> String {
+pub(super) fn capture_label(capture: &CaptureGroup) -> String {
     match &capture.name {
         Some(name) => format!("Capture #{} ({name})", capture.group_index),
         None => format!("Capture #{}", capture.group_index),
     }
 }
 
-fn byte_label(span: crate::regex_tester::ByteSpan) -> String {
+pub(super) fn byte_label(span: crate::regex_tester::ByteSpan) -> String {
     format!(
         "UTF-8 bytes {}..{} (end exclusive)",
         span.start_byte(),

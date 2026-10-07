@@ -3,6 +3,7 @@ use crate::regex_tester::{EvaluationLimit, EvaluationResult, MatchCompleteness, 
 use eframe::egui;
 use std::sync::Arc;
 use std::time::Instant;
+mod clipboard;
 mod examples;
 mod explanation;
 mod highlighting;
@@ -20,7 +21,7 @@ fn copy_text(
     clipboard
         .write_text(text)
         .map(|()| success)
-        .map_err(|error| format!("Could not copy: {error}"))
+        .map_err(|error| format!("Could not copy: {}", clipboard::error_message(&error)))
 }
 
 fn viewport_builder() -> egui::ViewportBuilder {
@@ -122,6 +123,7 @@ enum InformationSection {
     History,
     Presets,
     Substitution,
+    Clipboard,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -451,6 +453,7 @@ impl RegexTesterDialogState {
                 InformationSection::History => "History",
                 InformationSection::Presets => "Presets",
                 InformationSection::Substitution => "Substitution",
+                InformationSection::Clipboard => "Clipboard",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -492,6 +495,11 @@ impl RegexTesterDialogState {
                     &mut self.information_section,
                     InformationSection::Substitution,
                     "Substitution",
+                );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::Clipboard,
+                    "Clipboard",
                 );
             });
         if let Some(feedback) = &self.copy_feedback {
@@ -557,6 +565,12 @@ impl RegexTesterDialogState {
         if self.information_section == InformationSection::Substitution {
             if substitution::show(ui, &mut self.session) {
                 self.copy_feedback = None;
+            }
+            return;
+        }
+        if self.information_section == InformationSection::Clipboard {
+            if let Some(action) = clipboard::show(ui, &self.session, self.selected_capture) {
+                self.clipboard_action(action);
             }
             return;
         }
@@ -644,6 +658,73 @@ impl RegexTesterDialogState {
             ),
             None => Err("The selected match or capture has no matched value".into()),
         });
+    }
+
+    fn clipboard_action(&mut self, action: clipboard::ClipboardAction) {
+        use clipboard::ClipboardAction as Action;
+        match action {
+            Action::ImportText => match self.clipboard.read_text() {
+                Ok(text) => {
+                    self.session.draft.test_text = text;
+                    self.mark_changed();
+                    self.copy_feedback = Some(Ok("Imported clipboard text"));
+                }
+                Err(error) => {
+                    self.copy_feedback = Some(Err(format!(
+                        "Could not import: {}",
+                        clipboard::error_message(&error)
+                    )));
+                }
+            },
+            Action::CopyMatch => self.copy_selected(inspection::CopyTarget::Match),
+            Action::CopyCapture(index) => {
+                self.copy_selected(inspection::CopyTarget::Capture(index))
+            }
+            Action::CopyPattern => {
+                self.copy_feedback = Some(copy_text(
+                    self.clipboard.as_ref(),
+                    &self.session.draft.pattern,
+                    "Copied pattern",
+                ));
+            }
+            Action::CopyAllMatches => {
+                let matches = self.session.matches();
+                self.copy_feedback = Some(if matches.is_empty() {
+                    Err("No current matches to copy.".into())
+                } else {
+                    let text = clipboard::all_matches(matches);
+                    copy_text(self.clipboard.as_ref(), &text, "Copied displayed matches")
+                });
+            }
+            Action::CopyReplacementResult => {
+                self.copy_feedback =
+                    Some(match self.session.substitution_result() {
+                        Some(crate::regex_tester::SubstitutionEvaluationResult::Success(
+                            result,
+                        )) if self.session.substitution_enabled() => copy_text(
+                            self.clipboard.as_ref(),
+                            &result.output,
+                            "Copied replacement result",
+                        ),
+                        _ => Err("No complete current replacement result to copy.".into()),
+                    });
+            }
+            Action::CopyMatchInformation => {
+                self.copy_feedback = Some(
+                    match self
+                        .session
+                        .selected_index()
+                        .and_then(|index| self.session.matches().get(index))
+                    {
+                        Some(matched) => {
+                            let text = clipboard::match_information(matched);
+                            copy_text(self.clipboard.as_ref(), &text, "Copied match information")
+                        }
+                        None => Err("No current selected match information to copy.".into()),
+                    },
+                );
+            }
+        }
     }
 
     fn reference_action(&mut self, action: reference::ReferenceAction) {
@@ -827,6 +908,236 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_clipboard_full_replacement_copy_requires_current_success_and_render_has_no_io()
+    {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        dialog.information_section = InformationSection::Clipboard;
+        let now = Instant::now();
+        dialog.session.draft.pattern = "a".into();
+        dialog.session.draft.test_text = "a".repeat(600);
+        dialog.session.draft.replacement = "🦀".repeat(10);
+        dialog.session.set_substitution_enabled(true, now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let Some(crate::regex_tester::SubstitutionEvaluationResult::Success(result)) =
+            dialog.session.substitution_result()
+        else {
+            panic!("expected complete result");
+        };
+        let full_output = result.output.clone();
+        assert!(full_output.len() > substitution::RESULT_PREVIEW_BYTES);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyReplacementResult);
+        assert_eq!(*backend.contents.lock().unwrap(), full_output);
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 1);
+        dialog.session.draft.replacement = "Z".into();
+        dialog.session.mark_replacement_changed(now);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyReplacementResult);
+        dialog.session.set_substitution_enabled(false, now);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyReplacementResult);
+        dialog.session.set_substitution_enabled(true, now);
+        dialog.session.draft.pattern = "[".into();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyReplacementResult);
+        dialog.session.draft.pattern = "a".into();
+        dialog.session.draft.replacement = "X".repeat(4000);
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert!(matches!(
+            dialog.session.substitution_result(),
+            Some(crate::regex_tester::SubstitutionEvaluationResult::Suspended(_))
+        ));
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyReplacementResult);
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 1);
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        let ctx = egui::Context::default();
+        dialog.open();
+        for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let bounds = ui.available_rect_before_wrap();
+                        dialog.body(ui);
+                        assert!(ui.min_rect().right() <= bounds.right() + 0.1);
+                        assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+                    });
+                },
+            );
+        }
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn regex_tester_clipboard_import_reads_once_preserves_other_fields_and_handles_errors_and_limits()
+     {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        dialog.session.draft.pattern = "/é/".into();
+        dialog.session.draft.flags.case_insensitive = true;
+        dialog.session.draft.test_text = "old private text".into();
+        dialog.session.draft.replacement = "$1 replacement".into();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let old = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        *backend.contents.lock().unwrap() = "é🦀\ninput".into();
+        dialog.clipboard_action(clipboard::ClipboardAction::ImportText);
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(dialog.session.draft.test_text, "é🦀\ninput");
+        assert_eq!(dialog.session.draft.pattern, old.pattern);
+        assert_eq!(dialog.session.draft.flags, old.flags);
+        assert_eq!(dialog.session.draft.replacement, old.replacement);
+        assert_eq!(dialog.session.revision(), revision + 1);
+        assert!(dialog.session.result().is_none());
+        assert!(dialog.session.explanation().is_none());
+        assert_eq!(*backend.contents.lock().unwrap(), "é🦀\ninput");
+        let imported = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        for error in [
+            ClipboardError::NonText,
+            ClipboardError::Busy("held by another app".into()),
+        ] {
+            *backend.read_error.lock().unwrap() = Some(error);
+            dialog.clipboard_action(clipboard::ClipboardAction::ImportText);
+            assert_eq!(dialog.session.draft, imported);
+            assert_eq!(dialog.session.revision(), revision);
+            assert!(dialog.copy_feedback.as_ref().unwrap().is_err());
+            assert_eq!(*backend.contents.lock().unwrap(), "é🦀\ninput");
+        }
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 3);
+        *backend.read_error.lock().unwrap() = None;
+        let oversized = "é🦀".repeat(dialog.session.policy().text_bytes);
+        *backend.contents.lock().unwrap() = oversized.clone();
+        dialog.clipboard_action(clipboard::ClipboardAction::ImportText);
+        assert_eq!(dialog.session.draft.test_text, oversized);
+        assert!(matches!(
+            dialog.session.result(),
+            Some(EvaluationResult::Suspended(_))
+        ));
+        assert!(dialog.session.pending_delay(now).is_none());
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 4);
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            clipboard::error_message(&ClipboardError::NonText),
+            "Clipboard does not contain text."
+        );
+    }
+
+    #[test]
+    fn regex_tester_clipboard_copies_exact_values_information_and_rejects_stale_or_absent_values() {
+        let backend = Arc::new(FakeClipboard::default());
+        let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
+        let now = Instant::now();
+        dialog.session.draft.pattern = "/é/".into();
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyPattern);
+        assert_eq!(*backend.contents.lock().unwrap(), "/é/");
+        dialog.session.draft.pattern = "(?P<letter>é)(🦀)(z)?()".into();
+        dialog.session.draft.test_text = "é🦀".into();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let draft = dialog.session.draft.clone();
+        for (action, expected) in [
+            (clipboard::ClipboardAction::CopyMatch, "é🦀"),
+            (clipboard::ClipboardAction::CopyCapture(0), "é"),
+            (clipboard::ClipboardAction::CopyCapture(3), ""),
+            (clipboard::ClipboardAction::CopyAllMatches, "é🦀"),
+        ] {
+            dialog.clipboard_action(action);
+            assert_eq!(*backend.contents.lock().unwrap(), expected);
+        }
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyMatchInformation);
+        let information = backend.contents.lock().unwrap().clone();
+        for label in [
+            "Line 1, column 1 (Unicode scalars)",
+            "UTF-8 bytes 0..6 (end exclusive)",
+            "Text:\né🦀",
+            "Capture #1 (letter)",
+            "Capture #2",
+            "Unmatched optional capture",
+            "Matched empty capture",
+        ] {
+            assert!(information.contains(label), "missing {label}");
+        }
+        let writes = backend.attempts.load(Ordering::SeqCst);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyCapture(2));
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), writes);
+        assert_eq!(dialog.session.draft, draft);
+        dialog.session.draft.pattern = "é|🦀".into();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyAllMatches);
+        assert_eq!(*backend.contents.lock().unwrap(), "é\n🦀");
+        dialog.session.draft.pattern = "^|$".into();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyAllMatches);
+        assert_eq!(*backend.contents.lock().unwrap(), "\n");
+        dialog.session.draft.pattern = "a".into();
+        dialog.session.draft.test_text = "a".repeat(1001);
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert_eq!(
+            clipboard::all_matches_label(&dialog.session),
+            "Copy displayed matches"
+        );
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyAllMatches);
+        assert_eq!(
+            *backend.contents.lock().unwrap(),
+            vec!["a"; 1000].join("\n")
+        );
+        let writes = backend.attempts.load(Ordering::SeqCst);
+        dialog.session.mark_changed(now);
+        for action in [
+            clipboard::ClipboardAction::CopyMatch,
+            clipboard::ClipboardAction::CopyCapture(0),
+            clipboard::ClipboardAction::CopyAllMatches,
+            clipboard::ClipboardAction::CopyMatchInformation,
+        ] {
+            dialog.clipboard_action(action);
+        }
+        assert_eq!(backend.attempts.load(Ordering::SeqCst), writes);
+        *backend.contents.lock().unwrap() = "keep existing clipboard".into();
+        backend.fail.store(true, Ordering::SeqCst);
+        dialog.clipboard_action(clipboard::ClipboardAction::CopyPattern);
+        assert_eq!(*backend.contents.lock().unwrap(), "keep existing clipboard");
+        assert!(
+            dialog
+                .copy_feedback
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .contains("Clipboard is busy")
+        );
+        assert_eq!(backend.reads.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn regex_tester_substitution_bounds_readonly_preview_and_retains_oversized_replacement() {
@@ -1319,6 +1630,7 @@ mod tests {
     #[derive(Default)]
     struct FakeClipboard {
         reads: AtomicUsize,
+        read_error: Mutex<Option<ClipboardError>>,
         attempts: AtomicUsize,
         writes: Mutex<Vec<String>>,
         contents: Mutex<String>,
@@ -1328,6 +1640,9 @@ mod tests {
     impl ClipboardBackend for FakeClipboard {
         fn read_text(&self) -> Result<String, ClipboardError> {
             self.reads.fetch_add(1, Ordering::Relaxed);
+            if let Some(error) = &*self.read_error.lock().unwrap() {
+                return Err(error.clone());
+            }
             Ok(self.contents.lock().unwrap().clone())
         }
         fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
