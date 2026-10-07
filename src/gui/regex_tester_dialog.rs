@@ -10,6 +10,7 @@ mod history;
 mod inspection;
 mod presets;
 mod reference;
+mod substitution;
 
 fn copy_text(
     clipboard: &dyn ClipboardBackend,
@@ -120,6 +121,7 @@ enum InformationSection {
     Examples,
     History,
     Presets,
+    Substitution,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -385,7 +387,7 @@ impl RegexTesterDialogState {
     }
 
     fn text_area(&mut self, ui: &mut egui::Ui) {
-        ui.label("Test text");
+        ui.label("Input / test text");
         if self.session.draft.test_text.len() > self.session.policy().text_bytes {
             self.oversized_text_area(ui);
             return;
@@ -448,6 +450,7 @@ impl RegexTesterDialogState {
                 InformationSection::Examples => "Examples",
                 InformationSection::History => "History",
                 InformationSection::Presets => "Presets",
+                InformationSection::Substitution => "Substitution",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -484,6 +487,11 @@ impl RegexTesterDialogState {
                     &mut self.information_section,
                     InformationSection::Presets,
                     "Presets",
+                );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::Substitution,
+                    "Substitution",
                 );
             });
         if let Some(feedback) = &self.copy_feedback {
@@ -543,6 +551,12 @@ impl RegexTesterDialogState {
                 }
             } else {
                 ui.weak("Preset storage is not configured.");
+            }
+            return;
+        }
+        if self.information_section == InformationSection::Substitution {
+            if substitution::show(ui, &mut self.session) {
+                self.copy_feedback = None;
             }
             return;
         }
@@ -813,6 +827,65 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_substitution_bounds_readonly_preview_and_retains_oversized_replacement() {
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.information_section = InformationSection::Substitution;
+        dialog.session.draft.pattern = "a".into();
+        dialog.session.draft.test_text = "a".repeat(600);
+        dialog.session.draft.replacement = "🦀".repeat(10);
+        let now = Instant::now();
+        dialog.session.set_substitution_enabled(true, now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let Some(crate::regex_tester::SubstitutionEvaluationResult::Success(result)) =
+            dialog.session.substitution_result()
+        else {
+            panic!("expected replacement result");
+        };
+        assert_eq!(result.output.len(), 24_000);
+        assert_eq!(
+            substitution::preview(&result.output).len(),
+            substitution::RESULT_PREVIEW_BYTES
+        );
+        assert_eq!(substitution::preview("é🦀"), "é🦀");
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        let ctx = egui::Context::default();
+        for oversized in [false, true] {
+            if oversized {
+                dialog.session.draft.replacement =
+                    "é🦀".repeat(dialog.session.policy().replacement_bytes);
+                dialog.session.mark_replacement_changed(now);
+            }
+            let retained_replacement = dialog.session.draft.replacement.clone();
+            for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let bounds = ui.available_rect_before_wrap();
+                            dialog.body(ui);
+                            assert!(ui.min_rect().right() <= bounds.right() + 0.1);
+                            assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+                        });
+                    },
+                );
+            }
+            assert_eq!(dialog.session.draft.pattern, draft.pattern);
+            assert_eq!(dialog.session.draft.flags, draft.flags);
+            assert_eq!(dialog.session.draft.test_text, draft.test_text);
+            assert_eq!(dialog.session.draft.replacement, retained_replacement);
+            assert_eq!(dialog.session.revision(), revision);
+            assert_eq!(dialog.session.matches().len(), 600);
+            assert!(dialog.session.pending_delay(now).is_none());
+        }
+    }
 
     #[test]
     fn regex_tester_presets_load_once_and_management_render_reopen_preserve_document() {

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     EvaluationPolicy, EvaluationResult, ExplanationResult, RegexDraft, RegexFlags, RegexMatch,
-    evaluate_with_policy, explain,
+    SubstitutionEvaluationResult, evaluate_substitution_with_policy, evaluate_with_policy, explain,
 };
 
 pub const EVALUATION_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -17,10 +17,13 @@ pub struct RegexSession {
     revision: u64,
     evaluated_revision: Option<u64>,
     pending_deadline: Option<Instant>,
+    pending_matching: bool,
     result: Option<EvaluationResult>,
     selected_index: Option<usize>,
     evaluated_source: Option<Arc<str>>,
     explanation_cache: Option<ExplanationCache>,
+    substitution_enabled: bool,
+    substitution_result: Option<SubstitutionEvaluationResult>,
 }
 
 struct ExplanationCache {
@@ -63,15 +66,22 @@ impl RegexSession {
         self.revision = self.revision.wrapping_add(1);
         self.evaluated_revision = None;
         self.evaluated_source = None;
+        self.substitution_result = None;
         match self
             .policy
             .check_inputs(&self.draft.pattern, &self.draft.test_text)
         {
             Ok(()) => {
+                self.pending_matching = true;
                 self.result = None;
                 self.pending_deadline = Some(now + EVALUATION_DEBOUNCE);
             }
             Err(suspension) => {
+                self.pending_matching = false;
+                if self.substitution_enabled {
+                    self.substitution_result =
+                        Some(SubstitutionEvaluationResult::Suspended(suspension));
+                }
                 self.result = Some(EvaluationResult::Suspended(suspension));
                 self.pending_deadline = None;
                 self.selected_index = None;
@@ -79,7 +89,7 @@ impl RegexSession {
         }
     }
 
-    /// Returns true only when this call evaluates the latest document revision.
+    /// Returns true only when queued matching or substitution work completes.
     pub fn tick(&mut self, now: Instant) -> bool {
         if !self
             .pending_deadline
@@ -88,30 +98,106 @@ impl RegexSession {
             return false;
         }
         self.pending_deadline = None;
-        self.result = Some(evaluate_with_policy(
-            &self.draft.pattern,
-            &self.draft.flags,
-            &self.draft.test_text,
-            &self.policy,
-        ));
-        self.evaluated_revision = Some(self.revision);
-        self.evaluated_source = matches!(self.result, Some(EvaluationResult::Success { .. }))
-            .then(|| Arc::from(self.draft.test_text.as_str()));
-        if matches!(self.result, Some(EvaluationResult::Success { .. }))
-            && !self
-                .explanation_cache
-                .as_ref()
-                .is_some_and(|cache| cache.matches(&self.draft))
-        {
-            self.explanation_cache = Some(ExplanationCache {
-                pattern: self.draft.pattern.clone(),
-                flags: self.draft.flags,
-                result: Arc::new(explain(&self.draft.pattern, &self.draft.flags)),
-            });
+        if std::mem::take(&mut self.pending_matching) {
+            self.result = Some(evaluate_with_policy(
+                &self.draft.pattern,
+                &self.draft.flags,
+                &self.draft.test_text,
+                &self.policy,
+            ));
+            self.evaluated_revision = Some(self.revision);
+            self.evaluated_source = matches!(self.result, Some(EvaluationResult::Success { .. }))
+                .then(|| Arc::from(self.draft.test_text.as_str()));
+            if matches!(self.result, Some(EvaluationResult::Success { .. }))
+                && !self
+                    .explanation_cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.matches(&self.draft))
+            {
+                self.explanation_cache = Some(ExplanationCache {
+                    pattern: self.draft.pattern.clone(),
+                    flags: self.draft.flags,
+                    result: Arc::new(explain(&self.draft.pattern, &self.draft.flags)),
+                });
+            }
+            let count = self.matches().len();
+            self.selected_index =
+                (count > 0).then(|| self.selected_index.unwrap_or(0).min(count - 1));
         }
-        let count = self.matches().len();
-        self.selected_index = (count > 0).then(|| self.selected_index.unwrap_or(0).min(count - 1));
+        if self.substitution_enabled {
+            self.substitution_result = match self.result.as_ref() {
+                Some(EvaluationResult::Success { .. }) => Some(evaluate_substitution_with_policy(
+                    &self.draft.pattern,
+                    &self.draft.flags,
+                    &self.draft.test_text,
+                    &self.draft.replacement,
+                    &self.policy,
+                )),
+                Some(EvaluationResult::InvalidPattern(error)) => {
+                    Some(SubstitutionEvaluationResult::InvalidPattern(error.clone()))
+                }
+                Some(EvaluationResult::Suspended(reason)) => {
+                    Some(SubstitutionEvaluationResult::Suspended(*reason))
+                }
+                None => None,
+            };
+        }
         true
+    }
+
+    pub fn substitution_enabled(&self) -> bool {
+        self.substitution_enabled
+    }
+    pub fn substitution_result(&self) -> Option<&SubstitutionEvaluationResult> {
+        self.substitution_result.as_ref()
+    }
+
+    pub fn set_substitution_enabled(&mut self, enabled: bool, now: Instant) {
+        if self.substitution_enabled == enabled {
+            return;
+        }
+        self.substitution_enabled = enabled;
+        if enabled {
+            self.ensure_initial_evaluation(now);
+            self.mark_replacement_changed(now);
+        } else {
+            self.substitution_result = None;
+            if !self.pending_matching {
+                self.pending_deadline = None;
+            }
+        }
+    }
+
+    /// Replacement edits preserve accepted source ranges, navigation, and syntax
+    /// analysis. Only replacement work shares/coalesces the existing deadline.
+    pub fn mark_replacement_changed(&mut self, now: Instant) {
+        self.substitution_result = None;
+        if !self.substitution_enabled {
+            return;
+        }
+        if let Err(reason) = super::policy::check_limit(
+            super::EvaluationLimit::ReplacementBytes,
+            self.policy.replacement_bytes,
+            self.draft.replacement.len(),
+        ) {
+            self.substitution_result = Some(SubstitutionEvaluationResult::Suspended(reason));
+            if !self.pending_matching {
+                self.pending_deadline = None;
+            }
+            return;
+        }
+        match self.result.as_ref() {
+            Some(EvaluationResult::InvalidPattern(error)) => {
+                self.substitution_result =
+                    Some(SubstitutionEvaluationResult::InvalidPattern(error.clone()));
+            }
+            Some(EvaluationResult::Suspended(reason)) => {
+                self.substitution_result = Some(SubstitutionEvaluationResult::Suspended(*reason));
+            }
+            _ => {
+                self.pending_deadline = Some(now + EVALUATION_DEBOUNCE);
+            }
+        }
     }
 
     pub fn pending_delay(&self, now: Instant) -> Option<Duration> {
@@ -201,6 +287,137 @@ impl RegexSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substitution_replacement_edits_coalesce_without_rerunning_accepted_matching() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "a".into();
+        session.draft.test_text = "aaa".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        session.select_match(2);
+        let source = session.evaluated_source.as_ref().unwrap().clone();
+        let explanation = session.explanation_cache.as_ref().unwrap().result.clone();
+        let revision = session.revision();
+        session.set_substitution_enabled(true, now);
+        session.draft.replacement = "X".into();
+        session.mark_replacement_changed(now + Duration::from_millis(100));
+        assert!(session.substitution_result().is_none());
+        assert!(!session.tick(now + Duration::from_millis(200)));
+        assert!(session.tick(now + Duration::from_millis(250)));
+        let Some(SubstitutionEvaluationResult::Success(result)) = session.substitution_result()
+        else {
+            panic!("expected substitution");
+        };
+        assert_eq!(result.output, "XXX");
+        assert_eq!(session.selected_index(), Some(2));
+        assert_eq!(session.revision(), revision);
+        assert!(Arc::ptr_eq(
+            &source,
+            session.evaluated_source.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &explanation,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+        assert!(!session.tick(now + Duration::from_secs(1)));
+        session.draft.replacement = "Y".into();
+        session.mark_replacement_changed(now);
+        session.set_substitution_enabled(false, now);
+        assert!(session.pending_delay(now).is_none());
+        assert!(session.substitution_result().is_none());
+        assert_eq!(session.matches().len(), 3);
+        session.set_substitution_enabled(true, now);
+        session.draft.test_text = "a".into();
+        session.mark_changed(now);
+        session.draft.replacement = "Z".into();
+        session.mark_replacement_changed(now + Duration::from_millis(100));
+        assert!(!session.tick(now + Duration::from_millis(200)));
+        session.set_substitution_enabled(false, now + Duration::from_millis(200));
+        assert!(session.tick(now + Duration::from_millis(250)));
+        assert_eq!(session.matches().len(), 1);
+        assert!(session.substitution_result().is_none());
+        assert!(session.pending_delay(now).is_none());
+    }
+
+    #[test]
+    fn substitution_semantics_invalid_and_budget_transitions_never_leave_stale_output() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "(é)(?P<animal>🦀)".into();
+        session.draft.test_text = "é🦀".into();
+        session.draft.replacement = "$2:${animal}:$1:$$".into();
+        session.set_substitution_enabled(true, now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let Some(SubstitutionEvaluationResult::Success(result)) = session.substitution_result()
+        else {
+            panic!("expected substitution");
+        };
+        assert_eq!(result.output, "🦀:🦀:é:$");
+        session.draft.pattern.clear();
+        session.draft.test_text = "é".into();
+        session.draft.replacement = "X".into();
+        session.mark_changed(now);
+        assert!(session.substitution_result().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let Some(SubstitutionEvaluationResult::Success(result)) = session.substitution_result()
+        else {
+            panic!("expected zero-width substitution");
+        };
+        assert_eq!(result.output, "XéX");
+        assert_eq!(result.replacements_made, 2);
+        session.draft.pattern = "[".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(matches!(
+            session.substitution_result(),
+            Some(SubstitutionEvaluationResult::InvalidPattern(_))
+        ));
+        assert!(session.pending_delay(now).is_none());
+        session.draft.pattern = "é".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(matches!(
+            session.substitution_result(),
+            Some(SubstitutionEvaluationResult::Success(_))
+        ));
+        session.policy.replacement_output_bytes = 1;
+        session.draft.replacement = "too long".into();
+        session.mark_replacement_changed(now);
+        assert!(session.substitution_result().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(
+            matches!(session.substitution_result(), Some(SubstitutionEvaluationResult::Suspended(reason)) if reason.limit == super::super::EvaluationLimit::ReplacementOutputBytes)
+        );
+        assert!(session.pending_delay(now).is_none());
+        assert!(!session.tick(now + Duration::from_secs(1)));
+        session.draft.replacement = "🦀".repeat(session.policy().replacement_bytes);
+        let retained = session.draft.replacement.clone();
+        session.mark_replacement_changed(now);
+        assert!(
+            matches!(session.substitution_result(), Some(SubstitutionEvaluationResult::Suspended(reason)) if reason.limit == super::super::EvaluationLimit::ReplacementBytes)
+        );
+        assert_eq!(session.draft.replacement, retained);
+        assert!(session.pending_delay(now).is_none());
+        assert_eq!(session.matches().len(), 1);
+        session.draft.pattern = "x".repeat(session.policy().pattern_bytes + 1);
+        session.mark_changed(now);
+        assert!(
+            matches!(session.substitution_result(), Some(SubstitutionEvaluationResult::Suspended(reason)) if reason.limit == super::super::EvaluationLimit::PatternBytes)
+        );
+        assert!(!session.pending_matching);
+        session.set_substitution_enabled(false, now);
+        session.ensure_initial_evaluation(now);
+        assert!(session.pending_delay(now).is_none());
+        assert!(!session.tick(now + Duration::from_secs(1)));
+        session.draft.pattern = "é".into();
+        session.mark_changed(now);
+        session.ensure_initial_evaluation(now);
+        assert!(session.tick(now + EVALUATION_DEBOUNCE));
+        assert_eq!(session.matches().len(), 1);
+        assert!(session.substitution_result().is_none());
+    }
 
     #[test]
     fn explanation_cache_reuses_text_edits_and_idle_but_replaces_pattern_and_flags() {
