@@ -43,6 +43,7 @@ use crate::plugins::radial::RadialPlugin;
 use crate::plugins::random::RandomPlugin;
 use crate::plugins::recycle::RecyclePlugin;
 use crate::plugins::reddit::RedditPlugin;
+use crate::plugins::regex_tester::RegexTesterPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
 use crate::plugins::screen_draw::ScreenDrawPlugin;
 use crate::plugins::screenshot::ScreenshotPlugin;
@@ -818,6 +819,7 @@ impl PluginManager {
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
+        self.register_with_settings(RegexTesterPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
         self.register_with_settings(OcrPlugin, plugin_settings);
         self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
@@ -1120,6 +1122,48 @@ fn plugin_matches_search(
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn regex_tester_builtin_registration_and_filtered_routing() {
+        let mut manager = PluginManager::new();
+        manager.reload_from_dirs(
+            &[],
+            10,
+            NetUnit::Auto,
+            false,
+            &HashMap::new(),
+            Arc::new(Vec::new()),
+        );
+        assert!(
+            manager
+                .plugin_names()
+                .iter()
+                .any(|name| name == "regex_tester")
+        );
+        let enabled = HashSet::from(["regex_tester".to_owned()]);
+        let search_caps = HashMap::from([("regex_tester".to_owned(), vec!["search".to_owned()])]);
+        let actions = manager.search_filtered(" REGEX ", Some(&enabled), Some(&search_caps));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "regex:open");
+        for query in ["regexfoo", "regex extra", "json"] {
+            assert!(
+                manager
+                    .search_filtered(query, Some(&enabled), Some(&search_caps))
+                    .is_empty()
+            );
+        }
+        assert!(
+            manager
+                .search_filtered("regex", Some(&HashSet::new()), None)
+                .is_empty()
+        );
+        let no_search_caps = HashMap::from([("regex_tester".to_owned(), Vec::new())]);
+        assert!(
+            manager
+                .search_filtered("regex", Some(&enabled), Some(&no_search_caps))
+                .is_empty()
+        );
+    }
 
     #[test]
     fn date_arithmetic_search_obeys_plugin_capability_and_prefix_filters() {

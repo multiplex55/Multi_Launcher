@@ -25,6 +25,7 @@ It’s designed to be “one hotkey away” from:
 - [File-search plugin](#file-search-plugin)
 - [Clipboard Modify](#clipboard-modify)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
+- [Regex Tester](#regex-tester)
 - [Screen region OCR](#screen-region-ocr)
 - [Dashboard](#dashboard)
 - [Mouse gestures](#mouse-gestures)
@@ -92,6 +93,7 @@ Multi Launcher is centered around a **single query box**:
 | `cb` | Clipboard history | `cb list` / `cb clear` |
 | `cm` | Clipboard Modify operations, templates, pipelines, and undo | `cm trim | uppercase` / `cm template prompt-context` |
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
+| `regex` | Local Rust regex tester | `regex` |
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
 | `ocr` | Local English text recognition from a screen region | `ocr` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
@@ -450,6 +452,15 @@ with the usual `color #rrggbb` HEX/RGB/HSL results after selection. Choose a res
 to copy it; selecting a pixel alone leaves the clipboard unchanged. The picker
 supports signed desktop coordinates, including monitors to the left or above the
 primary monitor, and samples the frozen image throughout the session.
+
+## Regex Tester
+
+`regex` opens a resizable local Regex Tester with live highlighting, match
+navigation, capture inspection, substitution previews, explanations, searchable
+reference material, examples, recent history, and saved presets. It uses Rust's
+`regex` engine; look-around and traditional backreferences are unsupported.
+Clipboard writes require an explicit copy action. See [Regex Tester](docs/regex_tester.md)
+for flags, shortcuts, storage, and interactive limits.
 
 ## Screen region OCR
 
@@ -887,6 +898,8 @@ These are created/updated as you use the app (typically in the working directory
 * `usage.json` — usage scoring data
 * `clipboard_history.json` — clipboard history
 * `calc_history.json` — calculator history
+* `regex_history.json` — bounded regex patterns/flags, beside the configured settings file
+* `regex_presets.json` — explicitly saved regex presets, beside the configured settings file
 * `fav.json` — favorites
 * `layouts.json` — window layouts
 * `multi_manager_workspaces.json` — stores MultiManager workspaces, captured windows, aliases, hotkeys, and home/target rectangles

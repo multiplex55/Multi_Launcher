@@ -9,6 +9,7 @@ where
     H: DialogCommandHost + HeadlessCommandHost + ?Sized,
 {
     match command {
+        Command::Dialog(DialogCommand::RegexTester) => host.open_regex_tester_dialog(),
         Command::Dialog(DialogCommand::Help) => host.open_help_dialog(),
         Command::Dialog(DialogCommand::Convert) => host.open_convert_dialog(),
         Command::Dialog(DialogCommand::Settings) => host.open_settings_dialog(),
@@ -73,6 +74,9 @@ mod tests {
     }
 
     impl DialogCommandHost for Host {
+        fn open_regex_tester_dialog(&mut self) {
+            self.mark("regex_tester");
+        }
         fn open_help_dialog(&mut self) {
             self.mark("help");
         }
@@ -171,6 +175,7 @@ mod tests {
     #[test]
     fn every_simple_dialog_routes_through_the_typed_host() {
         let cases = [
+            (Command::Dialog(DialogCommand::RegexTester), "regex_tester"),
             (Command::Dialog(DialogCommand::Help), "help"),
             (Command::Timer(TimerCommand::TimerDialog), "timer"),
             (Command::Timer(TimerCommand::AlarmDialog), "alarm"),

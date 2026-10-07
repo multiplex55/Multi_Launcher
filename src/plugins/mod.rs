@@ -43,6 +43,7 @@ pub mod radial;
 pub mod random;
 pub mod recycle;
 pub mod reddit;
+pub mod regex_tester;
 pub mod runescape;
 pub mod screen_draw;
 pub mod screenshot;

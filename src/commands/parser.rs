@@ -301,6 +301,7 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
             query: s[6..].to_string(),
             argument: json_string_field(action.args.as_deref(), "query"),
         }),
+        "regex:open" => Command::Dialog(DialogCommand::RegexTester),
         "help:show" => Command::Dialog(DialogCommand::Help),
         "timer:dialog:timer" => Command::Timer(TimerCommand::TimerDialog),
         "timer:dialog:alarm" => Command::Timer(TimerCommand::AlarmDialog),
@@ -1970,6 +1971,40 @@ mod tests {
                 ),
                 "{raw}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod regex_tester_parser_tests {
+    use super::*;
+    #[test]
+    fn regex_tester_open_is_exact_and_arguments_remain_metadata() {
+        let action = Action {
+            label: "Regex".into(),
+            desc: String::new(),
+            action: "regex:open".into(),
+            args: Some("not an inline pattern".into()),
+        };
+        let invocation = parse_command(
+            action.clone(),
+            Some("saved query".into()),
+            ActivationSource::Enter,
+        )
+        .unwrap();
+        assert_eq!(
+            invocation.command,
+            Command::Dialog(DialogCommand::RegexTester)
+        );
+        assert_eq!(invocation.original_action, action);
+        assert_eq!(invocation.query_override.as_deref(), Some("saved query"));
+        for raw in ["regex:open:extra", "regex:open extra", "regex:unknown"] {
+            let mut malformed = action.clone();
+            malformed.action = raw.into();
+            assert!(!matches!(
+                parse_action(&malformed),
+                Ok(Command::Dialog(DialogCommand::RegexTester))
+            ));
         }
     }
 }

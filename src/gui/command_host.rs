@@ -135,6 +135,10 @@ impl ScreenDrawCommandHost for LauncherApp {
 }
 
 impl DialogCommandHost for LauncherApp {
+    fn open_regex_tester_dialog(&mut self) {
+        self.regex_tester_dialog.open();
+        self.focus_panel(super::Panel::RegexTesterDialog);
+    }
     fn open_help_dialog(&mut self) {
         self.help_window.open = true;
     }
@@ -805,7 +809,8 @@ impl HeadlessCommandHost for LauncherApp {
 fn command_accepts_query_override(command: &Command) -> bool {
     !matches!(
         command,
-        Command::Radial(_)
+        Command::Dialog(crate::commands::DialogCommand::RegexTester)
+            | Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
             | Command::ColorPick(_)
@@ -1062,6 +1067,42 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
     }
+    #[test]
+    fn regex_tester_dispatch_ignores_query_override_and_retains_draft() {
+        let mut app = test_app();
+        app.query = "keep query".into();
+        app.regex_tester_dialog.session.draft.pattern = "draft".into();
+        let action = crate::actions::Action {
+            label: "Regex".into(),
+            desc: String::new(),
+            action: "regex:open".into(),
+            args: Some("replacement query".into()),
+        };
+        let invocation = crate::commands::parse_command(
+            action,
+            Some("override query".into()),
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+        assert!(!command_accepts_query_override(&invocation.command));
+        app.dispatch_command_invocation(invocation.clone());
+        app.dispatch_command_invocation(invocation);
+        assert!(app.regex_tester_dialog.open);
+        assert!(app.any_panel_open());
+        assert_eq!(app.query, "keep query");
+        assert_eq!(app.regex_tester_dialog.session.draft.pattern, "draft");
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == super::super::Panel::RegexTesterDialog)
+                .count(),
+            1
+        );
+        assert!(command_accepts_query_override(&Command::Dialog(
+            crate::commands::DialogCommand::Help
+        )));
+    }
+
     #[test]
     fn ocr_host_dispatch_stages_selection_only_and_rejects_query_override() {
         let mut app = test_app();
