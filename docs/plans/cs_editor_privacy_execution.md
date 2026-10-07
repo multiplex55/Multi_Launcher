@@ -9,9 +9,9 @@ Current source matches the plan's relevant archive-described inventory.
 | M1-A | implemented; tests deferred to M3-B; `97eaf1a6` | Persist optional per-snippet content masking |
 | M1-B | implemented; tests deferred to M3-B; `6a128a87` | Preserve masking through updates; shared previews |
 | M2-A | implemented; tests deferred to M3-B; `8ca1fc17` | Responsive rows, filtering, sizing |
-| M2-B | implemented; tests deferred to M3-B | Inline confirmation, exact GUI alias validation, stale-save guard |
-| M3-A | in_progress | Privacy checkbox and concealed presentation |
-| M3-B | pending | Deliberate reveal and lifecycle; primary targeted gate |
+| M2-B | implemented; tests deferred to M3-B; `255dcc79` | Inline confirmation, exact GUI alias validation, stale-save guard |
+| M3-A | implemented; tests deferred to M3-B | Privacy checkbox and concealed presentation |
+| M3-B | in_progress | Deliberate reveal and lifecycle; primary targeted gate |
 | M4-A | pending | Dashboard and confirmed preview consumers |
 | M4-B | pending | Documentation, final focused verification and review |
 

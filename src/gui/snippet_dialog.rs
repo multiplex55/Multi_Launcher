@@ -37,6 +37,8 @@ pub struct SnippetDialog {
     edit_idx: Option<usize>,
     alias: String,
     text: String,
+    hide_contents: bool,
+    body_revealed: bool,
     filter: String,
     load_error: Option<String>,
     inline_error: Option<String>,
@@ -138,9 +140,7 @@ impl SnippetDialog {
     pub fn open(&mut self) {
         let _ = self.load_from(SNIPPETS_FILE);
         self.open = true;
-        self.edit_idx = None;
-        self.alias.clear();
-        self.text.clear();
+        self.reset_editor();
         self.filter.clear();
         self.inline_error = None;
         self.pending_removal = None;
@@ -150,21 +150,95 @@ impl SnippetDialog {
         self.pending_removal = None;
         self.inline_error = None;
         if self.load_from(SNIPPETS_FILE).is_err() {
-            self.edit_idx = None;
+            self.reset_editor();
             self.open = true;
             return;
         }
         self.filter.clear();
         if let Some(pos) = self.entries.iter().position(|e| e.alias == alias) {
-            self.edit_idx = Some(pos);
-            self.alias = alias.to_string();
-            self.text = self.entries[pos].text.clone();
+            self.begin_existing(pos);
         } else {
-            self.edit_idx = Some(self.entries.len());
-            self.alias = alias.to_string();
-            self.text.clear();
+            self.begin_new(alias);
         }
+    }
+
+    fn begin_existing(&mut self, index: usize) -> bool {
+        let Some(entry) = self.entries.get(index).cloned() else {
+            return false;
+        };
+        self.pending_removal = None;
+        self.inline_error = None;
+        self.edit_idx = Some(index);
+        self.alias = entry.alias;
+        self.text = entry.text;
+        self.hide_contents = entry.hide_contents;
+        self.body_revealed = !entry.hide_contents;
         self.open = true;
+        true
+    }
+
+    fn begin_new(&mut self, alias: &str) {
+        self.pending_removal = None;
+        self.inline_error = None;
+        self.edit_idx = Some(self.entries.len());
+        self.alias = alias.to_owned();
+        self.text.clear();
+        self.hide_contents = false;
+        self.body_revealed = true;
+        self.open = true;
+    }
+
+    fn reset_editor(&mut self) {
+        self.edit_idx = None;
+        self.alias.clear();
+        self.text.clear();
+        self.hide_contents = false;
+        self.body_revealed = false;
+    }
+
+    fn set_hide_contents(&mut self, hide_contents: bool) {
+        if self.hide_contents == hide_contents {
+            return;
+        }
+        self.hide_contents = hide_contents;
+        let editing_existing = self
+            .edit_idx
+            .is_some_and(|index| index < self.entries.len());
+        if editing_existing && hide_contents {
+            self.body_revealed = false;
+        }
+    }
+
+    fn editor_candidate(
+        &self,
+    ) -> Result<(Vec<SnippetEntry>, Vec<SnippetEntry>, AliasValidation), &'static str> {
+        let Some(index) = self.edit_idx else {
+            return Err("No snippet is being edited.");
+        };
+        let expected = self.entries.clone();
+        let mut candidate = expected.clone();
+        let alias_validation = if index == candidate.len() {
+            candidate.push(SnippetEntry {
+                alias: self.alias.clone(),
+                text: self.text.clone(),
+                hide_contents: self.hide_contents,
+            });
+            AliasValidation {
+                edited_index: None,
+                alias: self.alias.clone(),
+            }
+        } else if let Some(entry) = candidate.get_mut(index) {
+            entry.alias = self.alias.clone();
+            entry.text = self.text.clone();
+            entry.hide_contents = self.hide_contents;
+            AliasValidation {
+                edited_index: Some(index),
+                alias: self.alias.clone(),
+            }
+        } else {
+            return Err("The edited snippet no longer exists.");
+        };
+        Ok((expected, candidate, alias_validation))
     }
 
     fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
@@ -317,11 +391,15 @@ impl SnippetDialog {
                     }
                     return;
                 }
-                if let Some(idx) = self.edit_idx {
+                if self.edit_idx.is_some() {
                     ui.horizontal(|ui| {
                         ui.label("Alias");
                         ui.text_edit_singleline(&mut self.alias);
                     });
+                    let mut hide_contents = self.hide_contents;
+                    if ui.checkbox(&mut hide_contents, "Hide contents").changed() {
+                        self.set_hide_contents(hide_contents);
+                    }
                     ui.label("Text");
                     let action_height = ui.spacing().interact_size.y
                         + ui.spacing().button_padding.y * 2.0
@@ -331,53 +409,41 @@ impl SnippetDialog {
                     let line_height = ui.fonts(|fonts| fonts.row_height(&font_id));
                     let desired_rows =
                         (editor_height / line_height).floor().clamp(4.0, 48.0) as usize;
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height(editor_height)
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut self.text)
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(desired_rows),
-                            );
-                        });
+                    if self.body_revealed {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .max_height(editor_height)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.text)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(desired_rows),
+                                );
+                            });
+                    } else {
+                        ui.label("Contents hidden");
+                        if ui.button("Reveal to Edit").clicked() {
+                            self.body_revealed = true;
+                        }
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             if self.alias.trim().is_empty() || self.text.trim().is_empty() {
                                 app.report_error_message("ui operation", "Both fields required");
                             } else {
-                                let expected = self.entries.clone();
-                                let mut candidate = expected.clone();
-                                let edited_index = if idx == candidate.len() {
-                                    candidate.push(SnippetEntry {
-                                        alias: self.alias.clone(),
-                                        text: self.text.clone(),
-                                        hide_contents: false,
-                                    });
-                                    None
-                                } else if let Some(entry) = candidate.get_mut(idx) {
-                                    entry.alias = self.alias.clone();
-                                    entry.text = self.text.clone();
-                                    Some(idx)
-                                } else {
-                                    self.inline_error =
-                                        Some("The edited snippet no longer exists.".to_owned());
-                                    None
-                                };
-                                if idx <= expected.len() {
-                                    save_request = Some((
-                                        expected,
-                                        candidate,
-                                        Some(AliasValidation {
-                                            edited_index,
-                                            alias: self.alias.clone(),
-                                        }),
-                                    ));
+                                match self.editor_candidate() {
+                                    Ok((expected, candidate, alias_validation)) => {
+                                        save_request =
+                                            Some((expected, candidate, Some(alias_validation)));
+                                    }
+                                    Err(error) => {
+                                        self.inline_error = Some(error.to_owned());
+                                    }
                                 }
                             }
                         }
                         if ui.button("Cancel").clicked() {
-                            self.edit_idx = None;
+                            self.reset_editor();
                             self.inline_error = None;
                             self.pending_removal = None;
                         }
@@ -440,6 +506,10 @@ impl SnippetDialog {
                                 for idx in matching_indices {
                                     let entry = self.entries[idx].clone();
                                     ui.horizontal(|ui| {
+                                        if entry.hide_contents {
+                                            ui.small("Hidden")
+                                                .on_hover_text("Contents are hidden in previews.");
+                                        }
                                         let spacing = ui.spacing().item_spacing.x;
                                         let row_height = ui.spacing().interact_size.y
                                             + ui.spacing().button_padding.y * 2.0;
@@ -513,11 +583,7 @@ impl SnippetDialog {
                                                 )
                                                 .clicked()
                                             {
-                                                self.pending_removal = None;
-                                                self.inline_error = None;
-                                                self.edit_idx = Some(idx);
-                                                self.alias = entry.alias.clone();
-                                                self.text = entry.text.clone();
+                                                self.begin_existing(idx);
                                             }
                                             if ui
                                                 .add_sized(
@@ -534,11 +600,7 @@ impl SnippetDialog {
                             });
                     }
                     if ui.button("Add Snippet").clicked() {
-                        self.pending_removal = None;
-                        self.inline_error = None;
-                        self.edit_idx = Some(self.entries.len());
-                        self.alias.clear();
-                        self.text.clear();
+                        self.begin_new("");
                     }
                     if ui.button("Close").clicked() {
                         close = true;
@@ -551,9 +613,7 @@ impl SnippetDialog {
             match self.commit_candidate(SNIPPETS_FILE, &expected, candidate, alias_validation) {
                 Ok(()) => {
                     Self::finish_success(app, "Saved snippet");
-                    self.edit_idx = None;
-                    self.alias.clear();
-                    self.text.clear();
+                    self.reset_editor();
                 }
                 Err(failure) => Self::report_commit_failure(app, &failure),
             }
@@ -640,6 +700,143 @@ mod tests {
 
         assert_eq!(single_line_alias(&entry.alias), "private alias");
         assert_eq!(entry.alias, "private\nalias");
+    }
+
+    #[test]
+    fn editor_initializes_saved_privacy_and_new_drafts_safely() {
+        let mut hidden = snippet("masked", "private\nline");
+        hidden.hide_contents = true;
+        let dialog_entries = vec![hidden.clone(), snippet("visible", "public")];
+        let mut dialog = SnippetDialog {
+            entries: dialog_entries,
+            ..SnippetDialog::default()
+        };
+
+        assert!(dialog.begin_existing(0));
+        assert!(dialog.hide_contents);
+        assert!(!dialog.body_revealed);
+        assert_eq!(dialog.text, hidden.text);
+
+        assert!(dialog.begin_existing(1));
+        assert!(!dialog.hide_contents);
+        assert!(dialog.body_revealed);
+
+        dialog.begin_new("new");
+        assert!(!dialog.hide_contents);
+        assert!(dialog.body_revealed);
+        assert!(dialog.text.is_empty());
+
+        dialog.set_hide_contents(true);
+        assert!(dialog.hide_contents);
+        assert!(
+            dialog.body_revealed,
+            "new drafts remain editable while masked"
+        );
+    }
+
+    #[test]
+    fn new_masked_draft_persists_plaintext_and_resets_after_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        save_snippets(path.to_str().unwrap(), &[]).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        dialog.begin_new("masked");
+        let body = "λ first line\n  second 中文 🚀\n";
+        dialog.text = body.to_owned();
+        dialog.set_hide_contents(true);
+        assert!(dialog.body_revealed);
+
+        let (expected, candidate, alias_validation) = dialog.editor_candidate().unwrap();
+        assert_eq!(candidate[0].text, body);
+        assert!(candidate[0].hide_contents);
+        dialog
+            .commit_candidate(
+                path.to_str().unwrap(),
+                &expected,
+                candidate,
+                Some(alias_validation),
+            )
+            .unwrap();
+
+        assert_eq!(load_snippets(path.to_str().unwrap()).unwrap()[0].text, body);
+        assert!(load_snippets(path.to_str().unwrap()).unwrap()[0].hide_contents);
+        dialog.reset_editor();
+        assert!(dialog.text.is_empty());
+        assert!(!dialog.hide_contents);
+        assert!(!dialog.body_revealed);
+    }
+
+    #[test]
+    fn alias_and_flag_only_save_preserves_masked_multiline_unicode_body() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let body = "original λ\n  multiline 中文 🚀\n";
+        let mut original = snippet("old alias", body);
+        original.hide_contents = true;
+        let initial = vec![original];
+        save_snippets(path.to_str().unwrap(), &initial).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+        assert!(!dialog.body_revealed);
+        assert_eq!(dialog.text, body);
+
+        dialog.alias = "new alias".to_owned();
+        dialog.set_hide_contents(false);
+        assert!(
+            !dialog.body_revealed,
+            "unmasking does not reveal the current session"
+        );
+        let (expected, candidate, alias_validation) = dialog.editor_candidate().unwrap();
+        assert_eq!(candidate[0].text, body);
+        dialog
+            .commit_candidate(
+                path.to_str().unwrap(),
+                &expected,
+                candidate,
+                Some(alias_validation),
+            )
+            .unwrap();
+
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved[0].alias, "new alias");
+        assert_eq!(saved[0].text, body);
+        assert!(!saved[0].hide_contents);
+    }
+
+    #[test]
+    fn hiding_existing_draft_conceals_but_preserves_edits_until_reveal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let initial = vec![snippet("visible", "original body")];
+        save_snippets(path.to_str().unwrap(), &initial).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+
+        dialog.text = "draft λ\nbody".to_owned();
+        dialog.set_hide_contents(true);
+        assert!(!dialog.body_revealed);
+        assert_eq!(dialog.text, "draft λ\nbody");
+        dialog.set_hide_contents(false);
+        assert!(!dialog.body_revealed);
+        assert_eq!(dialog.text, "draft λ\nbody");
+
+        dialog.body_revealed = true;
+        dialog.text = "revealed replacement 中文".to_owned();
+        let (expected, candidate, alias_validation) = dialog.editor_candidate().unwrap();
+        dialog
+            .commit_candidate(
+                path.to_str().unwrap(),
+                &expected,
+                candidate,
+                Some(alias_validation),
+            )
+            .unwrap();
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved[0].text, "revealed replacement 中文");
+        assert!(!saved[0].hide_contents);
     }
 
     #[test]
