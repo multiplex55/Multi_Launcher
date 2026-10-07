@@ -3569,8 +3569,10 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M11-B | complete | `996877c8`; 7 scoped checks passed, fmt/diff passed; independent review no findings. Exact owned F3/Shift-F3, normal Tab traversal and retained Esc draft/substitution mode. |
 | M11-C | complete | `4dfbe33d`; all10 scoped checks passed after correcting error-state editor geometry; fmt/diff and review passed. Theme colors, readable units, monospace errors and narrow layout. |
 | M12-A | complete | `7acf8929`; all20 engine tests passed, fmt/diff passed. Exact repeated Unicode final capture and optional participation added; remaining domain categories previously covered. |
-| M12-B | in_progress | Typed production data-root constructor and real nondefault-root history/preset writes and reload. |
-| M12-C–M13-B | pending | Actual match-row pointer contract, documentation, final review and native acceptance. |
+| M12-B | complete | `8056d183`; 8 scoped tests passed, fmt/diff and root review passed. Typed production data-root constructor verifies actual profile writes, buffer privacy and reload. |
+| M12-C | complete | `4b6eb456`; all4 scoped checks passed, fmt/diff passed. Actual pointer activation, capture/summary, scroll offset/paint, cursor/draft preservation and reopen mode retention. |
+| M13-A | complete | README discovery/data files and docs/regex_tester.md guide added; independent documentation review passed after exact label and initially-unchecked wording corrections. |
+| M13-B | complete | Bounded final independent source review through M12-B found no substantive defects; M12-C changes tests only. Final targeted run and native acceptance remain required. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3640,3 +3642,4 @@ M11-A measurements: Windows x86_64, Intel Family6 Model158, 8 logical CPUs, rust
 Normal warning ranges: pattern/replacement1KiB, text16KiB. Hard limits retained after measurements: pattern/replacement4KiB, text64KiB, captures100, matches1000, materialized strings2MiB, output1MiB. Dense and materialization cases reported truncation honestly; output stress suspended before partial success. No workers or input truncation justified.
 
 M12 bounded test gaps: repeated final capture semantics (M12-A); typed data-root dialog constructor plus real nondefault-root writes, avoiding unrelated full LauncherApp startup (M12-B); actual match-row activation and substitution mode reopen assertion (M12-C). Existing tests already cover the rest of the plan's integration/state lists.
+M12-C fixture corrections preserved meaningful assertions: group arrays omit full-match capture; deterministic frame time and one subsequent paint frame verify egui scroll animation/render ordering. No production workaround or assertion weakening. Actual scroll offset and visible movement both pass.
