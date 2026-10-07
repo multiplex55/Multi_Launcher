@@ -10,6 +10,7 @@ mod explanation;
 mod highlighting;
 mod history;
 mod inspection;
+mod keyboard;
 mod presets;
 #[cfg(test)]
 mod profiling;
@@ -214,7 +215,7 @@ impl RegexTesterDialogState {
                 if close {
                     self.open = false;
                 } else if independent {
-                    egui::CentralPanel::default().show(child, |ui| self.body(ui));
+                    egui::CentralPanel::default().show(child, |ui| self.body_in_viewport(ui, true));
                 } else {
                     // Standalone egui contexts embed viewports. Keep that fallback
                     // within its parent rather than changing root-window geometry.
@@ -240,6 +241,20 @@ impl RegexTesterDialogState {
     }
 
     fn body(&mut self, ui: &mut egui::Ui) -> CoreLayout {
+        self.body_in_viewport(ui, false)
+    }
+
+    fn body_in_viewport(&mut self, ui: &mut egui::Ui, independent: bool) -> CoreLayout {
+        if let Some(forward) = keyboard::navigation(ui.ctx(), ui.layer_id(), independent) {
+            let changed = if forward {
+                self.session.next_match()
+            } else {
+                self.session.previous_match()
+            };
+            if changed {
+                self.request_match_scroll(ui);
+            }
+        }
         let now = Instant::now();
         self.session.ensure_initial_evaluation(now);
         let bounds = ui.available_rect_before_wrap();
@@ -911,12 +926,16 @@ impl RegexTesterDialogState {
             let enabled = !self.session.matches().is_empty();
             if ui
                 .add_enabled(enabled, egui::Button::new("Previous"))
+                .on_hover_text("Previous match (Shift+F3)")
                 .clicked()
                 && self.session.previous_match()
             {
                 self.request_match_scroll(ui);
             }
-            if ui.add_enabled(enabled, egui::Button::new("Next")).clicked()
+            if ui
+                .add_enabled(enabled, egui::Button::new("Next"))
+                .on_hover_text("Next match (F3)")
+                .clicked()
                 && self.session.next_match()
             {
                 self.request_match_scroll(ui);
@@ -930,6 +949,207 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keyboard_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn keyboard_frame(
+        dialog: &mut RegexTesterDialogState,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 680.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+            },
+        );
+    }
+
+    fn keyboard_dialog() -> RegexTesterDialogState {
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.information_section = InformationSection::Substitution;
+        dialog.session.draft.pattern = "one".into();
+        dialog.session.draft.test_text = "one one one".into();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog.session.set_substitution_enabled(true, now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog
+    }
+
+    #[test]
+    fn regex_tester_keyboard_f3_wraps_without_changing_source_or_cursor() {
+        let ctx = egui::Context::default();
+        let mut dialog = keyboard_dialog();
+        keyboard_frame(&mut dialog, &ctx, Vec::new());
+        let id = egui::Id::new("regex_tester_test_text");
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+        let selection = egui::text::CCursorRange::one(egui::text::CCursor::new(2));
+        state.cursor.set_char_range(Some(selection));
+        state.store(&ctx, id);
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        for (modifiers, index) in [
+            (egui::Modifiers::SHIFT, 2),
+            (egui::Modifiers::NONE, 0),
+            (egui::Modifiers::NONE, 1),
+        ] {
+            keyboard_frame(
+                &mut dialog,
+                &ctx,
+                vec![keyboard_event(egui::Key::F3, modifiers)],
+            );
+            assert_eq!(dialog.session.selected_index(), Some(index));
+            assert!(!dialog.scroll_to_selected);
+            assert!(!ctx.input(|input| input.events.iter().any(|event| matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::F3,
+                    ..
+                }
+            ))));
+            assert_eq!(
+                egui::TextEdit::load_state(&ctx, id)
+                    .unwrap()
+                    .cursor
+                    .char_range(),
+                Some(selection)
+            );
+        }
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+    }
+
+    #[test]
+    fn regex_tester_keyboard_tab_traverses_source_and_replacement_without_edits() {
+        let ctx = egui::Context::default();
+        let mut dialog = keyboard_dialog();
+        keyboard_frame(&mut dialog, &ctx, Vec::new());
+        let draft = dialog.session.draft.clone();
+        let revision = dialog.session.revision();
+        for id in [
+            "regex_tester_pattern",
+            "regex_tester_test_text",
+            "regex_substitution_replacement",
+        ] {
+            for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT] {
+                let id = egui::Id::new(id);
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                keyboard_frame(
+                    &mut dialog,
+                    &ctx,
+                    vec![keyboard_event(egui::Key::Tab, modifiers)],
+                );
+                // egui applies previous-widget focus on the following frame.
+                keyboard_frame(&mut dialog, &ctx, Vec::new());
+                assert_ne!(ctx.memory(|memory| memory.focused()), Some(id));
+                assert!(ctx.memory(|memory| memory.focused()).is_some());
+            }
+        }
+        assert_eq!(dialog.session.draft, draft);
+        assert_eq!(dialog.session.revision(), revision);
+    }
+
+    #[test]
+    fn regex_tester_keyboard_modified_f3_and_popup_are_not_claimed() {
+        let ctx = egui::Context::default();
+        let mut dialog = keyboard_dialog();
+        keyboard_frame(&mut dialog, &ctx, Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("regex_tester_test_text")));
+        for modifiers in [
+            egui::Modifiers::CTRL,
+            egui::Modifiers::ALT,
+            egui::Modifiers::COMMAND,
+        ] {
+            keyboard_frame(
+                &mut dialog,
+                &ctx,
+                vec![keyboard_event(egui::Key::F3, modifiers)],
+            );
+            assert_eq!(dialog.session.selected_index(), Some(0));
+            assert!(ctx.input(|input| input.events.iter().any(|event| matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::F3,
+                    ..
+                }
+            ))));
+        }
+        ctx.memory_mut(|memory| memory.open_popup(egui::Id::new("foreign_popup")));
+        keyboard_frame(
+            &mut dialog,
+            &ctx,
+            vec![keyboard_event(egui::Key::F3, egui::Modifiers::NONE)],
+        );
+        assert_eq!(dialog.session.selected_index(), Some(0));
+        assert!(ctx.input(|input| input.events.iter().any(|event| matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::F3,
+                ..
+            }
+        ))));
+    }
+
+    #[test]
+    fn regex_tester_keyboard_foreign_layer_and_embedded_no_focus_leave_f3_available() {
+        let ctx = egui::Context::default();
+        let mut dialog = keyboard_dialog();
+        let foreign_id = egui::Id::new("foreign_editor");
+        let mut foreign = String::new();
+        let mut run = |events| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("foreign_layer")).show(ctx, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut foreign).id(foreign_id));
+                    });
+                    egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+                },
+            );
+        };
+        run(Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(foreign_id));
+        run(vec![keyboard_event(egui::Key::F3, egui::Modifiers::NONE)]);
+        assert!(ctx.input(|input| input.events.iter().any(|event| matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::F3,
+                ..
+            }
+        ))));
+        ctx.memory_mut(|memory| memory.surrender_focus(foreign_id));
+        run(vec![keyboard_event(egui::Key::F3, egui::Modifiers::SHIFT)]);
+        assert!(ctx.input(|input| input.events.iter().any(|event| matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::F3,
+                ..
+            }
+        ))));
+        assert_eq!(dialog.session.selected_index(), Some(0));
+    }
 
     #[test]
     fn regex_tester_same_frame_paste_retains_full_unicode_buffers_in_all_three_editors() {
@@ -2147,7 +2367,8 @@ mod tests {
     #[test]
     fn regex_tester_embedded_shell_focuses_once_and_escape_closes() {
         let ctx = egui::Context::default();
-        let mut dialog = RegexTesterDialogState::default();
+        let mut dialog = keyboard_dialog();
+        let draft = dialog.session.draft.clone();
         dialog.open();
         let _ = ctx.run(egui::RawInput::default(), |ctx| dialog.show(ctx));
         assert!(!dialog.focus_pattern);
@@ -2161,5 +2382,7 @@ mod tests {
         });
         let _ = ctx.run(input, |ctx| dialog.show(ctx));
         assert!(!dialog.open);
+        assert_eq!(dialog.session.draft, draft);
+        assert!(dialog.session.substitution_enabled());
     }
 }
