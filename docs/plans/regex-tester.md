@@ -3552,8 +3552,11 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M4-B/M5-A | complete | `0190fa19`; typed route, full tracked lifecycle, native 960x680 child and bounded embedded fallback. 55 focused tests, final3 shell tests, bin cargo check, fmt/diff pass. |
 | M5-B | complete | `a1e6dce1`; 6 focused egui state/layout tests, flags and raw slash preservation, normal/narrow containment. |
 | M6-A1 | complete | `c8d8c2e9`; 63 targeted tests passed, independent review no findings. Default budgets and honest truncation/suspension; replacement preflight before expansion. |
-| M6-A2 | in_progress | Single domain-owned draft/session, coalesced nonblocking deadlines and actual result summaries. |
-| M6-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M6-A2 | complete | `1d2d805a`; 69 targeted tests, fmt/diff passed. Single draft/session, 150ms coalesced deadline, stale clearing, honest summaries, bounded text preview. |
+| M6-A3 | complete | `d44c82ed`; 9 GUI tests passed, reviewer confirmed fix. Oversized pattern preview128 bytes, explicit clear, original pattern/flags retained. Initial-paste layout hardening remains M11. |
+| M6-B | complete | `1f3d7452`; 11 GUI tests passed, independent review no findings. Bounded inline compiler feedback, stale clearing, narrow geometry. |
+| M7-A | in_progress | Editable byte-span highlighting and efficient zero-width markers; exact evaluated-source guard prevents stale painting. |
+| M7-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3595,3 +3598,5 @@ M4-B/M5-A independent review of 0190fa19: no substantive findings in typed routi
 M6-A checkpoint split: introduce bounded pure evaluation first (`M6-A1`), then domain-owned debounce/session integration (`M6-A2`). Live UI evaluation must never materialize unbounded matches/captures/replacement output while waiting for M11-A. Named preliminary limits and explicit truncation/suspension metadata are foundational; M11-A will profile representative workloads, tune limits and complete rendering/large-input policy. This sequencing preserves the existing protection requirement rather than adding product scope.
 
 M6-A1 preliminary limits: pattern/replacement4KiB, text64KiB, captures100, stored matches1000, materialized strings2MiB, replacement output1MiB. Direct regex-automata0.4.10 (already locked; alloc-only features) exposes the exact interpolation parser needed to count expansion before allocating large captures. M11 profiling/tuning remains pending. Generated default clipboard_modifiers.json test artifact verified absent before run and removed; no user file discarded.
+
+M6-A2/B review: single session scheduling and inline validation have no unresolved findings. M6-A3 explicitly remediates oversized pattern rendering; original buffer retained with bounded preview and clear recovery. All checkpoints verified before committing.
