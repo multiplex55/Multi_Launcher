@@ -3,6 +3,7 @@ use crate::regex_tester::{EvaluationLimit, EvaluationResult, MatchCompleteness, 
 use eframe::egui;
 use std::sync::Arc;
 use std::time::Instant;
+mod explanation;
 mod highlighting;
 mod inspection;
 
@@ -99,6 +100,7 @@ enum InformationSection {
     #[default]
     Matches,
     MatchDetails,
+    Explanation,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -402,6 +404,7 @@ impl RegexTesterDialogState {
             .selected_text(match self.information_section {
                 InformationSection::Matches => "Matches",
                 InformationSection::MatchDetails => "Selected match",
+                InformationSection::Explanation => "Explanation",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -413,6 +416,11 @@ impl RegexTesterDialogState {
                     &mut self.information_section,
                     InformationSection::MatchDetails,
                     "Selected match",
+                );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::Explanation,
+                    "Explanation",
                 );
             });
         if let Some(feedback) = &self.copy_feedback {
@@ -427,6 +435,16 @@ impl RegexTesterDialogState {
         }
         if self.information_section == InformationSection::MatchDetails {
             self.match_details_area(ui);
+            return;
+        }
+        if self.information_section == InformationSection::Explanation {
+            if let Some(result) = self.session.explanation() {
+                explanation::show(ui, result);
+            } else {
+                // Compiler validation is authoritative; pending revisions have
+                // no accessible stale analysis.
+                ui.weak(self.summary());
+            }
             return;
         }
 
@@ -638,6 +656,46 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_explanation_view_tracks_invalid_pending_and_valid_state() {
+        let now = Instant::now();
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.information_section = InformationSection::Explanation;
+        dialog.session.draft.pattern = "[".into();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert!(dialog.validation_error().is_some());
+        assert!(dialog.session.explanation().is_none());
+        dialog.session.draft.pattern = "(?i:é)+".into();
+        dialog.session.mark_changed(now);
+        assert!(dialog.validation_error().is_none());
+        assert!(dialog.session.explanation().is_none());
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert!(dialog.session.explanation().is_some());
+        let draft = dialog.session.draft.clone();
+        let ctx = egui::Context::default();
+        for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let bounds = ui.available_rect_before_wrap();
+                    dialog.body(ui);
+                    assert!(ui.min_rect().right() <= bounds.right() + 0.1);
+                    assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+                });
+            });
+        }
+        assert_eq!(dialog.session.draft, draft);
+        assert!(dialog.session.pending_delay(now).is_none());
+    }
     use crate::clipboard_modify::clipboard::ClipboardError;
     use std::sync::{
         Mutex,

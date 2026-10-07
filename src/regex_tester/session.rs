@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{EvaluationPolicy, EvaluationResult, RegexDraft, RegexMatch, evaluate_with_policy};
+use super::{
+    EvaluationPolicy, EvaluationResult, ExplanationResult, RegexDraft, RegexFlags, RegexMatch,
+    evaluate_with_policy, explain,
+};
 
 pub const EVALUATION_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -17,6 +20,19 @@ pub struct RegexSession {
     result: Option<EvaluationResult>,
     selected_index: Option<usize>,
     evaluated_source: Option<Arc<str>>,
+    explanation_cache: Option<ExplanationCache>,
+}
+
+struct ExplanationCache {
+    pattern: String,
+    flags: RegexFlags,
+    result: Arc<ExplanationResult>,
+}
+
+impl ExplanationCache {
+    fn matches(&self, draft: &RegexDraft) -> bool {
+        self.pattern == draft.pattern && self.flags == draft.flags
+    }
 }
 
 /// Borrowed presentation data never clones matches or capture text.
@@ -81,6 +97,18 @@ impl RegexSession {
         self.evaluated_revision = Some(self.revision);
         self.evaluated_source = matches!(self.result, Some(EvaluationResult::Success { .. }))
             .then(|| Arc::from(self.draft.test_text.as_str()));
+        if matches!(self.result, Some(EvaluationResult::Success { .. }))
+            && !self
+                .explanation_cache
+                .as_ref()
+                .is_some_and(|cache| cache.matches(&self.draft))
+        {
+            self.explanation_cache = Some(ExplanationCache {
+                pattern: self.draft.pattern.clone(),
+                flags: self.draft.flags,
+                result: Arc::new(explain(&self.draft.pattern, &self.draft.flags)),
+            });
+        }
         let count = self.matches().len();
         self.selected_index = (count > 0).then(|| self.selected_index.unwrap_or(0).min(count - 1));
         true
@@ -102,6 +130,21 @@ impl RegexSession {
     }
     pub fn policy(&self) -> &EvaluationPolicy {
         &self.policy
+    }
+
+    /// Expose analysis only for the currently accepted document. The bounded
+    /// pattern/flag cache survives text edits, but pending and invalid revisions
+    /// never expose old syntax descriptions.
+    pub fn explanation(&self) -> Option<&ExplanationResult> {
+        if self.evaluated_revision != Some(self.revision)
+            || !matches!(self.result, Some(EvaluationResult::Success { .. }))
+        {
+            return None;
+        }
+        self.explanation_cache
+            .as_ref()
+            .filter(|cache| cache.matches(&self.draft))
+            .map(|cache| cache.result.as_ref())
     }
 
     pub fn matches(&self) -> &[RegexMatch] {
@@ -158,6 +201,98 @@ impl RegexSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explanation_cache_reuses_text_edits_and_idle_but_replaces_pattern_and_flags() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "(?i:é)+".into();
+        session.mark_changed(now);
+        assert!(session.explanation().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let cached = session.explanation_cache.as_ref().unwrap().result.clone();
+        let ExplanationResult::Success { explanations } = session.explanation().unwrap() else {
+            panic!("valid syntax must have structured explanations");
+        };
+        assert!(explanations.iter().any(|entry| entry.token == "é"));
+        assert!(
+            explanations
+                .iter()
+                .any(|entry| entry.label == "Scoped flags")
+        );
+        for entry in explanations {
+            assert_eq!(
+                &session.draft.pattern[entry.span.start_byte()..entry.span.end_byte()],
+                entry.token
+            );
+        }
+        session.draft.test_text = "Éé".into();
+        session.mark_changed(now);
+        assert!(session.explanation().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(Arc::ptr_eq(
+            &cached,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+        assert!(!session.tick(now + Duration::from_secs(1)));
+        assert!(Arc::ptr_eq(
+            &cached,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+        session.draft.flags.multi_line = true;
+        session.mark_changed(now);
+        assert!(session.explanation().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let changed_flags = session.explanation_cache.as_ref().unwrap().result.clone();
+        assert!(!Arc::ptr_eq(&cached, &changed_flags));
+        session.draft.pattern = "🦀".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(!Arc::ptr_eq(
+            &changed_flags,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+    }
+
+    #[test]
+    fn invalid_pending_and_suspended_revisions_never_expose_stale_explanations() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "a".into();
+        session.mark_changed(now);
+        session.tick(now + EVALUATION_DEBOUNCE);
+        let cached = session.explanation_cache.as_ref().unwrap().result.clone();
+        session.draft.pattern = "[".into();
+        session.mark_changed(now);
+        assert!(session.explanation().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(matches!(
+            session.result(),
+            Some(EvaluationResult::InvalidPattern(_))
+        ));
+        assert!(session.explanation().is_none());
+        assert!(Arc::ptr_eq(
+            &cached,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+        session.draft.pattern = "x".repeat(session.policy().pattern_bytes + 1);
+        session.mark_changed(now);
+        assert!(!session.tick(now + EVALUATION_DEBOUNCE));
+        assert!(session.explanation().is_none());
+        assert!(Arc::ptr_eq(
+            &cached,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+        session.draft.pattern = "a".into();
+        session.mark_changed(now);
+        assert!(session.explanation().is_none());
+        session.tick(now + EVALUATION_DEBOUNCE);
+        assert!(session.explanation().is_some());
+        assert!(Arc::ptr_eq(
+            &cached,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+    }
 
     #[test]
     fn navigation_wraps_and_never_changes_source_or_pending_state() {
