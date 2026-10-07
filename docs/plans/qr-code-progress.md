@@ -14,7 +14,7 @@ Authority: `qr-code-plan.md` and the current QR kickstart request. Source baseli
 | M4-A | Explicit Paste and Copy Text | complete |
 | M4-B | Explicit image copy | complete |
 | M4-C | Explicit PNG save | complete |
-| M5 | Remaining integration coverage, targeted verification, review | pending |
+| M5 | Remaining integration coverage, targeted verification, review | complete |
 
 Commit boundaries follow these stages; neighboring small coherent checkpoints may be combined as permitted by the approved plan. Each source checkpoint is inspected and committed before materially different work. Only one implementation writer is active at a time.
 
@@ -37,3 +37,38 @@ M3-C: Advanced L/M/Q/H transient controls regenerate before preview; source/sele
 M4-A: explicit text clipboard actions through existing backend; exact text, failure preservation, payload-free typed inline status, empty Copy disabled/oversized text copyable. Mock call-count/error/empty/capacity tests added pending M5. Independent review, cargo check and format/diff checks passed.
 
 M4-B/M4-C combined coherent output checkpoint: same cached raster to explicit guarded image clipboard/PNG actions. Native chooser PNG default/neutral filename, confirmed destination unchanged with PNG suffix validation, explicit PNG encoding, silent cancel, state retained on error. Image byte/PNG roundtrip/guard/path/cancel/failure tests added pending M5. Review, cargo check, formatting/diff checks passed.
+M5-A: added one full searched-action activation test, preserving literal payload/query and proving no history/usage recording plus fresh bare invocation reset. All tests previously recorded as pending M5 have now passed.
+
+## Final verification
+
+- `cargo nextest run --lib --test plugin_commands --test plugin_routing --test domain -E 'test(qr) | test(commands::) | binary(plugin_commands) | binary(plugin_routing) | test(command_bus_architecture)'`: **202 passed, 4,709 skipped**, across four selected binaries. No full repository run.
+- `cargo check`: **passed** on final source (41.40s).
+- `rustfmt --edition 2024 --check --config skip_children=true` on all changed Rust files: **passed**.
+- `git diff --check`: **passed**. Cumulative diff inspected; only QR and directly needed integration/tests/ledger files changed.
+- Independent milestone and cumulative reviews: no remaining substantive findings. Initial Unicode/Kanji optimizer defect and unsupported filter fixtures corrected before their commits; no separate remediation commit was needed.
+- Test-generated root `clipboard_modifiers.json` removed (absent in initial clean tree). No test/GUI process left running.
+
+## Native smoke limitations
+
+The newly compiled executable was launched in isolated `target/qr-native-smoke`, without touching the user's normal data. The Windows helper returned no targetable launcher window, including after visible relaunch; approval for a temporary blank native test surface timed out. Both agent-owned launcher processes were terminated and no UI smoke result is claimed. Native invocation/editing, clipboard image paste, save-dialog default extension/cancel, and phone-camera scanning remain human smoke checks. The isolated directory contains only normal settings/modifier catalog, no QR export or payload history.
+
+## Architecture and dependency
+
+`qrcode 0.14.1`, default features disabled, adds local encoding without optional image/SVG renderers or additional dependency packages. ASCII retains smallest optimized version selection; non-ASCII uses UTF-8 ECI 26 and Byte mode to avoid Shift-JIS Kanji reinterpretation. Application-owned correction/matrix/error types isolate the encoder. A single opaque raster with four quiet modules and eight pixels per module serves preview, image clipboard and PNG. Dialog state, source, correction and feedback stay transient; generation/texture are cached until edits. Plugin discovery carries exact text in structured action arguments through the typed interactive command bus with history skipped.
+
+No new adjacent future enhancement was discovered. Scanning/history/structured forms/SVG/styling/cloud generation/Universal Actions remain deferred as specified by the approved plan.
+
+## Checkpoint history
+
+| Stage | Commit |
+| --- | --- |
+| Execution ledger | `50a13b8f` |
+| M1-A local encoding | `41477b8d` |
+| M1-B shared raster/metadata | `62fd68bf` |
+| M2-A plugin/query routing | `9f68b762` |
+| M2-B / M3-A typed invocation/lifecycle | `5cf43d79` |
+| M3-B live native preview | `bbd5f72b` |
+| M3-C correction/capacity controls | `d8fa8213` |
+| M4-A text clipboard | `c7cb3893` |
+| M4-B / M4-C image clipboard/PNG | `bb257e1e` |
+| M5-A integration coverage/final report | This commit |
