@@ -29,13 +29,14 @@ fn bounded_area(ui: &mut egui::Ui, rect: egui::Rect, id: &str, render: impl FnOn
 #[derive(Clone, Copy, Debug)]
 struct CoreLayout {
     header: egui::Rect,
+    validation: Option<egui::Rect>,
     editor: egui::Rect,
     information: Option<egui::Rect>,
     status: egui::Rect,
 }
 
 impl CoreLayout {
-    fn new(bounds: egui::Rect, information_open: bool) -> Self {
+    fn new(bounds: egui::Rect, information_open: bool, invalid_pattern: bool) -> Self {
         let header_height = 100.0_f32.min(bounds.height() * 0.45);
         let status_height = 24.0_f32.min(bounds.height() * 0.15);
         let gap = 8.0_f32.min(bounds.height() * 0.03);
@@ -45,8 +46,15 @@ impl CoreLayout {
             egui::pos2(bounds.left(), bounds.bottom() - status_height),
             bounds.max,
         );
+        let validation = invalid_pattern.then(|| {
+            egui::Rect::from_min_size(
+                egui::pos2(bounds.left(), header.bottom()),
+                egui::vec2(bounds.width(), 80.0_f32.min(bounds.height() * 0.16)),
+            )
+        });
+        let content_top = validation.map_or(header.bottom(), |area| area.bottom());
         let content = egui::Rect::from_min_max(
-            egui::pos2(bounds.left(), header.bottom() + gap),
+            egui::pos2(bounds.left(), content_top + gap),
             egui::pos2(bounds.right(), status.top() - gap),
         );
         let (editor, information) = if !information_open {
@@ -74,6 +82,7 @@ impl CoreLayout {
         };
         Self {
             header,
+            validation,
             editor,
             information,
             status,
@@ -162,16 +171,25 @@ impl RegexTesterDialogState {
         let now = Instant::now();
         self.session.ensure_initial_evaluation(now);
         let bounds = ui.available_rect_before_wrap();
+        let had_error = self.validation_error().is_some();
         // Recompute after the toggle so collapsing frees editor space this frame.
-        let header = CoreLayout::new(bounds, self.information_open).header;
+        let header = CoreLayout::new(bounds, self.information_open, had_error).header;
         bounded_area(ui, header, "regex_tester_header", |ui| {
             self.pattern_area(ui)
         });
-        let layout = CoreLayout::new(bounds, self.information_open);
+        let layout = CoreLayout::new(bounds, self.information_open, had_error);
         bounded_area(ui, layout.editor, "regex_tester_editor_area", |ui| {
             self.text_area(ui)
         });
         self.session.tick(now);
+        if let Some(validation) = layout.validation {
+            bounded_area(ui, validation, "regex_tester_validation", |ui| {
+                self.validation_area(ui)
+            });
+        }
+        if had_error != self.validation_error().is_some() {
+            ui.ctx().request_repaint();
+        }
         if let Some(information) = layout.information {
             bounded_area(ui, information, "regex_tester_information_area", |ui| {
                 self.information_area(ui)
@@ -336,6 +354,32 @@ impl RegexTesterDialogState {
             });
     }
 
+    fn validation_error(&self) -> Option<&str> {
+        match self.session.result() {
+            Some(EvaluationResult::InvalidPattern(error)) => Some(&error.message),
+            _ => None,
+        }
+    }
+
+    fn validation_area(&self, ui: &mut egui::Ui) {
+        let Some(message) = self.validation_error() else {
+            return;
+        };
+        egui::ScrollArea::vertical()
+            .id_source("regex_tester_validation_scroll")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height().max(1.0))
+            .show(ui, |ui| {
+                ui.set_max_width(ui.available_width());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(message).color(ui.visuals().error_fg_color),
+                    )
+                    .wrap(true),
+                );
+            });
+    }
+
     fn oversized_text_area(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
             .id_source("regex_tester_oversized_preview_scroll")
@@ -406,6 +450,71 @@ mod tests {
         assert_eq!(builder.inner_size, Some(egui::vec2(960.0, 680.0)));
         assert_eq!(builder.min_inner_size, Some(egui::vec2(360.0, 240.0)));
         assert_eq!(builder.resizable, Some(true));
+    }
+
+    #[test]
+    fn regex_tester_inline_validation_clears_while_pending_and_after_fixing() {
+        let now = Instant::now();
+        let ctx = egui::Context::default();
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.pattern = "[".into();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert!(
+            dialog
+                .validation_error()
+                .unwrap()
+                .contains("unclosed character class")
+        );
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(360.0, 240.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let bounds = ui.available_rect_before_wrap();
+                let layout = dialog.body(ui);
+                assert!(bounds.contains_rect(layout.validation.unwrap()));
+                assert!(bounds.contains_rect(layout.editor));
+                assert!(layout.editor.height() > 25.0);
+                assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+            });
+        });
+        dialog.session.draft.pattern = "a".into();
+        dialog.session.mark_changed(now);
+        assert!(dialog.validation_error().is_none());
+        assert!(dialog.session.result().is_none());
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        assert!(dialog.validation_error().is_none());
+        assert!(matches!(
+            dialog.session.result(),
+            Some(EvaluationResult::Success { .. })
+        ));
+    }
+
+    #[test]
+    fn regex_tester_inline_validation_preserves_rust_unsupported_construct_messages() {
+        let now = Instant::now();
+        for (pattern, expected) in [("(?=a)", "look-around"), (r"(a)\1", "backreferences")] {
+            let mut dialog = RegexTesterDialogState::default();
+            dialog.session.draft.pattern = pattern.into();
+            dialog.session.mark_changed(now);
+            dialog
+                .session
+                .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+            let Some(EvaluationResult::InvalidPattern(error)) = dialog.session.result() else {
+                panic!("invalid pattern required")
+            };
+            assert_eq!(dialog.validation_error(), Some(error.message.as_str()));
+            assert!(dialog.validation_error().unwrap().contains(expected));
+        }
     }
 
     #[test]
@@ -531,12 +640,12 @@ mod tests {
     fn regex_tester_information_collapse_restores_editor_space_and_survives_reopen() {
         let mut dialog = RegexTesterDialogState::default();
         let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 680.0));
-        let expanded = CoreLayout::new(bounds, dialog.information_open);
+        let expanded = CoreLayout::new(bounds, dialog.information_open, false);
         dialog.information_open = false;
         dialog.open();
         dialog.open = false;
         dialog.open();
-        let collapsed = CoreLayout::new(bounds, dialog.information_open);
+        let collapsed = CoreLayout::new(bounds, dialog.information_open, false);
         assert!(expanded.information.is_some());
         assert!(collapsed.information.is_none());
         assert!(collapsed.editor.width() > expanded.editor.width());
