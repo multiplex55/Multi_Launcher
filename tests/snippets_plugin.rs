@@ -18,6 +18,7 @@ fn load_save_roundtrip() {
     let entries = vec![SnippetEntry {
         alias: "hw".into(),
         text: "hello".into(),
+        hide_contents: false,
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
     let loaded = load_snippets(SNIPPETS_FILE).unwrap();
@@ -35,6 +36,7 @@ fn search_returns_clipboard_action() {
     let entries = vec![SnippetEntry {
         alias: "hi".into(),
         text: "hello world".into(),
+        hide_contents: false,
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -56,10 +58,12 @@ fn list_command_returns_entries() {
         SnippetEntry {
             alias: "a".into(),
             text: "alpha".into(),
+            hide_contents: false,
         },
         SnippetEntry {
             alias: "b".into(),
             text: "beta".into(),
+            hide_contents: false,
         },
     ];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
@@ -78,6 +82,7 @@ fn rm_command_returns_remove_actions() {
     let entries = vec![SnippetEntry {
         alias: "todelete".into(),
         text: "bye".into(),
+        hide_contents: false,
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -96,6 +101,7 @@ fn search_preserves_newlines() {
     let entries = vec![SnippetEntry {
         alias: "multi".into(),
         text: "a\nb".into(),
+        hide_contents: false,
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -143,6 +149,7 @@ fn search_edit_returns_actions() {
     let entries = vec![SnippetEntry {
         alias: "greet".into(),
         text: "hello".into(),
+        hide_contents: false,
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 

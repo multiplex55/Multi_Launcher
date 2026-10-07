@@ -25,6 +25,12 @@ static LIVE_SNIPPETS: Lazy<super::live_snapshot::LiveSnapshotRegistry<SnippetEnt
 pub struct SnippetEntry {
     pub alias: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_contents: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Load all snippets from the JSON file at `path`.
@@ -104,7 +110,11 @@ pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()>
             }
             item.text = text;
         } else {
-            list.push(SnippetEntry { alias, text });
+            list.push(SnippetEntry {
+                alias,
+                text,
+                hide_contents: false,
+            });
         }
         Ok(true)
     })?;
@@ -417,6 +427,7 @@ mod persistence_tests {
         SnippetEntry {
             alias: alias.into(),
             text: text.into(),
+            hide_contents: false,
         }
     }
 
@@ -452,6 +463,69 @@ mod persistence_tests {
             load_snippets_typed(directory.path()).unwrap_err(),
             PersistenceError::Read { .. }
         ));
+    }
+
+    #[test]
+    fn hide_contents_defaults_for_legacy_and_false_is_omitted() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("legacy.json");
+        std::fs::write(&legacy, r#"[{"alias":"a","text":"first"}]"#).unwrap();
+        assert_eq!(
+            load_snippets(legacy.to_str().unwrap()).unwrap(),
+            vec![snippet("a", "first")]
+        );
+
+        let explicit_false = directory.path().join("explicit-false.json");
+        std::fs::write(
+            &explicit_false,
+            r#"[{"alias":"a","text":"first","hide_contents":false}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_snippets(explicit_false.to_str().unwrap()).unwrap(),
+            vec![snippet("a", "first")]
+        );
+
+        let saved = directory.path().join("saved-unmasked.json");
+        let expected = vec![snippet("a", "first")];
+        save_snippets(saved.to_str().unwrap(), &expected).unwrap();
+        let serialized: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(serialized.as_array().unwrap().len(), 1);
+        assert_eq!(
+            serialized[0],
+            serde_json::json!({"alias": "a", "text": "first"})
+        );
+        assert_eq!(load_snippets(saved.to_str().unwrap()).unwrap(), expected);
+    }
+
+    #[test]
+    fn hidden_multiline_unicode_snippet_round_trips_through_save_and_load() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let expected = vec![SnippetEntry {
+            alias: "résumé-茶☕".into(),
+            text: "first line\r\n第二行\nemoji 🧪 and café".into(),
+            hide_contents: true,
+        }];
+
+        save_snippets(path.to_str().unwrap(), &expected).unwrap();
+
+        let serialized: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(serialized.as_array().unwrap().len(), 1);
+        assert_eq!(
+            serialized[0]["alias"].as_str(),
+            Some(expected[0].alias.as_str())
+        );
+        assert_eq!(
+            serialized[0]["text"].as_str(),
+            Some(expected[0].text.as_str())
+        );
+        assert_eq!(serialized[0]["hide_contents"].as_bool(), Some(true));
+        assert_eq!(load_snippets(path.to_str().unwrap()).unwrap(), expected);
     }
 
     #[test]

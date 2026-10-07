@@ -140,6 +140,7 @@ impl SnippetDialog {
                                     candidate.push(SnippetEntry {
                                         alias: self.alias.clone(),
                                         text: self.text.clone(),
+                                        hide_contents: false,
                                     });
                                 } else if let Some(e) = candidate.get_mut(idx) {
                                     e.alias = self.alias.clone();
@@ -225,6 +226,7 @@ mod tests {
         SnippetEntry {
             alias: alias.to_string(),
             text: text.to_string(),
+            hide_contents: false,
         }
     }
 
