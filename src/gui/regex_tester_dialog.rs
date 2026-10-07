@@ -6,6 +6,7 @@ use std::time::Instant;
 mod examples;
 mod explanation;
 mod highlighting;
+mod history;
 mod inspection;
 mod reference;
 
@@ -116,6 +117,7 @@ enum InformationSection {
     Explanation,
     Reference,
     Examples,
+    History,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -129,6 +131,8 @@ pub struct RegexTesterDialogState {
     information_section: InformationSection,
     reference: reference::ReferenceState,
     examples: examples::ExamplesState,
+    history: Option<history::HistoryState>,
+    pub preset_store: Option<crate::regex_tester::PresetStore>,
     selected_capture: usize,
     clipboard: Arc<dyn ClipboardBackend>,
     copy_feedback: Option<Result<&'static str, String>>,
@@ -152,6 +156,8 @@ impl RegexTesterDialogState {
             information_section: InformationSection::default(),
             reference: reference::ReferenceState::default(),
             examples: examples::ExamplesState::default(),
+            history: None,
+            preset_store: None,
             selected_capture: 0,
             clipboard,
             copy_feedback: None,
@@ -165,6 +171,17 @@ impl RegexTesterDialogState {
             self.focus_pattern = true;
             self.open = true;
         }
+    }
+
+    /// Explicit production storage configuration; default construction does no IO.
+    pub fn with_storage_paths(
+        history_path: impl Into<std::path::PathBuf>,
+        preset_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let mut dialog = Self::default();
+        dialog.history = Some(history::HistoryState::open(history_path));
+        dialog.preset_store = Some(crate::regex_tester::PresetStore::open(preset_path));
+        dialog
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
@@ -228,6 +245,7 @@ impl RegexTesterDialogState {
             self.text_area(ui)
         });
         if self.session.tick(now) {
+            self.record_history();
             self.scroll_to_selected = false;
             ui.ctx().request_repaint();
         }
@@ -426,6 +444,7 @@ impl RegexTesterDialogState {
                 InformationSection::Explanation => "Explanation",
                 InformationSection::Reference => "Reference",
                 InformationSection::Examples => "Examples",
+                InformationSection::History => "History",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -452,6 +471,11 @@ impl RegexTesterDialogState {
                     &mut self.information_section,
                     InformationSection::Examples,
                     "Examples",
+                );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::History,
+                    "History",
                 );
             });
         if let Some(feedback) = &self.copy_feedback {
@@ -487,6 +511,20 @@ impl RegexTesterDialogState {
         if self.information_section == InformationSection::Examples {
             if let Some(example) = self.examples.show(ui) {
                 self.load_example(example);
+            }
+            return;
+        }
+        if self.information_section == InformationSection::History {
+            if let Some(history) = &mut self.history {
+                let retryable = matches!(
+                    self.session.result(),
+                    Some(EvaluationResult::Success { .. })
+                ) && !self.session.draft.pattern.is_empty();
+                if let Some(action) = history.show(ui, retryable) {
+                    self.history_action(action);
+                }
+            } else {
+                ui.weak("History storage is not configured.");
             }
             return;
         }
@@ -595,6 +633,33 @@ impl RegexTesterDialogState {
     fn load_example(&mut self, example: &crate::regex_tester::RegexExample) {
         self.session.draft = example.to_draft();
         self.mark_changed();
+    }
+
+    fn record_history(&mut self) {
+        if let Some(history) = &mut self.history {
+            history.record_success(&self.session);
+        }
+    }
+
+    fn history_action(&mut self, action: history::HistoryAction) {
+        let Some(history) = &mut self.history else {
+            return;
+        };
+        match action {
+            history::HistoryAction::Load(index) => {
+                if let Some(entry) = history.store.entries().get(index) {
+                    self.session.draft.pattern.clone_from(&entry.pattern);
+                    self.session.draft.flags = entry.flags;
+                    self.mark_changed();
+                }
+            }
+            history::HistoryAction::Reload => {
+                let _ = history.store.reload();
+            }
+            history::HistoryAction::Retry => {
+                history.retry(&self.session);
+            }
+        }
     }
 
     fn validation_error(&self) -> Option<&str> {
@@ -720,6 +785,80 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_configured_history_records_restarts_and_loads_only_pattern_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let history_path = dir.path().join("regex_history.json");
+        let preset_path = dir.path().join("regex_presets.json");
+        let mut dialog = RegexTesterDialogState::with_storage_paths(&history_path, &preset_path);
+        assert!(!history_path.exists());
+        assert!(!preset_path.exists());
+        assert!(dialog.preset_store.is_some());
+        assert!(RegexTesterDialogState::default().history.is_none());
+        let now = Instant::now();
+        dialog.session.draft.pattern = "é".into();
+        dialog.session.draft.flags.case_insensitive = true;
+        dialog.session.draft.test_text = "secret É".into();
+        dialog.session.draft.replacement = "secret replacement".into();
+        dialog
+            .session
+            .mark_changed(now - std::time::Duration::from_secs(1));
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                dialog.body(ui);
+            });
+        });
+        assert!(history_path.exists());
+        assert!(!preset_path.exists());
+        let mut restarted = RegexTesterDialogState::with_storage_paths(&history_path, &preset_path);
+        assert_eq!(
+            restarted.history.as_ref().unwrap().store.entries()[0].pattern,
+            "é"
+        );
+        restarted.session.draft.pattern = "a".into();
+        restarted.session.draft.test_text = "retained test text".into();
+        restarted.session.draft.replacement = "retained replacement".into();
+        restarted.session.mark_changed(now);
+        restarted
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        let revision = restarted.session.revision();
+        restarted.scroll_to_selected = true;
+        restarted.copy_feedback = Some(Ok("Old feedback"));
+        restarted.history_action(history::HistoryAction::Load(0));
+        assert_eq!(restarted.session.draft.pattern, "é");
+        assert!(restarted.session.draft.flags.case_insensitive);
+        assert_eq!(restarted.session.draft.test_text, "retained test text");
+        assert_eq!(restarted.session.draft.replacement, "retained replacement");
+        assert_eq!(restarted.session.revision(), revision + 1);
+        assert!(restarted.session.result().is_none());
+        assert!(restarted.session.explanation().is_none());
+        assert!(!restarted.scroll_to_selected);
+        assert!(restarted.copy_feedback.is_none());
+        restarted.information_section = InformationSection::History;
+        restarted.open();
+        restarted.open = false;
+        restarted.open();
+        assert_eq!(restarted.session.draft.pattern, "é");
+        for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let bounds = ui.available_rect_before_wrap();
+                        restarted.body(ui);
+                        assert!(ui.min_rect().right() <= bounds.right() + 0.1);
+                        assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
+                    });
+                },
+            );
+        }
+    }
 
     #[test]
     fn regex_tester_examples_load_exact_editable_drafts_and_clear_stale_state_once() {

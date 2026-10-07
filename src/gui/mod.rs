@@ -1698,6 +1698,10 @@ impl LauncherApp {
         let toast_duration = settings.toast_duration;
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
+        let regex_tester_dialog = RegexTesterDialogState::with_storage_paths(
+            data_root.path().join("regex_history.json"),
+            data_root.path().join("regex_presets.json"),
+        );
         let data_recovery_dialog = DataRecoveryDialog::new(data_root, settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -2220,7 +2224,7 @@ impl LauncherApp {
                 clipboard_modify_settings.dialog_height,
             ),
             json_utility_dialog: JsonUtilityDialogState::default(),
-            regex_tester_dialog: RegexTesterDialogState::default(),
+            regex_tester_dialog,
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
             clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
