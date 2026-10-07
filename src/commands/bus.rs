@@ -136,6 +136,7 @@ mod tests {
     }
 
     impl DialogCommandHost for FakeHost {
+        fn open_regex_tester_dialog(&mut self) {}
         fn open_help_dialog(&mut self) {
             self.dialog_calls += 1;
         }

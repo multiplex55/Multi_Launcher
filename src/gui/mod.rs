@@ -42,6 +42,7 @@ mod query_history;
 mod query_observation;
 mod radial_actions;
 mod radial_editor;
+mod regex_tester_dialog;
 mod render;
 mod screen_draw_restore;
 mod screen_draw_toolbar;
@@ -107,6 +108,7 @@ pub use note_panel::{
     spawn_external,
 };
 pub use notes_dialog::NotesDialog;
+pub use regex_tester_dialog::RegexTesterDialogState;
 pub use screenshot_editor::{
     MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke, MarkupText, MarkupTool,
     ScreenshotEditor, render_markup_layers,
@@ -568,6 +570,7 @@ pub enum Panel {
     ClipboardDialog,
     ClipboardModifyDialog,
     JsonUtilityDialog,
+    RegexTesterDialog,
     ConvertPanel,
     VolumeDialog,
     BrightnessDialog,
@@ -617,6 +620,7 @@ struct PanelStates {
     clipboard_dialog: bool,
     clipboard_modify_dialog: bool,
     json_utility_dialog: bool,
+    regex_tester_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
     brightness_dialog: bool,
@@ -835,6 +839,7 @@ pub struct LauncherApp {
     pub clipboard_modify_runtime: ClipboardModifyRuntime,
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub json_utility_dialog: JsonUtilityDialogState,
+    pub regex_tester_dialog: RegexTesterDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
     pub(crate) clipboard_modify_hide_launcher_after_apply: bool,
@@ -2215,6 +2220,7 @@ impl LauncherApp {
                 clipboard_modify_settings.dialog_height,
             ),
             json_utility_dialog: JsonUtilityDialogState::default(),
+            regex_tester_dialog: RegexTesterDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
             clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
@@ -2831,7 +2837,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 45] = [
+    const TRACKED_PANELS: [Panel; 46] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2862,6 +2868,7 @@ impl LauncherApp {
         Panel::ClipboardDialog,
         Panel::ClipboardModifyDialog,
         Panel::JsonUtilityDialog,
+        Panel::RegexTesterDialog,
         Panel::ConvertPanel,
         Panel::VolumeDialog,
         Panel::BrightnessDialog,
@@ -2911,6 +2918,7 @@ impl LauncherApp {
             Panel::ClipboardDialog => self.clipboard_dialog.open,
             Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
+            Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
             Panel::BrightnessDialog => self.brightness_dialog.open,
@@ -3116,6 +3124,10 @@ impl LauncherApp {
                 self.clipboard_modify_dialog.open = false;
                 self.clipboard_modify_dialog.cleanup_after_close();
                 self.panel_states.clipboard_modify_dialog = false;
+            }
+            Panel::RegexTesterDialog => {
+                self.regex_tester_dialog.open = false;
+                self.panel_states.regex_tester_dialog = false;
             }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.open = false;
@@ -3323,6 +3335,10 @@ impl LauncherApp {
                 self.clipboard_modify_dialog.cleanup_after_close();
                 self.panel_states.clipboard_modify_dialog = false;
             }
+            Panel::RegexTesterDialog => {
+                self.regex_tester_dialog.open = false;
+                self.panel_states.regex_tester_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.open = false;
                 self.panel_states.json_utility_dialog = false;
@@ -3427,6 +3443,11 @@ impl LauncherApp {
                 .clipboard_modify_dialog
                 .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
             Panel::JsonUtilityDialog => self.json_utility_dialog.open = true,
+            Panel::RegexTesterDialog => {
+                if !self.regex_tester_dialog.open {
+                    self.regex_tester_dialog.open();
+                }
+            }
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.open = true,
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
@@ -3564,6 +3585,7 @@ impl LauncherApp {
         check!(clipboard_dialog, Panel::ClipboardDialog);
         check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
+        check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);
         check!(brightness_dialog, Panel::BrightnessDialog);
@@ -4416,6 +4438,36 @@ mod tests {
         app.file_search_dialog.open = true;
 
         assert!(app.any_panel_open());
+    }
+
+    #[test]
+    fn regex_tester_panel_lifecycle_preserves_draft_and_deduplicates_stack() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.regex_tester_dialog.draft.pattern = "saved session".into();
+        app.regex_tester_dialog.draft.test_text = "sample".into();
+        let draft = app.regex_tester_dialog.draft.clone();
+        app.ensure_open(Panel::RegexTesterDialog);
+        app.update_panel_stack();
+        app.ensure_open(Panel::RegexTesterDialog);
+        app.update_panel_stack();
+        assert!(app.any_panel_open());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::RegexTesterDialog)
+                .count(),
+            1
+        );
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(Panel::RegexTesterDialog));
+        assert!(!app.panel_stack.contains(&Panel::RegexTesterDialog));
+        app.ensure_open(Panel::RegexTesterDialog);
+        app.update_panel_stack();
+        app.force_close_panel(Panel::RegexTesterDialog);
+        assert!(!app.regex_tester_dialog.open);
+        assert!(!app.panel_stack.contains(&Panel::RegexTesterDialog));
+        assert_eq!(app.regex_tester_dialog.draft, draft);
     }
 
     #[test]

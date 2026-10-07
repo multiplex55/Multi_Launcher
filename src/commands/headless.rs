@@ -81,6 +81,9 @@ fn execute_with_external(
         Command::Ocr(_) => {
             anyhow::bail!("screen region OCR requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::RegexTester) => {
+            anyhow::bail!("Regex Tester requires the launcher interface")
+        }
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
@@ -787,5 +790,35 @@ mod tests {
             "screen region OCR requires the launcher interface"
         );
         assert!(!called);
+    }
+}
+
+#[cfg(test)]
+mod regex_tester_headless_tests {
+    use super::*;
+    #[test]
+    fn regex_tester_requires_gui_without_external_fallback() {
+        let original = Action {
+            label: "Regex".into(),
+            desc: String::new(),
+            action: "regex:open".into(),
+            args: Some("ignored".into()),
+        };
+        let mut calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::RegexTester),
+            &original,
+            &mut |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires the launcher interface")
+        );
+        assert_eq!(calls, 0);
     }
 }

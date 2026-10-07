@@ -28,6 +28,7 @@ pub trait RadialCommandHost {
 }
 
 pub trait DialogCommandHost {
+    fn open_regex_tester_dialog(&mut self);
     fn open_help_dialog(&mut self);
     fn open_timer_dialog(&mut self);
     fn open_alarm_dialog(&mut self);
