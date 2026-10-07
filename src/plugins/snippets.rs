@@ -6,6 +6,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard,
@@ -21,12 +22,85 @@ static VERSIONED_SNIPPETS: Lazy<Mutex<Option<(PathBuf, Vec<SnippetEntry>)>>> =
 static LIVE_SNIPPETS: Lazy<super::live_snapshot::LiveSnapshotRegistry<SnippetEntry>> =
     Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetInputKind {
+    #[default]
+    SingleLine,
+    Multiline,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct SnippetFieldDefinition {
+    /// Placeholder key used in the snippet text, for example `name` in `{{name}}`.
+    pub name: String,
+    /// Empty persisted labels are displayed using a readable version of `name`.
+    #[serde(default)]
+    pub label: String,
+    #[serde(default, rename = "default")]
+    pub default_value: String,
+    #[serde(default = "required_by_default")]
+    pub required: bool,
+    #[serde(default)]
+    pub input_kind: SnippetInputKind,
+}
+
+impl SnippetFieldDefinition {
+    /// Create a new authored field with the standard required, single-line defaults.
+    pub fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            label: readable_field_label(&name),
+            name,
+            default_value: String::new(),
+            required: true,
+            input_kind: SnippetInputKind::SingleLine,
+        }
+    }
+
+    /// Return the configured label or a readable fallback derived from the key.
+    pub fn display_label(&self) -> Cow<'_, str> {
+        if self.label.is_empty() {
+            Cow::Owned(readable_field_label(&self.name))
+        } else {
+            Cow::Borrowed(&self.label)
+        }
+    }
+}
+
+fn readable_field_label(name: &str) -> String {
+    let label = name
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            characters.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(characters).collect()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if label.is_empty() {
+        name.to_owned()
+    } else {
+        label
+    }
+}
+
+fn required_by_default() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SnippetEntry {
     pub alias: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub hide_contents: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub prompt_for_fields: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<SnippetFieldDefinition>,
 }
 
 /// Produce a safe, single-line body preview without changing the saved text.
@@ -136,6 +210,8 @@ pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()>
                 alias,
                 text,
                 hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
             });
         }
         Ok(true)
@@ -450,6 +526,8 @@ mod persistence_tests {
             alias: alias.into(),
             text: text.into(),
             hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }
     }
 
@@ -459,6 +537,8 @@ mod persistence_tests {
             alias: "private".into(),
             text: "private body\n秘密 🧪".into(),
             hide_contents: true,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         };
 
         assert_eq!(snippet_preview_text(&entry), "******");
@@ -544,6 +624,104 @@ mod persistence_tests {
     }
 
     #[test]
+    fn legacy_and_opt_out_metadata_default_without_rewriting_input() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("legacy.json");
+        let legacy_bytes = br#"[{"alias":"a","text":"first","future_entry_option":true}]"#;
+        std::fs::write(&legacy, legacy_bytes).unwrap();
+
+        let loaded = load_snippets(legacy.to_str().unwrap()).unwrap();
+        assert_eq!(loaded, vec![snippet("a", "first")]);
+        assert!(!loaded[0].prompt_for_fields);
+        assert!(loaded[0].fields.is_empty());
+        assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes);
+
+        let opt_out = directory.path().join("opt-out.json");
+        std::fs::write(
+            &opt_out,
+            r#"[{"alias":"a","text":"first","prompt_for_fields":false,"fields":[{"name":"name","label":"Name","future_field_option":"ignored"}]}]"#,
+        )
+        .unwrap();
+        let loaded_opt_out = load_snippets(opt_out.to_str().unwrap()).unwrap();
+        assert!(!loaded_opt_out[0].prompt_for_fields);
+        assert_eq!(
+            loaded_opt_out[0].fields[0],
+            SnippetFieldDefinition::new("name")
+        );
+
+        let saved_opt_out = directory.path().join("opt-out-saved.json");
+        save_snippets(saved_opt_out.to_str().unwrap(), &loaded_opt_out).unwrap();
+        assert_eq!(
+            load_snippets(saved_opt_out.to_str().unwrap()).unwrap(),
+            loaded_opt_out
+        );
+    }
+
+    #[test]
+    fn prompted_metadata_round_trips_with_defaults_for_omitted_options_and_unknown_fields() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("prompted-source.json");
+        std::fs::write(
+            &source,
+            r#"[{"alias":"reply","text":"Hi {{name}}: {{details}}","prompt_for_fields":true,"fields":[{"name":"name","label":"Name","future_field_option":"ignored"},{"name":"details","label":"Details","default":"line 1\nline 2","required":false,"input_kind":"multiline","future_field_option":"ignored"},{"name":"missing_label","future_field_option":"ignored"},{"name":"_"}],"future_entry_option":"ignored"}]"#,
+        )
+        .unwrap();
+
+        let loaded = load_snippets(source.to_str().unwrap()).unwrap();
+        let first = &loaded[0].fields[0];
+        assert_eq!(first.name, "name");
+        assert_eq!(first.label, "Name");
+        assert!(first.default_value.is_empty());
+        assert!(first.required);
+        assert_eq!(first.input_kind, SnippetInputKind::SingleLine);
+
+        let second = &loaded[0].fields[1];
+        assert_eq!(second.name, "details");
+        assert_eq!(second.default_value, "line 1\nline 2");
+        assert!(!second.required);
+        assert_eq!(second.input_kind, SnippetInputKind::Multiline);
+
+        let missing_label = &loaded[0].fields[2];
+        assert!(missing_label.label.is_empty());
+        assert_eq!(missing_label.display_label(), "Missing Label");
+        let underscore_label = &loaded[0].fields[3];
+        assert!(underscore_label.label.is_empty());
+        assert_eq!(underscore_label.display_label(), "_");
+
+        let saved = directory.path().join("prompted-saved.json");
+        save_snippets(saved.to_str().unwrap(), &loaded).unwrap();
+        let serialized: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+        assert_eq!(serialized[0]["prompt_for_fields"].as_bool(), Some(true));
+        assert_eq!(serialized[0]["fields"][0]["input_kind"], "single_line");
+        assert_eq!(serialized[0]["fields"][1]["input_kind"], "multiline");
+        assert_eq!(load_snippets(saved.to_str().unwrap()).unwrap(), loaded);
+    }
+
+    #[test]
+    fn field_constructor_and_entry_equality_include_prompt_configuration() {
+        let field = SnippetFieldDefinition::new("ticket_id");
+        assert_eq!(field.name, "ticket_id");
+        assert_eq!(field.label, "Ticket Id");
+        assert_eq!(field.display_label(), "Ticket Id");
+        assert!(field.default_value.is_empty());
+        assert!(field.required);
+        assert_eq!(field.input_kind, SnippetInputKind::SingleLine);
+
+        let plain = snippet("reply", "Hi {{name}}");
+        let mut prompted = plain.clone();
+        prompted.prompt_for_fields = true;
+        prompted.fields.push(SnippetFieldDefinition::new("name"));
+        assert_ne!(plain, prompted);
+
+        let mut differently_configured = prompted.clone();
+        differently_configured.fields[0].label = "Your name".into();
+        assert_ne!(prompted, differently_configured);
+    }
+
+    #[test]
     fn hidden_multiline_unicode_snippet_round_trips_through_save_and_load() {
         let _guard = TEST_MUTEX.lock().unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -552,6 +730,8 @@ mod persistence_tests {
             alias: "résumé-茶☕".into(),
             text: "first line\r\n第二行\nemoji 🧪 and café".into(),
             hide_contents: true,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }];
 
         save_snippets(path.to_str().unwrap(), &expected).unwrap();

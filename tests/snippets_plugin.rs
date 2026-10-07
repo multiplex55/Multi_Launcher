@@ -19,6 +19,8 @@ fn load_save_roundtrip() {
         alias: "hw".into(),
         text: "hello".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
     let loaded = load_snippets(SNIPPETS_FILE).unwrap();
@@ -37,6 +39,8 @@ fn search_returns_clipboard_action() {
         alias: "hi".into(),
         text: "hello world".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -59,11 +63,15 @@ fn list_command_returns_entries() {
             alias: "a".into(),
             text: "alpha".into(),
             hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         },
         SnippetEntry {
             alias: "b".into(),
             text: "beta".into(),
             hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         },
     ];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
@@ -83,6 +91,8 @@ fn rm_command_returns_remove_actions() {
         alias: "todelete".into(),
         text: "bye".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -102,6 +112,8 @@ fn search_preserves_newlines() {
         alias: "multi".into(),
         text: "a\nb".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -149,6 +161,8 @@ fn command_add_and_inline_edit_preserve_hidden_flag() {
             alias: "hidden".into(),
             text: "original body".into(),
             hide_contents: true,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }],
     )
     .unwrap();
@@ -182,6 +196,8 @@ fn hidden_body_search_and_list_keep_alias_label_and_original_clipboard_payload()
             alias: "private-alias".into(),
             text: body.into(),
             hide_contents: true,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }],
     )
     .unwrap();
@@ -206,6 +222,8 @@ fn search_edit_returns_actions() {
         alias: "greet".into(),
         text: "hello".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 

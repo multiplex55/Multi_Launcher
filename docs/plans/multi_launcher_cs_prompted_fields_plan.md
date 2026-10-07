@@ -1,10 +1,17 @@
 # Multi Launcher — Plan B: Prompted Snippet Fields
 
-**Status:** Approved requirements; implementation not started  
+**Status:** M1-A verified; remaining stages pending (checkpoint commit pending parent)\
 **Deliverable:** Extend the existing Clipboard Snippets (`cs`) plugin to support opt-in, user-filled template fields, without creating a new plugin.  
-**Source of truth for this plan:** `multi_launcher(20261007-185532).zip` (uploaded 2026-10-07; SHA-256 `0d1deb806acd61857693a0559d2cd5cc5bf7f4336e3259969e9749ce9504e7ec`).  
+**Execution baseline:** `prompt-fields` at `888a55fb793cdcf2c44202ed56f2752abe8c9da1`; the user approved the current branch HEAD in place of the ZIP requirement on 2026-10-07.\
+**Original reference snapshot:** `multi_launcher(20261007-185532).zip` (SHA-256 `0d1deb806acd61857693a0559d2cd5cc5bf7f4336e3259969e9749ce9504e7ec`); retained as historical context, not an execution prerequisite.\
 **Companion kickoff:** `multi_launcher_cs_prompted_fields_codex_start.md`  
-**Authority:** The agreed Plan B questionnaire, this plan, and the checked-out repository's `AGENTS.md`. The uploaded snapshot is the feature's stated reference baseline; at execution time, inspect the current branch and reconcile any newer intentional changes rather than overwriting them.
+**Authority:** The agreed Plan B questionnaire, this plan, the checked-out repository's `AGENTS.md`, and the user's execution-baseline approval recorded above. The checked-out current branch is authoritative for implementation.
+
+**Execution ledger:**
+
+- M1-A — verified; checkpoint commit pending parent.
+- Verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippets::persistence_tests)'` passed 13/13; `cargo nextest run --test snippets_plugin --test plugin_exact_match -E 'test(load_save_roundtrip) or test(snippet_edit_command_unfiltered)'` passed 2/2 before the final label-fallback-only correction.
+- Pending: M1-B, M2-A, M2-B, M3-A, M3-B, M3-C, M4-A, M4-B, M5-A, M5-B, M6-A and the M6-B review gate.
 
 > **Required directive:** Use the project's active checkpoint commit cadence and define the task-specific commit boundaries in the plan.
 
@@ -142,6 +149,7 @@ The JSON is **illustrative**; exact field names/types are implementer-owned, sub
 3. Field declarations identify the placeholder key, hold label/default/required/input-kind, and persist only those **configured** defaults; they do **not** store values entered during a fill dialog.
 4. Discovery order in the snippet text is authoritative initially; existing metadata is reconciled by **key**, preserving labels/defaults/required/input-kind for fields that remain, adding new fields with sensible defaults, and removing orphan metadata only on an explicit committed edit.
 5. New fields default to **required** and **single-line**; label defaults to a readable version of the key; default text begins empty. Optional fields may have an empty default. Existing metadata is never discarded during an ordinary text update merely because the caller only supplies alias/text.
+   A missing persisted label may deserialize as empty; reconciliation and display use the readable key fallback so partial metadata never produces a blank field label.
 6. Respect existing atomic transaction, no-op-save behavior, watchers, version counters, snapshot update semantics, last-good-data on malformed JSON, and failure rollback. Do not introduce a second JSON file.
 7. A normal `cs add` creates a non-prompted snippet. A normal `cs edit <alias> <text>` on an existing prompted snippet preserves prompting and compatible field settings, reconciles newly valid fields, and rejects malformed prompted templates without corrupting persistent data. Do not silently disable prompting or delete field configuration to make old commands work.
 8. Editing via UI changes a **draft**, not the persisted entry, until Save. Cancel discards draft changes, even after a failed validation.

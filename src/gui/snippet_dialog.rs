@@ -278,6 +278,8 @@ impl SnippetDialog {
                 alias: self.alias.clone(),
                 text: self.text.clone(),
                 hide_contents: self.hide_contents,
+                prompt_for_fields: false,
+                fields: Vec::new(),
             });
             AliasValidation {
                 edited_index: None,
@@ -741,6 +743,8 @@ mod tests {
             alias: alias.to_string(),
             text: text.to_string(),
             hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }
     }
 

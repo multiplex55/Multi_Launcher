@@ -227,6 +227,8 @@ mod tests {
             alias: alias.into(),
             text: text.into(),
             hide_contents,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }
     }
 
