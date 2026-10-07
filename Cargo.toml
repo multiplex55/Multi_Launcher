@@ -103,6 +103,7 @@ ab_glyph = "0.2"
 time = ">=0.3.47, <0.4"
 bytes = ">=1.11.1, <2"
 sha2 = "0.10"
+qrcode = { version = "0.14.1", default-features = false }
 
 [features]
 unstable_grab = ["rdev/unstable_grab"]

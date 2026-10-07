@@ -9,6 +9,9 @@ where
     H: DialogCommandHost + HeadlessCommandHost + ?Sized,
 {
     match command {
+        Command::Dialog(DialogCommand::Qr { initial_text }) => {
+            host.open_qr_dialog(initial_text.as_deref())
+        }
         Command::Dialog(DialogCommand::RegexTester) => host.open_regex_tester_dialog(),
         Command::Dialog(DialogCommand::Help) => host.open_help_dialog(),
         Command::Dialog(DialogCommand::Convert) => host.open_convert_dialog(),
@@ -74,6 +77,7 @@ mod tests {
     }
 
     impl DialogCommandHost for Host {
+        fn open_qr_dialog(&mut self, _: Option<&str>) {}
         fn open_regex_tester_dialog(&mut self) {
             self.mark("regex_tester");
         }

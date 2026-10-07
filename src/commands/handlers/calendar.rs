@@ -304,6 +304,7 @@ mod tests {
         fn open_json_utility(&mut self, _: crate::commands::JsonUtilityIntent) {}
     }
     impl DialogCommandHost for Host {
+        fn open_qr_dialog(&mut self, _: Option<&str>) {}
         fn open_regex_tester_dialog(&mut self) {}
         fn open_help_dialog(&mut self) {}
         fn open_timer_dialog(&mut self) {}

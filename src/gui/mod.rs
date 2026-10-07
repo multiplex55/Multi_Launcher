@@ -38,6 +38,7 @@ mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
 mod ocr_view;
+mod qr_dialog;
 mod query_history;
 mod query_observation;
 mod radial_actions;
@@ -108,6 +109,7 @@ pub use note_panel::{
     spawn_external,
 };
 pub use notes_dialog::NotesDialog;
+pub use qr_dialog::QrDialogState;
 pub use regex_tester_dialog::RegexTesterDialogState;
 pub use screenshot_editor::{
     MarkupArrow, MarkupHistory, MarkupLayer, MarkupRect, MarkupStroke, MarkupText, MarkupTool,
@@ -571,6 +573,7 @@ pub enum Panel {
     ClipboardModifyDialog,
     JsonUtilityDialog,
     RegexTesterDialog,
+    QrDialog,
     ConvertPanel,
     VolumeDialog,
     BrightnessDialog,
@@ -621,6 +624,7 @@ struct PanelStates {
     clipboard_modify_dialog: bool,
     json_utility_dialog: bool,
     regex_tester_dialog: bool,
+    qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
     brightness_dialog: bool,
@@ -840,6 +844,7 @@ pub struct LauncherApp {
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub json_utility_dialog: JsonUtilityDialogState,
     pub regex_tester_dialog: RegexTesterDialogState,
+    pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
     pub(crate) clipboard_modify_hide_launcher_after_apply: bool,
@@ -2222,6 +2227,7 @@ impl LauncherApp {
             ),
             json_utility_dialog: JsonUtilityDialogState::default(),
             regex_tester_dialog,
+            qr_dialog: QrDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
             clipboard_modify_hide_launcher_after_apply: clipboard_modify_settings
@@ -2838,7 +2844,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 46] = [
+    const TRACKED_PANELS: [Panel; 47] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2870,6 +2876,7 @@ impl LauncherApp {
         Panel::ClipboardModifyDialog,
         Panel::JsonUtilityDialog,
         Panel::RegexTesterDialog,
+        Panel::QrDialog,
         Panel::ConvertPanel,
         Panel::VolumeDialog,
         Panel::BrightnessDialog,
@@ -2920,6 +2927,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
+            Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
             Panel::BrightnessDialog => self.brightness_dialog.open,
@@ -3125,6 +3133,10 @@ impl LauncherApp {
                 self.clipboard_modify_dialog.open = false;
                 self.clipboard_modify_dialog.cleanup_after_close();
                 self.panel_states.clipboard_modify_dialog = false;
+            }
+            Panel::QrDialog => {
+                self.qr_dialog.close();
+                self.panel_states.qr_dialog = false;
             }
             Panel::RegexTesterDialog => {
                 self.regex_tester_dialog.open = false;
@@ -3336,6 +3348,10 @@ impl LauncherApp {
                 self.clipboard_modify_dialog.cleanup_after_close();
                 self.panel_states.clipboard_modify_dialog = false;
             }
+            Panel::QrDialog => {
+                self.qr_dialog.close();
+                self.panel_states.qr_dialog = false;
+            }
             Panel::RegexTesterDialog => {
                 self.regex_tester_dialog.open = false;
                 self.panel_states.regex_tester_dialog = false;
@@ -3444,6 +3460,7 @@ impl LauncherApp {
                 .clipboard_modify_dialog
                 .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
             Panel::JsonUtilityDialog => self.json_utility_dialog.open = true,
+            Panel::QrDialog => self.qr_dialog.open = true,
             Panel::RegexTesterDialog => {
                 if !self.regex_tester_dialog.open {
                     self.regex_tester_dialog.open();
@@ -3587,6 +3604,7 @@ impl LauncherApp {
         check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
+        check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);
         check!(brightness_dialog, Panel::BrightnessDialog);
@@ -4439,6 +4457,45 @@ mod tests {
         app.file_search_dialog.open = true;
 
         assert!(app.any_panel_open());
+    }
+
+    #[test]
+    fn qr_panel_lifecycle_preserves_source_and_deduplicates_stack() {
+        use crate::commands::DialogCommandHost;
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let source = "  caf\u{e9}\n\u{1f512} ";
+        app.open_qr_dialog(Some(source));
+        app.update_panel_stack();
+        app.ensure_open(Panel::QrDialog);
+        app.update_panel_stack();
+        assert!(app.any_panel_open());
+        assert_eq!(app.qr_dialog.source, source);
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|p| **p == Panel::QrDialog)
+                .count(),
+            1
+        );
+        app.qr_dialog.feedback = Some(Ok("stale".into()));
+        assert!(app.close_front_dialog());
+        assert!(app.qr_dialog.feedback.is_none());
+        assert!(!app.qr_dialog.focus_source);
+        assert!(!app.is_panel_open(Panel::QrDialog));
+        assert!(!app.panel_stack.contains(&Panel::QrDialog));
+        app.ensure_open(Panel::QrDialog);
+        app.update_panel_stack();
+        app.force_close_panel(Panel::QrDialog);
+        assert!(!app.qr_dialog.open);
+        assert!(!app.panel_stack.contains(&Panel::QrDialog));
+        assert_eq!(app.qr_dialog.source, source);
+        app.open_qr_dialog(None);
+        assert!(app.qr_dialog.source.is_empty());
+        assert_eq!(
+            app.qr_dialog.error_correction,
+            crate::qr::QrErrorCorrection::Medium
+        );
     }
 
     #[test]

@@ -81,6 +81,9 @@ fn execute_with_external(
         Command::Ocr(_) => {
             anyhow::bail!("screen region OCR requires the launcher interface")
         }
+        Command::Dialog(DialogCommand::Qr { .. }) => {
+            anyhow::bail!("QR Generator requires the launcher interface")
+        }
         Command::Dialog(DialogCommand::RegexTester) => {
             anyhow::bail!("Regex Tester requires the launcher interface")
         }
@@ -820,5 +823,38 @@ mod regex_tester_headless_tests {
                 .contains("requires the launcher interface")
         );
         assert_eq!(calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod qr_headless_tests {
+    use super::*;
+    #[test]
+    fn qr_headless_rejects_without_external_execution() {
+        let original = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "qr:open".into(),
+            args: Some("secret".into()),
+        };
+        let mut calls = 0;
+        let error = execute_with_external(
+            Command::Dialog(DialogCommand::Qr {
+                initial_text: original.args.clone(),
+            }),
+            &original,
+            &mut |_, _| {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 0);
+        assert!(
+            error
+                .to_string()
+                .contains("requires the launcher interface")
+        );
+        assert!(!error.to_string().contains("secret"));
     }
 }

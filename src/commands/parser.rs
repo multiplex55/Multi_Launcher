@@ -238,6 +238,14 @@ mod radial_parser_tests {
 
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
+    if s == "qr:open" {
+        return Ok(Command::Dialog(DialogCommand::Qr {
+            initial_text: action.args.clone(),
+        }));
+    }
+    if s.starts_with("qr:") {
+        return Err(CommandError::new("qr", "Unknown QR command").with_gui_failure_policy());
+    }
 
     if s == "radial" {
         return Ok(Command::Radial(RadialCommand::ShowDefault));
@@ -2006,5 +2014,46 @@ mod regex_tester_parser_tests {
                 Ok(Command::Dialog(DialogCommand::RegexTester))
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod qr_parser_tests {
+    use super::*;
+    #[test]
+    fn qr_parser_transports_optional_plain_text_exactly() {
+        for args in [
+            None,
+            Some(""),
+            Some("  caf\u{e9}\n\u{1f512} "),
+            Some("{broken JSON"),
+            Some("42"),
+        ] {
+            let action = Action {
+                label: String::new(),
+                desc: String::new(),
+                action: "qr:open".into(),
+                args: args.map(str::to_owned),
+            };
+            assert_eq!(
+                parse_action(&action).unwrap(),
+                Command::Dialog(DialogCommand::Qr {
+                    initial_text: args.map(str::to_owned)
+                })
+            );
+        }
+    }
+    #[test]
+    fn qr_unknown_protocol_errors_never_echo_payloads() {
+        let action = Action {
+            label: "secret".into(),
+            desc: String::new(),
+            action: "qr:future:secret".into(),
+            args: Some("secret".into()),
+        };
+        let error = parse_action(&action).unwrap_err();
+        assert_eq!(error.domain, "qr");
+        assert_eq!(error.message, "Unknown QR command");
+        assert!(!format!("{error:?}").contains("secret"));
     }
 }

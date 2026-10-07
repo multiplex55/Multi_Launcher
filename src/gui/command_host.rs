@@ -135,6 +135,10 @@ impl ScreenDrawCommandHost for LauncherApp {
 }
 
 impl DialogCommandHost for LauncherApp {
+    fn open_qr_dialog(&mut self, initial_text: Option<&str>) {
+        self.qr_dialog.open(initial_text);
+        self.focus_panel(super::Panel::QrDialog);
+    }
     fn open_regex_tester_dialog(&mut self) {
         self.regex_tester_dialog.open();
         self.focus_panel(super::Panel::RegexTesterDialog);
@@ -810,6 +814,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
     !matches!(
         command,
         Command::Dialog(crate::commands::DialogCommand::RegexTester)
+            | Command::Dialog(crate::commands::DialogCommand::Qr { .. })
             | Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
@@ -1067,6 +1072,100 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
     }
+    #[test]
+    fn qr_searched_action_opens_exact_payload_without_history_and_reopens_fresh() {
+        let mut app = test_app();
+        app.plugins.register(Box::new(crate::plugins::qr::QrPlugin));
+        app.match_exact = true;
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.test_skip_history_persistence = true;
+        let payload = "  caf\u{e9}  \u{1f512}\n\"quoted\" \\path kind:secret id:42 ";
+        let query = format!("qr {payload}");
+        app.query = query.clone();
+        app.search();
+        let action = app
+            .results
+            .iter()
+            .find(|action| action.action == "qr:open")
+            .unwrap()
+            .clone();
+        app.activate_action(action, None, crate::commands::ActivationSource::Enter);
+        assert!(app.qr_dialog.open);
+        assert_eq!(app.qr_dialog.source, payload);
+        assert_eq!(
+            app.qr_dialog.error_correction,
+            crate::qr::QrErrorCorrection::Medium
+        );
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::QrDialog));
+        assert_eq!(app.query, query);
+        assert!(app.usage.is_empty());
+        assert!(app.test_recorded_history_queries.is_empty());
+
+        app.qr_dialog
+            .set_error_correction(crate::qr::QrErrorCorrection::High);
+        app.qr_dialog.feedback = Some(Ok("old status".into()));
+        assert!(app.close_front_dialog());
+        app.query = "qr".into();
+        app.last_results_valid = false;
+        app.search();
+        let action = app
+            .results
+            .iter()
+            .find(|action| action.action == "qr:open")
+            .unwrap()
+            .clone();
+        app.activate_action(action, None, crate::commands::ActivationSource::Enter);
+        assert!(app.qr_dialog.open);
+        assert!(app.qr_dialog.source.is_empty());
+        assert_eq!(
+            app.qr_dialog.error_correction,
+            crate::qr::QrErrorCorrection::Medium
+        );
+        assert!(app.qr_dialog.feedback.is_none());
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::QrDialog));
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == super::super::Panel::QrDialog)
+                .count(),
+            1
+        );
+        assert_eq!(app.query, "qr");
+        assert!(app.usage.is_empty());
+        assert!(app.test_recorded_history_queries.is_empty());
+    }
+
+    #[test]
+    fn qr_dispatch_ignores_query_override_and_resets_dialog() {
+        let mut app = test_app();
+        app.query = "keep query".into();
+        app.qr_dialog.open(Some("old"));
+        app.qr_dialog.error_correction = crate::qr::QrErrorCorrection::High;
+        let source = "  caf\u{e9}\n\u{1f512} ";
+        let invocation = crate::commands::parse_command(
+            crate::actions::Action {
+                label: "QR".into(),
+                desc: String::new(),
+                action: "qr:open".into(),
+                args: Some(source.into()),
+            },
+            Some("override".into()),
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .unwrap();
+        assert!(!command_accepts_query_override(&invocation.command));
+        app.dispatch_command_invocation(invocation);
+        assert_eq!(app.query, "keep query");
+        assert_eq!(app.qr_dialog.source, source);
+        assert_eq!(
+            app.qr_dialog.error_correction,
+            crate::qr::QrErrorCorrection::Medium
+        );
+        assert!(app.qr_dialog.open);
+        assert_eq!(app.panel_stack.last(), Some(&super::super::Panel::QrDialog));
+    }
+
     #[test]
     fn regex_tester_dispatch_ignores_query_override_and_retains_draft() {
         let mut app = test_app();
