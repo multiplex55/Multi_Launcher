@@ -3565,8 +3565,9 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M9-B | complete | `d3b5355e`; 11 scoped tests passed. Private stable-ID management, explicit buffer choices and protected CRUD. Review external-rename finding resolved by typed content-only store mutation; reviewer confirmed. |
 | M10-A | complete | `af19733c`; 19 focused tests passed, independent review no findings. Shared deadline with source/replacement ownership, preserved matching, bounded readonly result previews. |
 | M10-B | complete | `26df0ea3`; initial5 scoped tests plus corrected exact-copy fixture passed. Review no findings. Explicit one-shot import/full-current copy, honest limited rows, no idle IO. |
-| M11-A | in_progress | Same-frame oversized paste layout guards and representative workload profiling; named warning/hard policies. |
-| M11-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M11-A | complete | `5ef57ffc`; 16 focused tests, manual release profiling, fmt/diff passed; review no findings. Exact retained paste guards and measured normal warnings; hard caps retained. |
+| M11-B | in_progress | Local owned F3/Shift-F3 navigation and standard Tab/editing/lifecycle focus checks. |
+| M11-C–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3620,3 +3621,19 @@ M9 decisions: presets omit sample/replacement by explicit unchecked defaults; lo
 M11 preparation: local epaint0.27 source confirms max_rows=0 returns before glyph layout, while positive row limits shape all sections first. Use exact-text elided galley for oversized same-frame paste (no char_limit truncation); retain full buffer and switch to existing bounded preview next frame. Profile representative evaluation/session/frame workloads and document timings. M11-C should replace debug enum names in substitution suspension feedback with friendly labels/units.
 
 M10 review: no unresolved substitution or clipboard findings. Exact-copy fixture was corrected to respect Rust suppression of adjacent empty matches, separating Unicode values from explicit zero-width anchor values; production copying remained unchanged. M12-A read-only gap analysis found only repeated-group/final-capture assertion missing; other required domain categories already have focused coverage.
+
+M11-A measurements: Windows x86_64, Intel Family6 Model158, 8 logical CPUs, rustc1.97.1, default optimized release; five samples after warm-up. Profile harness is explicitly ignored/manual, with no timing-based correctness assertions. Build6m22; measurement run2.78s. Headless egui CPU timings do not establish native display/OS latency.
+
+| Measurement | Median | Slowest |
+| --- | --- | --- |
+| Ordinary session ticks | 0.31–5.77ms | 6.04ms |
+| 100 nested captures ×64KiB | 44.01ms | 44.62ms |
+| Cold egui frames, 960×680 and360×240 | 1.16–12.52ms | 13.42ms |
+| Warm egui frames | 0.027–0.141ms | 0.145ms |
+| 1MiB retained paste, all3 editors/both sizes | 1.98–2.29ms | 3.94ms |
+| Following preview frame | 0.23–0.40ms | 0.56ms |
+| Atomic history record | 7.33ms | 7.73ms |
+
+Normal warning ranges: pattern/replacement1KiB, text16KiB. Hard limits retained after measurements: pattern/replacement4KiB, text64KiB, captures100, matches1000, materialized strings2MiB, output1MiB. Dense and materialization cases reported truncation honestly; output stress suspended before partial success. No workers or input truncation justified.
+
+M12 bounded test gaps: repeated final capture semantics (M12-A); typed data-root dialog constructor plus real nondefault-root writes, avoiding unrelated full LauncherApp startup (M12-B); actual match-row activation and substitution mode reopen assertion (M12-C). Existing tests already cover the rest of the plan's integration/state lists.
