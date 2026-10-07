@@ -1,6 +1,6 @@
 use crate::actions::Action;
 use crate::clipboard_modify::store::{SharedClipboardModifierCatalog, shared_default_catalog};
-use crate::common::query::{apply_action_filters, split_action_filters};
+use crate::common::query::{QueryFilters, apply_action_filters, split_action_filters};
 use crate::plugins::asciiart::AsciiArtPlugin;
 use crate::plugins::base_convert::BaseConvertPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
@@ -39,6 +39,7 @@ use crate::plugins::note::NotePlugin;
 use crate::plugins::ocr::OcrPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::processes::ProcessesPlugin;
+use crate::plugins::qr::QrPlugin;
 use crate::plugins::radial::RadialPlugin;
 use crate::plugins::random::RandomPlugin;
 use crate::plugins::recycle::RecyclePlugin;
@@ -82,6 +83,17 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 pub const CAP_GRID_RESULTS_COMPATIBLE: &str = "grid_results_compatible";
 pub const CAP_FORCE_LIST_RESULTS: &str = "force_list_results";
 
+/// Controls whether a plugin receives the original query text or the query
+/// after action-filter tokens have been removed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PluginQueryPolicy {
+    /// Apply the launcher's `kind:` and `id:` query filters to plugin results.
+    #[default]
+    ActionFilters,
+    /// Preserve the original query as literal plugin input and skip action filters.
+    Literal,
+}
+
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
     fn search(&self, query: &str) -> Vec<Action>;
@@ -103,6 +115,11 @@ pub trait Plugin: Send + Sync {
     /// for all queries.
     fn query_prefixes(&self) -> &[&str] {
         &[]
+    }
+
+    /// Select how query text and action-filter tokens are handled for this plugin.
+    fn query_policy(&self) -> PluginQueryPolicy {
+        PluginQueryPolicy::ActionFilters
     }
 
     /// Opt-out of prefix routing and always run this plugin for searches.
@@ -468,10 +485,6 @@ impl PluginSearchSnapshot {
         let catalog_versions_at_start =
             crate::radial::dynamic::MutableResultCatalogVersions::current();
         let (filtered_query, filters) = split_action_filters(query);
-        let query_head = filtered_query
-            .split_whitespace()
-            .next()
-            .map(str::to_ascii_lowercase);
         let g_prefix_filter = query
             .trim_start()
             .to_ascii_lowercase()
@@ -485,33 +498,31 @@ impl PluginSearchSnapshot {
         let mut tickets = Vec::new();
         for slot in &self.plugins {
             let search_result = slot.plugin.read().ok().and_then(|plugin| {
+                let query_plan = plugin_query_plan(&**plugin, query, &filtered_query);
                 plugin_matches_search(
                     &**plugin,
-                    query_head.as_deref(),
+                    query_plan.query_head,
                     enabled_plugins,
                     self.enabled_caps.as_ref(),
                 )
-                .then(|| capture_search_refresh_tickets(|| plugin.search(&filtered_query)))
+                .then(|| {
+                    (
+                        query_plan.apply_action_filters,
+                        capture_search_refresh_tickets(|| plugin.search(query_plan.query)),
+                    )
+                })
             });
             // Do this only after the provider guard leaves scope. If settings
             // or reload changed lifecycle state while the provider ran, this
             // same bounded worker applies the latest requested state instead
             // of requiring another search or blocking the GUI writer.
             slot.apply_pending_enabled();
-            if let Some((mut found, mut found_tickets)) = search_result {
+            if let Some((apply_filters, (mut found, mut found_tickets))) = search_result {
+                found = filter_plugin_results(found, &filters, apply_filters);
                 actions.append(&mut found);
                 tickets.append(&mut found_tickets);
             }
         }
-        let actions = if filters.include_kinds.is_empty()
-            && filters.exclude_kinds.is_empty()
-            && filters.include_ids.is_empty()
-            && filters.exclude_ids.is_empty()
-        {
-            actions
-        } else {
-            apply_action_filters(actions, &filters)
-        };
         let pending = tickets
             .iter()
             .any(|(source, ticket)| !self.updates.ticket_resolved(source, *ticket));
@@ -820,6 +831,7 @@ impl PluginManager {
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(RegexTesterPlugin, plugin_settings);
+        self.register_with_settings(QrPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
         self.register_with_settings(OcrPlugin, plugin_settings);
         self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
@@ -1064,29 +1076,75 @@ fn search_filtered_plugins<'a>(
     enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Vec<Action> {
     let (filtered_query, filters) = split_action_filters(query);
-    let query_head = filtered_query
-        .split_whitespace()
-        .next()
-        .map(str::to_ascii_lowercase);
     let mut actions = Vec::new();
     let perf_enabled = crate::performance::enabled();
     for plugin in plugins {
-        if !plugin_matches_search(plugin, query_head.as_deref(), enabled_plugins, enabled_caps) {
+        let query_plan = plugin_query_plan(plugin, query, &filtered_query);
+        if !plugin_matches_search(plugin, query_plan.query_head, enabled_plugins, enabled_caps) {
             continue;
         }
         let name = plugin.name();
         let timer = crate::performance::Timer::start_if(perf_enabled);
-        actions.extend(plugin.search(&filtered_query));
+        let found = plugin.search(query_plan.query);
         timer.finish_plugin(name);
+        actions.extend(filter_plugin_results(
+            found,
+            &filters,
+            query_plan.apply_action_filters,
+        ));
     }
-    if filters.include_kinds.is_empty()
-        && filters.exclude_kinds.is_empty()
-        && filters.include_ids.is_empty()
-        && filters.exclude_ids.is_empty()
-    {
-        actions
+    actions
+}
+
+struct PluginQueryPlan<'a> {
+    query: &'a str,
+    query_head: Option<&'a str>,
+    apply_action_filters: bool,
+}
+
+fn plugin_query_plan<'a>(
+    plugin: &dyn Plugin,
+    original_query: &'a str,
+    filtered_query: &'a str,
+) -> PluginQueryPlan<'a> {
+    let literal_query = plugin.query_policy() == PluginQueryPolicy::Literal
+        && query_head(original_query).is_some_and(|head| {
+            plugin
+                .query_prefixes()
+                .iter()
+                .any(|prefix| prefix.eq_ignore_ascii_case(head))
+        });
+    let query = if literal_query {
+        original_query
     } else {
-        apply_action_filters(actions, &filters)
+        filtered_query
+    };
+
+    PluginQueryPlan {
+        query,
+        query_head: query_head(query),
+        apply_action_filters: !literal_query,
+    }
+}
+
+fn query_head(query: &str) -> Option<&str> {
+    query.split_whitespace().next()
+}
+
+fn filter_plugin_results(
+    actions: Vec<Action>,
+    filters: &QueryFilters,
+    apply_filters: bool,
+) -> Vec<Action> {
+    if apply_filters
+        && (!filters.include_kinds.is_empty()
+            || !filters.exclude_kinds.is_empty()
+            || !filters.include_ids.is_empty()
+            || !filters.exclude_ids.is_empty())
+    {
+        apply_action_filters(actions, filters)
+    } else {
+        actions
     }
 }
 
@@ -1163,6 +1221,25 @@ mod tests {
                 .search_filtered("regex", Some(&enabled), Some(&no_search_caps))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn literal_qr_query_preserves_payload_in_sync_and_snapshot_search() {
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(QrPlugin));
+        let payload =
+            "hello  \"world\" C:\\qr\n日本語 kind:private id:private !kind:other !id:other";
+        let query = format!("  QR {payload}");
+
+        let synchronous = manager.search_filtered(&query, None, None);
+        let snapshot = manager.search_snapshot(None, None).search(&query);
+
+        assert_eq!(synchronous.len(), 1);
+        assert_eq!(synchronous[0].action, "qr:open");
+        assert_eq!(synchronous[0].args.as_deref(), Some(payload));
+        assert_eq!(snapshot.actions, synchronous);
+        assert!(!snapshot.pending);
+        assert_eq!(snapshot.start_revision, snapshot.provider_revision);
     }
 
     #[test]

@@ -97,6 +97,9 @@ impl LauncherApp {
         let Some(head) = parts.next().map(str::to_ascii_lowercase) else {
             return false;
         };
+        if head == "qr" && action == "qr:open" {
+            return true;
+        }
         let Some(subcommand) = parts.next().map(str::to_ascii_lowercase) else {
             return false;
         };
@@ -1237,6 +1240,42 @@ mod tests {
             NOTE_SEARCH_DEBOUNCE,
         ));
     }
+
+    #[test]
+    fn literal_qr_payload_survives_exact_sync_and_snapshot_search() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.plugins.register(Box::new(crate::plugins::qr::QrPlugin));
+        app.match_exact = true;
+
+        let payload =
+            "two  spaces \"quoted\" C:\\qr\n日本語 kind:private id:private !kind:other !id:other";
+        let query = format!(" \tQR {payload}");
+        app.query = query.clone();
+        app.search();
+
+        let synchronous = app
+            .results
+            .iter()
+            .find(|action| action.action == "qr:open")
+            .expect("literal QR result should survive exact display filtering");
+        assert_eq!(synchronous.args.as_deref(), Some(payload));
+
+        let provider_snapshot = app
+            .plugins
+            .search_snapshot(
+                app.enabled_plugins.as_ref(),
+                app.enabled_capabilities.as_ref(),
+            )
+            .search(&query);
+        let deferred = app.search_read_only_outcome_with_plugin_snapshot(&query, provider_snapshot);
+        let snapshot_action = deferred
+            .actions
+            .iter()
+            .find(|action| action.action == "qr:open")
+            .expect("snapshot QR result should survive exact display filtering");
+        assert_eq!(snapshot_action.args.as_deref(), Some(payload));
+    }
 }
 
 #[cfg(test)]
@@ -1280,6 +1319,25 @@ mod clipboard_modify_exact_filter_tests {
         assert!(!LauncherApp::should_bypass_exact_post_filter(
             "cm upper",
             "query:cm uppercase"
+        ));
+    }
+
+    #[test]
+    fn qr_resolved_action_bypasses_only_for_qr_query_head() {
+        assert!(LauncherApp::should_bypass_exact_post_filter(
+            "qr hello", "qr:open"
+        ));
+        assert!(LauncherApp::should_bypass_exact_post_filter(
+            "  QR hello",
+            "qr:open"
+        ));
+        assert!(!LauncherApp::should_bypass_exact_post_filter(
+            "qrfoo hello",
+            "qr:open"
+        ));
+        assert!(!LauncherApp::should_bypass_exact_post_filter(
+            "qr hello",
+            "other:open"
         ));
     }
 }

@@ -203,6 +203,7 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
         "screen_draw",
         "ocr",
         "radial",
+        "qr",
     ] {
         assert!(plugin_names.contains(name), "missing plugin {name}");
     }
@@ -231,6 +232,7 @@ fn default_command_collection_keeps_clipboard_modify_baseline_plugins_registered
             "data:folder",
         ),
         ("Screen Draw", "Screen Draw", "screen_draw:start"),
+        ("qr", "Create a QR code locally from text", "query:qr"),
         (
             "OCR Screen Region",
             "Select a screen region and recognize English text locally",

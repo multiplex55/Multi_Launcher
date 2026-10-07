@@ -39,6 +39,7 @@ pub mod note;
 pub mod ocr;
 pub mod omni_search;
 pub mod processes;
+pub mod qr;
 pub mod radial;
 pub mod random;
 pub mod recycle;

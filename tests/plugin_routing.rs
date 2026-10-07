@@ -100,6 +100,64 @@ fn routing_selects_expected_plugins() {
 }
 
 #[test]
+fn literal_qr_query_preserves_payload_and_obeys_plugin_gates() {
+    use multi_launcher::plugins::qr::QrPlugin;
+    use std::collections::{HashMap, HashSet};
+
+    let payload =
+        "two  spaces \"quoted\" C:\\folder\n日本語 kind:private id:private !kind:other !id:other";
+    let query = format!("  QR {payload}");
+    let mut plugins = PluginManager::new();
+    plugins.register(Box::new(QrPlugin));
+
+    let results = plugins.search_filtered(&query, None, None);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].action, "qr:open");
+    assert_eq!(results[0].args.as_deref(), Some(payload));
+
+    let enabled = HashSet::from(["qr".to_string()]);
+    let search_capability = HashMap::from([("qr".to_string(), vec!["search".to_string()])]);
+    let routed = plugins.search_filtered(&query, Some(&enabled), Some(&search_capability));
+    assert_eq!(routed, results);
+
+    let disabled = HashSet::from(["other".to_string()]);
+    assert!(
+        plugins
+            .search_filtered(&query, Some(&disabled), None)
+            .is_empty()
+    );
+    let wrong_capability = HashMap::from([("qr".to_string(), vec!["commands".to_string()])]);
+    assert!(
+        plugins
+            .search_filtered(&query, Some(&enabled), Some(&wrong_capability))
+            .is_empty()
+    );
+
+    for unrelated in ["qrfoo text", "qrcode text", "other qr text"] {
+        assert!(
+            plugins.search_filtered(unrelated, None, None).is_empty(),
+            "query {unrelated:?}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_plugin_results_still_use_action_filters() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut plugins = PluginManager::new();
+    plugins.register(Box::new(CountingPlugin::new("ordinary", &[], false, calls)));
+
+    assert!(
+        plugins
+            .search_filtered("needle kind:missing", None, None)
+            .is_empty()
+    );
+    let filtered = plugins.search_filtered("needle kind:test", None, None);
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].label, "ordinary:needle");
+}
+
+#[test]
 fn global_plugins_and_opt_out_plugins_still_run() {
     let global_calls = Arc::new(AtomicUsize::new(0));
     let opt_out_calls = Arc::new(AtomicUsize::new(0));
