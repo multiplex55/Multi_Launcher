@@ -6,9 +6,9 @@ Current source matches the plan's relevant archive-described inventory.
 
 | Stage | State | Checkpoint |
 |---|---|---|
-| M1-A | implemented; test execution deferred to M3-B | Persist optional per-snippet content masking |
-| M1-B | in_progress | Preserve masking through updates; shared previews |
-| M2-A | pending | Responsive rows, filtering, sizing |
+| M1-A | implemented; tests deferred to M3-B; `97eaf1a6` | Persist optional per-snippet content masking |
+| M1-B | implemented; tests deferred to M3-B | Preserve masking through updates; shared previews |
+| M2-A | in_progress | Responsive rows, filtering, sizing |
 | M2-B | pending | Inline confirmation, exact GUI alias validation, stale-save guard |
 | M3-A | pending | Privacy checkbox and concealed presentation |
 | M3-B | pending | Deliberate reveal and lifecycle; primary targeted gate |
@@ -31,4 +31,5 @@ report manual GUI acceptance separately from automated state/layout evidence.
   transaction; reject stale snapshots rather than overwriting newer records.
 - Generic panel dismissal/reopen must participate in reveal reset, including
   close/reopen between UI frames.
+
 

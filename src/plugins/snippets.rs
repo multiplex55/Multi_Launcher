@@ -29,6 +29,28 @@ pub struct SnippetEntry {
     pub hide_contents: bool,
 }
 
+/// Produce a safe, single-line body preview without changing the saved text.
+pub fn snippet_preview_text(entry: &SnippetEntry) -> String {
+    if entry.hide_contents {
+        return "******".to_owned();
+    }
+
+    let mut preview = String::with_capacity(entry.text.len());
+    let mut space_pending = false;
+    for character in entry.text.chars() {
+        if character.is_whitespace() || character.is_control() {
+            space_pending = !preview.is_empty();
+        } else {
+            if space_pending {
+                preview.push(' ');
+                space_pending = false;
+            }
+            preview.push(character);
+        }
+    }
+    preview
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -429,6 +451,27 @@ mod persistence_tests {
             text: text.into(),
             hide_contents: false,
         }
+    }
+
+    #[test]
+    fn preview_masks_hidden_body_without_changing_saved_text() {
+        let entry = SnippetEntry {
+            alias: "private".into(),
+            text: "private body\n秘密 🧪".into(),
+            hide_contents: true,
+        };
+
+        assert_eq!(snippet_preview_text(&entry), "******");
+        assert_eq!(entry.text, "private body\n秘密 🧪");
+    }
+
+    #[test]
+    fn preview_normalizes_whitespace_and_controls_without_changing_saved_text() {
+        let original = "  first\t\r\nsecond\u{0000}\u{001b}   third\u{0085} ";
+        let entry = snippet("normal", original);
+
+        assert_eq!(snippet_preview_text(&entry), "first second third");
+        assert_eq!(entry.text, original);
     }
 
     #[test]
