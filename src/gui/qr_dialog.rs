@@ -113,6 +113,48 @@ impl QrDialogState {
         );
     }
 
+    fn copy_qr_with(&mut self, write: impl FnOnce(arboard::ImageData<'_>) -> Result<(), ()>) {
+        let Some(raster) = &self.raster else {
+            return;
+        };
+        let image = arboard::ImageData {
+            width: raster.width() as usize,
+            height: raster.height() as usize,
+            bytes: std::borrow::Cow::Borrowed(raster.as_raw()),
+        };
+        self.feedback = Some(
+            write(image)
+                .map(|()| "Copied QR image to clipboard".into())
+                .map_err(|()| "Could not copy QR image. Try again.".into()),
+        );
+    }
+
+    fn save_png_with(
+        &mut self,
+        choose: impl FnOnce() -> Option<std::path::PathBuf>,
+        write: impl FnOnce(&std::path::Path, &RgbaImage) -> Result<(), ()>,
+    ) {
+        let Some(raster) = &self.raster else {
+            return;
+        };
+        let Some(path) = choose() else {
+            return;
+        };
+        // Write exactly the destination confirmed by the native dialog.
+        if !path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+        {
+            self.feedback = Some(Err("Choose a filename ending in .png.".into()));
+            return;
+        }
+        self.feedback = Some(
+            write(&path, raster)
+                .map(|()| "Saved QR PNG".into())
+                .map_err(|()| "Could not save QR PNG. Check the destination and try again.".into()),
+        );
+    }
+
     fn refresh_generation(&mut self) {
         if !self.dirty {
             return;
@@ -226,12 +268,6 @@ impl QrDialogState {
                             self.copy_text(&ArboardClipboardBackend);
                         }
                     });
-                    if let Some(feedback) = &self.feedback {
-                        match feedback {
-                            Ok(message) => { ui.label(message); }
-                            Err(message) => { ui.colored_label(ui.visuals().error_fg_color, message); }
-                        }
-                    }
                     ui.label(format!(
                         "{} characters · {} UTF-8 bytes",
                         self.metadata.character_count, self.metadata.utf8_byte_count
@@ -278,7 +314,28 @@ impl QrDialogState {
                             });
                         }
                     }
+                    ui.horizontal(|ui| {
+                        let valid = self.raster.is_some();
+                        if ui.add_enabled(valid, egui::Button::new("Copy QR")).clicked() {
+                            self.copy_qr_with(|image| {
+                                arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_image(image)).map_err(|_| ())
+                            });
+                        }
+                        if ui.add_enabled(valid, egui::Button::new("Save PNG")).clicked() {
+                            self.save_png_with(
+                                || rfd::FileDialog::new().add_filter("PNG image", &["png"])
+                                    .set_file_name("multi_launcher_qr.png").save_file(),
+                                |path, raster| raster.save_with_format(path, image::ImageFormat::Png).map_err(|_| ()),
+                            );
+                        }
+                    });
                     ui.separator();
+                    if let Some(feedback) = &self.feedback {
+                        match feedback {
+                            Ok(message) => { ui.label(message); }
+                            Err(message) => { ui.colored_label(ui.visuals().error_fg_color, message); }
+                        }
+                    }
                     close = ui.button("Close").clicked();
                 });
         if close {
@@ -369,6 +426,102 @@ mod tests {
         state.set_source(String::new());
         state.copy_text(&clipboard);
         assert_eq!(clipboard.writes.load(SeqCst), 3);
+    }
+
+    #[test]
+    fn qr_image_copy_uses_cached_rgba_and_preserves_state_on_failure() {
+        let mut state = QrDialogState::default();
+        state.copy_qr_with(|_| panic!("empty output must not call writer"));
+        state.open(Some("exact source"));
+        state.refresh_texture(&egui::Context::default());
+        let raster = state.raster.clone().unwrap();
+        let revision = state.revision;
+        let texture = state.texture.as_ref().unwrap().id();
+        state.copy_qr_with(|image| {
+            assert_eq!(image.width, raster.width() as usize);
+            assert_eq!(image.height, raster.height() as usize);
+            assert_eq!(image.bytes.as_ref(), raster.as_raw());
+            Ok(())
+        });
+        assert!(matches!(state.feedback, Some(Ok(_))));
+        state.copy_qr_with(|_| Err(()));
+        assert!(matches!(state.feedback, Some(Err(_))));
+        assert_eq!(state.source, "exact source");
+        assert_eq!(state.raster.as_ref(), Some(&raster));
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.texture.as_ref().unwrap().id(), texture);
+        assert!(state.open);
+        state.set_source("x".repeat(10000));
+        state.copy_qr_with(|_| panic!("invalid output must not call writer"));
+    }
+
+    #[test]
+    fn qr_png_save_roundtrips_cached_raster_without_changing_confirmed_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("neutral.PNG");
+        let mut state = QrDialogState::default();
+        state.open(Some("private source"));
+        state.refresh_texture(&egui::Context::default());
+        let raster = state.raster.clone().unwrap();
+        let texture = state.texture.as_ref().unwrap().id();
+        let revision = state.revision;
+        state.save_png_with(
+            || Some(path.clone()),
+            |chosen, image| {
+                assert_eq!(chosen, path);
+                image
+                    .save_with_format(chosen, image::ImageFormat::Png)
+                    .map_err(|_| ())
+            },
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(decoded, raster);
+        assert_eq!(*decoded.get_pixel(0, 0), image::Rgba([255, 255, 255, 255]));
+        assert!(matches!(state.feedback, Some(Ok(_))));
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.texture.as_ref().unwrap().id(), texture);
+        assert_eq!(state.source, "private source");
+        assert!(state.open);
+    }
+
+    #[test]
+    fn qr_png_cancel_invalid_paths_and_write_errors_have_no_unrequested_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = QrDialogState::default();
+        state.save_png_with(
+            || panic!("empty must not choose"),
+            |_, _| panic!("empty must not write"),
+        );
+        state.open(Some("source"));
+        state.feedback = Some(Ok("prior status".into()));
+        let feedback = state.feedback.clone();
+        state.save_png_with(|| None, |_, _| panic!("cancel must not write"));
+        assert_eq!(state.feedback, feedback);
+        for filename in ["neutral", "neutral.jpg"] {
+            let path = temp.path().join(filename);
+            state.save_png_with(
+                || Some(path.clone()),
+                |_, _| panic!("invalid suffix must not write"),
+            );
+            assert!(!path.exists());
+            assert!(!path.with_extension("png").exists());
+            assert!(matches!(state.feedback, Some(Err(_))));
+        }
+        let raster = state.raster.clone();
+        let revision = state.revision;
+        state.save_png_with(|| Some(temp.path().join("neutral.png")), |_, _| Err(()));
+        assert!(matches!(state.feedback, Some(Err(_))));
+        assert_eq!(state.raster, raster);
+        assert_eq!(state.source, "source");
+        assert_eq!(state.revision, revision);
+        assert!(state.open);
+        state.set_source("x".repeat(10000));
+        state.save_png_with(
+            || panic!("invalid must not choose"),
+            |_, _| panic!("invalid must not write"),
+        );
     }
 
     #[test]

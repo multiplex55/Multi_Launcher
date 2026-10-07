@@ -12,8 +12,8 @@ Authority: `qr-code-plan.md` and the current QR kickstart request. Source baseli
 | M3-B | Editor, cached live preview | complete |
 | M3-C | Advanced correction and capacity feedback | complete |
 | M4-A | Explicit Paste and Copy Text | complete |
-| M4-B | Explicit image copy | pending |
-| M4-C | Explicit PNG save | pending |
+| M4-B | Explicit image copy | complete |
+| M4-C | Explicit PNG save | complete |
 | M5 | Remaining integration coverage, targeted verification, review | pending |
 
 Commit boundaries follow these stages; neighboring small coherent checkpoints may be combined as permitted by the approved plan. Each source checkpoint is inspected and committed before materially different work. Only one implementation writer is active at a time.
@@ -35,3 +35,5 @@ M3-B: editable exact multiline source, independent counts, cached generation/ras
 M3-C: Advanced L/M/Q/H transient controls regenerate before preview; source/selection retained on capacity failure, fresh Medium/Advanced closed. Correction/capacity/cache tests added pending M5. Independent review, cargo check, formatting/diff checks passed.
 
 M4-A: explicit text clipboard actions through existing backend; exact text, failure preservation, payload-free typed inline status, empty Copy disabled/oversized text copyable. Mock call-count/error/empty/capacity tests added pending M5. Independent review, cargo check and format/diff checks passed.
+
+M4-B/M4-C combined coherent output checkpoint: same cached raster to explicit guarded image clipboard/PNG actions. Native chooser PNG default/neutral filename, confirmed destination unchanged with PNG suffix validation, explicit PNG encoding, silent cancel, state retained on error. Image byte/PNG roundtrip/guard/path/cancel/failure tests added pending M5. Review, cargo check, formatting/diff checks passed.
