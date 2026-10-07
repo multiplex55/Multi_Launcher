@@ -354,6 +354,8 @@ mod tests {
             br#"{"version":1,"entries":"wrong"}"#,
             br#"{"version":2,"entries":[]}"#,
             br#"{"version":1,"entries":[{"pattern":"a","flags":{},"test_text":"private"}]}"#,
+            br#"{"version":1,"entries":[{"pattern":"a","flags":{"case_insensitve":true}}]}"#,
+            br#"{"version":1,"entries":[{"pattern":"a","flags":{"unicode":true,"future_flag":true}}]}"#,
         ] {
             std::fs::write(&path, bytes).unwrap();
             let mut store = HistoryStore::open(&path);

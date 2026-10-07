@@ -366,6 +366,14 @@ mod tests {
             presets: vec![preset.clone()],
         };
         let mut invalid_documents = vec![b"{bad".to_vec(), br#"{"version":1,"next_id":1,"presets":[{"id":0,"name":"a","pattern":"a","flags":{}}]}"#.to_vec()];
+        for flags in [
+            serde_json::json!({"case_insensitve": true}),
+            serde_json::json!({"unicode": true, "future_flag": true}),
+        ] {
+            let mut document = serde_json::to_value(&valid).unwrap();
+            document["presets"][0]["flags"] = flags;
+            invalid_documents.push(serde_json::to_vec(&document).unwrap());
+        }
         for document in [
             PresetDocument {
                 version: 2,

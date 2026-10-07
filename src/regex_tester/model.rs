@@ -7,7 +7,7 @@ use std::ops::Range;
 /// controls. The suffix uses the conventional `i`, `m`, `s`, `u`, and `x`
 /// letters in that order; Rust regex evaluates all matches without a `g` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RegexFlags {
     pub case_insensitive: bool,
     pub multi_line: bool,
