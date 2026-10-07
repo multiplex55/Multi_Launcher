@@ -3543,8 +3543,11 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M1-A | complete | `69678c2e`; 4 targeted Nextest tests and formatting passed. Pure models with indexed UTF-8-safe display locations. |
 | M1-B | complete | `5e196ca9`; 6 targeted Nextest tests and formatting passed. Pure RegexBuilder evaluator retains every capture/zero-width match. |
 | M1-C | complete | `0b030817`; 7 new substitution tests, 13 engine tests passed; replacement expansion delegates to Rust regex. |
-| M2-A | in_progress | Deterministic original-span AST explanations, conservative semantics. |
-| M2-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M2-A | complete | `413f9623`; 6 targeted offline Nextest tests and formatting passed. AST retains original byte spans; compiler validates before explaining. |
+| M2-B | complete | `eb1a38fa`; 26 reference entries, 4 targeted Nextest tests passed; typed categories and fragment context. |
+| M2-C | complete | `7d0df134`; 12 examples, 3 targeted Nextest tests verify every sample and both substitutions. |
+| M3-A | in_progress | Bounded history with atomic publication and failed-load protection. |
+| M3-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3566,3 +3569,7 @@ Manual acceptance remains required and unverified. Native computer control avail
 - Workload policy must bound compilation, captures, replacement expansion, markers, and editor layout. Truncated match counts require explicit metadata and honest wording; rejected work clears pending evaluation rather than repainting indefinitely.
 
 M1-A/B independent review: no substantive findings. Read-only review covered Unicode, ranges, LF/CRLF, captures, zero-width results and flag compilation. Native acceptance remains pending.
+
+M1-C/M2-A independent review: no substantive findings in replacement counting, capture expansion, zero-width semantics, original AST spans, or scoped-flag explanation claims.
+
+M3 storage contract: independent settings-relative history/preset files; typed versioned documents, health latch blocks writes after invalid loads; revalidate disk before mutation, atomic save before memory publication, explicit reload recovery. History stores pattern/flags only, max 50; presets use stable IDs and explicit optional text/replacement. No broad data-recovery catalog migration required.
