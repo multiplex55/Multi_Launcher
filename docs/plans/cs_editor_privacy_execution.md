@@ -11,9 +11,9 @@ Current source matches the plan's relevant archive-described inventory.
 | M2-A | complete; `8ca1fc17` | Responsive rows, filtering, sizing |
 | M2-B | complete; `255dcc79` | Inline confirmation, exact GUI alias validation, stale-save guard |
 | M3-A | complete; `b5e58094` | Privacy checkbox and concealed presentation |
-| M3-B | complete; review P1 resolved | Deliberate reveal and lifecycle; primary targeted gate |
-| M4-A | in_progress | Dashboard and confirmed preview consumers |
-| M4-B | pending | Documentation, final focused verification and review |
+| M3-B | complete; `4291c7aa`; review P1 resolved | Deliberate reveal and lifecycle; primary targeted gate |
+| M4-A | complete; four focused tests passed; final review clear | Dashboard and confirmed preview consumers |
+| M4-B | in_progress | Documentation, final focused verification and review |
 
 Each stage uses the approved stage-tagged commit subject. Source writes are
 sequential through the configured implementer. Reviews occur after M3-B and

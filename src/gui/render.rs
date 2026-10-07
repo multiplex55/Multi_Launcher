@@ -217,6 +217,14 @@ fn root_result_kind(action: &str) -> RootResultKind {
     }
 }
 
+fn generic_result_tooltip(action: &Action) -> String {
+    if action.desc == "Snippet" {
+        action.label.clone()
+    } else {
+        action.action.clone()
+    }
+}
+
 #[cfg(windows)]
 fn trace_root_pointer_moves(ctx: &egui::Context, hwnd: windows::Win32::Foundation::HWND) {
     use windows::Win32::{Foundation::POINT, Graphics::Gdi::ClientToScreen};
@@ -1859,7 +1867,7 @@ impl LauncherApp {
                                             a.action.clone()
                                         }
                                     } else {
-                                        a.action.clone()
+                                        generic_result_tooltip(&a)
                                     };
                                     let menu_resp = self.attach_result_context_menu(
                                         &a,
@@ -2919,6 +2927,28 @@ mod tests {
     };
 
     static MACRO_ACTIVATION_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn generic_result_tooltips_hide_snippet_bodies_and_keep_clipboard_actions() {
+        let snippet = Action {
+            label: "sig".into(),
+            desc: "Snippet".into(),
+            action: "clipboard:private λ\nbody".into(),
+            args: None,
+        };
+        assert_eq!(generic_result_tooltip(&snippet), "sig");
+
+        let clipboard_history = Action {
+            label: "Clipboard entry".into(),
+            desc: "Clipboard".into(),
+            action: "clipboard:copy:3".into(),
+            args: None,
+        };
+        assert_eq!(
+            generic_result_tooltip(&clipboard_history),
+            "clipboard:copy:3"
+        );
+    }
 
     #[test]
     fn controlled_normal_close_preferences_preserve_prepared_settings_and_unrelated_values() {

@@ -4,8 +4,46 @@ use super::{
 use crate::actions::Action;
 use crate::dashboard::DashboardRefreshRequest;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
+use crate::plugins::snippets::{SnippetEntry, snippet_preview_text};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+
+const HIDDEN_SNIPPET_TOOLTIP: &str = "Contents are hidden in previews.";
+
+fn shorten_snippet_preview(preview: &str, max_chars: usize) -> String {
+    let mut characters = preview.chars();
+    let shortened: String = characters.by_ref().take(max_chars).collect();
+    if characters.next().is_some() {
+        format!("{shortened}…")
+    } else {
+        shortened
+    }
+}
+
+fn snippet_button_label(snippet: &SnippetEntry) -> String {
+    let preview = shorten_snippet_preview(&snippet_preview_text(snippet), 40);
+    format!("{}: {preview}", snippet.alias)
+}
+
+fn snippet_button_tooltip(snippet: &SnippetEntry) -> &str {
+    if snippet.hide_contents {
+        HIDDEN_SNIPPET_TOOLTIP
+    } else {
+        &snippet.text
+    }
+}
+
+fn snippet_widget_action(snippet: &SnippetEntry) -> WidgetAction {
+    WidgetAction {
+        action: Action {
+            label: snippet.alias.clone(),
+            desc: "Snippet".into(),
+            action: format!("clipboard:{}", snippet.text),
+            args: None,
+        },
+        query_override: Some(format!("cs {}", snippet.alias)),
+    }
+}
 
 fn default_clipboard_count() -> usize {
     5
@@ -152,24 +190,11 @@ impl Widget for ClipboardSnippetsWidget {
             ui.separator();
             ui.label("Snippets");
             for snippet in snippets.iter().take(self.cfg.snippet_count) {
-                if ui
-                    .button(format!(
-                        "{} — {}",
-                        snippet.alias,
-                        Self::shorten(&snippet.text, 40)
-                    ))
-                    .on_hover_text(&snippet.text)
-                    .clicked()
-                {
-                    clicked = Some(WidgetAction {
-                        action: Action {
-                            label: snippet.alias.clone(),
-                            desc: "Snippet".into(),
-                            action: format!("clipboard:{}", snippet.text),
-                            args: None,
-                        },
-                        query_override: Some(format!("cs {}", snippet.alias)),
-                    });
+                let response = ui
+                    .button(snippet_button_label(snippet))
+                    .on_hover_text(snippet_button_tooltip(snippet));
+                if response.clicked() {
+                    clicked = Some(snippet_widget_action(snippet));
                 }
             }
         }
@@ -186,5 +211,59 @@ impl Widget for ClipboardSnippetsWidget {
         }
 
         clicked
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        HIDDEN_SNIPPET_TOOLTIP, shorten_snippet_preview, snippet_button_label,
+        snippet_button_tooltip, snippet_widget_action,
+    };
+    use crate::plugins::snippets::SnippetEntry;
+
+    fn snippet(alias: &str, text: &str, hide_contents: bool) -> SnippetEntry {
+        SnippetEntry {
+            alias: alias.into(),
+            text: text.into(),
+            hide_contents,
+        }
+    }
+
+    #[test]
+    fn hidden_snippet_dashboard_preview_and_tooltip_do_not_expose_body() {
+        let body = "private λ\nsecond line 🧪";
+        let hidden = snippet("private", body, true);
+
+        assert_eq!(snippet_button_label(&hidden), "private: ******");
+        assert_eq!(snippet_button_tooltip(&hidden), HIDDEN_SNIPPET_TOOLTIP);
+        assert!(!snippet_button_label(&hidden).contains("private λ"));
+        assert!(!snippet_button_tooltip(&hidden).contains("private λ"));
+
+        let action = snippet_widget_action(&hidden);
+        assert_eq!(action.action.action, format!("clipboard:{body}"));
+        assert_eq!(action.action.desc, "Snippet");
+        assert_eq!(action.query_override.as_deref(), Some("cs private"));
+    }
+
+    #[test]
+    fn visible_snippet_keeps_full_hover_text_and_normalizes_preview() {
+        let body = "  first\t世界\nsecond 🧪   ";
+        let visible = snippet("normal", body, false);
+
+        assert_eq!(
+            snippet_button_label(&visible),
+            "normal: first 世界 second 🧪"
+        );
+        assert_eq!(snippet_button_tooltip(&visible), body);
+    }
+
+    #[test]
+    fn snippet_preview_limit_counts_unicode_characters() {
+        let preview = format!("{}Z", "λ".repeat(40));
+        assert_eq!(
+            shorten_snippet_preview(&preview, 40),
+            format!("{}…", "λ".repeat(40))
+        );
     }
 }
