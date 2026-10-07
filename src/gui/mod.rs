@@ -3048,7 +3048,7 @@ impl LauncherApp {
                 self.panel_states.shell_cmd_dialog = false;
             }
             Panel::SnippetDialog => {
-                self.snippet_dialog.open = false;
+                self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
             }
             Panel::MacroDialog => {
@@ -3262,7 +3262,7 @@ impl LauncherApp {
                 self.panel_states.shell_cmd_dialog = false;
             }
             Panel::SnippetDialog => {
-                self.snippet_dialog.open = false;
+                self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
             }
             Panel::MacroDialog => {
@@ -3438,7 +3438,7 @@ impl LauncherApp {
             Panel::TimerDialog => self.timer_dialog.open = true,
             Panel::CompletionDialog => self.completion_dialog.open = true,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
-            Panel::SnippetDialog => self.snippet_dialog.open = true,
+            Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::MkMacroDialog => self.mkmacro_dialog.open(),
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,

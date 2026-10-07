@@ -594,6 +594,7 @@ mod tests {
         let initial = Arc::new(vec![SnippetEntry {
             alias: "saved".into(),
             text: "value".into(),
+            hide_contents: false,
         }]);
         let mut current = Arc::clone(&initial);
         publish_loaded_or_retain(
@@ -606,6 +607,7 @@ mod tests {
         let recovered = vec![SnippetEntry {
             alias: "recovered".into(),
             text: "value".into(),
+            hide_contents: false,
         }];
         publish_loaded_or_retain(&mut current, Ok(recovered.clone()), "snippets");
         assert_eq!(current.as_ref(), &recovered);

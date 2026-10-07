@@ -276,6 +276,7 @@ fn snippet_edit_command_unfiltered() {
     let entries = vec![SnippetEntry {
         alias: "foo".into(),
         text: "bar".into(),
+        hide_contents: false,
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
     let mut settings = Settings::default();
