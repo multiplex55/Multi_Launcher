@@ -3561,8 +3561,10 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M8-A | complete | `61dd8435`; 33 focused tests passed, independent review no findings. Session caches bounded pattern/flag analysis; readonly wrapped explanation/sidebar exposes original byte spans. |
 | M8-B | complete | `528a2f92`; initial25 tests plus final2 Reference tests passed after correcting fixture query/lifecycle assumptions. Review no findings; explicit Append/Copy and retained local filters. |
 | M8-C | complete | `d83dcec2`; 27 focused GUI/examples tests passed, independent review no findings. Local retained search and explicit complete draft loading with replacement reset. |
-| M9-A | in_progress | Settings-root history/preset store configuration, privacy-preserving recent pattern browser and controlled successful recording. |
-| M9-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M9-A | complete | `5a92a048`; 16 focused tests passed, independent review no findings. Settings-root stores, successful changed-pair recording, privacy-preserving load, corruption diagnostics/reload/retry. |
+| M9-B | complete | `d3b5355e`; 11 scoped tests passed. Private stable-ID management, explicit buffer choices and protected CRUD. Review external-rename finding resolved by typed content-only store mutation; reviewer confirmed. |
+| M10-A | in_progress | Bounded substitution session/result sharing debounce while preserving current matching on replacement-only edits. |
+| M10-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3610,3 +3612,5 @@ M6-A2/B review: single session scheduling and inline validation have no unresolv
 M7 review: no unresolved findings in editable range rendering, zero-width markers, exact-source guards, navigation/cursor preservation, capture inspection or explicit copy isolation. Native acceptance remains pending.
 
 M8 review: explanations, reference and examples have no unresolved findings. Reference fixture corrections respected description search and initial-session evaluation; no production behavior changed to satisfy tests. History/preset filenames selected as regex_history.json and regex_presets.json under the existing settings-relative AppDataRoot.
+
+M9 decisions: presets omit sample/replacement by explicit unchecked defaults; loading None preserves current buffer while Some empty clears it, with UI explanation. Update keeps the latest disk name via PresetContent/update_content inside the validated atomic candidate mutation; existing full-update semantics remain intact. Independent review finding resolved before checkpoint commit.
