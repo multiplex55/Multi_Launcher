@@ -115,7 +115,7 @@ pub(super) fn paint_markers(
     text: &str,
     view: &EvaluatedText<'_>,
 ) {
-    if !view.applies_to(text) || output.galley.job.text != text {
+    if output.galley.elided || !view.applies_to(text) || output.galley.job.text != text {
         return;
     }
     let painter = ui
@@ -139,7 +139,7 @@ pub(super) fn active_caret(
     text: &str,
     view: &EvaluatedText<'_>,
 ) -> Option<egui::Rect> {
-    if !view.applies_to(text) || output.galley.job.text != text {
+    if output.galley.elided || !view.applies_to(text) || output.galley.job.text != text {
         return None;
     }
     let matched = view.matches.get(view.selected_index?)?;

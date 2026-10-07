@@ -30,6 +30,26 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
             }
             ui.label("Replacement");
             ui.weak("Rust replacement syntax: $1, ${name}, and $$ for a literal dollar.");
+            if session.draft.replacement.len()
+                > crate::regex_tester::policy::NORMAL_REPLACEMENT_BYTES
+                && session.draft.replacement.len() <= session.policy().replacement_bytes
+            {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Large replacement: above the normal 1 KiB range.",
+                );
+            }
+            let maximum_bytes = session.policy().replacement_bytes;
+            let mut layouter = |ui: &egui::Ui, text: &str, width: f32| {
+                super::editor_layout::plain(
+                    ui,
+                    text,
+                    width,
+                    maximum_bytes,
+                    egui::TextStyle::Monospace.resolve(ui.style()),
+                    false,
+                )
+            };
             if session.draft.replacement.len() > session.policy().replacement_bytes {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
@@ -51,8 +71,9 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
             } else if ui
                 .add(
                     egui::TextEdit::multiline(&mut session.draft.replacement)
-                        .id_source("regex_substitution_replacement")
+                        .id(egui::Id::new("regex_substitution_replacement"))
                         .font(egui::TextStyle::Monospace)
+                        .layouter(&mut layouter)
                         .desired_width(ui.available_width())
                         .desired_rows(3),
                 )

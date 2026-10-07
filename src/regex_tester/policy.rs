@@ -8,6 +8,12 @@ pub const MAX_MATERIALIZED_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_REPLACEMENT_BYTES: usize = 4 * 1024;
 pub const MAX_REPLACEMENT_OUTPUT_BYTES: usize = 1024 * 1024;
 
+/// Normal editing ranges; larger accepted inputs show a warning before the
+/// separate hard suspension limits are reached.
+pub const NORMAL_PATTERN_BYTES: usize = 1024;
+pub const NORMAL_TEXT_BYTES: usize = 16 * 1024;
+pub const NORMAL_REPLACEMENT_BYTES: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvaluationPolicy {
     pub pattern_bytes: usize,

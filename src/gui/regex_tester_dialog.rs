@@ -4,12 +4,15 @@ use eframe::egui;
 use std::sync::Arc;
 use std::time::Instant;
 mod clipboard;
+mod editor_layout;
 mod examples;
 mod explanation;
 mod highlighting;
 mod history;
 mod inspection;
 mod presets;
+#[cfg(test)]
+mod profiling;
 mod reference;
 mod substitution;
 
@@ -299,6 +302,9 @@ impl RegexTesterDialogState {
                 self.oversized_pattern_area(ui);
                 return;
             }
+            if self.session.draft.pattern.len() > crate::regex_tester::policy::NORMAL_PATTERN_BYTES {
+                ui.colored_label(ui.visuals().warn_fg_color, "Large").on_hover_text("Pattern exceeds the normal 1 KiB range; interactive evaluation remains bounded at 4 KiB.");
+            }
             ui.label(egui::RichText::new("/").monospace().size(18.0));
             let suffix = format!("/{}", self.session.draft.flags.suffix());
             let suffix_width = ui.fonts(|fonts| {
@@ -313,11 +319,16 @@ impl RegexTesterDialogState {
             });
             let width =
                 (ui.available_width() - suffix_width - ui.spacing().item_spacing.x).max(1.0);
+            let maximum_bytes = self.session.policy().pattern_bytes;
+            let mut layouter = |ui: &egui::Ui, text: &str, width: f32| {
+                editor_layout::plain(ui, text, width, maximum_bytes, egui::FontId::monospace(18.0), true)
+            };
             let pattern = ui.add_sized(
                 [width, 28.0],
                 egui::TextEdit::singleline(&mut self.session.draft.pattern)
                     .id(egui::Id::new("regex_tester_pattern"))
                     .font(egui::FontId::monospace(18.0))
+                    .layouter(&mut layouter)
                     .hint_text("Regular expression"),
             );
             if pattern.changed() {
@@ -394,6 +405,13 @@ impl RegexTesterDialogState {
             self.oversized_text_area(ui);
             return;
         }
+        if self.session.draft.test_text.len() > crate::regex_tester::policy::NORMAL_TEXT_BYTES {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Large input: above the normal 16 KiB range.",
+            );
+        }
+        let maximum_bytes = self.session.policy().text_bytes;
         let editor_size = ui.available_size().max(egui::vec2(1.0, 1.0));
         egui::ScrollArea::both()
             .id_source("regex_tester_text_scroll")
@@ -404,7 +422,11 @@ impl RegexTesterDialogState {
                     let (text, view) = self.session.text_edit_parts();
                     let mut layouter = |ui: &egui::Ui, text: &str, width: f32| {
                         ui.fonts(|fonts| {
-                            fonts.layout_job(highlighting::layout(text, &view, ui, width))
+                            fonts.layout_job(
+                                editor_layout::oversized_job(text, maximum_bytes).unwrap_or_else(
+                                    || highlighting::layout(text, &view, ui, width),
+                                ),
+                            )
                         })
                     };
                     let output = egui::TextEdit::multiline(text)
@@ -908,6 +930,88 @@ impl RegexTesterDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_tester_same_frame_paste_retains_full_unicode_buffers_in_all_three_editors() {
+        let text = "🦀".repeat(256 * 1024);
+        for (editor, id) in [
+            (0, "regex_tester_pattern"),
+            (1, "regex_tester_test_text"),
+            (2, "regex_substitution_replacement"),
+        ] {
+            let mut dialog = RegexTesterDialogState::default();
+            dialog.information_section = InformationSection::Substitution;
+            let now = Instant::now();
+            dialog.session.set_substitution_enabled(true, now);
+            dialog
+                .session
+                .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+            let ctx = egui::Context::default();
+            let run = |dialog: &mut RegexTesterDialogState, events: Vec<egui::Event>| {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 680.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            dialog.body(ui);
+                        });
+                    },
+                );
+            };
+            run(&mut dialog, Vec::new());
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(id)));
+            run(&mut dialog, vec![egui::Event::Paste(text.clone())]);
+            let buffer = |dialog: &RegexTesterDialogState| {
+                match editor {
+                    0 => dialog.session.draft.pattern.as_str(),
+                    1 => dialog.session.draft.test_text.as_str(),
+                    _ => dialog.session.draft.replacement.as_str(),
+                }
+                .to_owned()
+            };
+            assert_eq!(buffer(&dialog), text, "editor {editor} dropped pasted data");
+            assert!(dialog.session.pending_delay(Instant::now()).is_none());
+            if editor == 2 {
+                assert!(matches!(
+                    dialog.session.substitution_result(),
+                    Some(crate::regex_tester::SubstitutionEvaluationResult::Suspended(_))
+                ));
+            } else {
+                assert!(matches!(
+                    dialog.session.result(),
+                    Some(EvaluationResult::Suspended(_))
+                ));
+            }
+            run(&mut dialog, Vec::new());
+            assert_eq!(buffer(&dialog), text);
+            assert!(
+                !dialog
+                    .session
+                    .tick(Instant::now() + std::time::Duration::from_secs(1))
+            );
+            // Explicit recovery preserves normal editing through the same ID.
+            match editor {
+                0 => dialog.session.draft.pattern.clear(),
+                1 => dialog.session.draft.test_text.clear(),
+                _ => dialog.session.draft.replacement.clear(),
+            }
+            if editor == 2 {
+                dialog.session.mark_replacement_changed(Instant::now());
+            } else {
+                dialog.session.mark_changed(Instant::now());
+            }
+            run(&mut dialog, Vec::new());
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(id)));
+            run(&mut dialog, vec![egui::Event::Paste("é".into())]);
+            assert_eq!(buffer(&dialog), "é");
+        }
+    }
 
     #[test]
     fn regex_tester_clipboard_full_replacement_copy_requires_current_success_and_render_has_no_io()
