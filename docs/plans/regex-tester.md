@@ -3546,8 +3546,11 @@ The task-specific commit map above remains the active checkpoint cadence. One im
 | M2-A | complete | `413f9623`; 6 targeted offline Nextest tests and formatting passed. AST retains original byte spans; compiler validates before explaining. |
 | M2-B | complete | `eb1a38fa`; 26 reference entries, 4 targeted Nextest tests passed; typed categories and fragment context. |
 | M2-C | complete | `7d0df134`; 12 examples, 3 targeted Nextest tests verify every sample and both substitutions. |
-| M3-A | in_progress | Bounded history with atomic publication and failed-load protection. |
-| M3-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
+| M3-A | complete | `02e7d44a`; 8 targeted Nextest tests, cap50 and failed-load/atomic-publication protection verified. |
+| M3-B | complete | `0dce7610`; 13 persistence tests pass, typed stable IDs and atomic protected CRUD. |
+| M4-A | in_progress | Normal regex_tester plugin discovery and registration. |
+| M4-B/M5-A | pending | Combined functioning typed-open and tracked dialog lifecycle boundary. |
+| M5-B–M13-B | pending | Execute task-specific map; targeted Nextest at stable boundaries, final review and required manual acceptance. |
 
 Manual acceptance remains required and unverified. Native computer control availability must be checked before the acceptance pass; no automated state test is a substitute for real OS checks.
 
@@ -3573,3 +3576,7 @@ M1-A/B independent review: no substantive findings. Read-only review covered Uni
 M1-C/M2-A independent review: no substantive findings in replacement counting, capture expansion, zero-width semantics, original AST spans, or scoped-flag explanation claims.
 
 M3 storage contract: independent settings-relative history/preset files; typed versioned documents, health latch blocks writes after invalid loads; revalidate disk before mutation, atomic save before memory publication, explicit reload recovery. History stores pattern/flags only, max 50; presets use stable IDs and explicit optional text/replacement. No broad data-recovery catalog migration required.
+
+M2-B/C independent catalog review: no substantive findings; all required categories/examples and contracts are present with accurate limitations.
+
+Checkpoint adjustment: M4-B and M5-A will be combined if required by the concrete host integration. The new typed opening method needs a functioning owned dialog state and tracked lifecycle, so an inert no-op host is not an acceptable intermediate implementation. Plugin registration M4-A remains separate, and core layout M5-B follows the integrated opening shell. This is a bounded combination permitted by the commit-map guidance, not a change in product scope.
