@@ -1,6 +1,7 @@
 use crate::regex_tester::{EvaluationLimit, EvaluationResult, MatchCompleteness, RegexSession};
 use eframe::egui;
 use std::time::Instant;
+mod highlighting;
 
 fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
@@ -181,7 +182,9 @@ impl RegexTesterDialogState {
         bounded_area(ui, layout.editor, "regex_tester_editor_area", |ui| {
             self.text_area(ui)
         });
-        self.session.tick(now);
+        if self.session.tick(now) {
+            ui.ctx().request_repaint();
+        }
         if let Some(validation) = layout.validation {
             bounded_area(ui, validation, "regex_tester_validation", |ui| {
                 self.validation_area(ui)
@@ -327,16 +330,26 @@ impl RegexTesterDialogState {
             .auto_shrink([false, false])
             .max_height(editor_size.y)
             .show(ui, |ui| {
-                let response = ui.add_sized(
-                    editor_size,
-                    egui::TextEdit::multiline(&mut self.session.draft.test_text)
+                let changed = {
+                    let (text, view) = self.session.text_edit_parts();
+                    let mut layouter = |ui: &egui::Ui, text: &str, width: f32| {
+                        ui.fonts(|fonts| {
+                            fonts.layout_job(highlighting::layout(text, &view, ui, width))
+                        })
+                    };
+                    let output = egui::TextEdit::multiline(text)
                         .id(egui::Id::new("regex_tester_test_text"))
                         .font(egui::TextStyle::Monospace)
                         .desired_rows(1)
                         .desired_width(editor_size.x)
-                        .hint_text("Type or paste text to test"),
-                );
-                if response.changed() {
+                        .min_size(editor_size)
+                        .layouter(&mut layouter)
+                        .hint_text("Type or paste text to test")
+                        .show(ui);
+                    highlighting::paint_markers(ui, &output, text, &view);
+                    output.response.changed()
+                };
+                if changed {
                     self.session.mark_changed(Instant::now());
                 }
             });

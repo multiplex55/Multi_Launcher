@@ -1,5 +1,6 @@
 //! Deterministic, non-blocking scheduling for one editable tester document.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{EvaluationPolicy, EvaluationResult, RegexDraft, RegexMatch, evaluate_with_policy};
@@ -15,6 +16,22 @@ pub struct RegexSession {
     pending_deadline: Option<Instant>,
     result: Option<EvaluationResult>,
     selected_index: Option<usize>,
+    evaluated_source: Option<Arc<str>>,
+}
+
+/// Borrowed presentation data never clones matches or capture text.
+pub struct EvaluatedText<'a> {
+    pub revision: u64,
+    pub evaluated_revision: Option<u64>,
+    pub source: Option<&'a str>,
+    pub matches: &'a [RegexMatch],
+    pub selected_index: Option<usize>,
+}
+
+impl EvaluatedText<'_> {
+    pub fn applies_to(&self, text: &str) -> bool {
+        self.evaluated_revision == Some(self.revision) && self.source == Some(text)
+    }
 }
 
 impl RegexSession {
@@ -29,6 +46,7 @@ impl RegexSession {
     pub fn mark_changed(&mut self, now: Instant) {
         self.revision = self.revision.wrapping_add(1);
         self.evaluated_revision = None;
+        self.evaluated_source = None;
         match self
             .policy
             .check_inputs(&self.draft.pattern, &self.draft.test_text)
@@ -61,6 +79,8 @@ impl RegexSession {
             &self.policy,
         ));
         self.evaluated_revision = Some(self.revision);
+        self.evaluated_source = matches!(self.result, Some(EvaluationResult::Success { .. }))
+            .then(|| Arc::from(self.draft.test_text.as_str()));
         let count = self.matches().len();
         self.selected_index = (count > 0).then(|| self.selected_index.unwrap_or(0).min(count - 1));
         true
@@ -100,6 +120,21 @@ impl RegexSession {
         let count = self.matches().len();
         self.selected_index = (count > 0).then(|| index.min(count - 1));
     }
+
+    pub fn text_edit_parts(&mut self) -> (&mut String, EvaluatedText<'_>) {
+        let matches = match self.result.as_ref() {
+            Some(EvaluationResult::Success { matches, .. }) => matches.as_slice(),
+            _ => &[],
+        };
+        let view = EvaluatedText {
+            revision: self.revision,
+            evaluated_revision: self.evaluated_revision,
+            source: self.evaluated_source.as_deref(),
+            matches,
+            selected_index: self.selected_index.filter(|index| *index < matches.len()),
+        };
+        (&mut self.draft.test_text, view)
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +160,9 @@ mod tests {
         assert!(!session.tick(now + Duration::from_secs(1)));
         session.ensure_initial_evaluation(now + Duration::from_secs(1));
         assert!(session.pending_delay(now).is_none());
+        assert_eq!(session.evaluated_source.as_deref(), Some("aaa"));
+        session.mark_changed(now);
+        assert!(session.evaluated_source.is_none());
     }
 
     #[test]
