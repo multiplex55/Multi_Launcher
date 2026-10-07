@@ -22,6 +22,7 @@ struct AliasValidation {
 enum CommitRejection {
     StaleSnapshot,
     DuplicateAlias,
+    InvalidEditorState,
 }
 
 #[derive(Debug)]
@@ -35,6 +36,7 @@ pub struct SnippetDialog {
     pub open: bool,
     entries: Vec<SnippetEntry>,
     edit_idx: Option<usize>,
+    body_edit_session: u64,
     alias: String,
     text: String,
     hide_contents: bool,
@@ -62,6 +64,10 @@ fn matching_snippet_indices(entries: &[SnippetEntry], filter: &str) -> Vec<usize
         .enumerate()
         .filter_map(|(index, entry)| matches_snippet_filter(entry, filter).then_some(index))
         .collect()
+}
+
+fn body_editor_id_source(session: u64) -> (&'static str, u64) {
+    ("snippet_body_editor", session)
 }
 
 fn single_line_alias(alias: &str) -> String {
@@ -138,7 +144,11 @@ fn is_load_failure(error: &anyhow::Error) -> bool {
 
 impl SnippetDialog {
     pub fn open(&mut self) {
-        let _ = self.load_from(SNIPPETS_FILE);
+        self.open_from(SNIPPETS_FILE);
+    }
+
+    fn open_from(&mut self, path: &str) {
+        let _ = self.load_from(path);
         self.open = true;
         self.reset_editor();
         self.filter.clear();
@@ -146,11 +156,35 @@ impl SnippetDialog {
         self.pending_removal = None;
     }
 
+    pub fn ensure_open(&mut self) {
+        self.ensure_open_from(SNIPPETS_FILE);
+    }
+
+    fn ensure_open_from(&mut self, path: &str) {
+        if !self.open {
+            self.open_from(path);
+        }
+    }
+
+    pub fn end_session(&mut self) {
+        self.open = false;
+        self.reset_editor();
+        self.filter.clear();
+        self.load_error = None;
+        self.inline_error = None;
+        self.pending_removal = None;
+    }
+
     pub fn open_edit(&mut self, alias: &str) {
+        self.open_edit_from(SNIPPETS_FILE, alias);
+    }
+
+    fn open_edit_from(&mut self, path: &str, alias: &str) {
         self.pending_removal = None;
         self.inline_error = None;
-        if self.load_from(SNIPPETS_FILE).is_err() {
+        if self.load_from(path).is_err() {
             self.reset_editor();
+            self.filter.clear();
             self.open = true;
             return;
         }
@@ -166,6 +200,7 @@ impl SnippetDialog {
         let Some(entry) = self.entries.get(index).cloned() else {
             return false;
         };
+        self.body_edit_session = self.body_edit_session.wrapping_add(1);
         self.pending_removal = None;
         self.inline_error = None;
         self.edit_idx = Some(index);
@@ -178,6 +213,7 @@ impl SnippetDialog {
     }
 
     fn begin_new(&mut self, alias: &str) {
+        self.body_edit_session = self.body_edit_session.wrapping_add(1);
         self.pending_removal = None;
         self.inline_error = None;
         self.edit_idx = Some(self.entries.len());
@@ -194,6 +230,26 @@ impl SnippetDialog {
         self.text.clear();
         self.hide_contents = false;
         self.body_revealed = false;
+    }
+
+    fn apply_window_open(&mut self, open: bool) {
+        if open {
+            self.open = true;
+        } else {
+            self.end_session();
+        }
+    }
+
+    fn cancel_editor(&mut self) {
+        self.reset_editor();
+        self.inline_error = None;
+        self.pending_removal = None;
+    }
+
+    fn reveal_contents(&mut self) {
+        if self.edit_idx.is_some() {
+            self.body_revealed = true;
+        }
     }
 
     fn set_hide_contents(&mut self, hide_contents: bool) {
@@ -241,6 +297,19 @@ impl SnippetDialog {
         Ok((expected, candidate, alias_validation))
     }
 
+    fn save_editor(&mut self, path: &str) -> Result<(), CommitFailure> {
+        let (expected, candidate, alias_validation) = match self.editor_candidate() {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.inline_error = Some(error.to_owned());
+                return Err(CommitFailure::Rejected(CommitRejection::InvalidEditorState));
+            }
+        };
+        self.commit_candidate(path, &expected, candidate, Some(alias_validation))?;
+        self.reset_editor();
+        Ok(())
+    }
+
     fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
         self.pending_removal = None;
         self.inline_error = None;
@@ -279,6 +348,9 @@ impl SnippetDialog {
                     }
                     CommitRejection::DuplicateAlias => {
                         "An entry with this exact alias already exists.".to_owned()
+                    }
+                    CommitRejection::InvalidEditorState => {
+                        "The editor is no longer available.".to_owned()
                     }
                 });
                 Err(CommitFailure::Rejected(rejection))
@@ -367,12 +439,12 @@ impl SnippetDialog {
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         if !self.open {
-            self.pending_removal = None;
+            self.end_session();
             return;
         }
         let mut window_open = self.open;
         let mut close = false;
-        let mut save_request = None;
+        let mut save_request = false;
         let mut confirm_removal = false;
         egui::Window::new("Snippets")
             .default_size((600.0, 500.0))
@@ -397,7 +469,13 @@ impl SnippetDialog {
                         ui.text_edit_singleline(&mut self.alias);
                     });
                     let mut hide_contents = self.hide_contents;
-                    if ui.checkbox(&mut hide_contents, "Hide contents").changed() {
+                    if ui
+                        .checkbox(&mut hide_contents, "Hide contents")
+                        .on_hover_text(
+                            "Hides previews only; saved text and copied clipboard/history remain plaintext.",
+                        )
+                        .changed()
+                    {
                         self.set_hide_contents(hide_contents);
                     }
                     ui.label("Text");
@@ -416,6 +494,9 @@ impl SnippetDialog {
                             .show(ui, |ui| {
                                 ui.add(
                                     egui::TextEdit::multiline(&mut self.text)
+                                        .id_source(body_editor_id_source(
+                                            self.body_edit_session,
+                                        ))
                                         .desired_width(f32::INFINITY)
                                         .desired_rows(desired_rows),
                                 );
@@ -423,7 +504,7 @@ impl SnippetDialog {
                     } else {
                         ui.label("Contents hidden");
                         if ui.button("Reveal to Edit").clicked() {
-                            self.body_revealed = true;
+                            self.reveal_contents();
                         }
                     }
                     ui.horizontal(|ui| {
@@ -431,21 +512,11 @@ impl SnippetDialog {
                             if self.alias.trim().is_empty() || self.text.trim().is_empty() {
                                 app.report_error_message("ui operation", "Both fields required");
                             } else {
-                                match self.editor_candidate() {
-                                    Ok((expected, candidate, alias_validation)) => {
-                                        save_request =
-                                            Some((expected, candidate, Some(alias_validation)));
-                                    }
-                                    Err(error) => {
-                                        self.inline_error = Some(error.to_owned());
-                                    }
-                                }
+                                save_request = true;
                             }
                         }
                         if ui.button("Cancel").clicked() {
-                            self.reset_editor();
-                            self.inline_error = None;
-                            self.pending_removal = None;
+                            self.cancel_editor();
                         }
                     });
                     if let Some(error) = &self.inline_error {
@@ -608,13 +679,9 @@ impl SnippetDialog {
                 }
             });
 
-        self.open = window_open;
-        if let Some((expected, candidate, alias_validation)) = save_request {
-            match self.commit_candidate(SNIPPETS_FILE, &expected, candidate, alias_validation) {
-                Ok(()) => {
-                    Self::finish_success(app, "Saved snippet");
-                    self.reset_editor();
-                }
+        if save_request {
+            match self.save_editor(SNIPPETS_FILE) {
+                Ok(()) => Self::finish_success(app, "Saved snippet"),
                 Err(failure) => Self::report_commit_failure(app, &failure),
             }
         }
@@ -626,21 +693,20 @@ impl SnippetDialog {
             }
         }
         if close {
-            self.open = false;
+            window_open = false;
         }
-        if !self.open {
-            self.pending_removal = None;
-        }
+        self.apply_window_open(window_open);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AliasValidation, CommitFailure, CommitRejection, SnippetDialog, matches_snippet_filter,
-        matching_snippet_indices, single_line_alias,
+        AliasValidation, CommitFailure, CommitRejection, SnippetDialog, body_editor_id_source,
+        matches_snippet_filter, matching_snippet_indices, single_line_alias,
     };
     use crate::plugins::snippets::{SnippetEntry, load_snippets, save_snippets};
+    use eframe::egui;
 
     fn snippet(alias: &str, text: &str) -> SnippetEntry {
         SnippetEntry {
@@ -735,6 +801,169 @@ mod tests {
     }
 
     #[test]
+    fn command_edit_path_uses_concealed_state_for_existing_masked_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let mut hidden = snippet("masked", "private λ\nbody");
+        hidden.hide_contents = true;
+        save_snippets(
+            path.to_str().unwrap(),
+            &[hidden.clone(), snippet("visible", "public")],
+        )
+        .unwrap();
+        let mut dialog = SnippetDialog::default();
+
+        dialog.open_edit_from(path.to_str().unwrap(), "masked");
+        assert!(dialog.open);
+        assert!(dialog.hide_contents);
+        assert!(!dialog.body_revealed);
+        assert_eq!(dialog.text, hidden.text);
+
+        dialog.open_edit_from(path.to_str().unwrap(), "visible");
+        assert!(!dialog.hide_contents);
+        assert!(dialog.body_revealed);
+        assert_eq!(dialog.text, "public");
+
+        dialog.open_edit_from(path.to_str().unwrap(), "new alias");
+        assert_eq!(dialog.alias, "new alias");
+        assert!(!dialog.hide_contents);
+        assert!(dialog.body_revealed);
+        assert!(dialog.text.is_empty());
+    }
+
+    #[test]
+    fn body_editor_undo_state_is_isolated_between_edit_sessions() {
+        use std::cell::Cell;
+
+        let mut masked = snippet("private", "confidential λ\nsecond line");
+        masked.hide_contents = true;
+        let mut dialog = SnippetDialog {
+            entries: vec![masked, snippet("public", "public body")],
+            ..SnippetDialog::default()
+        };
+        assert!(dialog.begin_existing(0));
+        assert!(!dialog.body_revealed);
+        dialog.reveal_contents();
+
+        let context = egui::Context::default();
+        let editor_bounds = Cell::new(egui::Rect::NOTHING);
+        let frame = |text: &mut String, session: u64, time: f64, events: Vec<egui::Event>| {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 480.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .expect("root viewport is present in RawInput")
+                .inner_rect = input.screen_rect;
+            context.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::multiline(text)
+                            .id_source(body_editor_id_source(session))
+                            .desired_width(300.0)
+                            .desired_rows(4),
+                    );
+                    editor_bounds.set(response.rect);
+                });
+            })
+        };
+
+        let first_session = dialog.body_edit_session;
+        let _ = frame(&mut dialog.text, first_session, 0.0, Vec::new());
+        let point = editor_bounds.get().left_top() + egui::vec2(12.0, 12.0);
+        let pointer_button = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = frame(
+            &mut dialog.text,
+            first_session,
+            0.1,
+            vec![egui::Event::PointerMoved(point)],
+        );
+        let _ = frame(
+            &mut dialog.text,
+            first_session,
+            0.2,
+            vec![pointer_button(true)],
+        );
+        let _ = frame(
+            &mut dialog.text,
+            first_session,
+            0.3,
+            vec![pointer_button(false)],
+        );
+        let _ = frame(
+            &mut dialog.text,
+            first_session,
+            0.4,
+            vec![egui::Event::Text(" edited".into())],
+        );
+        assert_ne!(dialog.text, "confidential λ\nsecond line");
+
+        dialog.set_hide_contents(false);
+        dialog.set_hide_contents(true);
+        assert!(!dialog.body_revealed);
+        assert_eq!(dialog.body_edit_session, first_session);
+        dialog.reveal_contents();
+        assert_eq!(dialog.body_edit_session, first_session);
+        dialog.cancel_editor();
+        assert!(dialog.begin_existing(1));
+        let second_session = dialog.body_edit_session;
+        assert_ne!(second_session, first_session);
+        assert_eq!(dialog.text, "public body");
+
+        let _ = frame(&mut dialog.text, second_session, 0.5, Vec::new());
+        let point = editor_bounds.get().left_top() + egui::vec2(12.0, 12.0);
+        let pointer_button = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let _ = frame(
+            &mut dialog.text,
+            second_session,
+            0.6,
+            vec![egui::Event::PointerMoved(point)],
+        );
+        let _ = frame(
+            &mut dialog.text,
+            second_session,
+            0.7,
+            vec![pointer_button(true)],
+        );
+        let _ = frame(
+            &mut dialog.text,
+            second_session,
+            0.8,
+            vec![pointer_button(false)],
+        );
+        let _ = frame(
+            &mut dialog.text,
+            second_session,
+            0.9,
+            vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+            }],
+        );
+        assert_eq!(dialog.text, "public body");
+    }
+
+    #[test]
     fn new_masked_draft_persists_plaintext_and_resets_after_save() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("snippets.json");
@@ -747,24 +976,17 @@ mod tests {
         dialog.set_hide_contents(true);
         assert!(dialog.body_revealed);
 
-        let (expected, candidate, alias_validation) = dialog.editor_candidate().unwrap();
+        let (_, candidate, _) = dialog.editor_candidate().unwrap();
         assert_eq!(candidate[0].text, body);
         assert!(candidate[0].hide_contents);
-        dialog
-            .commit_candidate(
-                path.to_str().unwrap(),
-                &expected,
-                candidate,
-                Some(alias_validation),
-            )
-            .unwrap();
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
 
         assert_eq!(load_snippets(path.to_str().unwrap()).unwrap()[0].text, body);
         assert!(load_snippets(path.to_str().unwrap()).unwrap()[0].hide_contents);
-        dialog.reset_editor();
         assert!(dialog.text.is_empty());
         assert!(!dialog.hide_contents);
         assert!(!dialog.body_revealed);
+        assert!(dialog.edit_idx.is_none());
     }
 
     #[test]
@@ -788,21 +1010,16 @@ mod tests {
             !dialog.body_revealed,
             "unmasking does not reveal the current session"
         );
-        let (expected, candidate, alias_validation) = dialog.editor_candidate().unwrap();
+        let (_, candidate, _) = dialog.editor_candidate().unwrap();
         assert_eq!(candidate[0].text, body);
-        dialog
-            .commit_candidate(
-                path.to_str().unwrap(),
-                &expected,
-                candidate,
-                Some(alias_validation),
-            )
-            .unwrap();
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
 
         let saved = load_snippets(path.to_str().unwrap()).unwrap();
         assert_eq!(saved[0].alias, "new alias");
         assert_eq!(saved[0].text, body);
         assert!(!saved[0].hide_contents);
+        assert!(!dialog.body_revealed);
+        assert!(dialog.text.is_empty());
     }
 
     #[test]
@@ -823,20 +1040,104 @@ mod tests {
         assert!(!dialog.body_revealed);
         assert_eq!(dialog.text, "draft λ\nbody");
 
-        dialog.body_revealed = true;
+        dialog.reveal_contents();
+        assert!(dialog.body_revealed);
         dialog.text = "revealed replacement 中文".to_owned();
-        let (expected, candidate, alias_validation) = dialog.editor_candidate().unwrap();
-        dialog
-            .commit_candidate(
-                path.to_str().unwrap(),
-                &expected,
-                candidate,
-                Some(alias_validation),
-            )
-            .unwrap();
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
         let saved = load_snippets(path.to_str().unwrap()).unwrap();
         assert_eq!(saved[0].text, "revealed replacement 中文");
         assert!(!saved[0].hide_contents);
+        assert!(!dialog.body_revealed);
+        assert!(dialog.edit_idx.is_none());
+    }
+
+    #[test]
+    fn cancel_and_close_clear_revealed_draft_immediately() {
+        let mut dialog = SnippetDialog {
+            entries: vec![snippet("private", "body")],
+            ..SnippetDialog::default()
+        };
+        dialog.reveal_contents();
+        assert!(!dialog.body_revealed, "reveal requires an active editor");
+        assert!(dialog.begin_existing(0));
+        dialog.reveal_contents();
+        dialog.text = "unsaved reveal".to_owned();
+        dialog.cancel_editor();
+        assert!(!dialog.body_revealed);
+        assert!(dialog.text.is_empty());
+        assert!(dialog.edit_idx.is_none());
+
+        assert!(dialog.begin_existing(0));
+        dialog.reveal_contents();
+        dialog.text = "another unsaved reveal".to_owned();
+        dialog.apply_window_open(false);
+        assert!(!dialog.open);
+        assert!(!dialog.body_revealed);
+        assert!(dialog.text.is_empty());
+        assert!(dialog.edit_idx.is_none());
+    }
+
+    #[test]
+    fn failed_editor_save_preserves_revealed_session_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let mut original = snippet("masked", "original body");
+        original.hide_contents = true;
+        save_snippets(path.to_str().unwrap(), &[original]).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.open_edit_from(path.to_str().unwrap(), "masked");
+        dialog.reveal_contents();
+        dialog.alias = "changed alias".to_owned();
+        dialog.text = "unsaved revised λ\nbody".to_owned();
+        dialog.set_hide_contents(false);
+        let draft = dialog.text.clone();
+        let invalid = b"external malformed update";
+        std::fs::write(&path, invalid).unwrap();
+
+        assert!(matches!(
+            dialog.save_editor(path.to_str().unwrap()),
+            Err(CommitFailure::Persistence(_))
+        ));
+        assert_eq!(dialog.edit_idx, Some(0));
+        assert_eq!(dialog.alias, "changed alias");
+        assert_eq!(dialog.text, draft);
+        assert!(dialog.body_revealed);
+        assert!(!dialog.hide_contents);
+        assert!(dialog.load_error.is_some());
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn ensure_open_is_idempotent_and_reopen_reloads_after_session_end() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let mut original = snippet("masked", "original body");
+        original.hide_contents = true;
+        save_snippets(path.to_str().unwrap(), &[original]).unwrap();
+        let mut dialog = SnippetDialog::default();
+
+        dialog.ensure_open_from(path.to_str().unwrap());
+        assert!(dialog.begin_existing(0));
+        dialog.reveal_contents();
+        dialog.text = "unsaved draft".to_owned();
+        let external = vec![snippet("masked", "external update")];
+        save_snippets(path.to_str().unwrap(), &external).unwrap();
+
+        dialog.ensure_open_from(path.to_str().unwrap());
+        assert!(dialog.open);
+        assert_eq!(dialog.text, "unsaved draft");
+        assert!(dialog.body_revealed);
+        assert_eq!(dialog.entries[0].text, "original body");
+
+        dialog.end_session();
+        assert!(dialog.text.is_empty());
+        assert!(!dialog.body_revealed);
+        dialog.ensure_open_from(path.to_str().unwrap());
+        assert!(dialog.open);
+        assert!(dialog.edit_idx.is_none());
+        assert!(dialog.text.is_empty());
+        assert!(!dialog.body_revealed);
+        assert_eq!(dialog.entries, external);
     }
 
     #[test]
