@@ -24,6 +24,7 @@ It’s designed to be “one hotkey away” from:
 - [Date arithmetic](#date-arithmetic)
 - [File-search plugin](#file-search-plugin)
 - [Clipboard Modify](#clipboard-modify)
+- [Clipboard Snippets](#clipboard-snippets)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
 - [Regex Tester](#regex-tester)
 - [Screen region OCR](#screen-region-ocr)
@@ -431,6 +432,37 @@ Common examples:
 - `cm template prompt-context` applies a configured template immediately.
 - `cm apply clean-lines` runs a saved pipeline immediately.
 - `cm undo` restores the clipboard text captured before the last Clipboard Modify write.
+
+## Clipboard Snippets
+
+Use `cs` to open the Snippets editor. The resizable editor keeps Edit and Remove
+available for long aliases or bodies, and shows each body preview on one line.
+Use the filter to search aliases and body text; **Clear Filter** resets it, and
+the match count shows how many entries are visible.
+
+Common commands:
+
+- `cs <query>` searches aliases and bodies; activate a result to copy its exact
+  saved text.
+- `cs list [query]` lists matching snippets, which can also be activated to copy.
+- `cs add <alias> <text>` creates a snippet or updates the existing exact alias.
+- `cs edit <alias>` finds an entry; activate its Edit result to open it in the
+  editor. `cs edit <alias> <text>` updates or creates that alias directly.
+- `cs rm <query>` finds matching snippets to remove.
+
+In the editor, **Hide contents** masks that snippet's previews. A saved masked
+snippet opens concealed; choose **Reveal to Edit** to show its body. Reveal lasts
+only for the current editing session and resets after Save, Cancel, closing the
+window, switching entries, or reopening. You can change the alias or masking
+setting and save without revealing the body; those changes preserve the saved
+text. The GUI rejects duplicate exact aliases when creating or renaming. Its
+Remove action asks for inline **Confirm** or **Cancel** before deleting an entry.
+
+Masking is visual only: snippets remain plaintext in `snippets.json`, in the
+underlying copy action, on the clipboard after use, and in clipboard history.
+Hidden bodies remain searchable, and text typed into the filter remains visible.
+The Dashboard also masks hidden snippet previews; its clipboard-history section
+is unchanged.
 
 ## JSON and screen color utilities
 
