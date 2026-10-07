@@ -48,6 +48,16 @@ pub struct PresetInput {
     pub replacement: Option<String>,
 }
 
+/// Content-only update payload. The current saved name and stable ID are
+/// preserved inside the same disk-candidate mutation as the content edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetContent {
+    pub pattern: String,
+    pub flags: RegexFlags,
+    pub sample_text: Option<String>,
+    pub replacement: Option<String>,
+}
+
 impl PresetInput {
     fn into_preset(self, id: PresetId, name: String) -> RegexPreset {
         RegexPreset {
@@ -156,6 +166,22 @@ impl PresetStore {
             let index = preset_index(path, document, id)?;
             let name = validate_name(path, &document.presets, &input.name, Some(id))?;
             document.presets[index] = input.into_preset(id, name);
+            Ok(())
+        })
+    }
+
+    pub fn update_content(
+        &mut self,
+        id: PresetId,
+        content: PresetContent,
+    ) -> Result<(), RegexStoreError> {
+        self.mutate(move |document, path| {
+            let index = preset_index(path, document, id)?;
+            let preset = &mut document.presets[index];
+            preset.pattern = content.pattern;
+            preset.flags = content.flags;
+            preset.sample_text = content.sample_text;
+            preset.replacement = content.replacement;
             Ok(())
         })
     }

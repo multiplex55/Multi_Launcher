@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::model::RegexFlags;
 
 mod presets;
-pub use presets::{PresetId, PresetInput, PresetStore, RegexPreset};
+pub use presets::{PresetContent, PresetId, PresetInput, PresetStore, RegexPreset};
 
 pub const MAX_RECENT_REGEXES: usize = 50;
 const HISTORY_VERSION: u32 = 1;

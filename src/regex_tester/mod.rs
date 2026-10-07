@@ -20,8 +20,8 @@ pub use model::{
     SubstitutionEvaluationResult, SubstitutionResult,
 };
 pub use persistence::{
-    HistoryEntry, HistoryStore, MAX_RECENT_REGEXES, PresetId, PresetInput, PresetStore,
-    RegexPreset, RegexStoreError, StoreDiagnostic, StoreLoadStatus,
+    HistoryEntry, HistoryStore, MAX_RECENT_REGEXES, PresetContent, PresetId, PresetInput,
+    PresetStore, RegexPreset, RegexStoreError, StoreDiagnostic, StoreLoadStatus,
 };
 pub use policy::{EvaluationLimit, EvaluationPolicy, EvaluationSuspension};
 pub use reference::{
