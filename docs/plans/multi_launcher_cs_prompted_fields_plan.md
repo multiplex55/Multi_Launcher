@@ -1,6 +1,6 @@
 # Multi Launcher — Plan B: Prompted Snippet Fields
 
-**Status:** M1-A through M6-A implementation and scoped automated evidence complete; M6-B P2 remediation is focused-verified with parent commit and reviewer reread pending; native smoke remains environment-blocked.\
+**Status:** M1-A through M6-B complete, including focused-verified review remediation and independent reread; native smoke remains explicitly environment-blocked.\
 **Deliverable:** Extend the existing Clipboard Snippets (`cs`) plugin to support opt-in, user-filled template fields, without creating a new plugin.  
 **Execution baseline:** `prompt-fields` at `888a55fb793cdcf2c44202ed56f2752abe8c9da1`; the user approved the current branch HEAD in place of the ZIP requirement on 2026-10-07.\
 **Original reference snapshot:** `multi_launcher(20261007-185532).zip` (SHA-256 `0d1deb806acd61857693a0559d2cd5cc5bf7f4336e3259969e9749ce9504e7ec`); retained as historical context, not an execution prerequisite.\
@@ -65,7 +65,10 @@
   cargo nextest run --lib -E 'test(gui::snippet_dialog::tests::preview_uses_unsaved_draft_without_mutating_editor_or_persisted_state)'
   ```
 
-- M6-B P2 status — source and focused evidence complete; parent commit and read-only reviewer reread pending. Native smoke remains explicitly environment-blocked.
+- M6-B P2 status — complete; commit `4ce7780a35cfa95677b8b54081ec934040222008`. The read-only reviewer confirmed the original P2 is resolved, owned focus/editor state is preserved, and no substantive findings remain in the repair or direct callers. No additional tests or source changes were requested.
+- Post-remediation executable: `cargo build --locked --bin multi_launcher` passed (exit 0, 1m 20s). The local debug executable includes the final privacy repair. The previously demonstrated native capture/accessibility limitation was not subjected to another unsupported automation campaign.
+- Final audit: cumulative `git diff --check 888a55fb793cdcf2c44202ed56f2752abe8c9da1..HEAD` passed; live snippet constructors use canonical alias actions, while indexed clipboard-history actions remain literal. Source working tree was clean after the M6-B commit; this closeout updates only the existing ledger. No full repository suite was run under the scoped verification budget. Native keyboard, focus, clipboard, root-position/flash, and radial smoke assertions remain unverified; use the focused human script in §6.
+- Changed files against the approved baseline (27): `README.md`; this plan; `src/commands/{bus.rs,headless.rs,host.rs,mod.rs,model.rs,parser.rs}`; `src/commands/handlers/{headless_gui.rs,mod.rs,snippet_run.rs}`; `src/dashboard/data_cache.rs`; `src/dashboard/widgets/{clipboard_snippets.rs,command_history.rs}`; `src/gui/{command_host.rs,mod.rs,radial_actions.rs,render.rs,snippet_dialog.rs,snippet_prompt_dialog.rs,universal_action_catalog.rs}`; `src/plugins/{mod.rs,snippet_template.rs,snippets.rs}`; `src/universal_actions/resolver.rs`; `tests/{plugin_exact_match.rs,snippets_plugin.rs}`.
 
 > **Required directive:** Use the project's active checkpoint commit cadence and define the task-specific commit boundaries in the plan.
 
