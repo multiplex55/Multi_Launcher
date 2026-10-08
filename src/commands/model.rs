@@ -108,7 +108,7 @@ impl Command {
             Self::ClipboardModify(_) => "clipboard_modify",
             Self::Screenshot(_) => "screenshot",
             Self::ScreenDraw(_) => "screen_draw",
-            Self::CoordinateTool(_) => "coordinate_tool",
+            Self::CoordinateTool(_) => "mouse",
             Self::Shell(_) => "shell",
             Self::Clipboard(_) => "clipboard",
             Self::Calculator(_) => "calculator",
@@ -188,6 +188,8 @@ kinds!(ScreenDrawCommand,
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoordinateToolCommand {
+    Settings,
+    Help,
     ToggleHud,
     SetHudEnabled(bool),
     SetSpace(crate::coordinate_tool::CoordinateSpace),
@@ -212,6 +214,7 @@ pub enum CoordinateToolCommand {
 }
 
 kinds!(CoordinateToolCommand,
+    Self::Settings => "settings", Self::Help => "help",
     Self::ToggleHud => "toggle_hud", Self::SetHudEnabled(_) => "set_hud_enabled",
     Self::SetSpace(_) => "set_space", Self::SetHudDetail(_) => "set_hud_detail",
     Self::SetOffset(_) => "set_offset", Self::Freeze => "freeze", Self::Unfreeze => "unfreeze",

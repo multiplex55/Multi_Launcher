@@ -109,6 +109,9 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::CoordinateTool(crate::commands::CoordinateToolCommand::Pick) => {
             InteractionRequirement::ExclusiveCapture
         }
+        Command::CoordinateTool(crate::commands::CoordinateToolCommand::Settings) => {
+            InteractionRequirement::LauncherUi
+        }
         Command::Launcher(_)
         | Command::Radial(
             crate::commands::RadialCommand::Edit | crate::commands::RadialCommand::Skins,
@@ -483,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_pick_releases_radial_before_capture_but_cancel_is_passive() {
+    fn mouse_pick_and_settings_use_their_required_handoffs() {
         assert_eq!(
             command_requirement(&Command::CoordinateTool(
                 crate::commands::CoordinateToolCommand::Pick,
@@ -495,6 +498,12 @@ mod tests {
                 crate::commands::CoordinateToolCommand::Cancel,
             )),
             InteractionRequirement::None
+        );
+        assert_eq!(
+            command_requirement(&Command::CoordinateTool(
+                crate::commands::CoordinateToolCommand::Settings,
+            )),
+            InteractionRequirement::LauncherUi
         );
     }
 

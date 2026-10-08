@@ -262,7 +262,7 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         return Ok(Command::Data(parse_data(action)));
     }
 
-    if let Some(command) = parse_coordinate_tool_wire(action) {
+    if let Some(command) = parse_mouse_wire(action) {
         return Ok(Command::CoordinateTool(command));
     }
 
@@ -413,11 +413,11 @@ fn parse_screen_draw(action: &str) -> Option<ScreenDrawCommand> {
 }
 
 /// Parse the private, colon-delimited action protocol emitted by the built-in
-/// coordinate plugin. Returning a typed invalid operation for a recognized
-/// family prevents malformed controls from falling through to external launch.
-pub(crate) fn parse_coordinate_tool_wire(action: &Action) -> Option<CoordinateToolCommand> {
+/// Mouse plugin. Malformed controls in the recognized namespace remain typed
+/// invalid operations instead of falling through to external launch.
+pub(crate) fn parse_mouse_wire(action: &Action) -> Option<CoordinateToolCommand> {
     let (family, operation) = action.action.split_once(':')?;
-    if !family.eq_ignore_ascii_case("coord") && !family.eq_ignore_ascii_case("crosshair") {
+    if !family.eq_ignore_ascii_case("mouse") {
         return None;
     }
 
@@ -427,7 +427,7 @@ pub(crate) fn parse_coordinate_tool_wire(action: &Action) -> Option<CoordinateTo
     };
     if action.args.is_some() {
         return Some(invalid(
-            "coordinate controls do not accept action arguments".into(),
+            "mouse controls do not accept action arguments".into(),
         ));
     }
 
@@ -436,10 +436,13 @@ pub(crate) fn parse_coordinate_tool_wire(action: &Action) -> Option<CoordinateTo
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>();
     let tokens = normalized.iter().map(String::as_str).collect::<Vec<_>>();
-    let command = if family.eq_ignore_ascii_case("coord") {
-        parse_coord_operation(&tokens)
-    } else {
-        parse_crosshair_operation(&tokens)
+    let command = match tokens.as_slice() {
+        ["settings"] => Ok(CoordinateToolCommand::Settings),
+        ["help"] => Ok(CoordinateToolCommand::Help),
+        ["coords", ..] => parse_coord_operation(&tokens[1..]),
+        ["crosshair", ..] => parse_crosshair_operation(&tokens[1..]),
+        [] => Err("mouse command is missing".into()),
+        [operation, ..] => Err(format!("unknown mouse command `{operation}`")),
     };
     Some(command.unwrap_or_else(invalid))
 }
@@ -467,8 +470,8 @@ fn parse_coord_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, Strin
             Ok(CoordinateToolCommand::SetHudDetail(HudDetail::Detailed))
         }
         ["offset", x, y] => {
-            let x = parse_bounded_integer(x, -512, 512, "offset x")?;
-            let y = parse_bounded_integer(y, -512, 512, "offset y")?;
+            let x = parse_bounded_integer(x, -512, 512, "mouse coords offset x")?;
+            let y = parse_bounded_integer(y, -512, 512, "mouse coords offset y")?;
             Ok(CoordinateToolCommand::SetOffset(CoordinateOffset::new(
                 x, y,
             )))
@@ -480,13 +483,13 @@ fn parse_coord_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, Strin
         ["cancel"] => Ok(CoordinateToolCommand::Cancel),
         ["help"] => Ok(CoordinateToolCommand::HudHelp),
         [operation, ..] if operation.eq_ignore_ascii_case("space") => {
-            Err("coordinate space must be desktop, monitor, or client".into())
+            Err("mouse coords space must be desktop, monitor, or client".into())
         }
         [operation, ..] if operation.eq_ignore_ascii_case("offset") => {
-            Err("offset requires signed x and y values in the range -512..512".into())
+            Err("mouse coords offset requires signed x and y values in the range -512..512".into())
         }
-        [operation, ..] => Err(format!("unknown coordinate command `{operation}`")),
-        [] => Err("coordinate command is missing".into()),
+        [operation, ..] => Err(format!("unknown mouse coords command `{operation}`")),
+        [] => Err("mouse coords command is missing".into()),
     }
 }
 
@@ -497,44 +500,48 @@ fn parse_crosshair_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, S
         ["off"] => Ok(CoordinateToolCommand::SetCrosshairEnabled(false)),
         ["color", value] => parse_crosshair_color(value),
         ["thickness", value] => Ok(CoordinateToolCommand::SetCrosshairThickness(
-            parse_bounded_integer(value, 1, 16, "crosshair thickness")?,
+            parse_bounded_integer(value, 1, 16, "mouse crosshair thickness")?,
         )),
         ["length", value] => Ok(CoordinateToolCommand::SetCrosshairLength(
-            parse_bounded_integer(value, 2, 256, "crosshair length")?,
+            parse_bounded_integer(value, 2, 256, "mouse crosshair length")?,
         )),
         ["opacity", value] => {
             let opacity = value
                 .parse::<f32>()
                 .ok()
                 .filter(|value| value.is_finite() && (0.1..=1.0).contains(value))
-                .ok_or_else(|| "crosshair opacity must be in the range 0.1..1.0".to_string())?;
+                .ok_or_else(|| {
+                    "mouse crosshair opacity must be in the range 0.1..1.0".to_string()
+                })?;
             Ok(CoordinateToolCommand::SetCrosshairOpacity(opacity))
         }
-        ["guides", state] => parse_toggle(state, "guides").map(CoordinateToolCommand::SetGuides),
+        ["guides", state] => {
+            parse_toggle(state, "mouse crosshair guides").map(CoordinateToolCommand::SetGuides)
+        }
         ["contrast", state] => {
-            parse_toggle(state, "contrast").map(CoordinateToolCommand::SetContrast)
+            parse_toggle(state, "mouse crosshair contrast").map(CoordinateToolCommand::SetContrast)
         }
         ["help"] => Ok(CoordinateToolCommand::CrosshairHelp),
         [operation, ..] if operation.eq_ignore_ascii_case("color") => {
-            Err("crosshair color requires #rrggbb".into())
+            Err("mouse crosshair color requires #rrggbb".into())
         }
         [operation, ..] if operation.eq_ignore_ascii_case("thickness") => {
-            Err("crosshair thickness must be in the range 1..16".into())
+            Err("mouse crosshair thickness must be in the range 1..16".into())
         }
         [operation, ..] if operation.eq_ignore_ascii_case("length") => {
-            Err("crosshair length must be in the range 2..256".into())
+            Err("mouse crosshair length must be in the range 2..256".into())
         }
         [operation, ..] if operation.eq_ignore_ascii_case("opacity") => {
-            Err("crosshair opacity must be in the range 0.1..1.0".into())
+            Err("mouse crosshair opacity must be in the range 0.1..1.0".into())
         }
         [operation, ..] if operation.eq_ignore_ascii_case("guides") => {
-            Err("guides must be on or off".into())
+            Err("mouse crosshair guides must be on or off".into())
         }
         [operation, ..] if operation.eq_ignore_ascii_case("contrast") => {
-            Err("contrast must be on or off".into())
+            Err("mouse crosshair contrast must be on or off".into())
         }
-        [operation, ..] => Err(format!("unknown crosshair command `{operation}`")),
-        [] => Err("crosshair command is missing".into()),
+        [operation, ..] => Err(format!("unknown mouse crosshair command `{operation}`")),
+        [] => Err("mouse crosshair command is missing".into()),
     }
 }
 
@@ -556,9 +563,9 @@ fn parse_crosshair_color(value: &str) -> Result<CoordinateToolCommand, String> {
 
     let hex = value
         .strip_prefix('#')
-        .ok_or_else(|| "crosshair color must use #rrggbb format".to_string())?;
+        .ok_or_else(|| "mouse crosshair color must use #rrggbb format".to_string())?;
     if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("crosshair color must use #rrggbb format".into());
+        return Err("mouse crosshair color must use #rrggbb format".into());
     }
     let parse =
         |start| u8::from_str_radix(&hex[start..start + 2], 16).map_err(|error| error.to_string());
@@ -2253,7 +2260,7 @@ mod qr_parser_tests {
 }
 
 #[cfg(test)]
-mod coordinate_tool_parser_tests {
+mod mouse_command_parser_tests {
     use super::*;
 
     fn parse(action: &str) -> CoordinateToolCommand {
@@ -2271,65 +2278,83 @@ mod coordinate_tool_parser_tests {
 
     #[test]
     fn control_tokens_are_case_insensitive_and_typed() {
-        assert_eq!(parse("CoOrD:ToGgLe"), CoordinateToolCommand::ToggleHud);
-        assert_eq!(parse("CoOrD:PiCk"), CoordinateToolCommand::Pick);
-        assert_eq!(parse("coord:CANCEL"), CoordinateToolCommand::Cancel);
+        assert_eq!(parse("MoUsE:SeTtInGs"), CoordinateToolCommand::Settings);
+        assert_eq!(parse("MOUSE:HELP"), CoordinateToolCommand::Help);
+        assert_eq!(parse("mouse:coords:help"), CoordinateToolCommand::HudHelp);
         assert_eq!(
-            parse("coord:space:CLIENT"),
+            parse("mouse:crosshair:help"),
+            CoordinateToolCommand::CrosshairHelp
+        );
+        assert_eq!(
+            parse("MoUsE:CoOrDs:ToGgLe"),
+            CoordinateToolCommand::ToggleHud
+        );
+        assert_eq!(parse("MoUsE:CoOrDs:PiCk"), CoordinateToolCommand::Pick);
+        assert_eq!(parse("mouse:coords:CANCEL"), CoordinateToolCommand::Cancel);
+        assert_eq!(
+            parse("mouse:coords:space:CLIENT"),
             CoordinateToolCommand::SetSpace(
                 crate::coordinate_tool::CoordinateSpace::ForegroundClient,
             )
         );
         assert_eq!(
-            parse("coord:offset:-512:+512"),
+            parse("mouse:coords:offset:-512:+512"),
             CoordinateToolCommand::SetOffset(crate::coordinate_tool::CoordinateOffset::new(
                 -512, 512
             ),)
         );
         assert_eq!(
-            parse("crosshair:color:#Aa00fF"),
+            parse("mouse:crosshair:color:#Aa00fF"),
             CoordinateToolCommand::SetCrosshairColor(crate::coordinate_tool::CrosshairColor::new(
                 0xaa, 0x00, 0xff
             ),)
         );
         assert_eq!(
-            parse("CROSSHAIR:opacity:0.5"),
+            parse("MOUSE:CROSSHAIR:opacity:0.5"),
             CoordinateToolCommand::SetCrosshairOpacity(0.5)
         );
         assert_eq!(
-            parse("crosshair:guides:OFF"),
+            parse("mouse:crosshair:guides:OFF"),
             CoordinateToolCommand::SetGuides(false)
+        );
+        assert_eq!(
+            Command::CoordinateTool(parse("mouse:settings")).domain(),
+            "mouse"
         );
     }
 
     #[test]
     fn malformed_coordinate_controls_remain_typed_and_never_external() {
         for raw in [
-            "coord:offset:513:0",
-            "coord:offset:1",
-            "coord:space:virtual",
-            "crosshair:thickness:0",
-            "crosshair:length:257",
-            "crosshair:opacity:NaN",
-            "crosshair:color:red",
-            "crosshair:guides:maybe",
-            "coord:pick:extra",
-            "coord:cancel:extra",
+            "mouse:coords:offset:513:0",
+            "mouse:coords:offset:1",
+            "mouse:coords:space:virtual",
+            "mouse:crosshair:thickness:0",
+            "mouse:crosshair:length:257",
+            "mouse:crosshair:opacity:NaN",
+            "mouse:crosshair:color:red",
+            "mouse:crosshair:guides:maybe",
+            "mouse:coords:pick:extra",
+            "mouse:coords:cancel:extra",
+            "mouse:settings:extra",
+            "mouse:unknown",
         ] {
             assert!(
                 matches!(parse(raw), CoordinateToolCommand::Invalid { .. }),
                 "{raw}"
             );
         }
-        let lookalike = Action {
-            label: String::new(),
-            desc: String::new(),
-            action: "coordx:copy".into(),
-            args: None,
-        };
-        assert!(matches!(
-            parse_action(&lookalike).unwrap(),
-            Command::External(_)
-        ));
+        for raw in ["coord:copy", "crosshair:on", "mousex:coords:copy"] {
+            let lookalike = Action {
+                label: String::new(),
+                desc: String::new(),
+                action: raw.into(),
+                args: None,
+            };
+            assert!(
+                matches!(parse_action(&lookalike).unwrap(), Command::External(_)),
+                "{raw}"
+            );
+        }
     }
 }

@@ -30,6 +30,7 @@ mod macro_dialog;
 pub mod mkmacro_dialog;
 mod mouse_gesture_settings_dialog;
 mod mouse_gestures_dialog;
+mod mouse_settings_dialog;
 mod multi_manager_actions;
 mod note_clipboard;
 mod note_graph_dialog;
@@ -105,6 +106,7 @@ pub use macro_dialog::MacroDialog;
 pub use mkmacro_dialog::MkMacroDialog;
 pub use mouse_gesture_settings_dialog::MouseGestureSettingsDialog;
 pub use mouse_gestures_dialog::{GestureRecorder, MgGesturesDialog, RecorderConfig};
+pub(crate) use mouse_settings_dialog::MouseSettingsDialog;
 pub use note_graph_dialog::NoteGraphDialog;
 pub use note_panel::{
     NotePanel, build_nvim_command, build_wezterm_command, extract_links, show_wiki_link,
@@ -560,6 +562,7 @@ pub enum Panel {
     MkMacroDialog,
     MouseGesturesDialog,
     MouseGestureSettingsDialog,
+    MouseSettingsDialog,
     ThemeSettingsDialog,
     FavDialog,
     FileSearchDialog,
@@ -612,6 +615,7 @@ struct PanelStates {
     mkmacro_dialog: bool,
     mouse_gestures_dialog: bool,
     mouse_gesture_settings_dialog: bool,
+    mouse_settings_dialog: bool,
     theme_settings_dialog: bool,
     fav_dialog: bool,
     file_search_dialog: bool,
@@ -819,6 +823,7 @@ pub struct LauncherApp {
     pub(crate) macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
+    mouse_settings_dialog: MouseSettingsDialog,
     theme_settings_dialog_open: bool,
     theme_settings_dialog: ThemeSettingsDialogState,
     fav_dialog: FavDialog,
@@ -1332,6 +1337,11 @@ impl LauncherApp {
     /// trigger it without reaching into private `LauncherApp` fields.
     pub fn open_mouse_gesture_settings_dialog(&mut self) {
         self.mouse_gesture_settings_dialog.open();
+    }
+
+    pub(crate) fn open_mouse_settings_dialog(&mut self) {
+        let preferences = self.coordinate_tool.preferences().clone();
+        self.mouse_settings_dialog.open(&preferences);
     }
 
     pub fn open_clipboard_modify_dialog(&mut self) {
@@ -2206,6 +2216,7 @@ impl LauncherApp {
             macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi::new(ctx),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),
+            mouse_settings_dialog: MouseSettingsDialog::default(),
             theme_settings_dialog_open: false,
             theme_settings_dialog: ThemeSettingsDialogState::default(),
             fav_dialog: FavDialog::default(),
@@ -2875,7 +2886,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 48] = [
+    const TRACKED_PANELS: [Panel; 49] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2892,6 +2903,7 @@ impl LauncherApp {
         Panel::MkMacroDialog,
         Panel::MouseGesturesDialog,
         Panel::MouseGestureSettingsDialog,
+        Panel::MouseSettingsDialog,
         Panel::ThemeSettingsDialog,
         Panel::FavDialog,
         Panel::FileSearchDialog,
@@ -2944,6 +2956,7 @@ impl LauncherApp {
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open,
+            Panel::MouseSettingsDialog => self.mouse_settings_dialog.open,
             Panel::ThemeSettingsDialog => self.theme_settings_dialog_open,
             Panel::FavDialog => self.fav_dialog.open,
             Panel::FileSearchDialog => self.file_search_dialog.open,
@@ -3103,6 +3116,10 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => {
                 self.mouse_gesture_settings_dialog.open = false;
                 self.panel_states.mouse_gesture_settings_dialog = false;
+            }
+            Panel::MouseSettingsDialog => {
+                self.mouse_settings_dialog.open = false;
+                self.panel_states.mouse_settings_dialog = false;
             }
             Panel::ThemeSettingsDialog => {
                 self.theme_settings_dialog_open = false;
@@ -3321,6 +3338,10 @@ impl LauncherApp {
                 self.mouse_gesture_settings_dialog.open = false;
                 self.panel_states.mouse_gesture_settings_dialog = false;
             }
+            Panel::MouseSettingsDialog => {
+                self.mouse_settings_dialog.open = false;
+                self.panel_states.mouse_settings_dialog = false;
+            }
             Panel::ThemeSettingsDialog => {
                 self.theme_settings_dialog_open = false;
                 self.panel_states.theme_settings_dialog = false;
@@ -3483,6 +3504,7 @@ impl LauncherApp {
             Panel::MkMacroDialog => self.mkmacro_dialog.open(),
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
+            Panel::MouseSettingsDialog => self.open_mouse_settings_dialog(),
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
             Panel::FavDialog => self.fav_dialog.open = true,
             Panel::FileSearchDialog => self.file_search_dialog.open(),
@@ -3629,6 +3651,7 @@ impl LauncherApp {
             mouse_gesture_settings_dialog,
             Panel::MouseGestureSettingsDialog
         );
+        check!(mouse_settings_dialog, Panel::MouseSettingsDialog);
         check!(theme_settings_dialog, Panel::ThemeSettingsDialog);
         check!(fav_dialog, Panel::FavDialog);
         check!(file_search_dialog, Panel::FileSearchDialog);

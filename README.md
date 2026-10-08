@@ -97,7 +97,7 @@ Multi Launcher is centered around a **single query box**:
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
 | `regex` | Local Rust regex tester | `regex` |
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
-| `coord` / `crosshair` | Live mouse coordinates and independent passive crosshair | `coord` / `coord copy` / `crosshair` |
+| `mouse` | Mouse settings, coordinates, picking, and independent crosshair | `mouse settings` / `mouse coords copy` / `mouse crosshair toggle` |
 | `ocr` | Local English text recognition from a screen region | `ocr` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
@@ -540,42 +540,58 @@ primary monitor, and samples the frozen image throughout the session.
 
 ## Mouse coordinates and crosshair
 
-On Windows, `coord` toggles a cursor-following, click-through coordinate HUD.
-`crosshair` independently toggles a passive crosshair at the cursor. Both can run
+On Windows, `mouse` discovers the common Mouse actions. `mouse settings`
+opens the focused Mouse Settings dialog; `mouse help`
+describes the command hierarchy. Settings are grouped into Crosshair and
+Coordinate Display, using the same saved preferences as scriptable commands.
+Appearance options primarily live in this dialog rather than filling normal
+launcher discovery with parameter commands.
+
+`mouse coords toggle` toggles a cursor-following, click-through coordinate HUD.
+`mouse crosshair toggle` independently toggles a passive crosshair at the cursor. Both can run
 together without taking focus or intercepting ordinary typing and clicks.
-`coord on|off` and `crosshair on|off` set a mode explicitly.
+`mouse coords on|off` and `mouse crosshair on|off` set a mode explicitly. Their
+Enabled checkboxes in Mouse Settings change live, transient runtime state;
+opening settings does not enable either mode. Apply saves appearance changes.
 
 Coordinates are signed physical pixels, including negative desktop positions.
-`coord space desktop|monitor|client` selects desktop coordinates, coordinates
+`mouse coords space desktop|monitor|client` selects desktop coordinates, coordinates
 relative to the containing monitor's full bounds, or coordinates relative to the
 foreground window's client origin. While the launcher is foreground, client
 space uses the last external target window. Missing geometry is reported as
 unavailable rather than copied as zero.
 
-Use `coord compact|detailed`, `coord offset -32 48`, and
-`coord freeze|unfreeze` to control presentation. `coord copy` writes the displayed
+Use Mouse Settings for the coordinate space, compact/detailed presentation and
+cursor offset. Advanced queries `mouse coords compact|detailed` and
+`mouse coords offset -32 48` remain available for automation.
+`mouse coords freeze|unfreeze` controls the displayed sample. `mouse coords copy` writes the displayed
 sample as `x,y`; a frozen HUD copies its frozen sample. Detailed presentation
 includes monitor/context information and the last successful copy.
 
-`coord pick` starts a one-shot capture and temporarily parks the launcher so
+`mouse coords pick` starts a one-shot capture and temporarily parks the launcher so
 targets remain visible. A fresh left click copies that pixel's live coordinates
 as `x,y`, using the space selected when the session began, even if the HUD is
 frozen. The capture consumes both the press and its matching release; the
 underlying application does not receive the capture click. Escape or
-`coord cancel` cancels without writing the clipboard. The session stays active
+`mouse coords cancel` cancels without writing the clipboard. The session stays active
 while an already consumed press waits for release, then cleans up before
-publishing a result. Repeating `coord pick` keeps the existing session.
+publishing a result. Repeating `mouse coords pick` keeps the existing session.
 
 Coordinate capture cannot overlap OCR, Color Pick, Screen Draw, screenshot crop,
 or a MkMacro point/rectangle overlay. A radial action that starts pick closes its
 radial session first; a new radial overlay cannot open until capture cleanup finishes.
 Passive HUD and crosshair operation remain independent of those capture tools.
 
-Crosshair controls are `crosshair color #ff0000`, `crosshair thickness 2`,
-`crosshair length 12`, `crosshair opacity 0.8`, `crosshair guides on|off`, and
-`crosshair contrast on|off`. Guides span the virtual desktop; contrast adds an
+Mouse Settings provides crosshair RGB color, thickness, arm length, opacity,
+guides and contrast outline. Advanced controls remain available as
+`mouse crosshair color #ff0000`, `mouse crosshair thickness 2`,
+`mouse crosshair length 12`, `mouse crosshair opacity 0.8`,
+`mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`.
+Guides span the virtual desktop; contrast adds an
 outline for visibility. Preferences are saved, while activation and frozen/copy
-state are temporary. `coord help` and `crosshair help` show the controls.
+state are temporary. `mouse coords help` and `mouse crosshair help` show the
+feature controls. Old standalone `coord` and `crosshair` queries/raw actions
+are removed; this branch's inspected stored data had no references requiring aliases.
 
 For an opt-in native runtime check, run `cargo run --bin coordinate_tool_smoke`
 on an interactive Windows desktop. It creates a controlled receiver window,

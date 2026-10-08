@@ -8,6 +8,17 @@ pub(crate) fn handle_coordinate_tool<H: LauncherCommandHost + ?Sized>(
     command: &CoordinateToolCommand,
 ) -> Result<CommandOutcome, CommandError> {
     let copied = match command {
+        CoordinateToolCommand::Settings => {
+            host.open_mouse_settings().map_err(|message| {
+                let mut error = CommandError::new("mouse", message);
+                error.toast = true;
+                error
+            })?;
+            return Ok(CommandOutcome::default());
+        }
+        CoordinateToolCommand::Help => {
+            return Ok(help_outcome(MOUSE_HELP));
+        }
         CoordinateToolCommand::HudHelp => {
             return Ok(help_outcome(COORDINATE_HELP));
         }
@@ -15,14 +26,14 @@ pub(crate) fn handle_coordinate_tool<H: LauncherCommandHost + ?Sized>(
             return Ok(help_outcome(CROSSHAIR_HELP));
         }
         CoordinateToolCommand::Invalid { error, .. } => {
-            let mut error = CommandError::new("coordinate_tool", error.clone());
+            let mut error = CommandError::new("mouse", error.clone());
             error.toast = true;
             return Err(error);
         }
         _ => host
             .execute_coordinate_tool_command(command)
             .map_err(|message| {
-                let mut error = CommandError::new("coordinate_tool", message);
+                let mut error = CommandError::new("mouse", message);
                 error.toast = true;
                 error
             })?,
@@ -49,9 +60,11 @@ fn help_outcome(text: &str) -> CommandOutcome {
     }
 }
 
-const COORDINATE_HELP: &str = "Coordinate HUD: coord toggles the HUD; use coord on|off, coord space desktop|monitor|client, coord compact|detailed, or coord offset <signed-x> <signed-y> (-512..512). Use coord freeze|unfreeze; coord copy writes the displayed signed physical-pixel position as x,y. `coord pick` copies the next click's physical x,y in the selected space after consuming its press and release; Escape cancels without changing the clipboard. Pick uses its click-time sample even while the HUD is frozen. `coord cancel` requests a safe cancellation and drains any consumed click release. Desktop uses signed virtual-desktop coordinates, monitor is relative to the cursor monitor origin, and client is relative to the foreground client origin. While Multi Launcher is foreground, client coordinates use the last external active window. The crosshair is independent; see crosshair help.";
+const MOUSE_HELP: &str = "Mouse controls: `mouse settings` opens the preferred appearance UI. Quick coordinate actions: `mouse coords toggle`, `mouse coords copy`, `mouse coords pick`, and `mouse coords cancel`; crosshair toggles are `mouse crosshair toggle|on|off`. Advanced commands: `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, `mouse coords offset <signed-x> <signed-y>` (-512..512), `mouse coords freeze|unfreeze`, `mouse crosshair color #rrggbb`, `mouse crosshair thickness` (1..16), `mouse crosshair length` (2..256), `mouse crosshair opacity` (0.1..1.0), `mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`. Coordinates are signed physical pixels. A pick consumes a fresh left press and release; Escape cancels without changing the clipboard. Picking uses its click-time sample even while the HUD is frozen. Client coordinates use the foreground client origin, or the last external active window while Multi Launcher is foreground. See `mouse coords help` and `mouse crosshair help` for details.";
 
-const CROSSHAIR_HELP: &str = "Crosshair controls: crosshair on|off; crosshair color #rrggbb; crosshair thickness 1..16; crosshair length 2..256; crosshair opacity 0.1..1.0; crosshair guides on|off; crosshair contrast on|off.";
+const COORDINATE_HELP: &str = "Coordinate HUD: `mouse coords toggle` toggles the HUD; use `mouse coords on|off`, `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, or `mouse coords offset <signed-x> <signed-y>` (-512..512). Use `mouse coords freeze|unfreeze`; `mouse coords copy` writes the displayed signed physical-pixel position as x,y. `mouse coords pick` copies the next click's physical x,y in the selected space after consuming its press and release; Escape cancels without changing the clipboard. Pick uses its click-time sample even while the HUD is frozen. `mouse coords cancel` requests safe cancellation and drains any consumed click release. Desktop uses signed virtual-desktop coordinates, monitor is relative to the cursor monitor origin, and client is relative to the foreground client origin. While Multi Launcher is foreground, client coordinates use the last external active window. For display preferences, use `mouse settings`. The crosshair is independent; see `mouse crosshair help`.";
+
+const CROSSHAIR_HELP: &str = "Crosshair controls: `mouse crosshair toggle|on|off`; `mouse crosshair color #rrggbb`; `mouse crosshair thickness <1..16>`; `mouse crosshair length <2..256>`; `mouse crosshair opacity <0.1..1.0>`; `mouse crosshair guides on|off`; `mouse crosshair contrast on|off`. The crosshair is independent from the coordinate HUD.";
 
 #[cfg(test)]
 mod tests {
@@ -63,11 +76,17 @@ mod tests {
         calls: Vec<CoordinateToolCommand>,
         copy: Option<String>,
         error: Option<String>,
+        settings_opened: usize,
     }
 
     impl LauncherCommandHost for Host {
         fn launcher_is_visible(&self) -> bool {
             true
+        }
+
+        fn open_mouse_settings(&mut self) -> Result<(), String> {
+            self.settings_opened += 1;
+            Ok(())
         }
 
         fn execute_coordinate_tool_command(
@@ -128,9 +147,14 @@ mod tests {
     #[test]
     fn help_is_pure_and_invalid_commands_do_not_reach_the_host() {
         let mut host = Host::default();
+        let general = handle_coordinate_tool(&mut host, &CoordinateToolCommand::Help).unwrap();
+        assert!(matches!(
+            general.toasts.as_slice(),
+            [ToastPolicy::Info(text)] if text.contains("mouse settings") && text.contains("mouse coords pick")
+        ));
         let help = handle_coordinate_tool(&mut host, &CoordinateToolCommand::HudHelp).unwrap();
         assert!(
-            matches!(help.toasts.as_slice(), [ToastPolicy::Info(text)] if text.contains("last external active window") && text.contains("coord pick") && text.contains("Escape cancels"))
+            matches!(help.toasts.as_slice(), [ToastPolicy::Info(text)] if text.contains("last external active window") && text.contains("mouse coords pick") && text.contains("Escape cancels"))
         );
         assert_eq!(
             help,
@@ -143,12 +167,23 @@ mod tests {
         assert!(host.calls.is_empty());
 
         let invalid = CoordinateToolCommand::Invalid {
-            raw: "coord:offset:513:0".into(),
-            error: "offset x must be in the range -512..512".into(),
+            raw: "mouse:coords:offset:513:0".into(),
+            error: "mouse coords offset x must be in the range -512..512".into(),
         };
         let error = handle_coordinate_tool(&mut host, &invalid).unwrap_err();
+        assert_eq!(error.domain, "mouse");
         assert!(error.toast);
         assert!(!error.refocus);
         assert!(host.calls.is_empty());
+        assert_eq!(host.settings_opened, 0);
+    }
+
+    #[test]
+    fn settings_routes_to_launcher_host_without_mutating_coordinate_runtime() {
+        let mut host = Host::default();
+        let outcome = handle_coordinate_tool(&mut host, &CoordinateToolCommand::Settings).unwrap();
+        assert_eq!(host.settings_opened, 1);
+        assert!(host.calls.is_empty());
+        assert_eq!(outcome, CommandOutcome::default());
     }
 }

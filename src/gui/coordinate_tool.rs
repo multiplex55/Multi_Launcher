@@ -117,6 +117,12 @@ impl CoordinateToolGui {
         use CoordinateToolCommand as Command;
 
         match command {
+            Command::Settings => {
+                return Err("Mouse settings are handled by the launcher command host".into());
+            }
+            Command::Help => {
+                return Err("Mouse help is handled by the mouse command handler".into());
+            }
             Command::ToggleHud => {
                 let enabled = !self.controller.runtime_state().hud_enabled();
                 self.controller.set_hud_enabled(enabled)?;
@@ -149,7 +155,7 @@ impl CoordinateToolGui {
                 }
             }
             Command::HudHelp | Command::CrosshairHelp => {
-                return Err("help is handled by the coordinate command handler".into());
+                return Err("help is handled by the mouse command handler".into());
             }
             Command::ToggleCrosshair => {
                 let enabled = !self.controller.runtime_state().crosshair_enabled();
@@ -611,14 +617,61 @@ impl CoordinateToolGui {
         self.capture_feedback.pop_front()
     }
 
-    #[cfg(test)]
     pub(crate) fn preferences(&self) -> &CoordinateToolPreferences {
         &self.preferences
     }
 
-    #[cfg(test)]
     pub(crate) fn runtime_state(&self) -> crate::coordinate_tool::CoordinateToolRuntimeState {
         self.controller.runtime_state()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_running(&self) -> bool {
+        self.controller.is_running()
+    }
+
+    /// Persist only fields edited relative to the draft's baseline. This
+    /// merges the dialog transaction into the latest settings file without
+    /// replacing newer preference changes made elsewhere in the launcher.
+    pub(crate) fn apply_draft_preferences(
+        &mut self,
+        baseline: &CoordinateToolPreferences,
+        draft: &CoordinateToolPreferences,
+    ) -> Result<(), String> {
+        let baseline = baseline.clone();
+        let draft = draft.clone();
+        self.update_preferences(move |current| {
+            if draft.space != baseline.space {
+                current.space = draft.space;
+            }
+            if draft.hud_detail != baseline.hud_detail {
+                current.hud_detail = draft.hud_detail;
+            }
+            if draft.cursor_offset.x != baseline.cursor_offset.x {
+                current.cursor_offset.x = draft.cursor_offset.x;
+            }
+            if draft.cursor_offset.y != baseline.cursor_offset.y {
+                current.cursor_offset.y = draft.cursor_offset.y;
+            }
+            if draft.crosshair.color != baseline.crosshair.color {
+                current.crosshair.color = draft.crosshair.color;
+            }
+            if draft.crosshair.thickness != baseline.crosshair.thickness {
+                current.crosshair.thickness = draft.crosshair.thickness;
+            }
+            if draft.crosshair.arm_length != baseline.crosshair.arm_length {
+                current.crosshair.arm_length = draft.crosshair.arm_length;
+            }
+            if draft.crosshair.opacity != baseline.crosshair.opacity {
+                current.crosshair.opacity = draft.crosshair.opacity;
+            }
+            if draft.crosshair.virtual_desktop_guides != baseline.crosshair.virtual_desktop_guides {
+                current.crosshair.virtual_desktop_guides = draft.crosshair.virtual_desktop_guides;
+            }
+            if draft.crosshair.high_contrast_outline != baseline.crosshair.high_contrast_outline {
+                current.crosshair.high_contrast_outline = draft.crosshair.high_contrast_outline;
+            }
+        })
     }
 
     fn update_preferences(
@@ -883,6 +936,40 @@ mod tests {
                 .is_err()
         );
         assert_eq!(failed_gui.preferences(), &before);
+    }
+
+    #[test]
+    fn draft_commit_merges_only_edited_fields_into_the_latest_settings_transaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .to_string();
+        let (mut gui, _, _, _) = adapter(path.clone());
+        let baseline = CoordinateToolPreferences::default();
+        let mut draft = baseline.clone();
+        draft.space = crate::coordinate_tool::CoordinateSpace::ForegroundClient;
+        draft.crosshair.opacity = 0.45;
+
+        Settings::update(&path, |settings| {
+            settings.coordinate_tool.space = crate::coordinate_tool::CoordinateSpace::Monitor;
+            settings.coordinate_tool.cursor_offset.x = 99;
+            settings.coordinate_tool.crosshair.thickness = 7;
+            Ok(())
+        })
+        .unwrap();
+
+        gui.apply_draft_preferences(&baseline, &draft).unwrap();
+        let committed = Settings::load(&path).unwrap().coordinate_tool;
+        assert_eq!(
+            committed.space,
+            crate::coordinate_tool::CoordinateSpace::ForegroundClient
+        );
+        assert_eq!(committed.cursor_offset.x, 99);
+        assert_eq!(committed.crosshair.thickness, 7);
+        assert_eq!(committed.crosshair.opacity, 0.45);
+        assert_eq!(gui.preferences(), &committed);
     }
 
     #[test]

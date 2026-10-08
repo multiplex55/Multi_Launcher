@@ -18,6 +18,14 @@ impl LauncherCommandHost for LauncherApp {
         self.visible_flag.load(Ordering::SeqCst)
     }
 
+    fn open_mouse_settings(&mut self) -> Result<(), String> {
+        self.focus_panel(super::Panel::MouseSettingsDialog);
+        if !self.visible_flag.load(Ordering::SeqCst) {
+            self.request_launcher_visibility(true);
+        }
+        Ok(())
+    }
+
     fn execute_coordinate_tool_command(
         &mut self,
         command: &crate::commands::CoordinateToolCommand,
@@ -1489,15 +1497,15 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_help_ignores_query_override_and_generic_hide_settings() {
+    fn mouse_help_ignores_query_override_and_generic_hide_settings() {
         let mut app = test_app();
-        app.query = "keep coordinate query".into();
+        app.query = "keep mouse query".into();
         app.clear_query_after_run = true;
         app.hide_after_run = true;
         app.visible_flag.store(true, Ordering::SeqCst);
         app.focus_query = false;
         let invocation = crate::commands::parse_command(
-            action("coord:help"),
+            action("mouse:help"),
             Some("must be ignored".into()),
             crate::commands::ActivationSource::Dashboard,
         )
@@ -1506,9 +1514,51 @@ mod tests {
         assert!(!command_accepts_query_override(&invocation.command));
         app.dispatch_command_invocation(invocation);
 
-        assert_eq!(app.query, "keep coordinate query");
+        assert_eq!(app.query, "keep mouse query");
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(!app.focus_query);
+    }
+
+    #[test]
+    fn mouse_settings_command_opens_and_focuses_idle_panel() {
+        let mut app = test_app();
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        let invocation = crate::commands::parse_command(
+            action("mouse:settings"),
+            None,
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+
+        app.dispatch_command_invocation(invocation);
+        assert!(app.is_panel_open(super::super::Panel::MouseSettingsDialog));
+        assert_eq!(
+            app.panel_stack.last(),
+            Some(&super::super::Panel::MouseSettingsDialog)
+        );
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.restore_flag.load(Ordering::SeqCst));
+        assert!(!app.coordinate_tool.is_running());
+        assert!(!app.coordinate_tool.runtime_state().hud_enabled());
+        assert!(!app.coordinate_tool.runtime_state().crosshair_enabled());
+        assert!(!app.coordinate_tool.capture_pending());
+
+        let invocation = crate::commands::parse_command(
+            action("mouse:settings"),
+            None,
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+        app.dispatch_command_invocation(invocation);
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == super::super::Panel::MouseSettingsDialog)
+                .count(),
+            1
+        );
+        app.coordinate_tool.shutdown().unwrap();
     }
 
     fn with_isolated_root_restore_fixture<T>(

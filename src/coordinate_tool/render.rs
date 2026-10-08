@@ -232,7 +232,7 @@ pub(crate) fn hud_lines(frame: &CoordinateRenderFrame) -> Vec<String> {
             lines.push(format!("Sampling: {}", concise_error(error)));
         }
         if frame.preferences.hud_detail == HudDetail::Detailed {
-            lines.push("Help: coord help".into());
+            lines.push("Help: mouse help".into());
         }
         return lines;
     };
@@ -329,7 +329,7 @@ pub(crate) fn hud_lines(frame: &CoordinateRenderFrame) -> Vec<String> {
     if let Some(error) = frame.sample_error.as_deref() {
         lines.push(format!("Sampling: {}", concise_error(error)));
     }
-    lines.push("Help: coord help".into());
+    lines.push("Help: mouse help".into());
     lines
 }
 
@@ -513,7 +513,7 @@ mod tests {
         assert!(lines.contains("Client origin: -1800,40"));
         assert!(lines.contains("Freeze: on"));
         assert!(lines.contains("Last copy: -1732,215 (Desktop)"));
-        assert!(lines.contains("Help: coord help"));
+        assert!(lines.contains("Help: mouse help"));
         assert_eq!(super::hud_font_size(Some(144)), 21);
         assert_eq!(super::hud_font_size(None), 14);
     }
@@ -552,7 +552,7 @@ mod tests {
         };
         let lines = super::hud_lines(&frame);
         assert!(lines.iter().any(|line| line.starts_with("Sampling: ")));
-        assert_eq!(lines.last().map(String::as_str), Some("Help: coord help"));
+        assert_eq!(lines.last().map(String::as_str), Some("Help: mouse help"));
 
         let uncapped = super::hud_layout(&lines, 32, None);
         assert!(uncapped.2 > 480);

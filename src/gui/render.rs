@@ -2243,6 +2243,9 @@ impl LauncherApp {
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
+        let mut mouse_settings_dlg = std::mem::take(&mut self.mouse_settings_dialog);
+        mouse_settings_dlg.ui(ctx, &mut self.coordinate_tool);
+        self.mouse_settings_dialog = mouse_settings_dlg;
         let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
         let mut theme_open = self.theme_settings_dialog_open;
         crate::gui::theme_settings_dialog::ui(ctx, self, &mut theme_open, &mut theme_state);

@@ -113,6 +113,7 @@ mod tests {
         screenshot_calls: usize,
         screen_draw_calls: Vec<crate::commands::ScreenDrawCommand>,
         coordinate_tool_calls: Vec<CoordinateToolCommand>,
+        mouse_settings_calls: usize,
         clipboard_modify_calls: usize,
         clipboard_modify_metadata:
             Option<crate::clipboard_modify::coordinator::ImmediateRequestMetadata>,
@@ -126,6 +127,11 @@ mod tests {
     impl LauncherCommandHost for FakeHost {
         fn launcher_is_visible(&self) -> bool {
             self.visible
+        }
+
+        fn open_mouse_settings(&mut self) -> Result<(), String> {
+            self.mouse_settings_calls += 1;
+            Ok(())
         }
 
         fn execute_coordinate_tool_command(
@@ -647,6 +653,19 @@ mod tests {
             [CoordinateToolCommand::ToggleHud]
         );
         assert_eq!(coordinate, CommandOutcome::default());
+
+        let settings = CommandBus
+            .dispatch(
+                &invocation(Command::CoordinateTool(CoordinateToolCommand::Settings)),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.mouse_settings_calls, 1);
+        assert_eq!(
+            host.coordinate_tool_calls,
+            [CoordinateToolCommand::ToggleHud]
+        );
+        assert_eq!(settings, CommandOutcome::default());
 
         CommandBus
             .dispatch(
