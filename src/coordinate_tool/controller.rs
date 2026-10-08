@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::model::{CoordinateSample, CoordinateToolRuntimeState, FormattedCoordinate};
+use super::model::{
+    CoordinateEffectsStatus, CoordinateSample, CoordinateToolRuntimeState, FormattedCoordinate,
+};
 use super::settings::CoordinateToolPreferences;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(16);
@@ -16,6 +18,10 @@ pub trait CoordinateSurfaceBackend {
     /// display/DPI notification even when the sampled cursor is unchanged.
     fn poll_events(&mut self) -> Result<bool, String> {
         Ok(false)
+    }
+
+    fn effects_status(&self) -> CoordinateEffectsStatus {
+        CoordinateEffectsStatus::default()
     }
 
     fn render(&mut self, frame: &CoordinateRenderFrame) -> Result<(), String>;
@@ -52,6 +58,7 @@ struct SharedState {
     pending_freeze: bool,
     sample_error: Option<String>,
     backend_error: Option<String>,
+    effects_status: CoordinateEffectsStatus,
 }
 
 impl Default for SharedState {
@@ -63,6 +70,7 @@ impl Default for SharedState {
             pending_freeze: false,
             sample_error: None,
             backend_error: None,
+            effects_status: CoordinateEffectsStatus::default(),
         }
     }
 }
@@ -241,6 +249,12 @@ impl CoordinateToolController {
             .or_else(|| shared.sample_error.clone())
     }
 
+    /// Current native halo and zoom lifecycle status, refreshed independently
+    /// of whether a cheap HUD/crosshair frame needed rendering.
+    pub fn effects_status(&self) -> CoordinateEffectsStatus {
+        lock(&self.shared).effects_status.clone()
+    }
+
     /// Stop and join the passive worker. The join completes only after backend
     /// shutdown has attempted to close all native resources.
     pub fn shutdown(&mut self) -> Result<(), String> {
@@ -354,6 +368,7 @@ fn run_worker(
                 false
             }
         };
+        lock(&shared).effects_status = backend.effects_status();
 
         let sample_result = sampler.sample();
         let current_sample = sample_result.as_ref().ok().cloned();
@@ -399,10 +414,12 @@ fn run_worker(
                 }
                 Err(error) => lock(&shared).backend_error = Some(error),
             }
+            lock(&shared).effects_status = backend.effects_status();
         }
     }
 
     let shutdown = backend.shutdown();
+    lock(&shared).effects_status = backend.effects_status();
     drop(backend);
     drop(sampler);
     shutdown
@@ -426,8 +443,8 @@ mod tests {
         CoordinateSurfaceBackend, CoordinateToolController,
     };
     use crate::coordinate_tool::model::{
-        CoordinateSample, ForegroundClientGeometry, MonitorGeometry, MonitorId, PhysicalPoint,
-        PhysicalRect,
+        CoordinateEffectsStatus, CoordinateSample, CursorEffectStatus, ForegroundClientGeometry,
+        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect,
     };
 
     #[derive(Clone)]
@@ -439,6 +456,7 @@ mod tests {
         samples: Arc<Mutex<VecDeque<Result<CoordinateSample, String>>>>,
         fallback: Result<CoordinateSample, String>,
         backend_failure: Option<String>,
+        effects_status: Arc<Mutex<CoordinateEffectsStatus>>,
         sample_gate: Option<mpsc::Sender<mpsc::SyncSender<()>>>,
         rendered: mpsc::Sender<CoordinateRenderFrame>,
     }
@@ -458,6 +476,7 @@ mod tests {
                     samples: Arc::new(Mutex::new(samples.into_iter().collect())),
                     fallback,
                     backend_failure: None,
+                    effects_status: Arc::new(Mutex::new(CoordinateEffectsStatus::default())),
                     sample_gate: None,
                     rendered,
                 },
@@ -513,6 +532,7 @@ mod tests {
     struct FakeSurfaceBackend {
         rendered: mpsc::Sender<CoordinateRenderFrame>,
         shutdowns: Arc<AtomicUsize>,
+        effects_status: Arc<Mutex<CoordinateEffectsStatus>>,
     }
 
     impl CoordinateSurfaceBackend for FakeSurfaceBackend {
@@ -522,8 +542,13 @@ mod tests {
                 .map_err(|error| error.to_string())
         }
 
+        fn effects_status(&self) -> CoordinateEffectsStatus {
+            self.effects_status.lock().unwrap().clone()
+        }
+
         fn shutdown(&mut self) -> Result<(), String> {
             self.shutdowns.fetch_add(1, Ordering::AcqRel);
+            *self.effects_status.lock().unwrap() = CoordinateEffectsStatus::default();
             Ok(())
         }
     }
@@ -547,6 +572,7 @@ mod tests {
             Ok(Box::new(FakeSurfaceBackend {
                 rendered: self.rendered.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
+                effects_status: Arc::clone(&self.effects_status),
             }))
         }
     }
@@ -854,6 +880,10 @@ mod tests {
         );
         assert!(rendered.recv_timeout(Duration::from_millis(100)).is_err());
         controller.shutdown().unwrap();
+        assert_eq!(
+            controller.effects_status().halo(),
+            &CursorEffectStatus::Disabled
+        );
     }
 
     #[test]
@@ -890,6 +920,41 @@ mod tests {
         assert!(!controller.runtime_state().has_active_mode());
         assert_eq!(factory.count(&factory.sampler_creations), 2);
         assert_eq!(factory.count(&factory.backend_creations), 2);
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn effect_status_refreshes_without_a_cheap_overlay_render() {
+        let (factory, rendered) = FakeFactory::new([], Ok(sample(-1800, 200, "DISPLAY1")));
+        let mut controller = CoordinateToolController::new(Arc::new(factory.clone()));
+        controller.set_hud_enabled(true).unwrap();
+        let _initial_frame = receive(&rendered);
+        assert_eq!(
+            controller.effects_status().halo(),
+            &CursorEffectStatus::Disabled
+        );
+
+        factory
+            .effects_status
+            .lock()
+            .unwrap()
+            .set_halo(CursorEffectStatus::Unavailable(
+                "magnifier filter setup failed".into(),
+            ));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if matches!(
+                controller.effects_status().halo(),
+                CursorEffectStatus::Unavailable(reason)
+                    if reason == "magnifier filter setup failed"
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "effect status should refresh");
+            std::thread::yield_now();
+        }
+        assert!(rendered.recv_timeout(Duration::from_millis(100)).is_err());
         controller.shutdown().unwrap();
     }
 

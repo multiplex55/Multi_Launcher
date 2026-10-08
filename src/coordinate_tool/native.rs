@@ -79,30 +79,37 @@ mod windows_runtime {
 
     use image::RgbaImage;
     use windows::Win32::Foundation::{
-        COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE,
+        BOOL, COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
         AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
         CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, ClientToScreen, CreateCompatibleDC,
-        CreateDIBSection, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH,
-        DIB_RGB_COLORS, DeleteDC, DeleteObject, FW_NORMAL, FillRect, GetMonitorInfoW, HBITMAP, HDC,
-        HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, MonitorFromPoint, OUT_DEFAULT_PRECIS,
-        SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+        CreateDIBSection, CreateEllipticRgn, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
+        DEFAULT_PITCH, DIB_RGB_COLORS, DeleteDC, DeleteObject, FW_NORMAL, FillRect,
+        GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+        MONITORINFOEXW, MonitorFromPoint, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode,
+        SetTextColor, SetWindowRgn, TRANSPARENT, TextOutW,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor,
         MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
     };
+    use windows::Win32::UI::Magnification::{
+        MAGCOLOREFFECT, MAGTRANSFORM, MW_FILTERMODE_EXCLUDE, MagInitialize, MagSetColorEffect,
+        MagSetWindowFilterList, MagSetWindowSource, MagSetWindowTransform, MagUninitialize,
+        WC_MAGNIFIER,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-        GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
-        HWND_TOPMOST, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, SM_CXVIRTUALSCREEN,
-        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowPos, ShowWindow,
-        TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_DISPLAYCHANGE, WM_DPICHANGED,
-        WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        WS_EX_TRANSPARENT, WS_POPUP,
+        GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, HMENU,
+        HWND_TOPMOST, IsWindowVisible, LWA_ALPHA, MA_NOACTIVATE, MSG, PM_REMOVE, PeekMessageW,
+        PostMessageW, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowPos,
+        ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_APP, WM_DISPLAYCHANGE,
+        WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_CHILD, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
     use windows::core::{PCWSTR, w};
 
@@ -110,8 +117,12 @@ mod windows_runtime {
         CoordinateRenderFrame, CoordinateSampler, CoordinateSurfaceBackend,
     };
     use super::super::model::{
-        CoordinateSample, ForegroundClientGeometry, MonitorGeometry, MonitorId, PhysicalPoint,
-        PhysicalRect, PhysicalSize,
+        CoordinateEffectsStatus, CoordinateSample, ForegroundClientGeometry, MonitorGeometry,
+        MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize,
+    };
+    use super::super::native_effects::{
+        CursorEffectsRuntime, EffectConfiguration, EffectKind, EffectNativeOperations,
+        EffectRequests,
     };
     use super::super::render::{
         GuideOrientation, crosshair_bitmap, guide_bitmap, guide_geometry, hud_font_size,
@@ -275,21 +286,40 @@ mod windows_runtime {
         ))
     }
 
+    const WM_COORDINATE_TOPOLOGY_INVALIDATED: u32 = WM_APP + 0x3A1;
+
+    fn post_topology_invalidation(hwnd: HWND) {
+        if let Err(error) = unsafe {
+            PostMessageW(
+                hwnd,
+                WM_COORDINATE_TOPOLOGY_INVALIDATED,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        } {
+            eprintln!("Could not queue coordinate topology refresh: {error}");
+        }
+    }
+
     unsafe extern "system" fn passive_window_proc(
         hwnd: HWND,
         message: u32,
         wparam: windows::Win32::Foundation::WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        if message == WM_NCHITTEST {
-            return LRESULT(windows::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize);
+        match message {
+            WM_NCHITTEST => {
+                LRESULT(windows::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize)
+            }
+            WM_DISPLAYCHANGE | WM_DPICHANGED => {
+                // These are sent directly to each top-level window, so they do
+                // not necessarily appear as MSG values in the worker's queue.
+                post_topology_invalidation(hwnd);
+                LRESULT(0)
+            }
+            WM_COORDINATE_TOPOLOGY_INVALIDATED => LRESULT(0),
+            _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         }
-        // The worker detects these notifications while pumping its queue and
-        // immediately resamples geometry before redrawing the active surfaces.
-        if message == WM_DISPLAYCHANGE || message == WM_DPICHANGED {
-            return LRESULT(0);
-        }
-        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
     }
 
     fn register_surface_class() -> Result<HINSTANCE, String> {
@@ -698,6 +728,515 @@ mod windows_runtime {
         }
     }
 
+    const EFFECT_HOST_CLASS: windows::core::PCWSTR = w!("MultiLauncherCoordinateEffectPassiveHost");
+
+    unsafe extern "system" fn effect_host_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match message {
+            WM_NCHITTEST => {
+                LRESULT(windows::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize)
+            }
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_DISPLAYCHANGE | WM_DPICHANGED => {
+                post_topology_invalidation(hwnd);
+                LRESULT(0)
+            }
+            WM_COORDINATE_TOPOLOGY_INVALIDATED => LRESULT(0),
+            _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+        }
+    }
+
+    fn register_effect_host_class(instance: HINSTANCE) -> Result<(), String> {
+        static REGISTERED: OnceLock<Result<(), String>> = OnceLock::new();
+        REGISTERED
+            .get_or_init(|| {
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(effect_host_proc),
+                    hInstance: instance,
+                    lpszClassName: EFFECT_HOST_CLASS,
+                    ..Default::default()
+                };
+                if unsafe { RegisterClassW(&class) } == 0 {
+                    Err(format!(
+                        "Could not register cursor-effect passive host class (GetLastError={})",
+                        unsafe { GetLastError().0 }
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+            .clone()
+    }
+
+    struct NativeEffectSurface {
+        host: HWND,
+        magnifier: HWND,
+        diameter: i32,
+        scale: f32,
+    }
+
+    /// Worker-thread owner for the process' single Magnification session and
+    /// its independent hidden effect hosts. The host is retained immediately
+    /// after creation so later setup errors can still be cleaned by reconcile.
+    struct WindowsEffectOperations {
+        instance: HINSTANCE,
+        session_initialized: bool,
+        halo: Option<NativeEffectSurface>,
+        zoom: Option<NativeEffectSurface>,
+    }
+
+    impl WindowsEffectOperations {
+        fn new(instance: HINSTANCE) -> Self {
+            Self {
+                instance,
+                session_initialized: false,
+                halo: None,
+                zoom: None,
+            }
+        }
+
+        fn surface(&self, kind: EffectKind) -> Option<&NativeEffectSurface> {
+            match kind {
+                EffectKind::Halo => self.halo.as_ref(),
+                EffectKind::Zoom => self.zoom.as_ref(),
+            }
+        }
+
+        fn surface_mut(&mut self, kind: EffectKind) -> &mut Option<NativeEffectSurface> {
+            match kind {
+                EffectKind::Halo => &mut self.halo,
+                EffectKind::Zoom => &mut self.zoom,
+            }
+        }
+
+        fn dimensions_and_scale(configuration: &EffectConfiguration) -> (i32, f32) {
+            match configuration {
+                EffectConfiguration::Halo(preferences) => {
+                    (preferences.radius.clamp(8, 256) * 2, 1.0)
+                }
+                EffectConfiguration::Zoom(preferences) => {
+                    let factor = if preferences.zoom_factor.is_finite() {
+                        preferences.zoom_factor.clamp(1.25, 4.0)
+                    } else {
+                        2.0
+                    };
+                    (preferences.diameter.clamp(64, 480), factor)
+                }
+            }
+        }
+
+        fn color_identity() -> MAGCOLOREFFECT {
+            MAGCOLOREFFECT {
+                transform: [
+                    1.0, 0.0, 0.0, 0.0, 0.0, // output red = input red
+                    0.0, 1.0, 0.0, 0.0, 0.0, // output green = input green
+                    0.0, 0.0, 1.0, 0.0, 0.0, // output blue = input blue
+                    0.0, 0.0, 0.0, 1.0, 0.0, // preserve alpha
+                    0.0, 0.0, 0.0, 0.0, 1.0, // no additive color
+                ],
+            }
+        }
+
+        fn set_circle_region(host: HWND, diameter: i32) -> Result<(), String> {
+            let region = unsafe { CreateEllipticRgn(0, 0, diameter, diameter) };
+            if region.0.is_null() {
+                return Err(format!(
+                    "CreateEllipticRgn failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            if unsafe { SetWindowRgn(host, region, BOOL(1)) } == 0 {
+                let error = unsafe { GetLastError().0 };
+                if !unsafe { DeleteObject(region) }.as_bool() {
+                    return Err(format!(
+                        "SetWindowRgn failed (GetLastError={error}); DeleteObject(region) also failed (GetLastError={})",
+                        unsafe { GetLastError().0 }
+                    ));
+                }
+                return Err(format!("SetWindowRgn failed (GetLastError={error})"));
+            }
+            // A successful SetWindowRgn transfers the region to USER32.
+            Ok(())
+        }
+
+        fn set_transform(magnifier: HWND, scale: f32) -> Result<(), String> {
+            let mut transform = MAGTRANSFORM {
+                v: [scale, 0.0, 0.0, 0.0, scale, 0.0, 0.0, 0.0, 1.0],
+            };
+            if !unsafe { MagSetWindowTransform(magnifier, &mut transform) }.as_bool() {
+                return Err(format!(
+                    "MagSetWindowTransform failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(())
+        }
+
+        fn set_identity_color(magnifier: HWND) -> Result<(), String> {
+            let mut effect = Self::color_identity();
+            if !unsafe { MagSetColorEffect(magnifier, &mut effect) }.as_bool() {
+                return Err(format!(
+                    "MagSetColorEffect failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(())
+        }
+
+        fn create_host(&mut self, kind: EffectKind, diameter: i32) -> Result<(), String> {
+            if !self.session_initialized {
+                return Err("Magnification session is not initialized".into());
+            }
+            if self.surface(kind).is_some() {
+                return Err(format!("{} effect host already exists", kind.label()));
+            }
+            register_effect_host_class(self.instance)?;
+            let extended_style = WS_EX_LAYERED
+                | WS_EX_TRANSPARENT
+                | WS_EX_NOACTIVATE
+                | WS_EX_TOOLWINDOW
+                | WS_EX_TOPMOST;
+            let host = unsafe {
+                CreateWindowExW(
+                    extended_style,
+                    EFFECT_HOST_CLASS,
+                    windows::core::PCWSTR::null(),
+                    WS_POPUP,
+                    -diameter - 16,
+                    -diameter - 16,
+                    diameter,
+                    diameter,
+                    None,
+                    None,
+                    self.instance,
+                    None,
+                )
+            }
+            .map_err(|error| format!("Could not create {} effect host: {error}", kind.label()))?;
+
+            *self.surface_mut(kind) = Some(NativeEffectSurface {
+                host,
+                magnifier: HWND::default(),
+                diameter,
+                scale: 1.0,
+            });
+            unsafe { SetLayeredWindowAttributes(host, COLORREF(0), 255, LWA_ALPHA) }.map_err(
+                |error| format!("Could not configure {} host alpha: {error}", kind.label()),
+            )?;
+            Self::set_circle_region(host, diameter)
+                .map_err(|error| format!("Could not shape {} host: {error}", kind.label()))
+        }
+
+        fn create_magnifier_child(
+            &mut self,
+            kind: EffectKind,
+            configuration: &EffectConfiguration,
+        ) -> Result<(), String> {
+            let (diameter, _) = Self::dimensions_and_scale(configuration);
+            let host = self
+                .surface(kind)
+                .map(|surface| surface.host)
+                .ok_or_else(|| format!("{} effect host is missing", kind.label()))?;
+            let child = unsafe {
+                CreateWindowExW(
+                    Default::default(),
+                    WC_MAGNIFIER,
+                    windows::core::PCWSTR::null(),
+                    WS_CHILD,
+                    0,
+                    0,
+                    diameter,
+                    diameter,
+                    host,
+                    HMENU::default(),
+                    self.instance,
+                    None,
+                )
+            }
+            .map_err(|error| {
+                format!(
+                    "Could not create {} WC_MAGNIFIER child: {error}",
+                    kind.label()
+                )
+            })?;
+            if let Some(surface) = self.surface_mut(kind).as_mut() {
+                surface.magnifier = child;
+            }
+            self.configure_surface(kind, configuration)
+        }
+
+        fn configure_surface(
+            &mut self,
+            kind: EffectKind,
+            configuration: &EffectConfiguration,
+        ) -> Result<(), String> {
+            let (diameter, scale) = Self::dimensions_and_scale(configuration);
+            let Some(surface) = self.surface(kind) else {
+                return Err(format!("{} effect host is missing", kind.label()));
+            };
+            let host = surface.host;
+            let magnifier = surface.magnifier;
+            let previous_diameter = surface.diameter;
+
+            if previous_diameter != diameter {
+                Self::set_circle_region(host, diameter).map_err(|error| {
+                    format!("Could not resize {} host region: {error}", kind.label())
+                })?;
+                unsafe {
+                    SetWindowPos(
+                        host,
+                        HWND::default(),
+                        0,
+                        0,
+                        diameter,
+                        diameter,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                    )
+                }
+                .map_err(|error| format!("Could not resize {} host: {error}", kind.label()))?;
+                if !magnifier.0.is_null() {
+                    unsafe {
+                        SetWindowPos(
+                            magnifier,
+                            HWND::default(),
+                            0,
+                            0,
+                            diameter,
+                            diameter,
+                            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                        )
+                    }
+                    .map_err(|error| {
+                        format!("Could not resize {} magnifier child: {error}", kind.label())
+                    })?;
+                }
+            }
+            if let Some(surface) = self.surface_mut(kind).as_mut() {
+                surface.diameter = diameter;
+                surface.scale = scale;
+            }
+            if !magnifier.0.is_null() {
+                Self::set_transform(magnifier, scale).map_err(|error| {
+                    format!("Could not configure {} scale: {error}", kind.label())
+                })?;
+                // M2 prepares neutral hidden children. Halo inversion and
+                // outlines are activated by their later rendering milestones.
+                Self::set_identity_color(magnifier).map_err(|error| {
+                    format!(
+                        "Could not configure {} neutral color: {error}",
+                        kind.label()
+                    )
+                })?;
+            }
+            Ok(())
+        }
+    }
+
+    impl EffectNativeOperations for WindowsEffectOperations {
+        fn initialize_session(&mut self) -> Result<(), String> {
+            if self.session_initialized {
+                return Ok(());
+            }
+            if !unsafe { MagInitialize() }.as_bool() {
+                return Err(format!(
+                    "MagInitialize returned FALSE (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            self.session_initialized = true;
+            Ok(())
+        }
+
+        fn has_surface(&self, kind: EffectKind) -> bool {
+            self.surface(kind).is_some()
+        }
+
+        fn create_surface(
+            &mut self,
+            kind: EffectKind,
+            configuration: &EffectConfiguration,
+        ) -> Result<(), String> {
+            let (diameter, _) = Self::dimensions_and_scale(configuration);
+            self.create_host(kind, diameter)?;
+            self.create_magnifier_child(kind, configuration)
+        }
+
+        fn configure_surface(
+            &mut self,
+            kind: EffectKind,
+            configuration: &EffectConfiguration,
+        ) -> Result<(), String> {
+            Self::configure_surface(self, kind, configuration)
+        }
+
+        fn host_window(&self, kind: EffectKind) -> Option<usize> {
+            self.surface(kind).map(|surface| surface.host.0 as usize)
+        }
+
+        fn set_filter_list(
+            &mut self,
+            kind: EffectKind,
+            excluded_windows: &[usize],
+        ) -> Result<(), String> {
+            let magnifier = self
+                .surface(kind)
+                .map(|surface| surface.magnifier)
+                .filter(|hwnd| !hwnd.0.is_null())
+                .ok_or_else(|| format!("{} magnifier child is missing", kind.label()))?;
+            if excluded_windows.len() > i32::MAX as usize {
+                return Err("too many HWNDs for MagSetWindowFilterList".into());
+            }
+            let mut handles = excluded_windows
+                .iter()
+                .map(|window| HWND(*window as *mut _))
+                .collect::<Vec<_>>();
+            if !unsafe {
+                MagSetWindowFilterList(
+                    magnifier,
+                    MW_FILTERMODE_EXCLUDE,
+                    handles.len() as i32,
+                    handles.as_mut_ptr(),
+                )
+            }
+            .as_bool()
+            {
+                return Err(format!(
+                    "MagSetWindowFilterList({}) failed (GetLastError={})",
+                    kind.label(),
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(())
+        }
+
+        fn is_visible(&self, kind: EffectKind) -> bool {
+            self.surface(kind)
+                .is_some_and(|surface| unsafe { IsWindowVisible(surface.host) }.as_bool())
+        }
+
+        fn hide_surface(&mut self, kind: EffectKind) -> Result<(), String> {
+            let Some(host) = self.surface(kind).map(|surface| surface.host) else {
+                return Ok(());
+            };
+            if unsafe { IsWindowVisible(host) }.as_bool() {
+                unsafe {
+                    let _ = ShowWindow(host, SW_HIDE);
+                }
+            }
+            if unsafe { IsWindowVisible(host) }.as_bool() {
+                return Err(format!(
+                    "{} effect host remained visible after SW_HIDE",
+                    kind.label()
+                ));
+            }
+            Ok(())
+        }
+
+        fn refresh_visible_source(
+            &mut self,
+            kind: EffectKind,
+            current_point: PhysicalPoint,
+        ) -> Result<(), String> {
+            let surface = self
+                .surface(kind)
+                .ok_or_else(|| format!("{} effect host is missing", kind.label()))?;
+            let source_size = ((surface.diameter as f32) / surface.scale)
+                .round()
+                .clamp(1.0, surface.diameter as f32) as i32;
+            let half = source_size / 2;
+            let left = current_point
+                .x
+                .checked_sub(half)
+                .ok_or_else(|| format!("{} source x coordinate overflowed", kind.label()))?;
+            let top = current_point
+                .y
+                .checked_sub(half)
+                .ok_or_else(|| format!("{} source y coordinate overflowed", kind.label()))?;
+            let source = RECT {
+                left,
+                top,
+                right: left.checked_add(source_size).ok_or_else(|| {
+                    format!("{} source right coordinate overflowed", kind.label())
+                })?,
+                bottom: top.checked_add(source_size).ok_or_else(|| {
+                    format!("{} source bottom coordinate overflowed", kind.label())
+                })?,
+            };
+            if !unsafe { MagSetWindowSource(surface.magnifier, source) }.as_bool() {
+                return Err(format!(
+                    "MagSetWindowSource({}) failed (GetLastError={})",
+                    kind.label(),
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            if !unsafe { InvalidateRect(surface.magnifier, None, BOOL(0)) }.as_bool() {
+                return Err(format!(
+                    "InvalidateRect({}) failed (GetLastError={})",
+                    kind.label(),
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(())
+        }
+
+        fn destroy_surface(&mut self, kind: EffectKind) -> Result<(), String> {
+            let Some(host) = self.surface(kind).map(|surface| surface.host) else {
+                return Ok(());
+            };
+            unsafe { DestroyWindow(host) }.map_err(|error| {
+                format!("Could not destroy {} effect host: {error}", kind.label())
+            })?;
+            *self.surface_mut(kind) = None;
+            Ok(())
+        }
+
+        fn uninitialize_session(&mut self) -> Result<(), String> {
+            if self.halo.is_some() || self.zoom.is_some() {
+                return Err("Cannot uninitialize Magnification while effect hosts remain".into());
+            }
+            if !self.session_initialized {
+                return Ok(());
+            }
+            if !unsafe { MagUninitialize() }.as_bool() {
+                return Err(format!(
+                    "MagUninitialize returned FALSE (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            self.session_initialized = false;
+            Ok(())
+        }
+    }
+
+    impl Drop for WindowsEffectOperations {
+        fn drop(&mut self) {
+            for kind in [EffectKind::Zoom, EffectKind::Halo] {
+                if !self.has_surface(kind) {
+                    continue;
+                }
+                if let Err(error) = self.hide_surface(kind) {
+                    eprintln!("coordinate effect cleanup: {error}");
+                }
+                if let Err(error) = self.destroy_surface(kind) {
+                    eprintln!("coordinate effect cleanup: {error}");
+                }
+            }
+            if self.halo.is_none() && self.zoom.is_none() && self.session_initialized {
+                if let Err(error) = self.uninitialize_session() {
+                    eprintln!("coordinate Magnification cleanup: {error}");
+                }
+            } else if self.halo.is_some() || self.zoom.is_some() {
+                eprintln!(
+                    "coordinate Magnification session retained because an effect host remains"
+                );
+            }
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq)]
     struct HudVisual {
         lines: Vec<String>,
@@ -718,12 +1257,14 @@ mod windows_runtime {
         crosshair: LayeredSurface,
         horizontal_guide: LayeredSurface,
         vertical_guide: LayeredSurface,
+        effects: CursorEffectsRuntime<WindowsEffectOperations>,
         crosshair_preferences: Option<CrosshairPreferences>,
         crosshair_image: Option<RgbaImage>,
         horizontal_guide_visual: Option<GuideVisual>,
         vertical_guide_visual: Option<GuideVisual>,
         hud_visual: Option<HudVisual>,
         refresh_requested: bool,
+        topology_invalidated: bool,
         shutdown: bool,
     }
 
@@ -735,12 +1276,14 @@ mod windows_runtime {
                 crosshair: LayeredSurface::new(instance)?,
                 horizontal_guide: LayeredSurface::new(instance)?,
                 vertical_guide: LayeredSurface::new(instance)?,
+                effects: CursorEffectsRuntime::new(WindowsEffectOperations::new(instance)),
                 crosshair_preferences: None,
                 crosshair_image: None,
                 horizontal_guide_visual: None,
                 vertical_guide_visual: None,
                 hud_visual: None,
                 refresh_requested: false,
+                topology_invalidated: false,
                 shutdown: false,
             })
         }
@@ -920,13 +1463,23 @@ mod windows_runtime {
             let mut refresh = false;
             let mut message = MSG::default();
             while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
-                if message.message == WM_DISPLAYCHANGE || message.message == WM_DPICHANGED {
+                if message.message == WM_COORDINATE_TOPOLOGY_INVALIDATED {
                     refresh = true;
+                    self.topology_invalidated = true;
                 }
                 unsafe {
                     let _ = TranslateMessage(&message);
                     DispatchMessageW(&message);
                 }
+            }
+            if !self.topology_invalidated {
+                let cheap_window_ids = [
+                    self.hud.hwnd.0 as usize,
+                    self.crosshair.hwnd.0 as usize,
+                    self.horizontal_guide.hwnd.0 as usize,
+                    self.vertical_guide.hwnd.0 as usize,
+                ];
+                self.effects.poll_visible_sources(&cheap_window_ids);
             }
             self.refresh_requested |= refresh;
             Ok(refresh)
@@ -937,6 +1490,23 @@ mod windows_runtime {
                 return Err("Coordinate surfaces are already shut down".into());
             }
             let force = mem::take(&mut self.refresh_requested);
+            let topology_invalidated = mem::take(&mut self.topology_invalidated);
+            let cheap_window_ids = [
+                self.hud.hwnd.0 as usize,
+                self.crosshair.hwnd.0 as usize,
+                self.horizontal_guide.hwnd.0 as usize,
+                self.vertical_guide.hwnd.0 as usize,
+            ];
+            self.effects.reconcile(
+                EffectRequests::from_runtime(&frame.runtime_state),
+                &frame.preferences,
+                frame
+                    .current_sample
+                    .as_ref()
+                    .map(|sample| sample.desktop_point),
+                &cheap_window_ids,
+                topology_invalidated,
+            );
             let mut errors = Vec::new();
             if let Err(error) = self.render_crosshair(frame, force) {
                 self.crosshair.hide();
@@ -951,12 +1521,19 @@ mod windows_runtime {
             errors.into_iter().next().map_or(Ok(()), Err)
         }
 
+        fn effects_status(&self) -> CoordinateEffectsStatus {
+            self.effects.status()
+        }
+
         fn shutdown(&mut self) -> Result<(), String> {
             if self.shutdown {
                 return Ok(());
             }
             self.shutdown = true;
             let mut errors = Vec::new();
+            if let Err(error) = self.effects.shutdown() {
+                errors.push(error);
+            }
             for result in [
                 self.hud.shutdown(),
                 self.crosshair.shutdown(),

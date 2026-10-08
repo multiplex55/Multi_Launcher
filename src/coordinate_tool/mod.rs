@@ -7,6 +7,7 @@ pub mod capture;
 pub mod controller;
 pub mod model;
 pub mod native;
+pub(crate) mod native_effects;
 pub mod render;
 pub mod settings;
 
@@ -20,9 +21,10 @@ pub use controller::{
     CoordinateToolController,
 };
 pub use model::{
-    CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState, CoordinateUnavailable,
-    ForegroundClientGeometry, FormattedCoordinate, MonitorGeometry, MonitorId, PhysicalPoint,
-    PhysicalRect, PhysicalSize, clamp_hud_origin, format_coordinate,
+    CoordinateEffectsStatus, CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState,
+    CoordinateUnavailable, CursorEffectStatus, ForegroundClientGeometry, FormattedCoordinate,
+    MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, clamp_hud_origin,
+    format_coordinate,
 };
 pub(crate) use native::NativeCoordinatePointSampler;
 pub use native::NativeCoordinateRuntimeFactory;

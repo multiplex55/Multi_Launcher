@@ -284,6 +284,50 @@ pub struct CoordinateToolRuntimeState {
     last_successful_copy: Option<FormattedCoordinate>,
 }
 
+/// Native preparation and presentation state for one cursor effect. Requested
+/// state remains in `CoordinateToolRuntimeState`; an unavailable resource does
+/// not change that request or disable another effect.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CursorEffectStatus {
+    #[default]
+    Disabled,
+    /// Native resources are ready and kept hidden until their renderer is active.
+    Prepared,
+    /// The passive effect surface is currently visible.
+    Active,
+    /// The effect remains requested but has no live cursor sample to follow.
+    Paused,
+    /// Resource preparation or cleanup failed. The reason is retained for the
+    /// effect status UI without turning into a shared HUD/crosshair error.
+    Unavailable(String),
+}
+
+/// Per-effect native status, separate from persisted preferences and requested
+/// runtime flags.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoordinateEffectsStatus {
+    halo: CursorEffectStatus,
+    zoom: CursorEffectStatus,
+}
+
+impl CoordinateEffectsStatus {
+    pub fn halo(&self) -> &CursorEffectStatus {
+        &self.halo
+    }
+
+    pub fn zoom(&self) -> &CursorEffectStatus {
+        &self.zoom
+    }
+
+    pub(crate) fn set_halo(&mut self, status: CursorEffectStatus) {
+        self.halo = status;
+    }
+
+    pub(crate) fn set_zoom(&mut self, status: CursorEffectStatus) {
+        self.zoom = status;
+    }
+}
+
 impl CoordinateToolRuntimeState {
     pub const fn hud_enabled(&self) -> bool {
         self.hud_enabled
