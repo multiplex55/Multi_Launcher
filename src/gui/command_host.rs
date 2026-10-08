@@ -80,7 +80,7 @@ impl RadialCommandHost for LauncherApp {
         &mut self,
         request: crate::radial::control::RadialControlRequest,
     ) -> Result<(), String> {
-        if self.coordinate_tool.capture_pending()
+        if self.coordinate_pick_blocks_other_screen_actions()
             && matches!(
                 &request,
                 crate::radial::control::RadialControlRequest::Show(_)

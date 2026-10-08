@@ -211,8 +211,12 @@ impl CoordinateToolGui {
 }
 
 impl LauncherApp {
+    pub(super) fn coordinate_pick_blocks_other_screen_actions(&self) -> bool {
+        self.coordinate_tool.capture_pending() || self.coordinate_capture_parking.is_some()
+    }
+
     pub(super) fn ensure_no_coordinate_pick(&self) -> Result<(), String> {
-        if self.coordinate_tool.capture_pending() {
+        if self.coordinate_pick_blocks_other_screen_actions() {
             Err("Finish or cancel coordinate picking before starting another screen capture".into())
         } else {
             Ok(())
@@ -220,6 +224,11 @@ impl LauncherApp {
     }
 
     pub(super) fn ensure_coordinate_pick_admitted(&self) -> Result<(), String> {
+        if self.coordinate_capture_parking.is_some() {
+            return Err(
+                "Restore the launcher window before starting another coordinate pick".into(),
+            );
+        }
         if self.coordinate_tool.capture_pending() {
             return Ok(());
         }
@@ -510,8 +519,13 @@ impl CoordinateToolGui {
     }
 
     pub(crate) fn cancel_pick(&mut self) -> bool {
+        let had_capture = self.active_pick.is_some() || self.capture.is_active();
+        if let Some((_, _, publish_allowed)) = &mut self.active_pick {
+            *publish_allowed = false;
+        }
+        let cancellation_requested = self.capture.cancel();
         self.poll_capture();
-        self.capture.is_active() && self.capture.cancel()
+        had_capture || cancellation_requested
     }
 
     /// A newer launcher visibility request supersedes this capture's UI owner.
@@ -998,6 +1012,53 @@ mod tests {
         assert!(gui.cancel_pick());
         outcomes.send(CaptureOutcome::Cancelled).unwrap();
         wait_for_capture_join(&mut gui);
+
+        assert_eq!(*clipboard.current.lock().unwrap(), Some("sentinel".into()));
+        assert!(clipboard.writes.lock().unwrap().is_empty());
+        assert!(
+            gui.controller
+                .runtime_state()
+                .last_successful_copy()
+                .is_none()
+        );
+        assert_eq!(
+            gui.take_capture_feedback(),
+            Some(CoordinateCaptureFeedback::Cancelled)
+        );
+        gui.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cancel_suppresses_a_joined_capture_result_waiting_in_the_adapter_queue() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .to_string();
+        let (mut gui, _, started, outcomes, clipboard) = capture_adapter(path);
+        *clipboard.current.lock().unwrap() = Some("sentinel".into());
+        assert!(gui.begin_pick().unwrap());
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        outcomes
+            .send(CaptureOutcome::Captured(sample(-100, 40)))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while gui.capture.is_active() && Instant::now() < deadline {
+            // Join and queue the terminal status without letting the GUI
+            // adapter publish it to the clipboard.
+            gui.capture.poll();
+            thread::yield_now();
+        }
+        assert!(
+            !gui.capture.is_active(),
+            "capture worker should have joined"
+        );
+        assert!(gui.active_pick.is_some());
+        assert_eq!(*clipboard.current.lock().unwrap(), Some("sentinel".into()));
+
+        assert!(gui.cancel_pick());
 
         assert_eq!(*clipboard.current.lock().unwrap(), Some("sentinel".into()));
         assert!(clipboard.writes.lock().unwrap().is_empty());

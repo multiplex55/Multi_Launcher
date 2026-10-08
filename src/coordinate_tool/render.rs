@@ -3,6 +3,7 @@ use image::{Rgba, RgbaImage};
 use super::controller::CoordinateRenderFrame;
 use super::model::{
     CoordinateSample, CoordinateSpace, CoordinateUnavailable, PhysicalPoint, PhysicalRect,
+    PhysicalSize,
 };
 use super::settings::{CrosshairColor, CrosshairPreferences, HudDetail};
 
@@ -352,8 +353,32 @@ pub(crate) fn hud_dimensions(lines: &[String], font_size: u32) -> (u32, u32) {
     let height = (lines.len() as u32)
         .saturating_mul(line_height)
         .saturating_add(18)
-        .clamp(36, 480);
+        .max(36);
     (width, height)
+}
+
+pub(crate) fn hud_layout(
+    lines: &[String],
+    preferred_font_size: u32,
+    work_area: Option<PhysicalSize>,
+) -> (u32, u32, u32) {
+    let mut font_size = preferred_font_size.clamp(12, 32);
+    let max_width = work_area.map(|area| u32::try_from(area.width()).unwrap_or(u32::MAX).max(1));
+    let max_height = work_area.map(|area| u32::try_from(area.height()).unwrap_or(u32::MAX).max(1));
+
+    loop {
+        let (width, height) = hud_dimensions(lines, font_size);
+        let fits_width = max_width.is_none_or(|limit| width <= limit);
+        let fits_height = max_height.is_none_or(|limit| height <= limit);
+        if (fits_width && fits_height) || font_size == 12 {
+            return (
+                font_size,
+                max_width.map_or(width, |limit| width.min(limit)),
+                max_height.map_or(height, |limit| height.min(limit)),
+            );
+        }
+        font_size -= 1;
+    }
 }
 
 fn format_coordinate_value(sample: &CoordinateSample, space: CoordinateSpace) -> String {
@@ -389,7 +414,7 @@ mod tests {
         CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState, ForegroundClientGeometry,
         MonitorGeometry, MonitorId,
     };
-    use crate::coordinate_tool::model::{PhysicalPoint, PhysicalRect};
+    use crate::coordinate_tool::model::{PhysicalPoint, PhysicalRect, PhysicalSize};
     use crate::coordinate_tool::settings::{CrosshairColor, CrosshairPreferences};
 
     #[test]
@@ -491,5 +516,60 @@ mod tests {
         assert!(lines.contains("Help: coord help"));
         assert_eq!(super::hud_font_size(Some(144)), 21);
         assert_eq!(super::hud_font_size(None), 14);
+    }
+
+    #[test]
+    fn high_dpi_frozen_hud_fits_sampling_error_and_final_help_row_in_work_area() {
+        let sample = CoordinateSample::new(
+            PhysicalPoint::new(-1732, 215),
+            Some(PhysicalRect::new(-1920, 0, 1920, 2160).unwrap()),
+            Some(MonitorGeometry {
+                id: MonitorId::new("DISPLAY_LEFT"),
+                bounds: PhysicalRect::new(-1920, 0, 0, 1080).unwrap(),
+                work_area: PhysicalRect::new(-1920, 0, 0, 1040).unwrap(),
+                effective_dpi: Some((288, 288)),
+            }),
+            Some(ForegroundClientGeometry::new(
+                PhysicalPoint::new(-1800, 40),
+                Some(PhysicalRect::new(-1800, 40, -100, 800).unwrap()),
+            )),
+        );
+        let mut runtime_state = CoordinateToolRuntimeState::default();
+        runtime_state.freeze(&sample);
+        runtime_state.record_successful_copy(
+            super::super::model::format_coordinate(&sample, CoordinateSpace::Desktop).unwrap(),
+        );
+        let frame = CoordinateRenderFrame {
+            preferences: crate::coordinate_tool::CoordinateToolPreferences {
+                hud_detail: crate::coordinate_tool::HudDetail::Detailed,
+                ..Default::default()
+            },
+            runtime_state,
+            current_sample: Some(sample.clone()),
+            displayed_sample: Some(sample.clone()),
+            placement_sample: Some(sample),
+            sample_error: Some("sample backend is temporarily unavailable".into()),
+        };
+        let lines = super::hud_lines(&frame);
+        assert!(lines.iter().any(|line| line.starts_with("Sampling: ")));
+        assert_eq!(lines.last().map(String::as_str), Some("Help: coord help"));
+
+        let uncapped = super::hud_layout(&lines, 32, None);
+        assert!(uncapped.2 > 480);
+
+        let work_area = PhysicalSize::new(1920, 520).unwrap();
+        let (font_size, width, height) = super::hud_layout(&lines, 32, Some(work_area));
+        assert!(
+            font_size < 32,
+            "font should shrink to fit the work-area height"
+        );
+        assert!(width <= 1920);
+        assert!(height <= 520);
+        let last_row_bottom =
+            9 + u32::try_from(lines.len() - 1).unwrap() * (font_size + 5) + font_size;
+        assert!(
+            last_row_bottom <= height,
+            "final HUD row must be fully inside the allocated surface"
+        );
     }
 }

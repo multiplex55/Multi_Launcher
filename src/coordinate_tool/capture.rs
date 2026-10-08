@@ -11,7 +11,6 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
-#[cfg(any(windows, test))]
 use std::{cell::RefCell, rc::Rc};
 
 use super::model::{CoordinateSample, PhysicalPoint};
@@ -322,9 +321,11 @@ impl CoordinateCaptureController {
             sender: self.updates_tx.clone(),
         };
         let thread_control = control.clone();
+        let owner_lease = crate::hotkey::launcher_invocation::CoordinatePickOwnerLease::acquire();
         let join = thread::Builder::new()
             .name("coordinate-tool-capture".into())
             .spawn(move || {
+                let _owner_lease = owner_lease;
                 let outcome = runtime.run_session(
                     session_id,
                     thread_control,

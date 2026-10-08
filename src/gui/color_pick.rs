@@ -42,7 +42,7 @@ impl LauncherApp {
     }
 
     pub(super) fn ensure_color_pick_does_not_own_root(&self) -> Result<(), String> {
-        if self.coordinate_tool.capture_pending() {
+        if self.coordinate_pick_blocks_other_screen_actions() {
             Err("Finish or cancel coordinate picking before starting Screen Draw".into())
         } else if self.color_pick_owns_root() {
             Err("Finish or cancel the screen color picker before starting Screen Draw".into())

@@ -114,8 +114,8 @@ mod windows_runtime {
         PhysicalRect, PhysicalSize,
     };
     use super::super::render::{
-        GuideOrientation, crosshair_bitmap, guide_bitmap, guide_geometry, hud_dimensions,
-        hud_font_size, hud_lines,
+        GuideOrientation, crosshair_bitmap, guide_bitmap, guide_geometry, hud_font_size,
+        hud_layout, hud_lines,
     };
     use super::super::settings::CrosshairPreferences;
     use crate::platform::pixels::premultiplied_bgra;
@@ -757,8 +757,14 @@ mod windows_runtime {
                 .as_ref()
                 .and_then(|sample| sample.monitor.as_ref())
                 .and_then(|monitor| monitor.effective_dpi.map(|(x, _)| x));
-            let font_size = hud_font_size(dpi);
-            let (width, height) = hud_dimensions(&lines, font_size);
+            let work_area = frame
+                .placement_sample
+                .as_ref()
+                .and_then(|sample| sample.monitor.as_ref())
+                .and_then(|monitor| {
+                    PhysicalSize::new(monitor.work_area.width(), monitor.work_area.height())
+                });
+            let (font_size, width, height) = hud_layout(&lines, hud_font_size(dpi), work_area);
             let visual = HudVisual {
                 lines,
                 font_size,

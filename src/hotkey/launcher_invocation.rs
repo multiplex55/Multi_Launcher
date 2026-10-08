@@ -21,9 +21,12 @@ pub enum ExclusiveOwner {
     VisualSelection = 2,
     MacroPlayback = 4,
     MacroRecorder = 8,
+    CoordinatePick = 16,
 }
 
 static EXCLUSIVE_OWNERS: AtomicU32 = AtomicU32::new(0);
+static COORDINATE_PICK_OWNER_LEASES: std::sync::OnceLock<std::sync::Mutex<usize>> =
+    std::sync::OnceLock::new();
 static EXCLUSIVE_WAKE: std::sync::OnceLock<std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>> =
     std::sync::OnceLock::new();
 
@@ -58,6 +61,38 @@ fn exclusive_owner_transition(previous: u32, owner: ExclusiveOwner, active: bool
 
 pub fn exclusive_owners() -> u32 {
     EXCLUSIVE_OWNERS.load(Ordering::Acquire)
+}
+
+/// Keeps native launcher hotkeys owned by the active coordinate-capture worker.
+/// The lease lives on that worker so shutdown and failure release it only after
+/// its native hooks and suppression resources have been torn down.
+pub(crate) struct CoordinatePickOwnerLease;
+
+impl CoordinatePickOwnerLease {
+    pub(crate) fn acquire() -> Self {
+        let mut leases = COORDINATE_PICK_OWNER_LEASES
+            .get_or_init(|| std::sync::Mutex::new(0))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *leases == 0 {
+            set_exclusive_owner(ExclusiveOwner::CoordinatePick, true);
+        }
+        *leases = leases.saturating_add(1);
+        Self
+    }
+}
+
+impl Drop for CoordinatePickOwnerLease {
+    fn drop(&mut self) {
+        let mut leases = COORDINATE_PICK_OWNER_LEASES
+            .get_or_init(|| std::sync::Mutex::new(0))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *leases = leases.saturating_sub(1);
+        if *leases == 0 {
+            set_exclusive_owner(ExclusiveOwner::CoordinatePick, false);
+        }
+    }
 }
 
 pub fn classify_provenance(injected: bool, extra_info: usize) -> InputProvenance {
@@ -3607,6 +3642,26 @@ mod tests {
         let owners = exclusive_owner_transition(owners, ExclusiveOwner::VisualSelection, true);
         let owners = exclusive_owner_transition(owners, ExclusiveOwner::MacroPlayback, false);
         assert_eq!(owners, ExclusiveOwner::VisualSelection as u32);
+
+        let owners = exclusive_owner_transition(owners, ExclusiveOwner::VisualSelection, false);
+        let owners = exclusive_owner_transition(owners, ExclusiveOwner::CoordinatePick, true);
+        assert_eq!(owners, ExclusiveOwner::CoordinatePick as u32);
+        let owner = if owners != 0 {
+            PriorityOwner::ExclusiveTool
+        } else {
+            PriorityOwner::Launcher
+        };
+        let mut adapter = LauncherInvocationAdapter::new(cfg()).unwrap();
+        for (at, vk) in [0xA0, 0xA4, 0x5B].into_iter().enumerate() {
+            let outcome = adapter.process(e(vk, KeyTransition::Down, at as u64), owner);
+            assert!(outcome.intents.is_empty());
+        }
+        let direct_chord = adapter.process(e(0x23, KeyTransition::Down, 4), owner);
+        assert!(!direct_chord.consume);
+        assert!(direct_chord.intents.is_empty());
+
+        let owners = exclusive_owner_transition(owners, ExclusiveOwner::CoordinatePick, false);
+        assert_eq!(owners, 0);
     }
     #[test]
     fn higher_priority_action_cancels_pending_and_owned_release_is_drained_once() {
