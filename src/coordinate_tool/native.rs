@@ -125,7 +125,8 @@ mod windows_runtime {
     };
     use super::super::render::{
         GuideOrientation, HaloColorTransform, crosshair_bitmap, guide_bitmap, guide_geometry,
-        halo_geometry, halo_outline_bitmap, hud_font_size, hud_layout, hud_lines,
+        halo_fallback_bitmap, halo_geometry, halo_outline_bitmap, hud_font_size, hud_layout,
+        hud_lines,
     };
     use super::super::settings::{CrosshairPreferences, HaloPreferences};
     use crate::platform::pixels::premultiplied_bgra;
@@ -829,7 +830,7 @@ mod windows_runtime {
         zoom: Option<NativeEffectSurface>,
         halo_outline: Option<LayeredSurface>,
         halo_outline_image: Option<RgbaImage>,
-        halo_outline_preferences: Option<HaloPreferences>,
+        halo_outline_configuration: Option<(HaloPreferences, bool)>,
     }
 
     impl WindowsEffectOperations {
@@ -841,7 +842,7 @@ mod windows_runtime {
                 zoom: None,
                 halo_outline: None,
                 halo_outline_image: None,
-                halo_outline_preferences: None,
+                halo_outline_configuration: None,
             }
         }
 
@@ -911,15 +912,27 @@ mod windows_runtime {
         fn configure_outline_surface(
             &mut self,
             preferences: HaloPreferences,
+            fallback: bool,
         ) -> Result<(), String> {
             let preferences = preferences.normalized();
-            if self.halo_outline_preferences == Some(preferences) {
+            if self.halo_outline_configuration == Some((preferences, fallback)) {
                 return Ok(());
             }
 
-            if preferences.outline_enabled {
-                let image = halo_outline_bitmap(preferences)
-                    .ok_or_else(|| "Could not create halo outline bitmap".to_string())?;
+            let image = if fallback {
+                Some(
+                    halo_fallback_bitmap(preferences)
+                        .ok_or_else(|| "Could not create halo fallback bitmap".to_string())?,
+                )
+            } else if preferences.outline_enabled {
+                Some(
+                    halo_outline_bitmap(preferences)
+                        .ok_or_else(|| "Could not create halo outline bitmap".to_string())?,
+                )
+            } else {
+                None
+            };
+            if let Some(image) = image {
                 if self.halo_outline.is_none() {
                     self.halo_outline = Some(LayeredSurface::new(self.instance)?);
                 }
@@ -932,8 +945,18 @@ mod windows_runtime {
                 self.halo_outline_image = None;
             }
 
-            self.halo_outline_preferences = Some(preferences);
+            self.halo_outline_configuration = Some((preferences, fallback));
             Ok(())
+        }
+
+        fn present_halo_fallback(&mut self, point: PhysicalPoint) -> Result<(), String> {
+            let Some((preferences, true)) = self.halo_outline_configuration else {
+                return Err("Halo fallback ring is not configured".into());
+            };
+            let geometry = halo_geometry(point, preferences.radius).ok_or_else(|| {
+                "Halo fallback geometry overflows physical coordinates".to_string()
+            })?;
+            self.present_halo_outline(geometry.origin)
         }
 
         fn hide_halo_outline(&mut self) -> Result<(), String> {
@@ -1330,8 +1353,12 @@ mod windows_runtime {
             }
         }
 
-        fn configure_halo_outline(&mut self, preferences: HaloPreferences) -> Result<(), String> {
-            Self::configure_outline_surface(self, preferences)
+        fn configure_halo_outline(
+            &mut self,
+            preferences: HaloPreferences,
+            fallback: bool,
+        ) -> Result<(), String> {
+            Self::configure_outline_surface(self, preferences, fallback)
         }
 
         fn set_filter_list(
@@ -1375,6 +1402,15 @@ mod windows_runtime {
                 .is_some_and(|surface| unsafe { IsWindowVisible(surface.host) }.as_bool())
         }
 
+        fn is_halo_fallback_visible(&self) -> bool {
+            self.halo_outline_configuration
+                .is_some_and(|(_, fallback)| fallback)
+                && self
+                    .halo_outline
+                    .as_ref()
+                    .is_some_and(LayeredSurface::is_visible)
+        }
+
         fn hide_surface(&mut self, kind: EffectKind) -> Result<(), String> {
             let mut errors = Vec::new();
             if let Some(host) = self.surface(kind).map(|surface| surface.host) {
@@ -1403,6 +1439,13 @@ mod windows_runtime {
             kind: EffectKind,
             current_point: PhysicalPoint,
         ) -> Result<(), String> {
+            if kind == EffectKind::Halo
+                && self
+                    .halo_outline_configuration
+                    .is_some_and(|(_, fallback)| fallback)
+            {
+                return self.present_halo_fallback(current_point);
+            }
             let origin = self.update_live_source(kind, current_point)?;
             if kind == EffectKind::Halo
                 && let Some(origin) = origin
@@ -1419,6 +1462,12 @@ mod windows_runtime {
         ) -> Result<(), String> {
             if kind != EffectKind::Halo {
                 return Err("Only the halo can be presented in this checkpoint".into());
+            }
+            if self
+                .halo_outline_configuration
+                .is_some_and(|(_, fallback)| fallback)
+            {
+                return self.present_halo_fallback(current_point);
             }
             let origin = self
                 .update_live_source(kind, current_point)?
@@ -1447,7 +1496,7 @@ mod windows_runtime {
             }
             self.halo_outline = None;
             self.halo_outline_image = None;
-            self.halo_outline_preferences = None;
+            self.halo_outline_configuration = None;
             Ok(())
         }
 
@@ -1529,7 +1578,7 @@ mod windows_runtime {
         hud_visual: Option<HudVisual>,
         refresh_requested: bool,
         topology_invalidated: bool,
-        ordered_halo_outline_enabled: Option<bool>,
+        ordered_halo_stack: Option<(bool, bool)>,
         shutdown: bool,
     }
 
@@ -1549,7 +1598,7 @@ mod windows_runtime {
                 hud_visual: None,
                 refresh_requested: false,
                 topology_invalidated: false,
-                ordered_halo_outline_enabled: None,
+                ordered_halo_stack: None,
                 shutdown: false,
             })
         }
@@ -1741,6 +1790,22 @@ mod windows_runtime {
                 }
             }
         }
+
+        fn sync_halo_stack_order(&mut self, outline_enabled: bool) {
+            let halo_stack = match self.effects.status().halo() {
+                CursorEffectStatus::Active => Some((false, outline_enabled)),
+                CursorEffectStatus::Fallback(_) => Some((true, outline_enabled)),
+                _ => None,
+            };
+            if let Some(halo_stack) = halo_stack {
+                if self.ordered_halo_stack != Some(halo_stack) {
+                    self.raise_visible_cheap_surfaces_above_halo();
+                }
+                self.ordered_halo_stack = Some(halo_stack);
+            } else {
+                self.ordered_halo_stack = None;
+            }
+        }
     }
 
     impl CoordinateSurfaceBackend for WindowsSurfaceBackend {
@@ -1765,6 +1830,11 @@ mod windows_runtime {
                     self.vertical_guide.hwnd.0 as usize,
                 ];
                 self.effects.poll_visible_sources(&cheap_window_ids);
+                let outline_enabled = self
+                    .ordered_halo_stack
+                    .map(|(_, outline_enabled)| outline_enabled)
+                    .unwrap_or(false);
+                self.sync_halo_stack_order(outline_enabled);
             }
             self.refresh_requested |= refresh;
             Ok(refresh)
@@ -1776,7 +1846,6 @@ mod windows_runtime {
             }
             let force = mem::take(&mut self.refresh_requested);
             let topology_invalidated = mem::take(&mut self.topology_invalidated);
-            let ordered_outline_enabled = self.ordered_halo_outline_enabled;
             let cheap_window_ids = [
                 self.hud.hwnd.0 as usize,
                 self.crosshair.hwnd.0 as usize,
@@ -1804,14 +1873,7 @@ mod windows_runtime {
                 self.hud.hide();
                 errors.push(error);
             }
-            if matches!(self.effects.status().halo(), CursorEffectStatus::Active) {
-                if ordered_outline_enabled != Some(frame.preferences.halo.outline_enabled) {
-                    self.raise_visible_cheap_surfaces_above_halo();
-                }
-                self.ordered_halo_outline_enabled = Some(frame.preferences.halo.outline_enabled);
-            } else {
-                self.ordered_halo_outline_enabled = None;
-            }
+            self.sync_halo_stack_order(frame.preferences.halo.outline_enabled);
             errors.into_iter().next().map_or(Ok(()), Err)
         }
 

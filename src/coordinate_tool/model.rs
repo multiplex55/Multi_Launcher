@@ -295,6 +295,9 @@ pub enum CursorEffectStatus {
     Prepared,
     /// The passive effect surface is currently visible.
     Active,
+    /// The halo is following the live cursor with a contrasting outline only;
+    /// desktop inversion could not be initialized or presented.
+    Fallback(String),
     /// The effect remains requested but has no live cursor sample to follow.
     Paused,
     /// Resource preparation or cleanup failed. The reason is retained for the

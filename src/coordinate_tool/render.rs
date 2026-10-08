@@ -193,6 +193,47 @@ pub(crate) fn halo_outline_bitmap(preferences: HaloPreferences) -> Option<RgbaIm
     Some(image)
 }
 
+/// Build a contrasting ring for the degraded halo mode. Unlike the optional
+/// user outline, this bitmap always has adjacent opaque black and white bands
+/// so it remains visible on both light and dark desktop content. It never
+/// fills the center: at the minimum radius, effective thickness is capped at
+/// radius minus one even when the saved optional outline asks for eight pixels.
+pub(crate) fn halo_fallback_bitmap(preferences: HaloPreferences) -> Option<RgbaImage> {
+    let preferences = preferences.normalized();
+    let radius = preferences.radius;
+    let diameter = radius.checked_mul(2)? as u32;
+    let requested_thickness = if preferences.outline_enabled {
+        preferences.outline_thickness.max(4)
+    } else {
+        4
+    };
+    let thickness = requested_thickness.min(radius - 1);
+    let outer_band = (thickness / 2).max(1);
+    let outer_inner_radius = (radius - outer_band) as f32;
+    let inner_radius = (radius - thickness) as f32;
+    let outer_inner_squared = outer_inner_radius * outer_inner_radius;
+    let inner_squared = inner_radius * inner_radius;
+    let outer_radius = radius as f32;
+    let black = Rgba([0, 0, 0, 255]);
+    let white = Rgba([255, 255, 255, 255]);
+    let mut image = RgbaImage::new(diameter, diameter);
+    for y in 0..diameter {
+        let dy = y as f32 + 0.5 - outer_radius;
+        for x in 0..diameter {
+            let dx = x as f32 + 0.5 - outer_radius;
+            let distance_squared = dx * dx + dy * dy;
+            if distance_squared > outer_inner_squared
+                && distance_squared <= outer_radius * outer_radius
+            {
+                image.put_pixel(x, y, black);
+            } else if distance_squared > inner_squared && distance_squared <= outer_inner_squared {
+                image.put_pixel(x, y, white);
+            }
+        }
+    }
+    Some(image)
+}
+
 fn crosshair_geometry(preferences: &CrosshairPreferences) -> CrosshairGeometry {
     // Bound raw/deserialized and directly constructed preferences before any
     // sizing arithmetic so malformed values cannot request a huge bitmap.
@@ -598,7 +639,8 @@ fn concise_error(error: &str) -> String {
 mod tests {
     use super::{
         CrosshairGeometry, GuideOrientation, HaloColorTransform, crosshair_bitmap,
-        crosshair_geometry, guide_geometry, halo_geometry, halo_outline_bitmap,
+        crosshair_geometry, guide_geometry, halo_fallback_bitmap, halo_geometry,
+        halo_outline_bitmap,
     };
     use crate::coordinate_tool::controller::CoordinateRenderFrame;
     use crate::coordinate_tool::model::{
@@ -703,6 +745,37 @@ mod tests {
         assert_eq!(minimum.get_pixel(8, 7).0[3], 0);
         assert_eq!(minimum.get_pixel(7, 8).0[3], 0);
         assert_eq!(minimum.get_pixel(8, 8).0[3], 0);
+    }
+
+    #[test]
+    fn halo_fallback_ring_has_contrasting_bands_and_transparent_center_at_minimum_radius() {
+        let fallback = halo_fallback_bitmap(HaloPreferences::default()).unwrap();
+        assert_eq!(fallback.dimensions(), (120, 120));
+        assert_eq!(fallback.get_pixel(60, 0).0, [0, 0, 0, 255]);
+        assert!(
+            fallback
+                .pixels()
+                .any(|pixel| pixel.0 == [255, 255, 255, 255])
+        );
+        assert_eq!(fallback.get_pixel(60, 60).0[3], 0);
+
+        let minimum = halo_fallback_bitmap(HaloPreferences {
+            radius: 8,
+            outline_enabled: true,
+            outline_thickness: 8,
+            ..HaloPreferences::default()
+        })
+        .unwrap();
+        assert_eq!(minimum.dimensions(), (16, 16));
+        assert!(minimum.pixels().any(|pixel| pixel.0 == [0, 0, 0, 255]));
+        assert!(
+            minimum
+                .pixels()
+                .any(|pixel| pixel.0 == [255, 255, 255, 255])
+        );
+        for (x, y) in [(7, 7), (8, 7), (7, 8), (8, 8)] {
+            assert_eq!(minimum.get_pixel(x, y).0[3], 0);
+        }
     }
 
     #[test]
