@@ -31,12 +31,20 @@ struct LauncherSession {
 }
 
 impl LauncherApp {
+    pub(super) fn color_pick_capture_busy(&self) -> bool {
+        self.color_pick.session.is_some()
+            || self.color_pick.parking.is_some()
+            || self.color_pick.controller.is_active()
+    }
+
     pub(super) fn color_pick_owns_root(&self) -> bool {
         self.color_pick.session.is_some() || self.color_pick.parking.is_some()
     }
 
     pub(super) fn ensure_color_pick_does_not_own_root(&self) -> Result<(), String> {
-        if self.color_pick_owns_root() {
+        if self.coordinate_tool.capture_pending() {
+            Err("Finish or cancel coordinate picking before starting Screen Draw".into())
+        } else if self.color_pick_owns_root() {
             Err("Finish or cancel the screen color picker before starting Screen Draw".into())
         } else if self.ocr_owns_root() {
             Err("Finish or cancel Screen Region OCR before starting Screen Draw".into())
@@ -49,6 +57,7 @@ impl LauncherApp {
         if self.color_pick_owns_root() || self.color_pick.controller.is_active() {
             return Ok(false);
         }
+        self.ensure_no_coordinate_pick()?;
         if self.ocr_owns_root() {
             return Err("Finish or cancel Screen Region OCR before picking a screen color".into());
         }
@@ -577,6 +586,25 @@ mod tests {
             app.color_pick.controller.cancel();
             wait(&mut app, |app| !app.color_pick_owns_root());
         }
+    }
+
+    #[test]
+    fn coordinate_pick_is_rejected_before_parking_while_color_pick_is_active() {
+        let mut app = app();
+        let (outcome_tx, cleaned, observer) = start(&mut app);
+        let revision = app.visibility_revision.current();
+
+        let error = app.begin_coordinate_pick().unwrap_err();
+
+        assert!(error.contains("screen color picker"));
+        assert_eq!(app.coordinate_capture_generation, 0);
+        assert!(app.coordinate_capture_parking.is_none());
+        assert!(!app.coordinate_tool.capture_pending());
+        assert_eq!(app.visibility_revision.current(), revision);
+        outcome_tx.send(ColorPickOutcome::Cancelled).unwrap();
+        wait(&mut app, |app| !app.color_pick_owns_root());
+        assert!(cleaned.load(Ordering::Acquire));
+        assert_eq!(observer.current_rect(), original());
     }
     #[test]
     fn color_pick_restore_failure_retains_transaction_and_outcome_until_retry() {

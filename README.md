@@ -557,6 +557,20 @@ Use `coord compact|detailed`, `coord offset -32 48`, and
 sample as `x,y`; a frozen HUD copies its frozen sample. Detailed presentation
 includes monitor/context information and the last successful copy.
 
+`coord pick` starts a one-shot capture and temporarily parks the launcher so
+targets remain visible. A fresh left click copies that pixel's live coordinates
+as `x,y`, using the space selected when the session began, even if the HUD is
+frozen. The capture consumes both the press and its matching release; the
+underlying application does not receive the capture click. Escape or
+`coord cancel` cancels without writing the clipboard. The session stays active
+while an already consumed press waits for release, then cleans up before
+publishing a result. Repeating `coord pick` keeps the existing session.
+
+Coordinate capture cannot overlap OCR, Color Pick, Screen Draw, screenshot crop,
+or a MkMacro point/rectangle overlay. A radial action that starts pick closes its
+radial session first; a new radial overlay cannot open until capture cleanup finishes.
+Passive HUD and crosshair operation remain independent of those capture tools.
+
 Crosshair controls are `crosshair color #ff0000`, `crosshair thickness 2`,
 `crosshair length 12`, `crosshair opacity 0.8`, `crosshair guides on|off`, and
 `crosshair contrast on|off`. Guides span the virtual desktop; contrast adds an

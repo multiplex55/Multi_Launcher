@@ -476,6 +476,8 @@ fn parse_coord_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, Strin
         ["freeze"] => Ok(CoordinateToolCommand::Freeze),
         ["unfreeze"] => Ok(CoordinateToolCommand::Unfreeze),
         ["copy"] => Ok(CoordinateToolCommand::Copy),
+        ["pick"] => Ok(CoordinateToolCommand::Pick),
+        ["cancel"] => Ok(CoordinateToolCommand::Cancel),
         ["help"] => Ok(CoordinateToolCommand::HudHelp),
         [operation, ..] if operation.eq_ignore_ascii_case("space") => {
             Err("coordinate space must be desktop, monitor, or client".into())
@@ -2270,6 +2272,8 @@ mod coordinate_tool_parser_tests {
     #[test]
     fn control_tokens_are_case_insensitive_and_typed() {
         assert_eq!(parse("CoOrD:ToGgLe"), CoordinateToolCommand::ToggleHud);
+        assert_eq!(parse("CoOrD:PiCk"), CoordinateToolCommand::Pick);
+        assert_eq!(parse("coord:CANCEL"), CoordinateToolCommand::Cancel);
         assert_eq!(
             parse("coord:space:CLIENT"),
             CoordinateToolCommand::SetSpace(
@@ -2309,8 +2313,8 @@ mod coordinate_tool_parser_tests {
             "crosshair:opacity:NaN",
             "crosshair:color:red",
             "crosshair:guides:maybe",
-            "coord:pick",
-            "coord:cancel",
+            "coord:pick:extra",
+            "coord:cancel:extra",
         ] {
             assert!(
                 matches!(parse(raw), CoordinateToolCommand::Invalid { .. }),

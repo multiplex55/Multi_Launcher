@@ -8,7 +8,7 @@ impl CoordinateToolPlugin {
     fn action(label: impl Into<String>, command: impl Into<String>) -> Action {
         Action {
             label: label.into(),
-            desc: "Passive physical mouse coordinates and crosshair".into(),
+            desc: "Physical mouse coordinates, one-shot pick, and independent crosshair".into(),
             action: command.into(),
             args: None,
         }
@@ -28,6 +28,8 @@ impl CoordinateToolPlugin {
             ("Freeze coordinate sample", "coord:freeze"),
             ("Unfreeze coordinate sample", "coord:unfreeze"),
             ("Copy coordinates", "coord:copy"),
+            ("Pick coordinates at the next click", "coord:pick"),
+            ("Cancel coordinate pick", "coord:cancel"),
             ("Coordinate HUD help", "coord:help"),
             ("Toggle crosshair", "crosshair:toggle"),
             ("Enable crosshair", "crosshair:on"),
@@ -103,7 +105,7 @@ impl Plugin for CoordinateToolPlugin {
     }
 
     fn description(&self) -> &str {
-        "Passive physical-pixel coordinate HUD and independent crosshair (prefixes: `coord`, `crosshair`)"
+        "Physical-pixel coordinate HUD, one-shot click-to-copy picking, and independent crosshair (prefixes: `coord`, `crosshair`)"
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -124,13 +126,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn passive_controls_are_exact_case_insensitive_and_bounded() {
+    fn controls_are_exact_case_insensitive_and_bounded() {
         let plugin = CoordinateToolPlugin;
         for (query, expected) in [
             ("coord", "coord:toggle"),
             ("COORD ON", "coord:on"),
             ("coord space CLIENT", "coord:space:client"),
             ("coord offset -512 +512", "coord:offset:-512:+512"),
+            ("coord pick", "coord:pick"),
+            ("COORD cancel", "coord:cancel"),
             ("crosshair color #Aa00FF", "crosshair:color:#aa00ff"),
             ("CROSSHAIR guides OFF", "crosshair:guides:off"),
         ] {
@@ -144,8 +148,8 @@ mod tests {
             "coord unknown",
             "coord offset 513 0",
             "coord offset 1",
-            "coord pick",
-            "coord cancel",
+            "coord pick extra",
+            "coord cancel extra",
             "crosshair thickness 0",
             "crosshair length 257",
             "crosshair opacity NaN",
@@ -158,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_and_metadata_expose_only_passive_controls() {
+    fn inventory_and_metadata_expose_passive_and_capture_controls() {
         let plugin = CoordinateToolPlugin;
         assert_eq!(plugin.query_prefixes(), ["coord", "crosshair"]);
         assert!(plugin.description().contains("physical-pixel"));
@@ -166,6 +170,8 @@ mod tests {
         for required in [
             "coord:help",
             "coord:copy",
+            "coord:pick",
+            "coord:cancel",
             "coord:space:client",
             "coord:offset:16:24",
             "crosshair:help",
@@ -176,9 +182,6 @@ mod tests {
                 "{required}"
             );
         }
-        assert!(commands.iter().all(|action| {
-            !action.action.ends_with(":pick") && !action.action.ends_with(":cancel")
-        }));
         assert_eq!(plugin.search("coord help")[0].action, "coord:help");
         assert_eq!(plugin.search("crosshair help")[0].action, "crosshair:help");
     }

@@ -153,7 +153,7 @@ Tests: down/up, mid-pair cancellation, pre-held activation, Escape, pass-through
 
 Verification at integration gate: coordinate-tool Nextest and native `cargo check --lib`; real input delivery proof in M3. Done: scoped capture compiled/tested, completion follows cleanup, scoped diff reviewed.
 
-## M2-B: Pick completion and coexistence (`pending`)
+## M2-B: Pick completion and coexistence (`in_progress`)
 
 Objective: canonical pick/cancel commands, clipboard publication after teardown, and mutually exclusive capture admission. Depends on M2-A.
 
@@ -173,6 +173,8 @@ Tests: exact copy after cleanup, clipboard sentinel on cancel/failure, reciproca
 Objective: targeted integration evidence, focused native smoke, one independent review and user documentation. Depends on M2-B. Resolve concrete findings in separate descriptive remediation commits, rerunning only affected checks.
 
 Use a small controlled native receiver fixture if useful to prove real input delivery. Synthetic input is allowed in test tooling; production input workarounds are not. No full suite, historical qualification campaign, repeated review loops or screenshots required. Record unavailable hardware/desktop conditions honestly.
+
+Native proof supplement: a focused `src/bin/coordinate_tool_smoke.rs` may use a child receiver process with counted left/key/text events. Separate PID avoids the launcher's intentional last-external-client resolver. Exercise production controllers/runtimes, with counting wrappers over public factories rather than production diagnostics. Guard each SendInput batch by exact receiver HWND/PID foreground identity; abort injection when focus cannot be established. Use acknowledgments/fences and deadlines rather than fixed sleeps as correctness gates. Verify passive input, signed native geometry, consumed pick pair, Escape sentinel where clipboard formats can be preserved, post-capture input, stable window count and zero windows/sampling after shutdown. Preserve cursor/foreground/clipboard state where possible; unsupported clipboard formats leave real-clipboard checks unverified rather than discard data. Actual mixed-DPI/negative-origin hardware and application-wide native coexistence remain explicit user smoke where unavailable. This is one small feature fixture, not a shared acceptance framework.
 
 Acceptance matrix:
 
@@ -213,3 +215,5 @@ M1-C committed `2d6e6236`. Passive automated integration gate passed: `cargo che
 Native compiler remediation also explicitly discards best-effort GDI cleanup return values, removing two new warnings. Rustfmt and diff checks passed. Real native input/focus and mixed-DPI acceptance remain pending M3. M2-A next. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.
 
 M2-A source implemented: session-scoped native hooks and message pump, event-point sample, paired left/Escape ownership, pre-held and modifier-qualified Escape tracking, nonblocking cancellation/draining, retained terminal results after worker join and partial setup cleanup. Fresh injected clicks follow physical click semantics. Gesture suppression adds a background synchronous release acknowledgment. Parent source review resolved unowned Escape carryover and completion/restart races before this checkpoint. Formatting/diff checks passed; compilation/tests and native acceptance pending. M2-B next.
+
+M2-A committed `cd670909`. M2-B source integrates canonical pick/cancel, launcher parking, click-time copy after joined teardown, snapshot coordinate space, reciprocal capture admission, radial handoff and supersession/shutdown publication suppression. Focused sentinel, reopen, conflict and parking tests added. Integration compilation and Nextest remain pending. Independent review is underway; concrete cancellation publication, native invocation admission and detailed HUD sizing findings will receive a descriptive follow-up checkpoint rather than be hidden in earlier history.

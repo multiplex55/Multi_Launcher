@@ -28,9 +28,15 @@ pub(crate) fn handle_coordinate_tool<H: LauncherCommandHost + ?Sized>(
             })?,
     };
 
+    let toasts = match command {
+        CoordinateToolCommand::Pick => copied.map(ToastPolicy::Info).into_iter().collect(),
+        CoordinateToolCommand::Cancel => copied.map(ToastPolicy::Info).into_iter().collect(),
+        _ => copied.into_iter().map(ToastPolicy::Copied).collect(),
+    };
+
     Ok(CommandOutcome {
         history: HistoryPolicy::Skip,
-        toasts: copied.into_iter().map(ToastPolicy::Copied).collect(),
+        toasts,
         ..CommandOutcome::default()
     })
 }
@@ -43,7 +49,7 @@ fn help_outcome(text: &str) -> CommandOutcome {
     }
 }
 
-const COORDINATE_HELP: &str = "Coordinate HUD: coord toggles the HUD; use coord on|off, coord space desktop|monitor|client, coord compact|detailed, or coord offset <signed-x> <signed-y> (-512..512). Use coord freeze|unfreeze; coord copy writes the displayed signed physical-pixel position as x,y. Desktop uses the signed virtual desktop, monitor is relative to the cursor monitor origin, and client is relative to the foreground client origin. While Multi Launcher is foreground, client coordinates use the last external active window. The crosshair is independent; see crosshair help.";
+const COORDINATE_HELP: &str = "Coordinate HUD: coord toggles the HUD; use coord on|off, coord space desktop|monitor|client, coord compact|detailed, or coord offset <signed-x> <signed-y> (-512..512). Use coord freeze|unfreeze; coord copy writes the displayed signed physical-pixel position as x,y. `coord pick` copies the next click's physical x,y in the selected space after consuming its press and release; Escape cancels without changing the clipboard. Pick uses its click-time sample even while the HUD is frozen. `coord cancel` requests a safe cancellation and drains any consumed click release. Desktop uses signed virtual-desktop coordinates, monitor is relative to the cursor monitor origin, and client is relative to the foreground client origin. While Multi Launcher is foreground, client coordinates use the last external active window. The crosshair is independent; see crosshair help.";
 
 const CROSSHAIR_HELP: &str = "Crosshair controls: crosshair on|off; crosshair color #rrggbb; crosshair thickness 1..16; crosshair length 2..256; crosshair opacity 0.1..1.0; crosshair guides on|off; crosshair contrast on|off.";
 
@@ -98,11 +104,33 @@ mod tests {
     }
 
     #[test]
+    fn pick_feedback_is_informational_and_cancel_is_a_noop_without_a_host_message() {
+        let mut host = Host {
+            copy: Some("Click once to copy coordinates; press Escape to cancel.".into()),
+            ..Host::default()
+        };
+        let picked = handle_coordinate_tool(&mut host, &CoordinateToolCommand::Pick).unwrap();
+        assert_eq!(
+            picked.toasts,
+            [ToastPolicy::Info(
+                "Click once to copy coordinates; press Escape to cancel.".into()
+            )]
+        );
+        assert_eq!(host.calls, [CoordinateToolCommand::Pick]);
+
+        host.calls.clear();
+        host.copy = None;
+        let cancelled = handle_coordinate_tool(&mut host, &CoordinateToolCommand::Cancel).unwrap();
+        assert!(cancelled.toasts.is_empty());
+        assert_eq!(host.calls, [CoordinateToolCommand::Cancel]);
+    }
+
+    #[test]
     fn help_is_pure_and_invalid_commands_do_not_reach_the_host() {
         let mut host = Host::default();
         let help = handle_coordinate_tool(&mut host, &CoordinateToolCommand::HudHelp).unwrap();
         assert!(
-            matches!(help.toasts.as_slice(), [ToastPolicy::Info(text)] if text.contains("last external active window"))
+            matches!(help.toasts.as_slice(), [ToastPolicy::Info(text)] if text.contains("last external active window") && text.contains("coord pick") && text.contains("Escape cancels"))
         );
         assert_eq!(
             help,

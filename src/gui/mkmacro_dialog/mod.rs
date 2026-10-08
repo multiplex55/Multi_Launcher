@@ -4717,6 +4717,10 @@ impl MkMacroDialog {
         self.visual_overlay.clone()
     }
 
+    pub(crate) fn set_coordinate_capture_active(&mut self, active: bool) {
+        self.action_editor.set_coordinate_capture_active(active);
+    }
+
     /// Temporarily moves the editor out while preserving its required shared
     /// visual-overlay client in the replacement state.
     pub fn take_action_editor(&mut self) -> action_editor::ActionEditorState {

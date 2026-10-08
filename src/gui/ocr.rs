@@ -73,6 +73,13 @@ struct LauncherSession {
 }
 
 impl LauncherApp {
+    pub(super) fn ocr_capture_busy(&self) -> bool {
+        self.ocr.session.is_some()
+            || self.ocr.parking.is_some()
+            || self.ocr.job.is_some()
+            || self.ocr.controller.is_active()
+    }
+
     pub(super) fn close_ocr_surface(&mut self) {
         let return_query_focus = self.ocr_surface_visible();
         self.cancel_ocr_selection();
@@ -186,6 +193,7 @@ impl LauncherApp {
     }
 
     fn ensure_ocr_selection_admitted(&self) -> Result<(), String> {
+        self.ensure_no_coordinate_pick()?;
         if self.color_pick_owns_root() || self.color_pick.controller.is_active() {
             return Err("Finish or cancel the screen color picker before starting OCR".into());
         }
@@ -955,6 +963,23 @@ mod tests {
         assert!(fixture.controller.operation_id().is_some());
         app.cancel_ocr_selection();
         wait(&mut app, |app| !app.ocr_owns_root());
+    }
+
+    #[test]
+    fn coordinate_pick_is_rejected_before_parking_while_ocr_is_staged() {
+        let mut app = app();
+        assert!(app.begin_ocr_selection().unwrap());
+        let revision = app.visibility_revision.current();
+
+        let error = app.begin_coordinate_pick().unwrap_err();
+
+        assert!(error.contains("Screen Region OCR"));
+        assert_eq!(app.coordinate_capture_generation, 0);
+        assert!(app.coordinate_capture_parking.is_none());
+        assert!(!app.coordinate_tool.capture_pending());
+        assert_eq!(app.visibility_revision.current(), revision);
+        app.shutdown_ocr_selection();
+        assert!(!app.ocr_capture_busy());
     }
     #[test]
     fn ocr_real_activation_from_primary_and_assigned_surfaces_preserves_prior_visibility() {

@@ -691,6 +691,8 @@ pub struct LauncherApp {
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
     pub(crate) coordinate_tool: coordinate_tool::CoordinateToolGui,
+    coordinate_capture_parking: Option<coordinate_tool::CoordinatePickParking>,
+    coordinate_capture_generation: u64,
     screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
     color_pick: color_pick::ColorPickLifecycle,
     ocr: ocr::OcrLifecycle,
@@ -2085,6 +2087,8 @@ impl LauncherApp {
                 settings_path.clone(),
                 settings.coordinate_tool.clone(),
             ),
+            coordinate_capture_parking: None,
+            coordinate_capture_generation: 0,
             screen_draw_recovery_bridge,
             color_pick: color_pick::ColorPickLifecycle::default(),
             ocr: ocr::OcrLifecycle::default(),

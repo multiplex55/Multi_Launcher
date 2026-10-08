@@ -5,12 +5,14 @@
 //! from those callbacks, and only publishes a terminal outcome after teardown.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Rc, RefCell};
 use std::thread::{self, JoinHandle};
+#[cfg(any(windows, test))]
+use std::{cell::RefCell, rc::Rc};
 
 use super::model::{CoordinateSample, PhysicalPoint};
 
@@ -292,9 +294,13 @@ impl CoordinateCaptureController {
     }
 
     pub fn begin(&mut self) -> Result<CaptureSessionId, String> {
-        self.poll();
         if let Some(worker) = self.worker.as_ref() {
             return Ok(worker.session_id);
+        }
+        if !self.completed.is_empty() {
+            return Err(
+                "A completed coordinate capture must be consumed before starting another".into(),
+            );
         }
 
         self.next_session_id = self
@@ -366,6 +372,12 @@ impl CoordinateCaptureController {
 
     pub fn status(&self) -> Option<&CaptureStatus> {
         self.status.as_ref()
+    }
+
+    /// A session remains active until its worker has been joined and its
+    /// terminal outcome has been consumed by the owning GUI adapter.
+    pub fn is_active(&self) -> bool {
+        self.worker.is_some()
     }
 
     /// Take the oldest terminal result, including results whose status was
@@ -2099,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_defers_terminal_until_join_and_keeps_result_across_restart() {
+    fn controller_requires_terminal_result_consumption_before_restart() {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let _release_workers_on_drop = ReleaseWorkersOnDrop(release_tx.clone());
@@ -2129,12 +2141,7 @@ mod tests {
         }
         assert!(controller.poll());
         assert_eq!(controller.status().unwrap().phase, CapturePhase::Completed);
-
-        // A new begin replaces the current status, but the terminal result is
-        // retained until the GUI explicitly takes it.
-        let second = controller.begin().unwrap();
-        assert_ne!(first, second);
-        assert_eq!(controller.status().unwrap().session_id, second);
+        assert!(controller.begin().is_err());
         let first_result = controller.take_completed().unwrap();
         assert_eq!(first_result.session_id, first);
         assert_eq!(
@@ -2144,6 +2151,12 @@ mod tests {
                 17,
             ))))
         );
+
+        // The next session cannot replace status until the adapter has
+        // published the prior outcome.
+        let second = controller.begin().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(controller.status().unwrap().session_id, second);
         assert_eq!(
             started_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             second

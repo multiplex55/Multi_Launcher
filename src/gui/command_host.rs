@@ -22,7 +22,11 @@ impl LauncherCommandHost for LauncherApp {
         &mut self,
         command: &crate::commands::CoordinateToolCommand,
     ) -> Result<Option<String>, String> {
-        self.coordinate_tool.execute(command)
+        match command {
+            crate::commands::CoordinateToolCommand::Pick => self.begin_coordinate_pick().map(Some),
+            crate::commands::CoordinateToolCommand::Cancel => Ok(self.cancel_coordinate_pick()),
+            _ => self.coordinate_tool.execute(command),
+        }
     }
 }
 
@@ -76,6 +80,14 @@ impl RadialCommandHost for LauncherApp {
         &mut self,
         request: crate::radial::control::RadialControlRequest,
     ) -> Result<(), String> {
+        if self.coordinate_tool.capture_pending()
+            && matches!(
+                &request,
+                crate::radial::control::RadialControlRequest::Show(_)
+            )
+        {
+            return Err("Finish or cancel coordinate picking before opening a radial menu".into());
+        }
         super::radial_control_client()
             .ok_or_else(|| "radial runtime service is unavailable".to_owned())?
             .send(request)
