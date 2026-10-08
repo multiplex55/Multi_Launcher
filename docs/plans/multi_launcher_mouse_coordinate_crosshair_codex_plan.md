@@ -135,7 +135,7 @@ Tests: exact parsing/invalid values, plugin inventory, metadata, bus once, headl
 
 Verification at integration gate: focused feature/plugin/parser/handler/GUI filters; `cargo nextest run --test domain command_bus_architecture`; `cargo check --lib`. Invariants: existing commands/plugins preserved. Non-goals: capture/global passive shortcuts/settings UI redesign. Done: all passive controls reachable, saved correctly, copy/help and lifecycle integrated, scoped diff reviewed.
 
-## M2-A: Capture owner and paired-input state machine (`implemented; integration verification pending`)
+## M2-A: Capture owner and paired-input state machine (`automated verification passed; native smoke pending`)
 
 Objective/ownership: one feature-owned transient capture session with capture-scoped native interception. Depends on M1-C. Scope: new capture model and native/controller extensions.
 
@@ -153,7 +153,7 @@ Tests: down/up, mid-pair cancellation, pre-held activation, Escape, pass-through
 
 Verification at integration gate: coordinate-tool Nextest and native `cargo check --lib`; real input delivery proof in M3. Done: scoped capture compiled/tested, completion follows cleanup, scoped diff reviewed.
 
-## M2-B: Pick completion and coexistence (`in_progress`)
+## M2-B: Pick completion and coexistence (`automated verification passed; native smoke pending`)
 
 Objective: canonical pick/cancel commands, clipboard publication after teardown, and mutually exclusive capture admission. Depends on M2-A.
 
@@ -168,7 +168,7 @@ Required changes:
 
 Tests: exact copy after cleanup, clipboard sentinel on cancel/failure, reciprocal conflicts, relevant activation routes, passive coexistence and reopen. Verification: feature and modified GUI lifecycle/suppression filters plus `cargo check --lib`. Non-goals: general interaction manager, broad hook refactor/historical acceptance migration. Done: canonical pick integrated, failures recover, conflicts covered and scoped diff reviewed.
 
-## M3-A: Verification, documentation and independent review (`pending`)
+## M3-A: Verification, documentation and independent review (`in_progress`)
 
 Objective: targeted integration evidence, focused native smoke, one independent review and user documentation. Depends on M2-B. Resolve concrete findings in separate descriptive remediation commits, rerunning only affected checks.
 
@@ -219,3 +219,7 @@ M2-A source implemented: session-scoped native hooks and message pump, event-poi
 M2-A committed `cd670909`. M2-B committed `92a1d168`: canonical pick/cancel, launcher parking, click-time copy after joined teardown, snapshot coordinate space, reciprocal capture admission, radial handoff and supersession/shutdown publication suppression. Real MkMacro point/rectangle starts also reject during active/draining coordinate pick. Focused sentinel, reopen, conflict and parking tests added. Integration compilation and Nextest remain pending.
 
 Independent review completed read-only source/caller inspection and `git diff --check`; no review builds or tests. Five concrete findings require one bounded follow-up: native tap/hold/direct-menu routing needs the existing exclusive-owner mask, cancel must suppress an unconsumed terminal click before polling, failed parking restoration must block overwrite/admission, unconditional fallback types need consistent Rc/RefCell imports, and detailed HUD height must fit required rows at high DPI. Remediation and its targeted verification are pending; no broader audit or full suite is required.
+
+Review remediation committed `74b2a8b4`. All five findings have scoped source fixes and focused regression assertions. The owner lease uses serialized count/mask transitions and is acquired before thread spawn, then held through native teardown. Integration `cargo check --lib` passed after correcting missing GUI imports, native key closure types, generic string conversion and a visibility tuple destructure; compiler remediation remains a distinct follow-up. Nextest first exposed three test-fixture compilation errors (capture module imports, obsolete completion signature, mismatched error types), now corrected; rerun pending. Only existing untouched GUI test warnings are left in observed output. M3 fixture source work is limited to a standalone binary while this unchanged core test gate runs; no concurrent expensive builds.
+
+Capture integration gate satisfied: `cargo check --lib` passed (33.89s final run). Nextest selected 66 tests with `cargo nextest run --lib --test domain -E 'test(coordinate_tool::) | test(coordinate_pick) | test(reopening_pick) | test(synchronous_suppression_release_restores_gestures_before_returning) | test(coordinate_tool_preferences_are_partial_compatible_normalized_and_persisted) | test(control_tokens_are_case_insensitive_and_typed) | test(command_bus_architecture) | test(exclusive_owner_events_preserve_independent_lifecycles)'`. Run `52c21b76-596f-44a2-ae91-54482ec5e172` built in 5m13s, then had 64 pass, one case-sensitive metadata assertion fail, one architecture test unrun due fail-fast. The description remained correct; its assertion now normalizes case. The smallest follow-up `cargo nextest run --lib --test domain -E 'test(inventory_and_metadata_expose_passive_and_capture_controls) | test(command_bus_architecture)'` passed all four (run `931c6041-9bbc-428c-bbcb-871e3dc344e2`, build 2m17s). Thus all 66 selected behaviors have passing evidence after corrections; no full suite or additional unrelated tests ran. A default clipboard-modifier JSON created by GUI test setup is a test artifact, not a delivered source/config change, and is removed before completion.

@@ -1,5 +1,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use super::LauncherApp;
+use eframe::egui;
 
 use crate::commands::CoordinateToolCommand;
 use crate::coordinate_tool::{
@@ -480,7 +484,7 @@ impl LauncherApp {
                 },
             )
         else {
-            let (current_visible, ()) = self
+            let (_, current_visible) = self
                 .visibility_revision
                 .inspect(|| self.visible_flag.load(Ordering::SeqCst));
             if !current_visible && let Some(transaction) = &mut state.transaction {
@@ -668,11 +672,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::coordinate_tool::capture::{CaptureControl, CaptureUpdatePublisher};
     use crate::coordinate_tool::{
-        CaptureControl, CaptureOutcome, CapturePhase, CaptureRuntime, CaptureSessionId,
-        CaptureUpdatePublisher, CoordinateOffset, CoordinateRenderFrame, CoordinateSample,
-        CoordinateSampler, CoordinateSpace, CoordinateSurfaceBackend, ForegroundClientGeometry,
-        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect,
+        CaptureOutcome, CapturePhase, CaptureRuntime, CaptureSessionId, CoordinateOffset,
+        CoordinateRenderFrame, CoordinateSample, CoordinateSampler, CoordinateSpace,
+        CoordinateSurfaceBackend, ForegroundClientGeometry, MonitorGeometry, MonitorId,
+        PhysicalPoint, PhysicalRect,
     };
 
     #[derive(Clone)]
@@ -967,10 +972,8 @@ mod tests {
         gui.execute(&CoordinateToolCommand::SetSpace(CoordinateSpace::Monitor))
             .unwrap();
         gui.execute(&CoordinateToolCommand::Freeze).unwrap();
-        let frozen_copy = gui
-            .controller
-            .sample_for_copy()
-            .and_then(|sample| format_coordinate(&sample, CoordinateSpace::Monitor));
+        let frozen_sample = gui.controller.sample_for_copy().unwrap();
+        let frozen_copy = format_coordinate(&frozen_sample, CoordinateSpace::Monitor);
         assert_eq!(frozen_copy.unwrap().text, "120,200");
 
         assert!(gui.begin_pick().unwrap());

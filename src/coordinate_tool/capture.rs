@@ -402,7 +402,7 @@ impl CoordinateCaptureController {
                 // The terminal send is the worker's final action, so a message
                 // can arrive after the first drain but before `is_finished`.
                 // Join first, then drain once more before starting another id.
-                changed |= self.drain_updates();
+                self.drain_updates();
                 let outcome = match (result, self.take_pending_completion(worker.session_id)) {
                     (Err(_), _) => CaptureOutcome::Failed(
                         "Coordinate capture worker stopped before cleanup was confirmed".into(),
@@ -412,7 +412,7 @@ impl CoordinateCaptureController {
                         "Coordinate capture worker exited without a terminal result".into(),
                     ),
                 };
-                changed |= self.finish_worker(worker.session_id, outcome);
+                self.finish_worker(worker.session_id, outcome);
                 changed = true;
             }
         }
@@ -1164,8 +1164,8 @@ mod windows_native {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
-        VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
+        GetAsyncKeyState, VIRTUAL_KEY, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_LSHIFT,
+        VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLMHF_INJECTED,
@@ -1275,7 +1275,7 @@ mod windows_native {
                 if result.0 < 0 {
                     machine
                         .borrow_mut()
-                        .request_failure("Coordinate hook message pump failed".into());
+                        .request_failure("Coordinate hook message pump failed");
                     if machine.borrow().needs_teardown() {
                         return Ok(());
                     }
@@ -1349,7 +1349,7 @@ mod windows_native {
     }
 
     fn read_initial_input_state() -> InitialInputState {
-        let down = |key| unsafe { GetAsyncKeyState(key.0 as i32) < 0 };
+        let down = |key: VIRTUAL_KEY| unsafe { GetAsyncKeyState(key.0 as i32) < 0 };
         InitialInputState {
             left_button_down: down(VK_LBUTTON),
             escape_down: down(VK_ESCAPE),
@@ -1357,7 +1357,7 @@ mod windows_native {
     }
 
     fn read_modifiers() -> CaptureModifiers {
-        let down = |key| unsafe { GetAsyncKeyState(key.0 as i32) < 0 };
+        let down = |key: VIRTUAL_KEY| unsafe { GetAsyncKeyState(key.0 as i32) < 0 };
         CaptureModifiers {
             control: down(VK_LCONTROL) || down(VK_RCONTROL),
             alt: down(VK_LMENU) || down(VK_RMENU),
@@ -2094,7 +2094,7 @@ mod tests {
             let outcome = CaptureOutcome::Captured(sample(point));
             // Inject a terminal notification while the fake worker is held at
             // a barrier. The controller must stage it until the worker exits.
-            let _ = updates.0.completed(session_id, outcome.clone());
+            let _ = updates.0.completed(outcome.clone());
             let _ = self.started.send(session_id);
             let _ = self.release.lock().unwrap().recv();
             outcome

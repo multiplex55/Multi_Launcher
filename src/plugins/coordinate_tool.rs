@@ -165,7 +165,12 @@ mod tests {
     fn inventory_and_metadata_expose_passive_and_capture_controls() {
         let plugin = CoordinateToolPlugin;
         assert_eq!(plugin.query_prefixes(), ["coord", "crosshair"]);
-        assert!(plugin.description().contains("physical-pixel"));
+        assert!(
+            plugin
+                .description()
+                .to_ascii_lowercase()
+                .contains("physical-pixel")
+        );
         let commands = plugin.commands();
         for required in [
             "coord:help",
