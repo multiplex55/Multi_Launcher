@@ -59,7 +59,7 @@ Do not claim completion solely from checked milestone boxes. Prove accepted beha
 - Repository instructions and agent definitions read; bounded read-only architecture inventory complete.
 - Implementation milestones and acceptance matrix: source-grounded planning below; ordinary unspecified defaults are implementation decisions, not additional approved requirements.
 
-## M1-A: Typed coordinate model and preferences (`pending`)
+## M1-A: Typed coordinate model and preferences (`implemented; verification pending`)
 
 Objective: feature-owned pure coordinate types, settings and conversion/formatting; no workers or GUI behavior changes yet.
 
@@ -202,4 +202,4 @@ Each row must have actual evidence or be explicitly recorded as unresolved envir
 
 Use `feat(coord): [M1-A] establish coordinate model and preferences`, `[M1-B] add passive HUD and crosshair runtime`, `[M1-C] integrate launcher controls and persistence`, `[M2-A] add scoped coordinate capture lifecycle`, `[M2-B] integrate capture and coexistence guards`, and `test(coord): [M3-A] verify Windows capture and document controls` when those coherent changes are ready. Exact subjects may adapt to real changes.
 
-M1-A status: in progress. Subsequent checkpoints: pending. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.
+M1-A source checkpoint implemented: signed/checked conversion, samples, independent transient state, frozen copy formatting, placement and normalized persisted preferences. Settings editor preserves preferences. Rustfmt and diff checks passed; new tests have not yet run. M1-B next. Subsequent checkpoints: pending. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.

@@ -1,3 +1,4 @@
+use crate::coordinate_tool::settings::CoordinateToolPreferences;
 use crate::gui::Panel;
 use crate::hotkey::Key;
 use crate::hotkey::{Hotkey, parse_hotkey};
@@ -571,6 +572,8 @@ pub struct Settings {
     pub query_results_layout: QueryResultsLayoutSettings,
     #[serde(default)]
     pub multi_manager: MultiManagerSettings,
+    #[serde(default)]
+    pub coordinate_tool: CoordinateToolPreferences,
     #[serde(default = "legacy_radial_feature_settings")]
     pub radial: crate::radial::model::RadialFeatureSettings,
     /// Local-only presentation state for the independent Radial Designer.
@@ -866,6 +869,7 @@ impl Default for Settings {
             note_graph: NoteGraphSettings::default(),
             query_results_layout: QueryResultsLayoutSettings::default(),
             multi_manager: MultiManagerSettings::default(),
+            coordinate_tool: CoordinateToolPreferences::default(),
             radial: crate::radial::model::RadialFeatureSettings::default(),
             radial_designer: RadialDesignerPreferences::default(),
             radial_submenu_migration: None,
@@ -928,7 +932,8 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::{
-        MultiManagerSettings, NoteSettings, NoteViewMode, QueryResultsLayoutSettings, Settings,
+        CoordinateToolPreferences, MultiManagerSettings, NoteSettings, NoteViewMode,
+        QueryResultsLayoutSettings, Settings,
     };
     use crate::radial::model::RadialFeatureSettings;
 
@@ -936,6 +941,7 @@ mod tests {
     fn empty_settings_deserializes_with_note_defaults() {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(parsed.note, NoteSettings::default());
+        assert_eq!(parsed.coordinate_tool, CoordinateToolPreferences::default());
         let mut legacy_radial = RadialFeatureSettings::default();
         legacy_radial.default_submenu_presentation =
             crate::radial::model::SubmenuPresentation::Cascade;
@@ -950,6 +956,52 @@ mod tests {
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
         );
+    }
+
+    #[test]
+    fn coordinate_tool_preferences_are_partial_compatible_normalized_and_persisted() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "coordinate_tool": {
+                    "space": "monitor",
+                    "crosshair": {
+                        "thickness": 0,
+                        "arm_length": 999,
+                        "opacity": 2.0,
+                        "virtual_desktop_guides": true
+                    }
+                }
+            }"#,
+        )
+        .expect("partial coordinate tool settings should deserialize");
+
+        assert_eq!(
+            parsed.coordinate_tool.space,
+            crate::coordinate_tool::CoordinateSpace::Monitor
+        );
+        assert_eq!(
+            parsed.coordinate_tool.hud_detail,
+            crate::coordinate_tool::HudDetail::Compact
+        );
+        assert_eq!(
+            parsed.coordinate_tool.cursor_offset,
+            crate::coordinate_tool::CoordinateOffset::new(16, 24)
+        );
+        assert_eq!(parsed.coordinate_tool.crosshair.thickness, 1);
+        assert_eq!(parsed.coordinate_tool.crosshair.arm_length, 256);
+        assert_eq!(parsed.coordinate_tool.crosshair.opacity, 1.0);
+        assert!(parsed.coordinate_tool.crosshair.virtual_desktop_guides);
+        assert!(parsed.coordinate_tool.crosshair.high_contrast_outline);
+
+        let serialized = serde_json::to_value(&parsed).expect("settings should serialize");
+        assert!(serialized["coordinate_tool"].get("hud_enabled").is_none());
+        assert!(
+            serialized["coordinate_tool"]
+                .get("crosshair_enabled")
+                .is_none()
+        );
+        let restored: Settings = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.coordinate_tool, parsed.coordinate_tool);
     }
 
     #[test]
