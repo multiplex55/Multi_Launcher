@@ -58,6 +58,8 @@ pub struct SnippetDialog {
     load_error: Option<String>,
     inline_error: Option<String>,
     pending_removal: Option<PendingRemoval>,
+    #[cfg(test)]
+    body_editor_widget_id: Option<egui::Id>,
 }
 
 fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
@@ -815,14 +817,19 @@ impl SnippetDialog {
                             .auto_shrink([false, false])
                             .max_height(editor_height)
                             .show(ui, |ui| {
-                                body_changed = ui.add(
+                                let response = ui.add(
                                     egui::TextEdit::multiline(&mut self.text)
                                         .id_source(body_editor_id_source(
                                             self.body_edit_session,
                                         ))
                                         .desired_width(f32::INFINITY)
                                         .desired_rows(desired_rows),
-                                ).changed();
+                                );
+                                #[cfg(test)]
+                                {
+                                    self.body_editor_widget_id = Some(response.id);
+                                }
+                                body_changed = response.changed();
                             });
                     } else {
                         ui.label("Contents hidden");
@@ -1147,6 +1154,21 @@ mod tests {
         ticket.required = false;
         ticket.input_kind = SnippetInputKind::Multiline;
 
+        let _ = dialog_frame(&ctx, &mut app.snippet_dialog, Vec::new());
+        let editor_id = app
+            .snippet_dialog
+            .body_editor_widget_id
+            .expect("the revealed authoring editor has a rendered widget id");
+        let mut editor_widget_state = egui::text_edit::TextEditState::load(&ctx, editor_id)
+            .expect("the revealed authoring editor has rendered widget state");
+        editor_widget_state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(6),
+            )));
+        let editor_cursor_before = editor_widget_state.cursor.char_range().unwrap();
+        editor_widget_state.store(&ctx, editor_id);
+
         let editor_state = |dialog: &SnippetDialog| {
             (
                 dialog.edit_idx,
@@ -1179,6 +1201,13 @@ mod tests {
 
         app.begin_snippet_preview(draft.clone()).unwrap();
         app.update_panel_stack();
+        assert_eq!(
+            egui::text_edit::TextEditState::load(&ctx, editor_id)
+                .expect("preview must retain authoring editor state")
+                .cursor
+                .char_range(),
+            Some(editor_cursor_before)
+        );
         assert!(app.snippet_prompt_dialog.is_preview_only());
         assert!(app.is_panel_open(crate::gui::Panel::SnippetPromptDialog));
         let first_generation = app.snippet_prompt_dialog.session().unwrap().generation;
@@ -1217,6 +1246,13 @@ mod tests {
         assert_eq!(app.cancel_snippet_prompt(), Some(draft.clone()));
         app.update_panel_stack();
         assert!(app.snippet_prompt_dialog.session().is_none());
+        assert_eq!(
+            egui::text_edit::TextEditState::load(&ctx, editor_id)
+                .expect("returning from preview must retain authoring editor state")
+                .cursor
+                .char_range(),
+            Some(editor_cursor_before)
+        );
         assert_eq!(
             app.panel_stack.last(),
             Some(&crate::gui::Panel::SnippetDialog)

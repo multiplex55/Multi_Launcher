@@ -817,7 +817,8 @@ impl HeadlessCommandHost for LauncherApp {
         &mut self,
         intent: crate::commands::SnippetPromptIntent,
     ) -> Result<(), String> {
-        self.snippet_prompt_dialog.begin_execution(intent);
+        self.snippet_prompt_dialog
+            .begin_execution(&self.egui_ctx, intent);
         self.focus_panel(super::Panel::SnippetPromptDialog);
         Ok(())
     }
@@ -847,7 +848,8 @@ impl LauncherApp {
         &mut self,
         draft: crate::plugins::snippets::SnippetEntry,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
-        self.snippet_prompt_dialog.begin_preview(draft)?;
+        self.snippet_prompt_dialog
+            .begin_preview(&self.egui_ctx, draft)?;
         self.focus_panel(super::Panel::SnippetPromptDialog);
         Ok(())
     }
@@ -866,9 +868,9 @@ impl LauncherApp {
         resolve_current: impl FnOnce(&str) -> Result<crate::plugins::snippets::SnippetEntry, ()>,
         copy_text: impl FnOnce(&str) -> Result<(), ()>,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
-        let completion = self
-            .snippet_prompt_dialog
-            .submit_with(resolve_current, copy_text)?;
+        let completion =
+            self.snippet_prompt_dialog
+                .submit_with(&self.egui_ctx, resolve_current, copy_text)?;
 
         self.panel_states.snippet_prompt_dialog = false;
         self.panel_stack
@@ -905,7 +907,7 @@ impl LauncherApp {
         &mut self,
     ) -> Option<crate::plugins::snippets::SnippetEntry> {
         let was_preview = self.snippet_prompt_dialog.is_preview_only();
-        let draft = self.snippet_prompt_dialog.cancel();
+        let draft = self.snippet_prompt_dialog.cancel(&self.egui_ctx);
         self.panel_states.snippet_prompt_dialog = false;
         self.panel_stack
             .retain(|panel| *panel != super::Panel::SnippetPromptDialog);

@@ -141,7 +141,11 @@ impl SnippetPromptDialog {
         self.feedback
     }
 
-    pub(crate) fn begin_execution(&mut self, intent: SnippetPromptIntent) -> u64 {
+    pub(crate) fn begin_execution(
+        &mut self,
+        ctx: &egui::Context,
+        intent: SnippetPromptIntent,
+    ) -> u64 {
         let session = SnippetPromptSession::new(
             intent.alias,
             intent.prepared,
@@ -153,10 +157,14 @@ impl SnippetPromptDialog {
                 root_policy: intent.root_policy,
             },
         );
-        self.replace_session(session)
+        self.replace_session(ctx, session)
     }
 
-    pub(crate) fn begin_preview(&mut self, draft: SnippetEntry) -> Result<u64, SnippetPromptError> {
+    pub(crate) fn begin_preview(
+        &mut self,
+        ctx: &egui::Context,
+        draft: SnippetEntry,
+    ) -> Result<u64, SnippetPromptError> {
         let prepared = match crate::plugins::snippets::prepare_snippet_run(&draft) {
             Ok(SnippetRunMode::Prompted(prepared)) => prepared,
             Ok(SnippetRunMode::Plain) | Err(_) => {
@@ -169,10 +177,11 @@ impl SnippetPromptDialog {
             prepared,
             SnippetPromptMode::PreviewOnly { draft },
         );
-        Ok(self.replace_session(session))
+        Ok(self.replace_session(ctx, session))
     }
 
-    fn replace_session(&mut self, mut session: SnippetPromptSession) -> u64 {
+    fn replace_session(&mut self, ctx: &egui::Context, mut session: SnippetPromptSession) -> u64 {
+        self.clear_widget_state(ctx);
         self.generation = self.generation.wrapping_add(1).max(1);
         session.generation = self.generation;
         self.session = Some(session);
@@ -385,10 +394,7 @@ impl SnippetPromptDialog {
                                         let mut text = preview.text;
                                         ui.add(
                                             egui::TextEdit::multiline(&mut text)
-                                                .id(egui::Id::new((
-                                                    "snippet_prompt_preview_text",
-                                                    generation,
-                                                )))
+                                                .id(preview_widget_id(generation))
                                                 .desired_rows(3)
                                                 .desired_width(f32::INFINITY)
                                                 .interactive(false),
@@ -537,6 +543,7 @@ impl SnippetPromptDialog {
     /// with safe local errors. Preview-only sessions are rejected before either runs.
     pub(crate) fn submit_with(
         &mut self,
+        ctx: &egui::Context,
         resolve_current: impl FnOnce(&str) -> Result<SnippetEntry, ()>,
         copy_text: impl FnOnce(&str) -> Result<(), ()>,
     ) -> Result<SnippetPromptCompletion, SnippetPromptError> {
@@ -580,6 +587,7 @@ impl SnippetPromptDialog {
 
         match result {
             Ok(completion) => {
+                self.clear_widget_state(ctx);
                 self.session = None;
                 self.open = false;
                 self.feedback = None;
@@ -595,7 +603,8 @@ impl SnippetPromptDialog {
 
     /// Cancel and drop entered values. Preview mode returns the exact unsaved draft
     /// so the editor can resume with its pre-preview state.
-    pub(crate) fn cancel(&mut self) -> Option<SnippetEntry> {
+    pub(crate) fn cancel(&mut self, ctx: &egui::Context) -> Option<SnippetEntry> {
+        self.clear_widget_state(ctx);
         self.open = false;
         self.feedback = None;
         self.pending_focus = None;
@@ -605,13 +614,52 @@ impl SnippetPromptDialog {
         }
     }
 
-    pub(crate) fn shutdown(&mut self) {
-        let _ = self.cancel();
+    pub(crate) fn shutdown(&mut self, ctx: &egui::Context) {
+        let _ = self.cancel(ctx);
+    }
+
+    fn clear_widget_state(&self, ctx: &egui::Context) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+
+        let mut ids = session
+            .prepared
+            .fields
+            .iter()
+            .map(|field| field_widget_id(session.generation, &field.name))
+            .collect::<Vec<_>>();
+        ids.push(preview_widget_id(session.generation));
+        ids.extend(self.copy_widget_id);
+        ids.extend(self.cancel_widget_id);
+
+        let focused = ctx.memory(|memory| {
+            ids.iter()
+                .copied()
+                .filter(|id| memory.has_focus(*id))
+                .collect::<Vec<_>>()
+        });
+        if !focused.is_empty() {
+            ctx.memory_mut(|memory| {
+                for id in focused {
+                    memory.surrender_focus(id);
+                }
+            });
+        }
+        ctx.data_mut(|data| {
+            for id in ids {
+                data.remove::<egui::text_edit::TextEditState>(id);
+            }
+        });
     }
 }
 
 fn field_widget_id(generation: u64, key: &str) -> egui::Id {
     egui::Id::new(("snippet_prompt_field", generation, key))
+}
+
+fn preview_widget_id(generation: u64) -> egui::Id {
+    egui::Id::new(("snippet_prompt_preview_text", generation))
 }
 
 fn button_widget_id(generation: u64, name: &str) -> egui::Id {
@@ -701,10 +749,65 @@ mod tests {
         }
     }
 
+    fn render_frame(
+        ctx: &egui::Context,
+        dialog: &mut SnippetPromptDialog,
+        events: Vec<egui::Event>,
+    ) {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(720.0, 520.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = dialog.show(ctx);
+            },
+        );
+    }
+
+    fn type_into_rendered_field(
+        ctx: &egui::Context,
+        dialog: &mut SnippetPromptDialog,
+        generation: u64,
+        key: &str,
+        value: &str,
+    ) {
+        let id = field_widget_id(generation, key);
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        render_frame(
+            ctx,
+            dialog,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::A,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+                },
+                egui::Event::Text(value.to_owned()),
+            ],
+        );
+        assert_eq!(
+            dialog
+                .session()
+                .and_then(|session| session.values.get(key))
+                .map(String::as_str),
+            Some(value)
+        );
+        assert!(egui::text_edit::TextEditState::load(ctx, id).is_some());
+    }
+
     #[test]
     fn execution_session_uses_defaults_and_focuses_first_required_field() {
+        let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(entry()));
+        dialog.begin_execution(&ctx, intent(entry()));
 
         let session = dialog.session().unwrap();
         assert_eq!(session.values.get("name").map(String::as_str), Some("Ada"));
@@ -717,12 +820,13 @@ mod tests {
 
     #[test]
     fn optional_only_form_focuses_first_available_field() {
+        let ctx = egui::Context::default();
         let mut saved = entry();
         for field in &mut saved.fields {
             field.required = false;
         }
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(saved));
+        dialog.begin_execution(&ctx, intent(saved));
         assert_eq!(
             dialog
                 .session()
@@ -733,10 +837,24 @@ mod tests {
 
     #[test]
     fn replacement_starts_fresh_generation_with_configured_defaults() {
+        let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        let first = dialog.begin_execution(intent(entry()));
-        assert!(dialog.set_value("name", "filled sentinel".into()));
-        let second = dialog.begin_execution(intent(entry()));
+        let first = dialog.begin_execution(&ctx, intent(entry()));
+        render_frame(&ctx, &mut dialog, Vec::new());
+        let first_field = field_widget_id(first, "name");
+        let first_preview = preview_widget_id(first);
+        type_into_rendered_field(&ctx, &mut dialog, first, "name", "replacement sentinel");
+        assert!(egui::text_edit::TextEditState::load(&ctx, first_preview).is_some());
+        assert!(ctx.memory(|memory| memory.has_focus(first_field)));
+
+        let second = dialog.begin_execution(&ctx, intent(entry()));
+        assert!(egui::text_edit::TextEditState::load(&ctx, first_field).is_none());
+        assert!(egui::text_edit::TextEditState::load(&ctx, first_preview).is_none());
+        assert!(!ctx.memory(|memory| memory.has_focus(first_field)));
+        render_frame(&ctx, &mut dialog, Vec::new());
+        assert!(
+            egui::text_edit::TextEditState::load(&ctx, field_widget_id(second, "name")).is_some()
+        );
 
         let session = dialog.session().unwrap();
         assert_ne!(first, second);
@@ -748,12 +866,19 @@ mod tests {
     #[test]
     fn successful_submit_copies_once_and_returns_only_captured_safe_attribution() {
         let entry = entry();
+        let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(entry.clone()));
-        dialog.set_value("ticket", "42".into());
+        dialog.begin_execution(&ctx, intent(entry.clone()));
+        let generation = dialog.session().unwrap().generation;
+        render_frame(&ctx, &mut dialog, Vec::new());
+        type_into_rendered_field(&ctx, &mut dialog, generation, "ticket", "42");
+        let name_id = field_widget_id(generation, "name");
+        let ticket_id = field_widget_id(generation, "ticket");
+        let preview_id = preview_widget_id(generation);
         let mut copied = Vec::new();
         let completion = dialog
             .submit_with(
+                &ctx,
                 |_| Ok(entry.clone()),
                 |text| {
                     copied.push(text.to_owned());
@@ -774,19 +899,27 @@ mod tests {
         );
         assert!(!dialog.is_open());
         assert!(dialog.session().is_none());
+        assert!(egui::text_edit::TextEditState::load(&ctx, name_id).is_none());
+        assert!(egui::text_edit::TextEditState::load(&ctx, ticket_id).is_none());
+        assert!(egui::text_edit::TextEditState::load(&ctx, preview_id).is_none());
 
-        let second = dialog.submit_with(|_| Ok(entry), |_| panic!("must not copy twice"));
+        let second = dialog.submit_with(&ctx, |_| Ok(entry), |_| panic!("must not copy twice"));
         assert_eq!(second, Err(SnippetPromptError::NoActiveSession));
     }
 
     #[test]
     fn required_and_missing_values_fail_without_copy_and_keep_the_session() {
+        let ctx = egui::Context::default();
         let mut saved = entry();
         saved.fields[1].required = true;
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(saved.clone()));
+        let generation = dialog.begin_execution(&ctx, intent(saved.clone()));
+        render_frame(&ctx, &mut dialog, Vec::new());
+        type_into_rendered_field(&ctx, &mut dialog, generation, "name", "retained sentinel");
+        let name_id = field_widget_id(generation, "name");
         let mut writes = 0;
         let result = dialog.submit_with(
+            &ctx,
             |_| Ok(saved.clone()),
             |_| {
                 writes += 1;
@@ -796,6 +929,7 @@ mod tests {
         assert_eq!(result, Err(SnippetPromptError::RequiredValueEmpty));
         assert_eq!(writes, 0);
         assert!(dialog.is_open());
+        assert!(egui::text_edit::TextEditState::load(&ctx, name_id).is_some());
         assert_eq!(
             dialog.feedback(),
             Some(SnippetPromptError::RequiredValueEmpty)
@@ -803,6 +937,7 @@ mod tests {
 
         dialog.session.as_mut().unwrap().values.remove("ticket");
         let result = dialog.submit_with(
+            &ctx,
             |_| Ok(saved),
             |_| {
                 writes += 1;
@@ -812,15 +947,19 @@ mod tests {
         assert_eq!(result, Err(SnippetPromptError::MissingValue));
         assert_eq!(writes, 0);
         assert!(dialog.is_open());
+        assert!(egui::text_edit::TextEditState::load(&ctx, name_id).is_some());
     }
 
     #[test]
     fn clipboard_failure_is_safe_and_retains_filled_values() {
         let entry = entry();
+        let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(entry.clone()));
+        dialog.begin_execution(&ctx, intent(entry.clone()));
         dialog.set_value("name", "private form sentinel".into());
-        let error = dialog.submit_with(|_| Ok(entry), |_| Err(())).unwrap_err();
+        let error = dialog
+            .submit_with(&ctx, |_| Ok(entry), |_| Err(()))
+            .unwrap_err();
 
         assert_eq!(error, SnippetPromptError::ClipboardUnavailable);
         assert!(!error.message().contains("private form sentinel"));
@@ -835,6 +974,37 @@ mod tests {
     }
 
     #[test]
+    fn invalid_preview_does_not_replace_or_clear_active_execution_state() {
+        let ctx = egui::Context::default();
+        let mut dialog = SnippetPromptDialog::default();
+        let generation = dialog.begin_execution(&ctx, intent(entry()));
+        render_frame(&ctx, &mut dialog, Vec::new());
+        type_into_rendered_field(&ctx, &mut dialog, generation, "name", "active sentinel");
+        let field_id = field_widget_id(generation, "name");
+        let preview_id = preview_widget_id(generation);
+
+        let mut invalid = entry();
+        invalid.prompt_for_fields = false;
+        assert_eq!(
+            dialog.begin_preview(&ctx, invalid),
+            Err(SnippetPromptError::InvalidConfiguration)
+        );
+        assert!(dialog.is_open());
+        assert_eq!(dialog.session().unwrap().generation, generation);
+        assert_eq!(
+            dialog
+                .session()
+                .unwrap()
+                .values
+                .get("name")
+                .map(String::as_str),
+            Some("active sentinel")
+        );
+        assert!(egui::text_edit::TextEditState::load(&ctx, field_id).is_some());
+        assert!(egui::text_edit::TextEditState::load(&ctx, preview_id).is_some());
+    }
+
+    #[test]
     fn changed_deleted_or_ambiguous_current_entries_are_stale() {
         for current in [
             Some({
@@ -846,10 +1016,12 @@ mod tests {
             None,
         ] {
             let snapshot = entry();
+            let ctx = egui::Context::default();
             let mut dialog = SnippetPromptDialog::default();
-            dialog.begin_execution(intent(snapshot));
+            dialog.begin_execution(&ctx, intent(snapshot));
             let mut writes = 0;
             let result = dialog.submit_with(
+                &ctx,
                 |_| current.clone().ok_or(()),
                 |_| {
                     writes += 1;
@@ -864,16 +1036,18 @@ mod tests {
 
     #[test]
     fn unchanged_persisted_entry_with_orphan_metadata_is_not_false_stale() {
+        let ctx = egui::Context::default();
         let mut saved = entry();
         let mut orphan = SnippetFieldDefinition::new("orphan");
         orphan.default_value = "persisted but unused".into();
         saved.fields.push(orphan);
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(saved.clone()));
+        dialog.begin_execution(&ctx, intent(saved.clone()));
         dialog.set_value("ticket", "42".into());
 
         let mut writes = Vec::new();
         let result = dialog.submit_with(
+            &ctx,
             |_| Ok(saved.clone()),
             |text| {
                 writes.push(text.to_owned());
@@ -891,13 +1065,20 @@ mod tests {
         draft.text = "Draft: {{name}} / {{ticket}}\r\n".into();
         draft.fields[0].default_value = "Draft default".into();
         let expected_draft = draft.clone();
+        let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_preview(draft).unwrap();
-        dialog.set_value("name", "preview only".into());
+        let generation = dialog.begin_preview(&ctx, draft).unwrap();
+        render_frame(&ctx, &mut dialog, Vec::new());
+        type_into_rendered_field(&ctx, &mut dialog, generation, "name", "preview only");
+        let name_id = field_widget_id(generation, "name");
+        let ticket_id = field_widget_id(generation, "ticket");
+        let preview_id = preview_widget_id(generation);
+        assert!(egui::text_edit::TextEditState::load(&ctx, preview_id).is_some());
 
         let mut resolutions = 0;
         let mut writes = 0;
         let result = dialog.submit_with(
+            &ctx,
             |_| {
                 resolutions += 1;
                 Err(())
@@ -913,34 +1094,59 @@ mod tests {
         assert!(dialog.is_open());
         assert_eq!(dialog.preview().unwrap().text, "Draft: preview only / \r\n");
 
-        assert_eq!(dialog.cancel(), Some(expected_draft));
+        assert_eq!(dialog.cancel(&ctx), Some(expected_draft));
         assert!(!dialog.is_open());
         assert!(dialog.session().is_none());
+        assert!(egui::text_edit::TextEditState::load(&ctx, name_id).is_none());
+        assert!(egui::text_edit::TextEditState::load(&ctx, ticket_id).is_none());
+        assert!(egui::text_edit::TextEditState::load(&ctx, preview_id).is_none());
     }
 
     #[test]
     fn cancel_and_shutdown_clear_values_and_safe_feedback() {
+        let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(entry()));
-        dialog.set_value("name", "private sentinel".into());
-        dialog.cancel();
+        let cancel_generation = dialog.begin_execution(&ctx, intent(entry()));
+        render_frame(&ctx, &mut dialog, Vec::new());
+        type_into_rendered_field(
+            &ctx,
+            &mut dialog,
+            cancel_generation,
+            "name",
+            "private sentinel",
+        );
+        let cancel_field = field_widget_id(cancel_generation, "name");
+        assert!(ctx.memory(|memory| memory.has_focus(cancel_field)));
+        dialog.cancel(&ctx);
         assert!(dialog.session().is_none());
         assert_eq!(dialog.feedback(), None);
+        assert!(egui::text_edit::TextEditState::load(&ctx, cancel_field).is_none());
+        assert!(!ctx.memory(|memory| memory.has_focus(cancel_field)));
 
-        dialog.begin_execution(intent(entry()));
-        dialog.set_value("name", "private sentinel".into());
-        dialog.shutdown();
+        let shutdown_generation = dialog.begin_execution(&ctx, intent(entry()));
+        render_frame(&ctx, &mut dialog, Vec::new());
+        type_into_rendered_field(
+            &ctx,
+            &mut dialog,
+            shutdown_generation,
+            "name",
+            "private sentinel",
+        );
+        let shutdown_field = field_widget_id(shutdown_generation, "name");
+        dialog.shutdown(&ctx);
         assert!(dialog.session().is_none());
         assert!(!dialog.is_open());
+        assert!(egui::text_edit::TextEditState::load(&ctx, shutdown_field).is_none());
     }
 
     #[test]
     fn session_and_attribution_do_not_format_entered_values() {
         let entry = entry();
+        let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        dialog.begin_execution(intent(entry.clone()));
+        dialog.begin_execution(&ctx, intent(entry.clone()));
         dialog.set_value("name", "private form sentinel".into());
-        let completion = dialog.submit_with(|_| Ok(entry), |_| Ok(())).unwrap();
+        let completion = dialog.submit_with(&ctx, |_| Ok(entry), |_| Ok(())).unwrap();
         assert_eq!(completion.safe_action.args, None);
         assert_eq!(completion.safe_action.action, "snippet:run:ticketreply");
         assert_eq!(completion.history_query, "cs ticketreply");
@@ -950,7 +1156,7 @@ mod tests {
     fn presentation_focuses_required_field_and_scopes_widgets_to_each_session() {
         let ctx = egui::Context::default();
         let mut dialog = SnippetPromptDialog::default();
-        let first_generation = dialog.begin_execution(intent(entry()));
+        let first_generation = dialog.begin_execution(&ctx, intent(entry()));
         let first_field_id = field_widget_id(first_generation, "name");
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 220.0));
 
@@ -966,7 +1172,7 @@ mod tests {
         assert!(ctx.memory(|memory| memory.has_focus(first_field_id)));
 
         dialog.set_value("name", "old transient value".into());
-        let second_generation = dialog.begin_execution(intent(entry()));
+        let second_generation = dialog.begin_execution(&ctx, intent(entry()));
         let second_field_id = field_widget_id(second_generation, "name");
         assert_ne!(first_field_id, second_field_id);
         assert_ne!(
@@ -994,7 +1200,7 @@ mod tests {
 
         let mut draft = entry();
         draft.alias = "draft".into();
-        dialog.begin_preview(draft).unwrap();
+        dialog.begin_preview(&ctx, draft).unwrap();
         let _ = ctx.run(
             egui::RawInput {
                 screen_rect: Some(screen),

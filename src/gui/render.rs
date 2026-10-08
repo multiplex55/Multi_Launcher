@@ -2467,7 +2467,7 @@ impl eframe::App for LauncherApp {
         self.root_window_bridge.clear();
         self.close_screen_draw_for_exit();
         self.macro_parameter_prompt.shutdown();
-        self.snippet_prompt_dialog.shutdown();
+        self.snippet_prompt_dialog.shutdown(&self.egui_ctx);
         self.data_recovery_dialog.shutdown();
         self.clipboard_modify_dialog.cleanup_after_close();
         self.clipboard_modify_immediate.cancel_pending();
@@ -7114,7 +7114,7 @@ mod tests {
         preview_app.test_skip_history_persistence = true;
         preview_app
             .snippet_prompt_dialog
-            .begin_preview(entry)
+            .begin_preview(&ctx, entry)
             .unwrap();
         preview_app.focus_panel(super::super::Panel::SnippetPromptDialog);
         let mut submissions = 0;
@@ -7166,7 +7166,7 @@ mod tests {
         request_test_prompt(&mut app, entry);
         let feedback = app
             .snippet_prompt_dialog
-            .submit_with(|_| Err(()), |_| panic!("stale form must not copy"))
+            .submit_with(&ctx, |_| Err(()), |_| panic!("stale form must not copy"))
             .unwrap_err();
         assert_eq!(
             feedback,
