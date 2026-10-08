@@ -642,13 +642,19 @@ mod tests {
         } else {
             image.height()
         };
-        (0..axis_length)
+        let center_position = if horizontal { center.0 } else { center.1 };
+        let ray_length = if positive {
+            axis_length - center_position
+        } else {
+            center_position + 1
+        };
+        (0..ray_length)
             .find(|distance| {
                 let x = if horizontal {
                     if positive {
                         center.0 + *distance
                     } else {
-                        center.0.saturating_sub(*distance)
+                        center.0 - *distance
                     }
                 } else {
                     center.0
@@ -658,7 +664,7 @@ mod tests {
                 } else if positive {
                     center.1 + *distance
                 } else {
-                    center.1.saturating_sub(*distance)
+                    center.1 - *distance
                 };
                 x < image.width() && y < image.height() && image.get_pixel(x, y).0[3] > 0
             })
@@ -677,14 +683,20 @@ mod tests {
         } else {
             image.height()
         };
+        let center_position = if horizontal { center.0 } else { center.1 };
+        let ray_length = if positive {
+            axis_length - center_position
+        } else {
+            center_position + 1
+        };
         let expected = [color.red, color.green, color.blue, 255];
-        (0..axis_length)
+        (0..ray_length)
             .filter(|distance| {
                 let x = if horizontal {
                     if positive {
                         center.0 + *distance
                     } else {
-                        center.0.saturating_sub(*distance)
+                        center.0 - *distance
                     }
                 } else {
                     center.0
@@ -694,7 +706,7 @@ mod tests {
                 } else if positive {
                     center.1 + *distance
                 } else {
-                    center.1.saturating_sub(*distance)
+                    center.1 - *distance
                 };
                 x < image.width() && y < image.height() && image.get_pixel(x, y).0 == expected
             })
