@@ -843,6 +843,15 @@ fn command_accepts_query_override(command: &Command) -> bool {
 }
 
 impl LauncherApp {
+    pub(crate) fn begin_snippet_preview(
+        &mut self,
+        draft: crate::plugins::snippets::SnippetEntry,
+    ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        self.snippet_prompt_dialog.begin_preview(draft)?;
+        self.focus_panel(super::Panel::SnippetPromptDialog);
+        Ok(())
+    }
+
     pub(crate) fn submit_snippet_prompt(
         &mut self,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
@@ -895,10 +904,14 @@ impl LauncherApp {
     pub(crate) fn cancel_snippet_prompt(
         &mut self,
     ) -> Option<crate::plugins::snippets::SnippetEntry> {
+        let was_preview = self.snippet_prompt_dialog.is_preview_only();
         let draft = self.snippet_prompt_dialog.cancel();
         self.panel_states.snippet_prompt_dialog = false;
         self.panel_stack
             .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
+        if was_preview && self.snippet_dialog.open {
+            self.focus_panel(super::Panel::SnippetDialog);
+        }
         draft
     }
 

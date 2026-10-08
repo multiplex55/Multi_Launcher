@@ -2192,9 +2192,24 @@ impl LauncherApp {
         let mut shell_dlg = std::mem::take(&mut self.shell_cmd_dialog);
         shell_dlg.ui(ctx, self);
         self.shell_cmd_dialog = shell_dlg;
-        let mut snip_dlg = std::mem::take(&mut self.snippet_dialog);
-        snip_dlg.ui(ctx, self);
-        self.snippet_dialog = snip_dlg;
+        let preview_active =
+            self.snippet_prompt_dialog.is_open() && self.snippet_prompt_dialog.is_preview_only();
+        if !preview_active {
+            let mut snip_dlg = std::mem::take(&mut self.snippet_dialog);
+            let preview_draft = snip_dlg.ui(ctx, self);
+            self.snippet_dialog = snip_dlg;
+            if let Some(draft) = preview_draft {
+                match self.begin_snippet_preview(draft) {
+                    Ok(()) => {
+                        snippet_prompt_owns_input |= self.snippet_prompt_dialog.is_open();
+                        if snippet_prompt_owns_input {
+                            Self::consume_prompt_opening_frame_keys(ctx);
+                        }
+                    }
+                    Err(error) => self.snippet_dialog.report_preview_start_failure(error),
+                }
+            }
+        }
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;

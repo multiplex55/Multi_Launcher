@@ -375,7 +375,11 @@ impl SnippetPromptDialog {
 
                     let response = ui
                         .push_id(button_widget_id(generation, "cancel"), |ui| {
-                            ui.button("Cancel")
+                            ui.button(if preview_only {
+                                "Return to Editor"
+                            } else {
+                                "Cancel"
+                            })
                         })
                         .inner;
                     self.cancel_widget_id = Some(response.id);
