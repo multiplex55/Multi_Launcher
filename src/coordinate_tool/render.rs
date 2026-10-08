@@ -5,7 +5,7 @@ use super::model::{
     CoordinateSample, CoordinateSpace, CoordinateUnavailable, PhysicalPoint, PhysicalRect,
     PhysicalSize,
 };
-use super::settings::{CrosshairColor, CrosshairPreferences, HudDetail};
+use super::settings::{CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PixelRect {
@@ -62,6 +62,135 @@ pub(crate) struct GuideGeometry {
     pub height: u32,
     colored_stroke: PixelRect,
     outline: Option<PixelRect>,
+}
+
+/// Physical desktop geometry for a circular halo centered on the sampled
+/// cursor hotspot. Source and destination have identical extents at 1x.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HaloGeometry {
+    pub origin: PhysicalPoint,
+    pub source: PhysicalRect,
+    pub diameter: i32,
+}
+
+/// Five-by-five Magnification color matrix and equivalent RGB pixel blend.
+/// Windows applies input channel vectors across matrix rows, so the additive
+/// offset belongs in the final row (indices 20..23). Alpha is passed through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HaloColorTransform {
+    slope: f32,
+    additive: f32,
+}
+
+impl HaloColorTransform {
+    pub(crate) fn from_strength(strength: f32) -> Self {
+        let strength = if strength.is_finite() {
+            strength.clamp(0.0, 1.0)
+        } else {
+            HaloPreferences::default().inversion_strength
+        };
+        Self {
+            slope: 1.0 - 2.0 * strength,
+            additive: strength,
+        }
+    }
+
+    pub(crate) fn matrix(self) -> [f32; 25] {
+        [
+            self.slope,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            self.slope,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            self.slope,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            self.additive,
+            self.additive,
+            self.additive,
+            0.0,
+            1.0,
+        ]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_rgba(self, pixel: [u8; 4]) -> [u8; 4] {
+        let mut result = pixel;
+        for channel in &mut result[..3] {
+            let normalized = f32::from(*channel) / 255.0;
+            *channel = ((normalized * self.slope + self.additive) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
+        result
+    }
+}
+
+/// Return the exact square source and placement rectangle for a 1x circular
+/// halo. The window spans `[hotspot-radius, hotspot+radius)` on each axis;
+/// coordinates are never shifted inward to accommodate a monitor edge.
+pub(crate) fn halo_geometry(cursor: PhysicalPoint, radius: i32) -> Option<HaloGeometry> {
+    let radius = radius.clamp(8, 256);
+    let diameter = radius.checked_mul(2)?;
+    let left = cursor.x.checked_sub(radius)?;
+    let top = cursor.y.checked_sub(radius)?;
+    let right = left.checked_add(diameter)?;
+    let bottom = top.checked_add(diameter)?;
+    Some(HaloGeometry {
+        origin: PhysicalPoint::new(left, top),
+        source: PhysicalRect::new(left, top, right, bottom)?,
+        diameter,
+    })
+}
+
+/// Build the optional crisp outline as a separate transparent-ring bitmap.
+/// Pixel centers are measured from the same physical hotspot as the native
+/// magnifier. At the minimum radius, rendered thickness is capped at radius-1
+/// so at least the center pixels remain transparent even when the preference
+/// requests the maximum eight-pixel border.
+pub(crate) fn halo_outline_bitmap(preferences: HaloPreferences) -> Option<RgbaImage> {
+    let preferences = preferences.normalized();
+    if !preferences.outline_enabled {
+        return None;
+    }
+
+    let radius = preferences.radius;
+    let diameter = radius.checked_mul(2)? as u32;
+    let thickness = preferences.outline_thickness.min(radius - 1);
+    let outer_radius = radius as f32;
+    let inner_radius = (radius - thickness) as f32;
+    let outer_squared = outer_radius * outer_radius;
+    let inner_squared = inner_radius * inner_radius;
+    let mut image = RgbaImage::new(diameter, diameter);
+    let outline = Rgba([
+        preferences.outline_color.red,
+        preferences.outline_color.green,
+        preferences.outline_color.blue,
+        255,
+    ]);
+    for y in 0..diameter {
+        let dy = y as f32 + 0.5 - outer_radius;
+        for x in 0..diameter {
+            let dx = x as f32 + 0.5 - outer_radius;
+            let distance_squared = dx * dx + dy * dy;
+            if distance_squared <= outer_squared && distance_squared > inner_squared {
+                image.put_pixel(x, y, outline);
+            }
+        }
+    }
+    Some(image)
 }
 
 fn crosshair_geometry(preferences: &CrosshairPreferences) -> CrosshairGeometry {
@@ -468,7 +597,8 @@ fn concise_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CrosshairGeometry, GuideOrientation, crosshair_bitmap, crosshair_geometry, guide_geometry,
+        CrosshairGeometry, GuideOrientation, HaloColorTransform, crosshair_bitmap,
+        crosshair_geometry, guide_geometry, halo_geometry, halo_outline_bitmap,
     };
     use crate::coordinate_tool::controller::CoordinateRenderFrame;
     use crate::coordinate_tool::model::{
@@ -476,7 +606,104 @@ mod tests {
         MonitorGeometry, MonitorId,
     };
     use crate::coordinate_tool::model::{PhysicalPoint, PhysicalRect, PhysicalSize};
-    use crate::coordinate_tool::settings::{CrosshairColor, CrosshairPreferences};
+    use crate::coordinate_tool::settings::{CrosshairColor, CrosshairPreferences, HaloPreferences};
+
+    #[test]
+    fn halo_blend_preserves_input_full_inversion_and_expected_partial_rgb_values() {
+        let unchanged = HaloColorTransform::from_strength(0.0);
+        assert_eq!(unchanged.apply_rgba([0, 255, 128, 77]), [0, 255, 128, 77]);
+
+        let partial = HaloColorTransform::from_strength(0.4);
+        assert_eq!(partial.apply_rgba([0, 0, 0, 255]), [102, 102, 102, 255]);
+        assert_eq!(
+            partial.apply_rgba([255, 255, 255, 255]),
+            [153, 153, 153, 255]
+        );
+        assert_eq!(partial.apply_rgba([128, 128, 128, 64]), [128, 128, 128, 64]);
+        assert_eq!(partial.apply_rgba([255, 0, 0, 19]), [153, 102, 102, 19]);
+        assert_eq!(partial.apply_rgba([17, 93, 241, 201]), [105, 121, 150, 201]);
+
+        let full = HaloColorTransform::from_strength(1.0);
+        assert_eq!(full.apply_rgba([0, 127, 255, 33]), [255, 128, 0, 33]);
+    }
+
+    #[test]
+    fn halo_native_matrix_uses_rgb_slopes_last_row_offsets_and_unchanged_alpha() {
+        let matrix = HaloColorTransform::from_strength(0.4).matrix();
+        assert!((matrix[0] - 0.2).abs() < f32::EPSILON);
+        assert!((matrix[6] - 0.2).abs() < f32::EPSILON);
+        assert!((matrix[12] - 0.2).abs() < f32::EPSILON);
+        assert_eq!(matrix[18], 1.0);
+        assert_eq!(&matrix[20..23], &[0.4, 0.4, 0.4]);
+        assert_eq!(matrix[24], 1.0);
+        for index in [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 19, 23] {
+            assert_eq!(matrix[index], 0.0);
+        }
+        assert_eq!(HaloColorTransform::from_strength(0.0).matrix()[0], 1.0);
+        assert_eq!(HaloColorTransform::from_strength(1.0).matrix()[0], -1.0);
+        assert_eq!(HaloColorTransform::from_strength(1.0).matrix()[20], 1.0);
+    }
+
+    #[test]
+    fn halo_geometry_centers_signed_source_and_destination_on_the_hotspot() {
+        let geometry = halo_geometry(PhysicalPoint::new(-1920, 250), 60).unwrap();
+        assert_eq!(geometry.origin, PhysicalPoint::new(-1980, 190));
+        assert_eq!(
+            geometry.source,
+            PhysicalRect::new(-1980, 190, -1860, 310).unwrap()
+        );
+        assert_eq!(geometry.diameter, 120);
+
+        assert!(halo_geometry(PhysicalPoint::new(i32::MIN, 0), 60).is_none());
+        assert!(halo_geometry(PhysicalPoint::new(i32::MAX, 0), 60).is_none());
+        assert_eq!(
+            halo_geometry(PhysicalPoint::new(10, 20), i32::MIN)
+                .unwrap()
+                .diameter,
+            16
+        );
+        assert_eq!(
+            halo_geometry(PhysicalPoint::new(10, 20), i32::MAX)
+                .unwrap()
+                .diameter,
+            512
+        );
+    }
+
+    #[test]
+    fn halo_outline_is_separate_transparent_and_keeps_a_hole_at_minimum_radius() {
+        let mut preferences = HaloPreferences {
+            outline_enabled: true,
+            outline_color: CrosshairColor::new(31, 121, 223),
+            outline_thickness: 1,
+            ..HaloPreferences::default()
+        };
+        let thin = halo_outline_bitmap(preferences).unwrap();
+        assert_eq!(thin.dimensions(), (120, 120));
+        assert_eq!(thin.get_pixel(60, 0).0, [31, 121, 223, 255]);
+        assert_eq!(thin.get_pixel(0, 0).0[3], 0);
+        for (x, y) in [(59, 59), (60, 59), (59, 60), (60, 60)] {
+            assert_eq!(thin.get_pixel(x, y).0[3], 0);
+        }
+        let thin_pixels = thin.pixels().filter(|pixel| pixel.0[3] > 0).count();
+
+        preferences.outline_thickness = 4;
+        let thick = halo_outline_bitmap(preferences).unwrap();
+        let thick_pixels = thick.pixels().filter(|pixel| pixel.0[3] > 0).count();
+        assert!(thick_pixels > thin_pixels);
+        assert_eq!(thick.get_pixel(60, 0).0, [31, 121, 223, 255]);
+        assert!(halo_outline_bitmap(HaloPreferences::default()).is_none());
+
+        preferences.radius = 8;
+        preferences.outline_thickness = 8;
+        let minimum = halo_outline_bitmap(preferences).unwrap();
+        assert_eq!(minimum.dimensions(), (16, 16));
+        assert!(minimum.pixels().any(|pixel| pixel.0[3] == 255));
+        assert_eq!(minimum.get_pixel(7, 7).0[3], 0);
+        assert_eq!(minimum.get_pixel(8, 7).0[3], 0);
+        assert_eq!(minimum.get_pixel(7, 8).0[3], 0);
+        assert_eq!(minimum.get_pixel(8, 8).0[3], 0);
+    }
 
     #[test]
     fn crosshair_geometry_keeps_four_arms_and_outline_around_each_arm() {

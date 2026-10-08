@@ -1,9 +1,8 @@
 //! Lazy native ownership for the cursor-centered magnifier effects.
 //!
-//! The runtime owns one Magnification session and at most one hidden host per
-//! requested effect. It deliberately contains no halo compositing or lens
-//! presentation logic; later effect renderers can activate these prepared
-//! surfaces without changing resource ownership.
+//! The runtime owns one Magnification session and the native resources for
+//! each requested effect. HALO presentation uses only the successful live
+//! cursor sample supplied by the worker; zoom remains prepared for M4.
 
 use super::model::{
     CoordinateEffectsStatus, CoordinateToolRuntimeState, CursorEffectStatus, PhysicalPoint,
@@ -86,7 +85,9 @@ pub(crate) trait EffectNativeOperations {
         kind: EffectKind,
         configuration: &EffectConfiguration,
     ) -> Result<(), String>;
+    fn configure_halo_outline(&mut self, preferences: HaloPreferences) -> Result<(), String>;
     fn host_window(&self, kind: EffectKind) -> Option<usize>;
+    fn auxiliary_window_ids(&self, kind: EffectKind) -> Vec<usize>;
     fn set_filter_list(
         &mut self,
         kind: EffectKind,
@@ -99,7 +100,13 @@ pub(crate) trait EffectNativeOperations {
         kind: EffectKind,
         current_point: PhysicalPoint,
     ) -> Result<(), String>;
+    fn present_live_source(
+        &mut self,
+        kind: EffectKind,
+        current_point: PhysicalPoint,
+    ) -> Result<(), String>;
     fn destroy_surface(&mut self, kind: EffectKind) -> Result<(), String>;
+    fn release_auxiliary_surface(&mut self, kind: EffectKind) -> Result<(), String>;
     fn uninitialize_session(&mut self) -> Result<(), String>;
 }
 
@@ -189,7 +196,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
             }
             self.cached_live_points[kind.index()] = None;
             if has_surface && (was_requested || topology_invalidated) {
-                match self.destroy_one(kind) {
+                match self.release_effect(kind) {
                     Ok(()) => self.set_status(kind, CursorEffectStatus::Disabled),
                     Err(error) => self.set_status(
                         kind,
@@ -200,8 +207,28 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                     ),
                 }
             } else if !has_surface && was_requested {
-                self.configurations[kind.index()] = None;
-                self.set_status(kind, CursorEffectStatus::Disabled);
+                match self.release_effect(kind) {
+                    Ok(()) => self.set_status(kind, CursorEffectStatus::Disabled),
+                    Err(error) => self.set_status(
+                        kind,
+                        CursorEffectStatus::Unavailable(format!(
+                            "Could not release disabled {} effect: {error}",
+                            kind.label()
+                        )),
+                    ),
+                }
+            }
+        }
+
+        // Keep the optional outline independently owned and ready even when
+        // Magnification initialization fails, so fallback can be added without
+        // coupling it to the native magnifier HWND.
+        if requests.halo && !self.is_unavailable(EffectKind::Halo) {
+            if let Err(error) = self.operations.configure_halo_outline(preferences.halo) {
+                self.fail_surface(
+                    EffectKind::Halo,
+                    format!("Could not configure halo outline: {error}"),
+                );
             }
         }
 
@@ -377,31 +404,23 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         }
         let mut errors = Vec::new();
         for kind in [EffectKind::Zoom, EffectKind::Halo] {
-            if self.operations.has_surface(kind) {
-                if let Err(error) = self.destroy_one(kind) {
-                    self.set_status(
-                        kind,
-                        CursorEffectStatus::Unavailable(format!(
-                            "Could not shut down {} effect: {error}",
-                            kind.label()
-                        )),
-                    );
-                    errors.push(error);
-                } else {
-                    self.set_status(kind, CursorEffectStatus::Disabled);
-                }
+            if let Err(error) = self.release_effect(kind) {
+                self.set_status(
+                    kind,
+                    CursorEffectStatus::Unavailable(format!(
+                        "Could not shut down {} effect: {error}",
+                        kind.label()
+                    )),
+                );
+                errors.push(error);
             } else {
-                self.configurations[kind.index()] = None;
                 self.set_status(kind, CursorEffectStatus::Disabled);
             }
         }
 
         self.requested = EffectRequests::default();
         self.cached_live_points = [None, None];
-        if !EFFECT_KINDS
-            .into_iter()
-            .any(|kind| self.operations.has_surface(kind))
-        {
+        if !self.has_magnification_surfaces() {
             if self.session_initialized {
                 match self.operations.uninitialize_session() {
                     Ok(()) => {
@@ -425,10 +444,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         }
 
         self.filters_dirty = false;
-        self.shutdown_complete = !self.session_initialized
-            && !EFFECT_KINDS
-                .into_iter()
-                .any(|kind| self.operations.has_surface(kind));
+        self.shutdown_complete = !self.session_initialized && !self.has_effect_resources();
         if errors.is_empty() {
             Ok(())
         } else {
@@ -480,7 +496,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
     }
 
     fn complete_exclusion_list(&self, cheap_window_ids: &[usize]) -> Vec<usize> {
-        let mut excluded = Vec::with_capacity(cheap_window_ids.len() + 2);
+        let mut excluded = Vec::with_capacity(cheap_window_ids.len() + 4);
         for &window in cheap_window_ids {
             if window != 0 && !excluded.contains(&window) {
                 excluded.push(window);
@@ -492,6 +508,11 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                 && !excluded.contains(&window)
             {
                 excluded.push(window);
+            }
+            for window in self.operations.auxiliary_window_ids(kind) {
+                if window != 0 && !excluded.contains(&window) {
+                    excluded.push(window);
+                }
             }
         }
         excluded
@@ -509,8 +530,8 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
             {
                 continue;
             }
-            let Some(_point) = current_point else {
-                if self.operations.is_visible(kind)
+            let Some(point) = current_point else {
+                if (kind == EffectKind::Halo || self.operations.is_visible(kind))
                     && let Err(error) = self.operations.hide_surface(kind)
                 {
                     self.fail_surface(
@@ -526,11 +547,21 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                 continue;
             };
 
-            if self.operations.is_visible(kind) {
-                // The worker's next poll refreshes the cached live source.
-                // Keeping that operation out of frame reconciliation avoids
-                // duplicate magnifier work during cursor movement while still
-                // allowing stationary desktop content to stay live.
+            if kind == EffectKind::Halo {
+                if let Err(error) = self.operations.present_live_source(kind, point) {
+                    self.fail_surface(kind, format!("Could not present live halo: {error}"));
+                    continue;
+                }
+                if !self.operations.is_visible(kind) {
+                    self.fail_surface(
+                        kind,
+                        "Native halo presentation completed without a visible host".into(),
+                    );
+                    continue;
+                }
+                self.set_status(kind, CursorEffectStatus::Active);
+            } else if self.operations.is_visible(kind) {
+                // Zoom remains prepared until M4 supplies its presentation.
                 self.set_status(kind, CursorEffectStatus::Active);
             } else {
                 self.set_status(kind, CursorEffectStatus::Prepared);
@@ -539,12 +570,12 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
     }
 
     fn destroy_one(&mut self, kind: EffectKind) -> Result<(), String> {
+        let hide_error = self.operations.hide_surface(kind).err();
         if !self.operations.has_surface(kind) {
             self.configurations[kind.index()] = None;
-            return Ok(());
+            return hide_error.map_or(Ok(()), Err);
         }
 
-        let hide_error = self.operations.hide_surface(kind).err();
         match self.operations.destroy_surface(kind) {
             Ok(()) => {
                 self.configurations[kind.index()] = None;
@@ -562,6 +593,34 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                 }
             }
         }
+    }
+
+    fn release_effect(&mut self, kind: EffectKind) -> Result<(), String> {
+        let surface_error = self.destroy_one(kind).err();
+        let auxiliary_error = self.operations.release_auxiliary_surface(kind).err();
+        self.configurations[kind.index()] = None;
+        self.cached_live_points[kind.index()] = None;
+        self.filters_dirty = true;
+        match (surface_error, auxiliary_error) {
+            (None, None) => Ok(()),
+            (Some(error), None) | (None, Some(error)) => Err(error),
+            (Some(surface), Some(auxiliary)) => Err(format!(
+                "{surface}; auxiliary cleanup also failed: {auxiliary}"
+            )),
+        }
+    }
+
+    fn has_effect_resources(&self) -> bool {
+        EFFECT_KINDS.into_iter().any(|kind| {
+            self.operations.has_surface(kind)
+                || !self.operations.auxiliary_window_ids(kind).is_empty()
+        })
+    }
+
+    fn has_magnification_surfaces(&self) -> bool {
+        EFFECT_KINDS
+            .into_iter()
+            .any(|kind| self.operations.has_surface(kind))
     }
 
     fn fail_surface(&mut self, kind: EffectKind, reason: String) {
@@ -596,9 +655,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         force: bool,
     ) {
         if !self.session_initialized
-            || EFFECT_KINDS
-                .into_iter()
-                .any(|kind| self.operations.has_surface(kind))
+            || self.has_magnification_surfaces()
             || (self.session_cleanup_failed && !topology_invalidated && !force)
         {
             return;
@@ -680,7 +737,7 @@ mod tests {
     use crate::coordinate_tool::model::{
         CoordinateEffectsStatus, CoordinateToolRuntimeState, CursorEffectStatus, PhysicalPoint,
     };
-    use crate::coordinate_tool::settings::CoordinateToolPreferences;
+    use crate::coordinate_tool::settings::{CoordinateToolPreferences, HaloPreferences};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum FailurePoint {
@@ -690,10 +747,13 @@ mod tests {
         AttachRegion(EffectKind),
         CreateChild(EffectKind),
         Configure(EffectKind),
+        ConfigureOutline,
         Filter(EffectKind),
         Hide(EffectKind),
         Refresh(EffectKind),
+        Present(EffectKind),
         Destroy(EffectKind),
+        ReleaseOutline,
         Uninitialize,
     }
 
@@ -703,6 +763,11 @@ mod tests {
         surfaces: [bool; 2],
         child_ready: [bool; 2],
         visible: [bool; 2],
+        outline_window_exists: bool,
+        outline_visible: bool,
+        outline_enabled: bool,
+        outline_preferences: Option<HaloPreferences>,
+        configurations: [Option<EffectConfiguration>; 2],
         failures: VecDeque<FailurePoint>,
         events: Vec<String>,
         create_attempts: [usize; 2],
@@ -710,6 +775,8 @@ mod tests {
         configure_calls: usize,
         filter_calls: usize,
         refresh_calls: usize,
+        present_calls: usize,
+        presented_points: Vec<PhysicalPoint>,
         partial_resources: usize,
         filter_lists: [Vec<usize>; 2],
     }
@@ -734,6 +801,10 @@ mod tests {
                 EffectKind::Zoom => 101,
             }
         }
+
+        const fn outline_id() -> usize {
+            102
+        }
     }
 
     impl EffectNativeOperations for FakeOperations {
@@ -753,7 +824,7 @@ mod tests {
         fn create_surface(
             &mut self,
             kind: EffectKind,
-            _configuration: &EffectConfiguration,
+            configuration: &EffectConfiguration,
         ) -> Result<(), String> {
             self.events.push(format!("create-host:{}", kind.label()));
             self.create_attempts[kind.index()] += 1;
@@ -780,25 +851,55 @@ mod tests {
             self.partial_resources += 1;
             self.resource_counts[kind.index()] += 1;
             self.child_ready[kind.index()] = true;
+            self.configurations[kind.index()] = Some(configuration.clone());
             Ok(())
         }
 
         fn configure_surface(
             &mut self,
             kind: EffectKind,
-            _configuration: &EffectConfiguration,
+            configuration: &EffectConfiguration,
         ) -> Result<(), String> {
             self.configure_calls += 1;
             self.events.push(format!("configure:{}", kind.label()));
             if self.fails(FailurePoint::Configure(kind)) {
                 Err("injected configuration failure".into())
             } else {
+                self.configurations[kind.index()] = Some(configuration.clone());
                 Ok(())
             }
         }
 
+        fn configure_halo_outline(&mut self, preferences: HaloPreferences) -> Result<(), String> {
+            let preferences = preferences.normalized();
+            if self.outline_preferences == Some(preferences) {
+                return Ok(());
+            }
+            self.events.push("configure-outline".into());
+            if self.fails(FailurePoint::ConfigureOutline) {
+                return Err("injected halo outline configuration failure".into());
+            }
+            if preferences.outline_enabled {
+                self.outline_window_exists = true;
+                self.outline_enabled = true;
+            } else {
+                self.outline_visible = false;
+                self.outline_enabled = false;
+            }
+            self.outline_preferences = Some(preferences);
+            Ok(())
+        }
+
         fn host_window(&self, kind: EffectKind) -> Option<usize> {
             self.has_surface(kind).then(|| Self::host_id(kind))
+        }
+
+        fn auxiliary_window_ids(&self, kind: EffectKind) -> Vec<usize> {
+            if kind == EffectKind::Halo && self.outline_window_exists {
+                vec![Self::outline_id()]
+            } else {
+                Vec::new()
+            }
         }
 
         fn set_filter_list(
@@ -828,21 +929,43 @@ mod tests {
                 return Err("injected hide failure".into());
             }
             self.visible[kind.index()] = false;
+            if kind == EffectKind::Halo {
+                self.outline_visible = false;
+            }
             Ok(())
         }
 
         fn refresh_visible_source(
             &mut self,
             kind: EffectKind,
-            _current_point: PhysicalPoint,
+            current_point: PhysicalPoint,
         ) -> Result<(), String> {
             self.events.push(format!("refresh:{}", kind.label()));
             self.refresh_calls += 1;
             if self.fails(FailurePoint::Refresh(kind)) {
                 Err("injected live-source refresh failure".into())
             } else {
+                self.presented_points.push(current_point);
                 Ok(())
             }
+        }
+
+        fn present_live_source(
+            &mut self,
+            kind: EffectKind,
+            current_point: PhysicalPoint,
+        ) -> Result<(), String> {
+            self.events.push(format!("present:{}", kind.label()));
+            self.present_calls += 1;
+            if self.fails(FailurePoint::Present(kind)) {
+                return Err("injected passive presentation failure".into());
+            }
+            self.presented_points.push(current_point);
+            self.visible[kind.index()] = true;
+            if kind == EffectKind::Halo {
+                self.outline_visible = self.outline_enabled;
+            }
+            Ok(())
         }
 
         fn destroy_surface(&mut self, kind: EffectKind) -> Result<(), String> {
@@ -857,6 +980,21 @@ mod tests {
                 self.partial_resources -= self.resource_counts[kind.index()];
                 self.resource_counts[kind.index()] = 0;
             }
+            Ok(())
+        }
+
+        fn release_auxiliary_surface(&mut self, kind: EffectKind) -> Result<(), String> {
+            if kind != EffectKind::Halo {
+                return Ok(());
+            }
+            self.events.push("release-outline".into());
+            if self.fails(FailurePoint::ReleaseOutline) {
+                return Err("injected halo outline cleanup failure".into());
+            }
+            self.outline_window_exists = false;
+            self.outline_visible = false;
+            self.outline_enabled = false;
+            self.outline_preferences = None;
             Ok(())
         }
 
@@ -930,7 +1068,7 @@ mod tests {
         assert!(runtime.operations.has_surface(EffectKind::Halo));
         assert!(!runtime.operations.has_surface(EffectKind::Zoom));
         assert_eq!(runtime.operations.create_attempts, [1, 0]);
-        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Prepared);
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
 
         reconcile(
             &mut runtime,
@@ -987,6 +1125,204 @@ mod tests {
             .unwrap();
         assert!(destroy_zoom < uninitialize);
         runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn halo_presents_the_current_live_sample_and_updates_preferences_in_place() {
+        let mut runtime = CursorEffectsRuntime::new(FakeOperations::default());
+        let initial = CoordinateToolPreferences::default();
+        let frozen_display_point = PhysicalPoint::new(700, -900);
+        let live_point = PhysicalPoint::new(-1540, 310);
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &initial,
+            Some(live_point),
+            false,
+        );
+
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
+        assert_eq!(*runtime.status().zoom(), CursorEffectStatus::Prepared);
+        assert_eq!(runtime.operations.presented_points, [live_point]);
+        assert!(
+            !runtime
+                .operations
+                .presented_points
+                .contains(&frozen_display_point)
+        );
+
+        runtime.operations.events.clear();
+        let mut changed = initial;
+        changed.halo.radius = 91;
+        changed.halo.inversion_strength = 0.75;
+        changed.halo.outline_enabled = true;
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &changed,
+            Some(live_point),
+            false,
+        );
+
+        assert_eq!(runtime.operations.create_attempts, [1, 1]);
+        assert_eq!(runtime.operations.configure_calls, 1);
+        assert_eq!(
+            runtime.operations.configurations[EffectKind::Halo.index()],
+            Some(EffectConfiguration::Halo(changed.halo))
+        );
+        assert!(runtime.operations.outline_visible);
+        let expected_filter = [1, 2, 3, 4, 100, 101, FakeOperations::outline_id()];
+        assert_eq!(
+            runtime.operations.filter_lists[EffectKind::Halo.index()],
+            expected_filter
+        );
+        assert_eq!(
+            runtime.operations.filter_lists[EffectKind::Zoom.index()],
+            expected_filter
+        );
+        assert_eq!(
+            runtime.operations.presented_points,
+            [live_point, live_point]
+        );
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
+
+        let outline_configuration = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "configure-outline")
+            .unwrap();
+        let halo_filter = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "filter:halo")
+            .unwrap();
+        let zoom_filter = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "filter:zoom")
+            .unwrap();
+        let presentation = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "present:halo")
+            .unwrap();
+        assert!(outline_configuration < halo_filter);
+        assert!(outline_configuration < zoom_filter);
+        assert!(halo_filter < presentation);
+        assert!(zoom_filter < presentation);
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn halo_missing_live_sample_hides_host_and_outline_until_sampling_recovers() {
+        let mut runtime = CursorEffectsRuntime::new(FakeOperations::default());
+        let mut preferences = CoordinateToolPreferences::default();
+        preferences.halo.outline_enabled = true;
+        reconcile(
+            &mut runtime,
+            requests(true, false),
+            &preferences,
+            Some(PhysicalPoint::new(-250, 88)),
+            false,
+        );
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
+        assert!(runtime.operations.visible[EffectKind::Halo.index()]);
+        assert!(runtime.operations.outline_visible);
+
+        reconcile(
+            &mut runtime,
+            requests(true, false),
+            &preferences,
+            None,
+            false,
+        );
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Paused);
+        assert!(!runtime.operations.visible[EffectKind::Halo.index()]);
+        assert!(!runtime.operations.outline_visible);
+        let presentations_before_poll = runtime.operations.present_calls;
+        poll(&mut runtime);
+        assert_eq!(runtime.operations.present_calls, presentations_before_poll);
+
+        let recovered = PhysicalPoint::new(-251, 88);
+        reconcile(
+            &mut runtime,
+            requests(true, false),
+            &preferences,
+            Some(recovered),
+            false,
+        );
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
+        assert_eq!(runtime.operations.presented_points.last(), Some(&recovered));
+        assert!(runtime.operations.outline_visible);
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn halo_presentation_failure_never_publishes_active_and_keeps_other_effect_prepared() {
+        let mut operations = FakeOperations::default();
+        operations.fail_next(FailurePoint::Present(EffectKind::Halo));
+        let mut runtime = CursorEffectsRuntime::new(operations);
+        let mut preferences = CoordinateToolPreferences::default();
+        preferences.halo.outline_enabled = true;
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(PhysicalPoint::new(40, -75)),
+            false,
+        );
+
+        assert!(matches!(
+            runtime.status().halo(),
+            CursorEffectStatus::Unavailable(reason) if reason.contains("present live halo")
+        ));
+        assert_eq!(*runtime.status().zoom(), CursorEffectStatus::Prepared);
+        assert!(!runtime.operations.has_surface(EffectKind::Halo));
+        assert!(runtime.operations.has_surface(EffectKind::Zoom));
+        assert!(!runtime.operations.visible[EffectKind::Halo.index()]);
+        assert!(!runtime.operations.outline_visible);
+        assert!(runtime.operations.session);
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn retained_outline_does_not_keep_an_empty_magnification_session_alive() {
+        let mut operations = FakeOperations::default();
+        operations.fail_next(FailurePoint::CreateHost(EffectKind::Halo));
+        let mut runtime = CursorEffectsRuntime::new(operations);
+        let mut preferences = CoordinateToolPreferences::default();
+        preferences.halo.outline_enabled = true;
+
+        reconcile(
+            &mut runtime,
+            requests(true, false),
+            &preferences,
+            Some(PhysicalPoint::new(-40, 72)),
+            false,
+        );
+
+        assert!(runtime.operations.outline_window_exists);
+        assert!(!runtime.operations.has_surface(EffectKind::Halo));
+        assert!(!runtime.operations.session);
+        assert_eq!(
+            runtime
+                .operations
+                .events
+                .iter()
+                .filter(|event| *event == "uninitialize")
+                .count(),
+            1
+        );
+        assert!(matches!(
+            runtime.status().halo(),
+            CursorEffectStatus::Unavailable(_)
+        ));
+        runtime.shutdown().unwrap();
+        assert!(!runtime.operations.outline_window_exists);
     }
 
     #[test]
@@ -1047,7 +1383,7 @@ mod tests {
                 runtime.status().zoom(),
                 CursorEffectStatus::Unavailable(_)
             ));
-            assert_eq!(*runtime.status().halo(), CursorEffectStatus::Prepared);
+            assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
             runtime.shutdown().unwrap();
             assert_eq!(runtime.operations.partial_resources, 0);
         }
@@ -1087,7 +1423,7 @@ mod tests {
             runtime.operations.create_attempts[EffectKind::Halo.index()],
             2
         );
-        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Prepared);
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
         runtime.shutdown().unwrap();
         assert_eq!(runtime.operations.partial_resources, 0);
         assert!(!runtime.operations.session);
@@ -1148,7 +1484,7 @@ mod tests {
             true,
         );
         assert_eq!(runtime.operations.create_attempts[0], 2);
-        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Prepared);
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
 
         reconcile(
             &mut runtime,
@@ -1185,7 +1521,6 @@ mod tests {
         assert_eq!(runtime.operations.refresh_calls, 0);
         let filters_before = runtime.operations.filter_calls;
 
-        runtime.operations.visible[EffectKind::Halo.index()] = true;
         reconcile(
             &mut runtime,
             requests(true, true),
@@ -1194,6 +1529,7 @@ mod tests {
             true,
         );
         assert_eq!(runtime.operations.refresh_calls, 0);
+        assert_eq!(runtime.operations.present_calls, 2);
         assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
         assert_eq!(*runtime.status().zoom(), CursorEffectStatus::Prepared);
         assert!(runtime.operations.filter_calls >= filters_before + 2);
@@ -1235,10 +1571,7 @@ mod tests {
             false,
         );
         let filters_before_poll = runtime.operations.filter_calls;
-        poll(&mut runtime);
         assert_eq!(runtime.operations.refresh_calls, 0);
-
-        runtime.operations.visible[EffectKind::Halo.index()] = true;
         poll(&mut runtime);
         assert_eq!(runtime.operations.refresh_calls, 1);
         assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
@@ -1254,7 +1587,6 @@ mod tests {
             false,
         );
         assert!(!runtime.operations.visible[EffectKind::Halo.index()]);
-        runtime.operations.visible[EffectKind::Halo.index()] = true;
         poll(&mut runtime);
         assert_eq!(runtime.operations.refresh_calls, 2);
         assert_eq!(*runtime.status().halo(), CursorEffectStatus::Paused);

@@ -1,9 +1,8 @@
 //! Passive Windows sampler and layered surfaces for the coordinate inspector.
 //!
 //! All HWND and GDI ownership remains on the single controller worker. The
-//! native backend draws only the compact HUD, center mark, and two narrow
-//! virtual-desktop bands; cursor motion moves the latter three windows without
-//! rebuilding a desktop-sized bitmap.
+//! backend draws the compact HUD, crosshair and narrow virtual-desktop guides,
+//! and presents lazily owned live magnification effects on that same worker.
 
 use super::controller::{CoordinateRuntimeFactory, CoordinateSampler, CoordinateSurfaceBackend};
 
@@ -117,18 +116,18 @@ mod windows_runtime {
         CoordinateRenderFrame, CoordinateSampler, CoordinateSurfaceBackend,
     };
     use super::super::model::{
-        CoordinateEffectsStatus, CoordinateSample, ForegroundClientGeometry, MonitorGeometry,
-        MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize,
+        CoordinateEffectsStatus, CoordinateSample, CursorEffectStatus, ForegroundClientGeometry,
+        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize,
     };
     use super::super::native_effects::{
         CursorEffectsRuntime, EffectConfiguration, EffectKind, EffectNativeOperations,
         EffectRequests,
     };
     use super::super::render::{
-        GuideOrientation, crosshair_bitmap, guide_bitmap, guide_geometry, hud_font_size,
-        hud_layout, hud_lines,
+        GuideOrientation, HaloColorTransform, crosshair_bitmap, guide_bitmap, guide_geometry,
+        halo_geometry, halo_outline_bitmap, hud_font_size, hud_layout, hud_lines,
     };
-    use super::super::settings::CrosshairPreferences;
+    use super::super::settings::{CrosshairPreferences, HaloPreferences};
     use crate::platform::pixels::premultiplied_bgra;
 
     struct ThreadDpiContext(DPI_AWARENESS_CONTEXT);
@@ -625,12 +624,19 @@ mod windows_runtime {
             origin: PhysicalPoint,
             image: &RgbaImage,
         ) -> Result<(), String> {
+            self.prepare_image(origin, image)?;
+            self.show()
+        }
+
+        fn prepare_image(
+            &mut self,
+            origin: PhysicalPoint,
+            image: &RgbaImage,
+        ) -> Result<(), String> {
             let (width, height) = image.dimensions();
             self.ensure_dib(width, height)?.copy_rgba(image)?;
             self.dirty = true;
-            self.upload(origin)?;
-            self.show();
-            Ok(())
+            self.upload(origin)
         }
 
         fn present_hud(
@@ -648,8 +654,7 @@ mod windows_runtime {
                 .ok_or_else(|| "Coordinate HUD backing DIB was not initialized".to_string())?
                 .draw_hud(width, height, font_size, lines)?;
             self.upload(origin)?;
-            self.show();
-            Ok(())
+            self.show()
         }
 
         fn reposition_and_show(&mut self, origin: PhysicalPoint) -> Result<(), String> {
@@ -668,7 +673,25 @@ mod windows_runtime {
                 .map_err(|error| format!("Could not move coordinate passive surface: {error}"))?;
                 self.position = Some(origin);
             }
-            self.show();
+            self.show()
+        }
+
+        fn reposition_without_raising(&mut self, origin: PhysicalPoint) -> Result<(), String> {
+            if self.position != Some(origin) {
+                unsafe {
+                    SetWindowPos(
+                        self.hwnd,
+                        HWND::default(),
+                        origin.x,
+                        origin.y,
+                        0,
+                        0,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSIZE,
+                    )
+                }
+                .map_err(|error| format!("Could not move coordinate passive surface: {error}"))?;
+                self.position = Some(origin);
+            }
             Ok(())
         }
 
@@ -687,13 +710,21 @@ mod windows_runtime {
             .map_err(|error| format!("Could not order coordinate passive surface: {error}"))
         }
 
-        fn show(&mut self) {
+        fn show(&mut self) -> Result<(), String> {
             if !self.visible {
+                // Raise only on a hidden-to-visible transition. This keeps
+                // newly re-enabled cheap surfaces above an active halo while
+                // avoiding per-frame z-order churn for stationary windows.
+                self.raise_topmost()?;
                 unsafe {
                     let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
                 }
+                if !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+                    return Err("Coordinate passive surface did not become visible".into());
+                }
                 self.visible = true;
             }
+            Ok(())
         }
 
         fn hide(&mut self) {
@@ -707,6 +738,14 @@ mod windows_runtime {
 
         fn needs_upload(&self) -> bool {
             self.dirty || self.dib.is_none()
+        }
+
+        fn mark_dirty(&mut self) {
+            self.dirty = true;
+        }
+
+        fn is_visible(&self) -> bool {
+            unsafe { IsWindowVisible(self.hwnd) }.as_bool()
         }
 
         fn shutdown(&mut self) -> Result<(), String> {
@@ -777,6 +816,7 @@ mod windows_runtime {
         magnifier: HWND,
         diameter: i32,
         scale: f32,
+        position: Option<PhysicalPoint>,
     }
 
     /// Worker-thread owner for the process' single Magnification session and
@@ -787,6 +827,9 @@ mod windows_runtime {
         session_initialized: bool,
         halo: Option<NativeEffectSurface>,
         zoom: Option<NativeEffectSurface>,
+        halo_outline: Option<LayeredSurface>,
+        halo_outline_image: Option<RgbaImage>,
+        halo_outline_preferences: Option<HaloPreferences>,
     }
 
     impl WindowsEffectOperations {
@@ -796,6 +839,9 @@ mod windows_runtime {
                 session_initialized: false,
                 halo: None,
                 zoom: None,
+                halo_outline: None,
+                halo_outline_image: None,
+                halo_outline_preferences: None,
             }
         }
 
@@ -841,6 +887,206 @@ mod windows_runtime {
             }
         }
 
+        fn set_color_effect(magnifier: HWND, mut effect: MAGCOLOREFFECT) -> Result<(), String> {
+            if !unsafe { MagSetColorEffect(magnifier, &mut effect) }.as_bool() {
+                return Err(format!(
+                    "MagSetColorEffect failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            Ok(())
+        }
+
+        fn set_halo_color(magnifier: HWND, strength: f32) -> Result<(), String> {
+            let effect = MAGCOLOREFFECT {
+                transform: HaloColorTransform::from_strength(strength).matrix(),
+            };
+            Self::set_color_effect(magnifier, effect)
+        }
+
+        fn set_identity_color(magnifier: HWND) -> Result<(), String> {
+            Self::set_color_effect(magnifier, Self::color_identity())
+        }
+
+        fn configure_outline_surface(
+            &mut self,
+            preferences: HaloPreferences,
+        ) -> Result<(), String> {
+            let preferences = preferences.normalized();
+            if self.halo_outline_preferences == Some(preferences) {
+                return Ok(());
+            }
+
+            if preferences.outline_enabled {
+                let image = halo_outline_bitmap(preferences)
+                    .ok_or_else(|| "Could not create halo outline bitmap".to_string())?;
+                if self.halo_outline.is_none() {
+                    self.halo_outline = Some(LayeredSurface::new(self.instance)?);
+                }
+                self.halo_outline_image = Some(image);
+                if let Some(outline) = self.halo_outline.as_mut() {
+                    outline.mark_dirty();
+                }
+            } else {
+                self.hide_halo_outline()?;
+                self.halo_outline_image = None;
+            }
+
+            self.halo_outline_preferences = Some(preferences);
+            Ok(())
+        }
+
+        fn hide_halo_outline(&mut self) -> Result<(), String> {
+            let Some(outline) = self.halo_outline.as_mut() else {
+                return Ok(());
+            };
+            outline.hide();
+            if outline.is_visible() {
+                return Err("Halo outline remained visible after SW_HIDE".into());
+            }
+            Ok(())
+        }
+
+        fn present_halo_outline(&mut self, origin: PhysicalPoint) -> Result<(), String> {
+            let Some(image) = self.halo_outline_image.as_ref() else {
+                return self.hide_halo_outline();
+            };
+            let outline = self
+                .halo_outline
+                .as_mut()
+                .ok_or_else(|| "Halo outline window is missing".to_string())?;
+            if outline.needs_upload() {
+                outline.prepare_image(origin, image)?;
+            } else {
+                outline.reposition_without_raising(origin)?;
+            }
+            outline.show()
+        }
+
+        fn update_live_source(
+            &mut self,
+            kind: EffectKind,
+            current_point: PhysicalPoint,
+        ) -> Result<Option<PhysicalPoint>, String> {
+            let (magnifier, host, diameter, scale, previous_position) = self
+                .surface(kind)
+                .map(|surface| {
+                    (
+                        surface.magnifier,
+                        surface.host,
+                        surface.diameter,
+                        surface.scale,
+                        surface.position,
+                    )
+                })
+                .ok_or_else(|| format!("{} effect host is missing", kind.label()))?;
+            if magnifier.0.is_null() {
+                return Err(format!("{} magnifier child is missing", kind.label()));
+            }
+
+            let (source, origin) = if kind == EffectKind::Halo {
+                let geometry = halo_geometry(current_point, diameter / 2)
+                    .ok_or_else(|| "Halo geometry overflows physical coordinates".to_string())?;
+                (
+                    RECT {
+                        left: geometry.source.left(),
+                        top: geometry.source.top(),
+                        right: geometry.source.right(),
+                        bottom: geometry.source.bottom(),
+                    },
+                    Some(geometry.origin),
+                )
+            } else {
+                let source_size = ((diameter as f32) / scale)
+                    .round()
+                    .clamp(1.0, diameter as f32) as i32;
+                let half = source_size / 2;
+                let left = current_point
+                    .x
+                    .checked_sub(half)
+                    .ok_or_else(|| format!("{} source x coordinate overflowed", kind.label()))?;
+                let top = current_point
+                    .y
+                    .checked_sub(half)
+                    .ok_or_else(|| format!("{} source y coordinate overflowed", kind.label()))?;
+                (
+                    RECT {
+                        left,
+                        top,
+                        right: left.checked_add(source_size).ok_or_else(|| {
+                            format!("{} source right coordinate overflowed", kind.label())
+                        })?,
+                        bottom: top.checked_add(source_size).ok_or_else(|| {
+                            format!("{} source bottom coordinate overflowed", kind.label())
+                        })?,
+                    },
+                    None,
+                )
+            };
+
+            if !unsafe { MagSetWindowSource(magnifier, source) }.as_bool() {
+                return Err(format!(
+                    "MagSetWindowSource({}) failed (GetLastError={})",
+                    kind.label(),
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            if !unsafe { InvalidateRect(magnifier, None, BOOL(0)) }.as_bool() {
+                return Err(format!(
+                    "InvalidateRect({}) failed (GetLastError={})",
+                    kind.label(),
+                    unsafe { GetLastError().0 }
+                ));
+            }
+
+            if let Some(origin) = origin {
+                if previous_position != Some(origin) {
+                    unsafe {
+                        SetWindowPos(
+                            host,
+                            HWND::default(),
+                            origin.x,
+                            origin.y,
+                            diameter,
+                            diameter,
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                        )
+                    }
+                    .map_err(|error| format!("Could not position halo host: {error}"))?;
+                    if let Some(surface) = self.surface_mut(kind).as_mut() {
+                        surface.position = Some(origin);
+                    }
+                }
+            }
+            Ok(origin)
+        }
+
+        fn show_halo_host(&self) -> Result<(), String> {
+            let (host, magnifier) = self
+                .surface(EffectKind::Halo)
+                .map(|surface| (surface.host, surface.magnifier))
+                .ok_or_else(|| "Halo host is missing".to_string())?;
+            if magnifier.0.is_null() {
+                return Err("Halo magnifier child is missing".into());
+            }
+            if !unsafe { IsWindowVisible(magnifier) }.as_bool() {
+                unsafe {
+                    let _ = ShowWindow(magnifier, SW_SHOWNOACTIVATE);
+                }
+            }
+            if !unsafe { IsWindowVisible(host) }.as_bool() {
+                unsafe {
+                    let _ = ShowWindow(host, SW_SHOWNOACTIVATE);
+                }
+            }
+            if !unsafe { IsWindowVisible(host) }.as_bool()
+                || !unsafe { IsWindowVisible(magnifier) }.as_bool()
+            {
+                return Err("Halo host and magnifier child did not become visible".into());
+            }
+            Ok(())
+        }
+
         fn set_circle_region(host: HWND, diameter: i32) -> Result<(), String> {
             let region = unsafe { CreateEllipticRgn(0, 0, diameter, diameter) };
             if region.0.is_null() {
@@ -870,17 +1116,6 @@ mod windows_runtime {
             if !unsafe { MagSetWindowTransform(magnifier, &mut transform) }.as_bool() {
                 return Err(format!(
                     "MagSetWindowTransform failed (GetLastError={})",
-                    unsafe { GetLastError().0 }
-                ));
-            }
-            Ok(())
-        }
-
-        fn set_identity_color(magnifier: HWND) -> Result<(), String> {
-            let mut effect = Self::color_identity();
-            if !unsafe { MagSetColorEffect(magnifier, &mut effect) }.as_bool() {
-                return Err(format!(
-                    "MagSetColorEffect failed (GetLastError={})",
                     unsafe { GetLastError().0 }
                 ));
             }
@@ -923,6 +1158,7 @@ mod windows_runtime {
                 magnifier: HWND::default(),
                 diameter,
                 scale: 1.0,
+                position: None,
             });
             unsafe { SetLayeredWindowAttributes(host, COLORREF(0), 255, LWA_ALPHA) }.map_err(
                 |error| format!("Could not configure {} host alpha: {error}", kind.label()),
@@ -1023,14 +1259,19 @@ mod windows_runtime {
                 Self::set_transform(magnifier, scale).map_err(|error| {
                     format!("Could not configure {} scale: {error}", kind.label())
                 })?;
-                // M2 prepares neutral hidden children. Halo inversion and
-                // outlines are activated by their later rendering milestones.
-                Self::set_identity_color(magnifier).map_err(|error| {
-                    format!(
-                        "Could not configure {} neutral color: {error}",
-                        kind.label()
-                    )
-                })?;
+                match (kind, configuration) {
+                    (EffectKind::Halo, EffectConfiguration::Halo(preferences)) => {
+                        Self::set_halo_color(magnifier, preferences.inversion_strength).map_err(
+                            |error| format!("Could not configure halo inversion: {error}"),
+                        )?;
+                    }
+                    (EffectKind::Zoom, EffectConfiguration::Zoom(_)) => {
+                        Self::set_identity_color(magnifier).map_err(|error| {
+                            format!("Could not configure neutral zoom color: {error}")
+                        })?;
+                    }
+                    _ => return Err("Effect configuration kind did not match its surface".into()),
+                }
             }
             Ok(())
         }
@@ -1077,6 +1318,22 @@ mod windows_runtime {
             self.surface(kind).map(|surface| surface.host.0 as usize)
         }
 
+        fn auxiliary_window_ids(&self, kind: EffectKind) -> Vec<usize> {
+            if kind == EffectKind::Halo {
+                self.halo_outline
+                    .as_ref()
+                    .filter(|outline| !outline.hwnd.0.is_null())
+                    .map(|outline| vec![outline.hwnd.0 as usize])
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn configure_halo_outline(&mut self, preferences: HaloPreferences) -> Result<(), String> {
+            Self::configure_outline_surface(self, preferences)
+        }
+
         fn set_filter_list(
             &mut self,
             kind: EffectKind,
@@ -1119,21 +1376,26 @@ mod windows_runtime {
         }
 
         fn hide_surface(&mut self, kind: EffectKind) -> Result<(), String> {
-            let Some(host) = self.surface(kind).map(|surface| surface.host) else {
-                return Ok(());
-            };
-            if unsafe { IsWindowVisible(host) }.as_bool() {
-                unsafe {
-                    let _ = ShowWindow(host, SW_HIDE);
+            let mut errors = Vec::new();
+            if let Some(host) = self.surface(kind).map(|surface| surface.host) {
+                if unsafe { IsWindowVisible(host) }.as_bool() {
+                    unsafe {
+                        let _ = ShowWindow(host, SW_HIDE);
+                    }
+                }
+                if unsafe { IsWindowVisible(host) }.as_bool() {
+                    errors.push(format!(
+                        "{} effect host remained visible after SW_HIDE",
+                        kind.label()
+                    ));
                 }
             }
-            if unsafe { IsWindowVisible(host) }.as_bool() {
-                return Err(format!(
-                    "{} effect host remained visible after SW_HIDE",
-                    kind.label()
-                ));
+            if kind == EffectKind::Halo
+                && let Err(error) = self.hide_halo_outline()
+            {
+                errors.push(error);
             }
-            Ok(())
+            errors.into_iter().next().map_or(Ok(()), Err)
         }
 
         fn refresh_visible_source(
@@ -1141,46 +1403,28 @@ mod windows_runtime {
             kind: EffectKind,
             current_point: PhysicalPoint,
         ) -> Result<(), String> {
-            let surface = self
-                .surface(kind)
-                .ok_or_else(|| format!("{} effect host is missing", kind.label()))?;
-            let source_size = ((surface.diameter as f32) / surface.scale)
-                .round()
-                .clamp(1.0, surface.diameter as f32) as i32;
-            let half = source_size / 2;
-            let left = current_point
-                .x
-                .checked_sub(half)
-                .ok_or_else(|| format!("{} source x coordinate overflowed", kind.label()))?;
-            let top = current_point
-                .y
-                .checked_sub(half)
-                .ok_or_else(|| format!("{} source y coordinate overflowed", kind.label()))?;
-            let source = RECT {
-                left,
-                top,
-                right: left.checked_add(source_size).ok_or_else(|| {
-                    format!("{} source right coordinate overflowed", kind.label())
-                })?,
-                bottom: top.checked_add(source_size).ok_or_else(|| {
-                    format!("{} source bottom coordinate overflowed", kind.label())
-                })?,
-            };
-            if !unsafe { MagSetWindowSource(surface.magnifier, source) }.as_bool() {
-                return Err(format!(
-                    "MagSetWindowSource({}) failed (GetLastError={})",
-                    kind.label(),
-                    unsafe { GetLastError().0 }
-                ));
-            }
-            if !unsafe { InvalidateRect(surface.magnifier, None, BOOL(0)) }.as_bool() {
-                return Err(format!(
-                    "InvalidateRect({}) failed (GetLastError={})",
-                    kind.label(),
-                    unsafe { GetLastError().0 }
-                ));
+            let origin = self.update_live_source(kind, current_point)?;
+            if kind == EffectKind::Halo
+                && let Some(origin) = origin
+            {
+                self.present_halo_outline(origin)?;
             }
             Ok(())
+        }
+
+        fn present_live_source(
+            &mut self,
+            kind: EffectKind,
+            current_point: PhysicalPoint,
+        ) -> Result<(), String> {
+            if kind != EffectKind::Halo {
+                return Err("Only the halo can be presented in this checkpoint".into());
+            }
+            let origin = self
+                .update_live_source(kind, current_point)?
+                .ok_or_else(|| "Halo geometry did not provide a destination".to_string())?;
+            self.show_halo_host()?;
+            self.present_halo_outline(origin)
         }
 
         fn destroy_surface(&mut self, kind: EffectKind) -> Result<(), String> {
@@ -1194,9 +1438,24 @@ mod windows_runtime {
             Ok(())
         }
 
+        fn release_auxiliary_surface(&mut self, kind: EffectKind) -> Result<(), String> {
+            if kind != EffectKind::Halo {
+                return Ok(());
+            }
+            if let Some(outline) = self.halo_outline.as_mut() {
+                outline.shutdown()?;
+            }
+            self.halo_outline = None;
+            self.halo_outline_image = None;
+            self.halo_outline_preferences = None;
+            Ok(())
+        }
+
         fn uninitialize_session(&mut self) -> Result<(), String> {
             if self.halo.is_some() || self.zoom.is_some() {
-                return Err("Cannot uninitialize Magnification while effect hosts remain".into());
+                return Err(
+                    "Cannot uninitialize Magnification while magnifier hosts remain".into(),
+                );
             }
             if !self.session_initialized {
                 return Ok(());
@@ -1215,15 +1474,17 @@ mod windows_runtime {
     impl Drop for WindowsEffectOperations {
         fn drop(&mut self) {
             for kind in [EffectKind::Zoom, EffectKind::Halo] {
-                if !self.has_surface(kind) {
-                    continue;
-                }
                 if let Err(error) = self.hide_surface(kind) {
                     eprintln!("coordinate effect cleanup: {error}");
                 }
-                if let Err(error) = self.destroy_surface(kind) {
+                if self.has_surface(kind)
+                    && let Err(error) = self.destroy_surface(kind)
+                {
                     eprintln!("coordinate effect cleanup: {error}");
                 }
+            }
+            if let Err(error) = self.release_auxiliary_surface(EffectKind::Halo) {
+                eprintln!("coordinate halo outline cleanup: {error}");
             }
             if self.halo.is_none() && self.zoom.is_none() && self.session_initialized {
                 if let Err(error) = self.uninitialize_session() {
@@ -1231,8 +1492,11 @@ mod windows_runtime {
                 }
             } else if self.halo.is_some() || self.zoom.is_some() {
                 eprintln!(
-                    "coordinate Magnification session retained because an effect host remains"
+                    "coordinate Magnification session retained because magnifier hosts remain"
                 );
+            }
+            if self.halo_outline.is_some() {
+                eprintln!("coordinate halo outline window remains after cleanup");
             }
         }
     }
@@ -1265,6 +1529,7 @@ mod windows_runtime {
         hud_visual: Option<HudVisual>,
         refresh_requested: bool,
         topology_invalidated: bool,
+        ordered_halo_outline_enabled: Option<bool>,
         shutdown: bool,
     }
 
@@ -1284,6 +1549,7 @@ mod windows_runtime {
                 hud_visual: None,
                 refresh_requested: false,
                 topology_invalidated: false,
+                ordered_halo_outline_enabled: None,
                 shutdown: false,
             })
         }
@@ -1456,6 +1722,25 @@ mod windows_runtime {
             }
             Ok(())
         }
+
+        fn raise_visible_cheap_surfaces_above_halo(&mut self) {
+            // The halo host and its independently owned outline are raised
+            // when presented. Re-establish the cheap overlay stack only when
+            // the halo first becomes visible or its outline is introduced;
+            // cursor movement does not churn topmost order.
+            for surface in [
+                &mut self.horizontal_guide,
+                &mut self.vertical_guide,
+                &mut self.crosshair,
+                &mut self.hud,
+            ] {
+                if surface.is_visible()
+                    && let Err(error) = surface.raise_topmost()
+                {
+                    eprintln!("coordinate overlay ordering: {error}");
+                }
+            }
+        }
     }
 
     impl CoordinateSurfaceBackend for WindowsSurfaceBackend {
@@ -1491,6 +1776,7 @@ mod windows_runtime {
             }
             let force = mem::take(&mut self.refresh_requested);
             let topology_invalidated = mem::take(&mut self.topology_invalidated);
+            let ordered_outline_enabled = self.ordered_halo_outline_enabled;
             let cheap_window_ids = [
                 self.hud.hwnd.0 as usize,
                 self.crosshair.hwnd.0 as usize,
@@ -1517,6 +1803,14 @@ mod windows_runtime {
             if let Err(error) = self.render_hud(frame, force) {
                 self.hud.hide();
                 errors.push(error);
+            }
+            if matches!(self.effects.status().halo(), CursorEffectStatus::Active) {
+                if ordered_outline_enabled != Some(frame.preferences.halo.outline_enabled) {
+                    self.raise_visible_cheap_surfaces_above_halo();
+                }
+                self.ordered_halo_outline_enabled = Some(frame.preferences.halo.outline_enabled);
+            } else {
+                self.ordered_halo_outline_enabled = None;
             }
             errors.into_iter().next().map_or(Ok(()), Err)
         }
