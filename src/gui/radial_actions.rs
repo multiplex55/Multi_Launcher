@@ -272,7 +272,12 @@ impl LauncherApp {
         action: &crate::universal_actions::UniversalAction,
         requirement: InteractionRequirement,
     ) -> InteractionRequirement {
-        radial_requirement_for_settings(action, requirement, self.radial_confirmation_enabled())
+        radial_requirement_for_snippet_mode(
+            action,
+            requirement,
+            self.radial_confirmation_enabled(),
+            |alias| crate::plugins::snippets::resolve_snippet(alias).ok(),
+        )
     }
 
     pub(super) fn invalidate_radial_leases(&mut self) {
@@ -375,6 +380,21 @@ impl LauncherApp {
             .collect();
         action_snapshot.extend(captured_result_entries.iter().cloned());
         let entries = action_snapshot.entries;
+        // Radial preparation is an activation snapshot. Resolve current snippet
+        // modes once here so the per-cell projection stays filesystem-free.
+        let snippet_entries = entries
+            .iter()
+            .any(|entry| {
+                matches!(
+                    &entry.target,
+                    crate::universal_actions::ActionTarget::Snippet { .. }
+                )
+            })
+            .then(|| {
+                crate::plugins::snippets::load_snippets(crate::plugins::snippets::SNIPPETS_FILE)
+                    .ok()
+            })
+            .flatten();
         let catalog = PersistedActionCatalog::new(entries.clone());
         let registry = UniversalActionRegistry;
         let binding_resolver = RadialBindingResolver::new(&catalog, &registry);
@@ -669,6 +689,7 @@ impl LauncherApp {
             &binding_resolver,
             &request.context,
             confirmation_required,
+            snippet_entries.as_deref(),
         );
         let effective_style = crate::radial::skin::compile_menu_tree(&request.document, &menu).ok();
         let mut frame = project_menu_frame_with_style(
@@ -756,8 +777,12 @@ impl LauncherApp {
                     super::universal_action_catalog::action_resolution_context_for_target,
                 ) {
                     Ok(binding) => {
-                        prepared.requirement = self
-                            .radial_interaction_requirement(&binding.action, binding.requirement)
+                        prepared.requirement = radial_requirement_for_snippet_entries(
+                            &binding.action,
+                            binding.requirement,
+                            confirmation_required,
+                            snippet_entries.as_deref(),
+                        )
                     }
                     Err(reason) => {
                         prepared.availability = FrozenAvailability::Unavailable {
@@ -774,6 +799,7 @@ impl LauncherApp {
             &binding_resolver,
             &request.context,
             confirmation_required,
+            snippet_entries.as_deref(),
         );
         sync_frame_static_cells(&mut frame);
         static_cells.clone_from(&frame.static_cells);
@@ -849,6 +875,7 @@ impl LauncherApp {
                 &binding_resolver,
                 &request.context,
                 confirmation_required,
+                snippet_entries.as_deref(),
             );
             let effective_style =
                 crate::radial::skin::compile_menu_tree(&request.document, child).ok();
@@ -937,10 +964,11 @@ impl LauncherApp {
                         &prepared.history_query,
                         super::universal_action_catalog::action_resolution_context_for_target,
                     ) {
-                        prepared.requirement = radial_requirement_for_settings(
+                        prepared.requirement = radial_requirement_for_snippet_entries(
                             &binding.action,
                             binding.requirement,
                             confirmation_required,
+                            snippet_entries.as_deref(),
                         );
                     }
                 }
@@ -952,6 +980,7 @@ impl LauncherApp {
                 &binding_resolver,
                 &request.context,
                 confirmation_required,
+                snippet_entries.as_deref(),
             );
             sync_frame_static_cells(&mut child_frame);
             frames.insert(child.id.clone(), child_frame);
@@ -2726,6 +2755,7 @@ fn prepare_dynamic_bindings(
     resolver: &RadialBindingResolver<'_>,
     context: &InvocationContext,
     confirmation_required: bool,
+    snippet_entries: Option<&[crate::plugins::snippets::SnippetEntry]>,
 ) {
     for frame in dynamic.values_mut() {
         for entry in &mut frame.entries {
@@ -2739,10 +2769,11 @@ fn prepare_dynamic_bindings(
                 super::universal_action_catalog::action_resolution_context_for_target,
             ) {
                 Ok(prepared) => {
-                    entry.requirement = radial_requirement_for_settings(
+                    entry.requirement = radial_requirement_for_snippet_entries(
                         &prepared.action,
                         prepared.requirement,
                         confirmation_required,
+                        snippet_entries,
                     )
                 }
                 Err(reason) => {
@@ -2850,6 +2881,7 @@ fn finalize_alternates(
     resolver: &RadialBindingResolver<'_>,
     context: &InvocationContext,
     confirmation_required: bool,
+    snippet_entries: Option<&[crate::plugins::snippets::SnippetEntry]>,
 ) {
     for prepared in frame.alternates.values_mut() {
         if prepared.availability == FrozenAvailability::Available {
@@ -2860,10 +2892,11 @@ fn finalize_alternates(
                 super::universal_action_catalog::action_resolution_context_for_target,
             ) {
                 Ok(binding) => {
-                    prepared.requirement = radial_requirement_for_settings(
+                    prepared.requirement = radial_requirement_for_snippet_entries(
                         &binding.action,
                         binding.requirement,
                         confirmation_required,
+                        snippet_entries,
                     )
                 }
                 Err(reason) => {
@@ -2891,6 +2924,60 @@ fn radial_requirement_for_settings(
     } else {
         requirement
     }
+}
+
+fn radial_requirement_for_snippet_mode(
+    action: &crate::universal_actions::UniversalAction,
+    requirement: InteractionRequirement,
+    confirmation_required: bool,
+    current_entry: impl FnOnce(&str) -> Option<crate::plugins::snippets::SnippetEntry>,
+) -> InteractionRequirement {
+    use crate::plugins::snippets::{SnippetRunMode, prepare_snippet_run};
+
+    let requirement = if action.id == crate::universal_actions::action_ids::RESULT_EXECUTE {
+        let alias = match (&action.target, &action.operation) {
+            (
+                crate::universal_actions::ActionTarget::Snippet { alias },
+                crate::universal_actions::UniversalActionOperation::InvokePrimary(primary),
+            ) if primary.args.is_none()
+                && crate::plugins::snippets::decode_snippet_run_action(&primary.action)
+                    .as_deref()
+                    == Some(alias.as_str()) =>
+            {
+                Some(alias.as_str())
+            }
+            _ => None,
+        };
+        if let Some(alias) = alias {
+            match current_entry(alias).map(|entry| prepare_snippet_run(&entry)) {
+                Some(Ok(SnippetRunMode::Plain)) => requirement,
+                Some(Ok(SnippetRunMode::Prompted(_))) | Some(Err(_)) | None => {
+                    InteractionRequirement::LauncherUi
+                }
+            }
+        } else {
+            requirement
+        }
+    } else {
+        requirement
+    };
+
+    radial_requirement_for_settings(action, requirement, confirmation_required)
+}
+
+fn radial_requirement_for_snippet_entries(
+    action: &crate::universal_actions::UniversalAction,
+    requirement: InteractionRequirement,
+    confirmation_required: bool,
+    entries: Option<&[crate::plugins::snippets::SnippetEntry]>,
+) -> InteractionRequirement {
+    radial_requirement_for_snippet_mode(action, requirement, confirmation_required, |alias| {
+        entries.and_then(|entries| {
+            crate::plugins::snippets::resolve_snippet_from_entries(entries, alias)
+                .ok()
+                .cloned()
+        })
+    })
 }
 
 fn sync_frame_static_cells(frame: &mut crate::radial::bindings::PreparedMenuFrame) {
@@ -3047,6 +3134,93 @@ mod tests {
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
         mpsc,
     };
+
+    #[test]
+    fn saved_radial_snippet_identity_uses_current_prompt_mode() {
+        let alias = "saved:ticket";
+        let selected = crate::actions::Action {
+            label: "Ticket".into(),
+            desc: "Snippet".into(),
+            action: crate::plugins::snippets::snippet_run_action(alias),
+            args: None,
+        };
+        let action = crate::universal_actions::UniversalAction {
+            id: crate::universal_actions::action_ids::RESULT_EXECUTE,
+            target: crate::universal_actions::ActionTarget::Snippet {
+                alias: alias.into(),
+            },
+            presentation: crate::universal_actions::ActionPresentation::new("Ticket"),
+            availability: crate::universal_actions::ActionAvailability::Available,
+            safety: crate::universal_actions::ActionSafety::Normal,
+            operation: crate::universal_actions::UniversalActionOperation::InvokePrimary(selected),
+        };
+        let mut current = crate::plugins::snippets::SnippetEntry {
+            alias: alias.into(),
+            text: "literal {{ text".into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        };
+
+        assert_eq!(
+            radial_requirement_for_snippet_mode(
+                &action,
+                InteractionRequirement::None,
+                false,
+                |_| Some(current.clone()),
+            ),
+            InteractionRequirement::None
+        );
+
+        current.text = "{{name}}".into();
+        current.prompt_for_fields = true;
+        current.fields = vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+            "name",
+        )];
+        assert_eq!(
+            radial_requirement_for_snippet_mode(
+                &action,
+                InteractionRequirement::None,
+                false,
+                |_| Some(current.clone()),
+            ),
+            InteractionRequirement::LauncherUi
+        );
+
+        current.prompt_for_fields = false;
+        assert_eq!(
+            radial_requirement_for_snippet_mode(
+                &action,
+                InteractionRequirement::None,
+                false,
+                |_| Some(current.clone()),
+            ),
+            InteractionRequirement::None
+        );
+
+        current.prompt_for_fields = true;
+        current.text = "{{unfinished".into();
+        assert_eq!(
+            radial_requirement_for_snippet_mode(
+                &action,
+                InteractionRequirement::None,
+                false,
+                |_| Some(current.clone()),
+            ),
+            InteractionRequirement::LauncherUi
+        );
+
+        assert_eq!(
+            radial_requirement_for_snippet_mode(
+                &action,
+                InteractionRequirement::None,
+                false,
+                |_| None,
+            ),
+            InteractionRequirement::LauncherUi,
+            "a missing current alias must not fall through to literal execution"
+        );
+    }
 
     #[test]
     fn cancelled_provider_worker_releases_capacity_and_wakes_root_queue() {

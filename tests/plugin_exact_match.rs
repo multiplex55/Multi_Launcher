@@ -277,6 +277,8 @@ fn snippet_edit_command_unfiltered() {
         alias: "foo".into(),
         text: "bar".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
     let mut settings = Settings::default();

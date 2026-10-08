@@ -51,6 +51,7 @@ mod screenshot_editor;
 mod search;
 mod shell_cmd_dialog;
 mod snippet_dialog;
+mod snippet_prompt_dialog;
 mod state;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
@@ -553,6 +554,7 @@ pub enum Panel {
     CompletionDialog,
     ShellCmdDialog,
     SnippetDialog,
+    SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
     MouseGesturesDialog,
@@ -604,6 +606,7 @@ struct PanelStates {
     completion_dialog: bool,
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
+    snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
     mouse_gestures_dialog: bool,
@@ -805,6 +808,7 @@ pub struct LauncherApp {
     completion_dialog: TimerCompletionDialog,
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
+    snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
     pub(crate) macro_prompt: MacroPromptUi,
@@ -2179,6 +2183,7 @@ impl LauncherApp {
             completion_dialog: TimerCompletionDialog::default(),
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
+            snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
             macro_prompt: MacroPromptUi::default(),
@@ -2618,6 +2623,15 @@ impl LauncherApp {
     }
 
     fn resolve_pin_action(&self, pin: &HistoryPin) -> Option<Action> {
+        let snapshot = self.dashboard_data_cache.snapshot();
+        if pin.action_id.starts_with("snippet:run:") {
+            return crate::plugins::snippets::resolve_snippet_run_action_from_entries(
+                &pin.action_id,
+                pin.args.as_deref(),
+                &snapshot.snippets,
+            );
+        }
+
         if let Some(action) = self.actions_by_id.get(&pin.action_id) {
             return Some(action.clone());
         }
@@ -2631,7 +2645,6 @@ impl LauncherApp {
             return Some(action);
         }
 
-        let snapshot = self.dashboard_data_cache.snapshot();
         if let Some(action) = snapshot.processes.iter().find(|action| {
             action.action == pin.action_id && action.args.as_deref() == pin.args.as_deref()
         }) {
@@ -2718,17 +2731,6 @@ impl LauncherApp {
             });
         }
 
-        for snippet in snapshot.snippets.iter() {
-            if pin.action_id == format!("clipboard:{}", snippet.text) {
-                return Some(Action {
-                    label: snippet.alias.clone(),
-                    desc: "Snippet".into(),
-                    action: pin.action_id.clone(),
-                    args: None,
-                });
-            }
-        }
-
         if let Some(alias) = pin.action_id.strip_prefix("snippet:edit:")
             && snapshot.snippets.iter().any(|s| s.alias == alias)
         {
@@ -2748,6 +2750,19 @@ impl LauncherApp {
                 desc: "Snippet".into(),
                 action: pin.action_id.clone(),
                 args: None,
+            });
+        }
+
+        // Pre-alias snippet favorites/pins stored literal clipboard commands.
+        // Keep their exact saved action and presentation; indexed history copies
+        // still require a current matching clipboard entry above.
+        if pin.action_id.starts_with("clipboard:") && !pin.action_id.starts_with("clipboard:copy:")
+        {
+            return Some(Action {
+                label: pin.label.clone(),
+                desc: pin.desc.clone(),
+                action: pin.action_id.clone(),
+                args: pin.args.clone(),
             });
         }
 
@@ -2844,7 +2859,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 47] = [
+    const TRACKED_PANELS: [Panel; 48] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2856,6 +2871,7 @@ impl LauncherApp {
         Panel::CompletionDialog,
         Panel::ShellCmdDialog,
         Panel::SnippetDialog,
+        Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
         Panel::MouseGesturesDialog,
@@ -2907,6 +2923,7 @@ impl LauncherApp {
             Panel::CompletionDialog => self.completion_dialog.open,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open,
             Panel::SnippetDialog => self.snippet_dialog.open,
+            Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open,
@@ -3050,6 +3067,9 @@ impl LauncherApp {
             Panel::SnippetDialog => {
                 self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
+            }
+            Panel::SnippetPromptDialog => {
+                let _ = self.cancel_snippet_prompt();
             }
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
@@ -3265,6 +3285,9 @@ impl LauncherApp {
                 self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
             }
+            Panel::SnippetPromptDialog => {
+                let _ = self.cancel_snippet_prompt();
+            }
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
@@ -3439,6 +3462,7 @@ impl LauncherApp {
             Panel::CompletionDialog => self.completion_dialog.open = true,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
             Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
+            Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::MkMacroDialog => self.mkmacro_dialog.open(),
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
@@ -3581,6 +3605,7 @@ impl LauncherApp {
         check!(completion_dialog, Panel::CompletionDialog);
         check!(shell_cmd_dialog, Panel::ShellCmdDialog);
         check!(snippet_dialog, Panel::SnippetDialog);
+        check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);
         check!(mouse_gestures_dialog, Panel::MouseGesturesDialog);
@@ -4064,6 +4089,117 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn saved_pin_rebinds_only_by_canonical_alias_not_literal_body() {
+        let directory = tempdir().unwrap();
+        let app = LauncherApp::new(
+            &egui::Context::default(),
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let shared_text = "same literal {{ body }}";
+        let entries = vec![
+            crate::plugins::snippets::SnippetEntry {
+                alias: "first".into(),
+                text: shared_text.into(),
+                hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
+            },
+            crate::plugins::snippets::SnippetEntry {
+                alias: "second".into(),
+                text: shared_text.into(),
+                hide_contents: true,
+                prompt_for_fields: true,
+                fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+                    "body",
+                )],
+            },
+        ];
+        let mut snapshot = crate::dashboard::data_cache::DashboardDataSnapshot::default();
+        snapshot.snippets = Arc::new(entries.clone());
+        app.dashboard_data_cache.set_snapshot_for_test(snapshot);
+
+        let pin = |action_id: String, args| HistoryPin {
+            action_id,
+            label: "saved label".into(),
+            desc: "Snippet".into(),
+            args,
+            query: String::new(),
+            timestamp: 0,
+        };
+        let resolved = app
+            .resolve_pin_action(&pin(
+                crate::plugins::snippets::snippet_run_action("second"),
+                None,
+            ))
+            .expect("canonical saved identity resolves by its exact alias");
+        assert_eq!(resolved.label, "second");
+        assert_eq!(
+            resolved.action,
+            crate::plugins::snippets::snippet_run_action("second")
+        );
+
+        let literal_pin = pin("clipboard:same literal {{ body }}".into(), None);
+        let literal = app
+            .resolve_pin_action(&literal_pin)
+            .expect("opaque literal clipboard pins remain executable");
+        assert_eq!(literal.label, literal_pin.label);
+        assert_eq!(literal.desc, literal_pin.desc);
+        assert_eq!(literal.action, literal_pin.action_id);
+        assert_eq!(literal.args, literal_pin.args);
+        assert!(
+            app.resolve_pin_action(&pin(
+                crate::plugins::snippets::snippet_run_action("missing"),
+                None,
+            ))
+            .is_none()
+        );
+        assert!(
+            app.resolve_pin_action(&pin("clipboard:copy:99".into(), None))
+                .is_none(),
+            "indexed clipboard copies still require a current entry"
+        );
+        assert!(
+            app.resolve_pin_action(&pin(
+                crate::plugins::snippets::snippet_run_action("second"),
+                Some("unexpected".into()),
+            ))
+            .is_none()
+        );
+
+        let mut duplicate_snapshot = crate::dashboard::data_cache::DashboardDataSnapshot::default();
+        duplicate_snapshot.snippets = Arc::new(vec![entries[1].clone(), entries[1].clone()]);
+        app.dashboard_data_cache
+            .set_snapshot_for_test(duplicate_snapshot);
+        assert!(
+            app.resolve_pin_action(&pin(
+                crate::plugins::snippets::snippet_run_action("second"),
+                None,
+            ))
+            .is_none()
+        );
     }
 
     fn deferred_child_input(viewport_id: egui::ViewportId) -> egui::RawInput {

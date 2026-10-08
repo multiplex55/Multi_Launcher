@@ -4,7 +4,7 @@ use crate::commands::handlers::{
     handle_data, handle_diff, handle_file_search, handle_headless_gui_with_history_query,
     handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
     handle_note, handle_ocr, handle_query, handle_radial, handle_screen_draw, handle_screenshot,
-    handle_simple_dialog, handle_todo,
+    handle_simple_dialog, handle_snippet_run, handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -59,6 +59,9 @@ impl CommandBus {
                 captured_history_query,
             )),
             Command::Data(command) => handle_data(host, command),
+            Command::Storage(
+                super::StorageCommand::SnippetRun(_) | super::StorageCommand::InvalidSnippetRun,
+            ) => handle_snippet_run(host, invocation, captured_history_query),
             Command::VirtualDesktop(super::VirtualDesktopCommand::Settings) => {
                 host.open_settings_dialog();
                 Ok(CommandOutcome::default())
@@ -654,6 +657,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(host.headless_calls, 1);
+    }
+
+    #[test]
+    fn invalid_snippet_run_uses_the_typed_handler_without_headless_fallback() {
+        let mut host = FakeHost::default();
+        let error = CommandBus
+            .dispatch(
+                &invocation(Command::Storage(
+                    super::super::StorageCommand::InvalidSnippetRun,
+                )),
+                &mut host,
+            )
+            .unwrap_err();
+
+        assert!(error.message.contains("invalid snippet run action"));
+        assert_eq!(host.headless_calls, 0);
     }
 
     #[test]

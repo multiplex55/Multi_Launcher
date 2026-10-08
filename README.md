@@ -442,13 +442,56 @@ the match count shows how many entries are visible.
 
 Common commands:
 
-- `cs <query>` searches aliases and bodies; activate a result to copy its exact
-  saved text.
-- `cs list [query]` lists matching snippets, which can also be activated to copy.
+- `cs <query>` searches aliases and bodies. Activating a plain snippet copies its
+  exact saved text; activating a prompted snippet opens its fill form.
+- `cs list [query]` lists matching snippets with the same plain or prompted
+  activation behavior.
 - `cs add <alias> <text>` creates a snippet or updates the existing exact alias.
 - `cs edit <alias>` finds an entry; activate its Edit result to open it in the
   editor. `cs edit <alias> <text>` updates or creates that alias directly.
 - `cs rm <query>` finds matching snippets to remove.
+
+### Prompted fields
+
+Prompting is opt-in for each snippet and starts off. In the editor, enable
+**Prompt for fields**, configure the discovered fields, and save. A template such
+as `Hello {{name}}` asks for `name`; keys are case-sensitive ASCII identifiers
+starting with a letter or `_`, followed by letters, digits, or `_`. Each distinct
+key appears once in first-use order, and repeated occurrences use the same value.
+`{{date}}` is an ordinary field; placeholders do not evaluate dates or other
+variables.
+
+The editor lets you set a field's display label, default, required status, and
+single-line or multiline input. Defaults populate a fresh form but are not
+fallbacks: clearing a required field blocks Copy, while an empty optional field
+substitutes an empty string. Required values containing only whitespace are
+blocked; otherwise the entered text—including whitespace, Unicode, and line
+breaks—is copied exactly. Tab and Shift+Tab move through the fields and Copy;
+plain Enter inserts a newline in a multiline field. **Ctrl+Enter** copies the
+completed result, and **Escape** or **Cancel** closes the form without copying.
+This is a copy-only form; it does not paste into another application.
+
+To write literal placeholder text while prompting is enabled, escape its opening
+with a backslash: `\{{name}}` produces `{{name}}`. Only the adjacent backslash is
+consumed, so `\\{{name}}` produces `\{{name}}`. An escaped opening is literal
+through its next `}}`, even if its contents are not a valid key; a dangling
+escaped `\{{` remains literal. When prompting is off, braces and backslashes are
+ordinary saved text and are copied unchanged.
+
+The live preview updates as you type. The editor's **Test / Preview** opens the
+same form from the unsaved draft; **Return to Editor**, **Escape**, or the window
+close returns to the editor without saving, copying, or recording history. If a
+template becomes invalid, a required value is blank, or the clipboard write
+fails, Copy is blocked and the form keeps its values so you can correct or
+retry. If the saved snippet changes or is removed while the form is open, the
+form keeps its values but cannot Copy; close it and reopen the snippet to use
+the current saved definition.
+
+Prompt form values are transient in memory and are not written to snippets,
+defaults, action identities, arguments, logs, or action history. The saved
+snippet body and configured defaults remain plaintext in `snippets.json`; a
+successful copy writes the completed text to the clipboard, and normal clipboard
+history may retain that copied output.
 
 In the editor, **Hide contents** masks that snippet's previews. A saved masked
 snippet opens concealed; choose **Reveal to Edit** to show its body. Reveal lasts
@@ -458,11 +501,19 @@ setting and save without revealing the body; those changes preserve the saved
 text. The GUI rejects duplicate exact aliases when creating or renaming. Its
 Remove action asks for inline **Confirm** or **Cancel** before deleting an entry.
 
-Masking is visual only: snippets remain plaintext in `snippets.json`, in the
-underlying copy action, on the clipboard after use, and in clipboard history.
-Hidden bodies remain searchable, and text typed into the filter remains visible.
-The Dashboard also masks hidden snippet previews; its clipboard-history section
-is unchanged.
+Masking is visual only: snippet bodies remain plaintext in `snippets.json` and
+hidden bodies remain searchable; text typed into the filter remains visible.
+Alias-aware actions store the snippet alias, not its body. The Dashboard also
+masks hidden snippet previews; its clipboard-history section remains literal and
+unchanged.
+
+Favorites and history pins saved before snippet aliases were introduced still
+run their stored literal action. To make one promptable, select the current
+snippet result and save it as a new favorite or pin. Replace a radial cell's
+literal clipboard action with the current snippet action, or use the dynamic
+**Snippets** source. Opaque older actions are not rewritten automatically.
+Current alias-aware snippet actions follow later changes between plain and
+prompted mode; headless activation reports that prompting requires the GUI.
 
 ## JSON and screen color utilities
 

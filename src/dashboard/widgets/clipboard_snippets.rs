@@ -4,7 +4,7 @@ use super::{
 use crate::actions::Action;
 use crate::dashboard::DashboardRefreshRequest;
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
-use crate::plugins::snippets::{SnippetEntry, snippet_preview_text};
+use crate::plugins::snippets::{SnippetEntry, snippet_preview_text, snippet_run_action};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
@@ -38,10 +38,22 @@ fn snippet_widget_action(snippet: &SnippetEntry) -> WidgetAction {
         action: Action {
             label: snippet.alias.clone(),
             desc: "Snippet".into(),
-            action: format!("clipboard:{}", snippet.text),
+            action: snippet_run_action(&snippet.alias),
             args: None,
         },
         query_override: Some(format!("cs {}", snippet.alias)),
+    }
+}
+
+fn clipboard_history_widget_action(index: usize) -> WidgetAction {
+    WidgetAction {
+        action: Action {
+            label: "Copy from clipboard history".into(),
+            desc: "Clipboard".into(),
+            action: format!("clipboard:copy:{index}"),
+            args: None,
+        },
+        query_override: Some("cb list".into()),
     }
 }
 
@@ -172,15 +184,7 @@ impl Widget for ClipboardSnippetsWidget {
                             .on_hover_text(entry)
                             .clicked()
                         {
-                            clicked = Some(WidgetAction {
-                                action: Action {
-                                    label: "Copy from clipboard history".into(),
-                                    desc: "Clipboard".into(),
-                                    action: format!("clipboard:copy:{idx}"),
-                                    args: None,
-                                },
-                                query_override: Some("cb list".into()),
-                            });
+                            clicked = Some(clipboard_history_widget_action(idx));
                         }
                     }
                 });
@@ -217,16 +221,18 @@ impl Widget for ClipboardSnippetsWidget {
 #[cfg(test)]
 mod tests {
     use super::{
-        HIDDEN_SNIPPET_TOOLTIP, shorten_snippet_preview, snippet_button_label,
-        snippet_button_tooltip, snippet_widget_action,
+        HIDDEN_SNIPPET_TOOLTIP, clipboard_history_widget_action, shorten_snippet_preview,
+        snippet_button_label, snippet_button_tooltip, snippet_widget_action,
     };
-    use crate::plugins::snippets::SnippetEntry;
+    use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition, snippet_run_action};
 
     fn snippet(alias: &str, text: &str, hide_contents: bool) -> SnippetEntry {
         SnippetEntry {
             alias: alias.into(),
             text: text.into(),
             hide_contents,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }
     }
 
@@ -241,9 +247,39 @@ mod tests {
         assert!(!snippet_button_tooltip(&hidden).contains("private λ"));
 
         let action = snippet_widget_action(&hidden);
-        assert_eq!(action.action.action, format!("clipboard:{body}"));
+        assert_eq!(action.action.action, snippet_run_action("private"));
+        assert!(!action.action.action.contains("private λ"));
         assert_eq!(action.action.desc, "Snippet");
+        assert_eq!(action.action.label, "private");
+        assert_eq!(action.action.args, None);
         assert_eq!(action.query_override.as_deref(), Some("cs private"));
+    }
+
+    #[test]
+    fn plain_and_prompted_snippet_rows_use_alias_identity_without_template_text() {
+        let alias = "team: λ|%";
+        let plain = snippet(alias, "Plain body with {{literal}}", false);
+        let mut prompted = snippet(alias, "Hello {{name}}", false);
+        prompted.prompt_for_fields = true;
+        prompted.fields = vec![SnippetFieldDefinition::new("name")];
+
+        let plain_action = snippet_widget_action(&plain);
+        let prompted_action = snippet_widget_action(&prompted);
+        let canonical = snippet_run_action(alias);
+        assert_eq!(plain_action.action.action, canonical);
+        assert_eq!(prompted_action.action.action, canonical);
+        assert_eq!(
+            crate::plugins::snippets::decode_snippet_run_action(&canonical).as_deref(),
+            Some(alias)
+        );
+        assert_eq!(prompted_action.action.label, alias);
+        assert_eq!(prompted_action.action.desc, "Snippet");
+        assert_eq!(prompted_action.action.args, None);
+        assert_eq!(
+            prompted_action.query_override.as_deref(),
+            Some("cs team: λ|%")
+        );
+        assert!(!prompted_action.action.action.contains("{{name}}"));
     }
 
     #[test]
@@ -265,5 +301,14 @@ mod tests {
             shorten_snippet_preview(&preview, 40),
             format!("{}…", "λ".repeat(40))
         );
+    }
+
+    #[test]
+    fn clipboard_history_action_preserves_index_and_clipboard_identity() {
+        let action = clipboard_history_widget_action(7);
+        assert_eq!(action.action.desc, "Clipboard");
+        assert_eq!(action.action.action, "clipboard:copy:7");
+        assert_eq!(action.action.args, None);
+        assert_eq!(action.query_override.as_deref(), Some("cb list"));
     }
 }

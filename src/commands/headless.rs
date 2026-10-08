@@ -59,6 +59,14 @@ fn execute_with_external(
         | Command::Storage(StorageCommand::InvalidTempfileAlias) => {
             external(&original_action.action, original_action.args.as_deref())
         }
+        Command::Storage(StorageCommand::InvalidSnippetRun) => {
+            anyhow::bail!("invalid snippet run action")
+        }
+        Command::Storage(StorageCommand::SnippetRun(alias)) => {
+            let entry = crate::plugins::snippets::resolve_snippet(&alias)?;
+            let text = headless_snippet_text(&entry).map_err(anyhow::Error::msg)?;
+            crate::actions::clipboard::set_text(text)
+        }
         Command::Shell(command) => execute_shell(command),
         Command::Clipboard(command) => execute_clipboard(command),
         Command::Calculator(command) => execute_calculator(command),
@@ -111,6 +119,66 @@ fn execute_with_external(
         | Command::FileSearch(_)
         | Command::Diff(_)
         | Command::Crop(_) => external(&original_action.action, original_action.args.as_deref()),
+    }
+}
+
+fn headless_snippet_text(entry: &crate::plugins::snippets::SnippetEntry) -> Result<&str, String> {
+    match crate::plugins::snippets::prepare_snippet_run(entry).map_err(|error| error.to_string())? {
+        crate::plugins::snippets::SnippetRunMode::Plain => Ok(&entry.text),
+        crate::plugins::snippets::SnippetRunMode::Prompted(_) => {
+            Err("prompted snippets require the launcher interface".into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod snippet_headless_tests {
+    use super::*;
+    use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition};
+
+    #[test]
+    fn plain_literals_are_available_and_prompted_snippets_require_launcher_ui() {
+        let plain = SnippetEntry {
+            alias: "plain".into(),
+            text: "{{literal}}\r\n秘密".into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        };
+        assert_eq!(headless_snippet_text(&plain).unwrap(), plain.text);
+
+        let prompted = SnippetEntry {
+            alias: "prompted".into(),
+            text: "private {{name}}".into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![SnippetFieldDefinition::new("name")],
+        };
+        let error = headless_snippet_text(&prompted).unwrap_err();
+        assert!(error.contains("require the launcher interface"));
+        assert!(!error.contains("private"));
+    }
+
+    #[test]
+    fn invalid_snippet_run_never_falls_through_to_external_execution() {
+        let original = Action {
+            label: "Bad snippet".into(),
+            desc: "Snippet".into(),
+            action: "snippet:run:%GG".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::Storage(StorageCommand::InvalidSnippetRun),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid snippet run action"));
+        assert!(external_calls.is_empty());
     }
 }
 
@@ -296,6 +364,9 @@ fn execute_storage(command: StorageCommand, original: &Action) -> anyhow::Result
         StorageCommand::HistoryClear => history::clear(),
         StorageCommand::HistoryLaunch(index) => history::launch_index(index),
         StorageCommand::SnippetAdd { alias, text } => snippets::add(&alias, &text),
+        StorageCommand::SnippetRun(_) | StorageCommand::InvalidSnippetRun => {
+            unreachable!("snippet runs are handled before generic storage execution")
+        }
         StorageCommand::SnippetEdit(_) => Ok(()),
         StorageCommand::SnippetRemove(alias) => snippets::remove(&alias),
         StorageCommand::FavoriteAdd {

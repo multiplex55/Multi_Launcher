@@ -808,6 +808,24 @@ impl HeadlessCommandHost for LauncherApp {
     fn launcher_should_refocus(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
     }
+
+    fn copy_snippet_text(&mut self, text: &str) -> anyhow::Result<()> {
+        crate::actions::clipboard::set_text(text)
+    }
+
+    fn request_snippet_prompt(
+        &mut self,
+        intent: crate::commands::SnippetPromptIntent,
+    ) -> Result<(), String> {
+        self.snippet_prompt_dialog
+            .begin_execution(&self.egui_ctx, intent);
+        self.focus_panel(super::Panel::SnippetPromptDialog);
+        Ok(())
+    }
+
+    fn snippet_root_policy(&self) -> crate::universal_actions::RootLauncherPolicy {
+        self.command_root_policy
+    }
 }
 
 fn command_accepts_query_override(command: &Command) -> bool {
@@ -826,6 +844,79 @@ fn command_accepts_query_override(command: &Command) -> bool {
 }
 
 impl LauncherApp {
+    pub(crate) fn begin_snippet_preview(
+        &mut self,
+        draft: crate::plugins::snippets::SnippetEntry,
+    ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        self.snippet_prompt_dialog
+            .begin_preview(&self.egui_ctx, draft)?;
+        self.focus_panel(super::Panel::SnippetPromptDialog);
+        Ok(())
+    }
+
+    pub(crate) fn submit_snippet_prompt(
+        &mut self,
+    ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        self.submit_snippet_prompt_using(
+            |alias| crate::plugins::snippets::resolve_snippet(alias).map_err(|_| ()),
+            |text| crate::actions::clipboard::set_text(text).map_err(|_| ()),
+        )
+    }
+
+    fn submit_snippet_prompt_using(
+        &mut self,
+        resolve_current: impl FnOnce(&str) -> Result<crate::plugins::snippets::SnippetEntry, ()>,
+        copy_text: impl FnOnce(&str) -> Result<(), ()>,
+    ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        let completion =
+            self.snippet_prompt_dialog
+                .submit_with(&self.egui_ctx, resolve_current, copy_text)?;
+
+        self.panel_states.snippet_prompt_dialog = false;
+        self.panel_stack
+            .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
+
+        let invocation = CommandInvocation {
+            command: Command::Storage(crate::commands::StorageCommand::SnippetRun(
+                completion.alias,
+            )),
+            original_action: completion.safe_action,
+            query_override: None,
+            source: completion.source,
+        };
+        let outcome = crate::commands::handlers::success_outcome(self, &invocation);
+        self.apply_command_outcome_with_root_policy(
+            outcome,
+            &invocation,
+            Some(&completion.history_query),
+            completion.root_policy,
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn submit_snippet_prompt_with_test_backends(
+        &mut self,
+        resolve_current: impl FnOnce(&str) -> Result<crate::plugins::snippets::SnippetEntry, ()>,
+        copy_text: impl FnOnce(&str) -> Result<(), ()>,
+    ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        self.submit_snippet_prompt_using(resolve_current, copy_text)
+    }
+
+    pub(crate) fn cancel_snippet_prompt(
+        &mut self,
+    ) -> Option<crate::plugins::snippets::SnippetEntry> {
+        let was_preview = self.snippet_prompt_dialog.is_preview_only();
+        let draft = self.snippet_prompt_dialog.cancel(&self.egui_ctx);
+        self.panel_states.snippet_prompt_dialog = false;
+        self.panel_stack
+            .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
+        if was_preview && self.snippet_dialog.open {
+            self.focus_panel(super::Panel::SnippetDialog);
+        }
+        draft
+    }
+
     pub(crate) fn dispatch_command_invocation(&mut self, invocation: CommandInvocation) {
         self.dispatch_command_invocation_with_history(invocation, None);
     }
@@ -1072,6 +1163,152 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
     }
+
+    fn prompted_entry() -> crate::plugins::snippets::SnippetEntry {
+        crate::plugins::snippets::SnippetEntry {
+            alias: "ticketreply".into(),
+            text: "Hello {{name}}".into(),
+            hide_contents: false,
+            prompt_for_fields: true,
+            fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+                "name",
+            )],
+        }
+    }
+
+    fn prompt_intent(
+        entry: crate::plugins::snippets::SnippetEntry,
+    ) -> crate::commands::SnippetPromptIntent {
+        let prepared = match crate::plugins::snippets::prepare_snippet_run(&entry).unwrap() {
+            crate::plugins::snippets::SnippetRunMode::Prompted(prepared) => prepared,
+            crate::plugins::snippets::SnippetRunMode::Plain => unreachable!(),
+        };
+        crate::commands::SnippetPromptIntent {
+            alias: entry.alias.clone(),
+            entry_snapshot: entry,
+            prepared,
+            safe_action: crate::actions::Action {
+                label: "ticketreply".into(),
+                desc: "Snippet".into(),
+                action: crate::plugins::snippets::snippet_run_action("ticketreply"),
+                args: None,
+            },
+            source: crate::commands::ActivationSource::Dashboard,
+            history_query: "captured snippet query".into(),
+            root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+        }
+    }
+
+    #[test]
+    fn prompt_request_opens_and_focuses_one_panel_from_hidden_or_visible_root() {
+        for initially_visible in [false, true] {
+            let mut app = test_app();
+            app.visible_flag
+                .store(initially_visible, std::sync::atomic::Ordering::SeqCst);
+            let entry = prompted_entry();
+            let before = app.launcher_interaction_snapshot();
+            crate::commands::HeadlessCommandHost::request_snippet_prompt(
+                &mut app,
+                prompt_intent(entry.clone()),
+            )
+            .unwrap();
+            app.update_panel_stack();
+            app.restore_for_new_launcher_interaction(&before);
+
+            assert!(app.visible_flag.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(app.panel_states.snippet_prompt_dialog);
+            assert_eq!(
+                app.panel_stack.last(),
+                Some(&super::super::Panel::SnippetPromptDialog)
+            );
+            assert_eq!(
+                app.panel_stack
+                    .iter()
+                    .filter(|panel| **panel == super::super::Panel::SnippetPromptDialog)
+                    .count(),
+                1
+            );
+            let first_generation = app.snippet_prompt_dialog.session().unwrap().generation;
+            app.snippet_prompt_dialog
+                .set_value("name", "filled sentinel".into());
+
+            crate::commands::HeadlessCommandHost::request_snippet_prompt(
+                &mut app,
+                prompt_intent(entry),
+            )
+            .unwrap();
+            let session = app.snippet_prompt_dialog.session().unwrap();
+            assert_ne!(session.generation, first_generation);
+            assert_eq!(session.values.get("name").map(String::as_str), Some(""));
+            assert_eq!(
+                app.panel_stack
+                    .iter()
+                    .filter(|panel| **panel == super::super::Panel::SnippetPromptDialog)
+                    .count(),
+                1
+            );
+
+            assert!(app.close_front_dialog());
+            assert!(app.snippet_prompt_dialog.session().is_none());
+            assert!(!app.panel_states.snippet_prompt_dialog);
+            assert!(!app.is_panel_open(super::super::Panel::SnippetPromptDialog));
+        }
+    }
+
+    #[test]
+    fn prompt_completion_uses_captured_history_and_root_policy_once() {
+        let mut app = test_app();
+        app.test_skip_history_persistence = true;
+        app.query = "later ambient query".into();
+        app.hide_after_run = true;
+        app.clear_query_after_run = true;
+        app.visible_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let entry = prompted_entry();
+        crate::commands::HeadlessCommandHost::request_snippet_prompt(
+            &mut app,
+            prompt_intent(entry.clone()),
+        )
+        .unwrap();
+        app.snippet_prompt_dialog.set_value("name", "Ada".into());
+        app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
+
+        let mut copied = Vec::new();
+        app.submit_snippet_prompt_with_test_backends(
+            |_| Ok(entry),
+            |text| {
+                copied.push(text.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(copied, ["Hello Ada"]);
+        assert_eq!(
+            app.test_recorded_history_queries,
+            ["captured snippet query"]
+        );
+        assert_eq!(app.usage.get("snippet:run:ticketreply"), Some(&1));
+        assert_eq!(app.query, "later ambient query");
+        assert!(!app.visible_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(app.snippet_prompt_dialog.session().is_none());
+        assert!(!app.is_panel_open(super::super::Panel::SnippetPromptDialog));
+
+        let duplicate = app.submit_snippet_prompt_with_test_backends(
+            |_| panic!("no resolver"),
+            |_| panic!("no second clipboard write"),
+        );
+        assert_eq!(
+            duplicate,
+            Err(super::super::snippet_prompt_dialog::SnippetPromptError::NoActiveSession)
+        );
+        assert_eq!(
+            app.test_recorded_history_queries,
+            ["captured snippet query"]
+        );
+        assert_eq!(app.usage.get("snippet:run:ticketreply"), Some(&1));
+    }
+
     #[test]
     fn qr_searched_action_opens_exact_payload_without_history_and_reopens_fresh() {
         let mut app = test_app();

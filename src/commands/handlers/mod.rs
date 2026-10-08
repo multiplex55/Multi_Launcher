@@ -16,6 +16,7 @@ mod note_link;
 mod radial;
 mod screen_draw;
 mod screenshot;
+mod snippet_run;
 mod todo;
 
 pub(crate) use calendar::handle_calendar;
@@ -36,4 +37,5 @@ pub(crate) use note_link::{handle_link, handle_note};
 pub(crate) use radial::handle_radial;
 pub(crate) use screen_draw::handle_screen_draw;
 pub(crate) use screenshot::handle_screenshot;
+pub(crate) use snippet_run::handle_snippet_run;
 pub(crate) use todo::handle_todo;

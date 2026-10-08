@@ -1,7 +1,9 @@
+use multi_launcher::commands::{Command, StorageCommand, parse_action};
 use multi_launcher::launcher::launch_action;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::snippets::{
-    SNIPPETS_FILE, SnippetEntry, SnippetsPlugin, load_snippets, save_snippets,
+    SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition, SnippetInputKind, SnippetsPlugin,
+    load_snippets, save_snippets, snippet_run_action,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -19,6 +21,8 @@ fn load_save_roundtrip() {
         alias: "hw".into(),
         text: "hello".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
     let loaded = load_snippets(SNIPPETS_FILE).unwrap();
@@ -28,7 +32,7 @@ fn load_save_roundtrip() {
 }
 
 #[test]
-fn search_returns_clipboard_action() {
+fn search_returns_typed_snippet_run_action_without_body_payload() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
@@ -37,6 +41,8 @@ fn search_returns_clipboard_action() {
         alias: "hi".into(),
         text: "hello world".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -44,8 +50,12 @@ fn search_returns_clipboard_action() {
     let results = plugin.search("cs hi");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].label, "hi");
-    assert_eq!(results[0].action, "clipboard:hello world");
+    assert_eq!(results[0].action, snippet_run_action("hi"));
     assert_eq!(results[0].desc, "Snippet");
+    assert_eq!(
+        parse_action(&results[0]).unwrap(),
+        Command::Storage(StorageCommand::SnippetRun("hi".into()))
+    );
 }
 
 #[test]
@@ -59,11 +69,15 @@ fn list_command_returns_entries() {
             alias: "a".into(),
             text: "alpha".into(),
             hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         },
         SnippetEntry {
             alias: "b".into(),
             text: "beta".into(),
             hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         },
     ];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
@@ -83,6 +97,8 @@ fn rm_command_returns_remove_actions() {
         alias: "todelete".into(),
         text: "bye".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
@@ -93,7 +109,7 @@ fn rm_command_returns_remove_actions() {
 }
 
 #[test]
-fn search_preserves_newlines() {
+fn search_run_action_keeps_newline_body_out_of_wire_payload() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
@@ -102,13 +118,16 @@ fn search_preserves_newlines() {
         alias: "multi".into(),
         text: "a\nb".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 
     let plugin = SnippetsPlugin::default();
     let results = plugin.search("cs multi");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "clipboard:a\nb");
+    assert_eq!(results[0].action, snippet_run_action("multi"));
+    assert_eq!(load_snippets(SNIPPETS_FILE).unwrap()[0].text, "a\nb");
 }
 
 #[test]
@@ -135,42 +154,68 @@ fn launch_action_add_saves_snippet() {
     assert_eq!(list[0].alias, "alias");
     assert_eq!(list[0].text, "text");
     assert!(!list[0].hide_contents);
+    assert!(!list[0].prompt_for_fields);
+    assert!(list[0].fields.is_empty());
 }
 
 #[test]
-fn command_add_and_inline_edit_preserve_hidden_flag() {
+fn command_add_and_inline_edit_preserve_prompt_metadata_and_hidden_flag() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
+    let fields = vec![
+        SnippetFieldDefinition {
+            name: "name".into(),
+            label: "Preferred name".into(),
+            default_value: "Ada".into(),
+            required: false,
+            input_kind: SnippetInputKind::Multiline,
+        },
+        SnippetFieldDefinition {
+            name: "ticket".into(),
+            label: "Ticket number".into(),
+            default_value: "INC-".into(),
+            required: true,
+            input_kind: SnippetInputKind::SingleLine,
+        },
+    ];
     save_snippets(
         SNIPPETS_FILE,
         &[SnippetEntry {
             alias: "hidden".into(),
-            text: "original body".into(),
+            text: "Hello {{name}}".into(),
             hide_contents: true,
+            prompt_for_fields: true,
+            fields: fields.clone(),
         }],
     )
     .unwrap();
 
     let plugin = SnippetsPlugin::default();
-    let add_action = plugin.search("cs add hidden updated by add").remove(0);
+    let add_action = plugin
+        .search("cs add hidden Updated {{name}} for {{ticket}} by add")
+        .remove(0);
     launch_action(&add_action).unwrap();
     let after_add = load_snippets(SNIPPETS_FILE).unwrap();
-    assert_eq!(after_add[0].text, "updated by add");
+    assert_eq!(after_add[0].text, "Updated {{name}} for {{ticket}} by add");
     assert!(after_add[0].hide_contents);
+    assert!(after_add[0].prompt_for_fields);
+    assert_eq!(after_add[0].fields, fields);
 
     let edit_action = plugin
-        .search("cs edit hidden updated by inline edit")
+        .search("cs edit hidden Inline edit {{name}} ticket {{ticket}}")
         .remove(0);
     launch_action(&edit_action).unwrap();
     let after_edit = load_snippets(SNIPPETS_FILE).unwrap();
-    assert_eq!(after_edit[0].text, "updated by inline edit");
+    assert_eq!(after_edit[0].text, "Inline edit {{name}} ticket {{ticket}}");
     assert!(after_edit[0].hide_contents);
+    assert!(after_edit[0].prompt_for_fields);
+    assert_eq!(after_edit[0].fields, fields);
 }
 
 #[test]
-fn hidden_body_search_and_list_keep_alias_label_and_original_clipboard_payload() {
+fn hidden_body_search_and_list_keep_alias_identity_without_leaking_body() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
@@ -182,6 +227,8 @@ fn hidden_body_search_and_list_keep_alias_label_and_original_clipboard_payload()
             alias: "private-alias".into(),
             text: body.into(),
             hide_contents: true,
+            prompt_for_fields: false,
+            fields: Vec::new(),
         }],
     )
     .unwrap();
@@ -191,9 +238,10 @@ fn hidden_body_search_and_list_keep_alias_label_and_original_clipboard_payload()
         let results = plugin.search(query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].label, "private-alias");
-        assert_eq!(results[0].action, format!("clipboard:{body}"));
-        assert_ne!(results[0].action, "clipboard:******");
+        assert_eq!(results[0].action, snippet_run_action("private-alias"));
+        assert!(!results[0].action.contains(body));
     }
+    assert_eq!(load_snippets(SNIPPETS_FILE).unwrap()[0].text, body);
 }
 
 #[test]
@@ -206,6 +254,8 @@ fn search_edit_returns_actions() {
         alias: "greet".into(),
         text: "hello".into(),
         hide_contents: false,
+        prompt_for_fields: false,
+        fields: Vec::new(),
     }];
     save_snippets(SNIPPETS_FILE, &entries).unwrap();
 

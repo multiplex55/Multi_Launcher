@@ -128,7 +128,17 @@ impl CommandHistoryWidget {
         ctx: &DashboardContext<'_>,
         action_id: &str,
         args: Option<&str>,
+        saved_action: &Action,
     ) -> Option<Action> {
+        let snapshot = ctx.data_cache.snapshot();
+        if action_id.starts_with("snippet:run:") {
+            return crate::plugins::snippets::resolve_snippet_run_action_from_entries(
+                action_id,
+                args,
+                &snapshot.snippets,
+            );
+        }
+
         if let Some(action) = ctx.actions_by_id.get(action_id) {
             return Some(action.clone());
         }
@@ -141,7 +151,6 @@ impl CommandHistoryWidget {
             return Some(action);
         }
 
-        let snapshot = ctx.data_cache.snapshot();
         if let Some(action) = snapshot
             .processes
             .iter()
@@ -226,17 +235,6 @@ impl CommandHistoryWidget {
             });
         }
 
-        for snippet in snapshot.snippets.iter() {
-            if action_id == format!("clipboard:{}", snippet.text) {
-                return Some(Action {
-                    label: snippet.alias.clone(),
-                    desc: "Snippet".into(),
-                    action: action_id.to_string(),
-                    args: None,
-                });
-            }
-        }
-
         if let Some(alias) = action_id.strip_prefix("snippet:edit:")
             && snapshot.snippets.iter().any(|s| s.alias == alias)
         {
@@ -259,12 +257,27 @@ impl CommandHistoryWidget {
             });
         }
 
+        // Old snippets were stored as literal clipboard commands. Keep those
+        // opaque actions runnable and retain their saved presentation, while
+        // indexed clipboard-history actions above remain availability-checked.
+        if action_id.starts_with("clipboard:")
+            && !action_id.starts_with("clipboard:copy:")
+            && saved_action.action == action_id
+            && saved_action.args.as_deref() == args
+        {
+            return Some(saved_action.clone());
+        }
+
         None
     }
 
     fn entry_from_history(ctx: &DashboardContext<'_>, entry: &HistoryEntry) -> DisplayEntry {
-        let resolved =
-            Self::resolve_action(ctx, &entry.action.action, entry.action.args.as_deref());
+        let resolved = Self::resolve_action(
+            ctx,
+            &entry.action.action,
+            entry.action.args.as_deref(),
+            &entry.action,
+        );
         let action = resolved.unwrap_or_else(|| entry.action.clone());
         DisplayEntry {
             action_id: entry.action.action.clone(),
@@ -283,7 +296,7 @@ impl CommandHistoryWidget {
             action: pin.action_id.clone(),
             args: pin.args.clone(),
         };
-        let resolved = Self::resolve_action(ctx, &pin.action_id, pin.args.as_deref());
+        let resolved = Self::resolve_action(ctx, &pin.action_id, pin.args.as_deref(), &fallback);
         let action = resolved.clone().unwrap_or(fallback);
         DisplayEntry {
             action_id: pin.action_id.clone(),
@@ -430,6 +443,39 @@ fn publish_pins_or_retain(current: &mut Vec<HistoryPin>, result: anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::data_cache::{DashboardDataCache, DashboardDataSnapshot};
+    use crate::plugin::PluginManager;
+    use std::collections::HashMap;
+
+    fn context<'a>(
+        data_cache: &'a DashboardDataCache,
+        plugins: &'a PluginManager,
+        actions: &'a [Action],
+        actions_by_id: &'a HashMap<String, Action>,
+        usage: &'a HashMap<String, u32>,
+    ) -> DashboardContext<'a> {
+        DashboardContext {
+            actions,
+            actions_by_id,
+            usage,
+            plugins,
+            enabled_plugins: None,
+            default_location: None,
+            data_cache,
+            actions_version: 0,
+            fav_version: 0,
+            notes_version: 0,
+            todo_version: 0,
+            calendar_version: 0,
+            clipboard_version: 0,
+            snippets_version: 0,
+            dashboard_visible: true,
+            dashboard_focused: true,
+            reduce_dashboard_work_when_unfocused: false,
+            diagnostics: None,
+            show_diagnostics_widget: false,
+        }
+    }
 
     fn pin(action_id: &str) -> HistoryPin {
         HistoryPin {
@@ -451,5 +497,76 @@ mod tests {
         let recovered = vec![pin("recovered")];
         publish_pins_or_retain(&mut current, Ok(recovered.clone()));
         assert_eq!(current, recovered);
+    }
+
+    #[test]
+    fn history_pins_keep_opaque_clipboard_literals_and_resolve_snippets_by_alias() {
+        let data_cache = DashboardDataCache::new();
+        let mut snapshot = DashboardDataSnapshot::default();
+        snapshot.snippets = std::sync::Arc::new(vec![
+            crate::plugins::snippets::SnippetEntry {
+                alias: "first".into(),
+                text: "same body {{literal}}".into(),
+                hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
+            },
+            crate::plugins::snippets::SnippetEntry {
+                alias: "second".into(),
+                text: "same body {{literal}}".into(),
+                hide_contents: true,
+                prompt_for_fields: true,
+                fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+                    "literal",
+                )],
+            },
+        ]);
+        data_cache.set_snapshot_for_test(snapshot);
+        let plugins = PluginManager::new();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let ctx = context(&data_cache, &plugins, &actions, &actions_by_id, &usage);
+
+        let opaque = HistoryPin {
+            action_id: "clipboard:same body {{literal}}".into(),
+            label: "Old saved snippet label".into(),
+            desc: "Snippet".into(),
+            args: Some("preserved args".into()),
+            query: "old query".into(),
+            timestamp: 1,
+        };
+        let displayed = CommandHistoryWidget::entry_from_pin(&ctx, &opaque);
+        assert!(!displayed.missing);
+        assert_eq!(displayed.action.label, "Old saved snippet label");
+        assert_eq!(displayed.action.desc, "Snippet");
+        assert_eq!(displayed.action.action, opaque.action_id);
+        assert_eq!(displayed.action.args, opaque.args);
+
+        let current_run = pin(&crate::plugins::snippets::snippet_run_action("second"));
+        let displayed = CommandHistoryWidget::entry_from_pin(&ctx, &current_run);
+        assert!(!displayed.missing);
+        assert_eq!(displayed.action.label, "second");
+        assert_eq!(displayed.action.action, current_run.action_id);
+
+        let missing_run = pin(&crate::plugins::snippets::snippet_run_action("removed"));
+        let displayed = CommandHistoryWidget::entry_from_pin(&ctx, &missing_run);
+        assert!(displayed.missing);
+        assert_eq!(displayed.action.action, missing_run.action_id);
+
+        let history = HistoryEntry {
+            query: "old query".into(),
+            query_lc: "old query".into(),
+            action: Action {
+                label: "Opaque history literal".into(),
+                desc: "Snippet".into(),
+                action: "clipboard:same body {{literal}}".into(),
+                args: None,
+            },
+            source: None,
+            timestamp: 1,
+        };
+        let displayed = CommandHistoryWidget::entry_from_history(&ctx, &history);
+        assert_eq!(displayed.action, history.action);
     }
 }
