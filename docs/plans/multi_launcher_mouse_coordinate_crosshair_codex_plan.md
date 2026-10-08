@@ -95,7 +95,7 @@ All commands are exact and case-insensitive. The passive HUD remains click-throu
 
 Client space means foreground-window client coordinates in physical pixels, including negative points outside its client area. Missing geometry is an explicit error. Pick captures a live click-time sample even if the HUD is frozen; it uses the selected space, copies once after paired release/native teardown, and restores prior independent HUD/crosshair state. Escape/cancel or invalid samples preserve clipboard contents. The word "pixel" identifies the cursor's selected location; the clipboard payload is coordinate text, not color or an image.
 
-## M1-B: Passive native runtime (`automated verification passed; native smoke pending`)
+## M1-B: Passive native runtime (`automated and native runtime verification passed`)
 
 Objective/owner: feature-owned `coordinate_tool::{controller,native}` supplies live HUD and independent crosshair; GUI remains an adapter. Depends on M1-A.
 
@@ -116,7 +116,7 @@ Invariants: passive input/focus untouched; signed coordinates; no duplicate work
 
 Verification at integration gate: targeted `coordinate_tool` Nextest plus `cargo check --lib`; directly affected helper consumers only if shared mechanics are extracted. Done: runtime integrated, lifecycle/resource/idle tests meaningful and passing at verification gate, scoped diff reviewed.
 
-## M1-C: Launcher controls and persistence (`automated verification passed; native smoke pending`)
+## M1-C: Launcher controls and persistence (`automated verification passed; application manual acceptance unperformed`)
 
 Objective/ownership: typed commands dispatch, plugin discovers, feature controller executes, GUI adapter coordinates feedback. Depends on M1-B.
 
@@ -135,7 +135,7 @@ Tests: exact parsing/invalid values, plugin inventory, metadata, bus once, headl
 
 Verification at integration gate: focused feature/plugin/parser/handler/GUI filters; `cargo nextest run --test domain command_bus_architecture`; `cargo check --lib`. Invariants: existing commands/plugins preserved. Non-goals: capture/global passive shortcuts/settings UI redesign. Done: all passive controls reachable, saved correctly, copy/help and lifecycle integrated, scoped diff reviewed.
 
-## M2-A: Capture owner and paired-input state machine (`automated verification passed; native smoke pending`)
+## M2-A: Capture owner and paired-input state machine (`automated and native runtime verification passed`)
 
 Objective/ownership: one feature-owned transient capture session with capture-scoped native interception. Depends on M1-C. Scope: new capture model and native/controller extensions.
 
@@ -153,7 +153,7 @@ Tests: down/up, mid-pair cancellation, pre-held activation, Escape, pass-through
 
 Verification at integration gate: coordinate-tool Nextest and native `cargo check --lib`; real input delivery proof in M3. Done: scoped capture compiled/tested, completion follows cleanup, scoped diff reviewed.
 
-## M2-B: Pick completion and coexistence (`automated verification passed; native smoke pending`)
+## M2-B: Pick completion and coexistence (`automated and native runtime verification passed; application manual acceptance unperformed`)
 
 Objective: canonical pick/cancel commands, clipboard publication after teardown, and mutually exclusive capture admission. Depends on M2-A.
 
@@ -168,7 +168,7 @@ Required changes:
 
 Tests: exact copy after cleanup, clipboard sentinel on cancel/failure, reciprocal conflicts, relevant activation routes, passive coexistence and reopen. Verification: feature and modified GUI lifecycle/suppression filters plus `cargo check --lib`. Non-goals: general interaction manager, broad hook refactor/historical acceptance migration. Done: canonical pick integrated, failures recover, conflicts covered and scoped diff reviewed.
 
-## M3-A: Verification, documentation and independent review (`in_progress`)
+## M3-A: Verification, documentation and independent review (`delivered; remaining manual acceptance recorded below`)
 
 Objective: targeted integration evidence, focused native smoke, one independent review and user documentation. Depends on M2-B. Resolve concrete findings in separate descriptive remediation commits, rerunning only affected checks.
 
@@ -225,3 +225,38 @@ Review remediation committed `74b2a8b4`. All five findings have scoped source fi
 Capture integration gate satisfied: `cargo check --lib` passed (33.89s final run). Nextest selected 66 tests with `cargo nextest run --lib --test domain -E 'test(coordinate_tool::) | test(coordinate_pick) | test(reopening_pick) | test(synchronous_suppression_release_restores_gestures_before_returning) | test(coordinate_tool_preferences_are_partial_compatible_normalized_and_persisted) | test(control_tokens_are_case_insensitive_and_typed) | test(command_bus_architecture) | test(exclusive_owner_events_preserve_independent_lifecycles)'`. Run `52c21b76-596f-44a2-ae91-54482ec5e172` built in 5m13s, then had 64 pass, one case-sensitive metadata assertion fail, one architecture test unrun due fail-fast. The description remained correct; its assertion now normalizes case. The smallest follow-up `cargo nextest run --lib --test domain -E 'test(inventory_and_metadata_expose_passive_and_capture_controls) | test(command_bus_architecture)'` passed all four (run `931c6041-9bbc-428c-bbcb-871e3dc344e2`, build 2m17s). Thus all 66 selected behaviors have passing evidence after corrections; no full suite or additional unrelated tests ran. A default clipboard-modifier JSON created by GUI test setup is a test artifact, not a delivered source/config change, and is removed before completion.
 
 Compiler/test corrections committed `289b6c1e`. `cargo check --bin multi_launcher` passed (37.94s), covering the executable's command/native invocation consumers. Final source inspection also found the remaining fixed HUD width cap could clip signed bounds at high DPI before work-area fitting; removed it and extended the existing high-DPI row test. `cargo check --lib --bin coordinate_tool_smoke` passed after three local fixture compiler corrections; `cargo nextest run --lib -E 'test(coordinate_tool::render::tests)'` passed all five (run `fa588676-368d-4973-baaf-1d580718e7ae`, build 1m08s). This follow-up verification stayed within rendering; all other acceptance evidence remains the earlier scoped gate.
+
+HUD width follow-up committed `8b82be5c`. M3 delivers the opt-in `src/bin/coordinate_tool_smoke.rs` plus README instructions. The fixture uses a separate receiver process, exact foreground HWND/PID guards before each injected batch, acknowledged input/message fences, split left-down/capturing/up, held-input cleanup guards and bounded receiver/controller teardown. It saves cursor/foreground before receiver creation and restores them only when their test ownership has not been superseded. It intentionally leaves the clipboard untouched rather than add generalized clipboard preservation or expose private GUI APIs. This is a material verification limitation, not clipboard proof.
+
+`cargo run --bin coordinate_tool_smoke` built successfully in 3m43s, then failed before creating a receiver or injecting input: sandbox cursor access returned `Access is denied (0x80070005)`. Running the already-built `.\target\debug\coordinate_tool_smoke.exe` with desktop access passed (exit 0). The native sample was desktop `(296,227)`, monitor origin `(0,0)`, client origin `(24,47)`, agreeing with direct per-monitor-aware Win32 geometry. No negative target-monitor origin or mixed-DPI layout was established.
+
+### Final acceptance evidence and limitations
+
+| Behavior | Actual evidence |
+| --- | --- |
+| Typed commands, exact families, headless boundary, settings compatibility | Earlier passive gate: 78 passed; capture gate: all 66 selected behaviors passed after focused corrections |
+| Signed conversion, unavailable geometry, freeze/copy/last-copy and failure sentinels | Pure model, controller and injected GUI clipboard tests passed |
+| HUD/crosshair independent and idempotent, passive typing/clicks/focus | Native receiver passed HUD-only, crosshair-only and both; repeated enables kept 1/1/2 visible surfaces, input delivery and receiver foreground unchanged |
+| Physical desktop/monitor/client geometry | Native runtime sample matched direct Win32 cursor, monitor/work-area, virtual-desktop and receiver client geometry |
+| Capture owns both click transitions and waits for release | Native split down/capturing/up passed, no terminal while held, receiver saw neither click edge after post-cleanup key fence |
+| Capture with both passive modes enabled | Native capture preserved both flags and surface visibility |
+| Escape and post-capture input | Native Escape pair suppressed and cancelled; ordinary click/text resumed after cleanup. GUI cancellation/supersession/shutdown clipboard sentinel tests passed |
+| No passive work/resources when off | Native controller joined; no passive HWNDs or continued sample calls; capture terminal followed native cleanup |
+| Reciprocal OCR/Color Pick/Screen Draw/crop/MkMacro guards and radial handoff/native admission | Focused GUI, routing and owner-mask tests passed; full application native before/after sequence unperformed |
+| Detailed high-DPI HUD content | Five rendering tests passed, including frozen sampling-error/help rows and width/work-area fitting; visual inspection at actual DPI unperformed |
+| Independent review | Five concrete findings remediated; parent inspected resulting scoped diffs and passing regression assertions |
+| Real application clipboard write/Escape sentinel | Unperformed; fixture never writes clipboard. Automated injected-clipboard evidence is distinct |
+| Actual mixed-DPI and negative-origin monitors | Unverified hardware acceptance; signed pure tests and same-monitor native geometry are not substitutes |
+| Preference restart, full application focus/modal lifecycle, Screen Draw emergency shortcuts, radial quick tap/hold | User-performed Windows smoke still required; no claim these manual checks passed |
+
+All implementation checkpoints are local on `mouse-improvements`, without an upstream or publication; master remains `9b4687b53d06d5ac09226cbe0421edae77312fc0`. No merge, rebase, force-push or checkpoint rewrite occurred. No full suite, pixel validation or historical acceptance campaign ran. Three warnings in untouched GUI tests remain outside scope. Non-Windows fallback imports were corrected by source inspection, but no cross-platform target compilation was performed.
+
+### Precise branch review and remaining Windows smoke
+
+Review `git log --oneline --reverse master..mouse-improvements` and `git diff master...mouse-improvements`; rerun the opt-in fixture on an interactive Windows desktop if desired. The required remaining manual smoke is bounded:
+
+1. In the application, set a known clipboard sentinel, run `coord pick` and Escape; verify unchanged clipboard. Pick in each selected space, check exact `x,y`, then freeze/move/copy to distinguish displayed frozen data from pick click-time data.
+2. Check compact/detailed HUD, offset clamping, guides, opacity and contrast on available displays; save preferences/restart and verify styles persist while activation/frozen/copy state starts off. On real mixed-DPI/negative-origin displays, compare physical origins/points on both monitors.
+3. With passive modes on, verify configured Screen Draw emergency hotkeys and radial quick tap/hold before and after a pick. Check OCR, Color Pick and MkMacro visual selection reject overlap with pick, then resume normally after cancel. Include one held-click cancellation/release and ordinary click afterward.
+
+These are remaining manual acceptance rows, not an invitation to run a broad unrelated regression matrix. Source implementation and scoped available-runtime evidence are delivered; full feature acceptance is not claimed while those rows remain unverified.

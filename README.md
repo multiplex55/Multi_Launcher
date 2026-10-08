@@ -577,6 +577,14 @@ Crosshair controls are `crosshair color #ff0000`, `crosshair thickness 2`,
 outline for visibility. Preferences are saved, while activation and frozen/copy
 state are temporary. `coord help` and `crosshair help` show the controls.
 
+For an opt-in native runtime check, run `cargo run --bin coordinate_tool_smoke`
+on an interactive Windows desktop. It creates a controlled receiver window,
+checks its foreground identity before injecting test input, exercises the real
+passive/capture runtimes, and prints `PASS` or `UNVERIFIED` evidence. Keep that
+receiver foreground during the run. It leaves clipboard contents untouched;
+application clipboard behavior, mixed-DPI layouts, and other tools' native
+shortcuts still need the focused manual checks recorded in the mouse plan.
+
 ## Regex Tester
 
 `regex` opens a resizable local Regex Tester with live highlighting, match
