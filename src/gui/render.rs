@@ -6980,6 +6980,25 @@ mod tests {
         });
     }
 
+    fn render_prompt_test_frame_at_size(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+        size: egui::Vec2,
+    ) {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                app.render_root_frame(ctx, None);
+            },
+        );
+    }
+
     #[test]
     fn snippet_prompt_focus_tab_multiline_and_escape_are_owned_by_the_dialog() {
         let ctx = egui::Context::default();
@@ -7111,6 +7130,139 @@ mod tests {
         assert_eq!(submissions, 0);
         assert!(preview_app.snippet_prompt_dialog.is_open());
         assert!(preview_app.snippet_prompt_dialog.is_preview_only());
+    }
+
+    #[test]
+    fn many_prompt_fields_and_feedback_keep_keyboard_and_footer_reachable_on_small_root() {
+        let ctx = egui::Context::default();
+        let (mut app, _test_directory) = new_prompt_app(&ctx);
+        app.test_skip_history_persistence = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+
+        let fields = (0..12)
+            .map(|index| {
+                let mut field =
+                    crate::plugins::snippets::SnippetFieldDefinition::new(format!("field_{index}"));
+                field.label = format!(
+                    "Long display label for the recipient or ticket field number {index} that wraps"
+                );
+                field.default_value = format!("value {index}");
+                field
+            })
+            .collect::<Vec<_>>();
+        let text = fields
+            .iter()
+            .map(|field| format!("{{{{{}}}}}", field.name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let entry = crate::plugins::snippets::SnippetEntry {
+            alias: "reply".into(),
+            text,
+            hide_contents: false,
+            prompt_for_fields: true,
+            fields,
+        };
+        request_test_prompt(&mut app, entry);
+        let feedback = app
+            .snippet_prompt_dialog
+            .submit_with(|_| Err(()), |_| panic!("stale form must not copy"))
+            .unwrap_err();
+        assert_eq!(
+            feedback,
+            super::super::snippet_prompt_dialog::SnippetPromptError::StaleTemplate
+        );
+
+        let screen_size = egui::vec2(400.0, 220.0);
+        render_prompt_test_frame_at_size(&ctx, &mut app, Vec::new(), screen_size);
+        // egui learns a new window's outer size during its first frame. Assert
+        // against the same settled bounds users get on the following frame.
+        render_prompt_test_frame_at_size(&ctx, &mut app, Vec::new(), screen_size);
+        let layout = app
+            .snippet_prompt_dialog
+            .last_layout
+            .as_ref()
+            .expect("the production prompt should report its rendered widgets");
+        assert_eq!(layout.field_ids.len(), 12);
+        assert!(
+            layout.body_content_size.y > layout.body_rect.height(),
+            "many fields should use the production body scroll area"
+        );
+        assert!(
+            layout.window_rect.min.x >= 0.0
+                && layout.window_rect.min.y >= 0.0
+                && layout.window_rect.max.x <= screen_size.x
+                && layout.window_rect.max.y <= screen_size.y,
+            "prompt window should stay inside the 400x220 root: {:?}",
+            layout.window_rect
+        );
+        let copy = layout.copy.expect("execute mode must render Copy");
+        assert!(
+            layout.window_rect.contains_rect(copy.rect),
+            "Copy response {:?} extends past prompt window {:?}",
+            copy.rect,
+            layout.window_rect
+        );
+        assert!(layout.window_rect.contains_rect(layout.cancel.rect));
+        assert!(layout.body_rect.max.y <= layout.cancel.rect.min.y);
+        let field_ids = layout.field_ids.clone();
+        assert!(ctx.memory(|memory| memory.has_focus(field_ids[0])));
+
+        for index in 1..field_ids.len() {
+            render_prompt_test_frame_at_size(
+                &ctx,
+                &mut app,
+                vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+                screen_size,
+            );
+            assert!(
+                ctx.memory(|memory| memory.has_focus(field_ids[index])),
+                "Tab should focus field {index}"
+            );
+        }
+
+        // egui animates scroll_to_me over 100–300 ms. Advance the deterministic
+        // test clock by one second so the final focused field reaches its target.
+        let settled_time = ctx.input(|input| input.time + 1.0);
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+                focused: true,
+                time: Some(settled_time),
+                ..Default::default()
+            },
+            |ctx| app.render_root_frame(ctx, None),
+        );
+        let layout = app.snippet_prompt_dialog.last_layout.as_ref().unwrap();
+        assert!(
+            layout.body_scroll_offset.y > 0.0,
+            "focusing later fields should scroll the production form; offset={:?}, body={:?}, content={:?}, focused={:?}",
+            layout.body_scroll_offset,
+            layout.body_rect,
+            layout.body_content_size,
+            ctx.memory(|memory| field_ids.iter().position(|id| memory.has_focus(*id)))
+        );
+        render_prompt_test_frame_at_size(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+            screen_size,
+        );
+        let layout = app.snippet_prompt_dialog.last_layout.as_ref().unwrap();
+        let copy = layout.copy.expect("Copy remains rendered after scrolling");
+        assert!(ctx.memory(|memory| memory.has_focus(copy.id)));
+        assert!(layout.window_rect.contains_rect(copy.rect));
+        assert!(layout.window_rect.contains_rect(layout.cancel.rect));
+
+        render_prompt_test_frame_at_size(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)],
+            screen_size,
+        );
+        let layout = app.snippet_prompt_dialog.last_layout.as_ref().unwrap();
+        assert!(ctx.memory(|memory| memory.has_focus(layout.cancel.id)));
+        assert!(layout.window_rect.contains_rect(layout.cancel.rect));
     }
 
     fn focus_launcher_query(ctx: &egui::Context, app: &mut LauncherApp) {

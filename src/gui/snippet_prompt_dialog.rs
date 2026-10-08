@@ -36,6 +36,27 @@ pub(crate) struct SnippetPromptDialog {
     pending_focus: Option<PromptFocusTarget>,
     copy_widget_id: Option<egui::Id>,
     cancel_widget_id: Option<egui::Id>,
+    #[cfg(test)]
+    pub(crate) last_layout: Option<SnippetPromptLayout>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct SnippetPromptWidgetLayout {
+    pub(crate) id: egui::Id,
+    pub(crate) rect: egui::Rect,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct SnippetPromptLayout {
+    pub(crate) window_rect: egui::Rect,
+    pub(crate) body_rect: egui::Rect,
+    pub(crate) body_content_size: egui::Vec2,
+    pub(crate) body_scroll_offset: egui::Vec2,
+    pub(crate) field_ids: Vec<egui::Id>,
+    pub(crate) copy: Option<SnippetPromptWidgetLayout>,
+    pub(crate) cancel: SnippetPromptWidgetLayout,
 }
 
 pub(crate) struct SnippetPromptSession {
@@ -226,10 +247,6 @@ impl SnippetPromptDialog {
             }
         }
 
-        let available = ctx.available_rect().size();
-        let max_size = egui::vec2(available.x.max(1.0), available.y.max(1.0));
-        let default_size = egui::vec2(max_size.x.min(620.0), max_size.y.min(700.0));
-        let min_size = egui::vec2(max_size.x.min(280.0), max_size.y.min(180.0));
         let title = format!(
             "{} — {}",
             if preview_only {
@@ -239,13 +256,41 @@ impl SnippetPromptDialog {
             },
             session.alias
         );
+        let available = ctx.available_rect().size();
+        let style = ctx.style();
+        let mut window_frame = egui::Frame::window(&style);
+        window_frame.inner_margin += window_frame.stroke.width / 2.0;
+        let title_bar_height = ctx
+            .fonts(|fonts| fonts.row_height(&style.text_styles[&egui::TextStyle::Heading]))
+            + style.spacing.window_margin.sum().y;
+        let window_chrome = window_frame.outer_margin.sum()
+            + window_frame.inner_margin.sum()
+            + egui::vec2(0.0, title_bar_height);
+        let max_size = (available - window_chrome).max(egui::vec2(1.0, 1.0));
+        let default_size = egui::vec2(max_size.x.min(620.0), max_size.y.min(700.0));
+        let min_size = egui::vec2(max_size.x.min(280.0), max_size.y.min(180.0));
         let mut opened = self.open;
         let feedback = self.feedback;
         let mut action = None;
         let mut value_changed = false;
+        #[cfg(test)]
+        let mut body_layout = None;
+        #[cfg(test)]
+        let mut copy_layout = None;
+        #[cfg(test)]
+        let mut cancel_layout = None;
+        #[cfg(test)]
+        let field_ids = session
+            .prepared
+            .fields
+            .iter()
+            .map(|field| field_widget_id(generation, &field.name))
+            .collect();
+        let mut focus_scroll_rect = None;
 
-        egui::Window::new(title)
-            .id(egui::Id::new(("snippet_prompt_window", generation)))
+        let window_id = egui::Id::new(("snippet_prompt_window", generation));
+        let _window_output = egui::Window::new(title)
+            .id(window_id)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .collapsible(false)
             .resizable(true)
@@ -268,7 +313,7 @@ impl SnippetPromptDialog {
                 let feedback_height = if feedback.is_some() { 22.0 } else { 0.0 };
                 let body_height =
                     (ui.available_height() - footer_height - feedback_height).max(24.0);
-                egui::ScrollArea::vertical()
+                let _body_output = egui::ScrollArea::vertical()
                     .id_source(("snippet_prompt_body", generation))
                     .auto_shrink([false, false])
                     .max_height(body_height)
@@ -301,7 +346,7 @@ impl SnippetPromptDialog {
                             if matches!(&focus_target, Some(PromptFocusTarget::Field(key)) if key == &field.name)
                             {
                                 response.request_focus();
-                                response.scroll_to_me(Some(egui::Align::Center));
+                                focus_scroll_rect = Some(response.rect);
                             }
 
                             ui.add_space(4.0);
@@ -354,7 +399,22 @@ impl SnippetPromptDialog {
                                 ui.colored_label(egui::Color32::LIGHT_RED, error.to_string());
                             }
                         }
+
+                        // The nested preview ScrollArea shares egui's frame-level
+                        // scroll target. Queue the field target after it renders so
+                        // the outer form ScrollArea consumes it.
+                        if let Some(rect) = focus_scroll_rect {
+                            ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                        }
                     });
+                #[cfg(test)]
+                {
+                    body_layout = Some((
+                        _body_output.inner_rect,
+                        _body_output.content_size,
+                        _body_output.state.offset,
+                    ));
+                }
 
                 if let Some(error) = feedback {
                     ui.colored_label(egui::Color32::LIGHT_RED, error.message());
@@ -364,6 +424,13 @@ impl SnippetPromptDialog {
                         let response = ui
                             .push_id(button_widget_id(generation, "copy"), |ui| ui.button("Copy"))
                             .inner;
+                        #[cfg(test)]
+                        {
+                            copy_layout = Some(SnippetPromptWidgetLayout {
+                                id: response.id,
+                                rect: response.rect,
+                            });
+                        }
                         self.copy_widget_id = Some(response.id);
                         if matches!(&focus_target, Some(PromptFocusTarget::Copy)) {
                             response.request_focus();
@@ -382,6 +449,13 @@ impl SnippetPromptDialog {
                             })
                         })
                         .inner;
+                    #[cfg(test)]
+                    {
+                        cancel_layout = Some(SnippetPromptWidgetLayout {
+                            id: response.id,
+                            rect: response.rect,
+                        });
+                    }
                     self.cancel_widget_id = Some(response.id);
                     if matches!(&focus_target, Some(PromptFocusTarget::Cancel)) {
                         response.request_focus();
@@ -391,6 +465,28 @@ impl SnippetPromptDialog {
                     }
                 });
             });
+
+        #[cfg(test)]
+        {
+            self.last_layout = match (_window_output, body_layout, cancel_layout) {
+                (
+                    Some(window),
+                    Some((body_rect, body_content_size, body_scroll_offset)),
+                    Some(cancel),
+                ) => Some(SnippetPromptLayout {
+                    window_rect: ctx
+                        .memory(|memory| memory.area_rect(window_id))
+                        .unwrap_or(window.response.rect),
+                    body_rect,
+                    body_content_size,
+                    body_scroll_offset,
+                    field_ids,
+                    copy: copy_layout,
+                    cancel,
+                }),
+                _ => None,
+            };
+        }
 
         self.open = opened;
         if value_changed {
