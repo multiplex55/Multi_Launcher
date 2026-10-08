@@ -37,6 +37,7 @@ fn typed_bus_has_no_legacy_or_wildcard_fallback() {
         "Crop",
         "JsonUtility",
         "ColorPick",
+        "CoordinateTool",
         "Data",
         "External",
     ] {

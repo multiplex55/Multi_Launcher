@@ -22,4 +22,5 @@ pub use host::{
 };
 pub use model::*;
 pub use outcome::*;
+pub(crate) use parser::parse_coordinate_tool_wire;
 pub use parser::{parse_action, parse_command};

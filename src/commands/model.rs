@@ -70,6 +70,7 @@ pub enum Command {
     ClipboardModify(ClipboardModifyCommand),
     Screenshot(ScreenshotCommand),
     ScreenDraw(ScreenDrawCommand),
+    CoordinateTool(CoordinateToolCommand),
     Shell(ShellCommand),
     Clipboard(ClipboardCommand),
     Calculator(CalculatorCommand),
@@ -107,6 +108,7 @@ impl Command {
             Self::ClipboardModify(_) => "clipboard_modify",
             Self::Screenshot(_) => "screenshot",
             Self::ScreenDraw(_) => "screen_draw",
+            Self::CoordinateTool(_) => "coordinate_tool",
             Self::Shell(_) => "shell",
             Self::Clipboard(_) => "clipboard",
             Self::Calculator(_) => "calculator",
@@ -143,6 +145,7 @@ impl Command {
             Self::ClipboardModify(v) => v.kind_name(),
             Self::Screenshot(v) => v.kind_name(),
             Self::ScreenDraw(v) => v.kind_name(),
+            Self::CoordinateTool(v) => v.kind_name(),
             Self::Shell(v) => v.kind_name(),
             Self::Clipboard(v) => v.kind_name(),
             Self::Calculator(v) => v.kind_name(),
@@ -181,6 +184,41 @@ kinds!(ScreenDrawCommand,
     Self::Start => "start", Self::OpenToolbar => "toolbar",
     Self::NewCapture => "new_capture", Self::Ghost => "ghost",
     Self::Done => "done", Self::Clear => "clear", Self::Close => "close"
+);
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CoordinateToolCommand {
+    ToggleHud,
+    SetHudEnabled(bool),
+    SetSpace(crate::coordinate_tool::CoordinateSpace),
+    SetHudDetail(crate::coordinate_tool::HudDetail),
+    SetOffset(crate::coordinate_tool::CoordinateOffset),
+    Freeze,
+    Unfreeze,
+    Copy,
+    HudHelp,
+    ToggleCrosshair,
+    SetCrosshairEnabled(bool),
+    SetCrosshairColor(crate::coordinate_tool::CrosshairColor),
+    SetCrosshairThickness(i32),
+    SetCrosshairLength(i32),
+    SetCrosshairOpacity(f32),
+    SetGuides(bool),
+    SetContrast(bool),
+    CrosshairHelp,
+    Invalid { raw: String, error: String },
+}
+
+kinds!(CoordinateToolCommand,
+    Self::ToggleHud => "toggle_hud", Self::SetHudEnabled(_) => "set_hud_enabled",
+    Self::SetSpace(_) => "set_space", Self::SetHudDetail(_) => "set_hud_detail",
+    Self::SetOffset(_) => "set_offset", Self::Freeze => "freeze", Self::Unfreeze => "unfreeze",
+    Self::Copy => "copy", Self::HudHelp => "hud_help", Self::ToggleCrosshair => "toggle_crosshair",
+    Self::SetCrosshairEnabled(_) => "set_crosshair_enabled", Self::SetCrosshairColor(_) => "set_crosshair_color",
+    Self::SetCrosshairThickness(_) => "set_crosshair_thickness", Self::SetCrosshairLength(_) => "set_crosshair_length",
+    Self::SetCrosshairOpacity(_) => "set_crosshair_opacity", Self::SetGuides(_) => "set_guides",
+    Self::SetContrast(_) => "set_contrast", Self::CrosshairHelp => "crosshair_help",
+    Self::Invalid { .. } => "invalid"
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]

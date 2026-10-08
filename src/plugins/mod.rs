@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod clipboard_modify;
 pub mod color_picker;
 pub mod convert_panel;
+pub mod coordinate_tool;
 pub mod crop;
 pub mod data;
 pub mod date_arithmetic;

@@ -42,6 +42,28 @@ mod screen_draw_headless_tests {
         assert!(error.to_string().contains("require the launcher interface"));
         assert!(external_calls.is_empty());
     }
+
+    #[test]
+    fn coordinate_copy_requires_the_launcher_interface_without_external_fallback() {
+        let original = Action {
+            label: "Copy Coordinates".into(),
+            desc: String::new(),
+            action: "coord:copy".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::CoordinateTool(CoordinateToolCommand::Copy),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("require the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
 }
 
 fn execute_with_external(
@@ -101,6 +123,9 @@ fn execute_with_external(
         Command::Radial(_) => anyhow::bail!("radial commands require the launcher interface"),
         Command::ScreenDraw(_) => {
             anyhow::bail!("screen draw commands require the launcher interface")
+        }
+        Command::CoordinateTool(_) => {
+            anyhow::bail!("coordinate inspector commands require the launcher interface")
         }
         Command::VirtualDesktop(command) => execute_virtual_desktop(command, original_action),
         Command::External(command) => external(&command.target, command.args.as_deref()),

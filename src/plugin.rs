@@ -11,6 +11,7 @@ use crate::plugins::clipboard::ClipboardPlugin;
 use crate::plugins::clipboard_modify::ClipboardModifyPlugin;
 use crate::plugins::color_picker::ColorPickerPlugin;
 use crate::plugins::convert_panel::ConvertPanelPlugin;
+use crate::plugins::coordinate_tool::CoordinateToolPlugin;
 use crate::plugins::crop::CropPlugin;
 use crate::plugins::data::DataPlugin;
 use crate::plugins::date_arithmetic::DateArithmeticPlugin;
@@ -833,6 +834,7 @@ impl PluginManager {
         self.register_with_settings(RegexTesterPlugin, plugin_settings);
         self.register_with_settings(QrPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
+        self.register_with_settings(CoordinateToolPlugin, plugin_settings);
         self.register_with_settings(OcrPlugin, plugin_settings);
         self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
         self.register_with_settings(BrightnessPlugin, plugin_settings);
@@ -1221,6 +1223,41 @@ mod tests {
                 .search_filtered("regex", Some(&enabled), Some(&no_search_caps))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn coordinate_tool_builtin_registration_and_filtered_routing() {
+        let mut manager = PluginManager::new();
+        manager.reload_from_dirs(
+            &[],
+            10,
+            NetUnit::Auto,
+            false,
+            &HashMap::new(),
+            Arc::new(Vec::new()),
+        );
+        assert!(
+            manager
+                .plugin_names()
+                .iter()
+                .any(|name| name == "coordinate_tool")
+        );
+
+        let enabled = HashSet::from(["coordinate_tool".to_owned()]);
+        let search_caps =
+            HashMap::from([("coordinate_tool".to_owned(), vec!["search".to_owned()])]);
+        let actions =
+            manager.search_filtered("COORD space CLIENT", Some(&enabled), Some(&search_caps));
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action, "coord:space:client");
+        for query in ["coordx", "coord pick", "crosshair opacity 1.1"] {
+            assert!(
+                manager
+                    .search_filtered(query, Some(&enabled), Some(&search_caps))
+                    .is_empty(),
+                "{query}"
+            );
+        }
     }
 
     #[test]

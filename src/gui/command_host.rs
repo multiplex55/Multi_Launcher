@@ -17,6 +17,13 @@ impl LauncherCommandHost for LauncherApp {
     fn launcher_is_visible(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst)
     }
+
+    fn execute_coordinate_tool_command(
+        &mut self,
+        command: &crate::commands::CoordinateToolCommand,
+    ) -> Result<Option<String>, String> {
+        self.coordinate_tool.execute(command)
+    }
 }
 
 fn split_virtual_desktop_outcome(
@@ -838,6 +845,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::JsonUtility(_)
             | Command::ColorPick(_)
             | Command::Ocr(_)
+            | Command::CoordinateTool(_)
             | Command::FileSearch(_)
             | Command::Diff(_)
     )
@@ -1466,6 +1474,29 @@ mod tests {
         assert_eq!(app.visibility_revision.current(), revision);
         assert_eq!(outcome.visibility, crate::commands::VisibilityPolicy::Keep);
         app.shutdown_ocr_selection();
+    }
+
+    #[test]
+    fn coordinate_help_ignores_query_override_and_generic_hide_settings() {
+        let mut app = test_app();
+        app.query = "keep coordinate query".into();
+        app.clear_query_after_run = true;
+        app.hide_after_run = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.focus_query = false;
+        let invocation = crate::commands::parse_command(
+            action("coord:help"),
+            Some("must be ignored".into()),
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .unwrap();
+
+        assert!(!command_accepts_query_override(&invocation.command));
+        app.dispatch_command_invocation(invocation);
+
+        assert_eq!(app.query, "keep coordinate query");
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.focus_query);
     }
 
     fn with_isolated_root_restore_fixture<T>(

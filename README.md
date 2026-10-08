@@ -26,6 +26,7 @@ It’s designed to be “one hotkey away” from:
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
+- [Mouse coordinates and crosshair](#mouse-coordinates-and-crosshair)
 - [Regex Tester](#regex-tester)
 - [Screen region OCR](#screen-region-ocr)
 - [Dashboard](#dashboard)
@@ -96,6 +97,7 @@ Multi Launcher is centered around a **single query box**:
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
 | `regex` | Local Rust regex tester | `regex` |
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
+| `coord` / `crosshair` | Live mouse coordinates and independent passive crosshair | `coord` / `coord copy` / `crosshair` |
 | `ocr` | Local English text recognition from a screen region | `ocr` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
@@ -535,6 +537,31 @@ with the usual `color #rrggbb` HEX/RGB/HSL results after selection. Choose a res
 to copy it; selecting a pixel alone leaves the clipboard unchanged. The picker
 supports signed desktop coordinates, including monitors to the left or above the
 primary monitor, and samples the frozen image throughout the session.
+
+## Mouse coordinates and crosshair
+
+On Windows, `coord` toggles a cursor-following, click-through coordinate HUD.
+`crosshair` independently toggles a passive crosshair at the cursor. Both can run
+together without taking focus or intercepting ordinary typing and clicks.
+`coord on|off` and `crosshair on|off` set a mode explicitly.
+
+Coordinates are signed physical pixels, including negative desktop positions.
+`coord space desktop|monitor|client` selects desktop coordinates, coordinates
+relative to the containing monitor's full bounds, or coordinates relative to the
+foreground window's client origin. While the launcher is foreground, client
+space uses the last external target window. Missing geometry is reported as
+unavailable rather than copied as zero.
+
+Use `coord compact|detailed`, `coord offset -32 48`, and
+`coord freeze|unfreeze` to control presentation. `coord copy` writes the displayed
+sample as `x,y`; a frozen HUD copies its frozen sample. Detailed presentation
+includes monitor/context information and the last successful copy.
+
+Crosshair controls are `crosshair color #ff0000`, `crosshair thickness 2`,
+`crosshair length 12`, `crosshair opacity 0.8`, `crosshair guides on|off`, and
+`crosshair contrast on|off`. Guides span the virtual desktop; contrast adds an
+outline for visibility. Preferences are saved, while activation and frozen/copy
+state are temporary. `coord help` and `crosshair help` show the controls.
 
 ## Regex Tester
 

@@ -262,6 +262,10 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         return Ok(Command::Data(parse_data(action)));
     }
 
+    if let Some(command) = parse_coordinate_tool_wire(action) {
+        return Ok(Command::CoordinateTool(command));
+    }
+
     if let Some(command) = parse_screen_draw(s) {
         return Ok(Command::ScreenDraw(command));
     }
@@ -406,6 +410,169 @@ fn parse_screen_draw(action: &str) -> Option<ScreenDrawCommand> {
         "screen_draw:close" => ScreenDrawCommand::Close,
         _ => return None,
     })
+}
+
+/// Parse the private, colon-delimited action protocol emitted by the built-in
+/// coordinate plugin. Returning a typed invalid operation for a recognized
+/// family prevents malformed controls from falling through to external launch.
+pub(crate) fn parse_coordinate_tool_wire(action: &Action) -> Option<CoordinateToolCommand> {
+    let (family, operation) = action.action.split_once(':')?;
+    if !family.eq_ignore_ascii_case("coord") && !family.eq_ignore_ascii_case("crosshair") {
+        return None;
+    }
+
+    let invalid = |error: String| CoordinateToolCommand::Invalid {
+        raw: action.action.clone(),
+        error,
+    };
+    if action.args.is_some() {
+        return Some(invalid(
+            "coordinate controls do not accept action arguments".into(),
+        ));
+    }
+
+    let normalized = operation
+        .split(':')
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let tokens = normalized.iter().map(String::as_str).collect::<Vec<_>>();
+    let command = if family.eq_ignore_ascii_case("coord") {
+        parse_coord_operation(&tokens)
+    } else {
+        parse_crosshair_operation(&tokens)
+    };
+    Some(command.unwrap_or_else(invalid))
+}
+
+fn parse_coord_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    use crate::coordinate_tool::{CoordinateOffset, CoordinateSpace, HudDetail};
+
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleHud),
+        ["on"] => Ok(CoordinateToolCommand::SetHudEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetHudEnabled(false)),
+        ["space", space] if space.eq_ignore_ascii_case("desktop") => {
+            Ok(CoordinateToolCommand::SetSpace(CoordinateSpace::Desktop))
+        }
+        ["space", space] if space.eq_ignore_ascii_case("monitor") => {
+            Ok(CoordinateToolCommand::SetSpace(CoordinateSpace::Monitor))
+        }
+        ["space", space] if space.eq_ignore_ascii_case("client") => Ok(
+            CoordinateToolCommand::SetSpace(CoordinateSpace::ForegroundClient),
+        ),
+        [detail] if detail.eq_ignore_ascii_case("compact") => {
+            Ok(CoordinateToolCommand::SetHudDetail(HudDetail::Compact))
+        }
+        [detail] if detail.eq_ignore_ascii_case("detailed") => {
+            Ok(CoordinateToolCommand::SetHudDetail(HudDetail::Detailed))
+        }
+        ["offset", x, y] => {
+            let x = parse_bounded_integer(x, -512, 512, "offset x")?;
+            let y = parse_bounded_integer(y, -512, 512, "offset y")?;
+            Ok(CoordinateToolCommand::SetOffset(CoordinateOffset::new(
+                x, y,
+            )))
+        }
+        ["freeze"] => Ok(CoordinateToolCommand::Freeze),
+        ["unfreeze"] => Ok(CoordinateToolCommand::Unfreeze),
+        ["copy"] => Ok(CoordinateToolCommand::Copy),
+        ["help"] => Ok(CoordinateToolCommand::HudHelp),
+        [operation, ..] if operation.eq_ignore_ascii_case("space") => {
+            Err("coordinate space must be desktop, monitor, or client".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("offset") => {
+            Err("offset requires signed x and y values in the range -512..512".into())
+        }
+        [operation, ..] => Err(format!("unknown coordinate command `{operation}`")),
+        [] => Err("coordinate command is missing".into()),
+    }
+}
+
+fn parse_crosshair_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleCrosshair),
+        ["on"] => Ok(CoordinateToolCommand::SetCrosshairEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetCrosshairEnabled(false)),
+        ["color", value] => parse_crosshair_color(value),
+        ["thickness", value] => Ok(CoordinateToolCommand::SetCrosshairThickness(
+            parse_bounded_integer(value, 1, 16, "crosshair thickness")?,
+        )),
+        ["length", value] => Ok(CoordinateToolCommand::SetCrosshairLength(
+            parse_bounded_integer(value, 2, 256, "crosshair length")?,
+        )),
+        ["opacity", value] => {
+            let opacity = value
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite() && (0.1..=1.0).contains(value))
+                .ok_or_else(|| "crosshair opacity must be in the range 0.1..1.0".to_string())?;
+            Ok(CoordinateToolCommand::SetCrosshairOpacity(opacity))
+        }
+        ["guides", state] => parse_toggle(state, "guides").map(CoordinateToolCommand::SetGuides),
+        ["contrast", state] => {
+            parse_toggle(state, "contrast").map(CoordinateToolCommand::SetContrast)
+        }
+        ["help"] => Ok(CoordinateToolCommand::CrosshairHelp),
+        [operation, ..] if operation.eq_ignore_ascii_case("color") => {
+            Err("crosshair color requires #rrggbb".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("thickness") => {
+            Err("crosshair thickness must be in the range 1..16".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("length") => {
+            Err("crosshair length must be in the range 2..256".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("opacity") => {
+            Err("crosshair opacity must be in the range 0.1..1.0".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("guides") => {
+            Err("guides must be on or off".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("contrast") => {
+            Err("contrast must be on or off".into())
+        }
+        [operation, ..] => Err(format!("unknown crosshair command `{operation}`")),
+        [] => Err("crosshair command is missing".into()),
+    }
+}
+
+fn parse_bounded_integer(
+    value: &str,
+    minimum: i32,
+    maximum: i32,
+    label: &str,
+) -> Result<i32, String> {
+    value
+        .parse::<i32>()
+        .ok()
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| format!("{label} must be in the range {minimum}..{maximum}"))
+}
+
+fn parse_crosshair_color(value: &str) -> Result<CoordinateToolCommand, String> {
+    use crate::coordinate_tool::CrosshairColor;
+
+    let hex = value
+        .strip_prefix('#')
+        .ok_or_else(|| "crosshair color must use #rrggbb format".to_string())?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("crosshair color must use #rrggbb format".into());
+    }
+    let parse =
+        |start| u8::from_str_radix(&hex[start..start + 2], 16).map_err(|error| error.to_string());
+    Ok(CoordinateToolCommand::SetCrosshairColor(
+        CrosshairColor::new(parse(0)?, parse(2)?, parse(4)?),
+    ))
+}
+
+fn parse_toggle(value: &str, label: &str) -> Result<bool, String> {
+    if value.eq_ignore_ascii_case("on") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("off") {
+        Ok(false)
+    } else {
+        Err(format!("{label} must be on or off"))
+    }
 }
 
 fn parse_json_utility(action: &str) -> Option<JsonUtilityCommand> {
@@ -2080,5 +2247,85 @@ mod qr_parser_tests {
         assert_eq!(error.domain, "qr");
         assert_eq!(error.message, "Unknown QR command");
         assert!(!format!("{error:?}").contains("secret"));
+    }
+}
+
+#[cfg(test)]
+mod coordinate_tool_parser_tests {
+    use super::*;
+
+    fn parse(action: &str) -> CoordinateToolCommand {
+        let action = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: action.into(),
+            args: None,
+        };
+        match parse_action(&action).unwrap() {
+            Command::CoordinateTool(command) => command,
+            other => panic!("expected coordinate command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_tokens_are_case_insensitive_and_typed() {
+        assert_eq!(parse("CoOrD:ToGgLe"), CoordinateToolCommand::ToggleHud);
+        assert_eq!(
+            parse("coord:space:CLIENT"),
+            CoordinateToolCommand::SetSpace(
+                crate::coordinate_tool::CoordinateSpace::ForegroundClient,
+            )
+        );
+        assert_eq!(
+            parse("coord:offset:-512:+512"),
+            CoordinateToolCommand::SetOffset(crate::coordinate_tool::CoordinateOffset::new(
+                -512, 512
+            ),)
+        );
+        assert_eq!(
+            parse("crosshair:color:#Aa00fF"),
+            CoordinateToolCommand::SetCrosshairColor(crate::coordinate_tool::CrosshairColor::new(
+                0xaa, 0x00, 0xff
+            ),)
+        );
+        assert_eq!(
+            parse("CROSSHAIR:opacity:0.5"),
+            CoordinateToolCommand::SetCrosshairOpacity(0.5)
+        );
+        assert_eq!(
+            parse("crosshair:guides:OFF"),
+            CoordinateToolCommand::SetGuides(false)
+        );
+    }
+
+    #[test]
+    fn malformed_coordinate_controls_remain_typed_and_never_external() {
+        for raw in [
+            "coord:offset:513:0",
+            "coord:offset:1",
+            "coord:space:virtual",
+            "crosshair:thickness:0",
+            "crosshair:length:257",
+            "crosshair:opacity:NaN",
+            "crosshair:color:red",
+            "crosshair:guides:maybe",
+            "coord:pick",
+            "coord:cancel",
+        ] {
+            assert!(
+                matches!(parse(raw), CoordinateToolCommand::Invalid { .. }),
+                "{raw}"
+            );
+        }
+        let lookalike = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "coordx:copy".into(),
+            args: None,
+        };
+        assert!(matches!(
+            parse_action(&lookalike).unwrap(),
+            Command::External(_)
+        ));
     }
 }

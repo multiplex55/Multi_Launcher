@@ -14,6 +14,7 @@ mod color_pick;
 mod command_host;
 mod confirmation_modal;
 mod convert_panel;
+pub(crate) mod coordinate_tool;
 mod cpu_list_dialog;
 pub mod crop_dialog;
 mod dashboard_editor_dialog;
@@ -689,6 +690,7 @@ pub struct LauncherApp {
     /// Main-thread orchestration for Screen Draw. Native session resources are
     /// intentionally owned outside `LauncherApp` by the later worker layer.
     pub screen_draw_controller: crate::screen_draw::ScreenDrawController,
+    pub(crate) coordinate_tool: coordinate_tool::CoordinateToolGui,
     screen_draw_recovery_bridge: Arc<crate::screen_draw::ScreenDrawRecoveryBridge>,
     color_pick: color_pick::ColorPickLifecycle,
     ocr: ocr::OcrLifecycle,
@@ -1305,6 +1307,12 @@ impl LauncherApp {
         if !self.show_settings {
             match Settings::load(&self.settings_path) {
                 Ok(settings) => {
+                    if let Err(error) = self
+                        .coordinate_tool
+                        .apply_loaded_preferences(settings.coordinate_tool.clone())
+                    {
+                        self.report_error_message("coordinate_tool.settings_reload", error);
+                    }
                     self.settings_editor = SettingsEditor::new_with_plugins(&settings);
                 }
                 Err(e) => {
@@ -2073,6 +2081,10 @@ impl LauncherApp {
                 controller.set_recovery_bridge(Arc::clone(&screen_draw_recovery_bridge));
                 controller
             },
+            coordinate_tool: coordinate_tool::CoordinateToolGui::new(
+                settings_path.clone(),
+                settings.coordinate_tool.clone(),
+            ),
             screen_draw_recovery_bridge,
             color_pick: color_pick::ColorPickLifecycle::default(),
             ocr: ocr::OcrLifecycle::default(),

@@ -1246,6 +1246,9 @@ impl LauncherApp {
         self.poll_color_pick(ctx);
         self.poll_ocr_selection(ctx);
         self.poll_screen_draw_capture(ctx);
+        if let Some(error) = self.coordinate_tool.poll_error() {
+            self.report_error_message("coordinate_tool.runtime", error);
+        }
         self.show_screen_draw_toolbar(ctx);
         self.multi_manager_drain_runtime_events();
         self.poll_clipboard_modify_runtime(ctx);
@@ -2462,6 +2465,9 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Err(error) = self.coordinate_tool.shutdown() {
+            self.report_error("coordinate_tool.shutdown", error);
+        }
         self.shutdown_color_pick();
         self.shutdown_ocr_selection();
         self.root_window_bridge.clear();

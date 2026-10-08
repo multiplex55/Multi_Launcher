@@ -88,9 +88,18 @@ pub struct CoordinateToolController {
 
 impl CoordinateToolController {
     pub fn new(factory: Arc<dyn CoordinateRuntimeFactory>) -> Self {
+        Self::new_with_preferences(factory, CoordinateToolPreferences::default())
+    }
+
+    pub fn new_with_preferences(
+        factory: Arc<dyn CoordinateRuntimeFactory>,
+        preferences: CoordinateToolPreferences,
+    ) -> Self {
+        let mut shared = SharedState::default();
+        shared.preferences = preferences.normalized();
         Self {
             factory,
-            shared: Arc::new(Mutex::new(SharedState::default())),
+            shared: Arc::new(Mutex::new(shared)),
             worker: None,
         }
     }
@@ -172,6 +181,25 @@ impl CoordinateToolController {
         lock(&self.shared).runtime.record_successful_copy(copied);
     }
 
+    /// Return the sample represented by the HUD for copying. Frozen data is
+    /// intentionally stable; live data is available only while sampling is
+    /// active and after a successful current observation.
+    pub fn sample_for_copy(&self) -> Result<CoordinateSample, String> {
+        let shared = lock(&self.shared);
+        if let Some(sample) = shared.runtime.frozen_sample() {
+            return Ok(sample.clone());
+        }
+        if self.worker.is_none() {
+            return Err("No live coordinate sample. Enable the HUD or crosshair first.".into());
+        }
+        shared.latest_sample.clone().ok_or_else(|| {
+            shared
+                .sample_error
+                .clone()
+                .unwrap_or_else(|| "No current coordinate sample is available yet.".into())
+        })
+    }
+
     pub fn runtime_state(&self) -> CoordinateToolRuntimeState {
         lock(&self.shared).runtime.clone()
     }
@@ -243,10 +271,15 @@ impl CoordinateToolController {
             return Ok(());
         };
         let _ = worker.sender.send(WorkerMessage::Shutdown);
-        worker
+        let result = worker
             .join
             .join()
-            .map_err(|_| "Coordinate worker panicked during shutdown".to_string())?
+            .map_err(|_| "Coordinate worker panicked during shutdown".to_string())?;
+        let mut shared = lock(&self.shared);
+        shared.latest_sample = None;
+        shared.pending_freeze = false;
+        shared.sample_error = None;
+        result
     }
 }
 
@@ -620,6 +653,42 @@ mod tests {
         controller.freeze();
         assert!(!controller.runtime_state().is_frozen());
         controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn copy_sample_is_live_or_frozen_and_never_uses_failed_or_inactive_live_data() {
+        let first_sample = sample(-1800, 200, "DISPLAY1");
+        let (factory, rendered, sample_gate) = FakeFactory::with_sample_gate(
+            [Ok(first_sample.clone()), Err("cursor query failed".into())],
+            Err("cursor query failed".into()),
+        );
+        let mut controller = CoordinateToolController::new(Arc::new(factory));
+        controller.set_hud_enabled(true).unwrap();
+        assert_eq!(
+            receive(&rendered).current_sample,
+            Some(first_sample.clone())
+        );
+        assert_eq!(controller.sample_for_copy().unwrap(), first_sample);
+
+        let release_failure = sample_gate
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second sample should reach the explicit gate");
+        controller.freeze();
+        release_failure.send(()).unwrap();
+        let failed = receive(&rendered);
+        assert!(failed.current_sample.is_none());
+        assert_eq!(
+            controller.sample_for_copy().unwrap(),
+            failed.runtime_state.frozen_sample().unwrap().clone()
+        );
+
+        controller.unfreeze();
+        assert_eq!(
+            controller.sample_for_copy().unwrap_err(),
+            "cursor query failed"
+        );
+        controller.shutdown().unwrap();
+        assert!(controller.sample_for_copy().is_err());
     }
 
     #[test]

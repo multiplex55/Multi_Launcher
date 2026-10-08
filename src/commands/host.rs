@@ -30,6 +30,13 @@ pub enum ScreenshotCommandResult {
 
 pub trait LauncherCommandHost {
     fn launcher_is_visible(&self) -> bool;
+
+    fn execute_coordinate_tool_command(
+        &mut self,
+        _command: &super::CoordinateToolCommand,
+    ) -> Result<Option<String>, String> {
+        Err("coordinate inspector commands require the launcher interface".into())
+    }
 }
 
 pub trait RadialCommandHost {

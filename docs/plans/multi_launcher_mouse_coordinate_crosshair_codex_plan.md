@@ -116,7 +116,7 @@ Invariants: passive input/focus untouched; signed coordinates; no duplicate work
 
 Verification at integration gate: targeted `coordinate_tool` Nextest plus `cargo check --lib`; directly affected helper consumers only if shared mechanics are extracted. Done: runtime integrated, lifecycle/resource/idle tests meaningful and passing at verification gate, scoped diff reviewed.
 
-## M1-C: Launcher controls and persistence (`pending`)
+## M1-C: Launcher controls and persistence (`implemented; integration verification pending`)
 
 Objective/ownership: typed commands dispatch, plugin discovers, feature controller executes, GUI adapter coordinates feedback. Depends on M1-B.
 
@@ -206,4 +206,6 @@ M1-A source checkpoint committed `c15d546f`: signed/checked conversion, samples,
 
 M1-B source checkpoint implemented: lazy single worker, injectable sampling/backend, per-monitor-aware native sampling, cached four-surface renderer, narrow guides, display refresh and teardown. Sampling errors clear the live sample; last-good geometry is placement-only. Native client context uses the last external window while launcher owns foreground; help must state this explicitly.
 
-Rustfmt and diff checks passed for M1-A/M1-B; Cargo verification and native acceptance have not yet run. M1-C next. Subsequent checkpoints: pending. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.
+M1-B committed `3d8c21ff`. M1-C implemented: canonical typed parser/bus/host, exact plugin discovery/inventory, saved controls, injectable clipboard failure handling, frozen/live copy validation, query-override exclusion and GUI construction/reload/poll/shutdown. Passive controls documented in README.
+
+Rustfmt and diff checks passed for M1-A/M1-B/M1-C; Cargo verification and native acceptance have not yet run. The passive integration gate is next, before capture implementation. Subsequent checkpoints: pending. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.
